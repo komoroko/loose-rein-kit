@@ -24,8 +24,7 @@ Symmetric with the human opening a gate, **rewinding approval is also the human'
      rein revise --impacted T-00x,T-00y
      ```
      (combinable with `--to` in one invocation; `--dry-run` previews; `rein dag --impacted` enumerates the same set read-only). Missing an impacted task is the dangerous direction, so the **whole closure is marked mechanically** — nothing in it runs until reconciled.
-   - Classify each marked task in the `/tasks` reconcile: **keep** (unaffected — restore its former status, with the justification stated) / **modify** (needs fixing → stays `needs-revision`) / **obsolete** (no longer needed → mark, do not delete) / **new** (added). "Keep" is a deliberate, human-presented reclassification, never a silent default.
-   - A task that was **`done` but invalidated** reverts to `todo` (needs reimplementation; the mark output lists former statuses). The implemented code stays on the branch but is back in scope plan-wise.
+   - Marking is all this step does. The marked closure is then reclassified inside the re-run of `/tasks` ("Re-run after a roll back", which owns the keep / modify / obsolete / new taxonomy and what becomes of a task that was `done`) — nothing in the closure runs until that reconcile has happened.
 5. **Guide to rebuilding**: "next is `/<phase>`". Reflect the above reconcile inside the re-run of `/design`/`/tasks`, and present the **impact (the impacted list and classification)** to the human at gate ③ for re-approval.
 
 ## Principles

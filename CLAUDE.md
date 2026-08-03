@@ -20,6 +20,3 @@ capability vocabulary onto Claude Code's mechanisms.
 
 Claude Code also carries the **mechanism layer** of the gates: the PreToolUse hook in
 `.claude/settings.json` runs `rein guard` on every Write/Edit (AGENTS.md "Gate rules").
-The grounded review that gate ④ approves is `rein review generate`; the structured security
-review feeds it. A gate opens only by `rein approve <gate>` recording a confirmation typed
-at an interactive terminal.

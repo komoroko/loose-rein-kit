@@ -19,7 +19,7 @@ prompts:
     prompts/commands/design.md: sha256:94ea18a22c9862dab1be55d47b89056b30cef1634aa677e02ec1a65328099ed4
     prompts/commands/onboard.md: sha256:47fd4093b4eda0b469312622f19b0152d2bde1374670976966fd7aa22495ce23
     prompts/commands/req.md: sha256:6780c8313f9df53cef881c001200ac3c77f4498631dbd99f9ad01954d9a3067f
-    prompts/commands/revise.md: sha256:a29a07dc24ca48fcf7f3a74648b7190b47cfe37900a589cc1f3da42346cdfa72
+    prompts/commands/revise.md: sha256:ed2d6c5c3d4f3507ce8f72eb852ce4143f7f9877be1d4f694fa9a702efc46fd5
     prompts/commands/status.md: sha256:8766d7b065516ed45adc793ac3d226d71987a8a86a4cc7abd9f5efccfdc63186
     prompts/commands/tasks.md: sha256:20d528c89cd0f51068fd0a7c24e774cd8e5626045993dceb507fa8e7b48a4086
     prompts/commands/verify.md: sha256:731581d353614943fbe1515c4b1f5dc7ec5dd3a7058045a0e344f0e9a6bd9cce
@@ -29,7 +29,65 @@ prompts:
     schema/plan.schema.json: sha256:3a7bd51bdec0eff2bb51f8d49302fa9358a051803a0200955ba9522227ccda03
     schema/review.schema.json: sha256:74deb11f1fc99c8418c234eddc676ab487d4e6d682eac80a03f425cdcd1ad2e8
     schema/state.schema.json: sha256:40e77db417a746c277c484365f43faab81f3069a304cecd3bcbfa6e55b5de0c3
-integrations: {}
+integrations:
+  claude:
+    version: 0.1.0
+    installed_at: '2026-08-04'
+    files:
+      .claude/agents/adversarial-reviewer.md: sha256:d420f000ac6892cba6f1d753f5a3894018c0e334ad1df77cf2b0904b237ad430
+      .claude/agents/architect.md: sha256:1e2741a798214f280a12c08acd3d8459611a0fbc1da60223ed5a6021a0d364c1
+      .claude/agents/implementer.md: sha256:149053480e7daee81f1de0ea6ea8eece70f77bfb8b2a8d6706c9b714b8ee425a
+      .claude/agents/requirements-analyst.md: sha256:485e3ab2a53565ab57aeb79d0377cca2bf5841006c68ae153267c62445dcaca3
+      .claude/commands/build.md: sha256:f11d7162b7df57be32232eb9766ddcf1c79ae0d1c5689fd7a6afcd17e991e228
+      .claude/commands/design.md: sha256:6791ceb2702b407d07cd965b4a71f48099f0152418c708d33ba498d498a8960f
+      .claude/commands/onboard.md: sha256:a0729659686db58949fcaabf4ba363731d094f5ae804892535120b43a47576c7
+      .claude/commands/req.md: sha256:07a60e8ce4a80459c4dada309924a10e984ea9cb9dd00dc2d0726beb3c34bd15
+      .claude/commands/revise.md: sha256:3aa6c07e8bc44187696a77dc0190bd351578e3747ce735698081ecc4c1de3ed5
+      .claude/commands/status.md: sha256:c0ffd6b956e0466a0197f6bb65fc1efaddbdd0a51af8c6d58b826c5cd33bb3de
+      .claude/commands/tasks.md: sha256:340c69cc9902deb1dcff2977f57eeb0230acee7dff4f82318d58cc623a97e744
+      .claude/commands/verify.md: sha256:6dffcfe1fcc16a7ea639d2f177558cc3c0961e1a0bf4eef1634905aabc3a448d
+    settings:
+      created: false
+      permissions_allow: []
+      hooks: {}
+  codex:
+    version: 0.1.0
+    installed_at: '2026-08-04'
+    files:
+      .agents/skills/build/SKILL.md: sha256:ac87ec52222a89be85fddc012a42d761abc2220c4e291e12fb12189aaa1d5cf9
+      .agents/skills/design/SKILL.md: sha256:a2cf5158ad10c9405c5d48f964efd89683f3bdba48bbd85583d9ab842423834e
+      .agents/skills/onboard/SKILL.md: sha256:5db6e1e3941273e6bcf3f1e3bbd67b58182a5232e5b26275dfce833df4371aa6
+      .agents/skills/req/SKILL.md: sha256:fae6c760594e9f041cef373f6b3493101ee1a44eacb5cf5f888b468c96d41876
+      .agents/skills/revise/SKILL.md: sha256:f441d48f534a1ffebe63377dd00087f20d7652a02679e4c967d3f21a8ec324d8
+      .agents/skills/status/SKILL.md: sha256:71c33d96e7ca17ddc47a8e41a13cbbb0a08c18ad9420d22d4f20bcea9da505e6
+      .agents/skills/tasks/SKILL.md: sha256:fd50ee9da77c515843528ef09d87cedb01509d091eeda11f15c018973310a0aa
+      .agents/skills/verify/SKILL.md: sha256:877ba961f15fb0deaad01df8a62d28191adbc6de1b3caddaffee913083e3d4b7
+      .codex/agents/adversarial-reviewer.toml: sha256:eedceeefa9ec3cee62459d24471a5730c5b507733888ceda3c78ccae99842431
+      .codex/agents/architect.toml: sha256:c32102f7103bc4a9fcdfc50fac3cc1985b1682963adad7017ccd721339556bd1
+      .codex/agents/implementer.toml: sha256:1c93b60464227ec637eed7290f3bb6d2a6f8c5d39bb904f131557a2ebf780b6b
+      .codex/agents/requirements-analyst.toml: sha256:9249d1d6d8632d2fec155ec3577b802e723ea3b2235c8ae87389d08cde865038
+      .codex/hooks.json: sha256:e78f4e7bf63b3c5fca54b9c341ac9898f2ba18497bc158bd3ea7aaea8f663c40
+      .codex/rein.md: sha256:3ee55b4131281a82403ae028544bf1b302857cb4afb06dce334f0629b4a72b18
+  copilot:
+    version: 0.1.0
+    installed_at: '2026-08-04'
+    files:
+      .github/agents/adversarial-reviewer.agent.md: sha256:6a9126f67cd68da0494217e0b47a2c2344031ec0573e04d45d70feb250c7c68d
+      .github/agents/architect.agent.md: sha256:76cd9b5960d25d7a275aaedfe6fa4f0effd07fe8179f671663dc4c43d3ea003d
+      .github/agents/implementer.agent.md: sha256:b1953ab17a6c7ef6b671c8fa148746ca3864ab40499503eba21ec1f8b3e05921
+      .github/agents/requirements-analyst.agent.md: sha256:b73ca2bbc692eabb91767be46efcdb5bead1cb876d6602f90fb58d2980faeed5
+      .github/hooks/rein.json: sha256:2eacdbf36f1c05dfcf5266383b57dbf46f31306cfb5d93d93bc6926b0b3f7949
+      .github/instructions/rein.instructions.md: sha256:e8477965f6d32d3cbfee912613b62779533ba458b79d5f7d7ae807e5e077c6d7
+      .github/prompts/build.prompt.md: sha256:0a4dce0d3d2db43f0fae1a8200d5d290e134d0deca1cddfac4c4af0d6ba13621
+      .github/prompts/design.prompt.md: sha256:0e899f78a22a8671e7e5bb991727d461418887fbb24b4cfecfdd8ff667b65544
+      .github/prompts/onboard.prompt.md: sha256:6c590a600ebd0e5b4a17121e5b4eef4931a3d110ad88abffdcc4bb0b0594be6e
+      .github/prompts/req.prompt.md: sha256:3159467287083c947e6bce166e19dded4075f47b8440617ed79c82330d67d0d5
+      .github/prompts/revise.prompt.md: sha256:e4823567b188530c5e18e6070b6189027adc30eb2de05fd27892748edf4c47b9
+      .github/prompts/status.prompt.md: sha256:2d6c78b176a66af1c6a5e93ce98c0d6482aec6e71576772806e603a8fcaf3496
+      .github/prompts/tasks.prompt.md: sha256:73713a15f2a2f683dc6212d466a90e16fb0a14518f1f8b5d0d37eac0a4f2520e
+      .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
 seeded: {}
 created_at: '2026-07-24'
 updated_at: '2026-08-04'
+rein:
+  version: 0.1.0
