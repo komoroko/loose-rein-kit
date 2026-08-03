@@ -1,0 +1,386 @@
+"""`rein approve <gate>` — the human's command, and the only path to an approved gate.
+
+Three steps, in this order, none skippable:
+
+  1. **Readiness** — every mechanical precondition for the gate (:func:`readiness`), reported
+     exhaustively rather than one at a time.
+  2. **Confirmation** — the digests this approval covers are printed, and the human types the
+     gate name at an interactive terminal (:func:`confirm_locally`).
+  3. **Receipt** — one Central Store transaction writes the gate receipt, binding those digests
+     and the audit-chain root (:func:`record_approval`).
+
+`--force` does not exist and is not coming back, and neither does `--by`: an identity you can
+type is not an identity, so the receipt records that *a* human confirmed, never which one.
+
+**What keeps an agent from approving its own work is not this file.** It is the rule that
+`rein approve` is never pre-authorized (AGENTS.md "Gate rules" 2). The TTY requirement here
+only stops a piped stdin, a CI job, or an agent's captured subprocess from approving by
+accident — the failure that would otherwise happen silently and often.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import sys
+from collections.abc import Mapping
+
+from rein import common, dag, dag_trace, digests, event_chain, models, review_policy
+from rein import repo as repo_mod
+from rein import store as store_mod
+
+logger = logging.getLogger(__name__)
+
+#: The document each gate approves, for the receipt's `artifact_digest`.
+GATE_ARTIFACT: dict[str, str] = {
+    "requirements": "docs/10-requirements.md",
+    "design": "docs/20-design.md",
+}
+
+
+class ApprovalError(RuntimeError):
+    """The gate cannot be approved, or an approval cannot be recorded."""
+
+
+# --- readiness ------------------------------------------------------------------
+
+
+def _chain_blockers(state: models.State, gate: str, *, already_approved_blocks: bool) -> list[str]:
+    pending = state.pending_upstream(gate)
+    if pending:
+        return [
+            f"gate '{pending}' is still pending — approving '{gate}' now would leave a decision "
+            "standing on one that was never made (gates open in order)"
+        ]
+    if already_approved_blocks and state.gate_status(gate) == "approved":
+        return [f"gate '{gate}' is already approved"]
+    return []
+
+
+def _plan_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> list[str]:
+    if plan is None:
+        return [f"no plan at .rein/plan.yaml — there is nothing for gate '{gate}' to approve"]
+    report = dag_trace.trace_repo(repo, plan)
+    blockers: list[str] = list(report.errors)
+    if not report.checked:
+        blockers.append(
+            "no requirement id on either side — the traceability thread is unknown, not whole. "
+            "`/req` declares R-N / NFR-N headings and writes the matching claims into .rein/plan.yaml"
+        )
+
+    # A plan with nothing in it passes every consistency check trivially. Requiring content is
+    # the difference between "no contradictions found" and "there is something here to approve".
+    if not plan.claims:
+        blockers.append(
+            "the plan states no claims — there is nothing to approve. `/req` turns each `R-N` / "
+            "`NFR-N` heading into a claim in .rein/plan.yaml."
+        )
+    if gate in {"tasks", "build", "release"} and not plan.tasks:
+        blockers.append("the plan declares no tasks")
+    return blockers
+
+
+def _task_blockers(plan: models.Plan | None, state: models.State | None, gate: str) -> list[str]:
+    if gate not in {"tasks", "build", "release"} or plan is None:
+        return []
+    try:
+        graph = dag.join(plan, state)
+    except dag.DagError as exc:
+        return [str(exc)]
+    blockers = [f"{cid}: no task is answerable for this claim" for cid in graph.claims_without_a_task(plan)]
+    if gate in {"build", "release"}:
+        unfinished = sorted(t.id for t in graph.tasks if not t.is_done)
+        if unfinished:
+            blockers.append(f"tasks not done: {', '.join(unfinished)}")
+    return blockers
+
+
+def _review_blockers(review: models.Review | None, gate: str, head: str = "") -> list[str]:
+    """Gate ④/⑤ preconditions carried by the machine review (plan §16.8).
+
+    A readiness check that passes because a stage has not been implemented yet is worse than
+    no check at all, so an absent review is a blocker rather than a shrug.
+
+    The mechanical half is `review_policy.blocking_reasons` — the module that owns the gate-④
+    decision — rather than a second copy of the same rules here. Two copies had already drifted:
+    this one never looked at `machine.gaps`, so a comparator could mark an actual-coverage gap
+    blocking, have it written to `review.yaml`, and watch the gate open anyway.
+    """
+    if gate not in {"build", "release"}:
+        return []
+    if review is None or not review.is_generated:
+        return [
+            "no machine review has been generated — run `rein review generate`. "
+            "Gate 4 approves a grounded review, not a green test run."
+        ]
+    blockers = review_policy.blocking_reasons(review, review.effective_risk)
+    reviewed = review.subject_head_sha
+    if head and reviewed and reviewed != head:
+        # Three documents say a later commit leaves the review stale. Only the UI pane had ever
+        # checked, so generate → commit → approve opened gate ④ over code no reviewer saw.
+        blockers.append(
+            f"the machine review was generated against {reviewed[:12]} and HEAD is now {head[:12]} — "
+            "it says nothing about the commits since. Re-run `rein review generate`."
+        )
+    if review.human_status != "frozen":
+        blockers.append(
+            f"the human review is '{review.human_status}', not 'frozen' — "
+            "complete it in the review UI (`rein review complete`)"
+        )
+    return blockers
+
+
+def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool = True) -> list[str]:
+    """Every mechanical reason `gate` cannot be approved. Empty means a request may be issued.
+
+    Deliberately exhaustive rather than short-circuiting: being handed one blocker, fixing it,
+    and being handed the next is exactly the review friction plan §2.6 budgets against.
+
+    `already_approved_blocks=False` is for a status board asking "what stands in this gate's
+    way" rather than confirming an approval (`status_api._default_readiness`, `ui.py`) — an
+    already-approved gate reporting itself as its own blocker would read a healthy board as
+    unready.
+    """
+    if gate not in models.GATE_VALUES:
+        raise ApprovalError(f"unknown gate {gate!r} (one of {', '.join(models.GATE_ORDER)})")
+
+    store = store_mod.Store(repo)
+    try:
+        state = store.read_state()
+        plan = store.read_plan()
+        review = store.read_review()
+    except models.DocumentError as exc:
+        return [str(exc)]
+
+    if state is None:
+        return ["no .rein/state.yaml — run `rein init` first"]
+
+    blockers: list[str] = []
+    _, defects = event_chain.scan(repo.events)
+    if defects:
+        blockers.append(
+            f"the audit chain has {len(defects)} defect(s) — a receipt binds the chain root, so it "
+            "cannot be issued against a damaged log (see `rein events --verify`)"
+        )
+    blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
+    blockers += _plan_blockers(repo, plan, gate)
+    blockers += _task_blockers(plan, state, gate)
+    blockers += _review_blockers(review, gate, _head_sha(repo))
+    return blockers
+
+
+def _head_sha(repo: repo_mod.Repo) -> str:
+    """The commit under review, or "" outside a git repository (nothing to compare against)."""
+    rc, out = repo._git_rc("rev-parse", "HEAD")
+    return out.strip() if rc == 0 else ""
+
+
+# --- what an approval covers -------------------------------------------------------
+
+
+def approval_subject(repo: repo_mod.Repo, gate: str) -> dict[str, str]:
+    """Every digest this approval would cover, including the audit-chain root at this moment.
+
+    The human reads this before confirming, and :func:`record_approval` writes it into the
+    receipt unchanged — so an approval can never be presented for a plan, a review, or a log
+    other than the one that was on screen. If any of these move afterwards, the approval stops
+    applying to what moved, which is what makes a stale review a blocker rather than a note.
+    """
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    plan = store.read_plan()
+    review = store.read_review()
+    config = store.read_config()
+    events, _ = event_chain.scan(repo.events)
+
+    subject: dict[str, str] = {
+        "repository_id": repo.repository_id,
+        "cycle_id": state.cycle_id if state else "",
+        "attested_chain_root": event_chain.chain_root(events),
+    }
+    if plan is not None:
+        subject["plan_digest"] = plan.digest()
+    if config is not None:
+        subject["config_digest"] = config.digest()
+    if review is not None and review.is_generated:
+        subject["machine_digest"] = review.machine_digest()
+        subject["human_digest"] = review.human_digest()
+    artifact = GATE_ARTIFACT.get(gate)
+    if artifact and repo.path(artifact).exists():
+        subject["artifact_digest"] = digests.of_file(repo.path(artifact))
+    subject["validation_digest"] = digests.of({"gate": gate, "readiness": "clear"})
+    return subject
+
+
+# --- recording an approval ---------------------------------------------------------
+
+#: Receipt keys carried straight from the subject. `repository_id` and `cycle_id` are not
+#: digests and already live in state.yaml, so they stay out of the receipt.
+_RECEIPT_DIGESTS = (
+    "plan_digest",
+    "config_digest",
+    "machine_digest",
+    "human_digest",
+    "artifact_digest",
+    "validation_digest",
+    "attested_chain_root",
+)
+
+
+def record_approval(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> str:
+    """Write the gate receipt in one Central Store transaction, and return its id.
+
+    Reachable only through :func:`confirm_locally`, which cannot run without an interactive
+    terminal. There is deliberately no second recording path: a second way to reach an approved
+    gate is the failure mode this module exists to prevent.
+    """
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    if state is None:
+        raise ApprovalError("no .rein/state.yaml to record the approval in")
+    seen = store_mod.read_digest(state)
+    approval_id = f"GA-{gate.upper()}-{event_chain.new_id()[:8].upper()}"
+
+    # Everything below runs under the store lock. The chain-root binding is only meaningful if
+    # nothing can append between the check and the receipt that pins it, and a gate approval
+    # that lost a race with a concurrent write is refused outright rather than retried.
+    with store.transaction() as tx:
+        events, defects = event_chain.scan(repo.events)
+        if defects:
+            raise ApprovalError("refusing to record an approval against a damaged audit chain")
+        root_before = event_chain.chain_root(events)
+        if not digests.matches(subject.get("attested_chain_root", ""), root_before):
+            raise ApprovalError(
+                "the audit chain moved while the confirmation was on screen — events were appended, "
+                f"removed, or regenerated. Re-run `rein approve {gate}`."
+            )
+
+        tx.append(
+            "gate_approved",
+            cycle_id=state.cycle_id,
+            actor="local-confirmation",
+            subject_ids=[gate, approval_id],
+            detail={"attested_chain_root": root_before, "subject_digest": digests.of(dict(subject))},
+        )
+
+        raw = json.loads(json.dumps(state.raw))  # plain deep copy; state.raw stays untouched
+        receipt: dict[str, object] = {
+            "approval_id": approval_id,
+            "confirmed_at": event_chain.now_iso(),
+            # The root the approval *lands* on, not the one it was confirmed against. Recording
+            # `root_before` here made the two fields identical and the second one unmatchable:
+            # this very transaction appends `gate_approved`, so the chain necessarily moves.
+            "result_chain_root": tx.projected_chain_root(),
+        }
+        receipt.update({key: subject[key] for key in _RECEIPT_DIGESTS if subject.get(key)})
+
+        raw["gates"][gate] = {"status": "approved", "receipt": receipt}
+        raw["current_phase"] = models.PHASE_AFTER_GATE[gate]
+        raw["updated_at"] = event_chain.now_iso()
+        tx.write("state", raw, expect_digest=seen)
+    return approval_id
+
+
+# --- the human confirmation -------------------------------------------------------
+
+
+#: What an approval does and does not establish, said in full every time one is taken. It is not
+#: a disclaimer to be skimmed: a reader of `state.yaml` months later has to know that the receipt
+#: records that *a* human approved at a terminal, and never *which*.
+AUTHORITY_NOTE = (
+    "This records that a human at this terminal approved it — not which human, and with no role\n"
+    "or domain behind it. What keeps an agent out is that `rein approve` is never pre-authorized\n"
+    "(AGENTS.md \"Gate rules\" 2), so something has to actually ask."
+)
+
+
+def render_subject(subject: Mapping[str, str]) -> str:
+    """The digests this approval would cover, in a form a human can read before typing.
+
+    The point of the pause is that there is something specific to read. A prompt that only says
+    "approve? [y/N]" is a fumble guard; naming what moves if any of these digests move is the
+    thing that makes the confirmation about this approval rather than about approving in general.
+    """
+    width = max((len(k) for k in subject), default=0)
+    return "\n".join(f"  {key.ljust(width)}  {value}" for key, value in subject.items())
+
+
+def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> None:
+    """Ask for the gate name at an interactive terminal. Raises unless it is typed back.
+
+    An interactive TTY is required and there is no flag to skip it. That is not proof of a human
+    — an agent driving a PTY can type a word — and this module does not pretend otherwise. What
+    the TTY check adds is that a piped stdin, a CI job, or an agent's captured subprocess cannot
+    approve by accident, which is the failure that would otherwise happen silently and often.
+    """
+    if not sys.stdin.isatty():
+        raise ApprovalError(
+            f"gate '{gate}' needs a confirmation typed at a terminal, and stdin is not one. "
+            "Run this in your shell — there is deliberately no flag that skips it."
+        )
+    print(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
+    print(AUTHORITY_NOTE)
+    print("\nType the gate name to confirm (anything else cancels).\ngate> ", end="", flush=True)
+    typed = sys.stdin.readline().strip()
+    if typed != gate:
+        raise ApprovalError(f"cancelled — {typed!r} is not '{gate}', so nothing was approved")
+
+
+def approve_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> int:
+    """Confirm, re-check, record, report."""
+    confirm_locally(repo, gate, subject)
+    # Re-checked after the pause: the repository may have moved while the prompt waited, and
+    # recording a second receipt over a gate something else opened is not a no-op.
+    blockers = readiness(repo, gate)
+    if blockers:
+        logger.error(render_blockers(gate, blockers))
+        return 1
+    approval_id = record_approval(repo, gate, subject)
+    print(f"gate '{gate}' opened ({approval_id})")
+    return 0
+
+
+# --- CLI -------------------------------------------------------------------------
+
+
+def render_blockers(gate: str, blockers: list[str]) -> str:
+    body = "\n".join(f"  - {b}" for b in blockers)
+    return f"gate '{gate}' is not ready ({len(blockers)} blocker(s)):\n{body}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="check a gate's readiness, then take the human's confirmation")
+    parser.add_argument("gate", help=f"one of: {', '.join(models.GATE_ORDER)}")
+    parser.add_argument("--check", action="store_true", help="readiness only; ask for nothing, open nothing")
+    parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    args = parser.parse_args(argv)
+    common.configure_logging()
+
+    try:
+        repo = repo_mod.get(args.repo)
+    except repo_mod.RepoNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+
+    try:
+        blockers = readiness(repo, args.gate)
+    except ApprovalError as exc:
+        logger.error(str(exc))
+        return 2
+    if blockers:
+        logger.error(render_blockers(args.gate, blockers))
+        return 1
+    if args.check:
+        print(f"gate '{args.gate}' is ready for a confirmation")
+        return 0
+
+    try:
+        return approve_locally(repo, args.gate, approval_subject(repo, args.gate))
+    except ApprovalError as exc:
+        logger.error(str(exc))
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

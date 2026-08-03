@@ -1,0 +1,35 @@
+# .rein/rein.lock — machine-written by `rein init|sync|install|uninstall|upgrade`.
+# Records the document format, the tool version/source, and a hash per installed file so
+# upgrades never overwrite local edits. Do not edit by hand.
+format: rein-grounded-v1
+tool_version: 0.1.0
+source: git+https://github.com/komoroko/loose-rein-kit.git
+prompts:
+  version: 0.1.0
+  files:
+    AGENTS.rein.md: sha256:d447012af612066dd7abb18dea76474b52c4315caf99e24aea6e335700bbcc20
+    oci/implementer/Containerfile: sha256:afaf88fd9398e34537dd58e8a15dfb8a7a57837fc67be5f494a968585706fc2e
+    oci/python/Containerfile: sha256:4483ac8b3030451e3d8b8b935ba5f8a0984e5cd9aabab1bb04aef7aba7675a7a
+    oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
+    prompts/agents/adversarial-reviewer.md: sha256:8b0e688e806832019a24128f00098757090826ff3147dc533b3ce2eea4fdebe3
+    prompts/agents/architect.md: sha256:d36360652d81f2dcfae8861557cd49a679f2f29241551b13e4aa5364ffbf6479
+    prompts/agents/implementer.md: sha256:53774005823fbf3f2586f03051358945b2365a8ae10037ece8f2acdaf57a4b0b
+    prompts/agents/requirements-analyst.md: sha256:f856541626e80f3439a3681c70a9ab09f557b0e3dc5c4ddd229f214b5f8efab3
+    prompts/commands/build.md: sha256:82841bc3e7de6dfdb5b372bb06882cc5136b47465d6dcde440231ec58e07bb03
+    prompts/commands/design.md: sha256:94ea18a22c9862dab1be55d47b89056b30cef1634aa677e02ec1a65328099ed4
+    prompts/commands/onboard.md: sha256:47fd4093b4eda0b469312622f19b0152d2bde1374670976966fd7aa22495ce23
+    prompts/commands/req.md: sha256:6780c8313f9df53cef881c001200ac3c77f4498631dbd99f9ad01954d9a3067f
+    prompts/commands/revise.md: sha256:a29a07dc24ca48fcf7f3a74648b7190b47cfe37900a589cc1f3da42346cdfa72
+    prompts/commands/status.md: sha256:8766d7b065516ed45adc793ac3d226d71987a8a86a4cc7abd9f5efccfdc63186
+    prompts/commands/tasks.md: sha256:20d528c89cd0f51068fd0a7c24e774cd8e5626045993dceb507fa8e7b48a4086
+    prompts/commands/verify.md: sha256:731581d353614943fbe1515c4b1f5dc7ec5dd3a7058045a0e344f0e9a6bd9cce
+    prompts/rules/gate-workflow.md: sha256:a6e4fbf22905c25dccacd2f1e24b2e04fc4173c921987f2811f9b77351be5c32
+    schema/config.schema.json: sha256:4d2735bca4fcf027ea4dd16713a503804da65e3914899d5cb9061f3d41a1b20b
+    schema/event.schema.json: sha256:a24d57ca1c58fbb853481777eb874a3a1f033f250322eaa2193eea1b11b2ecaa
+    schema/plan.schema.json: sha256:3a7bd51bdec0eff2bb51f8d49302fa9358a051803a0200955ba9522227ccda03
+    schema/review.schema.json: sha256:74deb11f1fc99c8418c234eddc676ab487d4e6d682eac80a03f425cdcd1ad2e8
+    schema/state.schema.json: sha256:40e77db417a746c277c484365f43faab81f3069a304cecd3bcbfa6e55b5de0c3
+integrations: {}
+seeded: {}
+created_at: '2026-07-24'
+updated_at: '2026-08-04'

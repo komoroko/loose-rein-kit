@@ -1,0 +1,125 @@
+name: CI
+
+# The same quality gate as local development, plus the base-side meta-policy.
+#
+# Third-party Actions are pinned to full 40-character commit SHAs (plan §29.1): a mutable tag lets
+# the action's owner change what runs in CI after review. The version each SHA corresponds to is in
+# the trailing comment so a human can audit the pin against the upstream release.
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: pre-commit (lint / format / type-check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Cache pre-commit environments
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      # `make check` == pre-commit (commit stage) + pre-push stage + template-lint (drift canaries)
+      # + sync-check (materialized artifacts match the packaged payload) — the full gate.
+      - name: Run pre-commit, template-lint and sync-check
+        run: make check
+
+  unit:
+    name: unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The endpoints that matter: the advertised 3.10 floor (pyproject requires-python) and the
+        # newest CPython. The unit layer runs without docker/ssh so a fork PR without secrets is green.
+        python-version: ["3.10", "3.13"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Install Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Run the unit suite (fakes only, no docker/ssh)
+        run: uv run --frozen pytest -q -m "not integration" tests/
+
+  integration:
+    name: integration tests (docker / git / ssh)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      # ubuntu-latest ships docker; the OCI executor tests exercise the real sandbox.
+      - name: Run the integration suite
+        run: uv run --frozen pytest -q -m integration tests/
+
+  policy:
+    name: base-side policy check
+    # Only meaningful for a pull request, where CI knows the trusted base and head SHAs from its own
+    # event context — never a branch name and never a base the head declared (plan §29.1, §29.3).
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # policy-check reads both the base and head trees
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      # Bootstrap note (plan §29.3): the commit that FIRST introduces this check has no prior base
+      # verifier to check it, so that one run is not self-verified. Every later PR is checked by the
+      # base side. The exact SHAs come from the event, so the head cannot declare its own base.
+      #
+      - name: Run policy-check (base-side meta-policy)
+        run: >-
+          uv run --frozen rein policy-check
+          --base-sha "${{ github.event.pull_request.base.sha }}"
+          --head-sha "${{ github.event.pull_request.head.sha }}"
+
+  # Aggregate gate over the unit matrix. Branch protection requires the single stable name "tests".
+  tests:
+    name: tests
+    needs: unit
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every matrix job succeeded
+        run: test "${{ needs.unit.result }}" = "success"

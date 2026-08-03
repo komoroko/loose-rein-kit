@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Bash(cat .rein/config.yaml:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git merge --ff-only:*)",
+      "Bash(git merge --no-ff:*)",
+      "Bash(git worktree:*)",
+      "Bash(ls:*)",
+      "Bash(rein status:*)",
+      "Bash(rein resume:*)",
+      "Bash(rein next:*)",
+      "Bash(rein dag:*)",
+      "Bash(rein build:*)",
+      "Bash(rein doctor:*)",
+      "Bash(rein events:*)",
+      "Bash(rein revise:*)",
+      "Bash(rein issue-sync:*)",
+      "Bash(rein sync --check:*)",
+      "Bash(make test:*)",
+      "Bash(make check:*)",
+      "Bash(make audit:*)",
+      "Bash(uv run pytest:*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f .rein/state.yaml && echo '--- Loose Rein: what changed since you last looked ---' && rein resume || true"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rein guard"
+          }
+        ]
+      }
+    ]
+  }
+}

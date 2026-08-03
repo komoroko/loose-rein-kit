@@ -1,0 +1,18 @@
+# Normalize text to LF (prevent CRLF creeping in on a Windows drive).
+# Even when checked out on a Windows mount such as /mnt/d, keep LF in the repo and working tree.
+* text=auto eol=lf
+
+# Shell scripts and makefile require LF (CRLF breaks them at runtime).
+*.sh    text eol=lf
+makefile text eol=lf
+Makefile text eol=lf
+
+# Do not convert binaries.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.lock  text eol=lf

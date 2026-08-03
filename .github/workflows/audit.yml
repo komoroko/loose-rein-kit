@@ -1,0 +1,28 @@
+name: audit
+
+# Scheduled supply-chain audit. /verify runs `make audit` at every release gate, but a repo can sit
+# between cycles for weeks — this catches newly disclosed vulnerabilities in the meantime.
+on:
+  schedule:
+    - cron: "0 21 * * 0" # weekly: Sunday 21:00 UTC (Monday morning JST)
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync
+
+      # Same as the /verify security gate: pip-audit over the resolved Python dependencies
+      # (plus pnpm audit when a frontend exists — the make target skips it otherwise).
+      - name: Run make audit
+        run: make audit

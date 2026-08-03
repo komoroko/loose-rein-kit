@@ -1,0 +1,1022 @@
+"""The deterministic orchestrator for the implementation phase (the engine behind `/build`).
+
+Scheduling runs **in code, not in a prompt**. An LLM writes the implementation, but which tasks
+run, at what parallelism, in what merge order, and when to stop are decided here — so two runs
+of the same plan schedule identically and a reviewer can predict the loop instead of
+interviewing it:
+
+  - frontier computation / consumption order / max parallelism / worktree isolation / merge order
+  - each quality-gate step's pass/fail, by exit code
+  - the per-step retry budget, the blocked decision, the stop condition, the gate check
+
+The determinism boundary:
+  - Deterministic (here): control flow, parallelism, merge, cmd-step decisions, stopping.
+  - Non-deterministic (LLM): the code, and the review step's fixes → absorbed by "re-run the
+    preceding cmd steps after an agent step; retry until green, else blocked".
+
+Three properties are load-bearing:
+
+**The loop produces no gate-④ evidence.** Gate ④ approves a *grounded review* — a blind
+actual-behaviour extraction compared against the frozen plan, with a coverage manifest — and a
+green test run is not a substitute. When the tasks finish, this prints what remains and stops.
+
+**A step's command is an argv list, not a shell string.** No `shlex.split` of user text, and a
+pipe has to live in a script a reviewer can read.
+
+**Task status is written through the Central Store**, in the same transaction as the event that
+explains it — so a status change with no audit record cannot happen, including when a leaf
+worktree is the thing reporting it.
+
+Usage:
+  rein build            # run
+  rein build --dry-run  # exercise the control flow without calling the agent CLI or git
+
+--dry-run is strictly read-only: statuses advance in an in-memory overlay only, and no document,
+event, or lock is written — running it never changes what a later real run sees.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
+from pathlib import Path
+from typing import Any
+
+from rein import (
+    build_git,
+    build_prompts,
+    common,
+    control_plane,
+    dag,
+    event_chain,
+    executors,
+    gate_guard,
+    models,
+    strict_yaml,
+)
+from rein import repo as repo_mod
+from rein import store as store_mod
+
+logger = logging.getLogger(__name__)
+
+StopLoop = common.StopLoop
+
+#: Where a sandboxed gate step sees the tree it is testing. One constant, so the mount and the
+#: working directory cannot disagree about where the repository is.
+_SANDBOX_WORKDIR = "/work"
+
+#: Adapter name → the argv that launches it headless, with the prompt appended last. An interim
+#: registry: PR-D replaces it with the executor profiles, which run the same adapters inside a
+#: sandbox rather than on the host.
+ADAPTERS: dict[str, tuple[str, ...]] = {
+    "claude": ("claude", "-p"),
+    "codex": ("codex", "exec"),
+    "gemini": ("gemini", "-p"),
+}
+
+#: Flags added only to the launches that are *expected* to change the tree. `codex exec` runs in a
+#: read-only sandbox unless told otherwise, so the implementer and the agent gate step could not
+#: write a byte — the loop would start, every task would produce an empty diff, and nothing would
+#: say why. Stating the level explicitly is right under either default.
+#: The review transport in `review.py` deliberately does not get these: a reviewer that cannot
+#: write is the point, not an oversight.
+WRITE_FLAGS: dict[str, tuple[str, ...]] = {"codex": ("--sandbox", "workspace-write")}
+
+
+def write_flags(argv: tuple[str, ...]) -> tuple[str, ...]:
+    """The write-enabling flags for the CLI `argv` launches, keyed on the CLI's own name."""
+    return WRITE_FLAGS.get(argv[0], ()) if argv else ()
+
+
+@dataclass(frozen=True)
+class GateStep:
+    """One quality-gate step, normalized from config.
+
+    kind="command" — run `command` (argv) and decide by exit code. `retries` is that step's own
+                     budget for handing the failure back to the implementer.
+    kind="agent"   — a headless review+simplify pass that fixes findings in place. Its content is
+                     non-deterministic, so the pipeline re-runs the cmd steps that already passed
+                     whenever it changed the tree.
+
+    `required` (command only): an empty command is normally a silent skip — fine for a library,
+    but for a runnable deliverable a forgotten smoke command lets the whole build finish without
+    ever launching the thing. Marking it required makes the loop refuse to start, before any
+    implementer has been paid for.
+    """
+
+    name: str
+    kind: str
+    command: tuple[str, ...] = ()
+    retries: int = 2
+    required: bool = False
+    #: The executor profile this step runs in. Dropping it here is how "repository code runs in
+    #: the sandbox, never on the host" quietly stops being true of the quality gate.
+    executor_profile: str = ""
+    #: The role an agent step runs as, and the argv that launches that role's adapter. Dropping
+    #: it makes the step launch `agents.implementer`'s adapter while calling itself
+    #: `code_reviewer` — two roles the operator configured separately become one process.
+    agent_role: str = ""
+    agent_argv: tuple[str, ...] = ()
+
+    @property
+    def runnable(self) -> bool:
+        return self.kind == "agent" or bool(self.command)
+
+    @property
+    def display(self) -> str:
+        return " ".join(self.command) if self.command else f"<{self.kind}:{self.name}>"
+
+
+@dataclass(frozen=True)
+class Config:
+    """The orchestrator's view of config.yaml — the single source of knobs."""
+
+    raw: models.Config
+    max_parallel: int
+    worktree_enabled: bool
+    worktree_dir: str
+    branch_pattern: str
+    steps: tuple[GateStep, ...]
+    branch: str
+    timeout_cmd: float | None
+    timeout_agent: float | None
+    adapter_argv: tuple[str, ...]
+
+    @property
+    def gate_cmds(self) -> list[str]:
+        """The deterministic commands of the gate, for prompts and display."""
+        return [s.display for s in self.steps if s.kind == "command" and s.command]
+
+    @staticmethod
+    def _argv_for(config: models.Config, role: str) -> tuple[str, ...]:
+        """The argv that launches `role`'s configured adapter. Refuses an adapter it cannot launch.
+
+        Resolved up front for every role the gate will use, so an unlaunchable adapter stops the
+        build before an implementer has been paid for — rather than at the first step that needed
+        it, halfway through a task.
+        """
+        adapter = config.adapter(role) or "claude"
+        argv = ADAPTERS.get(adapter)
+        if argv is None:
+            raise ValueError(
+                f"agents.{role}.adapter is {adapter!r}, which this release does not know how to launch "
+                f"(one of: {', '.join(sorted(ADAPTERS))})"
+            )
+        return argv
+
+    @classmethod
+    def from_models(cls, config: models.Config) -> Config:
+        steps = tuple(
+            GateStep(
+                name=step.name,
+                kind=step.kind,
+                command=step.command,
+                retries=max(0, step.retries),
+                required=step.required,
+                executor_profile=step.executor_profile,
+                agent_role=step.agent_role,
+                # An agent step launches the role it declares. The schema already requires
+                # `agent_role` here; resolving it is what makes the declaration true.
+                agent_argv=cls._argv_for(config, step.agent_role) if step.kind == "agent" and step.agent_role else (),
+            )
+            for step in config.quality_gate
+        )
+        argv = cls._argv_for(config, "implementer")
+        return cls(
+            raw=config,
+            max_parallel=max(1, config.max_parallel),
+            # Not optional: parallel leaves writing one tree is how two tasks' changes end up
+            # attributed to one review.
+            worktree_enabled=True,
+            worktree_dir=config.worktree_dir,
+            # `-` (not `/`) between branch and task: git forbids a branch that is a path-prefix of
+            # another ref ("work" + "work/T-001" cannot coexist), so a slash pattern always fails.
+            branch_pattern="{branch}-{task_id}",
+            steps=steps,
+            branch=config.work_branch,
+            timeout_cmd=float(config.command_timeout_sec) or None,
+            timeout_agent=float(config.agent_timeout_sec) or None,
+            adapter_argv=argv,
+        )
+
+    @classmethod
+    def load(cls, repo: repo_mod.Repo) -> Config:
+        store = store_mod.Store(repo)
+        config = store.read_config()
+        if config is None:
+            raise ValueError(f"no {repo.config} — run `rein init` first")
+        return cls.from_models(config)
+
+
+# --- the build lock -----------------------------------------------------------
+#
+# One lock per repository, in the shared runtime directory rather than inside the working tree:
+# a per-worktree lock file meant two leaves could each hold "the" lock (plan §11.1). Lock order
+# is build.lock → store.lock, always.
+
+
+def build_lock(repo: repo_mod.Repo) -> store_mod.FileLock:
+    """The exclusive whole-run lock. Held for the duration of a build."""
+    return store_mod.FileLock(store_mod.Store(repo).build_lock)
+
+
+# --- task status (through the Central Store) ----------------------------------
+
+
+def set_task_status(repo: repo_mod.Repo, task_id: str, status: str, *, note: str = "") -> None:
+    """Write one task's status and the event that explains it, in one transaction.
+
+    Retried on a lost race with a leaf writing its own task entry through the control plane.
+    """
+    if status not in models.TASK_STATUS_VALUES:
+        raise ValueError(f"unknown task status {status!r}")
+    store_mod.retry_on_stale(lambda: _set_task_status_once(repo, task_id, status, note=note))
+
+
+def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, note: str) -> None:
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    if state is None:
+        raise StopLoop("no .rein/state.yaml to record task status in")
+    seen = store_mod.read_digest(state)
+
+    raw = json.loads(json.dumps(state.raw))
+    tasks = raw.setdefault("tasks", {})
+    entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+    attempts = entry.get("attempts", 0) if isinstance(entry.get("attempts"), int) else 0
+    if status == "in-progress":
+        attempts += 1
+    merged = {**entry, "status": status, "attempts": attempts, "note": note}
+    tasks[task_id] = {k: v for k, v in merged.items() if v != ""}
+    raw["updated_at"] = event_chain.now_iso()
+
+    event = {"done": "task_completed", "in-progress": "task_started", "blocked": "task_failed"}.get(
+        status, "decision_declared"
+    )
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append(event, cycle_id=state.cycle_id, subject_ids=[task_id], detail={"status": status, "note": note})
+
+
+# Single definitions live elsewhere; the old names stay importable from here.
+summarize_failure = common.summarize_failure
+_FAILURE_MAX_LINES = common._FAILURE_MAX_LINES
+
+
+# --- subprocess -------------------------------------------------------------
+
+
+# The implementation lives in common.run; the `_run` name stays because the tests monkeypatch it
+# here to fake git and agent-CLI results.
+_run = common.run
+
+
+def _late_run(cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
+    """Late-binding indirection to `_run`: resolved from this module's globals at call time, so a
+    test patching build_loop._run reaches the injected GitWorkspace runner too — regardless of
+    whether the patch lands before or after the Orchestrator is constructed."""
+    return _run(cmd, cwd, timeout)
+
+
+# --- scheduling (pure, under test) ------------------------------------------
+
+
+def plan_batch(graph: dag.Graph, max_parallel: int) -> tuple[str, list[dag.Task]] | None:
+    """Deterministically decide the next batch to start.
+
+    Returns:
+      ("serial", [one foundation task])       — foundation / high fan-out is finalized serially
+      ("parallel", [leaf tasks, ≤max_parallel]) — independent leaves are launched in parallel in isolation
+      None                                    — the frontier is empty
+    """
+    ordered = graph.order_frontier()
+    if not ordered:
+        return None
+    foundations = [t for t in ordered if t.kind == "foundation"]
+    if foundations:
+        return ("serial", [foundations[0]])
+    return ("parallel", ordered[:max_parallel])
+
+
+# --- orchestrator body ------------------------------------------------------
+
+
+class Orchestrator:
+    def __init__(self, config: Config, dry_run: bool, repo: repo_mod.Repo | None = None) -> None:
+        self.config = config
+        self.dry_run = dry_run
+        # The discovered repository anchors every path and git call below — the orchestrator
+        # behaves identically no matter which directory it was launched from.
+        self.repo = repo or repo_mod.get()
+        self.root = str(self.repo.root)
+        self.store = store_mod.Store(self.repo)
+        self.state = self.store.read_state()
+        self.cycle_id = self.state.cycle_id if self.state else ""
+        self.branch = config.branch
+        # The git/worktree layer (build_git.py); the runner is late-bound through _run above.
+        self.ws = build_git.GitWorkspace(
+            self.repo,
+            self.branch,
+            dry_run=dry_run,
+            worktree_dir=config.worktree_dir,
+            branch_pattern=config.branch_pattern,
+            run=_late_run,
+            on_event=lambda event, subject, detail: self._event(event, subject, detail),
+        )
+        # The control plane, once `run()` starts serving. A leaf reaches the Store only through
+        # it, so there is nothing to hand out before the socket exists.
+        self.control: control_plane.ControlServer | None = None
+        # Names this run in every token and every event a leaf records, so a decision can be
+        # traced back to the build that produced it.
+        self.run_id = f"RUN-{event_chain.now_iso().replace(':', '').replace('-', '')[:15]}"
+        # Dry-run status overlay: the simulated statuses live here instead of tasks.yaml, so the
+        # loop can progress to completion while the run stays strictly read-only.
+        self._sim_status: dict[str, str] = {}
+
+    def _set_status(self, task_id: str, status: str) -> None:
+        if self.dry_run:
+            self._sim_status[task_id] = status
+            print(f"    [dry-run] {task_id} → {status}")
+            return
+        set_task_status(self.repo, task_id, status)
+
+    def _escalate(self, event: str, message: str, *, task: str = "") -> None:
+        """Record something a human has to decide about, and say so on the console.
+
+        There is no "resolve" verb any more: an escalation is closed by a signed disposition in
+        the review, not by a flag somebody flips in a log (`rein events --summary` lists
+        what is still open).
+        """
+        logger.warning(f"[escalation] {message}")
+        self._event(event, task or self.cycle_id, {"message": message})
+
+    def _event(self, event: str, subject: str, detail: dict[str, Any] | None = None) -> None:
+        """Append one audit event through the Central Store. A no-op in a dry run.
+
+        Every status change the loop makes goes through here or through `set_task_status`, so
+        there is no path by which the build mutates state without saying why.
+        """
+        if self.dry_run or not self.cycle_id:
+            return
+        with self.store.transaction() as tx:
+            tx.append(event, cycle_id=self.cycle_id, subject_ids=[subject], detail=detail or {})
+
+    def _load_graph(self) -> dag.Graph:
+        graph = dag.load(self.repo)
+        if self.dry_run and self._sim_status:
+            graph = dag.Graph.from_tasks([replace(t, status=self._sim_status.get(t.id, t.status)) for t in graph.tasks])
+        return graph
+
+    # -- implementer launch and quality gate --
+
+    def _implementer_prompt(self, task: dag.Task, failure_log: str) -> str:
+        return build_prompts.implementer_prompt(
+            task,
+            failure_log,
+            gate_cmds=self.config.gate_cmds,
+            has_baseline=self.repo.path("docs/05-current-state.md").exists(),
+        )
+
+    @property
+    def _resume_capable(self) -> bool:
+        """Retry-session continuity is claude-preset-gated — deliberately no adapter layer.
+
+        Resume flags are per-CLI (codex is a different subcommand shape; gemini/custom are
+        unverifiable), so only the known `claude -p` contract gets them; every other CLI keeps
+        today's fresh launch per retry.
+        """
+        return bool(self.config.adapter_argv) and self.config.adapter_argv[0] == "claude"
+
+    def _invoke_implementer(
+        self, task: dag.Task, cwd: str, failure_log: str, session: str = "", resume: bool = False
+    ) -> None:
+        """One headless implementer launch; `session`/`resume` thread retry-session continuity.
+
+        With a session id, the first launch stamps it (--session-id) and a retry resumes it
+        (--resume) so the implementer keeps its own context across its retries instead of
+        re-reading ticket/design/code cold. A failed resume falls back to one fresh launch
+        (session files can expire) rather than stopping the loop on a continuity optimization.
+        """
+        if self.dry_run:
+            print(f"    [dry-run] launch implementer (cwd={cwd}) task={task.id}")
+            return
+        prompt = self._implementer_prompt(task, failure_log)
+        flags = list(write_flags(self.config.adapter_argv))
+        flags += (["--resume", session] if resume else ["--session-id", session]) if session else []
+        env = self._leaf_env(task)
+        rc, out = _run(
+            [*self.config.adapter_argv, *flags, prompt],
+            cwd=cwd,
+            timeout=self.config.timeout_agent,
+            env=env,
+        )
+        if rc != 0 and resume:
+            print(f"    [resume] {task.id}: resuming session failed (rc={rc}); relaunching fresh")
+            # A fresh token: the first one was spent on the launch that failed, and the server
+            # accepts each nonce once.
+            rc, out = _run(
+                [*self.config.adapter_argv, *write_flags(self.config.adapter_argv), prompt],
+                cwd=cwd,
+                timeout=self.config.timeout_agent,
+                env=self._leaf_env(task),
+            )
+        if rc != 0:
+            raise StopLoop(f"{task.id}: failed to launch implementer (rc={rc})\n{out[-1000:]}")
+
+    def _leaf_env(self, task: dag.Task) -> dict[str, str] | None:
+        """The environment an implementer runs with: the control socket and a scoped token.
+
+        Scoped to this run and this task, granting only what a leaf legitimately needs
+        (declare a decision, record a knowledge gap, report status, append an event). It can
+        never carry `gate.approve` or its siblings — `mint` refuses to sign those, and the
+        server refuses to serve them even if a token somehow claimed them.
+
+        None when there is no control plane (a dry run), which means the leaf inherits this
+        process's environment and its `rein decision add` will refuse rather than write
+        into a worktree that is about to be deleted.
+        """
+        if self.control is None:
+            return None
+        token = control_plane.mint(
+            self.control.secret,
+            run_id=self.run_id,
+            task_id=task.id,
+            capabilities=sorted(control_plane.LEAF_CAPABILITIES),
+            ttl_sec=int(self.config.timeout_agent or control_plane.DEFAULT_TTL_SEC),
+        )
+        return {
+            **os.environ,
+            control_plane.SOCKET_ENV: str(self.control.socket_path),
+            control_plane.TOKEN_ENV: token,
+        }
+
+    @property
+    def _steps_effective(self) -> tuple[GateStep, ...]:
+        """The gate steps actually run. All of them: the DoD has no opt-out knob."""
+        return self.config.steps
+
+    def _steps_for(self, task: dag.Task) -> tuple[GateStep, ...]:
+        """The gate steps for one task — the shared DoD, identically for every task.
+
+        Per-task steps would be a knob an implementer could turn on its own work; the whole
+        point of the DoD is that it is not one.
+        """
+        return self._steps_effective
+
+    def _review_scope(self, task: dag.Task, cwd: str, base: str) -> tuple[list[str], str]:
+        """The changed-path list + exact diff command that scope the review step's read.
+
+        Computed fresh at review time (the tree moves between retries). A leaf worktree's scope
+        is everything since it forked off the work branch; a serial task's is the commits since
+        `base` (the pre-task HEAD) plus the dirty tree. No base on the work branch (dry-run,
+        or a caller without one) degrades to the unscoped prompt.
+        """
+        if self.dry_run:
+            return [], ""
+        if cwd != self.root:
+            return self.ws.branch_changed_paths(self.ws.branch_for(task.id)), f"git diff {self.branch}...HEAD"
+        if base:
+            return self.ws.changed_since(base), f"git diff {base[:12]}..HEAD"
+        return [], ""
+
+    def _review_prompt(self, task: dag.Task, cwd: str, base: str) -> str:
+        changed, diff_cmd = self._review_scope(task, cwd, base)
+        return build_prompts.review_prompt(
+            task, gate_cmds=self.config.gate_cmds, changed_paths=changed, diff_cmd=diff_cmd
+        )
+
+    def _tree_state(self, cwd: str) -> tuple[str, str]:
+        return self.ws.tree_state(cwd)
+
+    def _run_agent_step(self, step: GateStep, task: dag.Task, cwd: str, base: str) -> bool:
+        """Run the review+simplify agent step headless. Returns True if it changed the tree.
+
+        Launched with the adapter of the role the *step* declares — not the implementer's. Those
+        were the same process until this was fixed, so a reviewer configured as a second opinion
+        was the same model that had just written the code.
+        """
+        before = self._tree_state(cwd)
+        argv = step.agent_argv or self.config.adapter_argv
+        rc, out = _run(
+            [*argv, *write_flags(argv), self._review_prompt(task, cwd, base)],
+            cwd=cwd,
+            timeout=self.config.timeout_agent,
+        )
+        if rc != 0:
+            raise StopLoop(f"{task.id}: failed to launch the review agent step (rc={rc})\n{out[-1000:]}")
+        return self._tree_state(cwd) != before
+
+    def _run_cmd_step(self, step: GateStep, cwd: str) -> str:
+        """Run one cmd step in its executor profile. "" on pass, a compact failure otherwise.
+
+        An argv list, never a shell string: a pipe or a redirect has to live in a script a
+        reviewer can read, not in a config value nobody parses the same way twice.
+
+        The step names an `executor_profile` — the config schema requires it — and it goes
+        through the `executors` dispatch. A `host` profile still runs on the host, which is what
+        a `host` profile means and what `doctor` warns about. `make test` runs agent-authored
+        test files, and running those with the operator's credentials is exactly what a
+        sandboxed profile exists to prevent.
+        """
+        profile = self._profile_for(step)
+        spec = executors.ExecutionSpec(
+            command=tuple(step.command),
+            profile=profile,
+            mounts=self._mounts_for(profile, cwd),
+            workdir=_SANDBOX_WORKDIR if profile.is_sandboxed else cwd,
+            timeout_sec=self.config.timeout_cmd,
+        )
+        try:
+            result = executors.for_profile(profile).run(spec)
+        except executors.ExecutorError as exc:
+            return summarize_failure(step.display, 1, str(exc))
+        return "" if result.exit_code == 0 else summarize_failure(step.display, result.exit_code, result.output)
+
+    def _profile_for(self, step: GateStep) -> models.ExecutorProfile:
+        """The profile a step runs in: its own, else `executors.quality_gate_profile`, else host.
+
+        Falling back to a host profile rather than refusing keeps a repository that has not built
+        its images working — `doctor` is what says the code is running unsandboxed, in one place,
+        instead of every step failing with the same message.
+        """
+        config = self.config.raw
+        named = config.profiles.get(step.executor_profile) if step.executor_profile else None
+        return named or config.profile_for("quality_gate") or models.ExecutorProfile("host", {"kind": "host"})
+
+    def _mounts_for(self, profile: models.ExecutorProfile, cwd: str) -> tuple[tuple[Path, str, str], ...]:
+        """The repository mount a sandboxed gate step needs to have something to test.
+
+        `mount_repo` is the profile's own say in it (the schema has carried the key with nothing
+        reading it): `read_only` for a gate that only inspects, otherwise read-write, because a
+        test run writes caches and artifacts and a read-only tree fails for the wrong reason.
+        """
+        if not profile.is_sandboxed:
+            return ()
+        mode = str(profile.raw.get("mount_repo", "read_write"))
+        if mode == "none":
+            return ()
+        return ((Path(cwd), _SANDBOX_WORKDIR, "ro" if mode == "read_only" else "rw"),)
+
+    def _run_pipeline(self, task: dag.Task, cwd: str, base: str = "") -> tuple[str | None, str]:
+        """Run the quality-gate steps (config quality_gate.steps = the DoD) in order.
+
+        Returns (failed_step_name, failure_summary), or (None, "") when every step passed.
+        An agent step's fixes invalidate the evidence of the cmd steps that already passed,
+        so those are re-run whenever it changed the tree (deterministic re-verification).
+        """
+        steps = self._steps_for(task)
+        if self.dry_run:
+            shown = " → ".join(f"{s.name}({s.kind})" for s in steps)
+            print(f"    [dry-run] quality gate: {shown} (cwd={cwd})")
+            return None, ""
+        passed: list[GateStep] = []
+        for step in steps:
+            if step.kind == "agent":
+                if self._run_agent_step(step, task, cwd, base):
+                    for prev in passed:
+                        failure = self._run_cmd_step(prev, cwd)
+                        if failure:
+                            return prev.name, failure
+                continue
+            if not step.command:
+                print(f"    [gate] skip {step.name}: no command configured")
+                continue
+            failure = self._run_cmd_step(step, cwd)
+            if failure:
+                return step.name, failure
+            passed.append(step)
+        return None, ""
+
+    def _run_task_to_done(self, task: dag.Task, cwd: str, base: str = "") -> tuple[bool, str]:
+        """Take one task to done via implementer implementation + the quality-gate pipeline.
+
+        Each cmd step carries its own send-back budget (step.retries); a failure consumes only
+        that step's budget. Returns (ok, log); ok=False means some step's budget ran out
+        (the caller marks the task blocked).
+        """
+        budgets = {s.name: s.retries for s in self._steps_for(task) if s.kind == "command"}
+        failure_log = ""
+        # Retry-session continuity (claude preset only): the implementer resumes its own session
+        # across its retries. A step's final retry is forced fresh — a resumed session re-reads
+        # its own failed reasoning, and the last attempt deserves an unanchored mind working from
+        # the compact failure summary alone. The review agent step is never resumed (independence).
+        session = str(uuid.uuid4()) if self._resume_capable and not self.dry_run else ""
+        resume = False
+        while True:
+            self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume)
+            failed, failure_log = self._run_pipeline(task, cwd, base)
+            if failed is None:
+                return True, ""
+            left = budgets.get(failed, 0)
+            print(f"    quality gate fail at step '{failed}' (retries left: {left}): {task.id}")
+            if not self.dry_run:  # unreachable in dry-run today (the dry pipeline always passes); keep read-only anyway
+                self._event("task_failed", task.id, {"step": failed, "retries_left": left})
+            if left <= 0:
+                return False, failure_log
+            budgets[failed] = left - 1
+            if session and budgets[failed] <= 0:  # final retry for this step → fresh session
+                session, resume = str(uuid.uuid4()), False
+            else:
+                resume = bool(session)
+
+    # -- post-merge integration gate --
+
+    def _integration_fix_prompt(self, ids: str, failure_log: str) -> str:
+        return build_prompts.integration_fix_prompt(ids, failure_log, gate_cmds=self.config.gate_cmds)
+
+    def _invoke_integration_fixer(self, ids: str, failure_log: str) -> None:
+        rc, out = _run(
+            [
+                *self.config.adapter_argv,
+                *write_flags(self.config.adapter_argv),
+                self._integration_fix_prompt(ids, failure_log),
+            ],
+            cwd=self.root,
+            timeout=self.config.timeout_agent,
+        )
+        if rc != 0:
+            raise StopLoop(f"{ids}: failed to launch the integration fixer (rc={rc})\n{out[-1000:]}")
+
+    def _integration_gate(self, tasks: list[dag.Task]) -> tuple[bool, str]:
+        """Re-verify the merged/integrated state of the work branch after a multi-leaf join.
+
+        Each leaf passed the gate only in its own isolated worktree; the *combined* file set can
+        still be red (a lint/type error only the whole tree surfaces, a format reflow another
+        task's change triggers). One batch-level re-run of the deterministic cmd steps catches
+        that before the merged tasks are marked done. Cost control: the caller runs this only
+        when 2+ leaves merged — a single-leaf join leaves the work tree identical to the one
+        already verified in that leaf's worktree (leaves branch from the batch's common base and
+        work advances only by this batch's merges), so re-running would prove nothing new.
+
+        On red, a headless fixer runs on the work branch within each step's own retries budget
+        (the same deterministic pattern as _run_task_to_done). Returns (ok, last_failure).
+        """
+        ids = ",".join(t.id for t in tasks)
+        if self.dry_run:
+            print(f"    [dry-run] integration gate on work after merging {ids}")
+            return True, ""
+        budgets = {s.name: s.retries for s in self.config.steps if s.kind == "command"}
+        while True:
+            failed, failure_log = None, ""
+            for step in self._steps_effective:
+                if step.kind != "command" or not step.command:
+                    continue
+                failure = self._run_cmd_step(step, cwd=self.root)
+                if failure:
+                    failed, failure_log = step.name, failure
+                    break
+            if failed is None:
+                return True, ""
+            left = budgets.get(failed, 0)
+            print(f"    integration gate fail at step '{failed}' (retries left: {left}): {ids}")
+            self._event("task_failed", ids, {"step": failed, "stage": "integration", "retries_left": left})
+            if left <= 0:
+                return False, failure_log
+            budgets[failed] = left - 1
+            self._invoke_integration_fixer(ids, failure_log)
+
+    # -- worktree / merge --
+
+    def _git(self, args: list[str], cwd: str | None = None) -> None:
+        self.ws.git(args, cwd)
+
+    def _branch_for(self, task: dag.Task) -> str:
+        return self.ws.branch_for(task.id)
+
+    def _worktree_path(self, task: dag.Task) -> str:
+        return self.ws.worktree_path(task.id)
+
+    def _add_worktree(self, task: dag.Task) -> str:
+        return self.ws.add_worktree(task.id)
+
+    def _safe_run_task(self, task: dag.Task, cwd: str) -> tuple[bool, str]:
+        """Call _run_task_to_done safely from a thread. Convert exceptions to (False, log).
+
+        So that one leaf's failure (e.g. implementer launch failure) does not drag down the whole parallel batch and
+        leave other tasks stuck in in_progress, deadlocking.
+        """
+        try:
+            return self._run_task_to_done(task, cwd=cwd)
+        except StopLoop as exc:
+            return False, str(exc)
+
+    def _finalize_commit(self, cwd: str, message: str) -> bool:
+        return self.ws.finalize_commit(cwd, message)
+
+    def _gate_violations(self, paths: list[str]) -> list[tuple[str, str]]:
+        """Gate-guard verdict for each path; [(path, deny reason)] for the denied ones.
+
+        The merge/finalize-stage twin of gate_guard's edit-time and commit-stage checkpoints.
+        Preservation commits run --no-verify and an implementer may commit with hooks absent or
+        bypassed, and once a commit reaches the work branch the commit-stage `--check-diff`
+        (a diff vs HEAD) can never see it again — so what a task actually changed is re-checked
+        in code here, before it lands. template_mode / enforce_hook short-circuit inside
+        evaluate() exactly as they do for the other checkpoints.
+        """
+        verdicts = ((p, gate_guard.evaluate(str(self.repo.path(p)), self.repo)) for p in paths)
+        return [(p, reason) for p, (ok, reason) in verdicts if not ok]
+
+    def _branch_changed_paths(self, branch: str) -> list[str]:
+        return self.ws.branch_changed_paths(branch)
+
+    def _changed_since(self, base: str) -> list[str]:
+        return self.ws.changed_since(base)
+
+    def _escalate_gate_violation(self, task_id: str, where: str, violations: list[tuple[str, str]]) -> None:
+        listing = "\n".join(f"  {p} — {reason}" for p, reason in violations)
+        self._escalate(
+            "gate_violation",
+            f"{task_id}: {where} touches gate-guarded paths whose prerequisite gate is pending — "
+            f"the task is blocked for human review (gate rule 3: never land next-phase edits silently).\n{listing}",
+            task=task_id,
+        )
+
+    def _cleanup_worktree(self, task: dag.Task) -> None:
+        self.ws.cleanup_worktree(task.id)
+
+    def merge_leaf(self, task: dag.Task, branch: str) -> bool:
+        return self.ws.merge_leaf(task.id, branch)
+
+    def _log_task_done(self, task: dag.Task) -> None:
+        """Record a task_done event carrying the work-branch commit that finalized the task.
+
+        The commit hash is what lets the log answer "which commit closed T-NNN" later (and, for a
+        resolved escalation, "which commit fixed it") without digging through git history by hand.
+        """
+        if self.dry_run:
+            return
+        self._event("task_completed", task.id, {"commit": self.ws.head()})
+
+    # -- main loop --
+
+    def _recover_in_progress(self) -> None:
+        """Reset tasks left in in-progress from a previous interruption back to todo (crash recovery).
+
+        Since the frontier only picks status==todo, re-running with in-progress left over would mean
+        that task is never started and the loop deadlocks. Roll back once at startup.
+        """
+        try:
+            graph = dag.load(self.repo)
+        except (OSError, dag.DagError, models.DocumentError, strict_yaml.StrictParseError):
+            return
+        for task in graph.tasks:
+            if task.status == "in-progress":
+                self._set_status(task.id, "todo")
+                print(f"  [recover] {task.id}: reset in-progress -> todo (resuming from an interruption)")
+
+    def run(self) -> int:
+        if self.state is None:
+            logger.error("no .rein/state.yaml — run `rein init` first")
+            return 2
+        if self.state.gate_status("tasks") != "approved":
+            logger.error(
+                "gate 3 (tasks) is not approved, so there is no frozen plan to build against. "
+                "Finish /tasks and get the plan approved first."
+            )
+            return 2
+        if self.state.plan_status != "frozen":
+            logger.error(
+                f"the plan is '{self.state.plan_status}', not 'frozen'. Gate 3's approval freezes it; "
+                "building against a draft would implement a plan nobody signed for."
+            )
+            return 2
+        if not self.dry_run and self.branch in ("", "HEAD"):
+            # work_branch falls back to "HEAD" when git is unavailable/detached; creating worktrees
+            # or committing against that would land the work on an arbitrary base.
+            logger.error(
+                "cannot determine the work branch (git unavailable or detached HEAD) — "
+                "fill `branch:` in state.md or check out the work branch first."
+            )
+            return 2
+        if self.dry_run:
+            return self._run_loop()  # read-only: no lock either, and no contention to guard against
+        try:
+            # Lock order is build.lock -> store.lock, always; the control plane takes the store
+            # lock per request inside it. The socket lives for exactly this run: a leaf that
+            # outlives the orchestrator has nothing to talk to, which is the correct answer.
+            with build_lock(self.repo), control_plane.serving(self.repo) as server:
+                self.control = server
+                return self._run_loop()
+        except store_mod.LockUnavailableError as exc:
+            logger.error(f"another build run holds the lock: {exc}")
+            return 2
+
+    def _run_loop(self) -> int:
+        self._recover_in_progress()
+        while True:
+            graph = self._load_graph()
+            counts = graph.counts()
+            unfinished = len(graph.tasks) - counts["done"]
+            if unfinished == 0:
+                return self._present_gate4(graph)
+
+            batch = plan_batch(graph, self.config.max_parallel)
+            if batch is None:
+                # frontier empty & there are unfinished ones = all blocked/needs-revision. To the human.
+                blocked = [t.id for t in graph.tasks if t.status in ("blocked", "needs-revision")]
+                self._escalate(
+                    "no_runnable",
+                    f"No runnable tasks and {unfinished} unfinished ({', '.join(blocked)}). Help needed.",
+                )
+                return 1
+
+            mode, tasks = batch
+            print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
+            try:
+                if mode == "serial" or not self.config.worktree_enabled:
+                    self._consume_serial(tasks)
+                else:
+                    self._consume_parallel(tasks)
+            except StopLoop as exc:
+                logger.error(str(exc))
+                return exc.code
+            # Recompute at the top of the loop after each batch (reassemble the chain).
+
+    def _consume_serial(self, tasks: list[dag.Task]) -> None:
+        """Finalize foundation tasks etc. serially on the work branch."""
+        for task in tasks:
+            self._set_status(task.id, "in-progress")
+            print(f"  [serial] {task.id} {task.title}")
+            pre_head = "" if self.dry_run else self.ws.head()
+            ok, log = self._run_task_to_done(task, cwd=self.root, base=pre_head)
+            if not ok:
+                self._set_status(task.id, "blocked")
+                self._escalate(
+                    "blocked",
+                    f"{task.id}: could not pass the quality gate within the limit; blocked.\n{log}",
+                    task=task.id,
+                )
+                raise StopLoop(f"{task.id} is blocked. Human intervention needed.", code=1)
+            # A serial task lands directly on the work branch (its own commits plus the finalize
+            # below), where --no-verify and already-in-HEAD commits both escape the commit-stage
+            # guard — so re-check everything the task changed before accepting it as done.
+            if not self.dry_run and pre_head:
+                violations = self._gate_violations(self._changed_since(pre_head))
+                if violations:
+                    self._set_status(task.id, "blocked")
+                    self._escalate_gate_violation(task.id, "its work-branch changes", violations)
+                    raise StopLoop(
+                        f"{task.id}: changed gate-guarded paths while their gate is pending "
+                        f"(commits since {pre_head[:12]} stay on the branch for review). "
+                        "Human intervention needed.",
+                        code=1,
+                    )
+            # Finalize the task diff only. The .rein/ orchestration state (tasks.yaml status, etc.)
+            # is not included in the per-task commit (keeping one commit = one task). If the
+            # implementer has not committed, this finalizes the diff (no-op otherwise).
+            if not self._finalize_commit(self.root, f"{task.id}: {task.title}"):
+                # The tree on the work branch keeps the diff, but the task must not be marked done
+                # without its commit (one commit = one task is the record gate ④ reviews).
+                self._set_status(task.id, "blocked")
+                raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
+            self._log_task_done(task)
+            self._set_status(task.id, "done")
+
+    def _consume_parallel(self, tasks: list[dag.Task]) -> None:
+        """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
+
+        Worktree creation is done serially on the main thread (avoiding .git index.lock contention);
+        only the implementation is parallelized.
+        """
+        for task in tasks:
+            self._set_status(task.id, "in-progress")
+        # Worktree creation is serial (avoid git lock contention). The implementation is run in parallel after.
+        branches = {task.id: self._add_worktree(task) for task in tasks}
+        results: dict[str, tuple[bool, str]] = {}
+        with ThreadPoolExecutor(max_workers=max(1, self.config.max_parallel)) as pool:
+            futures = {pool.submit(self._safe_run_task, t, self._worktree_path(t)): t for t in tasks}
+            for future, task in futures.items():
+                results[task.id] = future.result()
+
+        blocked_any = False
+        merged: list[dag.Task] = []
+        # Merge deterministically in ascending id order (sequential join).
+        for task in sorted(tasks, key=lambda t: t.id):
+            ok, log = results[task.id]
+            if not ok:
+                self._set_status(task.id, "blocked")
+                self._escalate(
+                    "blocked",
+                    f"{task.id}: could not pass the quality gate within the limit; blocked.\n{log}",
+                    task=task.id,
+                )
+                self._cleanup_worktree(task)  # the branch keeps the diff for inspection
+                blocked_any = True
+                continue
+            # The leaf's full diff must be on its branch before the merge — an implementer that
+            # forgot to commit would otherwise lose that work when the worktree is removed.
+            if not self._finalize_commit(self._worktree_path(task), f"{task.id}: {task.title}"):
+                # Keep the worktree (it may hold the only copy) and let the rest of the batch merge.
+                self._set_status(task.id, "blocked")
+                blocked_any = True
+                continue
+            # The leaf's commits were made in its worktree, where --no-verify (finalize) or a
+            # bypassed hook can carry a gate violation; merging would bury it in the work branch's
+            # HEAD where --check-diff never looks again. Check the branch's full diff first.
+            if not self.dry_run:
+                violations = self._gate_violations(self._branch_changed_paths(branches[task.id]))
+                if violations:
+                    self._set_status(task.id, "blocked")
+                    self._escalate_gate_violation(task.id, f"leaf branch {branches[task.id]}", violations)
+                    self._cleanup_worktree(task)  # not merged; the branch keeps the diff for review
+                    blocked_any = True
+                    continue
+            if self.merge_leaf(task, branches[task.id]):
+                merged.append(task)  # done is decided after the integration gate below
+            else:
+                self._set_status(task.id, "blocked")
+                self._cleanup_worktree(task)  # conflict: aborted merge, worktree no longer needed
+                blocked_any = True
+        # Integration gate: only a join of 2+ leaves creates a combined tree nobody has verified
+        # (a single-leaf join is byte-identical to that leaf's already-gated worktree state).
+        # Not a knob any more: each leaf was green only in isolation, so a batch that merged
+        # two or more of them has never been verified as one tree until now.
+        if len(merged) >= 2:
+            ok, log = self._integration_gate(merged)
+        else:
+            ok, log = True, ""
+        ids = ",".join(t.id for t in merged)
+        if ok:
+            for task in merged:
+                self._set_status(task.id, "done")
+                self._log_task_done(task)
+        else:
+            for task in merged:
+                self._set_status(task.id, "blocked")
+            self._escalate(
+                "integration_red",
+                f"{ids}: merged into work, but the integrated state fails the quality gate within the "
+                f"limit. Fix the work branch, then set these tasks back to done.\n{log}",
+                task=ids,
+            )
+            blocked_any = True
+        if blocked_any:
+            raise StopLoop("A blocked task occurred. Human intervention needed.", code=1)
+
+    # -- handing over to the review pipeline -----------------------------------
+
+    def _present_gate4(self, graph: dag.Graph) -> int:
+        """All tasks done. Say what still has to happen — and what has NOT been established.
+
+        (There is no "you left a step empty" nudge here any more: the config schema requires a
+        `command` for every command step, so an empty one cannot reach this code. The scaffold
+        ships a placeholder `["true"]` instead, which `doctor` can see and a silent skip cannot.)
+
+        This deliberately does not invite an approval. Green tests plus an AI's summary is not
+        evidence that the code does what the plan says: gate ④ approves a grounded review — a
+        blind extraction of actual behaviour, compared against the frozen plan, with a coverage
+        manifest saying what could not be analysed — and this loop has produced none of that.
+        """
+        print("\n========== all tasks done ==========")
+        print(dag.render(graph))
+
+        print(
+            "\nWhat this run established: every task's code passed the configured quality gate.\n"
+            "What it did NOT establish: that the code does what the plan claims.\n"
+            "\nNext:\n"
+            "  1. rein review generate   — coverage manifest, blind actual extraction,\n"
+            "                                   conformance comparison, security and maintainability review\n"
+            "  2. rein ui                — answer the unprimed challenges, then read the comparison\n"
+            "  3. rein approve build     — readiness check, then your confirmation at the terminal\n"
+            "\nThis loop cannot open gate 4, and neither can anything but a human: a gate opens only on\n"
+            "the gate name typed at an interactive terminal, recorded by `rein approve` itself."
+        )
+        return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="the deterministic orchestrator for the implementation phase")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="run only the control flow without calling the agent CLI or git"
+    )
+    parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    args = parser.parse_args(argv)
+    common.configure_logging()
+    try:
+        repo = repo_mod.get(args.repo)
+    except repo_mod.RepoNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+    if not repo.is_canonical_checkout:
+        # A leaf worktree cannot own a build: its store mutations have to go through the control
+        # plane, and a build that recorded nothing centrally would lose its own decisions.
+        logger.error(
+            "this is a linked worktree — run the build from the canonical checkout. "
+            "Leaf worktrees participate through the control plane, they do not drive it."
+        )
+        return 2
+    try:
+        config = Config.load(repo)
+    except (OSError, ValueError, models.DocumentError, strict_yaml.StrictParseError) as exc:
+        logger.error(f"cannot load .rein/config.yaml: {exc} — `rein doctor` validates it")
+        return 1
+    return Orchestrator(config, dry_run=args.dry_run, repo=repo).run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,42 @@
+# .rein/plan.yaml — the EXPECTED MODEL: what this cycle is supposed to do. Frozen at gate 3;
+# after that, changing it goes through `rein revise --to tasks`, which invalidates the
+# downstream gates in a chain.
+#
+# Two sections carry the whole traceability thread, and neither works without the other:
+#
+#   /req    → claims.  One per `R-N` / `NFR-N` heading in docs/10-requirements.md. The heading
+#             is the checklist; the claim is what it MEANS, stated so that it could be false.
+#   /tasks  → tasks.   The DAG. Each task names the claims it answers.
+#
+# `rein dag --trace` walks requirement → claim → task and blocks on either break: a heading no
+# claim covers, or a claim citing a heading that does not exist. With neither side filled it
+# reports `unknown` and exits 2 — a check with nothing to check is not a pass.
+
+cycle:
+  id: cycle-1
+  # The commit this cycle branches from. CI re-derives it from the pull-request event and
+  # refuses to take this field's word for it (plan §17.3) — it is here for humans and for
+  # offline runs.
+  base_commit: "0000000000000000000000000000000000000000"
+  branch: build/product
+
+# What the implementation is supposed to do. One claim, one checkable statement.
+claims: []
+#  - id: C-001
+#    requirement_ids: [R-1]
+#    statement: <one behaviour, stated so that it could be false>
+#    risk: high                       # low | medium | high | critical
+#    domains: [<domain>]
+
+# The task DAG. `kind` drives orchestration: layers, parallelism, and merge order derive from
+# `blocked_by`, in code rather than by agent discretion.
+tasks: []
+#  - id: T-001
+#    title: <what this task delivers>
+#    kind: foundation                 # foundation | parallel | integration
+#    blocked_by: []
+#    claim_ids: [C-001]
+#    domains: [<domain>]
+#    risk: high
+#    scope:
+#      include: [src/]

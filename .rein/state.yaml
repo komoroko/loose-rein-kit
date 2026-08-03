@@ -1,0 +1,37 @@
+# .rein/state.yaml — this project's MUTABLE state. Nothing else.
+#
+# Task titles, dependencies, and claim mappings are NOT here: they live in plan.yaml, frozen
+# at gate 3. Duplicating them is how two documents drift apart.
+#
+# This file is machine-written. Every change goes through one Central Store transaction
+# together with the audit events that explain it, so `rein` is the only writer — editing
+# it by hand produces a state change with no matching event, which `doctor` reports and the
+# gate guard denies.
+#
+# A gate reaches `approved` only via a receipt `rein` recorded from a human approval: the gate
+# name typed at an interactive terminal, confirmed by `rein approve`. The receipt binds the
+# plan/config/machine/human digests and the audit-chain root it was confirmed against. There is
+# no other path, no --force, and no hand-edit that survives verification.
+
+project: "loose-rein-kit"
+cycle_id: cycle-1                      # lowercase slug naming this delta cycle
+current_phase: brief                   # brief | requirements | design | tasks | build | verify | done
+updated_at: "2026-07-24"
+
+gates:
+  requirements: { status: pending, receipt: null }   # gate 1 — the human OKs the /req result
+  design:       { status: pending, receipt: null }   # gate 2 — the human OKs the /design choices
+  tasks:        { status: pending, receipt: null }   # gate 3 — the human OKs the plan; the plan freezes
+  build:        { status: pending, receipt: null }   # gate 4 — the human OKs the grounded review
+  release:      { status: pending, receipt: null }   # gate 5 — the human OKs the release
+
+plan:
+  status: draft                        # draft | frozen | invalidated
+
+execution:
+  status: idle
+
+review:
+  status: none
+
+tasks: {}

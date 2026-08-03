@@ -1,0 +1,74 @@
+[project]
+name = "loose-rein-kit"
+version = "0.1.0"
+description = "Human-on-the-Loop development harness: frozen requirement claims, blind actual-behaviour review, and human-confirmed gate approval as an installable CLI"
+readme = "README.md"
+license = { file = "LICENSE" }
+# The floor, not a recommendation: the rein tooling runs on 3.10+ (verified by
+# running its test suite under 3.10).
+requires-python = ">=3.10"
+dependencies = [
+    "packaging>=21.0",
+    "pyyaml>=6.0",
+    # Strict schema validation is a core boundary, not a nicety: plan 15.4 makes schema
+    # conformance an absolute block, and a check that can silently turn itself off (a
+    # soft-import degrading to WARN) is not a boundary. Hence a hard dependency.
+    "jsonschema>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/komoroko/loose-rein-kit"
+Changelog = "https://github.com/komoroko/loose-rein-kit/blob/main/CHANGELOG.md"
+
+[project.scripts]
+rein = "rein.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rein"]
+
+[tool.uv]
+# Exclude versions newer than one week from upload from being installed.
+# A cooldown to avoid just-published releases (supply-chain risk, early-release bugs).
+# The value is relative to the current time and re-evaluated rolling on each resolve (uv lock / uv sync).
+exclude-newer = "1 week"
+
+[tool.ruff]
+exclude = [".git", ".mypy_cache", ".venv", "third_party"]
+line-length = 120
+target-version = "py310"  # match requires-python's floor (keeps UP suggestions 3.10-safe)
+
+[tool.ruff.lint]
+fixable = ["ALL"]
+unfixable = []
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "auto"
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+warn_unused_ignores = false
+python_version = "3.10"  # type-check against the floor so 3.11+ stdlib use is caught mechanically
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config -ra"
+markers = [
+    "integration: exercises real git/subprocess, not just fakes (deselect with -m 'not integration')",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pre-commit>=4.6.0",
+    "mypy>=2.1.0",
+    "ruff>=0.15.16",
+    "types-pyyaml>=6.0.12.20260518",
+    "jsonschema>=4.0",
+]

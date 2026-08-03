@@ -1,0 +1,156 @@
+""".rein/rein.lock — the machine-written record of what the harness installed.
+
+The lock answers three questions without a network call: **which rein release last wrote
+this repo's artifacts** (and from which source), **which document format the repository is
+on**, and **which files the tool owns** (the materialized prompts/schema under `.rein/`,
+the per-agent integration surfaces, and the one-shot seeds) — each with a content hash, so
+`sync`/`upgrade`/`uninstall` can tell a pristine file (safe to refresh/remove) from a locally
+modified one (never touched silently).
+
+The format is a single opaque `format:` string rather than a number, deliberately: a numeric
+version invites "newer than I know, but probably close enough", which is how every
+compatibility shim starts. :data:`FORMAT` must match **exactly** or the lock is refused — there
+is no ordering, so there is nothing to be lenient about (plan §4.3).
+
+Structure (YAML mapping, `sort_keys=False` so the file reads top-down):
+
+  format: rein-grounded-v1  # exact match required
+  tool_version: 0.1.0            # the release that last wrote the lock
+  source: ''                     # where that release came from (git ref / path), when known
+  prompts: {version, files:}     # the materialized artifacts (.rein/prompts|schema, rules)
+  integrations: {claude: {...}}  # present only for installed agent surfaces (install.py)
+  seeded: {path: hash}           # one-shot seeds the repo owns from then on (uninstall check only)
+  created_at / updated_at
+
+Writers: `init` (creates), `sync`/`upgrade` (prompts section), `install`/`uninstall`
+(integrations). The lock is always rewritten *last* in an operation, so a crash leaves behind
+at worst an under-recorded lock that the next run reconverges.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+from packaging.version import InvalidVersion, Version
+
+from rein import repo as repo_mod
+
+#: The one document format this release reads. Not a number: there is no "close enough".
+FORMAT = "rein-grounded-v1"
+LOCK_NAME = ".rein/rein.lock"
+
+_HEADER = (
+    "# .rein/rein.lock — machine-written by `rein init|sync|install|uninstall|upgrade`.\n"
+    "# Records the document format, the tool version/source, and a hash per installed file so\n"
+    "# upgrades never overwrite local edits. Do not edit by hand.\n"
+)
+
+
+class LockError(RuntimeError):
+    """An unusable lock: unparseable, not a mapping, or written in a different document format."""
+
+
+def norm_hash(blob: bytes) -> str:
+    """sha256 of the CRLF-normalized bytes — a checkout's line-ending conversion is not an edit."""
+    return "sha256:" + hashlib.sha256(blob.replace(b"\r\n", b"\n")).hexdigest()
+
+
+def new(version: str, source: str) -> dict[str, Any]:
+    """A fresh lock skeleton for `init` to fill."""
+    today = date.today().isoformat()
+    return {
+        "format": FORMAT,
+        "tool_version": version,
+        "source": source,
+        "prompts": {"version": version, "files": {}},
+        "integrations": {},
+        "seeded": {},
+        "created_at": today,
+        "updated_at": today,
+    }
+
+
+def read(path: Path) -> dict[str, Any] | None:
+    """The lock mapping, or None when the file does not exist. LockError when unusable.
+
+    A lock in any other format — a missing `format` key included — is refused outright.
+    "Proceed and guess" is how a repository gets silently corrupted by a tool that does not
+    understand it.
+    """
+    from rein import strict_yaml  # lazy: keep `import lock` cheap on the hook path
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LockError(f"cannot read {path}: {exc}") from None
+    try:
+        data = strict_yaml.load_mapping(text, what=str(path))
+    except strict_yaml.StrictParseError as exc:
+        raise LockError(f"{exc} — machine-written; restore it from git") from None
+
+    found = data.get("format")
+    if found != FORMAT:
+        raise LockError(
+            f"{path} is in format {found!r}, but this rein reads {FORMAT!r} only — "
+            "upgrade the tool (`uv tool upgrade loose-rein-kit`) or re-initialize the repository"
+        )
+    return data
+
+
+def write(path: Path, data: dict[str, Any]) -> None:
+    """Write the lock (stamping updated_at), with the do-not-edit header."""
+    import yaml  # lazy (see read)
+
+    data = dict(data)
+    data["format"] = FORMAT  # never take the caller's word for the format it just wrote
+    data["updated_at"] = date.today().isoformat()
+    data.setdefault("created_at", data["updated_at"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_HEADER + yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def tool_version_of(data: dict[str, Any]) -> str:
+    """The rein version recorded in a lock mapping ("" when unrecorded)."""
+    value = data.get("tool_version")
+    return str(value) if isinstance(value, str) else ""
+
+
+def startup_warning(repo: repo_mod.Repo, running_version: str) -> str | None:
+    """The cheap per-invocation check: one warning line, or None when all is well.
+
+    A missing lock is silent (mid-init states are legitimate); an unusable or foreign-format
+    lock raises LockError (the caller turns that into a hard error); a version skew between
+    the running tool and the lock's writer gets one actionable stderr line.
+    """
+    data = read(repo.lock)
+    if data is None:
+        return None
+    recorded = tool_version_of(data)
+    if not recorded or recorded == running_version:
+        return None
+    try:
+        recorded_v, running_v = Version(recorded), Version(running_version)
+    except InvalidVersion:
+        # A version string nothing can parse is a damaged lock. Saying nothing here and leaving
+        # it for `doctor` means the one command that runs on every invocation stays quiet about
+        # the file it just read — the shape of leniency this format was narrowed to avoid.
+        return (
+            f"{LOCK_NAME} records tool_version {recorded!r}, which is not a version — the lock is "
+            f"damaged (running {running_version}). Run `rein doctor`."
+        )
+    if recorded_v == running_v:
+        return None  # canonically equal despite differing spellings (0.1.01 vs 0.1.1)
+    if recorded_v > running_v:
+        return (
+            f"rein {running_version} is older than the {recorded} that wrote {LOCK_NAME} — "
+            "upgrade the tool (`uv tool upgrade loose-rein-kit`)"
+        )
+    return (
+        f"rein {running_version} is newer than the {recorded} recorded in {LOCK_NAME} — "
+        "run `rein sync` to refresh the materialized artifacts (and the lock)"
+    )

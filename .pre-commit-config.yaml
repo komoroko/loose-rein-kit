@@ -1,0 +1,89 @@
+﻿repos:
+  # Loose Rein gate guard, commit-stage mode: fail when the diff vs HEAD touches a gate-guarded
+  # path whose prerequisite gate is not approved (AGENTS.md "Gate rules", mechanism layer).
+  # Agent-agnostic: runs in `make check` (every agent's DoD) and on `git commit` once hooks are
+  # installed — covering agents without tool hooks (e.g. Codex) and edits that bypass them
+  # (e.g. shell redirects). No-op while guard.template_mode is true.
+  - repo: local
+    hooks:
+      - id: rein-gate-guard
+        name: rein gate guard (commit stage)
+        entry: uv run --frozen rein guard --check-diff
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+  # gitleaks (secret scanning; mechanically prevents committing secrets)
+  # Exclude false positives with .gitleaksignore.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # pre-commit-hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    - id: trailing-whitespace
+    - id: end-of-file-fixer
+    - id: check-yaml
+    - id: debug-statements
+    - id: name-tests-test
+      # tests/ uses pytest's conventional test_*.py naming (the hook's default wants *_test.py);
+      # _support.py is deliberately not a test module (shared helpers imported by the suite)
+      args: [--pytest-test-first]
+      exclude: ^tests/_support\.py$
+    - id: requirements-txt-fixer
+
+  # Ruff (lint + format + import sorting; black/isort are consolidated into ruff)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16
+    hooks:
+      # Run the linter.
+      - id: ruff
+        name: ruff
+        description: "Run 'ruff' for extremely fast Python linting"
+        entry: ruff check --force-exclude
+        language: python
+        types_or: [python, pyi]
+        # --fix: enable lint fixes
+        args: [--fix]
+        require_serial: true
+        additional_dependencies: []
+        minimum_pre_commit_version: "4.6.0"
+      # Run the formatter.
+      - id: ruff-format
+        name: ruff-format
+        description: "Run 'ruff format' for extremely fast Python formatting"
+        entry: ruff format --force-exclude
+        language: python
+        types_or: [python, pyi]
+        args: []
+        require_serial: true
+        additional_dependencies: []
+        minimum_pre_commit_version: "4.6.0"
+        stages: [pre-push]
+
+  # mypy
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.1.0
+    hooks:
+      # Run the mypy.
+      - id: mypy
+        name: mypy
+        description: "Run 'mypy' for Python linting"
+        entry: mypy
+        language: python
+        args: [--config-file=pyproject.toml]
+        require_serial: true
+        # Type stubs for the isolated hook env. Add your product's typed deps (e.g. pydantic)
+        # here when the product uses them — mypy runs in its own venv and can't see .venv.
+        additional_dependencies:
+          - "mypy-extensions>=1.1.0"
+          - "types-PyYAML>=6.0.12.20260518"
+          # Treat the tests' @pytest.fixture as typed (without pytest types in the isolated env,
+          # strict's disallow_untyped_decorators raises an untyped-decorator error).
+          - "pytest>=9.0.3"
+        minimum_pre_commit_version: "4.6.0"
+        stages: [pre-push]

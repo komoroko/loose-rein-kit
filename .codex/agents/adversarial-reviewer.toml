@@ -1,0 +1,6 @@
+# Loose Rein role agent. The body lives in the SSOT prompts, not here — the same one-line
+# pointer the Claude Code and Copilot role files carry, so one role has one definition.
+name = "adversarial-reviewer"
+description = "Independent red-team critique of the phase deliverable before gates ①–③. Attacks for counterexamples, ambiguities, hidden assumptions, and plan defects; report-only. Delegated from /req, /design, and /tasks."
+sandbox_mode = "read-only"
+developer_instructions = "Your full role definition is in `.rein/prompts/agents/adversarial-reviewer.md`. Read that file first and follow it exactly."

@@ -1,0 +1,19 @@
+{
+  "$comment": "VS Code Copilot agent-hooks registration (preview). Same gate guard as .claude/settings.json — VS Code may parse both and run the guard twice per tool; that is harmless (read-only, idempotent deny). Matchers are ignored by VS Code, so the guard runs on every tool and passes anything that carries no file path. Requires the rein CLI on PATH (uv tool install).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "rein guard",
+        "timeout": 30
+      }
+    ],
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "test -f .rein/state.yaml && echo '--- Loose Rein: what changed since you last looked ---' && rein resume || true",
+        "timeout": 10
+      }
+    ]
+  }
+}

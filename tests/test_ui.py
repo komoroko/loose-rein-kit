@@ -1,0 +1,804 @@
+"""Verify ui.py: the action whitelist and the HTTP surface (deterministic, offline).
+
+The gate-approval rewrite itself lives in approve.py (the single sanctioned write path) and is
+unit-tested in test_approve.py; here only the endpoint's delegation behavior is asserted."""
+
+from __future__ import annotations
+
+import http.client
+import json
+import re
+import threading
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from rein import models, registry, store, ui
+from tests._support import SANDBOXED_PROFILES, chain, make_config, make_state, seed_repo
+
+# --- action_argv: the fixed whitelist ------------------------------------------
+
+
+def test_action_argv_whitelist() -> None:
+    assert ui.action_argv("doctor", {}) == ["make", "doctor"]
+    assert ui.action_argv("tests", {}) == ["make", "test"]  # parameterless: zero injection surface
+    argv = ui.action_argv("revise", {"phase": "design", "reason": "rethink auth"})
+    assert argv[:2] == ["make", "revise"] and "--to design" in argv[2]
+    assert "'rethink auth'" in argv[2]  # free text is shell-quoted server-side
+    assert ui.action_argv("cycle_close", {"slug": "payment-refactor"}) == [
+        "make",
+        "cycle-close",
+        "NAME=payment-refactor",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("action", "params"),
+    [
+        ("rm_rf", {}),  # not on the whitelist
+        # There is no `events --resolve`; a dashboard button that outlived such a verb would post an
+        # action that could only ever fail. The action is gone, so it is now simply not on the
+        # whitelist — a log an operator can close by hand is not evidence of anything.
+        ("events_resolve", {"id": 3, "note": "fixed"}),
+        ("revise", {"phase": "verify", "reason": "x"}),  # not a roll-back target
+        ("revise", {"phase": "design", "reason": "  "}),  # empty reason
+        ("cycle_close", {"slug": "Bad Slug!"}),  # invalid slug characters
+        ("cycle_close", {"slug": "x; rm -rf /"}),  # injection attempt
+    ],
+)
+def test_action_argv_rejects_invalid(action: str, params: dict[str, object]) -> None:
+    with pytest.raises(ui.UiActionError) as exc:
+        ui.action_argv(action, params)
+    assert exc.value.status == 400
+
+
+# --- HTTP surface ---------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def isolate_config_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep every ui.main / registry write off the developer's real ~/.config during tests."""
+    monkeypatch.setenv("REIN_CONFIG_HOME", str(tmp_path / "cfg"))
+
+
+def _seed_repo(base: Path, project: str) -> Path:
+    base.mkdir(parents=True, exist_ok=True)
+    seed_repo(
+        base,
+        state=make_state(
+            project=project,
+            gates=dict.fromkeys(models.GATE_ORDER, "pending"),
+            phase="requirements",
+            plan_status="draft",
+        ),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+    )
+    return base
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    return _seed_repo(tmp_path, "demo")
+
+
+@pytest.fixture
+def server(repo: Path) -> Iterator[ui.DashboardServer]:
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=repo, read_only=False)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def _request(
+    srv: ui.DashboardServer, method: str, path: str, body: dict[str, object] | None = None, token: str | None = None
+) -> tuple[int, bytes]:
+    conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-Rein-Token"] = token
+    conn.request(method, path, json.dumps(body) if body is not None else None, headers)
+    res = conn.getresponse()
+    data = res.read()
+    conn.close()
+    return res.status, data
+
+
+def _get_conditional(srv: ui.DashboardServer, path: str, etag: str | None = None) -> tuple[int, str | None, bytes]:
+    """GET `path`, optionally with If-None-Match, returning (status, ETag, body)."""
+    conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+    headers = {"If-None-Match": etag} if etag is not None else {}
+    conn.request("GET", path, None, headers)
+    res = conn.getresponse()
+    data = res.read()
+    conn.close()
+    return res.status, res.getheader("ETag"), data
+
+
+def test_get_status_returns_next_command(server: ui.DashboardServer) -> None:
+    status, data = _request(server, "GET", "/api/status")
+    assert status == 200
+    payload = json.loads(data)
+    assert payload["next"]["command"] == "/req" and payload["project"] == "demo"
+
+
+def test_get_page_is_offline_self_contained(server: ui.DashboardServer) -> None:
+    status, data = _request(server, "GET", "/")
+    page = data.decode("utf-8")
+    assert status == 200 and "Loose Rein" in page
+    assert server.token in page  # the POST token is delivered only via the page
+    # Offline canary across the page AND every allowlisted asset: no external reference anywhere.
+    assets = {name: _request(server, "GET", f"/assets/{name}")[1].decode("utf-8") for name in ui._ASSET_TYPES}
+    for name, text in {"index.html": page, **assets}.items():
+        assert "http://" not in text and "https://" not in text, name
+        assert "//cdn" not in text and "@import" not in text, name
+    # every URL the page or a module references is same-origin: an /assets/ file or a #tab hash
+    for name, text in {"index.html": page, **assets}.items():
+        for url in re.findall(r'(?:src|href|from)\s*=?\s*"([^"]+)"', text):
+            assert url.startswith(("/assets/", "#")), f"{name} references {url}"
+    # the sections live in the page; their renderers and the theme machinery in the modules
+    for marker in ('id="stepper"', 'id="trace"', 'id="rvMain"', 'id="tabs"', 'id="toasts"'):
+        assert marker in page, marker
+    bundle = "".join(assets.values())
+    for marker in ("buildDag", "showTaskDetail", "data-theme", "renderReview"):
+        assert marker in bundle, marker
+
+
+def test_no_asset_builds_a_click_handler_out_of_a_task_id() -> None:
+    """Task ids are agent-written and not pattern-validated on load (dag.py takes them as-is).
+
+    Interpolating one into an inline `onclick="f('<id>')"` lets a quote in the id close the JS
+    string and run script on the page that holds the approval token — the XSS→self-approval path
+    mdlite.py exists to close. Ids must travel as escaped attribute values read back by a delegated
+    listener, so no generated handler may name a task-detail call at all.
+    """
+    sources = {p.name: p.read_text(encoding="utf-8") for p in ui.ASSETS_DIR.iterdir() if p.suffix == ".js"}
+    for name, text in sources.items():
+        assert 'onclick="showTaskDetail' not in text, name
+        assert "showTaskDetail('" not in text.replace("onTaskClick(showTaskDetail)", ""), name
+    bundle = "".join(sources.values())
+    assert 'data-task="' in bundle and 'getAttribute("data-task")' in bundle
+
+
+def test_shipped_assets_match_the_allowlist_exactly() -> None:
+    # _ASSET_TYPES is a hand-maintained allowlist (auditability over convenience); this catches a
+    # file added to ui_assets/ but forgotten in the dict — which would 404 at runtime — and vice versa.
+    on_disk = {p.name for p in ui.ASSETS_DIR.iterdir() if p.is_file()}
+    assert on_disk == set(ui._ASSET_TYPES) | {"index.html"}
+
+
+# --- the payload contract between the modules and the server --------------------
+#
+# The drift this catches actually happened: `_tasks_block` renamed its task list to `rows` and
+# `trace` collapsed to a verdict, while view-tasks.js kept reading `tasks.tasks` and
+# `trace.requirements`. Nothing failed — no test asserted that a field a module reads exists — so
+# the Tasks tab threw a TypeError inside `refresh()`, whose catch reports "disconnected". A pane
+# that silently stops rendering is worse than one that 500s, because the dashboard still looks alive.
+
+
+def _repo_with_tasks(tmp_path: Path) -> Path:
+    from tests._support import make_claim, make_plan, make_task
+
+    base = tmp_path / "threaded"
+    base.mkdir(parents=True, exist_ok=True)
+    seed_repo(
+        base,
+        state=make_state(
+            project="demo",
+            gates=dict.fromkeys(models.GATE_ORDER, "pending"),
+            phase="build",
+            plan_status="frozen",
+            tasks={"T-001": "done", "T-002": "in-progress"},
+        ),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+        plan=make_plan(
+            claims=[make_claim("C-001", requirement_ids=["R-1"])],
+            tasks=[make_task("T-001", claim_ids=["C-001"]), make_task("T-002", claim_ids=["C-001"])],
+        ),
+    )
+    return base
+
+
+def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> None:
+    """Each key below is read by name in ui_assets/*.js; a rename on either side must fail here."""
+    from rein import status_api
+
+    payload = status_api.collect_status(_repo_with_tasks(tmp_path))
+
+    tasks = payload["tasks"]
+    assert isinstance(tasks, dict)
+    # view-tasks.js: buildDag/layersBar/renderTasks; view-overview.js: renderAttention
+    for key in ("rows", "counts", "total", "layers", "critical_path", "frontier"):
+        assert key in tasks, f"status.tasks.{key}"
+    for key in ("id", "title", "kind", "status", "risk", "blocked_by", "claim_ids"):
+        assert key in tasks["rows"][0], f"status.tasks.rows[].{key}"
+    # the pills and the layer bar index counts by the status vocabulary itself
+    assert set(tasks["counts"]) == set(models.TASK_STATUS_ORDER)
+
+    trace = payload["trace"]
+    assert isinstance(trace, dict)
+    for key in ("ok", "errors", "warnings", "requirements"):
+        assert key in trace, f"status.trace.{key}"
+    for key in ("id", "nfr", "claims", "tasks"):
+        assert key in trace["requirements"][0], f"status.trace.requirements[].{key}"
+
+    # view-overview.js renderAttention / notify.js snapshot
+    assert isinstance(payload["attention"], list)
+    for key in ("gates", "warnings", "next", "project", "current_phase", "phase_order", "decision"):
+        assert key in payload, f"status.{key}"
+    decision = payload["decision"]
+    assert isinstance(decision, dict)
+    for key in ("id", "waiting_on_human", "kind", "headline", "action"):
+        assert key in decision, f"status.decision.{key}"
+
+
+def test_the_pending_decision_is_one_identity_not_a_stream_of_events() -> None:
+    """notify.js interrupts on `decision.id` changing; a decision the loop re-derives is silent."""
+    from rein import status_api
+
+    approve = status_api.Recommendation(command="rein approve build", kind="approve_gate", reason="ready")
+    first = status_api.pending_decision(approve, "build")
+    assert first["waiting_on_human"] is True and first["id"]
+    # the same decision, re-derived on the next poll, is the same identity
+    assert status_api.pending_decision(approve, "build")["id"] == first["id"]
+    # a different gate is a different call to make
+    assert status_api.pending_decision(approve, "release")["id"] != first["id"]
+    # work for the agent is not an interruption for the human
+    run = status_api.Recommendation(command="/build", kind="run_phase", reason="phase in progress")
+    assert status_api.pending_decision(run, "build") == {
+        "id": "",
+        "waiting_on_human": False,
+        "kind": "run_phase",
+        "headline": "phase in progress",
+        "action": "/build",
+        "blocking": 0,
+        "open": 0,
+    }
+
+
+def test_the_queue_counts_the_decision_without_choosing_it() -> None:
+    """The queue may not pick what interrupts: that would jitter the ping and split the advice.
+
+    `rein next` and the dashboard must recommend the same command, so the decision stays
+    derived from the decision table. What the queue adds is how much stands behind it.
+    """
+    from rein import status_api
+
+    run = status_api.Recommendation(command="/build", kind="run_phase", reason="phase in progress")
+    queue = [
+        {"id": "a", "severity": "blocking", "kind": "gate_blocker", "subject": "build", "headline": "x", "action": ""},
+        {"id": "b", "severity": "attention", "kind": "escalation", "subject": "T-1", "headline": "y", "action": ""},
+        {"id": "c", "severity": "info", "kind": "ungrounded", "subject": "C-1", "headline": "z", "action": ""},
+    ]
+    decision = status_api.pending_decision(run, "build", pending=queue)
+    assert decision["action"] == "/build"  # still the decision table's answer, not queue[0]'s
+    assert decision["blocking"] == 1
+    assert decision["open"] == 2  # info is context, not something waiting on a person
+
+
+def test_event_feed_payload_carries_every_field_the_feed_reads(server: ui.DashboardServer, repo: Path) -> None:
+    _seed_events(repo, count=3)
+    status, data = _request(server, "GET", "/api/events")
+    assert status == 200
+    payload = json.loads(data)
+    for key in ("events", "total", "chain_root"):
+        assert key in payload, key
+    assert payload["events"], "events were just seeded, so the feed must not be empty"
+    for key in ("seq", "date", "event", "actor", "subject_ids", "detail", "needs_decision"):
+        assert key in payload["events"][0], f"events[].{key}"
+
+
+def test_no_module_reads_a_field_the_payload_stopped_carrying() -> None:
+    """Spelling canaries for the renames that already bit, so they cannot come back quietly."""
+    sources = {p.name: p.read_text(encoding="utf-8") for p in ui.ASSETS_DIR.iterdir() if p.suffix == ".js"}
+    forbidden = {
+        "tasks.tasks": "the task list is `tasks.rows`",
+        "in_progress": "the status is spelled `in-progress` (models.TASK_STATUS_ORDER)",
+        ".escalations": "events awaiting a human arrive as `attention`",
+        "d.logs": "there is no `logs` block; those logs live in docs/",
+        "e.open": "the feed's open flag is `needs_decision`",
+    }
+    for name, text in sources.items():
+        for token, why in forbidden.items():
+            assert token not in text, f"{name} reads `{token}` — {why}"
+
+
+def test_assets_are_served_with_their_types_and_nothing_else(server: ui.DashboardServer) -> None:
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+    conn.request("GET", "/assets/app.css")
+    res = conn.getresponse()
+    assert res.status == 200 and res.getheader("Content-Type", "").startswith("text/css")
+    res.read()
+    conn.close()
+    # anything off the exact-name allowlist is a 404 (including traversal shapes)
+    for path in ("/assets/nope.js", "/assets/../ui.py", "/assets/app.js.bak"):
+        assert _request(server, "GET", path)[0] == 404, path
+
+
+def test_get_unknown_path_is_404(server: ui.DashboardServer) -> None:
+    assert _request(server, "GET", "/nope")[0] == 404
+
+
+def test_post_without_token_is_403(server: ui.DashboardServer) -> None:
+    status, _ = _request(server, "POST", "/api/run", {"action": "doctor", "params": {}})
+    assert status == 403
+
+
+def test_post_unknown_action_is_400(server: ui.DashboardServer) -> None:
+    status, _ = _request(server, "POST", "/api/run", {"action": "nope", "params": {}}, token=server.token)
+    assert status == 400
+
+
+def test_post_gate_approve_returns_a_request_and_opens_nothing(server: ui.DashboardServer, repo: Path) -> None:
+    """Clicking in a localhost UI is not authentication: the browser proves nothing about who
+    is at the keyboard, so this endpoint only reports readiness and hands back the command the
+    human runs in their own terminal (plan §7.1)."""
+    from rein import repo as repo_mod
+    from rein import store as store_mod
+
+    status, body = _request(server, "POST", "/api/gate/approve", {"gate": "requirements"}, token=server.token)
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["gate"] == "requirements"
+    assert "type the gate name" in " ".join(payload["next"])
+
+    state = store_mod.Store(repo_mod.Repo(repo)).read_state()
+    assert state is not None and state.gate_status("requirements") == "pending"
+
+
+def test_post_gate_approve_reports_blockers_rather_than_proceeding(
+    server: ui.DashboardServer,
+) -> None:
+    status, body = _request(server, "POST", "/api/gate/approve", {"gate": "build"}, token=server.token)
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["ok"] is False
+    assert payload["blockers"]
+    assert payload["covers"] is None
+
+
+def test_read_only_server_refuses_posts(repo: Path) -> None:
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=repo, read_only=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        status, _ = _request(srv, "POST", "/api/gate/approve", {"gate": "requirements"}, token=srv.token)
+        assert status == 405
+        assert _request(srv, "GET", "/api/status")[0] == 200  # reads still work
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_main_once_prints_parseable_json(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert ui.main(["--once", "--root", str(repo)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["next"]["command"] == "/req"
+
+
+def test_main_refuses_non_loopback_bind_with_writes_enabled(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert ui.main(["--host", "0.0.0.0", "--root", str(repo)]) == 2
+    assert "refusing to bind" in capsys.readouterr().err
+    # --once starts no server, so the guard does not apply to it
+    assert ui.main(["--host", "0.0.0.0", "--once", "--root", str(repo)]) == 0
+
+
+def test_open_mode_targets_vscode_over_external_browser() -> None:
+    assert ui.open_mode(no_open=False, term_program="vscode") == "vscode"
+    assert ui.open_mode(no_open=False, term_program=None) == "browser"
+    assert ui.open_mode(no_open=False, term_program="Apple_Terminal") == "browser"
+    assert ui.open_mode(no_open=True, term_program="vscode") == "none"  # --no-open overrides detection
+
+
+# --- events endpoint ------------------------------------------------------------
+
+
+def _seed_events(repo: Path, count: int) -> None:
+    """A chained log: `count - 1` completed tasks, then one event awaiting a human decision."""
+    from rein import event_chain
+
+    ui._events_cache = None
+    names = ["task_completed"] * (count - 1) + ["task_failed"]
+    event_chain.append_lines(repo / ".rein" / "events.ndjson", chain(*names))
+
+
+def test_get_events_returns_tail_newest_first_with_open_flag(server: ui.DashboardServer, repo: Path) -> None:
+    _seed_events(repo, count=5)
+    status, data = _request(server, "GET", "/api/events?limit=3")
+    assert status == 200
+    payload = json.loads(data)
+    assert payload["total"] == 5 and len(payload["events"]) == 3
+    newest = payload["events"][0]
+    assert newest["event"] == "task_failed" and newest["needs_decision"] is True
+    assert payload["events"][1]["needs_decision"] is False  # a completed task needs no decision
+    # The chain root the feed was rendered from, so a viewer can check it against a receipt.
+    assert payload["chain_root"].startswith("sha256:")
+
+
+def test_get_events_defaults_and_rejects_bad_limit(server: ui.DashboardServer, repo: Path) -> None:
+    empty = json.loads(_request(server, "GET", "/api/events")[1])
+    assert empty["events"] == [] and empty["total"] == 0
+    assert _request(server, "GET", "/api/events?limit=abc")[0] == 400
+
+
+def test_events_are_parsed_once_per_version_of_the_log(server: ui.DashboardServer, repo: Path) -> None:
+    # The Activity feed polls every 3s and answering it means parsing the *whole* log (an
+    # escalation's open state depends on a resolve that may sit anywhere in it). Cache on the
+    # file's identity — but an append must still be visible on the very next request.
+    _seed_events(repo, count=5)
+    log = repo / ".rein" / "events.ndjson"
+    first = ui._load_events_cached(log)
+    assert ui._load_events_cached(log) is first  # unchanged file: the same parsed list, not a re-parse
+
+    from rein import event_chain
+
+    event_chain.append_lines(log, [event_chain.link(first[-1], event_chain.make("task_completed", "demo-cycle"))])
+    payload = json.loads(_request(server, "GET", "/api/events")[1])
+    assert payload["total"] == 6 and payload["events"][0]["seq"] == 6
+
+    missing = repo / ".rein" / "nope.ndjson"
+    assert ui._load_events_cached(missing) == []  # an absent log is empty
+
+
+# --- /api/status conditional requests --------------------------------------------
+
+
+def test_status_etag_ignores_when_the_payload_was_generated(server: ui.DashboardServer) -> None:
+    # generated_at is a fresh wall-clock stamp on every call. If it counted towards the ETag, an
+    # idle repo would look like it changed on every poll — which is exactly the bug this closes.
+    status_a, etag_a, body_a = _get_conditional(server, "/api/status")
+    status_b, etag_b, body_b = _get_conditional(server, "/api/status")
+    assert status_a == status_b == 200
+    assert etag_a is not None and etag_a == etag_b
+    assert json.loads(body_a)["generated_at"] is not None  # still in the body: the page shows it
+    assert {k: v for k, v in json.loads(body_a).items() if k != "generated_at"} == {
+        k: v for k, v in json.loads(body_b).items() if k != "generated_at"
+    }
+
+
+def test_status_answers_304_for_a_matching_etag(server: ui.DashboardServer) -> None:
+    _, etag, _ = _get_conditional(server, "/api/status")
+    status, echoed, body = _get_conditional(server, "/api/status", etag)
+    assert status == 304
+    assert body == b""  # a 304 carries no body — that is the whole point of the round trip
+    assert echoed == etag
+
+
+def test_status_without_if_none_match_is_always_200(server: ui.DashboardServer) -> None:
+    assert _get_conditional(server, "/api/status")[0] == 200
+    assert _get_conditional(server, "/api/status", '"not-the-current-one"')[0] == 200
+
+
+def test_status_etag_changes_when_the_ssot_moves(server: ui.DashboardServer, repo: Path) -> None:
+    _, etag, _ = _get_conditional(server, "/api/status")
+    (repo / ".rein" / "state.yaml").write_bytes(
+        store.dump_yaml(
+            make_state(
+                gates={
+                    "requirements": "approved",
+                    "design": "pending",
+                    "tasks": "pending",
+                    "build": "pending",
+                    "release": "pending",
+                },
+                phase="design",
+                plan_status="draft",
+            )
+        )
+    )
+    status, new_etag, body = _get_conditional(server, "/api/status", etag)
+    assert status == 200 and new_etag != etag
+    assert json.loads(body)["gates"][0]["status"] == "approved"
+
+
+def test_status_reads_the_event_log_through_the_cache(server: ui.DashboardServer, repo: Path) -> None:
+    # /api/status is the always-on poll; it used to re-parse the whole events.ndjson every few
+    # seconds while the cache served only the Activity feed. Same file version → same parsed list.
+    _seed_events(repo, count=5)
+    log = repo / ".rein" / "events.ndjson"
+    ui._events_cache = None  # empty the one slot, so what fills it can only be the request below
+    assert len(json.loads(_get_conditional(server, "/api/status")[2])["attention"]) == 1
+    assert ui._events_cache is not None and ui._events_cache[0][0] == str(log)
+
+
+# --- review endpoint ------------------------------------------------------------
+
+
+def test_get_review_serves_rendered_deliverable(server: ui.DashboardServer, repo: Path) -> None:
+    doc = repo / "docs" / "10-requirements.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text(
+        "# Requirements\n<script>steal(TOKEN)</script>\n\n## Self-assessment\n- **Confidence**: low\n",
+        encoding="utf-8",
+    )
+    status, data = _request(server, "GET", "/api/review/requirements")
+    assert status == 200
+    payload = json.loads(data)
+    assert payload["is_awaiting"] is True and payload["index"] == 1
+    (main,) = payload["deliverables"]
+    assert "<h1>Requirements</h1>" in main["html"]
+    assert "<script" not in main["html"]  # XSS regression: agent markup arrives inert
+    assert main["self_assessment"]["confidence"] == "low"
+
+
+@pytest.mark.parametrize("path", ["/api/review/nope", "/api/review/../state", "/api/review/", "/api/review/Build"])
+def test_get_review_unknown_gate_is_404(server: ui.DashboardServer, path: str) -> None:
+    assert _request(server, "GET", path)[0] == 404
+
+
+# --- Challenge-first human review (plan §21.1, §21.2) ---------------------------
+
+
+def _generated_review_with_challenge() -> dict[str, object]:
+    """A minimal generated machine review carrying one high-risk Decision Card (DC-001).
+
+    Being high-risk, it doubles as the unprimed challenge (expected choice 'B') — a challenge is
+    not a separate machine section any more, it is a high/critical card asked in two beats
+    (human_review.challenges): the reviewer answers before `evidence` is served back.
+    """
+    return {
+        "machine": {
+            "status": "generated",
+            "binding": {
+                "change_digest": "sha256:" + "a" * 64,
+                "plan_digest": "sha256:" + "b" * 64,
+                "toolchain_digest": "sha256:" + "c" * 64,
+            },
+            "coverage": [
+                {
+                    "diff_digest": "sha256:" + "d" * 64,
+                    "analyzed_files": 1,
+                    "truncated": False,
+                    "coverage_status": "sufficient",
+                }
+            ],
+            "actual_extraction": [],
+            "claims": [],
+            # A high-risk card, so it blocks the freeze until answered (human_review.unanswered_decisions).
+            "statements": [
+                {"id": "STMT-001", "text": "Return it to the implementer.", "epistemic_status": "machine_inferred"},
+                {"id": "STMT-002", "text": "Change the expectation instead.", "epistemic_status": "machine_inferred"},
+            ],
+            "decision_cards": [
+                {
+                    "id": "DC-001",
+                    "question": "C-001 diverged. What happens to it?",
+                    "risk": "high",
+                    "options": [{"id": "A", "statement_id": "STMT-001"}, {"id": "B", "statement_id": "STMT-002"}],
+                    "evidence": {
+                        "expected_choice": "B",
+                        "expected": {"statement": "a lost response never double-commits"},
+                        "counterfactual": "trace the retry key",
+                    },
+                }
+            ],
+        },
+        "human": {"status": "not_started"},
+    }
+
+
+@pytest.fixture
+def review_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
+    root = tmp_path / "rv"
+    root.mkdir()
+    seed_repo(
+        root,
+        state=make_state(project="rv", gates=dict.fromkeys(models.GATE_ORDER, "pending"), phase="build"),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+        review=_generated_review_with_challenge(),
+    )
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=root, read_only=False)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_session_carries_the_next_challenge_without_its_reveal(review_server: ui.DashboardServer) -> None:
+    status, data = _request(review_server, "GET", "/api/review/session")
+    assert status == 200
+    session = json.loads(data)
+    assert session["generated"] is True
+    assert session["next_challenge"]["id"] == "DC-001"
+    assert "reveal" not in session["next_challenge"]  # the expected choice must not leak with the question
+    assert session["machine_digest"].startswith("sha256:")
+
+
+def _card(stage_payload: dict[str, object], card_id: str) -> dict[str, object]:
+    cards = stage_payload["decision_cards"]
+    assert isinstance(cards, list)
+    return next(c for c in cards if c["id"] == card_id)  # type: ignore[index]
+
+
+def test_the_decision_stage_withholds_evidence_until_the_card_is_answered(review_server: ui.DashboardServer) -> None:
+    before = json.loads(_request(review_server, "GET", "/api/review/stage/decision")[1])
+    assert "evidence" not in _card(before, "DC-001")
+
+    digest = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
+    body = {"challenge_id": "DC-001", "choice": "B", "confidence": "high", "machine_digest": digest}
+    status, data = _request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)
+    assert status == 200 and json.loads(data)["ok"] is True
+
+    after = json.loads(_request(review_server, "GET", "/api/review/stage/decision")[1])
+    assert _card(after, "DC-001")["evidence"]["expected_choice"] == "B"
+
+
+def test_a_human_answer_leaves_the_machine_digest_unchanged(review_server: ui.DashboardServer) -> None:
+    # E2E-09: answering a challenge moves the human half, never the machine half.
+    before = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
+    body = {"challenge_id": "DC-001", "choice": "B", "confidence": "low", "machine_digest": before}
+    data = json.loads(_request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)[1])
+    assert data["machine_digest"] == before
+
+
+def test_a_stale_machine_digest_is_refused_with_409(review_server: ui.DashboardServer) -> None:
+    # E2E-08: an answer written against a machine review that has since changed is a conflict.
+    stale = "sha256:" + "0" * 64
+    body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "confidence": "low", "machine_digest": stale}
+    status, _ = _request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)
+    assert status == 409
+
+
+def test_an_answer_naming_no_machine_review_is_refused(review_server: ui.DashboardServer) -> None:
+    """The guard used to be opt-in from the client: `assert_machine_current` short-circuited on
+    an empty string, so simply omitting the field merged the answer into whatever machine review
+    happened to be on disk — the E2E-08 failure, reachable by leaving a field out."""
+    body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "confidence": "low"}
+    status, data = _request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)
+    assert status == 400 and b"machine_digest is required" in data
+
+
+def test_an_answer_without_a_confidence_is_refused(review_server: ui.DashboardServer) -> None:
+    """The pane hardcoded "medium" and the server defaulted to "low", so the recorded number was
+    whichever fabrication won. How sure the reviewer was is theirs to state or not state at all."""
+    digest = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
+    body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "machine_digest": digest}
+    status, data = _request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)
+    assert status == 400 and b"confidence is required" in data
+
+
+def _answer_challenge(server: ui.DashboardServer) -> str:
+    """Clear the unprimed challenge (the card's own unprimed read), returning the machine digest."""
+    digest = str(json.loads(_request(server, "GET", "/api/review/session")[1])["machine_digest"])
+    body: dict[str, object] = {
+        "challenge_id": "DC-001",
+        "choice": "B",  # the expected choice, so no counterfactual opens
+        "confidence": "medium",
+        "machine_digest": digest,
+    }
+    assert _request(server, "POST", "/api/review/challenge", body, token=server.token)[0] == 200
+    return digest
+
+
+def test_a_decision_card_can_be_answered_from_the_pane(review_server: ui.DashboardServer) -> None:
+    """The judgement gate ④ asks for had a schema slot, an id validator and no endpoint at all."""
+    digest = _answer_challenge(review_server)
+    body: dict[str, object] = {
+        "card_id": "DC-001",
+        "choice": "A",
+        "confidence": "high",
+        "reason": "the retry key is not threaded through",
+        "machine_digest": digest,
+    }
+    status, data = _request(review_server, "POST", "/api/review/decision", body, token=review_server.token)
+    assert status == 200, data
+    stage = json.loads(_request(review_server, "GET", "/api/review/stage/decision")[1])
+    assert stage["decisions"] == [
+        {"card_id": "DC-001", "choice": "A", "confidence": "high", "reason": "the retry key is not threaded through"}
+    ]
+    assert stage["unanswered"] == []
+
+
+def test_an_unanswered_high_risk_card_blocks_the_freeze(review_server: ui.DashboardServer) -> None:
+    _answer_challenge(review_server)
+    session = json.loads(_request(review_server, "GET", "/api/review/session")[1])
+    assert session["unanswered_decisions"] == ["DC-001"]
+    assert any("decision cards" in b for b in session["completion_blockers"])
+    assert session["can_freeze"] is False
+
+
+def test_a_decision_without_a_confidence_is_refused(review_server: ui.DashboardServer) -> None:
+    digest = _answer_challenge(review_server)
+    body: dict[str, object] = {"card_id": "DC-001", "choice": "A", "machine_digest": digest}
+    status, data = _request(review_server, "POST", "/api/review/decision", body, token=review_server.token)
+    assert status == 400 and b"confidence is required" in data
+
+
+def test_a_stage_tick_means_a_recorded_judgement_not_a_visit(review_server: ui.DashboardServer) -> None:
+    """`settled` is None where a stage records nothing — neither "done" nor "skipped" is a claim
+    this payload is entitled to make about a stage the reviewer merely scrolled past."""
+    session = json.loads(_request(review_server, "GET", "/api/review/session")[1])
+    settled = {s["name"]: s["settled"] for s in session["stages"]}
+    assert settled["decision"] is False  # DC-001 is neither read nor decided yet
+    assert settled["freeze"] is False  # not frozen
+    assert settled["scope"] is None and settled["diff"] is None  # reading stages record nothing
+
+
+def test_review_post_without_token_is_403(review_server: ui.DashboardServer) -> None:
+    status, _ = _request(review_server, "POST", "/api/review/challenge", {"challenge_id": "DC-001", "choice": "B"})
+    assert status == 403
+
+
+def test_review_is_readable_on_a_read_only_server(repo: Path) -> None:
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=repo, read_only=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert _request(srv, "GET", "/api/review/requirements")[0] == 200  # reviewing is view-only
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# --- project switcher -----------------------------------------------------------
+
+
+@pytest.fixture
+def multi_server(tmp_path: Path) -> Iterator[tuple[ui.DashboardServer, dict[str, Path]]]:
+    """A server backed by a real registry with two projects (alpha active, beta second)."""
+    alpha = _seed_repo(tmp_path / "alpha", "alpha")
+    beta = _seed_repo(tmp_path / "beta", "beta")
+    reg_path = registry.registry_path()
+    reg = registry.Registry()
+    reg.add("alpha", alpha)
+    reg.add("beta", beta)
+    reg.set_active("alpha")
+    registry.save(reg, reg_path)
+
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=alpha, read_only=False, registry_path=reg_path)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield srv, {"alpha": alpha, "beta": beta}
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_get_projects_lists_registry_with_active(multi_server: tuple[ui.DashboardServer, dict[str, Path]]) -> None:
+    srv, _ = multi_server
+    status, data = _request(srv, "GET", "/api/projects")
+    assert status == 200
+    payload = json.loads(data)
+    assert payload["active"] == "alpha"
+    by_name = {p["name"]: p for p in payload["projects"]}
+    assert set(by_name) == {"alpha", "beta"}
+    assert by_name["alpha"]["active"] is True and by_name["alpha"]["exists"] is True
+
+
+def test_status_follows_the_active_project(multi_server: tuple[ui.DashboardServer, dict[str, Path]]) -> None:
+    srv, _ = multi_server
+    assert json.loads(_request(srv, "GET", "/api/status")[1])["project"] == "alpha"
+    status, _ = _request(srv, "POST", "/api/project/select", {"name": "beta"}, token=srv.token)
+    assert status == 200
+    # the switch persisted, so /api/status now reports the beta repo
+    assert json.loads(_request(srv, "GET", "/api/status")[1])["project"] == "beta"
+    assert json.loads(_request(srv, "GET", "/api/projects")[1])["active"] == "beta"
+
+
+def test_select_unknown_project_is_400(multi_server: tuple[ui.DashboardServer, dict[str, Path]]) -> None:
+    srv, _ = multi_server
+    status, _ = _request(srv, "POST", "/api/project/select", {"name": "ghost"}, token=srv.token)
+    assert status == 400
+
+
+def test_select_without_token_is_403(multi_server: tuple[ui.DashboardServer, dict[str, Path]]) -> None:
+    srv, _ = multi_server
+    status, _ = _request(srv, "POST", "/api/project/select", {"name": "beta"})
+    assert status == 403
+
+
+def test_pinned_server_reports_single_project_and_refuses_select(server: ui.DashboardServer) -> None:
+    # The `server` fixture builds a registry_path-less (pinned) server from a single repo.
+    payload = json.loads(_request(server, "GET", "/api/projects")[1])
+    assert len(payload["projects"]) == 1 and payload["projects"][0]["active"] is True
+    status, _ = _request(server, "POST", "/api/project/select", {"name": "whatever"}, token=server.token)
+    assert status == 409  # no registry backs a pinned server
+
+
+def test_main_once_does_not_touch_the_registry(repo: Path) -> None:
+    # --once is a scripting/inspection path: it prints status and must not mutate user-global state.
+    assert ui.main(["--once", "--root", str(repo)]) == 0
+    assert not registry.registry_path().exists()

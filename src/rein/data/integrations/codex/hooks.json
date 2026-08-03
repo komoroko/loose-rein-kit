@@ -1,0 +1,28 @@
+{
+  "$comment": "Codex hook registration. Same gate guard as .claude/settings.json and .github/hooks/rein.json. The matcher is the canonical tool name `apply_patch` (Codex accepts `Write`/`Edit` as aliases but always sends `apply_patch` in the payload), and the guard reads the patch text for the paths it is about to write. Writes made through the shell instead (`sed -i`, a heredoc patch) are not matched here — as on the other two hosts — and are caught by the commit-stage check. Project-scoped Codex config is only read once you trust the project. Requires the rein CLI on PATH (uv tool install).",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "rein guard",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "test -f .rein/state.yaml && echo '--- Loose Rein: what changed since you last looked ---' && rein resume || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

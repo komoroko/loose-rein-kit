@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/komoroko/loose-rein-kit/schema/state.schema.json",
+  "title": "Loose Rein state.yaml (rein-grounded-v1)",
+  "description": "Mutable state only. Task titles, dependencies, and claim mappings live in the frozen plan — duplicating them here is how two documents drift apart. Written exclusively by the Central Store's transaction; no command edits this file directly.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "project",
+    "cycle_id",
+    "current_phase",
+    "gates",
+    "plan"
+  ],
+  "properties": {
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "cycle_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "current_phase": {
+      "enum": [
+        "brief",
+        "requirements",
+        "design",
+        "tasks",
+        "build",
+        "verify",
+        "done"
+      ]
+    },
+    "updated_at": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirements",
+        "design",
+        "tasks",
+        "build",
+        "release"
+      ],
+      "properties": {
+        "requirements": {
+          "$ref": "#/$defs/gate"
+        },
+        "design": {
+          "$ref": "#/$defs/gate"
+        },
+        "tasks": {
+          "$ref": "#/$defs/gate"
+        },
+        "build": {
+          "$ref": "#/$defs/gate"
+        },
+        "release": {
+          "$ref": "#/$defs/gate"
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "draft",
+            "frozen",
+            "invalidated"
+          ]
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "config_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "toolchain_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "frozen_at": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^RUN-[A-Z0-9-]+$"
+        },
+        "status": {
+          "enum": [
+            "idle",
+            "running",
+            "waiting_for_review",
+            "blocked",
+            "complete"
+          ]
+        },
+        "trusted_base_sha": {
+          "$ref": "#/$defs/commit"
+        },
+        "subject_head_sha": {
+          "$ref": "#/$defs/commit"
+        }
+      }
+    },
+    "review": {
+      "description": "Digests of the current review. `human_digest` is null until the human section is frozen; a mismatch between any of these and a recomputed value makes the review stale (plan 17.5).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "enum": [
+            "none",
+            "generating",
+            "awaiting_human",
+            "human_in_progress",
+            "frozen",
+            "stale"
+          ]
+        },
+        "change_digest": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "actual_digest": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "machine_digest": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "human_digest": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "coverage_digest": {
+          "$ref": "#/$defs/nullableDigest"
+        },
+        "generated_at": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "tasks": {
+      "description": "Per-task mutable status, keyed by the task id declared in plan.yaml. A key with no matching plan task is a cross-reference error.",
+      "type": "object",
+      "maxProperties": 512,
+      "propertyNames": {
+        "pattern": "^T-[0-9]{3,}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "todo",
+              "in-progress",
+              "blocked",
+              "needs-revision",
+              "done"
+            ]
+          },
+          "attempts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000
+          },
+          "completed_commit": {
+            "$ref": "#/$defs/commit"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "nullableDigest": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      ]
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "gate": {
+      "description": "A gate is `approved` only with a receipt binding the human confirmation, the deliverable digests, and the event chain root at the moment of approval. There is no path to `approved` without one — plan 16.0.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "approved"
+          ]
+        },
+        "receipt": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/receipt"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "approved"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "receipt"
+            ],
+            "properties": {
+              "receipt": {
+                "$ref": "#/$defs/receipt"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approval_id",
+        "validation_digest",
+        "attested_chain_root",
+        "result_chain_root"
+      ],
+      "properties": {
+        "approval_id": {
+          "description": "The id `rein approve` minted for this confirmation. It appears in the gate_approved event's subjects too, so the receipt and the audit record cannot disagree about what was approved.",
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^GA-[A-Z0-9-]+$"
+        },
+        "confirmed_at": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "artifact_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "config_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "machine_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "human_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "toolchain_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "validation_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "attested_chain_root": {
+          "$ref": "#/$defs/digest"
+        },
+        "result_chain_root": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    }
+  }
+}

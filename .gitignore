@@ -1,0 +1,51 @@
+# ---- Python / uv ----
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+# Anchored to the repository root on purpose. A bare `build/` matches at every depth, and this
+# repository ships a phase named build: it silently swallowed the Codex skill
+# `.agents/skills/build/SKILL.md` and its payload twin, so `git add -A` staged seven of the eight
+# phase entry points while every filesystem-level check still reported parity.
+/build/
+/dist/
+# Commit uv.lock for reproducibility (do not ignore it)
+
+# ---- frontend / pnpm ----
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# ---- mkdocs ----
+site/
+
+# ---- Loose Rein runtime artifacts ----
+# This list is a canary's subject, not a free-form note: `rein template-lint` derives what
+# belongs here from the code that writes it, so an entry naming a file nothing writes any more is
+# reported as drift. Two things deliberately absent:
+#  - .rein/events.ndjson — the hash-chained audit log. Every gate receipt binds a root of it,
+#    so it is committed with the cycle's records and archived at cycle-close, never ignored.
+#  - locks and journals — they live under $XDG_RUNTIME_DIR, outside the repository entirely
+#    (store.runtime_dir()), so there has never been anything here to ignore.
+# Comments go on their own line. git honours `#` only at the start of a line, so a trailing
+# "# …" is part of the pattern — which is how both entries below matched nothing at all.
+# temporary worktrees build_loop.py creates for parallel tasks
+.worktrees/
+# generated PR body (rein pr-draft); regenerate rather than track
+.rein/pr-draft.md
+
+# ---- environment variables / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- OS / editor ----
+.DS_Store
+.idea/
+.vscode/
+
+# ---- Claude Code local settings ----
+.claude/settings.local.json

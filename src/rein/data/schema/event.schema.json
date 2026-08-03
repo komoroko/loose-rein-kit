@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/komoroko/loose-rein-kit/schema/event.schema.json",
+  "title": "Loose Rein events.ndjson record (rein-grounded-v1)",
+  "description": "One line of the append-only audit log. `event_digest` covers every other field, so a rewritten event breaks its own digest; `prev_event_digest` chains it, so a deleted or reordered event breaks the next one's link. A gate receipt pins the chain root it was confirmed against, which is what makes a wholesale re-hash of the log detectable (plan 18.5, E2E-29).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["seq", "id", "tx_id", "ts", "event", "cycle_id", "prev_event_digest", "event_digest"],
+  "properties": {
+    "seq": {
+      "description": "Monotonically increasing within the store lock. Duplicates and gaps are both chain violations.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "id": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[0-9a-f-]{8,64}$" },
+    "tx_id": { "type": "string", "minLength": 8, "maxLength": 64, "pattern": "^[0-9a-f-]{8,64}$" },
+    "ts": { "type": "string", "minLength": 10, "maxLength": 64 },
+    "event": {
+      "enum": [
+        "cycle_initialized",
+        "knowledge_gap",
+        "gate_approved",
+        "gate_revised",
+        "plan_frozen",
+        "plan_invalidated",
+        "task_started",
+        "task_failed",
+        "task_completed",
+        "decision_declared",
+        "coverage_generated",
+        "actual_extraction_started",
+        "actual_extraction_generated",
+        "actual_extraction_failed",
+        "comparison_generated",
+        "security_review_generated",
+        "review_generated",
+        "review_failed",
+        "challenge_answered",
+        "decision_recorded",
+        "counterfactual_answered",
+        "expertise_declared",
+        "expert_requested",
+        "disposition_recorded",
+        "human_review_frozen",
+        "release_approved",
+        "cycle_closed"
+      ]
+    },
+    "cycle_id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "actor": { "type": "string", "maxLength": 200 },
+    "subject_ids": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 64 } },
+    "prev_event_digest": {
+      "description": "The predecessor's event_digest; the empty string only for seq 1.",
+      "oneOf": [{ "const": "" }, { "$ref": "#/$defs/digest" }]
+    },
+    "event_digest": { "$ref": "#/$defs/digest" },
+    "detail": { "type": "object", "maxProperties": 64 }
+  },
+
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+  }
+}

@@ -1,0 +1,1170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/komoroko/loose-rein-kit/schema/review.schema.json",
+  "title": "Loose Rein review.yaml (rein-grounded-v1)",
+  "description": "Two independently-digested halves. Regenerating `machine` resets `human`; a human answering a challenge must NOT make `machine` stale (plan 17.5). Every human-facing sentence is a statement with an epistemic status and evidence links — there is no free-form prose field anywhere in this document, because a sentence without a status is exactly what an AI fills in when it has no source (plan 6.8).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "machine",
+    "human"
+  ],
+  "properties": {
+    "machine": {
+      "$ref": "#/$defs/machine"
+    },
+    "human": {
+      "$ref": "#/$defs/human"
+    }
+  },
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "disposition": {
+      "description": "What a human may do about a gap. `accept the risk` is deliberately absent (plan 15.4); `dispute_finding` says the reviewer is wrong and carries the reason.",
+      "enum": [
+        "acknowledge_corrected_model",
+        "revise_requirement",
+        "revise_design",
+        "revise_implementation",
+        "request_expert",
+        "run_experiment",
+        "reduce_scope",
+        "dispute_finding"
+      ]
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "repoPath": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+    },
+    "claimId": {
+      "type": "string",
+      "pattern": "^C-[0-9]{3,}$"
+    },
+    "statementId": {
+      "type": "string",
+      "pattern": "^STMT-[0-9]{3,}$"
+    },
+    "actualStatementId": {
+      "type": "string",
+      "pattern": "^AST-[0-9]{3,}$"
+    },
+    "decisionCardId": {
+      "type": "string",
+      "pattern": "^DC-[0-9]{3,}$"
+    },
+    "domain": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "codeAnchor": {
+      "description": "Where in the committed tree a statement is grounded. The blob is checked against the actual object at that path, so an invented anchor cannot pass validation (plan 12.7).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "start_line",
+        "end_line",
+        "blob"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "blob": {
+          "type": "string",
+          "pattern": "^git-blob:[0-9a-f]{40}([0-9a-f]{24})?$"
+        }
+      }
+    },
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "allOf": [
+        {
+          "description": "A GENERATED machine review must carry its binding, its coverage manifest, its blind actual extraction, and its per-claim results. Making `not_generated` an explicit status rather than an emergent property of empty lists is the same rule as everywhere else: 'we did not measure' must be a state you can name, not one you infer from a missing field (plan 2.4).",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "generated"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "binding",
+              "coverage",
+              "actual_extraction",
+              "claims"
+            ],
+            "properties": {
+              "coverage": {
+                "minItems": 1
+              },
+              "binding": {
+                "required": [
+                  "change_digest",
+                  "plan_digest",
+                  "toolchain_digest"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "not_generated",
+            "generated"
+          ]
+        },
+        "effective_risk": {
+          "description": "The max of every risk contributor for this change (plan 13.5): the plan's claim and task risk, the deterministic signals, and what the coverage gap is worth. Recorded so the gate decision reads the same number the reviewers were given, instead of recomputing it from a diff that has since moved. A review that does not carry it is treated as `high`, never as `low`.",
+          "$ref": "#/$defs/risk"
+        },
+        "binding": {
+          "description": "What this review is a review OF. Any of these moving makes the whole machine review stale, and with it every human answer built on top of it.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "change_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "plan_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "config_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "toolchain_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "coverage_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "actual_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "trusted_base_sha": {
+              "$ref": "#/$defs/commit"
+            },
+            "subject_head_sha": {
+              "$ref": "#/$defs/commit"
+            },
+            "generated_at": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "independence": {
+              "description": "Which model/provider group produced each half. A critical change requires the two to differ — reusing one session's output for both is not independence (plan 12.4).",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "actual_extractor": {
+                  "$ref": "#/$defs/independenceGroup"
+                },
+                "comparator": {
+                  "$ref": "#/$defs/independenceGroup"
+                },
+                "security_reviewer": {
+                  "$ref": "#/$defs/independenceGroup"
+                }
+              }
+            }
+          }
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "claims_total": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "aligned": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "diverged": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "missing": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unverified": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "unknown": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "statements": {
+          "description": "The atomic statements every human-facing screen is assembled from (plan 6.8).",
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "text",
+              "epistemic_status"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/statementId"
+              },
+              "text": {
+                "$ref": "#/$defs/text"
+              },
+              "epistemic_status": {
+                "description": "`machine_inferred` is the honest label for 'an AI wrote this'. There is no status meaning 'reads plausibly'.",
+                "enum": [
+                  "code_observed",
+                  "expert_attested",
+                  "machine_inferred",
+                  "unknown",
+                  "conflicted"
+                ]
+              },
+              "applicability": {
+                "type": "object",
+                "maxProperties": 16,
+                "additionalProperties": {
+                  "type": "string",
+                  "maxLength": 200
+                }
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "actual_statement_ids": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                      "$ref": "#/$defs/actualStatementId"
+                    }
+                  }
+                }
+              },
+              "limitations": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/$defs/text"
+                }
+              }
+            }
+          }
+        },
+        "actual_extraction": {
+          "description": "What the code actually does, extracted WITHOUT the plan, the expected claims, or the implementer's own explanation (plan 12.2). Frozen as `actual_digest` before the comparator runs.",
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "statement",
+              "category",
+              "confidence",
+              "code_anchors"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/actualStatementId"
+              },
+              "statement": {
+                "$ref": "#/$defs/text"
+              },
+              "category": {
+                "enum": [
+                  "state_propagation",
+                  "control_flow",
+                  "side_effect",
+                  "default_value",
+                  "failure_handling",
+                  "concurrency",
+                  "persistence",
+                  "security_boundary",
+                  "observability",
+                  "public_interface",
+                  "dependency"
+                ]
+              },
+              "confidence": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "code_anchors": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/$defs/codeAnchor"
+                }
+              },
+              "observed_conditions": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/$defs/text"
+                }
+              },
+              "unknowns": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/$defs/text"
+                }
+              }
+            }
+          }
+        },
+        "coverage": {
+          "description": "What the detector could and could not analyse. More than one entry when a large diff was partitioned. `insufficient` anywhere means extra-behaviour counts read as 'undeterminable', never as '0' (plan 2.4).",
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "diff_digest",
+              "analyzed_files",
+              "coverage_status",
+              "truncated"
+            ],
+            "properties": {
+              "diff_digest": {
+                "$ref": "#/$defs/digest"
+              },
+              "partition": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "analyzed_files": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "analyzed_hunks": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "analyzed_bytes": {
+                "description": "Size in bytes of the diff this entry covers. The `max_diff_bytes_per_partition` budget is denominated in bytes, so without a measured value that budget has no actual and can never be exceeded — which is what an unmeasured entry reads as. Absent on reviews generated before the measure; those read as 0, i.e. within budget.",
+                "type": "integer",
+                "minimum": 0
+              },
+              "unsupported_files": {
+                "type": "array",
+                "maxItems": 512,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "reason"
+                  ],
+                  "properties": {
+                    "path": {
+                      "$ref": "#/$defs/repoPath"
+                    },
+                    "reason": {
+                      "enum": [
+                        "binary",
+                        "generated",
+                        "unsupported_language",
+                        "parser_failure",
+                        "too_large",
+                        "vendored"
+                      ]
+                    },
+                    "detail": {
+                      "description": "Which extension, or which analyzer went missing. `reason` is the closed vocabulary a query can aggregate; this is what a human needs to act on it, since 'register an analyzer for .psd' is only actionable if something says .psd.",
+                      "type": "string",
+                      "maxLength": 500
+                    }
+                  }
+                }
+              },
+              "generated_files": {
+                "type": "array",
+                "maxItems": 512,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path"
+                  ],
+                  "properties": {
+                    "path": {
+                      "$ref": "#/$defs/repoPath"
+                    },
+                    "source_locator": {
+                      "type": "string",
+                      "maxLength": 500
+                    }
+                  }
+                }
+              },
+              "languages": {
+                "type": "object",
+                "maxProperties": 64,
+                "additionalProperties": {
+                  "enum": [
+                    "ast",
+                    "ast_plus_llm",
+                    "token_only",
+                    "unsupported"
+                  ]
+                }
+              },
+              "analyzers": {
+                "description": "External analyzer name -> the digest of the executable that answered, for every analyzer whose reading is counted in `analyzed_files`. A file counted as read with nobody named is a claim no one can check afterwards (out-of-scope 11).",
+                "type": "object",
+                "maxProperties": 32,
+                "additionalProperties": {
+                  "$ref": "#/$defs/digest"
+                }
+              },
+              "deleted_lines_analyzed": {
+                "type": "boolean"
+              },
+              "rename_semantics_analyzed": {
+                "type": "boolean"
+              },
+              "dependency_semantics_analyzed": {
+                "type": "boolean"
+              },
+              "binary_semantics_analyzed": {
+                "type": "boolean"
+              },
+              "truncated": {
+                "const": false
+              },
+              "partitioned": {
+                "type": "boolean"
+              },
+              "coverage_status": {
+                "enum": [
+                  "sufficient",
+                  "insufficient"
+                ]
+              }
+            }
+          }
+        },
+        "claims": {
+          "description": "Per-claim result on three separate axes. There is deliberately no single 'verified' field: integrity is a fact, semantic_support is somebody's judgement, and conformance is an observation. Collapsing them is what lets an AI's opinion be presented as a check (plan 2.1, 6.7).",
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "claim_id",
+              "verdict",
+              "integrity",
+              "semantic_support",
+              "conformance"
+            ],
+            "properties": {
+              "claim_id": {
+                "$ref": "#/$defs/claimId"
+              },
+              "expected": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "statement": {
+                    "$ref": "#/$defs/text"
+                  }
+                }
+              },
+              "actual_statement_ids": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "$ref": "#/$defs/actualStatementId"
+                }
+              },
+              "verdict": {
+                "enum": [
+                  "aligned",
+                  "diverged",
+                  "missing",
+                  "unverified",
+                  "unknown"
+                ]
+              },
+              "integrity": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "verified",
+                      "failed",
+                      "unavailable"
+                    ]
+                  },
+                  "code_anchor_digest": {
+                    "$ref": "#/$defs/digest"
+                  }
+                }
+              },
+              "semantic_support": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status",
+                  "assessment_basis"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "supported",
+                      "contradicted",
+                      "conflicted",
+                      "unknown"
+                    ]
+                  },
+                  "assessment_basis": {
+                    "description": "`machine_assessed` must never be rendered with the weight of the other three, nor translated as 'verified' (plan 6.7, 21.4).",
+                    "enum": [
+                      "machine_assessed",
+                      "experimental",
+                      "expert_attested",
+                      "formal"
+                    ]
+                  },
+                  "assessor_digest": {
+                    "$ref": "#/$defs/digest"
+                  },
+                  "limitations": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "$ref": "#/$defs/text"
+                    }
+                  }
+                }
+              },
+              "conformance": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "observed",
+                      "partial",
+                      "unknown"
+                    ]
+                  },
+                  "scope": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "$ref": "#/$defs/text"
+                    }
+                  }
+                }
+              },
+              "unknowns": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "$ref": "#/$defs/text"
+                }
+              }
+            }
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "kind",
+              "risk",
+              "blocking",
+              "statement_id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^GAP-[0-9]{3,}$"
+              },
+              "kind": {
+                "enum": [
+                  "evidence_gap",
+                  "actual_coverage_gap"
+                ]
+              },
+              "subject_ids": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "statement_id": {
+                "$ref": "#/$defs/statementId"
+              },
+              "risk": {
+                "$ref": "#/$defs/risk"
+              },
+              "blocking": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "extra_behaviors": {
+          "description": "Behaviour present in the code that no claim in the plan accounts for — the AI-invented `timeout=30` case (E2E-02). Shown before the raw diff, never after.",
+          "type": "array",
+          "maxItems": 512,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "statement_id",
+              "category",
+              "risk",
+              "grounded",
+              "blocking"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^EXTRA-[0-9]{3,}$"
+              },
+              "statement_id": {
+                "$ref": "#/$defs/statementId"
+              },
+              "category": {
+                "enum": [
+                  "new_default",
+                  "retry_timeout_fallback",
+                  "external_side_effect",
+                  "public_interface",
+                  "persistence",
+                  "exception_suppression",
+                  "security_boundary",
+                  "observability_reduction",
+                  "dependency_change",
+                  "concurrency"
+                ]
+              },
+              "risk": {
+                "$ref": "#/$defs/risk"
+              },
+              "grounded": {
+                "type": "boolean"
+              },
+              "blocking": {
+                "type": "boolean"
+              },
+              "actual_statement_ids": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "$ref": "#/$defs/actualStatementId"
+                }
+              }
+            }
+          }
+        },
+        "security": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "findings"
+          ],
+          "properties": {
+            "findings": {
+              "type": "array",
+              "maxItems": 256,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "severity",
+                  "category",
+                  "attack_scenario",
+                  "blocking"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^SEC-[0-9]{3,}$"
+                  },
+                  "severity": {
+                    "$ref": "#/$defs/risk"
+                  },
+                  "category": {
+                    "enum": [
+                      "credential_exposure",
+                      "injection",
+                      "authz_bypass",
+                      "authn_weakness",
+                      "crypto_misuse",
+                      "ssrf",
+                      "path_traversal",
+                      "deserialization",
+                      "supply_chain",
+                      "sandbox_escape",
+                      "information_disclosure",
+                      "denial_of_service",
+                      "other"
+                    ]
+                  },
+                  "attack_scenario": {
+                    "$ref": "#/$defs/text"
+                  },
+                  "code_anchors": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                      "$ref": "#/$defs/codeAnchor"
+                    }
+                  },
+                  "blocking": {
+                    "type": "boolean"
+                  },
+                  "recommended_fix": {
+                    "$ref": "#/$defs/text"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "decision_cards": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "question",
+              "risk",
+              "options"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/decisionCardId"
+              },
+              "question": {
+                "$ref": "#/$defs/text"
+              },
+              "risk": {
+                "$ref": "#/$defs/risk"
+              },
+              "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 8,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "statement_id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "maxLength": 8,
+                      "pattern": "^[A-Z]$"
+                    },
+                    "statement_id": {
+                      "$ref": "#/$defs/statementId"
+                    }
+                  }
+                }
+              },
+              "requires_domains": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "$ref": "#/$defs/domain"
+                }
+              },
+              "evidence": {
+                "description": "What the card is about — the Expected the plan states, the Actual a reviewer that never saw the plan read, and the gap or finding that raised it. The API withholds it until the reviewer has recorded their own read of a high/critical card (human_review.challenges).",
+                "type": "object"
+              }
+            }
+          }
+        },
+        "review_budget": {
+          "description": "Exceeding a budget splits the scope; it never lengthens the screen (plan 14.10).",
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "limit",
+              "actual",
+              "exceeded"
+            ],
+            "properties": {
+              "name": {
+                "enum": [
+                  "max_critical_decisions",
+                  "max_human_statements",
+                  "max_unresolved_low_medium_unknowns",
+                  "max_diff_bytes_per_partition"
+                ]
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "actual": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "exceeded": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    },
+    "independenceGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "group"
+      ],
+      "properties": {
+        "group": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$"
+        },
+        "prompt_digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "human": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "binding": {
+          "description": "Which machine review these answers are about. A POST carrying a stale machine_digest is refused rather than merged (plan 17.5).",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "machine_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "change_digest": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        },
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "started_at": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "stage": {
+              "enum": [
+                "scope",
+                "decision",
+                "diff",
+                "freeze"
+              ]
+            },
+            "completed_stages": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "enum": [
+                  "scope",
+                  "decision",
+                  "diff",
+                  "freeze"
+                ]
+              }
+            }
+          }
+        },
+        "expertise": {
+          "description": "Self-declared, per domain. High/critical work by a `partial` or `unfamiliar` reviewer needs an expert, an experiment, or a smaller scope — a general reviewer's risk acceptance is not enough (plan 14.9).",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "domain",
+              "level"
+            ],
+            "properties": {
+              "domain": {
+                "$ref": "#/$defs/domain"
+              },
+              "level": {
+                "enum": [
+                  "familiar",
+                  "partial",
+                  "unfamiliar"
+                ]
+              }
+            }
+          }
+        },
+        "challenge_answers": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "challenge_id",
+              "choice",
+              "confidence",
+              "answered_before_reveal"
+            ],
+            "properties": {
+              "challenge_id": {
+                "$ref": "#/$defs/challengeId"
+              },
+              "choice": {
+                "type": "string",
+                "maxLength": 8,
+                "pattern": "^[A-Z]$"
+              },
+              "rationale": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "confidence": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "answered_before_reveal": {
+                "const": true
+              }
+            }
+          }
+        },
+        "counterfactual_answers": {
+          "description": "Required after a mismatch. One acknowledgement does not close a mismatch (plan 14.3).",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "challenge_id",
+              "corrected_model"
+            ],
+            "properties": {
+              "challenge_id": {
+                "$ref": "#/$defs/challengeId"
+              },
+              "answer": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "corrected_model": {
+                "$ref": "#/$defs/text"
+              }
+            }
+          }
+        },
+        "decisions": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "card_id",
+              "choice",
+              "confidence"
+            ],
+            "properties": {
+              "card_id": {
+                "$ref": "#/$defs/decisionCardId"
+              },
+              "choice": {
+                "type": "string",
+                "maxLength": 8,
+                "pattern": "^[A-Z]$"
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "confidence": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            }
+          }
+        },
+        "dispositions": {
+          "description": "Note what is absent: there is no 'accept the risk' action for a critical unknown (plan 15.4).",
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subject_id",
+              "action"
+            ],
+            "properties": {
+              "subject_id": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "action": {
+                "$ref": "#/$defs/disposition"
+              },
+              "note": {
+                "type": "string",
+                "maxLength": 2000
+              },
+              "owner": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "due": {
+                "type": "string",
+                "maxLength": 32
+              },
+              "detection": {
+                "type": "string",
+                "maxLength": 2000
+              }
+            }
+          }
+        },
+        "requested_experts": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "domain",
+              "subject_ids"
+            ],
+            "properties": {
+              "domain": {
+                "$ref": "#/$defs/domain"
+              },
+              "subject_ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 2000
+              }
+            }
+          }
+        },
+        "status": {
+          "enum": [
+            "not_started",
+            "in_progress",
+            "frozen"
+          ]
+        }
+      }
+    },
+    "challengeId": {
+      "description": "A card asked in two beats: the reviewer's unprimed read is recorded against the same id the decision is (human_review.challenges).",
+      "$ref": "#/$defs/decisionCardId"
+    }
+  }
+}

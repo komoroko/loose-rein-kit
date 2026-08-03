@@ -1,0 +1,434 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/komoroko/loose-rein-kit/schema/config.schema.json",
+  "title": "Loose Rein config.yaml (rein-grounded-v1)",
+  "description": "Execution knobs, frozen wholesale at gate 3. What this file may NOT contain matters as much as what it may: no principal, no provider executable path, no credential, no PATH lookup — a pull request cannot widen its own permissions by editing a file it also ships. Unknown keys are rejected everywhere: a typo that was inert would silently mean 'the knob you thought you set is not set'.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "project",
+    "executors",
+    "executor_profiles",
+    "quality_gate"
+  ],
+  "properties": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "work_branch"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "work_branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_parallel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "worktree_dir": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "command_timeout_sec": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "agent_timeout_sec": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        }
+      }
+    },
+    "executors": {
+      "description": "Which profile each role runs under. The profile bodies live in executor_profiles; the indirection is what lets one sandbox be shared and audited once.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "implementer_profile",
+        "reviewer_profile"
+      ],
+      "properties": {
+        "implementer_profile": {
+          "$ref": "#/$defs/profileName"
+        },
+        "reviewer_profile": {
+          "$ref": "#/$defs/profileName"
+        },
+        "quality_gate_profile": {
+          "$ref": "#/$defs/profileName"
+        }
+      }
+    },
+    "executor_profiles": {
+      "description": "Sandbox definitions. Any command that runs repository-derived code, tests, or build scripts must use an `oci` profile regardless of risk; `host` is reserved for trusted tooling that runs no repository code (plan 10.1).",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 32,
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/executorProfile"
+      }
+    },
+    "agents": {
+      "description": "The AI roles. `independence_group` is what a critical change's independence requirement is checked against: the actual extractor and the comparator must not share one (plan 12.4).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "implementer": {
+          "$ref": "#/$defs/agentRole"
+        },
+        "code_reviewer": {
+          "$ref": "#/$defs/agentRole"
+        },
+        "actual_extractor": {
+          "$ref": "#/$defs/agentRole"
+        },
+        "comparator": {
+          "$ref": "#/$defs/agentRole"
+        },
+        "security_reviewer": {
+          "$ref": "#/$defs/agentRole"
+        }
+      }
+    },
+    "quality_gate": {
+      "description": "The single definition of the DoD. `command` is an argv array, never a shell string — a pipe or a redirect has to be made explicit in a script a reviewer can read.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          },
+          "kind": {
+            "enum": [
+              "command",
+              "agent"
+            ]
+          },
+          "command": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500
+            }
+          },
+          "agent_role": {
+            "enum": [
+              "code_reviewer"
+            ]
+          },
+          "executor_profile": {
+            "$ref": "#/$defs/profileName"
+          },
+          "retries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "command"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "required": [
+                "command",
+                "executor_profile"
+              ],
+              "properties": {
+                "command": {
+                  "minItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "agent"
+                }
+              },
+              "required": [
+                "kind"
+              ]
+            },
+            "then": {
+              "required": [
+                "agent_role"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "review_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "budgets": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_critical_decisions": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "max_human_statements": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "max_unresolved_low_medium_unknowns": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "max_diff_bytes_per_partition": {
+              "type": "integer",
+              "minimum": 4096,
+              "maximum": 8388608
+            }
+          }
+        }
+      }
+    },
+    "guard": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "template_mode": {
+          "description": "True only while a repository IS the Loose Rein template (its scaffold originals share paths with product deliverables). `rein init` writes false for products, which is when the guard goes live.",
+          "type": "boolean"
+        },
+        "paths": {
+          "description": "A path ending in '/' guards that prefix; any other path guards that exact file. Exact wins over prefixes, longest prefix wins.",
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "requires_gate"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "maxLength": 512,
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*/?$"
+              },
+              "requires_gate": {
+                "enum": [
+                  "requirements",
+                  "design",
+                  "tasks",
+                  "build",
+                  "release"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "github": {
+      "description": "One-way mirror of the plan's tasks to GitHub Issues. Off by default (offline-safe); the plan stays the SSOT and Issues are never read back.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "close_on_done": {
+          "type": "boolean"
+        },
+        "repo": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    }
+  },
+  "$defs": {
+    "profileName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "domain": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "repoPath": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+    },
+    "envName": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "executorProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "oci",
+            "host"
+          ]
+        },
+        "image": {
+          "description": "Digest-pinned, always. A mutable tag would let the environment a review was performed in change after that review was approved.",
+          "type": "string",
+          "maxLength": 500,
+          "pattern": "^[a-z0-9][a-zA-Z0-9._/:-]*@sha256:[0-9a-f]{64}$"
+        },
+        "containerfile": {
+          "description": "Name of a packaged Containerfile under data/oci/<name>/, built locally by `rein oci build`. A bootstrap convenience — the pinned `image` digest above stays the binding fact.",
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "mount_repo": {
+          "enum": [
+            "none",
+            "read_only",
+            "read_write"
+          ]
+        },
+        "writable_tmp_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65536
+        },
+        "network_profile": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "env_allowlist": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/envName"
+          }
+        },
+        "read_only_root": {
+          "type": "boolean"
+        },
+        "pids_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16384
+        },
+        "memory_mb": {
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 262144
+        },
+        "cpu_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "oci"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "image",
+              "network_profile"
+            ]
+          }
+        }
+      ]
+    },
+    "agentRole": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter"
+      ],
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "independence_group": {
+          "description": "provider/model. Distinct strings are what the critical-independence check compares; same provider with a distinct model passes but is weaker, and doctor says so.",
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$"
+        }
+      }
+    }
+  }
+}

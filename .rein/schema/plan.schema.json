@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/komoroko/loose-rein-kit/schema/plan.schema.json",
+  "title": "Loose Rein plan.yaml (rein-grounded-v1)",
+  "description": "The Expected Model: what this cycle claims the implementation will do, and the task DAG that builds it. Frozen at gate 3. Three sections and no more — `claims` ties each R-N/NFR-N heading of docs/10-requirements.md to a statement, `tasks` ties each statement to the work that answers it, and `rein dag --trace` walks the thread end to end. Every enum here is mirrored by a constant in rein/models.py; tests/test_models.py fails if the two drift.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cycle", "claims"],
+  "properties": {
+    "cycle": { "$ref": "#/$defs/cycle" },
+    "claims": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/claim" } },
+    "tasks": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/task" } }
+  },
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "risk": { "enum": ["low", "medium", "high", "critical"] },
+    "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+    "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "repoPath": {
+      "description": "A repo-relative POSIX path. No absolute form, no '..' segment, no backslash — a reference that can escape the repository is not a reference to anything reviewable.",
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+    },
+    "domains": {
+      "type": "array",
+      "maxItems": 16,
+      "items": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9_-]*$" }
+    },
+    "claimId": { "type": "string", "pattern": "^C-[0-9]{3,}$" },
+    "taskId": { "type": "string", "pattern": "^T-[0-9]{3,}$" },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "digest"],
+      "properties": {
+        "path": { "$ref": "#/$defs/repoPath" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "cycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "base_commit", "branch"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "base_commit": { "$ref": "#/$defs/commit" },
+        "branch": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "brief": { "$ref": "#/$defs/artifactRef" },
+            "requirements": { "$ref": "#/$defs/artifactRef" },
+            "design": { "$ref": "#/$defs/artifactRef" }
+          }
+        }
+      }
+    },
+    "claim": {
+      "description": "What one requirement means, in a sentence a reviewer can hold against the code. `requirement_ids` is what makes it traceable: a claim citing an id no heading declares is a dangling reference, and a heading no claim cites is an uncovered requirement — `rein dag --trace` blocks on both.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement", "risk"],
+      "properties": {
+        "id": { "$ref": "#/$defs/claimId" },
+        "requirement_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "maxLength": 32, "pattern": "^(R|NFR)-[0-9]+$" }
+        },
+        "statement": { "$ref": "#/$defs/text" },
+        "risk": { "$ref": "#/$defs/risk" },
+        "domains": { "$ref": "#/$defs/domains" }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "kind", "risk"],
+      "properties": {
+        "id": { "$ref": "#/$defs/taskId" },
+        "title": { "$ref": "#/$defs/label" },
+        "kind": {
+          "description": "The DAG role that drives orchestration: layers, parallelism, and merge order derive from it, not from LLM discretion.",
+          "enum": ["foundation", "parallel", "integration"]
+        },
+        "blocked_by": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/taskId" } },
+        "claim_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/claimId" } },
+        "domains": { "$ref": "#/$defs/domains" },
+        "risk": { "$ref": "#/$defs/risk" },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "include": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/repoPath" } },
+            "exclude": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/repoPath" } }
+          }
+        }
+      }
+    }
+  }
+}
