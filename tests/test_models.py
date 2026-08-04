@@ -252,9 +252,7 @@ def test_unknown_field_rejected() -> None:
 
 
 def test_absolute_scope_path_rejected() -> None:
-    bad = TASK_PLAN.replace(
-        "scope: {include: [src/payment/], exclude: [docs/]}", "scope: {include: [/etc/passwd]}"
-    )
+    bad = TASK_PLAN.replace("scope: {include: [src/payment/], exclude: [docs/]}", "scope: {include: [/etc/passwd]}")
     assert "include" in _plan_error(bad)
 
 

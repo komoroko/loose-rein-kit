@@ -38,9 +38,7 @@ def implementer_prompt(task: dag.Task, failure_log: str, *, gate_cmds: Sequence[
     # measured against, and the gate-③ frozen quality_gate is the judgement boundary — not a
     # command the implementer chose.
     task_test_ref = (
-        f"This task is answerable for: {', '.join(task.claim_ids)} (see .rein/plan.yaml).\n"
-        if task.claim_ids
-        else ""
+        f"This task is answerable for: {', '.join(task.claim_ids)} (see .rein/plan.yaml).\n" if task.claim_ids else ""
     )
     prompt = (
         f'You are the implementer subagent. Your only task is {task.id} "{task.title}".\n'

@@ -409,5 +409,3 @@ def test_the_cli_offers_no_verb_that_edits_or_removes_a_record() -> None:
     parser = control_plane._build_parser("rein decision", "decision.declare")
     action = next(a for a in parser._actions if a.dest == "action")
     assert action.choices == ["add"]
-
-

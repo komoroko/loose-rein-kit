@@ -184,5 +184,3 @@ def test_a_head_that_removes_the_commit_stage_guard_is_refused(repo: repo_mod.Re
 def test_a_repository_that_never_wired_a_hook_is_not_weakening_anything(repo: repo_mod.Repo) -> None:
     """The comparison is against the base, not an assertion that every repo must have every hook."""
     assert not [p for p in policy_check.check(repo, _base(repo), _head(repo)) if "gate guard" in p]
-
-

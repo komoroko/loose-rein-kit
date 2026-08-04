@@ -132,5 +132,3 @@ def test_the_base_branch_is_named(tmp_path: Path, capsys: pytest.CaptureFixture[
     seed_repo(tmp_path)
     pr_draft.main(["--base", "develop", "--stdout", "--repo", str(tmp_path)])
     assert "base: `develop`" in capsys.readouterr().out
-
-

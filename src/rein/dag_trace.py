@@ -114,9 +114,7 @@ class TraceReport:
             "an agent invented is not a requirement"
             for cid, rid in self.dangling
         ]
-        problems += [
-            f"{rid}: no section in {DESIGN_DOC} covers it" for rid in self.undesigned if not is_nfr(rid)
-        ]
+        problems += [f"{rid}: no section in {DESIGN_DOC} covers it" for rid in self.undesigned if not is_nfr(rid)]
         problems += [f"{rid}: never appears in the test plan — it would ship unverified" for rid in self.untested]
         problems += [f"{tid}: task answers for no claim" for tid in self.orphan_tasks]
         return problems

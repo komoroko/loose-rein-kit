@@ -379,8 +379,7 @@ def run_init(
     )
     print(
         f'\nInitialized "{name}" (work branch: {branch}; the gate guard is live).\n'
-        "Add an agent surface when you want one: `rein install claude` / `rein install copilot`.\n"
-        + next_step
+        "Add an agent surface when you want one: `rein install claude` / `rein install copilot`.\n" + next_step
     )
     return 0
 
@@ -451,9 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     if not name:
         if sys.stdin.isatty():
             return wizard(root)
-        logger.error(
-            "usage: rein init --name <product> [--branch build/<product>] (or run on a TTY for the wizard)"
-        )
+        logger.error("usage: rein init --name <product> [--branch build/<product>] (or run on a TTY for the wizard)")
         return 2
     branch = args.branch.strip() or f"build/{name}"
     mode = "greenfield" if args.greenfield else "brownfield" if args.brownfield else "auto"

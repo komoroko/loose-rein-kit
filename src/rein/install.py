@@ -454,10 +454,7 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
         _print_plan(drift)
         _print_stale_integrations(stale)
         if drift:
-            print(
-                f"sync --check: {len(drift)} file(s) differ from the packaged payload "
-                f"(rein {rein.__version__})."
-            )
+            print(f"sync --check: {len(drift)} file(s) differ from the packaged payload (rein {rein.__version__}).")
         if stale:
             print(f"sync --check: {len(stale)} integration surface(s) predate rein {rein.__version__}.")
         return 1
@@ -775,9 +772,7 @@ def _repo_from(args: argparse.Namespace) -> repo_mod.Repo:
 
 
 def cmd_sync(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="rein sync", description="materialize prompts/schema/rules from the package"
-    )
+    parser = argparse.ArgumentParser(prog="rein sync", description="materialize prompts/schema/rules from the package")
     parser.add_argument("--check", action="store_true", help="report drift without writing (exit 1 on drift)")
     parser.add_argument("--force", action="store_true", help="overwrite locally modified files too")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")

@@ -185,12 +185,7 @@ def _expected_model(plan: models.Plan | None) -> dict[str, Any]:
     """The plan's claims as the comparator's Expected — the only place the plan enters the pipeline."""
     if plan is None:
         return {"claims": []}
-    return {
-        "claims": [
-            {"id": c.id, "statement": c.raw.get("statement", ""), "risk": c.risk}
-            for c in plan.claims
-        ]
-    }
+    return {"claims": [{"id": c.id, "statement": c.raw.get("statement", ""), "risk": c.risk} for c in plan.claims]}
 
 
 # -- assembly (pure, schema-valid) --------------------------------------------

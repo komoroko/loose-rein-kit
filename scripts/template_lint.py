@@ -105,6 +105,7 @@ _BANNED_TERMS: tuple[str, ...] = (
     "--refresh-state",
 )
 
+
 def _require(text: str, path: str, terms: list[str], what: str) -> list[str]:
     return [f"{path}: missing {what} `{t}`" for t in terms if t not in text]
 

@@ -37,8 +37,6 @@ def test_an_unapproved_release_gate_blocks(tmp_path: Path) -> None:
     assert any("release gate (5) is not approved" in b for b in blockers)
 
 
-
-
 def test_a_damaged_chain_blocks(tmp_path: Path) -> None:
     repo = finished_repo(tmp_path, events=chain("cycle_initialized", "task_completed"))
     repo.events.write_text(repo.events.read_text(encoding="utf-8").replace("demo-cycle", "x", 1), encoding="utf-8")
@@ -176,5 +174,3 @@ def test_dry_run_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[st
 def test_a_bad_slug_is_refused(tmp_path: Path) -> None:
     finished_repo(tmp_path)
     assert cycle.main(["--name", "Payment Refactor!", "--repo", str(tmp_path)]) == 2
-
-

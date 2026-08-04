@@ -75,9 +75,7 @@ EXECUTOR_VALUES = frozenset({"oci", "host"})
 MOUNT_MODE_VALUES = frozenset({"none", "read_only", "read_write"})
 HOME_MODE_VALUES = frozenset({"ephemeral", "host"})
 QUALITY_GATE_KIND_VALUES = frozenset({"command", "agent"})
-AGENT_ROLE_VALUES = frozenset(
-    {"implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"}
-)
+AGENT_ROLE_VALUES = frozenset({"implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"})
 
 # --- review vocabulary (plan §6.7) --------------------------------------------
 #
@@ -560,6 +558,7 @@ class Plan:
 
     def ids(self, section: str) -> frozenset[str]:
         return frozenset(self._index.get(section, {}))
+
 
 @dataclass(frozen=True)
 class State:

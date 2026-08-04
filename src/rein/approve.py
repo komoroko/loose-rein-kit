@@ -291,7 +291,7 @@ def record_approval(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
 AUTHORITY_NOTE = (
     "This records that a human at this terminal approved it — not which human, and with no role\n"
     "or domain behind it. What keeps an agent out is that `rein approve` is never pre-authorized\n"
-    "(AGENTS.md \"Gate rules\" 2), so something has to actually ask."
+    '(AGENTS.md "Gate rules" 2), so something has to actually ask.'
 )
 
 

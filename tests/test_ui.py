@@ -11,6 +11,7 @@ import re
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -608,10 +609,10 @@ def test_session_carries_the_next_challenge_without_its_reveal(review_server: ui
     assert session["machine_digest"].startswith("sha256:")
 
 
-def _card(stage_payload: dict[str, object], card_id: str) -> dict[str, object]:
+def _card(stage_payload: dict[str, Any], card_id: str) -> dict[str, Any]:
     cards = stage_payload["decision_cards"]
     assert isinstance(cards, list)
-    return next(c for c in cards if c["id"] == card_id)  # type: ignore[index]
+    return next(c for c in cards if c["id"] == card_id)
 
 
 def test_the_decision_stage_withholds_evidence_until_the_card_is_answered(review_server: ui.DashboardServer) -> None:

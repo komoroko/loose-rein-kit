@@ -55,8 +55,7 @@ def find_root(start: Path | None = None, override: str | None = None) -> Path:
         if _has_marker(candidate):
             return candidate
     raise RepoNotFoundError(
-        f"no .rein/ found walking up from {current} — run `rein init` there, "
-        "pass --repo PATH, or set REIN_ROOT"
+        f"no .rein/ found walking up from {current} — run `rein init` there, pass --repo PATH, or set REIN_ROOT"
     )
 
 

@@ -310,9 +310,7 @@ def test_render_trace_of_a_whole_thread_says_so() -> None:
     plan = _plan_with(
         claims=[make_claim("C-001", requirement_ids=["R-1"])], tasks=[make_task("T-001", claim_ids=["C-001"])]
     )
-    report = dag_trace.trace(
-        plan, dag.join(plan, None), declared=["R-1"], design_text="### R-1 → design\ncovered."
-    )
+    report = dag_trace.trace(plan, dag.join(plan, None), declared=["R-1"], design_text="### R-1 → design\ncovered.")
     assert "The thread is whole" in dag_trace.render_trace(report)
 
 

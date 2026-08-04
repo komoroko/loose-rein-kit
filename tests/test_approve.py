@@ -85,9 +85,7 @@ def test_a_typed_gate_name_opens_the_gate(
     assert "not which human" in capsys.readouterr().out
 
 
-def test_the_receipt_binds_the_plan_digest_and_the_chain_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_receipt_binds_the_plan_digest_and_the_chain_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = local_repo(tmp_path)
     monkeypatch.setattr("sys.stdin", _Tty("requirements\n"))
     approve.main(["requirements", "--repo", str(tmp_path)])

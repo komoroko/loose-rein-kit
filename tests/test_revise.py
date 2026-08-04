@@ -219,5 +219,3 @@ def test_the_reason_lands_in_the_audit_chain(tmp_path: Path) -> None:
     assert "plan_invalidated" in kinds  # rewinding to tasks un-freezes the plan
     revised = next(e for e in events if e.event == "gate_revised")
     assert revised.detail["reason"] == "the requirement was wrong"
-
-

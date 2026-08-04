@@ -197,5 +197,3 @@ def test_an_invalid_config_is_reported_not_overwritten(tmp_path: Path) -> None:
     seed_repo(tmp_path)
     (tmp_path / ".rein" / "config.yaml").write_text("project: {}\n", encoding="utf-8")
     assert agent_cli.main(["codex", "--repo", str(tmp_path)]) == 1
-
-
