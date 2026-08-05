@@ -2,10 +2,10 @@
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
 format: rein-grounded-v1
-tool_version: 0.1.0
+tool_version: 0.2.0
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.1.0
+  version: 0.2.0
   files:
     AGENTS.rein.md: sha256:1d8d7437fa64239e7f1aa3e50e4467ec7a5efda12d90c1ebc256ad2da0ce6e16
     oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
@@ -31,7 +31,7 @@ prompts:
     schema/state.schema.json: sha256:09791dca88f563ee2f6a33f819076c9ca8c775ed3f701e923ce123fecec8584c
 integrations:
   claude:
-    version: 0.1.0
+    version: 0.2.0
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:d420f000ac6892cba6f1d753f5a3894018c0e334ad1df77cf2b0904b237ad430
@@ -51,7 +51,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.1.0
+    version: 0.2.0
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:ac87ec52222a89be85fddc012a42d761abc2220c4e291e12fb12189aaa1d5cf9
@@ -69,7 +69,7 @@ integrations:
       .codex/hooks.json: sha256:e78f4e7bf63b3c5fca54b9c341ac9898f2ba18497bc158bd3ea7aaea8f663c40
       .codex/rein.md: sha256:3ee55b4131281a82403ae028544bf1b302857cb4afb06dce334f0629b4a72b18
   copilot:
-    version: 0.1.0
+    version: 0.2.0
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:6a9126f67cd68da0494217e0b47a2c2344031ec0573e04d45d70feb250c7c68d

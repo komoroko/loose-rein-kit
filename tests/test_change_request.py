@@ -106,7 +106,7 @@ def test_a_request_must_say_what_is_wrong(tmp_path: Path) -> None:
 
 
 def test_addressing_must_name_what_changed(tmp_path: Path) -> None:
-    """"Addressed" with nothing behind it is a status field cleared to make a board green — and
+    """ "Addressed" with nothing behind it is a status field cleared to make a board green — and
     this one stops a gate being blocked."""
     repo = repo_at(tmp_path)
     request_id = change_request.add(repo, "requirements", "R-3", "unmeasurable")
@@ -186,8 +186,11 @@ def test_the_board_reads_them_out_of_the_repository(tmp_path: Path) -> None:
     repo = repo_at(tmp_path)
     change_request.add(repo, "requirements", "R-3", "unmeasurable")
     status = status_api.collect_status(repo)
-    assert status["next"]["kind"] == "reconcile"  # type: ignore[index]
-    blocking = [row for row in status["pending"] if row["severity"] == "blocking"]  # type: ignore[union-attr]
+    recommendation = status["next"]
+    pending = status["pending"]
+    assert isinstance(recommendation, dict) and isinstance(pending, list)
+    assert recommendation["kind"] == "reconcile"
+    blocking = [row for row in pending if row["severity"] == "blocking"]
     assert any("open change request" in row["headline"] for row in blocking)
 
 
