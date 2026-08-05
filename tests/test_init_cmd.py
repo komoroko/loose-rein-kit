@@ -319,3 +319,64 @@ def test_wizard_asks_only_name_and_brief(
     assert 'project: "myproduct"' in state
     data = lock_mod.read(proj / ".rein" / "rein.lock")
     assert data is not None and data["rein"]["source"] == "git+https://example.com/rein@vX"
+
+
+# --- sandboxing is part of initialization -----------------------------------------
+#
+# It is the one precondition `rein init` never mentioned: a fresh config ships `kind: host`,
+# which is not policy-compliant, and the human learned about it later from a `doctor` FAIL that
+# pointed at a command sandboxing one profile of three.
+
+
+def test_a_fresh_repo_is_told_what_it_still_owes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert init_cmd.run_init(tmp_path, "demo", "build/demo", "") == 0
+    out = capsys.readouterr().out
+    assert "sandbox: not built yet" in out
+    assert "rein oci build --all --write-config" in out
+
+
+def test_a_missing_runtime_is_named_as_the_thing_to_install_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rein import executors
+
+    monkeypatch.setattr(executors, "container_runtime", lambda: None)
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    line = init_cmd.sandbox_step(tmp_path, offer=False)
+    assert "docker/podman not found" in line
+    assert "rein oci build --all --write-config" in line
+
+
+def test_the_wizard_offers_to_build_and_takes_no_for_an_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default no: it is a multi-minute build, and a setup step that runs one by default is a
+    setup step people learn to Ctrl-C."""
+    from rein import executors, oci_cli
+
+    monkeypatch.setattr(executors, "container_runtime", lambda: "docker")
+    monkeypatch.setattr(oci_cli, "main", lambda *a, **k: pytest.fail("must not build on a bare Enter"))  # noqa: ARG005
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    assert "skipped" in init_cmd.sandbox_step(tmp_path, offer=True, ask=lambda _q: "")
+
+
+def test_the_wizard_builds_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from rein import executors, oci_cli
+
+    calls: list[list[str]] = []
+
+    def record(argv: list[str]) -> int:
+        calls.append(argv)
+        return 0
+
+    monkeypatch.setattr(executors, "container_runtime", lambda: "docker")
+    monkeypatch.setattr(oci_cli, "main", record)
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    assert "built and pinned" in init_cmd.sandbox_step(tmp_path, offer=True, ask=lambda _q: "y")
+    assert calls == [["build", "--all", "--write-config", "--repo", str(tmp_path)]]
+
+
+def test_an_already_sandboxed_repo_is_not_asked_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests._support import SANDBOXED_PROFILES, make_config, seed_repo
+
+    seed_repo(tmp_path, config=make_config(profiles=SANDBOXED_PROFILES))
+    monkeypatch.setattr("rein.executors.container_runtime", lambda: "docker")
+    assert "already sandboxed" in init_cmd.sandbox_step(tmp_path, offer=True, ask=lambda _q: "y")

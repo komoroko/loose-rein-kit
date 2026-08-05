@@ -118,9 +118,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "build":
+        # Checked before the first build rather than discovered inside it: `build_image` would
+        # otherwise spend the setup (temp dir, payload extraction) only to report the one thing
+        # that was knowable up front, and `--all` would report it three times.
+        if executors.container_runtime() is None:
+            logger.error(
+                "no container runtime on PATH — install docker or podman first. There is nothing here that "
+                "can build an image, and until one exists the profiles keep running repository code on the host."
+            )
+            return 1
+
         names = list(executors.containerfile_names()) if args.all else [args.profile]
         pins: dict[str, str] = {}
-        for name in names:
+        for index, name in enumerate(names, start=1):
+            # Progress goes out before the build, not after. `common.run` captures the engine's
+            # output, so a three-image build otherwise prints nothing for several minutes and
+            # looks hung at exactly the moment a first-time user is least sure it is working.
+            print(f"[{index}/{len(names)}] building rein-{name} (this can take a few minutes)…", flush=True)
             try:
                 digest = executors.build_image(name)
             except executors.ExecutorError as exc:
@@ -156,17 +170,24 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         path.write_text(text, encoding="utf-8")
         print(f"\npinned {', '.join(sorted(pins))} in .rein/config.yaml (kind: oci)")
-        print("run `rein oci verify` to confirm, then `rein doctor`")
-        return 0
+        # Verify here rather than telling the human to run it. A pin that does not resolve is the
+        # failure this command is most likely to leave behind, and "run `rein oci verify` next"
+        # made confirming it an optional step that a first-time setup skips.
+        print("\nverifying the pins:")
+        return _verify(args.repo)
 
-    # verify
+    return _verify(args.repo)
+
+
+def _verify(repo_arg: str | None) -> int:
+    """`rein oci verify`: does a local image actually exist for every pinned profile?"""
+    from rein import store as store_mod
+
     try:
-        repo = repo_mod.get(args.repo)
+        repo = repo_mod.get(repo_arg)
     except repo_mod.RepoNotFoundError as exc:
         logger.error(str(exc))
         return 1
-    from rein import store as store_mod
-
     try:
         config = store_mod.Store(repo).read_config()
     except (models.DocumentError, store_mod.StoreError) as exc:
@@ -181,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
         ok, message = executors.verify_pinned(profile)
         print(f"  [{'PASS' if ok else 'FAIL'}] {message}")
         failures += 0 if ok else 1
+    if not failures:
+        print("\nevery profile's pinned image is present — run `rein doctor` for the rest.")
     return 1 if failures else 0
 
 

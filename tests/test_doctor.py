@@ -628,3 +628,23 @@ def test_a_host_with_no_codex_registration_gets_no_trust_note(tmp_path: Path) ->
     findings = doctor.check_hook(repo_mod.Repo(tmp_path))
     assert _levels(findings, "gate guard registered (claude)") == ["PASS"]
     assert _levels(findings, "only once the project is trusted") == []
+
+
+# --- the sandbox prerequisite -----------------------------------------------------
+
+
+def test_a_missing_runtime_is_reported_before_any_image_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh repository has every profile on `kind: host`. Gating the runtime check on "OCI
+    profiles are configured" meant it was told to build images and never told what with — the
+    prerequisite surfaced as a failed build several minutes later instead."""
+    monkeypatch.setattr("rein.doctor.shutil.which", lambda _name: None)
+    results = doctor.check_sandbox(models.Config(make_config()))
+    runtime = [f for f in results if "docker/podman" in f.message]
+    assert len(runtime) == 1 and runtime[0].level == "FAIL"
+    assert "install one first" in runtime[0].message
+
+
+def test_the_sandbox_fail_names_a_command_that_finishes_the_job() -> None:
+    results = doctor.check_sandbox(models.Config(make_config()))
+    fail = next(f for f in results if f.level == "FAIL" and "run repository-derived code" in f.message)
+    assert "rein oci build --all --write-config" in fail.message

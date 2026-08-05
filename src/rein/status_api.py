@@ -153,15 +153,14 @@ def next_action(
         )
     # 5. Sandboxing is a precondition for running anything, so it precedes the phase rows.
     if unsandboxed_profiles:
-        # `--profile` takes a packaged Containerfile name, and a profile's name is not one:
-        # interpolating `unsandboxed_profiles[0]` recommended `--profile quality`, which fails.
-        targets = unsandboxed_build_targets or unsandboxed_profiles
         return Recommendation(
-            command="rein oci build --profile " + targets[0],
+            command=models.sandbox_setup_command(unsandboxed_build_targets or unsandboxed_profiles),
             kind="fix",
             reason="Profile(s) " + ", ".join(unsandboxed_profiles) + " run repository-derived code on the host. "
-            "Build the packaged sandbox image, pin its digest in config.yaml, and check the image can run the "
-            "step you point at it.",
+            "This builds every packaged image, pins each digest in config.yaml and flips those profiles to "
+            "`kind: oci`. It needs docker or podman on PATH, and the image still has to be able to run the "
+            "step you point it at.",
+            also=("rein doctor",),
         )
     # 6. Events awaiting a human decision block the release gate.
     if current_phase == "verify" and attention_count:
@@ -373,14 +372,13 @@ def pending_queue(
             )
         )
     if unsandboxed_profiles:
-        targets = list(unsandboxed_build_targets) or list(unsandboxed_profiles)
         items.append(
             _pending_item(
                 "blocking",
                 "sandbox",
                 ", ".join(unsandboxed_profiles),
                 "profile(s) " + ", ".join(unsandboxed_profiles) + " run repository-derived code on the host",
-                "rein oci build --profile " + targets[0],
+                models.sandbox_setup_command(list(unsandboxed_build_targets) or list(unsandboxed_profiles)),
             )
         )
     if probe_gate is not None and gate_blockers is not None:

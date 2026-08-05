@@ -77,8 +77,14 @@ def test_needs_revision_parks_everything_at_tasks() -> None:
 
 
 def test_an_unsandboxed_profile_precedes_the_phase_rows() -> None:
+    """And the command finishes the job: every image, and the pins written.
+
+    Recommending `--profile <first of N>` sandboxed one profile of three and, without
+    `--write-config`, left the digest to be copied out of the terminal by hand — so the
+    recommendation never actually cleared the FAIL it was answering.
+    """
     rec = decide(unsandboxed_profiles=["quality", "reviewer"], unsandboxed_build_targets=["python", "reviewer"])
-    assert rec.command == "rein oci build --profile python"
+    assert rec.command == "rein oci build --all --write-config"
 
 
 def test_the_recommended_build_names_a_containerfile_not_a_profile() -> None:
@@ -87,7 +93,9 @@ def test_the_recommended_build_names_a_containerfile_not_a_profile() -> None:
     from rein import executors
 
     rec = decide(unsandboxed_profiles=["quality"], unsandboxed_build_targets=["python"])
-    target = rec.command.rsplit(" ", 1)[1]
+    argv = rec.command.split()
+    assert "--write-config" in argv
+    target = argv[argv.index("--profile") + 1]
     assert target in executors.containerfile_names(), f"{rec.command!r} names no packaged Containerfile"
 
 

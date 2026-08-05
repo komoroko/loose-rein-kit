@@ -360,16 +360,16 @@ def check_sandbox(config: models.Config | None) -> list[Finding]:
     findings: list[Finding] = []
     offenders = config.unsandboxed_code_profiles()
     if offenders:
-        builds = " ; ".join(f"rein oci build --profile {target}" for target in config.unsandboxed_build_targets())
         findings.append(
             Finding(
                 "FAIL",
                 "sandbox",
                 f"profile(s) {', '.join(offenders)} run repository-derived code on the host. A test file is "
-                f"code an agent wrote, and it would run with your credentials. Build the packaged image(s) "
-                f"({builds}), pin each digest in config.yaml, and check that the image can actually run the "
-                "step you pointed at it — the packaged images carry python, uv and pytest, so a step invoking "
-                "`make` or needing a dependency closure needs its own Containerfile first.",
+                f"code an agent wrote, and it would run with your credentials. Run "
+                f"`{config.sandbox_setup_command()}` — it builds each packaged image, pins the digests here and "
+                "flips those profiles to `kind: oci`. Then check that the image can actually run the step you "
+                "pointed at it: the packaged images carry python, uv and pytest, so a step invoking `make` or "
+                "needing a dependency closure needs its own Containerfile first.",
             )
         )
     for name, profile in sorted(config.profiles.items()):
@@ -388,14 +388,25 @@ def check_sandbox(config: models.Config | None) -> list[Finding]:
                 )
             )
 
-    if any(p.is_sandboxed for p in config.profiles.values()):
+    # Checked whenever a sandbox is configured *or still owed*. Gating this on "OCI profiles are
+    # configured" meant a fresh repository — every profile still `kind: host` — was told to build
+    # images and never told it needed a container runtime to do it, so the prerequisite surfaced
+    # only as a failed build several minutes later.
+    if offenders or any(p.is_sandboxed for p in config.profiles.values()):
         runtime = shutil.which("docker") or shutil.which("podman")
-        level, message = (
-            ("PASS", f"container runtime found ({Path(runtime).name})")
-            if runtime
-            else ("FAIL", "no docker/podman on PATH, but OCI profiles are configured")
-        )
-        findings.append(Finding(level, "sandbox", message))
+        if runtime:
+            findings.append(Finding("PASS", "sandbox", f"container runtime found ({Path(runtime).name})"))
+        elif offenders:
+            findings.append(
+                Finding(
+                    "FAIL",
+                    "sandbox",
+                    "no docker/podman on PATH, and the profiles above still need sandboxing — install one "
+                    "first; there is nothing to build the images with.",
+                )
+            )
+        else:
+            findings.append(Finding("FAIL", "sandbox", "no docker/podman on PATH, but OCI profiles are configured"))
     return findings
 
 

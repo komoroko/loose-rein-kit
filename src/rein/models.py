@@ -317,6 +317,23 @@ def max_risk(risks: Iterable[str]) -> str:
     return max(risks, key=RISK_ORDER.index, default="low")
 
 
+def sandbox_setup_command(build_targets: Sequence[str]) -> str:
+    """The one command that actually sandboxes `build_targets`. "" when there is nothing to do.
+
+    Derived in one place because four surfaces print it — `rein next`, `rein doctor`, the
+    dashboard, and `rein init` — and they all used to print
+    `rein oci build --profile <first of N>`: one image out of three, and without
+    `--write-config`, so the digest still had to be copied out of the terminal by hand. The
+    complete form was documented in the shipped `config.yaml` and recommended by nothing, which
+    is the whole of why sandbox setup felt like a research project.
+
+    Pure, so the recommendation table stays testable without a repository on disk.
+    """
+    if len(build_targets) > 1:
+        return "rein oci build --all --write-config"
+    return f"rein oci build --profile {build_targets[0]} --write-config" if build_targets else ""
+
+
 # --- errors -------------------------------------------------------------------
 
 
@@ -1004,6 +1021,10 @@ class Config:
         recommend `--profile quality`, which no packaged Containerfile answers to.
         """
         return sorted({profile.build_target for profile in self._unsandboxed_profiles()})
+
+    def sandbox_setup_command(self) -> str:
+        """The one command that finishes the job for this config (:func:`sandbox_setup_command`)."""
+        return sandbox_setup_command(self.unsandboxed_build_targets())
 
     def _unsandboxed_profiles(self) -> list[ExecutorProfile]:
         if not isinstance(self.raw.get("executors"), dict):
