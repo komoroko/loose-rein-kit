@@ -238,6 +238,96 @@ def test_an_approved_gate_missing_a_bound_digest_fails() -> None:
     assert "missing" in req[0].message
 
 
+# --- freeze drift -----------------------------------------------------------------
+#
+# `check_receipts` answers "does this receipt bind anything". These answer "does what it bound
+# still exist" — a receipt can name every required digest and describe a document that has since
+# been edited, and for a long time nothing anywhere said so.
+
+
+def _frozen(plan_doc: dict[str, object], config_doc: dict[str, object], **overrides: object) -> models.State:
+    """A state whose freeze record matches the two documents beside it."""
+    raw = make_state(plan_status="frozen")
+    raw["plan"] = {
+        "status": "frozen",
+        "digest": models.Plan(plan_doc).digest(),
+        "config_digest": models.Config(config_doc).digest(),
+        **overrides,
+    }
+    for gate in ("requirements", "design", "tasks"):
+        receipt = raw["gates"][gate]["receipt"]
+        receipt["plan_digest"] = raw["plan"]["digest"]
+        receipt["config_digest"] = raw["plan"]["config_digest"]
+    return models.State(raw)
+
+
+def test_a_matching_freeze_passes() -> None:
+    plan_doc, config_doc = make_plan(), make_config()
+    results = doctor.check_freeze_drift(_frozen(plan_doc, config_doc), models.Plan(plan_doc), models.Config(config_doc))
+    assert [f.level for f in results] == ["PASS", "PASS"]
+
+
+def test_a_config_edited_after_the_freeze_is_a_fail() -> None:
+    """The reported case: pinning a sandbox digest and adding a `guard.paths` entry after gate ③.
+    `rein doctor` kept printing `0 FAIL` against a config nobody had approved."""
+    plan_doc, config_doc = make_plan(), make_config()
+    state = _frozen(plan_doc, config_doc)
+    edited = models.Config(make_config(max_parallel=9))
+    results = doctor.check_freeze_drift(state, models.Plan(plan_doc), edited)
+    fails = [f for f in results if f.level == "FAIL"]
+    assert len(fails) == 1
+    assert "config.yaml has changed since gate 3 froze it" in fails[0].message
+
+
+def test_a_plan_edited_after_the_freeze_is_a_fail() -> None:
+    plan_doc, config_doc = make_plan(), make_config()
+    state = _frozen(plan_doc, config_doc)
+    edited = models.Plan(make_plan(claims=[make_claim("C-001"), make_claim("C-002", requirement_ids=["R-2"])]))
+    results = doctor.check_freeze_drift(state, edited, models.Config(config_doc))
+    assert [f.level for f in results if f.level == "FAIL"]
+    assert any("plan.yaml has changed" in f.message for f in results)
+
+
+def test_a_post_freeze_receipt_naming_another_digest_is_a_fail() -> None:
+    """The artifact matches the freeze, but gate ③'s receipt names something else — so the
+    approval was taken against a document other than the one now frozen."""
+    plan_doc, config_doc = make_plan(), make_config()
+    state = _frozen(plan_doc, config_doc)
+    raw = dict(state.raw)
+    raw["gates"]["tasks"]["receipt"]["config_digest"] = "sha256:" + "0" * 64
+    results = doctor.check_freeze_drift(models.State(raw), models.Plan(plan_doc), models.Config(config_doc))
+    fails = [f for f in results if f.level == "FAIL"]
+    assert len(fails) == 1
+    assert "gate 'tasks' receipt" in fails[0].message and "not the one the freeze records" in fails[0].message
+
+
+def test_the_pre_freeze_gates_are_not_judged_against_the_freeze() -> None:
+    """Gates ① and ② were approved while the plan was still a draft, and /design and /tasks then
+    moved it — legitimately. Comparing their receipts against the live document (the obvious
+    reading of "check every receipt's digests") turns every healthy repository permanently red.
+    """
+    plan_doc, config_doc = make_plan(), make_config()
+    state = _frozen(plan_doc, config_doc)
+    raw = dict(state.raw)
+    for gate in ("requirements", "design"):
+        raw["gates"][gate]["receipt"]["plan_digest"] = "sha256:" + "1" * 64
+    results = doctor.check_freeze_drift(models.State(raw), models.Plan(plan_doc), models.Config(config_doc))
+    assert not [f for f in results if f.level == "FAIL"]
+
+
+def test_a_draft_plan_has_no_freeze_to_check() -> None:
+    results = doctor.check_freeze_drift(models.State(make_state(plan_status="draft")), None, None)
+    assert [f.level for f in results] == ["INFO"]
+
+
+def test_a_frozen_artifact_that_cannot_be_read_is_a_fail() -> None:
+    """Not measured must never render as fine, least of all for the document a freeze covers."""
+    plan_doc, config_doc = make_plan(), make_config()
+    results = doctor.check_freeze_drift(_frozen(plan_doc, config_doc), None, models.Config(config_doc))
+    fails = [f for f in results if f.level == "FAIL"]
+    assert len(fails) == 1 and "cannot be read" in fails[0].message
+
+
 # --- runtime and sandbox ------------------------------------------------------
 
 
