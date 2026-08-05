@@ -123,7 +123,11 @@ def test_get_status_returns_next_command(server: ui.DashboardServer) -> None:
     status, data = _request(server, "GET", "/api/status")
     assert status == 200
     payload = json.loads(data)
-    assert payload["next"]["command"] == "/req" and payload["project"] == "demo"
+    # This fixture stands at gate ① with nothing mechanical in the way, so the recommendation is
+    # the human's decision — not "/req" again. The dashboard's waiting-state signals key off it.
+    assert payload["next"]["command"] == "rein approve requirements"
+    assert payload["decision"]["waiting_on_human"] is True
+    assert payload["project"] == "demo"
 
 
 def test_get_page_is_offline_self_contained(server: ui.DashboardServer) -> None:
@@ -376,7 +380,7 @@ def test_read_only_server_refuses_posts(repo: Path) -> None:
 def test_main_once_prints_parseable_json(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert ui.main(["--once", "--root", str(repo)]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["next"]["command"] == "/req"
+    assert payload["next"]["command"] == "rein approve requirements"
 
 
 def test_main_refuses_non_loopback_bind_with_writes_enabled(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:

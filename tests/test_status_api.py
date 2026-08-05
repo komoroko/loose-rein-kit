@@ -120,6 +120,65 @@ def test_an_approved_gate_advances_to_the_next_phase() -> None:
     assert "rein build" in rec.also
 
 
+# --- the gate waiting on a human ----------------------------------------------
+#
+# The kind existed, `pending_decision` special-cased it, and no row ever produced one: a phase
+# that was finished and a gate with nothing in its way still recommended running the phase again,
+# and `waiting_on_human` stayed False for the entire wait.
+
+
+def test_a_ready_gate_is_the_humans_decision_not_another_phase_run() -> None:
+    rec = decide(current_phase="build", gate_ready=True)
+    assert rec.command == "rein approve build"
+    assert rec.kind == "approve_gate"
+    assert "rein ui" in rec.also
+
+
+def test_a_ready_gate_says_the_agent_does_not_run_it() -> None:
+    """The recommendation is about to be printed to agents that are built to run the next
+    recommended command — so the sentence that stops them travels with it."""
+    assert "an agent never runs it for you" in decide(current_phase="build", gate_ready=True).reason
+
+
+def test_a_blocked_gate_still_points_at_the_phase() -> None:
+    rec = decide(current_phase="build", gate_ready=False)
+    assert rec.command == "/build"
+    assert rec.kind == "run_phase"
+
+
+def test_an_unprobed_gate_is_not_treated_as_ready() -> None:
+    """`None` means readiness was not probed, which is not the same as probed-and-clear. A board
+    that never looked must not tell a human their gate is waiting on them."""
+    assert decide(current_phase="build", gate_ready=None).kind == "run_phase"
+
+
+def test_a_ready_gate_makes_the_decision_wait_on_a_human() -> None:
+    rec = decide(current_phase="build", gate_ready=True)
+    decision = status_api.pending_decision(rec, "build")
+    assert decision["waiting_on_human"] is True
+    assert decision["kind"] == "approve_gate"
+    # The id names the gate, so the notification does not re-fire as an unrelated row appears.
+    assert decision["id"] == "approve_gate:build:rein approve build"
+
+
+def test_the_queue_and_the_recommendation_agree_about_readiness() -> None:
+    """Both are derived from the same `gate_blockers`, so a board showing "waiting on your
+    decision" and a recommendation saying "run the phase again" cannot coexist."""
+    rec = decide(current_phase="build", gate_ready=True)
+    queue = status_api.pending_queue(
+        probe_gate="build",
+        gate_blockers=[],
+        chain_defects=0,
+        unsandboxed_profiles=[],
+        unsandboxed_build_targets=[],
+        attention=[],
+        task_rows=[],
+    )
+    ready = [row for row in queue if row["kind"] == "gate_ready"]
+    assert len(ready) == 1
+    assert ready[0]["action"] == rec.command
+
+
 def test_a_missing_plan_mid_lifecycle_is_a_repair() -> None:
     assert decide(plan_missing=True, current_phase="build").command == "rein doctor"
 

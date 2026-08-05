@@ -111,8 +111,14 @@ def next_action(
     plan_missing: bool,
     unsandboxed_profiles: list[str],
     unsandboxed_build_targets: list[str] | None = None,
+    gate_ready: bool | None = None,
 ) -> Recommendation:
-    """The deterministic decision table (first match wins)."""
+    """The deterministic decision table (first match wins).
+
+    `gate_ready` is tri-state, for the same reason `pending_queue`'s `gate_blockers` is: `None`
+    means readiness was **not probed**, which is not the same as probed-and-blocked. Collapsing
+    them would let "we did not look" decide a recommendation.
+    """
     # 1. The audit chain is the substrate every receipt binds. Nothing else matters until it is intact.
     if chain_defects:
         return Recommendation(
@@ -190,6 +196,22 @@ def next_action(
     if gate is not None:
         index = GATE_ORDER.index(gate) + 1
         if gates.get(gate) != "approved":
+            # The phase is done and nothing mechanical is left: what remains is a person deciding.
+            # Without this row the table only ever said "run the phase again" — `Recommendation`
+            # declared the `approve_gate` kind and `pending_decision` special-cased it, but no row
+            # produced one, so `waiting_on_human` stayed False through the whole wait and the
+            # dashboard's title, favicon and notification never signalled the one thing they exist
+            # for. The queue's `gate_ready` row is derived from the same `gate_blockers`, so the
+            # board and the recommendation cannot disagree about whether the gate is ready.
+            if gate_ready:
+                return Recommendation(
+                    command=f"rein approve {gate}",
+                    kind="approve_gate",
+                    reason=f"Phase '{current_phase}' is complete and gate {index} ({gate}) has no mechanical "
+                    "blocker left — it is waiting on your decision. Read it in `rein ui` and approve there, or "
+                    "run this yourself at a terminal; an agent never runs it for you.",
+                    also=("rein ui", f"rein approve {gate} --check"),
+                )
             also: tuple[str, ...] = (f"rein approve {gate} --check",)
             if current_phase == "build":
                 also = ("rein build", *also)
@@ -578,6 +600,8 @@ def collect_status(
         plan_missing=plan is None,
         unsandboxed_profiles=unsandboxed_profiles,
         unsandboxed_build_targets=unsandboxed_build_targets,
+        # None when readiness was not probed — the table must not read that as "blocked".
+        gate_ready=None if gate_blockers is None else not gate_blockers,
     )
     # A /-command only exists inside an agent whose surface was installed; recommending one in a
     # repo with no integration would send the user to a command their agent has never heard of.
