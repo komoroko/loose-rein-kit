@@ -7,7 +7,9 @@ Three steps, in this order, none skippable:
   2. **Confirmation** — the digests this approval covers are printed, and the human types the
      gate name at an interactive terminal (:func:`confirm_locally`).
   3. **Receipt** — one Central Store transaction writes the gate receipt, binding those digests
-     and the audit-chain root (:func:`record_approval`).
+     and the audit-chain root (:func:`record_approval`). Gate ③ additionally **freezes the
+     plan** in that same transaction: `state.plan` gains `frozen` plus the digests the freeze
+     covers, which is what `rein build` requires and what `rein guard` rule 2 protects.
 
 `--force` does not exist and is not coming back, and neither does `--by`: an identity you can
 type is not an identity, so the receipt records that *a* human confirmed, never which one.
@@ -227,6 +229,49 @@ _RECEIPT_DIGESTS = (
     "attested_chain_root",
 )
 
+#: The gate whose approval freezes the Expected Model. Gate ③ approves the plan and the
+#: toolchain it will be built against; everything downstream is measured against that freeze.
+FREEZING_GATE = "tasks"
+
+#: The keys `state.plan` carries once frozen — exactly the set `revise.apply` clears on a roll
+#: back. A key written here and not cleared there would survive an un-freeze and let a later
+#: check "verify" against a freeze that no longer holds.
+_FROZEN_PLAN_KEYS = ("digest", "config_digest", "toolchain_digest", "frozen_at")
+
+
+def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[str, str]:
+    """`state.plan` as gate ③ freezes it, refusing if the documents moved since `subject`.
+
+    Recomputed here rather than copied from `subject` because `subject` was assembled *before*
+    the human read it and typed. If plan.yaml or config.yaml moved in between, freezing the
+    stale digest would record a freeze of bytes nobody approved — and the chain-root guard above
+    does not cover these two files. Same posture, one document further out.
+    """
+    store = store_mod.Store(repo)
+    plan = store.read_plan()
+    config = store.read_config()
+    if plan is None:
+        raise ApprovalError("gate 'tasks' freezes .rein/plan.yaml, and there is no plan to freeze")
+    if config is None:
+        raise ApprovalError("gate 'tasks' freezes .rein/config.yaml, and there is no config to freeze")
+
+    for name, current, presented in (
+        ("plan.yaml", plan.digest(), subject.get("plan_digest", "")),
+        ("config.yaml", config.digest(), subject.get("config_digest", "")),
+    ):
+        if presented and not digests.matches(presented, current):
+            raise ApprovalError(
+                f"{name} changed while the confirmation was on screen — the approval would freeze "
+                "bytes other than the ones it was shown. Re-run `rein approve tasks`."
+            )
+    return {
+        "status": "frozen",
+        "digest": plan.digest(),
+        "config_digest": config.digest(),
+        "toolchain_digest": config.toolchain_digest(),
+        "frozen_at": event_chain.now_iso(),
+    }
+
 
 def record_approval(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> str:
     """Write the gate receipt in one Central Store transaction, and return its id.
@@ -278,6 +323,21 @@ def record_approval(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         raw["gates"][gate] = {"status": "approved", "receipt": receipt}
         raw["current_phase"] = models.PHASE_AFTER_GATE[gate]
         raw["updated_at"] = event_chain.now_iso()
+
+        # Gate ③ is what freezes the plan. Without this the freeze existed only in prose: three
+        # documents said gate ③ freezes the plan, `gate_guard` rule 2 keyed off `plan.status ==
+        # "frozen"`, and `rein build` refused to start against a draft — while nothing anywhere
+        # ever wrote "frozen", so a correctly approved repository could not build.
+        if gate == FREEZING_GATE:
+            raw["plan"] = _frozen_plan_block(repo, subject)
+            tx.append(
+                "plan_frozen",
+                cycle_id=state.cycle_id,
+                actor="local-confirmation",
+                subject_ids=[approval_id],
+                detail={key: raw["plan"][key] for key in _FROZEN_PLAN_KEYS},
+            )
+
         tx.write("state", raw, expect_digest=seen)
     return approval_id
 

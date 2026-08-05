@@ -412,3 +412,114 @@ def test_recording_an_approval_writes_a_receipt_and_advances_the_phase(tmp_path:
     assert state.current_phase == "design"
     receipt = state.gate_receipt("requirements")
     assert receipt is not None and receipt["approval_id"] == approval_id
+
+
+# --- gate ③ freezes the plan ---------------------------------------------------
+#
+# This is the half that was missing entirely. Three documents said gate ③ freezes the plan,
+# `gate_guard` rule 2 keyed off `plan.status == "frozen"`, and `rein build` refused to start
+# against a draft — while no code anywhere ever wrote "frozen". A correctly approved repository
+# could not build, and rule 2 never once engaged.
+
+
+def _tasks_gate_repo(tmp_path: Path) -> repo_mod.Repo:
+    """A repo standing at gate ③, with a plan whose claims all have a task."""
+    return repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"tasks": "pending", "build": "pending", "release": "pending"},
+            phase="tasks",
+            plan_status="draft",
+        ),
+        plan=make_plan(claims=[make_claim("C-001")], tasks=[make_task("T-001", claim_ids=["C-001"])]),
+    )
+
+
+def test_approving_gate_three_freezes_the_plan(tmp_path: Path) -> None:
+    repo = _tasks_gate_repo(tmp_path)
+    store = store_mod.Store(repo)
+    plan, config = store.read_plan(), store.read_config()
+    assert plan is not None and config is not None
+
+    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+
+    state = store.read_state()
+    assert state is not None
+    assert state.plan_status == "frozen"
+    assert state.plan_digest == plan.digest()
+    assert state.plan_config_digest == config.digest()
+    frozen = state.raw["plan"]
+    assert frozen["toolchain_digest"] == config.toolchain_digest()
+    assert frozen["frozen_at"]
+
+
+def test_the_freeze_keys_are_exactly_the_ones_a_roll_back_clears(tmp_path: Path) -> None:
+    # revise.apply pops these four. A key written at the freeze and not cleared on the roll back
+    # would survive an un-freeze and let a later check "verify" against a freeze that no longer
+    # holds — so the two sets are asserted equal rather than trusted to stay in step.
+    from rein import revise
+
+    repo = _tasks_gate_repo(tmp_path)
+    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    assert state is not None
+    assert set(state.raw["plan"]) == {"status", *approve._FROZEN_PLAN_KEYS}
+
+    revision = revise.plan_revision(repo, "tasks", [])
+    assert revision["unfreezes_plan"] is True
+    revise.apply(repo, revision, "a defect in the task breakdown")
+
+    after = store.read_state()
+    assert after is not None
+    assert after.raw["plan"] == {"status": "draft"}  # every frozen key cleared, none left behind
+
+
+def test_the_freeze_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
+    repo = _tasks_gate_repo(tmp_path)
+    approval_id = approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+
+    events = store_mod.Store(repo).read_events()
+    assert [e.event for e in events] == ["gate_approved", "plan_frozen"]
+    frozen = events[1]
+    assert approval_id in frozen.subject_ids
+    # The digests the freeze covers travel in the event, so the chain says what was frozen and
+    # not merely that something was.
+    assert set(frozen.detail) == set(approve._FROZEN_PLAN_KEYS)
+
+
+def test_a_plan_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path) -> None:
+    repo = _tasks_gate_repo(tmp_path)
+    subject = approve.approval_subject(repo, "tasks")
+    # The human is reading the digest table; meanwhile the plan gains a claim. The chain-root
+    # guard does not cover plan.yaml, so without this check the approval would freeze bytes
+    # nobody was shown.
+    seed_repo(
+        tmp_path,
+        plan=make_plan(
+            claims=[make_claim("C-001"), make_claim("C-002", requirement_ids=["R-2"])],
+            tasks=[make_task("T-001", claim_ids=["C-001", "C-002"])],
+        ),
+        state=None,
+        review=None,
+        config=None,
+    )
+    with pytest.raises(approve.ApprovalError, match="plan.yaml changed while the confirmation"):
+        approve.record_approval(repo, "tasks", subject)
+
+
+def test_a_config_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path) -> None:
+    repo = _tasks_gate_repo(tmp_path)
+    subject = approve.approval_subject(repo, "tasks")
+    seed_repo(tmp_path, config=make_config(max_parallel=7), state=None, plan=None, review=None)
+    with pytest.raises(approve.ApprovalError, match="config.yaml changed while the confirmation"):
+        approve.record_approval(repo, "tasks", subject)
+
+
+def test_the_other_gates_do_not_touch_the_plan_block(tmp_path: Path) -> None:
+    # Only gate ③ freezes. Gate ① approving a draft plan and leaving it draft is what lets
+    # /design and /tasks keep writing to it.
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    approve.record_approval(repo, "requirements", approve.approval_subject(repo, "requirements"))
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and state.plan_status == "draft"

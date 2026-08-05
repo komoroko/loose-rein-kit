@@ -622,6 +622,17 @@ class State:
         return _str(plan, "digest") if isinstance(plan, dict) else ""
 
     @property
+    def plan_config_digest(self) -> str:
+        """What `config.yaml` hashed to when gate ③ froze it. "" before the freeze.
+
+        The pair of :attr:`plan_digest`. config.yaml is frozen by the same gate and for the same
+        reason — it pins the sandbox and the quality gate a review's evidence was produced in —
+        so a drift check that only covered plan.yaml left half the freeze unguarded.
+        """
+        plan = self.raw.get("plan")
+        return _str(plan, "config_digest") if isinstance(plan, dict) else ""
+
+    @property
     def execution(self) -> Mapping[str, Any]:
         value = self.raw.get("execution")
         return value if isinstance(value, dict) else {}
@@ -873,6 +884,16 @@ class Config:
 
     def digest(self) -> str:
         return digests.of(self.raw, drop=digests.VOLATILE_TIMESTAMP_KEYS)
+
+    def toolchain_digest(self) -> str:
+        """Which sandbox each role runs in, as one digest.
+
+        Bound into the gate ③ freeze and into every machine review, so that changing the sandbox
+        a step ran in moves the digest and an approval taken against the old one stops applying.
+        Narrower than :meth:`digest` on purpose: a comment or a budget moving in config.yaml is
+        not a change of the environment the evidence was produced in.
+        """
+        return digests.of({"executors": self.raw.get("executors")})
 
     @property
     def project_name(self) -> str:

@@ -444,11 +444,11 @@ def _independence(config: models.Config | None) -> dict[str, Any]:
 def _toolchain_digest(config: models.Config | None) -> str:
     """What the review was produced in: the executor profiles that ran its steps.
 
-    Bound into the review so that changing which sandbox a review ran in moves the digest, and an
-    approval taken against the old one stops applying to the new.
+    Delegates to :meth:`models.Config.toolchain_digest`, which the gate ③ freeze binds too — two
+    copies of "which sandbox was this" would eventually disagree, and then a freeze and a review
+    would be talking about different environments while reporting the same digest name.
     """
-    profiles = config.raw.get("executors") if config is not None and isinstance(config.raw, Mapping) else None
-    return digests.of({"executors": profiles})
+    return config.toolchain_digest() if config is not None else digests.of({"executors": None})
 
 
 def _coverage_gaps(gaps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
