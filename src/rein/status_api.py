@@ -112,6 +112,7 @@ def next_action(
     unsandboxed_profiles: list[str],
     unsandboxed_build_targets: list[str] | None = None,
     gate_ready: bool | None = None,
+    open_change_requests: int = 0,
 ) -> Recommendation:
     """The deterministic decision table (first match wins).
 
@@ -202,6 +203,18 @@ def next_action(
             # dashboard's title, favicon and notification never signalled the one thing they exist
             # for. The queue's `gate_ready` row is derived from the same `gate_blockers`, so the
             # board and the recommendation cannot disagree about whether the gate is ready.
+            # A human already read this and said "not yet". Recommending the phase command is
+            # right, but the reason has to name what they asked for — otherwise the next session
+            # re-derives the deliverable from scratch and answers nothing.
+            if open_change_requests:
+                return Recommendation(
+                    command=PHASE_COMMAND[current_phase],
+                    kind="reconcile",
+                    reason=f"{open_change_requests} change request(s) you raised are still open, and gate "
+                    f"{index} stays shut until they are. Read them, fix only what each one anchors, and mark "
+                    "each addressed.",
+                    also=(f"rein changes list --gate {gate}",),
+                )
             if gate_ready:
                 return Recommendation(
                     command=f"rein approve {gate}",
@@ -600,6 +613,7 @@ def collect_status(
         unsandboxed_build_targets=unsandboxed_build_targets,
         # None when readiness was not probed — the table must not read that as "blocked".
         gate_ready=None if gate_blockers is None else not gate_blockers,
+        open_change_requests=len(state.change_requests_for(probe_gate, "open")) if state and probe_gate else 0,
     )
     # A /-command only exists inside an agent whose surface was installed; recommending one in a
     # repo with no integration would send the user to a command their agent has never heard of.

@@ -230,6 +230,8 @@ EVENT_ORDER: tuple[str, ...] = (
     "knowledge_gap",
     "gate_approved",
     "gate_revised",
+    "changes_requested",
+    "changes_addressed",
     "plan_frozen",
     "plan_invalidated",
     "task_started",
@@ -255,6 +257,18 @@ EVENT_ORDER: tuple[str, ...] = (
     "cycle_closed",
 )
 EVENT_VALUES = frozenset(EVENT_ORDER)
+
+#: How a gate confirmation reached the tool. Both are the same kind of claim — something with
+#: access to this machine's terminal did it — and neither is proof of a human. Recorded so a
+#: reader can tell them apart rather than seeing an unqualified "approved".
+CONFIRMATION_CHANNELS: tuple[str, ...] = ("terminal", "ui-session")
+CONFIRMATION_CHANNEL_VALUES = frozenset(CONFIRMATION_CHANNELS)
+
+#: A change request's life. `open` holds the gate shut; `addressed` is the agent saying it has
+#: been answered and naming how, which stops it blocking but puts it on the approval screen; a
+#: gate approval closes what it covered. Worst first, like the other ordered vocabularies here.
+CHANGE_REQUEST_STATUS_ORDER: tuple[str, ...] = ("open", "addressed", "resolved")
+CHANGE_REQUEST_STATUS_VALUES = frozenset(CHANGE_REQUEST_STATUS_ORDER)
 
 #: Capabilities the control plane can grant. A leaf agent never receives any of
 #: :data:`CENTRAL_ONLY_CAPABILITIES` (plan §11.3).
@@ -648,6 +662,17 @@ class State:
         """
         plan = self.raw.get("plan")
         return _str(plan, "config_digest") if isinstance(plan, dict) else ""
+
+    @property
+    def change_requests(self) -> list[Mapping[str, Any]]:
+        """Every change a human asked for instead of approving, oldest first."""
+        value = self.raw.get("change_requests")
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def change_requests_for(self, gate: str, *statuses: str) -> list[Mapping[str, Any]]:
+        """This gate's change requests, filtered to `statuses` (all of them when none is given)."""
+        wanted = frozenset(statuses) if statuses else CHANGE_REQUEST_STATUS_VALUES
+        return [cr for cr in self.change_requests if cr.get("gate") == gate and cr.get("status") in wanted]
 
     @property
     def execution(self) -> Mapping[str, Any]:

@@ -21,6 +21,14 @@ export function invalidate() { state.etag = null; }
 export const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+// Put plain text in the output pane. Text, never markup: the strings routed here come from the
+// server (blockers, digests) and #out is the one place both writes and command output land.
+export function showOut(text) {
+  const out = document.getElementById("out");
+  out.style.display = "block";
+  out.textContent = text;
+}
+
 export function toast(msg, kind) {
   const el = document.createElement("div");
   el.className = "toast " + (kind || "");

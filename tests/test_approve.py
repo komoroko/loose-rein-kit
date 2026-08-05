@@ -2,9 +2,10 @@
 
 The single most important assertion in this file is that **only a human confirmation opens a
 gate**. `readiness` never opens one — it only says whether one *could* be opened; `confirm_locally`
-requires an interactive terminal and the gate name typed back; `record_approval` is the one
-Central Store transaction that actually flips a gate, and it is reachable only through
-`approve_locally`, which runs both of the above first.
+requires an interactive terminal and an explicit yes (the default is no); `record_approval` is the
+one Central Store transaction that actually flips a gate, reachable only through a confirmation —
+this one, or the dashboard's, whose write session comes from the launch link `rein ui` prints to
+its own terminal. Two channels of the same kind, one recording path, and the receipt says which.
 """
 
 from __future__ import annotations
@@ -67,11 +68,11 @@ def local_repo(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:
     return repo_at(tmp_path, **kwargs)
 
 
-def test_a_typed_gate_name_opens_the_gate(
+def test_a_yes_at_the_terminal_opens_the_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = local_repo(tmp_path)
-    monkeypatch.setattr("sys.stdin", _Tty("requirements\n"))
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
     assert approve.main(["requirements", "--repo", str(tmp_path)]) == 0
 
     state = store_mod.Store(repo).read_state()
@@ -80,14 +81,17 @@ def test_a_typed_gate_name_opens_the_gate(
     assert state.current_phase == "design"
     receipt = state.gate_receipt("requirements")
     assert receipt is not None and receipt["approval_id"].startswith("GA-REQUIREMENTS-")
-    # The prompt has to say what it is worth, every time — a reader of state.yaml months later
-    # must not mistake a typed confirmation for an identity-bound signature.
-    assert "not which human" in capsys.readouterr().out
+    # The prompt has to say what it is worth, every time — and what it is worth is narrower than
+    # "a human approved", which nothing here can establish. Both halves are asserted: what it
+    # does not claim, and the property that actually holds.
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "not which human, and not, provably, a human at all" in printed
+    assert "cannot happen by accident, by default, or by a configuration anyone pre-authorized" in printed
 
 
 def test_the_receipt_binds_the_plan_digest_and_the_chain_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = local_repo(tmp_path)
-    monkeypatch.setattr("sys.stdin", _Tty("requirements\n"))
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
     approve.main(["requirements", "--repo", str(tmp_path)])
 
     receipt = (store_mod.Store(repo).read_state() or models.State({})).gate_receipt("requirements") or {}
@@ -99,7 +103,7 @@ def test_the_receipt_binds_the_plan_digest_and_the_chain_root(tmp_path: Path, mo
 
 def test_recording_pins_the_event_that_opened_the_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = local_repo(tmp_path)
-    monkeypatch.setattr("sys.stdin", _Tty("requirements\n"))
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
     approve.main(["requirements", "--repo", str(tmp_path)])
 
     store = store_mod.Store(repo)
@@ -111,13 +115,35 @@ def test_recording_pins_the_event_that_opened_the_gate(tmp_path: Path, monkeypat
     assert "requirements" in events[0].subject_ids
 
 
-def test_anything_but_the_gate_name_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("answer", ["\n", "n\n", "no\n", "requirements\n", "  \n"])
+def test_anything_but_yes_cancels(answer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare Enter is the case that matters: the default must be no, so a stray keystroke in a
+    terminal that has been sitting open cannot open a gate."""
     repo = local_repo(tmp_path)
-    monkeypatch.setattr("sys.stdin", _Tty("yes\n"))
+    monkeypatch.setattr("sys.stdin", _Tty(answer))
     assert approve.main(["requirements", "--repo", str(tmp_path)]) == 1
 
     state = store_mod.Store(repo).read_state()
     assert state is not None and state.gate_status("requirements") == "pending"
+
+
+def test_declining_points_at_the_way_to_record_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ "No" used to be a dead end: the reason lived in the human's head, or in a chat message
+    that the next session never saw."""
+    local_repo(tmp_path)
+    monkeypatch.setattr("sys.stdin", _Tty("n\n"))
+    approve.main(["requirements", "--repo", str(tmp_path)])
+    assert "rein changes add requirements" in caplog.text
+
+
+def test_the_terminal_path_says_which_channel_confirmed_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = local_repo(tmp_path)
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
+    approve.main(["requirements", "--repo", str(tmp_path)])
+    receipt = (store_mod.Store(repo).read_state() or models.State({})).gate_receipt("requirements") or {}
+    assert receipt["confirmed_via"] == "terminal"
 
 
 # --- readiness ------------------------------------------------------------------

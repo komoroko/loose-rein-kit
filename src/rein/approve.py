@@ -4,8 +4,10 @@ Three steps, in this order, none skippable:
 
   1. **Readiness** — every mechanical precondition for the gate (:func:`readiness`), reported
      exhaustively rather than one at a time.
-  2. **Confirmation** — the digests this approval covers are printed, and the human types the
-     gate name at an interactive terminal (:func:`confirm_locally`).
+  2. **Confirmation** — the digests this approval covers are printed, and a human confirms:
+     `[y/N]` at an interactive terminal (:func:`confirm_locally`), or in the dashboard, whose
+     write session is minted only by redeeming the launch link printed to the terminal `rein ui`
+     runs in. Two channels of the same kind; the receipt records which.
   3. **Receipt** — one Central Store transaction writes the gate receipt, binding those digests
      and the audit-chain root (:func:`record_approval`). Gate ③ additionally **freezes the
      plan** in that same transaction: `state.plan` gains `frozen` plus the digests the freeze
@@ -14,10 +16,13 @@ Three steps, in this order, none skippable:
 `--force` does not exist and is not coming back, and neither does `--by`: an identity you can
 type is not an identity, so the receipt records that *a* human confirmed, never which one.
 
-**What keeps an agent from approving its own work is not this file.** It is the rule that
-`rein approve` is never pre-authorized (AGENTS.md "Gate rules" 2). The TTY requirement here
-only stops a piped stdin, a CI job, or an agent's captured subprocess from approving by
-accident — the failure that would otherwise happen silently and often.
+**Nothing here proves a human approved, and this module never claims it does.** An agent driving
+a pty can answer a prompt. What actually holds is narrower and worth saying exactly: **an approval
+cannot happen by accident, by default, or by a configuration someone pre-authorized.** Three
+things carry that — the TTY requirement below (a piped stdin, a CI job, an agent's captured
+subprocess all fail it), the launch-link handover on the dashboard side, and the rule that
+`rein approve` is never pre-authorized, which `rein doctor` checks in code (AGENTS.md "Gate
+rules" 2). The receipt records the channel, never an identity.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ import logging
 import sys
 from collections.abc import Mapping
 
-from rein import common, dag, dag_trace, digests, event_chain, models, review_policy
+from rein import change_request, common, dag, dag_trace, digests, event_chain, models, review_policy
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -133,6 +138,19 @@ def _review_blockers(review: models.Review | None, gate: str, head: str = "") ->
     return blockers
 
 
+def _change_request_blockers(state: models.State, gate: str) -> list[str]:
+    """Open change requests hold the gate shut. This is what makes declining mean something.
+
+    Without it "not yet, change R-3" was a sentence in a chat window: the gate stayed ready, the
+    board kept recommending an approval, and a new session had no idea a human had already said
+    no. An `addressed` request does not block — it is listed on the approval screen instead.
+    """
+    return [
+        f"{cr.get('id')} is an open change request against {cr.get('target')}: {cr.get('reason')}"
+        for cr in state.change_requests_for(gate, "open")
+    ]
+
+
 def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool = True) -> list[str]:
     """Every mechanical reason `gate` cannot be approved. Empty means a request may be issued.
 
@@ -166,6 +184,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
             "cannot be issued against a damaged log (see `rein events --verify`)"
         )
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
+    blockers += _change_request_blockers(state, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
     blockers += _review_blockers(review, gate, _head_sha(repo))
@@ -273,12 +292,21 @@ def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[
     }
 
 
-def record_approval(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> str:
+def record_approval(
+    repo: repo_mod.Repo, gate: str, subject: Mapping[str, str], *, confirmed_via: str = "terminal"
+) -> str:
     """Write the gate receipt in one Central Store transaction, and return its id.
 
-    Reachable only through :func:`confirm_locally`, which cannot run without an interactive
-    terminal. There is deliberately no second recording path: a second way to reach an approved
-    gate is the failure mode this module exists to prevent.
+    **Two confirmation paths, one recording path.** A human confirms either at a terminal
+    (:func:`confirm_locally`) or in the dashboard, whose write session is minted only by
+    redeeming the launch secret printed on the server's controlling terminal. Both are the same
+    kind of claim — something with access to that terminal did this — and neither is proof of a
+    human. What they share is the property that actually holds: an approval cannot happen by
+    accident or by default, because no configuration can pre-authorize either channel.
+
+    There is still exactly one *recording* path. A second way to reach an approved gate is the
+    failure mode this module exists to prevent, so both confirmations end here, and the receipt
+    records which one was used rather than flattening them into an unqualified "approved".
     """
     store = store_mod.Store(repo)
     state = store.read_state()
@@ -313,6 +341,10 @@ def record_approval(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         receipt: dict[str, object] = {
             "approval_id": approval_id,
             "confirmed_at": event_chain.now_iso(),
+            # Which channel carried the confirmation. Not a claim about who: a reader months
+            # later has to be able to tell a terminal confirmation from a dashboard one, and
+            # neither of them from an identity.
+            "confirmed_via": confirmed_via,
             # The root the approval *lands* on, not the one it was confirmed against. Recording
             # `root_before` here made the two fields identical and the second one unmatchable:
             # this very transaction appends `gate_approved`, so the chain necessarily moves.
@@ -323,6 +355,10 @@ def record_approval(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         raw["gates"][gate] = {"status": "approved", "receipt": receipt}
         raw["current_phase"] = models.PHASE_AFTER_GATE[gate]
         raw["updated_at"] = event_chain.now_iso()
+        # The approval is what closes the change requests it covered: the human read each note
+        # beside these digests and decided they were answered. Open ones cannot be here —
+        # readiness refuses while any stands.
+        change_request.resolve_addressed(raw, gate)
 
         # Gate ③ is what freezes the plan. Without this the freeze existed only in prose: three
         # documents said gate ③ freezes the plan, `gate_guard` rule 2 keyed off `plan.status ==
@@ -349,10 +385,17 @@ def record_approval(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
 #: a disclaimer to be skimmed: a reader of `state.yaml` months later has to know that the receipt
 #: records that *a* human approved at a terminal, and never *which*.
 AUTHORITY_NOTE = (
-    "This records that a human at this terminal approved it — not which human, and with no role\n"
-    "or domain behind it. What keeps an agent out is that `rein approve` is never pre-authorized\n"
-    '(AGENTS.md "Gate rules" 2), so something has to actually ask.'
+    "This records that someone with access to this terminal approved it — not which human, and\n"
+    "not, provably, a human at all. What it does establish: an approval cannot happen by accident,\n"
+    "by default, or by a configuration anyone pre-authorized. That is carried by the terminal this\n"
+    'prompt needs and by `rein approve` never being pre-authorizable (AGENTS.md "Gate rules" 2).'
 )
+
+
+def addressed_requests(repo: repo_mod.Repo, gate: str) -> list[Mapping[str, object]]:
+    """The change requests this approval would close — shown on both approval screens."""
+    state = store_mod.Store(repo).read_state()
+    return state.change_requests_for(gate, "addressed") if state else []
 
 
 def render_subject(subject: Mapping[str, str]) -> str:
@@ -367,12 +410,18 @@ def render_subject(subject: Mapping[str, str]) -> str:
 
 
 def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> None:
-    """Ask for the gate name at an interactive terminal. Raises unless it is typed back.
+    """Confirm at an interactive terminal. Raises unless the answer is yes.
 
     An interactive TTY is required and there is no flag to skip it. That is not proof of a human
-    — an agent driving a PTY can type a word — and this module does not pretend otherwise. What
-    the TTY check adds is that a piped stdin, a CI job, or an agent's captured subprocess cannot
-    approve by accident, which is the failure that would otherwise happen silently and often.
+    — an agent driving a PTY can answer a prompt — and this module does not pretend otherwise.
+    What the TTY check adds is that a piped stdin, a CI job, or an agent's captured subprocess
+    cannot approve by accident, which is the failure that would otherwise happen silently.
+
+    The answer is `[y/N]`, not the gate name typed back. Retyping a word that is already on the
+    command line two seconds earlier costs keystrokes and establishes nothing: someone who would
+    reflexively press `y` would as reflexively type `tasks`. What is load-bearing is the pause
+    with the digests above it, the TTY, and **the default being no** — a stray Enter must never
+    approve anything.
     """
     if not sys.stdin.isatty():
         raise ApprovalError(
@@ -380,11 +429,20 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
             "Run this in your shell — there is deliberately no flag that skips it."
         )
     print(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
+    addressed = addressed_requests(repo, gate)
+    if addressed:
+        # Read before deciding, not after. These are the changes this human asked for last time;
+        # the notes are the agent's claim that they were made, and approving closes them.
+        print(f"{len(addressed)} change request(s) you raised were addressed:")
+        print(change_request.render(addressed) + "\n")
     print(AUTHORITY_NOTE)
-    print("\nType the gate name to confirm (anything else cancels).\ngate> ", end="", flush=True)
-    typed = sys.stdin.readline().strip()
-    if typed != gate:
-        raise ApprovalError(f"cancelled — {typed!r} is not '{gate}', so nothing was approved")
+    print(f"\nApprove gate '{gate}'? [y/N] ", end="", flush=True)
+    if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+        raise ApprovalError(
+            f"nothing was approved. If the deliverable needs work, record it against the gate so it "
+            f"survives this session and holds the gate shut until it is answered:\n"
+            f"  rein changes add {gate} --target <docs/...#R-3 | T-004> --reason <what is wrong>"
+        )
 
 
 def approve_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> int:

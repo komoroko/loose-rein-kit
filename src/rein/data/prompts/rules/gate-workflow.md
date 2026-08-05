@@ -115,14 +115,21 @@ The installed `rein guard` denies in code at three checkpoints — **edit-time**
 hook on deliverable writes), **commit-stage** (`rein guard --check-diff` in pre-commit /
 the quality gate), and **merge-stage** (`rein build` re-checks every path a task changed
 before it lands; violations escalate as `gate_violation`). Guarded paths: `guard.paths`.
-A `state.yaml` gate flip to `approved` written by hand is denied — the only write path is a
-human approval `rein approve` recorded: readiness checked, the digests it would cover printed,
-and a confirmation typed at an interactive terminal, all inside one Central Store transaction
-that writes the receipt. **Never run the approve command on the human's behalf.** `rein
-approve` machine-checks the gate's readiness first (unresolved `[NEEDS CLARIFICATION]` markers,
-the review's `subject_head_sha` freshness, coverage sufficiency, blocking findings, a frozen
-human review, open escalations) and refuses to proceed when anything is missing — there is
-**no `--force`**. The only standing exception is `guard.template_mode: true` while the repo IS
+A `state.yaml` gate flip to `approved` written by hand is denied. The only write path is
+`approve.record_approval`, reached by a human confirming in one of **two** places: `rein approve
+<gate>` at a terminal (`[y/N]`, default no), or the dashboard's approval footer, whose write
+session exists only because someone opened the single-use launch link `rein ui` printed to its own
+terminal. Both check readiness first, print the digests the approval would cover, and write the
+receipt — which records *which channel* confirmed, never who. **Never run the approve command on
+the human's behalf, and never treat `rein next`'s `rein approve <gate>` recommendation as
+something to execute.** `rein approve` machine-checks readiness (unresolved `[NEEDS
+CLARIFICATION]` markers, the review's `subject_head_sha` freshness, coverage sufficiency, blocking
+findings, a frozen human review, open change requests, open escalations) and refuses when anything
+is missing — there is **no `--force`**.
+
+Declining is a first-class answer, not a dead end: answering `n`, or using the dashboard's
+"request changes", records a change request against the gate (`rein changes`) that **holds the
+gate shut until it is answered** and survives the session. The only standing exception is `guard.template_mode: true` while the repo IS
 the template. Detail: the `guard` block's comments in `config.yaml`.
 
 ## Repo map

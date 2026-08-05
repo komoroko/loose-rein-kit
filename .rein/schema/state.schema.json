@@ -195,6 +195,71 @@
           }
         }
       }
+    },
+    "change_requests": {
+      "description": "Changes a human asked for instead of approving. Human-authored, mutable, and it has to outlive the session that raised it — which is why it lives here and not in a chat message.",
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "gate",
+          "target",
+          "reason",
+          "status",
+          "opened_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^CR-[A-Z]+-[0-9A-F]+$"
+          },
+          "gate": {
+            "description": "Which gate this request stands against.",
+            "enum": [
+              "requirements",
+              "design",
+              "tasks",
+              "build",
+              "release"
+            ]
+          },
+          "target": {
+            "description": "What in the deliverable this is about: a document anchor (docs/10-requirements.md#R-3) or an id (R-3, C-001, T-004). The anchor is the point — it is what lets the fix read one slice instead of re-running the phase.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "status": {
+            "description": "open: blocks the gate. addressed: the agent says it is answered and names how; no longer blocks, but is listed on the approval screen so the human reads it before deciding. resolved: closed by the gate approval that covered it.",
+            "enum": [
+              "open",
+              "addressed",
+              "resolved"
+            ]
+          },
+          "opened_at": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "addressed_at": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000
+          }
+        }
+      }
     }
   },
   "$defs": {
@@ -286,6 +351,13 @@
         "confirmed_at": {
           "type": "string",
           "maxLength": 64
+        },
+        "confirmed_via": {
+          "description": "Which channel carried the human's confirmation: a terminal, or a dashboard write session (which exists only by redeeming the launch secret printed on the server's terminal). Not a claim about *who* — both are the same kind of claim, that something with access to this machine's terminal did it, and neither is proof of a human. A reader months later still has to be able to tell them apart.",
+          "enum": [
+            "terminal",
+            "ui-session"
+          ]
         },
         "artifact_digest": {
           "$ref": "#/$defs/digest"

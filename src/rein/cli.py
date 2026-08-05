@@ -44,6 +44,7 @@ VERBS: dict[str, str] = {
     "sync": "install:cmd_sync",
     "upgrade": "install:cmd_upgrade",
     "approve": "approve",
+    "changes": "change_request",
     "revise": "revise",
     "review": "review",
     "build": "build_loop",
@@ -88,6 +89,7 @@ daily verbs:
 
 operations:
   approve <gate> [--check]     readiness check, then the human's confirmation at this terminal
+  changes add|list|address     ask for changes instead of approving (holds the gate shut)
   oci build|verify             build the sandbox images and pin their digests
   revise --to <phase> ...      roll back upstream (gates reset in a chain)
   review generate|complete|show  the grounded machine review (gate ④'s evidence)
