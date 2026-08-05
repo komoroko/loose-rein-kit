@@ -368,12 +368,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         gets a viewer and no way to write anything.
         """
         session = self.server.redeem(offered_secret) if offered_secret else None
-        if offered_secret and session is None:
-            # Either not the secret, or it has already been redeemed. Say so on the server's own
-            # terminal: if the human's browser lands here, something else took their session.
+        held = self._authorized()
+        if offered_secret and session is None and not held:
+            # A spent secret presented by someone who does *not* hold the session it minted. That
+            # is the anomaly: either the wrong secret, or something else redeemed this one first.
+            #
+            # The `held` guard is the whole point of this condition. The launch URL stays in the
+            # address bar, so every ordinary reload re-presents an already-spent secret — warning
+            # on those would fire the theft alarm on the most common benign action there is, and a
+            # detection signal that cries wolf on F5 is one the human has already learned to skip.
             logger.warning(
-                "a launch link was presented that is not valid (wrong, or already redeemed). If you did not"
-                " reload an old link, something else on this machine opened the dashboard first — restart it."
+                "a launch link was presented that is not valid (wrong, or already redeemed), by a client"
+                " holding no write session. Something else on this machine may have opened the dashboard"
+                " first — restart it."
             )
         try:
             page = (ASSETS_DIR / "index.html").read_text(encoding="utf-8")
@@ -381,7 +388,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"cannot read ui_assets/index.html: {exc}"})
             return
 
-        authorized = session is not None or self._authorized()
+        authorized = session is not None or held
         writable = authorized and not self.server.read_only
         page = page.replace("__TOKEN__", self.server.token if writable else "").replace(
             "__READ_ONLY__", "false" if writable else "true"

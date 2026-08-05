@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import re
 import threading
 from collections.abc import Iterator
@@ -471,6 +472,29 @@ def test_the_launch_link_is_what_puts_the_token_in_the_page(server: ui.Dashboard
     assert server.token in page and "window.READ_ONLY = false" in page
     # HttpOnly so page scripts cannot read it back out; SameSite=Strict so no other origin rides it.
     assert ui.SESSION_COOKIE in cookie and "HttpOnly" in cookie and "SameSite=Strict" in cookie
+
+
+def test_reloading_the_launch_url_keeps_the_session_and_raises_no_alarm(
+    server: ui.DashboardServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The launch URL stays in the address bar, so every reload re-presents a spent secret.
+
+    Two things have to hold, and the second is what the warning is *for*: the reload must still be
+    writable (the cookie is the authority, not the query string), and it must stay quiet. A theft
+    alarm that fires on F5 is one the human stops reading, which costs the detection property the
+    single-use secret exists to provide.
+    """
+    session = session_for(server)  # the browser's first visit, redeeming the link
+    with caplog.at_level(logging.WARNING, logger="rein.ui"):
+        page = _request(server, "GET", f"/?k={server.launch_secret}", session=session)[1].decode("utf-8")
+    assert server.token in page and "window.READ_ONLY = false" in page
+    assert "opened the dashboard first" not in caplog.text
+
+    # Without the session it is the real anomaly — someone holding a spent secret and nothing else.
+    with caplog.at_level(logging.WARNING, logger="rein.ui"):
+        page = _request(server, "GET", f"/?k={server.launch_secret}")[1].decode("utf-8")
+    assert server.token not in page and "window.READ_ONLY = true" in page
+    assert "opened the dashboard first" in caplog.text
 
 
 def test_a_read_only_server_hands_out_no_session(repo: Path) -> None:
