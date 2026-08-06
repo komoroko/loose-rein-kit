@@ -23,7 +23,10 @@
     --prog-bg:#123353; --prog-bd:#3b82f6; --prog-ink:#bcd9ff;
     --blk-bg:#48170f; --blk-bd:#e0503a; --blk-ink:#ffb9ad;
     --rev-bg:#3f2c07; --rev-bd:#e7a53a; --rev-ink:#ffd894;
-    --done-bg:#0d3324; --done-bd:#1f9d69; --done-ink:#a6f0c9; --shadow:0 1px 0 rgba(0,0,0,.5);
+    /* done sits *above* the rest of the family in luminance, not below it: at #0d3324 it was
+       darker than --todo-bg and barely separable from --panel, so a finished task read as an
+       empty slot — the one status a glance at the board is most often looking for. */
+    --done-bg:#125437; --done-bd:#1f9d69; --done-ink:#a6f0c9; --shadow:0 1px 0 rgba(0,0,0,.5);
   } }
   :root[data-theme="dark"] {
     --bg:#0a1211; --panel:#0f1a18; --panel2:#0c1514; --ink:#d6e4e0; --muted:#88a09b; --border:#213230;
@@ -33,7 +36,7 @@
     --prog-bg:#123353; --prog-bd:#3b82f6; --prog-ink:#bcd9ff;
     --blk-bg:#48170f; --blk-bd:#e0503a; --blk-ink:#ffb9ad;
     --rev-bg:#3f2c07; --rev-bd:#e7a53a; --rev-ink:#ffd894;
-    --done-bg:#0d3324; --done-bd:#1f9d69; --done-ink:#a6f0c9; --shadow:0 1px 0 rgba(0,0,0,.5);
+    --done-bg:#125437; --done-bd:#1f9d69; --done-ink:#a6f0c9; --shadow:0 1px 0 rgba(0,0,0,.5);
   }
   * { box-sizing:border-box; }
   body { font-family:var(--sans); margin:0; color:var(--ink); line-height:1.45; background-color:var(--bg);
@@ -155,15 +158,26 @@
   svg.dag { display:block; min-width:100%; }
   svg.dag .edge { stroke:var(--border); stroke-width:1.5; fill:none; }
   svg.dag .edge.crit { stroke:var(--accent); stroke-width:2.5; }
+  /* A marker does not inherit the path's stroke, so the two arrowheads are filled here and follow
+     the theme with everything else. */
+  svg.dag #dagarw path { fill:var(--border); }
+  svg.dag #dagarwc path { fill:var(--accent); }
   svg.dag .nd { stroke:var(--todo-bd); stroke-width:1.5; cursor:pointer; }
-  svg.dag .nd.crit { stroke:var(--accent); stroke-width:2.5; }
   svg.dag text { font-size:12px; fill:var(--ink); pointer-events:none; font-family:var(--mono); }
-  svg.dag .nd.todo { fill:var(--todo-bg); } svg.dag .nd.in_progress { fill:var(--prog-bg); }
-  svg.dag .nd.blocked { fill:var(--blk-bg); } svg.dag .nd.needs-revision { fill:var(--rev-bg); }
-  svg.dag .nd.done { fill:var(--done-bg); }
-  svg.dag .nd.in_progress { stroke:var(--prog-bd); }
+  /* The class is the status string verbatim (models.TASK_STATUS_ORDER) — hyphenated. An
+     underscored copy of `in-progress` here matched nothing, so a running node fell through to the
+     SVG default fill (black) and never pulsed. Status also drives the *stroke*, not only the fill:
+     a fill alone is too small a luminance step to read at node size in the dark palette. */
+  svg.dag .nd.todo { fill:var(--todo-bg); stroke:var(--todo-bd); }
+  svg.dag .nd.in-progress { fill:var(--prog-bg); stroke:var(--prog-bd); }
+  svg.dag .nd.blocked { fill:var(--blk-bg); stroke:var(--blk-bd); }
+  svg.dag .nd.needs-revision { fill:var(--rev-bg); stroke:var(--rev-bd); }
+  svg.dag .nd.done { fill:var(--done-bg); stroke:var(--done-bd); }
+  /* Last, so it outranks the status strokes above: the critical path is a property of the graph,
+     and losing it to whatever status a node happens to be in would make it unreadable. */
+  svg.dag .nd.crit { stroke:var(--accent); stroke-width:2.5; }
   @media (prefers-reduced-motion: no-preference) {
-    svg.dag .nd.in_progress { animation:ndpulse 1.6s ease-in-out infinite; }
+    svg.dag .nd.in-progress { animation:ndpulse 1.6s ease-in-out infinite; }
     @keyframes ndpulse { 50% { stroke-width:3.5; opacity:.72; } }
   }
   /* per-layer build progress (one row per execution layer, one segment per task) */
@@ -172,17 +186,30 @@
   .lname { font-family:var(--mono); font-size:.68rem; color:var(--muted); width:1.6rem; text-align:right; }
   .lbar { display:flex; gap:2px; flex:0 1 auto; }
   .seg.clk { cursor:pointer; }
-  .seg { display:inline-block; width:1.15rem; height:.5rem; border-radius:2px; background:var(--todo-bg);
+  /* A segment is 18×8px, too small for the `-bg` fills to separate from the panel in the dark
+     palette — so every status fills with its saturated `-bd`, one rule for all five (`done` was
+     already the odd one out doing exactly this, which is why it never matched its own chip). */
+  .seg { display:inline-block; width:1.15rem; height:.5rem; border-radius:2px; background:var(--todo-bd);
          border:1px solid var(--todo-bd); }
-  .seg.in-progress { background:var(--prog-bg); border-color:var(--prog-bd); }
-  .seg.blocked { background:var(--blk-bg); border-color:var(--blk-bd); }
-  .seg.needs-revision { background:var(--rev-bg); border-color:var(--rev-bd); }
+  .seg.in-progress { background:var(--prog-bd); border-color:var(--prog-bd); }
+  .seg.blocked { background:var(--blk-bd); border-color:var(--blk-bd); }
+  .seg.needs-revision { background:var(--rev-bd); border-color:var(--rev-bd); }
   .seg.done { background:var(--done-bd); border-color:var(--done-bd); }
   @media (prefers-reduced-motion: no-preference) {
     .seg.in-progress { animation:segpulse 1.6s ease-in-out infinite; }
     @keyframes segpulse { 50% { opacity:.55; } }
   }
   .lcount { font-family:var(--mono); font-size:.7rem; color:var(--muted); white-space:nowrap; }
+  /* graph key: what a column, an arrow and a teal line mean. The status pills above the graph
+     already carry the colours, so this says only what nothing else in the view says. */
+  .legend { display:flex; flex-wrap:wrap; align-items:center; gap:.3rem 1.1rem; margin:.1rem 0 .55rem;
+            font-size:.7rem; color:var(--muted); }
+  .legend .li { display:inline-flex; align-items:center; gap:.35rem; }
+  .legend svg { display:block; overflow:visible; }
+  .legend .lgline { stroke:var(--border); stroke-width:1.5; fill:none; }
+  .legend .lgline.crit { stroke:var(--accent); stroke-width:2.5; }
+  .legend .lghead { fill:var(--border); }
+  .legend .lghead.crit { fill:var(--accent); }
   /* event feed rows */
   table.events td { font-size:.8rem; }
   tr.ev-ok td { color:var(--ink); }

@@ -60,8 +60,14 @@ until the frontier is empty. Leaves go by **`role-delegation` to the `implemente
 resolved by the implementer at the merge point — *if your environment cannot delegate or
 isolate, run the leaves serially on the work branch, adopting the implementer role inline per
 its role file*. Behavior is identical to A — what changes is who runs the machinery, which
-puts four duties on the lead that mode A does in code:
+puts five duties on the lead that mode A does in code:
 
+0. **Take the batch from `rein dag --frontier`, never from your own reading of the plan.** It
+   returns only tasks whose every `blocked_by` is already `done`, in consumption order, so a
+   task cannot be started on top of unfinished upstream work and no two tasks in one batch can
+   depend on each other. Reading the DAG yourself and picking what "looks ready" is the one way
+   to break an ordering mode A cannot break — cap the batch at `max_parallel` and take the
+   prefix.
 1. **Run every gate decision yourself and read its exit status.** A delegated implementer's
    textual "green" report is not evidence, even when it pastes output — summarized or elided
    pastes have hidden real failures. Run the pipeline steps in the algorithm's order yourself
@@ -82,6 +88,13 @@ puts four duties on the lead that mode A does in code:
    split is a plan change — take it through `/revise` (the plan is frozen at gate ③); an upstream (requirements/design) defect is
    `needs-revision` + escalation — never fixed on your own; roll back via `/revise` at the
    human's discretion.
+   **Write down what a re-run would need.** A delegated implementer's context dies with the
+   session, so before you delegate a task read `state.yaml.tasks.<id>.handoff` and pass what it
+   holds into the delegation (which gate step failed last, what it said, how much of the step's
+   `retries` budget is actually left, and any salvage branch holding an interrupted attempt's
+   commits). When an iteration ends with a task unfinished, record the same there. Without it a
+   build picked up in another terminal starts the task cold, with a full budget it has already
+   spent. (Mode A writes and reads this record itself.)
 4. **Session hygiene.** At a layer boundary, when the conversation is heavy with re-run
    output, you may suggest `session-compaction` — only when no task is `in-progress`, merges
    are committed and marked `done`, and observations are recorded in tickets / `state.yaml`

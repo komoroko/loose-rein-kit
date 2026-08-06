@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -69,6 +70,36 @@ StopLoop = common.StopLoop
 #: Where a sandboxed gate step sees the tree it is testing. One constant, so the mount and the
 #: working directory cannot disagree about where the repository is.
 _SANDBOX_WORKDIR = "/work"
+
+
+def _worktree_common_git_dir(checkout: Path) -> Path | None:
+    """The main repository's `.git` for a linked worktree, or None for an ordinary checkout.
+
+    A linked worktree's `.git` is a file (`gitdir: <abs>/.git/worktrees/<id>`); the shared object
+    store and refs live at that directory's `commondir`. Only the *shared* directory is returned:
+    it is what has to exist inside a sandbox at its host path for the redirect to resolve.
+    Anything unreadable or unexpected reads as "not a worktree" — the caller then mounts what it
+    always did, so a malformed repository degrades to today's behaviour rather than to a crash.
+    """
+    marker = checkout / ".git"
+    if not marker.is_file():
+        return None  # an ordinary checkout: `.git` is the real directory, already inside the mount
+    try:
+        line = marker.read_text(encoding="utf-8").strip()
+        if not line.startswith("gitdir:"):
+            return None
+        git_dir = Path(line[len("gitdir:") :].strip())
+        if not git_dir.is_absolute() or not git_dir.is_dir():
+            return None
+        common = (git_dir / "commondir").read_text(encoding="utf-8").strip()
+        joined = common if os.path.isabs(common) else os.path.join(str(git_dir), common)
+        # Normalized textually, never `resolve()`d: the container has to carry this directory at
+        # the very path the worktree's `.git` file names, and resolving symlinks would rename it.
+        shared = Path(os.path.normpath(joined))
+        return shared if shared.is_dir() else None
+    except OSError:
+        return None
+
 
 #: Adapter name → the argv that launches it headless, with the prompt appended last. An interim
 #: registry: PR-D replaces it with the executor profiles, which run the same adapters inside a
@@ -252,6 +283,10 @@ def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, not
     if status == "in-progress":
         attempts += 1
     merged = {**entry, "status": status, "attempts": attempts, "note": note}
+    if status == "done":
+        # A finished task inherits nothing: keeping the handoff would hand the next cycle a
+        # failure summary and a salvage branch for work that has already landed.
+        merged.pop("handoff", None)
     tasks[task_id] = {k: v for k, v in merged.items() if v != ""}
     raw["updated_at"] = event_chain.now_iso()
 
@@ -261,6 +296,85 @@ def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, not
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=seen)
         tx.append(event, cycle_id=state.cycle_id, subject_ids=[task_id], detail={"status": status, "note": note})
+
+
+# --- what the next attempt inherits (through the Central Store) ----------------
+#
+# The implementer's own agent session is process-local and dies with the terminal that ran it, so
+# a build restarted from another terminal used to begin the task cold: full retry budget, empty
+# failure log, and the previous attempt's committed work stranded on a salvage branch nothing
+# read back. What survives a crash has to be written down, which is what this is.
+
+#: Caps mirroring state.schema.json's `handoff`, so a long gate log cannot make state.yaml
+#: unwritable at exactly the moment it is carrying a failure.
+_HANDOFF_STEP_MAX = 64
+_HANDOFF_SUMMARY_MAX = 4000
+_HANDOFF_BRANCH_MAX = 200
+
+
+def read_task_handoff(state: models.State | None, task_id: str) -> dict[str, Any]:
+    """The handoff recorded for a task, or an empty mapping when there is none."""
+    if state is None:
+        return {}
+    entry = state.raw.get("tasks", {}).get(task_id) if isinstance(state.raw.get("tasks"), dict) else None
+    handoff = entry.get("handoff") if isinstance(entry, dict) else None
+    return dict(handoff) if isinstance(handoff, dict) else {}
+
+
+def update_task_handoff(
+    repo: repo_mod.Repo, task_id: str, patch: dict[str, Any], *, event: str, detail: dict[str, Any]
+) -> None:
+    """Merge `patch` into the task's handoff and append `event`, in one transaction.
+
+    Same write path and same stale-retry as `set_task_status`: the record of what the next
+    attempt inherits must not be able to exist outside the audit chain.
+    """
+    store_mod.retry_on_stale(lambda: _update_task_handoff_once(repo, task_id, patch, event, detail))
+
+
+def _update_task_handoff_once(
+    repo: repo_mod.Repo, task_id: str, patch: dict[str, Any], event: str, detail: dict[str, Any]
+) -> None:
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    if state is None:
+        raise StopLoop("no .rein/state.yaml to record the task handoff in")
+    seen = store_mod.read_digest(state)
+
+    raw = json.loads(json.dumps(state.raw))
+    tasks = raw.setdefault("tasks", {})
+    entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+    previous = entry.get("handoff")
+    handoff: dict[str, Any] = dict(previous) if isinstance(previous, dict) else {}
+    handoff.update(patch)
+    handoff["updated_at"] = event_chain.now_iso()
+    tasks[task_id] = {**entry, "status": entry.get("status", "todo"), "handoff": handoff}
+    raw["updated_at"] = event_chain.now_iso()
+
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append(event, cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
+
+
+def record_attempt_failure(
+    repo: repo_mod.Repo, task_id: str, *, failed_step: str, failure_summary: str, retries_left: dict[str, int]
+) -> None:
+    """Record a gate-step failure as both the audit event and the next attempt's inheritance."""
+    patch = {
+        "failed_step": failed_step[:_HANDOFF_STEP_MAX],
+        "failure_summary": failure_summary[-_HANDOFF_SUMMARY_MAX:],
+        "retries_left": {name[:_HANDOFF_STEP_MAX]: max(0, min(100, n)) for name, n in retries_left.items()},
+    }
+    detail = {"step": failed_step, "retries_left": retries_left.get(failed_step, 0)}
+    update_task_handoff(repo, task_id, patch, event="task_failed", detail=detail)
+
+
+def record_salvage(repo: repo_mod.Repo, task_id: str, *, branch: str, salvage_state: str) -> None:
+    """Note where an interrupted attempt's work went, and whether the next one picked it up."""
+    patch = {"salvage_branch": branch[:_HANDOFF_BRANCH_MAX], "salvage_state": salvage_state}
+    update_task_handoff(
+        repo, task_id, patch, event="decision_declared", detail={"salvage_branch": branch, "state": salvage_state}
+    )
 
 
 # Single definitions live elsewhere; the old names stay importable from here.
@@ -327,6 +441,7 @@ class Orchestrator:
             branch_pattern=config.branch_pattern,
             run=_late_run,
             on_event=lambda event, subject, detail: self._event(event, subject, detail),
+            on_salvage=lambda task_id, branch, state: self._record_salvage(task_id, branch, state),
         )
         # The control plane, once `run()` starts serving. A leaf reaches the Store only through
         # it, so there is nothing to hand out before the socket exists.
@@ -345,26 +460,52 @@ class Orchestrator:
             return
         set_task_status(self.repo, task_id, status)
 
-    def _escalate(self, event: str, message: str, *, task: str = "") -> None:
+    def _escalate(self, kind: str, message: str, *, task: str | Sequence[str] = "") -> None:
         """Record something a human has to decide about, and say so on the console.
+
+        `kind` is the *escalation's* vocabulary (`blocked`, `no_runnable`, …), not the audit
+        chain's. Passing it straight through as the event type — which this did — made every
+        escalation path raise `ValueError` out of `event_chain.make`, so the loop died with a
+        traceback exactly when it had something to tell a human. The chain records these as
+        `knowledge_gap` (what `rein events --summary` lists as still open) and keeps the kind in
+        the detail, the same shape `set_task_status` uses to map statuses onto event names.
 
         There is no "resolve" verb any more: an escalation is closed by a signed disposition in
         the review, not by a flag somebody flips in a log (`rein events --summary` lists
         what is still open).
         """
         logger.warning(f"[escalation] {message}")
-        self._event(event, task or self.cycle_id, {"message": message})
+        self._event("knowledge_gap", task or self.cycle_id, {"kind": kind, "message": message})
 
-    def _event(self, event: str, subject: str, detail: dict[str, Any] | None = None) -> None:
+    def _escalate_batch(self, kind: str, message: str, tasks: Sequence[dag.Task]) -> None:
+        self._escalate(kind, message, task=[t.id for t in tasks])
+
+    def _event(self, event: str, subject: str | Sequence[str], detail: dict[str, Any] | None = None) -> None:
         """Append one audit event through the Central Store. A no-op in a dry run.
 
         Every status change the loop makes goes through here or through `set_task_status`, so
         there is no path by which the build mutates state without saying why.
+
+        A batch is several subjects, not one string holding several ids: the schema caps a
+        subject at 64 characters, which a comma-joined batch of eleven leaves already exceeds,
+        and one id per entry is what makes `rein events` able to find the batch by task.
         """
         if self.dry_run or not self.cycle_id:
             return
+        subjects = [subject] if isinstance(subject, str) else list(subject)
         with self.store.transaction() as tx:
-            tx.append(event, cycle_id=self.cycle_id, subject_ids=[subject], detail=detail or {})
+            tx.append(event, cycle_id=self.cycle_id, subject_ids=subjects, detail=detail or {})
+
+    def _record_salvage(self, task_id: str, branch: str, state: str) -> None:
+        if self.dry_run or not self.cycle_id:
+            return
+        record_salvage(self.repo, task_id, branch=branch, salvage_state=state)
+
+    def _handoff_for(self, task: dag.Task) -> dict[str, Any]:
+        """What an interrupted attempt at this task left for the next one. Empty in a dry run."""
+        if self.dry_run:
+            return {}
+        return read_task_handoff(self.store.read_state(), task.id)
 
     def _load_graph(self) -> dag.Graph:
         graph = dag.load(self.repo)
@@ -380,6 +521,7 @@ class Orchestrator:
             failure_log,
             gate_cmds=self.config.gate_cmds,
             has_baseline=self.repo.path("docs/05-current-state.md").exists(),
+            handoff=self._handoff_for(task),
         )
 
     @property
@@ -554,13 +696,31 @@ class Orchestrator:
         `mount_repo` is the profile's own say in it (the schema has carried the key with nothing
         reading it): `read_only` for a gate that only inspects, otherwise read-write, because a
         test run writes caches and artifacts and a read-only tree fails for the wrong reason.
+
+        A leaf runs in a `git worktree`, whose `.git` is a *file* naming the main repository's
+        `.git/worktrees/<id>` by absolute host path. Mounting the checkout alone left that
+        redirect pointing at nothing inside the container, so every gate step that shells out to
+        git (`pre-commit`, and so `gitleaks`) failed identically on every retry, for every leaf —
+        never for a foundation task, which runs on the main checkout where `.git` is a real
+        directory. Binding the main `.git` at *the same absolute path* makes the existing
+        redirect resolve as-is; `commondir` is relative to it and follows. Rewriting the
+        worktree's `.git` file would break the same repository for the host.
+
+        This is the sandbox's boundary widening by exactly one directory: with `--network none`
+        still in force, a step can now write the repository it is already building (a leaf
+        commits to its own branch anyway) and nothing else.
         """
         if not profile.is_sandboxed:
             return ()
         mode = str(profile.raw.get("mount_repo", "read_write"))
         if mode == "none":
             return ()
-        return ((Path(cwd), _SANDBOX_WORKDIR, "ro" if mode == "read_only" else "rw"),)
+        access = "ro" if mode == "read_only" else "rw"
+        mounts = [(Path(cwd), _SANDBOX_WORKDIR, access)]
+        git_dir = _worktree_common_git_dir(Path(cwd))
+        if git_dir is not None:
+            mounts.append((git_dir, str(git_dir), access))
+        return tuple(mounts)
 
     def _run_pipeline(self, task: dag.Task, cwd: str, base: str = "") -> tuple[str | None, str]:
         """Run the quality-gate steps (config quality_gate.steps = the DoD) in order.
@@ -600,7 +760,16 @@ class Orchestrator:
         (the caller marks the task blocked).
         """
         budgets = {s.name: s.retries for s in self._steps_for(task) if s.kind == "command"}
-        failure_log = ""
+        # What an earlier, interrupted attempt left behind. Restoring the budgets is the load-
+        # bearing half: a run killed mid-task and restarted otherwise came back with a full
+        # allowance every time, so a task that can never pass could burn retries forever.
+        handoff = self._handoff_for(task)
+        failure_log = str(handoff.get("failure_summary", ""))
+        inherited = handoff.get("retries_left")
+        if isinstance(inherited, dict):
+            budgets = {name: min(left, inherited.get(name, left)) for name, left in budgets.items()}
+        if failure_log:
+            print(f"    [handoff] {task.id}: resuming after a failed '{handoff.get('failed_step', '?')}' step")
         # Retry-session continuity (claude preset only): the implementer resumes its own session
         # across its retries. A step's final retry is forced fresh — a resumed session re-reads
         # its own failed reasoning, and the last attempt deserves an unanchored mind working from
@@ -614,11 +783,20 @@ class Orchestrator:
                 return True, ""
             left = budgets.get(failed, 0)
             print(f"    quality gate fail at step '{failed}' (retries left: {left}): {task.id}")
+            budgets[failed] = max(0, left - 1)
             if not self.dry_run:  # unreachable in dry-run today (the dry pipeline always passes); keep read-only anyway
-                self._event("task_failed", task.id, {"step": failed, "retries_left": left})
+                # The event and the next attempt's inheritance are the same fact, so they are the
+                # same write: a terminal killed between them would otherwise leave a task_failed
+                # in the chain with nothing saying what the next run has left to spend.
+                record_attempt_failure(
+                    self.repo,
+                    task.id,
+                    failed_step=failed,
+                    failure_summary=failure_log,
+                    retries_left=budgets,
+                )
             if left <= 0:
                 return False, failure_log
-            budgets[failed] = left - 1
             if session and budgets[failed] <= 0:  # final retry for this step → fresh session
                 session, resume = str(uuid.uuid4()), False
             else:
@@ -674,7 +852,9 @@ class Orchestrator:
                 return True, ""
             left = budgets.get(failed, 0)
             print(f"    integration gate fail at step '{failed}' (retries left: {left}): {ids}")
-            self._event("task_failed", ids, {"step": failed, "stage": "integration", "retries_left": left})
+            self._event(
+                "task_failed", [t.id for t in tasks], {"step": failed, "stage": "integration", "retries_left": left}
+            )
             if left <= 0:
                 return False, failure_log
             budgets[failed] = left - 1
@@ -692,7 +872,7 @@ class Orchestrator:
         return self.ws.worktree_path(task.id)
 
     def _add_worktree(self, task: dag.Task) -> str:
-        return self.ws.add_worktree(task.id)
+        return self.ws.add_worktree(task.id, str(self._handoff_for(task).get("salvage_branch", "")))
 
     def _safe_run_task(self, task: dag.Task, cwd: str) -> tuple[bool, str]:
         """Call _run_task_to_done safely from a thread. Convert exceptions to (False, log).
@@ -948,11 +1128,11 @@ class Orchestrator:
         else:
             for task in merged:
                 self._set_status(task.id, "blocked")
-            self._escalate(
+            self._escalate_batch(
                 "integration_red",
                 f"{ids}: merged into work, but the integrated state fails the quality gate within the "
                 f"limit. Fix the work branch, then set these tasks back to done.\n{log}",
-                task=ids,
+                merged,
             )
             blocked_any = True
         if blocked_any:

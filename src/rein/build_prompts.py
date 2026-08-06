@@ -8,7 +8,7 @@ are thin delegates that pass in the few facts a prompt actually needs.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from rein import dag
 
@@ -17,7 +17,38 @@ def _gate_list(gate_cmds: Sequence[str]) -> str:
     return " and ".join(f"`{c}`" for c in gate_cmds) or "the quality-gate commands"
 
 
-def implementer_prompt(task: dag.Task, failure_log: str, *, gate_cmds: Sequence[str], has_baseline: bool) -> str:
+def handoff_note(handoff: Mapping[str, object]) -> str:
+    """What the previous, interrupted attempt at this task left behind — or "" if nothing did.
+
+    The implementer's own agent session does not survive the terminal that ran it, so this is
+    what a build restarted elsewhere can actually tell the next attempt. Only the salvage state
+    is spelled out; the failure itself already reaches the prompt through `failure_log`.
+    """
+    branch, state = str(handoff.get("salvage_branch", "")), str(handoff.get("salvage_state", ""))
+    if not branch:
+        return ""
+    if state == "restored":
+        return (
+            f"A previous attempt at this task was interrupted. Its committed work has already been "
+            f"merged into this branch from {branch} — continue from it rather than starting over."
+        )
+    if state == "conflict":
+        return (
+            f"A previous attempt at this task was interrupted. Its committed work is on {branch}, but "
+            f"merging it here conflicted. Inspect it (`git diff {branch}`), then take what is still "
+            "correct — do not assume it is all wrong, and do not merge it blind."
+        )
+    return f"A previous attempt at this task was interrupted; its committed work is on {branch}."
+
+
+def implementer_prompt(
+    task: dag.Task,
+    failure_log: str,
+    *,
+    gate_cmds: Sequence[str],
+    has_baseline: bool,
+    handoff: Mapping[str, object] | None = None,
+) -> str:
     # Point the implementer at the design section for this task's requirement rather than the whole
     # design doc: reading only the relevant slice keeps the subagent context lean and avoids
     # "Lost in the Middle" on a long design (see AGENTS.md "Context budget"). Fall back to the whole
@@ -51,6 +82,9 @@ def implementer_prompt(task: dag.Task, failure_log: str, *, gate_cmds: Sequence[
         "Do not reach outside scope (other tasks' territory). If you find a requirements/design defect, "
         "do not fix it on your own — report it."
     )
+    note = handoff_note(handoff or {})
+    if note:
+        prompt += f"\n\n{note}"
     if failure_log:
         # failure_log is already a compact summarize_failure() output (salient lines, budget-capped),
         # so it is passed through as-is — no crude tail-slicing that could cut the actionable lines.

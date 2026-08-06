@@ -253,10 +253,32 @@ def next_action(
     )
 
 
-def _tasks_block(graph: dag.Graph) -> dict[str, object]:
+def _handoffs(state: models.State | None) -> dict[str, dict[str, str]]:
+    """Per task, the short form of what an interrupted attempt left for the next one.
+
+    Only the two fields the board has room to say something with: a task that was retried says
+    *why*, instead of a status that reads the same whether it is on its first attempt or its
+    fourth. The full record (failure summary, remaining budget) is state.yaml's, not the UI's.
+    """
+    tasks = state.raw.get("tasks") if state else None
+    if not isinstance(tasks, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for task_id, entry in tasks.items():
+        handoff = entry.get("handoff") if isinstance(entry, dict) else None
+        if not isinstance(handoff, dict):
+            continue
+        short = {k: str(handoff[k]) for k in ("failed_step", "salvage_state") if handoff.get(k)}
+        if short:
+            out[str(task_id)] = short
+    return out
+
+
+def _tasks_block(graph: dag.Graph, state: models.State | None = None) -> dict[str, object]:
     """The task-graph slice of the status object — every value derived, nothing stored."""
     fan = graph.fan_out()
     counts = graph.counts()
+    handoffs = _handoffs(state)
     return {
         "counts": {s: counts[s] for s in dag.STATUS_ORDER},
         "total": len(graph.tasks),
@@ -276,6 +298,7 @@ def _tasks_block(graph: dag.Graph) -> dict[str, object]:
                 "blocked_by": list(t.blocked_by),
                 "claim_ids": list(t.claim_ids),
                 "fan_out": fan[t.id],
+                "handoff": handoffs.get(t.id, {}),
             }
             for t in graph.tasks
         ],
@@ -570,7 +593,7 @@ def collect_status(
     if plan is not None:
         try:
             graph = dag.join(plan, state)
-            tasks_block = _tasks_block(graph)
+            tasks_block = _tasks_block(graph, state)
             counts = graph.counts()
             trace_block = _trace_block(dag_trace.trace_repo(repo, plan, graph))
         except dag.DagError as exc:

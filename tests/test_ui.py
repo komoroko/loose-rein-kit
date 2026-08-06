@@ -195,6 +195,32 @@ def test_no_asset_builds_a_click_handler_out_of_a_task_id() -> None:
     assert 'data-task="' in bundle and 'getAttribute("data-task")' in bundle
 
 
+def test_every_task_status_is_styled_by_the_name_the_page_emits() -> None:
+    """The status string reaches the DOM verbatim (`esc(tk.status)`), so a stylesheet spelling it
+    any other way styles nothing.
+
+    This happened: the DAG rules said `.nd.in_progress` — Mermaid's spelling, where `-` cannot
+    appear in an identifier (`dag_render._node_key`) — while the class emitted was `in-progress`.
+    A running task's node matched no `fill` rule and fell through to the SVG default, black, on
+    the one status a person watching a build is looking for.
+    """
+    css = (ui.ASSETS_DIR / "app.css").read_text(encoding="utf-8")
+    for status in models.TASK_STATUS_ORDER:
+        for selector in (f"svg.dag .nd.{status}", f".seg.{status}", f".chip.{status}"):
+            if status == "todo":
+                continue  # todo is the unqualified base rule of all three, by design
+            assert selector in css, f"{selector} is not styled — a {status} task would render unstyled"
+    assert "in_progress" not in css, "the underscored spelling is Mermaid's, and matches nothing in the DOM"
+
+
+def test_the_graph_says_what_its_lines_mean() -> None:
+    """An edge drawn without a head or a key is a line between two boxes: the reader cannot tell
+    which end must finish first, nor that a column is an execution layer."""
+    js = (ui.ASSETS_DIR / "view-tasks.js").read_text(encoding="utf-8")
+    assert "marker-end" in js and "<marker" in js
+    assert "blocked_by" in js and "execution layers" in js and "critical path" in js
+
+
 def test_shipped_assets_match_the_allowlist_exactly() -> None:
     # _ASSET_TYPES is a hand-maintained allowlist (auditability over convenience); this catches a
     # file added to ui_assets/ but forgotten in the dict — which would 404 at runtime — and vice versa.

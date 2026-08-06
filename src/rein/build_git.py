@@ -24,6 +24,12 @@ class EventSink(Protocol):
     def __call__(self, event: str, subject: str, detail: dict[str, object]) -> None: ...
 
 
+class SalvageSink(Protocol):
+    """Where preserved work-in-progress is recorded, so the next attempt inherits it."""
+
+    def __call__(self, task_id: str, branch: str, state: str) -> None: ...
+
+
 class Runner(Protocol):
     """common.run's shape: (returncode, stdout+stderr merged)."""
 
@@ -43,6 +49,7 @@ class GitWorkspace:
         branch_pattern: str,
         run: Runner,
         on_event: EventSink | None = None,
+        on_salvage: SalvageSink | None = None,
     ) -> None:
         self.repo = repo
         self.root = str(repo.root)
@@ -55,6 +62,9 @@ class GitWorkspace:
         # happens inside leaf worktrees, and a worktree writing its own event log is how a
         # decision recorded during a parallel build used to disappear (plan §11.1).
         self.on_event: EventSink = on_event or (lambda event, subject, detail: None)
+        # Where preserved work is reported so the *next* attempt can find it. Injected for the
+        # same reason as on_event: this runs inside a worktree that is about to be replaced.
+        self.on_salvage: SalvageSink = on_salvage or (lambda task_id, branch, state: None)
 
     def git(self, args: list[str], cwd: str | None = None) -> None:
         """Run one git command; StopLoop on failure; prints and no-ops under dry-run."""
@@ -85,17 +95,42 @@ class GitWorkspace:
         _, out = self._run(["git", "rev-parse", "HEAD"], cwd=cwd or self.root)
         return out.strip()
 
-    def add_worktree(self, task_id: str) -> str:
+    def add_worktree(self, task_id: str, restore_from: str = "") -> str:
         """Create a worktree for a leaf task and return the branch name. Clean up any existing one first.
 
         To avoid .git index.lock contention, worktree creation must be called **serially on the main thread**.
+
+        `restore_from` is an earlier attempt's salvage branch. The new branch still starts from the
+        work branch — branching from the salvage point instead would silently drop whatever the
+        work branch gained in the meantime — and the preserved work is merged in on top. That is
+        the difference between "the interrupted run's work was kept" and "the next run continues
+        it": preservation alone left every restarted task re-implemented from zero.
         """
         branch = self.branch_for(task_id)
         path = self.worktree_path(task_id)
-        if not self.dry_run:
-            self._salvage_leftovers(task_id, branch, path)
+        salvaged = "" if self.dry_run else self._salvage_leftovers(task_id, branch, path)
         self.git(["worktree", "add", "-b", branch, path, self.branch])
+        self._restore_salvaged(task_id, path, salvaged or restore_from)
         return branch
+
+    def _restore_salvaged(self, task_id: str, path: str, salvage: str) -> None:
+        """Merge a salvage branch into the fresh worktree; report what happened either way.
+
+        A conflict is not fatal — the branch keeps the work and the implementer is told where it
+        is — because failing the task here would strand the very run meant to recover it.
+        """
+        if not salvage or self.dry_run:
+            return
+        if self._run(["git", "rev-parse", "--verify", "--quiet", salvage], cwd=self.root)[0] != 0:
+            return
+        rc, _ = self._run(["git", "merge", "--no-edit", salvage], cwd=path)
+        if rc == 0:
+            print(f"  [handoff] {task_id}: restored the previous attempt's work from {salvage}")
+            self.on_salvage(task_id, salvage, "restored")
+            return
+        self._run(["git", "merge", "--abort"], cwd=path)
+        print(f"  [handoff] {task_id}: {salvage} conflicts with the work branch — left for the implementer")
+        self.on_salvage(task_id, salvage, "conflict")
 
     def _salvage_name(self, branch: str) -> str:
         """A free salvage-branch name: `<branch>-salvage-<UTC stamp>`, suffixed on collision."""
@@ -107,8 +142,10 @@ class GitWorkspace:
             candidate = f"{branch}-salvage-{stamp}-{n}"
         return candidate
 
-    def _salvage_leftovers(self, task_id: str, branch: str, path: str) -> None:
+    def _salvage_leftovers(self, task_id: str, branch: str, path: str) -> str:
         """Preserve, then clear, a previous run's leftover worktree/branch so `worktree add -b` can re-run.
+
+        Returns the salvage branch it created, or "" when there was nothing to preserve.
 
         The clean-up used to be unconditional (`worktree remove --force` + `branch -D`), which
         destroyed a crashed run's committed work — and the branch cleanup_worktree deliberately
@@ -134,9 +171,12 @@ class GitWorkspace:
                     {"branch_salvaged": f"{branch} -> {salvage}", "why": "unmerged work preserved at restart"},
                 )
                 print(f"  [salvage] {task_id}: {branch} held unmerged work — renamed to {salvage}")
-            else:
-                self._run(["git", "branch", "-D", branch], cwd=self.root)
+                self.on_salvage(task_id, salvage, "pending")
+                self._run(["git", "worktree", "prune"], cwd=self.root)
+                return salvage
+            self._run(["git", "branch", "-D", branch], cwd=self.root)
         self._run(["git", "worktree", "prune"], cwd=self.root)
+        return ""
 
     def cleanup_worktree(self, task_id: str) -> None:
         """Remove a leaf's worktree without merging (blocked / merge conflict).
