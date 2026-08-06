@@ -1,15 +1,12 @@
 """`rein changes` — "not yet, and here is what is wrong", recorded where it survives.
 
-The lifecycle could record **yes** and it could record a **roll back of a yes** (`rein revise`,
-for gates already approved). The answer in between — *I have read this, I am not approving it,
-change these things* — had no home at all: it lived in a chat message, and the next session, the
-next compaction, or the next agent never saw it. So a gate could sit "ready" while the human had
-already said no, and `rein next` would cheerfully recommend approving it.
+The lifecycle could record **yes** and could roll one back (`rein revise`, for gates already
+approved). The answer in between — *I have read this, I am not approving it, change these things*
+— lived in a chat message, so a gate could sit "ready" while the human had already said no.
 
-A request is **anchored**. `--target` names a place — `docs/10-requirements.md#R-3`, `T-004`,
-`C-001` — not a mood. That is the point, not decoration: the agent answering it reads the slice
-the anchor names and edits that, instead of re-running the phase over the whole deliverable and
-regenerating text nobody complained about.
+A request is **anchored**: `--target` names a place (`docs/10-requirements.md#R-3`, `T-004`), not
+a mood, so the agent answering it edits the slice the anchor names instead of re-running the phase
+over the whole deliverable.
 
 Three states, and which one blocks is the whole design:
 
@@ -19,10 +16,9 @@ Three states, and which one blocks is the whole design:
                  the approval screen, so the human reads what changed before deciding again.
   ``resolved``   closed by the gate approval that covered it.
 
-Why the agent may move `open → addressed`: if only a human could, every fix would need a terminal
-round trip, and people would stop filing requests. Why that is not a loophole: `addressed` does
-not approve anything. It hands the decision back with a claim attached, and the human sees the
-claim next to the digests right before they answer `[y/N]`.
+The agent may move `open → addressed` because the alternative is a terminal round trip per fix,
+and that is not a loophole: `addressed` approves nothing. It hands the decision back with a claim
+attached, which the human reads beside the digests before answering `[y/N]`.
 """
 
 from __future__ import annotations
@@ -73,9 +69,8 @@ def add(repo: repo_mod.Repo, gate: str, target: str, reason: str) -> str:
     """Record a change request against `gate`. Returns its id.
 
     Deliberately possible at any time, including on a gate that is otherwise ready — that is the
-    case it exists for. It needs no authority of any kind: it can only ever *narrow* what happens
-    next, which is why the dashboard may record one without the capability handover an approval
-    needs.
+    case it exists for. It needs no authority of any kind, because it can only ever *narrow* what
+    happens next.
     """
     if gate not in models.GATE_VALUES:
         raise ChangeRequestError(f"unknown gate {gate!r} (one of {', '.join(models.GATE_ORDER)})")

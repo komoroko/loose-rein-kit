@@ -353,7 +353,7 @@
           "maxLength": 64
         },
         "confirmed_via": {
-          "description": "Which channel carried the human's confirmation: a terminal, or a dashboard write session (which exists only by redeeming the launch secret printed on the server's terminal). Not a claim about *who* — both are the same kind of claim, that something with access to this machine's terminal did it, and neither is proof of a human. A reader months later still has to be able to tell them apart.",
+          "description": "Which channel carried the human's confirmation: a terminal, or a dashboard write session (which exists only by redeeming the launch secret printed on the server's terminal). Never a claim about *who* — both say only that something with access to this machine's terminal did it.",
           "enum": [
             "terminal",
             "ui-session"

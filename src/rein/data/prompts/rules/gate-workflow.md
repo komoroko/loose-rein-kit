@@ -125,12 +125,12 @@ the human's behalf, and never treat `rein next`'s `rein approve <gate>` recommen
 something to execute.** `rein approve` machine-checks readiness (unresolved `[NEEDS
 CLARIFICATION]` markers, the review's `subject_head_sha` freshness, coverage sufficiency, blocking
 findings, a frozen human review, open change requests, open escalations) and refuses when anything
-is missing — there is **no `--force`**.
+is missing — there is **no `--force`**. The only standing exception is `guard.template_mode: true`
+while the repo IS the template. Detail: the `guard` block's comments in `config.yaml`.
 
 Declining is a first-class answer, not a dead end: answering `n`, or using the dashboard's
 "request changes", records a change request against the gate (`rein changes`) that **holds the
-gate shut until it is answered** and survives the session. The only standing exception is `guard.template_mode: true` while the repo IS
-the template. Detail: the `guard` block's comments in `config.yaml`.
+gate shut until it is answered** and survives the session.
 
 ## Repo map
 

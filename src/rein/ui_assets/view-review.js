@@ -682,11 +682,8 @@ function footerHtml() {
     " (" + esc(current) + ')</button> <button data-act="changes" data-id="-">Request changes</button>';
 }
 
-// The other direction of the same footer. A change request only ever narrows what happens next,
-// so it needs nothing beyond the write session every POST here carries — which is exactly the
-// line this dashboard draws: narrowing judgements are writable, the widening one is what the
-// launch-link handover protects. Anchoring it to a target is the point, not a formality: it is
-// what lets the fix read one slice instead of re-running the phase over the whole deliverable.
+// The other direction of the same footer. Anchoring to a target is the point, not a formality:
+// it is what lets the fix read one slice instead of re-running the phase over the deliverable.
 function requestChanges() {
   if (!review || review.error || review.gate !== current) return;
   const suggested = (mainEntries().find(x => x.id === selected) || {}).path || "";

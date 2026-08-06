@@ -274,10 +274,8 @@ def sandbox_step(root: Path, *, offer: bool, ask: Callable[[str], str] | None = 
     """Set the sandboxes up, or say exactly what is owed. Returns a line for the summary.
 
     Sandboxing is a precondition for everything the lifecycle does — `/build` runs repository
-    code, and a fresh config ships `kind: host`, which is not policy-compliant. It was
-    nonetheless the one prerequisite `rein init` never mentioned: the human learned about it
-    later, from a `doctor` FAIL, and was pointed at a command that sandboxed one profile of
-    three. Making it a step of initialization is what turns it from a research project into a
+    code, and a fresh config ships `kind: host`, which is not policy-compliant — yet it used to
+    surface only later, as a `doctor` FAIL. Making it a step of initialization turns it into a
     question with a default.
 
     `offer` gates the interactive path: on a TTY we ask (default no — it is a multi-minute

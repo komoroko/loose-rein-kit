@@ -19,22 +19,12 @@ typed parameters; command lines are built server-side, so arbitrary command exec
 structurally impossible. Phase execution (/req … /build) and outward-facing operations (push / PR /
 merge) are deliberately absent.
 
-**Write authority.** It comes from the terminal `rein ui` was started in, and nowhere else. That
-terminal prints a **single-use launch link**; redeeming it mints a session cookie, and *only* a
-session may write. A process that merely fetches `/` gets a page with no token that declares
-itself read-only. This is the correction of a doctrine that used to say "a localhost click is not
-authentication" while embedding the CSRF token in the served page: anything able to `curl` the
-page could read that token, so the browser channel was open to any local process in two requests —
-including the human-review writes that gate ④ requires. The honest line is not about
-authentication, because nothing here can prove a human. It is about **which channel the capability
-travels over**: a captured subprocess cannot read another terminal's output, so an approval cannot
-happen by accident, by default, or by a configuration someone pre-authorized. A determined local
-process with a real pty (or the screen) defeats this — exactly as it defeats `rein approve`'s TTY
-check — and the receipt says which channel was used rather than claiming more than that.
-
-Writing a **change request** needs the same session, but note what makes it different in kind: it
-can only ever narrow what happens next. That is why the pane offers it freely while approval is
-the one act the whole handover exists to protect.
+**Write authority** comes from the terminal `rein ui` was started in, and nowhere else: it prints a
+**single-use launch link**, redeeming it mints a session cookie, and only a session may write. A
+process that merely fetches `/` gets a page with no token that declares itself read-only. The
+in-page CSRF token was never authority — anything able to `curl` the page could read it — so what
+the line rests on is the channel, not the click, and not a proof of a human that no repository can
+give (AGENTS.md "Gate rules" 2 states the ceiling).
 
 The page polls `/api/status` for the whole life of a supervised run, and a run is mostly waiting —
 so the endpoint answers `304 Not Modified` against an `ETag` taken over the payload *minus* its
@@ -363,20 +353,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _send_page(self, offered_secret: str) -> None:
         """Serve the dashboard, redeeming a launch secret into a session when one is presented.
 
-        A page served without a session carries no token and declares itself read-only, so a
-        process that simply fetches `/` — the two-curl attack the old in-page token allowed —
-        gets a viewer and no way to write anything.
+        Without a session the page carries no token and declares itself read-only: fetching `/`
+        buys a viewer, never a way to write.
         """
         session = self.server.redeem(offered_secret) if offered_secret else None
         held = self._authorized()
         if offered_secret and session is None and not held:
-            # A spent secret presented by someone who does *not* hold the session it minted. That
-            # is the anomaly: either the wrong secret, or something else redeemed this one first.
-            #
-            # The `held` guard is the whole point of this condition. The launch URL stays in the
-            # address bar, so every ordinary reload re-presents an already-spent secret — warning
-            # on those would fire the theft alarm on the most common benign action there is, and a
-            # detection signal that cries wolf on F5 is one the human has already learned to skip.
+            # A spent secret presented by a client that does not hold the session it minted —
+            # either the wrong secret, or something else redeemed this one first. The `held`
+            # guard is what keeps this off ordinary reloads: the launch URL stays in the address
+            # bar, so every F5 re-presents a spent secret, and an alarm that fires on F5 is one
+            # the human stops reading.
             logger.warning(
                 "a launch link was presented that is not valid (wrong, or already redeemed), by a client"
                 " holding no write session. Something else on this machine may have opened the dashboard"
@@ -537,10 +524,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.server.read_only:
             self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "server is running with --read-only"})
             return
-        # Both, and the session is the one that matters. The token is a CSRF guard — it lives in
-        # the page, so anything that can fetch `/` could once read it, which is exactly why it was
-        # never authority. The session cannot be fetched: it is minted only by redeeming the
-        # launch secret printed on this server's terminal.
+        # Both, and the session is the one that matters: it cannot be fetched, only minted by
+        # redeeming the launch secret. The token lives in the page, so it is a CSRF guard.
         if not self._authorized():
             self._send_json(
                 HTTPStatus.FORBIDDEN,
@@ -572,16 +557,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _approve_gate(self, body: dict[str, object]) -> None:
         """Record the approval the human just made in the pane they read it in.
 
-        Reaching here means the request carried a session, which exists only because someone
-        redeemed the launch secret printed on this server's controlling terminal. That is the
-        same class of channel `rein approve`'s TTY requirement uses, and it is what the gate rule
-        actually rests on — not the click, and never the in-page token, which anything able to
-        fetch `/` could read.
+        Reaching here means the request carried a session — the launch-link handover, the same
+        class of channel as `rein approve`'s TTY requirement.
 
-        `covers` must come back exactly as it was displayed. The pane shows the digests an
-        approval binds; if the repository moved while the human was reading them, this refuses
-        rather than binding a subject nobody was shown — the same guard `record_approval` applies
-        to the audit chain, one document further out.
+        `covers` must come back exactly as it was displayed: if the repository moved while the
+        human was reading the digests, this refuses rather than binding a subject nobody was
+        shown — the guard `record_approval` applies to the audit chain, one document further out.
         """
         gate = str(body.get("gate") or "")
         shown = body.get("covers")
@@ -611,10 +592,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _request_changes(self, body: dict[str, object]) -> None:
         """Record "not yet, change this" from the pane the human is already reading in.
 
-        The other direction of the same footer, and the reason the line this dashboard draws is
-        about *direction* rather than authentication: a change request can only ever narrow what
-        happens next, so it needs no capability beyond the session every write here carries.
-        Approving widens, and that is the one the launch-link handover exists for.
+        The other direction of the same footer, and cheap for the same reason a change request is
+        cheap everywhere: it only ever narrows what happens next.
         """
         try:
             request_id = change_request.add(

@@ -83,20 +83,18 @@ identity-bound mode, so authority never depends on anything outside the reposito
    `rein approve` for them, and never pre-authorize it.** When `rein next` recommends
    `rein approve <gate>` — it does, once a gate is ready — that is a line to *show*, not to run.
 
-   **What this does and does not establish.** Nothing in the repository can prove a human
-   approved; the receipt records that *a* confirmation happened and over which channel, never who.
-   What is actually guaranteed is narrower and holds: **an approval cannot happen by accident, by
-   default, or by a configuration someone pre-authorized.** Three mechanisms carry it — the TTY
-   requirement (a piped stdin, a CI job, an agent's captured subprocess all fail it), the
-   dashboard's single-use launch link, printed to the terminal `rein ui` runs in and readable by
-   nothing else, and `rein doctor`'s check that no settings file pre-authorizes a gate-opening
-   verb. A determined local process with a real pty defeats all of it, exactly as it always could.
-   Say that plainly rather than calling a click "not authentication" and a keystroke authentic:
-   both are the same claim, that something with access to this machine's terminal did it.
+   **What this establishes.** Not that a human approved — nothing in the repository can show that,
+   and the receipt records only that *a* confirmation happened and over which channel. What holds
+   is narrower: **an approval cannot happen by accident, by default, or by a configuration someone
+   pre-authorized.** Three mechanisms carry it — the TTY requirement (a piped stdin, a CI job, an
+   agent's captured subprocess all fail it), the dashboard's single-use launch link, printed to the
+   terminal `rein ui` runs in and readable by nothing else, and `rein doctor`'s check that no
+   settings file pre-authorizes a gate-opening verb. A local process with a real pty defeats all
+   three, as it always could.
 
-   The line that does hold is about **direction**: a surface may record judgements that only ever
-   *narrow* what happens next — a change request, a review answer, a disposition — while the one
-   judgement that *widens* it needs the capability handover above.
+   What is left is **direction**: a surface may record judgements that only ever *narrow* what
+   happens next — a change request, a review answer, a disposition — while the one judgement that
+   *widens* it needs the capability handover above.
 3. **Do not silently fix problems in requirements/design.** Set the task `needs-revision`,
    record a `knowledge-gap`/escalation event, and raise it to the human.
 

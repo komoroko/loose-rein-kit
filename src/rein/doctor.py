@@ -208,10 +208,8 @@ def check_freeze_drift(
     """Has anything the gate ③ freeze covers moved since? (read-only half of `rein guard` rule 2)
 
     Separate from :func:`check_receipts`, which answers "does this receipt bind anything". This
-    answers "does what it bound still exist" — and a receipt can name every required digest while
-    describing a document that has since been edited. A board reporting `0 FAIL` over a
-    `config.yaml` that no longer matches what was approved is exactly the "we did not look"
-    reading as "there is nothing there" that this codebase refuses everywhere else.
+    answers "does what it bound still exist" — a receipt can name every required digest while
+    describing a document that has since been edited.
 
     Two comparisons, in this order, because they answer different questions: the freeze record in
     `state.yaml` against the document on disk (did the artifact move?), then each post-freeze

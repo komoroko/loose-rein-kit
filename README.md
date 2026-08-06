@@ -303,16 +303,15 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
 
    Or in `rein ui`, from the same pane that just showed you the deliverable — no extra step.
 
-   **What that establishes, exactly.** Not that a human approved: nothing in a repository can
-   show that, and this tool does not pretend otherwise. The receipt records that *a* confirmation
-   happened and over which channel, never *which* human — there is no identity-bound mode. What
-   does hold is narrower and load-bearing: **an approval cannot happen by accident, by default,
-   or by a configuration someone pre-authorized.** Three things carry it — the interactive TTY
-   `rein approve` insists on (a piped stdin, a CI job, or an agent's captured subprocess all fail
-   it), the dashboard's **single-use launch link**, printed to the terminal `rein ui` runs in and
-   readable by nothing that can merely fetch the page, and `rein doctor`'s check that no settings
-   file pre-authorizes a gate-opening verb. There is no `--force`, and editing a gate line by hand
-   is denied by the guard.
+   **What that establishes.** Not that a human approved — nothing in a repository can show that.
+   The receipt records that *a* confirmation happened and over which channel, never *which* human;
+   there is no identity-bound mode. What does hold is narrower and load-bearing: **an approval
+   cannot happen by accident, by default, or by a configuration someone pre-authorized.** Three
+   things carry it — the interactive TTY `rein approve` insists on (a piped stdin, a CI job, or an
+   agent's captured subprocess all fail it), the dashboard's **single-use launch link**, printed to
+   the terminal `rein ui` runs in and readable by nothing that can merely fetch the page, and
+   `rein doctor`'s check that no settings file pre-authorizes a gate-opening verb. There is no
+   `--force`, and editing a gate line by hand is denied by the guard.
 
 4. **Ask for changes** instead, when the deliverable is not right. This is a first-class answer,
    not a dead end — say no at the prompt, or use the dashboard's *Request changes*:
@@ -327,10 +326,8 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
    the agent reads the slice it names and fixes that, instead of re-running the phase over the
    whole document. It answers with `rein changes address <id> --note <what changed>`, which
    unblocks the gate and puts the note on your approval screen — approving is what closes it.
-
-   (A change request needs no authority of any kind: it can only ever *narrow* what happens next.
-   That is the line the dashboard draws — narrowing judgements are writable, the one that widens
-   is what the launch link protects.)
+   Raising one needs no authority of any kind, which is why the dashboard offers it freely: it can
+   only ever *narrow* what happens next.
 
 5. **Roll back** on an upstream defect *after* a gate was approved: `/revise <phase>` resets gates
    from the target onward and marks task impact (`rein revise --impacted T-00x` sets seeds and

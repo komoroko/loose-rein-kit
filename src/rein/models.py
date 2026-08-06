@@ -335,13 +335,9 @@ def sandbox_setup_command(build_targets: Sequence[str]) -> str:
     """The one command that actually sandboxes `build_targets`. "" when there is nothing to do.
 
     Derived in one place because four surfaces print it — `rein next`, `rein doctor`, the
-    dashboard, and `rein init` — and they all used to print
-    `rein oci build --profile <first of N>`: one image out of three, and without
-    `--write-config`, so the digest still had to be copied out of the terminal by hand. The
-    complete form was documented in the shipped `config.yaml` and recommended by nothing, which
-    is the whole of why sandbox setup felt like a research project.
-
-    Pure, so the recommendation table stays testable without a repository on disk.
+    dashboard, and `rein init`. They used to print `rein oci build --profile <first of N>`: one
+    image out of three, without `--write-config`, so the digest still had to be copied out of the
+    terminal by hand. Pure, so the recommendation table stays testable without a repo on disk.
     """
     if len(build_targets) > 1:
         return "rein oci build --all --write-config"
@@ -656,9 +652,8 @@ class State:
     def plan_config_digest(self) -> str:
         """What `config.yaml` hashed to when gate ③ froze it. "" before the freeze.
 
-        The pair of :attr:`plan_digest`. config.yaml is frozen by the same gate and for the same
-        reason — it pins the sandbox and the quality gate a review's evidence was produced in —
-        so a drift check that only covered plan.yaml left half the freeze unguarded.
+        The pair of :attr:`plan_digest`: gate ③ freezes config.yaml too, because it pins the
+        sandbox and the quality gate a review's evidence is produced in.
         """
         plan = self.raw.get("plan")
         return _str(plan, "config_digest") if isinstance(plan, dict) else ""

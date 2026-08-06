@@ -16,13 +16,10 @@ Three steps, in this order, none skippable:
 `--force` does not exist and is not coming back, and neither does `--by`: an identity you can
 type is not an identity, so the receipt records that *a* human confirmed, never which one.
 
-**Nothing here proves a human approved, and this module never claims it does.** An agent driving
-a pty can answer a prompt. What actually holds is narrower and worth saying exactly: **an approval
-cannot happen by accident, by default, or by a configuration someone pre-authorized.** Three
-things carry that — the TTY requirement below (a piped stdin, a CI job, an agent's captured
-subprocess all fail it), the launch-link handover on the dashboard side, and the rule that
-`rein approve` is never pre-authorized, which `rein doctor` checks in code (AGENTS.md "Gate
-rules" 2). The receipt records the channel, never an identity.
+**Nothing here proves a human approved, and this module never claims it does** — an agent driving
+a pty can answer a prompt. What holds is the narrower claim AGENTS.md "Gate rules" 2 states: an
+approval cannot happen by accident, by default, or by a configuration someone pre-authorized. The
+TTY requirement below is one of the three mechanisms carrying it.
 """
 
 from __future__ import annotations
@@ -297,16 +294,12 @@ def record_approval(
 ) -> str:
     """Write the gate receipt in one Central Store transaction, and return its id.
 
-    **Two confirmation paths, one recording path.** A human confirms either at a terminal
+    **Two confirmation paths, one recording path.** A human confirms at a terminal
     (:func:`confirm_locally`) or in the dashboard, whose write session is minted only by
-    redeeming the launch secret printed on the server's controlling terminal. Both are the same
-    kind of claim — something with access to that terminal did this — and neither is proof of a
-    human. What they share is the property that actually holds: an approval cannot happen by
-    accident or by default, because no configuration can pre-authorize either channel.
-
-    There is still exactly one *recording* path. A second way to reach an approved gate is the
-    failure mode this module exists to prevent, so both confirmations end here, and the receipt
-    records which one was used rather than flattening them into an unqualified "approved".
+    redeeming the launch secret printed on the server's controlling terminal — the same kind of
+    claim over a different channel. Both end here: a second way to reach an approved gate is the
+    failure mode this module exists to prevent, so the receipt records *which* channel confirmed
+    rather than flattening them into an unqualified "approved".
     """
     store = store_mod.Store(repo)
     state = store.read_state()
@@ -341,9 +334,7 @@ def record_approval(
         receipt: dict[str, object] = {
             "approval_id": approval_id,
             "confirmed_at": event_chain.now_iso(),
-            # Which channel carried the confirmation. Not a claim about who: a reader months
-            # later has to be able to tell a terminal confirmation from a dashboard one, and
-            # neither of them from an identity.
+            # Which channel carried the confirmation, never who (models.CONFIRMATION_CHANNELS).
             "confirmed_via": confirmed_via,
             # The root the approval *lands* on, not the one it was confirmed against. Recording
             # `root_before` here made the two fields identical and the second one unmatchable:
@@ -360,10 +351,8 @@ def record_approval(
         # readiness refuses while any stands.
         change_request.resolve_addressed(raw, gate)
 
-        # Gate ③ is what freezes the plan. Without this the freeze existed only in prose: three
-        # documents said gate ③ freezes the plan, `gate_guard` rule 2 keyed off `plan.status ==
-        # "frozen"`, and `rein build` refused to start against a draft — while nothing anywhere
-        # ever wrote "frozen", so a correctly approved repository could not build.
+        # Gate ③ is what freezes the plan — the write `gate_guard` rule 2 and `rein build` both
+        # key off, and the only one in the codebase that sets `plan.status = "frozen"`.
         if gate == FREEZING_GATE:
             raw["plan"] = _frozen_plan_block(repo, subject)
             tx.append(
@@ -412,16 +401,14 @@ def render_subject(subject: Mapping[str, str]) -> str:
 def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> None:
     """Confirm at an interactive terminal. Raises unless the answer is yes.
 
-    An interactive TTY is required and there is no flag to skip it. That is not proof of a human
-    — an agent driving a PTY can answer a prompt — and this module does not pretend otherwise.
-    What the TTY check adds is that a piped stdin, a CI job, or an agent's captured subprocess
-    cannot approve by accident, which is the failure that would otherwise happen silently.
+    An interactive TTY is required and there is no flag to skip it. What that adds is not proof
+    of a human but that a piped stdin, a CI job, or an agent's captured subprocess cannot approve
+    by accident — the failure that would otherwise happen silently.
 
-    The answer is `[y/N]`, not the gate name typed back. Retyping a word that is already on the
-    command line two seconds earlier costs keystrokes and establishes nothing: someone who would
-    reflexively press `y` would as reflexively type `tasks`. What is load-bearing is the pause
-    with the digests above it, the TTY, and **the default being no** — a stray Enter must never
-    approve anything.
+    The answer is `[y/N]`, not the gate name typed back: retyping a word that is already on the
+    command line establishes nothing, since someone who would reflexively press `y` would as
+    reflexively type `tasks`. What is load-bearing is the pause with the digests above it, the
+    TTY, and **the default being no** — a stray Enter must never approve anything.
     """
     if not sys.stdin.isatty():
         raise ApprovalError(

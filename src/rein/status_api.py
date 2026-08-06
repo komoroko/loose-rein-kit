@@ -196,16 +196,9 @@ def next_action(
     if gate is not None:
         index = GATE_ORDER.index(gate) + 1
         if gates.get(gate) != "approved":
-            # The phase is done and nothing mechanical is left: what remains is a person deciding.
-            # Without this row the table only ever said "run the phase again" — `Recommendation`
-            # declared the `approve_gate` kind and `pending_decision` special-cased it, but no row
-            # produced one, so `waiting_on_human` stayed False through the whole wait and the
-            # dashboard's title, favicon and notification never signalled the one thing they exist
-            # for. The queue's `gate_ready` row is derived from the same `gate_blockers`, so the
-            # board and the recommendation cannot disagree about whether the gate is ready.
-            # A human already read this and said "not yet". Recommending the phase command is
-            # right, but the reason has to name what they asked for — otherwise the next session
-            # re-derives the deliverable from scratch and answers nothing.
+            # A human already read this and said "not yet". The phase command is still the right
+            # recommendation, but the reason has to name what they asked for — otherwise the next
+            # session re-derives the deliverable from scratch and answers nothing.
             if open_change_requests:
                 return Recommendation(
                     command=PHASE_COMMAND[current_phase],
@@ -215,6 +208,11 @@ def next_action(
                     "each addressed.",
                     also=(f"rein changes list --gate {gate}",),
                 )
+            # The phase is done and nothing mechanical is left: what remains is a person deciding.
+            # This is the only row producing `approve_gate`, and so the only thing that ever turns
+            # `waiting_on_human` on — the state the dashboard's title, favicon and notification
+            # exist for. It reads the same `gate_blockers` the queue's `gate_ready` row does, so
+            # the board and the recommendation cannot disagree.
             if gate_ready:
                 return Recommendation(
                     command=f"rein approve {gate}",
