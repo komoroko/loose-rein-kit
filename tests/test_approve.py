@@ -2,9 +2,10 @@
 
 The single most important assertion in this file is that **only a human confirmation opens a
 gate**. `readiness` never opens one — it only says whether one *could* be opened; `confirm_locally`
-requires an interactive terminal and the gate name typed back; `record_approval` is the one
-Central Store transaction that actually flips a gate, and it is reachable only through
-`approve_locally`, which runs both of the above first.
+requires an interactive terminal and an explicit yes (the default is no); `record_approval` is the
+one Central Store transaction that actually flips a gate, reachable only through a confirmation —
+this one, or the dashboard's, whose write session comes from the launch link `rein ui` prints to
+its own terminal. Two channels of the same kind, one recording path, and the receipt says which.
 """
 
 from __future__ import annotations
@@ -67,11 +68,11 @@ def local_repo(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:
     return repo_at(tmp_path, **kwargs)
 
 
-def test_a_typed_gate_name_opens_the_gate(
+def test_a_yes_at_the_terminal_opens_the_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = local_repo(tmp_path)
-    monkeypatch.setattr("sys.stdin", _Tty("requirements\n"))
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
     assert approve.main(["requirements", "--repo", str(tmp_path)]) == 0
 
     state = store_mod.Store(repo).read_state()
@@ -80,14 +81,17 @@ def test_a_typed_gate_name_opens_the_gate(
     assert state.current_phase == "design"
     receipt = state.gate_receipt("requirements")
     assert receipt is not None and receipt["approval_id"].startswith("GA-REQUIREMENTS-")
-    # The prompt has to say what it is worth, every time — a reader of state.yaml months later
-    # must not mistake a typed confirmation for an identity-bound signature.
-    assert "not which human" in capsys.readouterr().out
+    # The prompt has to say what it is worth, every time — and what it is worth is narrower than
+    # "a human approved", which nothing here can establish. Both halves are asserted: what it
+    # does not claim, and the property that actually holds.
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "not which human, and not, provably, a human at all" in printed
+    assert "cannot happen by accident, by default, or by a configuration anyone pre-authorized" in printed
 
 
 def test_the_receipt_binds_the_plan_digest_and_the_chain_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = local_repo(tmp_path)
-    monkeypatch.setattr("sys.stdin", _Tty("requirements\n"))
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
     approve.main(["requirements", "--repo", str(tmp_path)])
 
     receipt = (store_mod.Store(repo).read_state() or models.State({})).gate_receipt("requirements") or {}
@@ -99,7 +103,7 @@ def test_the_receipt_binds_the_plan_digest_and_the_chain_root(tmp_path: Path, mo
 
 def test_recording_pins_the_event_that_opened_the_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = local_repo(tmp_path)
-    monkeypatch.setattr("sys.stdin", _Tty("requirements\n"))
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
     approve.main(["requirements", "--repo", str(tmp_path)])
 
     store = store_mod.Store(repo)
@@ -111,13 +115,35 @@ def test_recording_pins_the_event_that_opened_the_gate(tmp_path: Path, monkeypat
     assert "requirements" in events[0].subject_ids
 
 
-def test_anything_but_the_gate_name_cancels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("answer", ["\n", "n\n", "no\n", "requirements\n", "  \n"])
+def test_anything_but_yes_cancels(answer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare Enter is the case that matters: the default must be no, so a stray keystroke in a
+    terminal that has been sitting open cannot open a gate."""
     repo = local_repo(tmp_path)
-    monkeypatch.setattr("sys.stdin", _Tty("yes\n"))
+    monkeypatch.setattr("sys.stdin", _Tty(answer))
     assert approve.main(["requirements", "--repo", str(tmp_path)]) == 1
 
     state = store_mod.Store(repo).read_state()
     assert state is not None and state.gate_status("requirements") == "pending"
+
+
+def test_declining_points_at_the_way_to_record_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ "No" used to be a dead end: the reason lived in the human's head, or in a chat message
+    that the next session never saw."""
+    local_repo(tmp_path)
+    monkeypatch.setattr("sys.stdin", _Tty("n\n"))
+    approve.main(["requirements", "--repo", str(tmp_path)])
+    assert "rein changes add requirements" in caplog.text
+
+
+def test_the_terminal_path_says_which_channel_confirmed_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = local_repo(tmp_path)
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
+    approve.main(["requirements", "--repo", str(tmp_path)])
+    receipt = (store_mod.Store(repo).read_state() or models.State({})).gate_receipt("requirements") or {}
+    assert receipt["confirmed_via"] == "terminal"
 
 
 # --- readiness ------------------------------------------------------------------
@@ -412,3 +438,114 @@ def test_recording_an_approval_writes_a_receipt_and_advances_the_phase(tmp_path:
     assert state.current_phase == "design"
     receipt = state.gate_receipt("requirements")
     assert receipt is not None and receipt["approval_id"] == approval_id
+
+
+# --- gate ③ freezes the plan ---------------------------------------------------
+#
+# This is the half that was missing entirely. Three documents said gate ③ freezes the plan,
+# `gate_guard` rule 2 keyed off `plan.status == "frozen"`, and `rein build` refused to start
+# against a draft — while no code anywhere ever wrote "frozen". A correctly approved repository
+# could not build, and rule 2 never once engaged.
+
+
+def _tasks_gate_repo(tmp_path: Path) -> repo_mod.Repo:
+    """A repo standing at gate ③, with a plan whose claims all have a task."""
+    return repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"tasks": "pending", "build": "pending", "release": "pending"},
+            phase="tasks",
+            plan_status="draft",
+        ),
+        plan=make_plan(claims=[make_claim("C-001")], tasks=[make_task("T-001", claim_ids=["C-001"])]),
+    )
+
+
+def test_approving_gate_three_freezes_the_plan(tmp_path: Path) -> None:
+    repo = _tasks_gate_repo(tmp_path)
+    store = store_mod.Store(repo)
+    plan, config = store.read_plan(), store.read_config()
+    assert plan is not None and config is not None
+
+    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+
+    state = store.read_state()
+    assert state is not None
+    assert state.plan_status == "frozen"
+    assert state.plan_digest == plan.digest()
+    assert state.plan_config_digest == config.digest()
+    frozen = state.raw["plan"]
+    assert frozen["toolchain_digest"] == config.toolchain_digest()
+    assert frozen["frozen_at"]
+
+
+def test_the_freeze_keys_are_exactly_the_ones_a_roll_back_clears(tmp_path: Path) -> None:
+    # revise.apply pops these four. A key written at the freeze and not cleared on the roll back
+    # would survive an un-freeze and let a later check "verify" against a freeze that no longer
+    # holds — so the two sets are asserted equal rather than trusted to stay in step.
+    from rein import revise
+
+    repo = _tasks_gate_repo(tmp_path)
+    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    assert state is not None
+    assert set(state.raw["plan"]) == {"status", *approve._FROZEN_PLAN_KEYS}
+
+    revision = revise.plan_revision(repo, "tasks", [])
+    assert revision["unfreezes_plan"] is True
+    revise.apply(repo, revision, "a defect in the task breakdown")
+
+    after = store.read_state()
+    assert after is not None
+    assert after.raw["plan"] == {"status": "draft"}  # every frozen key cleared, none left behind
+
+
+def test_the_freeze_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
+    repo = _tasks_gate_repo(tmp_path)
+    approval_id = approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+
+    events = store_mod.Store(repo).read_events()
+    assert [e.event for e in events] == ["gate_approved", "plan_frozen"]
+    frozen = events[1]
+    assert approval_id in frozen.subject_ids
+    # The digests the freeze covers travel in the event, so the chain says what was frozen and
+    # not merely that something was.
+    assert set(frozen.detail) == set(approve._FROZEN_PLAN_KEYS)
+
+
+def test_a_plan_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path) -> None:
+    repo = _tasks_gate_repo(tmp_path)
+    subject = approve.approval_subject(repo, "tasks")
+    # The human is reading the digest table; meanwhile the plan gains a claim. The chain-root
+    # guard does not cover plan.yaml, so without this check the approval would freeze bytes
+    # nobody was shown.
+    seed_repo(
+        tmp_path,
+        plan=make_plan(
+            claims=[make_claim("C-001"), make_claim("C-002", requirement_ids=["R-2"])],
+            tasks=[make_task("T-001", claim_ids=["C-001", "C-002"])],
+        ),
+        state=None,
+        review=None,
+        config=None,
+    )
+    with pytest.raises(approve.ApprovalError, match="plan.yaml changed while the confirmation"):
+        approve.record_approval(repo, "tasks", subject)
+
+
+def test_a_config_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path) -> None:
+    repo = _tasks_gate_repo(tmp_path)
+    subject = approve.approval_subject(repo, "tasks")
+    seed_repo(tmp_path, config=make_config(max_parallel=7), state=None, plan=None, review=None)
+    with pytest.raises(approve.ApprovalError, match="config.yaml changed while the confirmation"):
+        approve.record_approval(repo, "tasks", subject)
+
+
+def test_the_other_gates_do_not_touch_the_plan_block(tmp_path: Path) -> None:
+    # Only gate ③ freezes. Gate ① approving a draft plan and leaving it draft is what lets
+    # /design and /tasks keep writing to it.
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    approve.record_approval(repo, "requirements", approve.approval_subject(repo, "requirements"))
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and state.plan_status == "draft"

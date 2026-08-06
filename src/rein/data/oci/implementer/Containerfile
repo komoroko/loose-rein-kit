@@ -30,7 +30,12 @@ RUN apt-get update \
  && apt-get install --no-install-recommends -y git make ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.9.7 /uv /usr/local/bin/uv
+# Pinned by digest like the base image above. A stale uv does not fail, it degrades silently:
+# 0.9.7 could not parse a relative `exclude-newer` and dropped the whole `[tool.uv]` table, then
+# re-resolved ignoring the lockfile's cutoff. This is the sandbox `rein build` runs generated
+# code in, so that divergence would be sandbox-only and invisible. Not the newest release on
+# purpose — see the note in ../python/Containerfile. Revisit at `rein upgrade`.
+COPY --from=ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa /uv /usr/local/bin/uv
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

@@ -12,7 +12,7 @@
 // DOM, and no server-supplied id is ever interpolated into a generated event handler — ids travel
 // as escaped data attributes read back by delegated listeners, the same rule as task ids in api.js.
 
-import { READ_ONLY, TOKEN, awaitingGate, esc, post, state, toast } from "/assets/api.js";
+import { READ_ONLY, TOKEN, awaitingGate, esc, post, showOut, state, toast } from "/assets/api.js";
 
 const DIFF_ID = "__diff__";  // the synthetic "change set" entry on a non-build gate's list
 let current = null;    // selected gate name
@@ -198,18 +198,42 @@ function selectDeliverable(id) {
   paint();
 }
 
-function approveCurrent() {
+// Two steps, deliberately: read what the approval would cover, then decide. The readiness fetch
+// is what puts the digests on screen, and the recording POST hands those same digests back — the
+// server refuses if the repository moved in between, so an approval can never bind bytes nobody
+// read. The confirm() below is an anti-misclick, NOT a security control: the authority is the
+// write session, which exists only because someone redeemed the launch link `rein ui` printed to
+// its own terminal.
+async function approveCurrent() {
   // The footer is drawn from `review`; refuse to act if it is not the payload for the selected
   // gate, so an approval can never be recorded against deliverables the human did not see.
   if (!review || review.error || review.gate !== current) return;
-  let msg = "Check gate " + review.index + " (" + current + ") for readiness?";
+  const gate = current;
+  let ready;
+  try {
+    ready = await (await fetch("/api/gate/" + encodeURIComponent(gate) + "/readiness")).json();
+  } catch (e) { toast("could not check the gate: " + e, "err"); return; }
+  if (ready.error) { toast(ready.error, "err"); return; }
+  if (!ready.ok) {
+    showOut("gate " + gate + " is not ready:\n" + (ready.blockers || []).map(b => "  - " + b).join("\n"));
+    toast("gate " + gate + ": " + (ready.blockers || []).length + " blocker(s) — not ready", "err");
+    return;
+  }
+
+  const covers = ready.covers || {};
+  const width = Math.max(0, ...Object.keys(covers).map(k => k.length));
+  const table = Object.entries(covers).map(([k, v]) => "  " + k.padEnd(width) + "  " + v).join("\n");
+  showOut("gate " + gate + " is ready. Approving binds:\n" + table);
+
+  let msg = "Approve gate " + gateIndex() + " (" + gate + ")?\n\nThis opens the gate. It binds:\n" + table;
   if (!isBuild()) {
     const unopened = mainEntries().filter(x => !openedSet().has(x.id)).map(x => x.label);
     if (unopened.length) msg += "\n\nNot opened here yet:\n  " + unopened.join("\n  ");
   }
-  msg += "\n\nThis does not open the gate — it reports readiness and prints the command you run.";
-  if (confirm(msg)) post("/api/gate/approve", { gate: current });
+  if (confirm(msg)) post("/api/gate/approve", { gate, covers });
 }
+
+function gateIndex() { return review && review.index ? review.index : "?"; }
 
 // --- shared rendering ---------------------------------------------------------
 
@@ -639,7 +663,9 @@ function deliverableBody() {
 // --- chrome -------------------------------------------------------------------
 
 function footerHtml() {
-  if (READ_ONLY) return '<span class="empty">read-only dashboard — approval happens elsewhere</span>';
+  if (READ_ONLY)
+    return '<span class="empty">read-only page — open the launch link `rein ui` printed to approve here, ' +
+      "or run <code>rein approve " + esc(current || "&lt;gate&gt;") + "</code> at a terminal</span>";
   if (review.status === "approved") return '<span class="okline">✓ gate ' + review.index + " already approved</span>";
   if (!review.is_awaiting)
     return '<span class="empty">not the gate under decision (awaiting: ' + esc(review.awaiting || "none") + ")</span>";
@@ -652,8 +678,22 @@ function footerHtml() {
     return warn + '<span class="warn" style="margin-right:.6rem">human review not frozen — ' + n +
       " blocker(s)</span><button class=\"primary\" disabled>Check gate " + review.index + "</button>";
   }
-  return warn + '<button class="primary" data-act="approve" data-id="-">Check gate ' + review.index +
-    " (" + esc(current) + ") for readiness</button>";
+  return warn + '<button class="primary" data-act="approve" data-id="-">Approve gate ' + review.index +
+    " (" + esc(current) + ')</button> <button data-act="changes" data-id="-">Request changes</button>';
+}
+
+// The other direction of the same footer. Anchoring to a target is the point, not a formality:
+// it is what lets the fix read one slice instead of re-running the phase over the deliverable.
+function requestChanges() {
+  if (!review || review.error || review.gate !== current) return;
+  const suggested = (mainEntries().find(x => x.id === selected) || {}).path || "";
+  const target = prompt(
+    "What needs to change? Name the place — a file#anchor or an id.\n\n" +
+    "  docs/10-requirements.md#R-3\n  T-004\n  C-001", suggested);
+  if (!target) return;
+  const reason = prompt("What is wrong with " + target + "?");
+  if (!reason) return;
+  post("/api/changes", { gate: current, target, reason });
 }
 
 function barHtml() {
@@ -721,6 +761,7 @@ const ACTIONS = {
   expert: requestExpert,
   freeze: freezeReview,
   approve: approveCurrent,
+  changes: requestChanges,
 };
 
 document.addEventListener("click", e => {

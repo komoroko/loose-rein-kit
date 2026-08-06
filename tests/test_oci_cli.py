@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from rein import executors, models, oci_cli
 from tests._support import make_config, seed_repo
 
@@ -120,3 +122,47 @@ def test_pinning_is_idempotent() -> None:
 def test_an_unknown_profile_is_reported_rather_than_silently_skipped() -> None:
     _, missing = oci_cli.pin_profiles(_shipped_config(), {**_PINS, "nope": "localhost/x@sha256:" + "d" * 64})
     assert missing == ["nope"]
+
+
+# --- setup friction: the command must be complete, and the prerequisite said up front ---------
+#
+# All three reporting surfaces used to print `rein oci build --profile <first of N>`: one image
+# out of three, without `--write-config`, so pasting it did not clear the FAIL it answered. And a
+# fresh repository — every profile still `kind: host` — was never told it needed a container
+# runtime at all, so that prerequisite surfaced as a failed build several minutes in.
+
+
+def test_the_setup_command_covers_every_target_at_once() -> None:
+    assert models.sandbox_setup_command(["python", "reviewer", "implementer"]) == (
+        "rein oci build --all --write-config"
+    )
+
+
+def test_a_single_target_is_named_rather_than_built_wholesale() -> None:
+    assert models.sandbox_setup_command(["python"]) == "rein oci build --profile python --write-config"
+
+
+def test_nothing_to_sandbox_recommends_nothing() -> None:
+    assert models.sandbox_setup_command([]) == ""
+
+
+def test_the_shipped_config_recommends_a_command_that_finishes_the_job() -> None:
+    config = models.Config(make_config())
+    assert config.unsandboxed_code_profiles()  # the scaffold ships kind: host
+    assert "--write-config" in config.sandbox_setup_command()
+
+
+def test_build_refuses_up_front_when_no_container_runtime_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Discovered before the first build rather than inside it: `--all` would otherwise pay the
+    setup three times to report the one thing that was knowable before starting."""
+    seed_repo(tmp_path)
+    monkeypatch.setattr(executors, "container_runtime", lambda: None)
+    monkeypatch.setattr(
+        executors,
+        "build_image",
+        lambda *a, **k: pytest.fail("must not reach the build"),  # noqa: ARG005
+    )
+    assert oci_cli.main(["build", "--all", "--write-config", "--repo", str(tmp_path)]) == 1
+    assert "install docker or podman first" in caplog.text

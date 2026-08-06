@@ -271,6 +271,31 @@ def test_the_loop_refuses_to_build_against_a_draft_plan(tmp_path: Path, capsys: 
     assert "not 'frozen'" in capsys.readouterr().err
 
 
+def test_approving_gate_three_is_what_lets_the_loop_start(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The two halves of the precondition above, joined.
+
+    Regression for the gap where nothing in the codebase ever wrote `plan.status: frozen`: a
+    repository whose gate ③ was properly approved still could not build, because the freeze
+    existed only in prose. Asserting the refusal (the test above) passed happily while the
+    approval that clears it did not exist — so the pair is what pins the behaviour.
+    """
+    from rein import approve
+    from rein import repo as repo_mod
+
+    root = build_repo(
+        tmp_path,
+        state=make_state(gates={"tasks": "pending", "build": "pending"}, phase="tasks", plan_status="draft"),
+    )
+    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 2
+
+    repo = repo_mod.Repo(root)
+    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    capsys.readouterr()  # drop the refusal above
+
+    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+    assert "not 'frozen'" not in capsys.readouterr().err
+
+
 def test_a_command_step_with_no_command_cannot_be_expressed() -> None:
     """An empty `run` would have to fail fast at build time. The schema refuses the shape
     outright instead, so the contradictory DoD never reaches the loop — the scaffold ships an

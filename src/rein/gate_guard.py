@@ -247,10 +247,14 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
 
 
 def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:
-    """The commit-stage form of rule 2: a frozen plan must still hash to what its receipt bound.
+    """The commit-stage form of rule 2: the frozen artifacts must still hash to what gate ③ froze.
 
     Stronger than the path rule the hook applies, because it compares content. An edit that was
     made, reverted, and re-applied leaves no trace in a path list but moves the digest.
+
+    Both artifacts are checked. Gate ③ freezes `config.yaml` for the same reason it freezes
+    `plan.yaml` — it pins the sandbox and the quality gate the evidence will be produced in — so
+    covering only the plan left half the freeze resting on the path rule alone.
     """
     from rein import store as store_mod
 
@@ -261,21 +265,27 @@ def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:
         return ["state.yaml cannot be read, so a frozen plan cannot be checked against its receipt"]
     if state is None or state.plan_status != "frozen":
         return []
-    recorded = state.plan_digest
-    if not recorded:
-        return []
-    try:
-        plan = store.read_plan()
-    except (models.DocumentError, strict_yaml.StrictParseError) as exc:
-        return [f"plan.yaml is frozen but no longer valid: {exc}"]
-    if plan is None:
-        return ["plan.yaml is frozen in state.yaml but the file is gone"]
-    if plan.digest() != recorded:
-        return [
-            "plan.yaml has changed since gate 3 froze it (its digest no longer matches the receipt). "
-            "Roll back with `rein revise --to tasks` instead of editing a frozen plan."
-        ]
-    return []
+
+    failures: list[str] = []
+    for label, recorded, read in (
+        ("plan.yaml", state.plan_digest, store.read_plan),
+        ("config.yaml", state.plan_config_digest, store.read_config),
+    ):
+        if not recorded:
+            continue  # frozen before this digest was recorded: nothing to compare against
+        try:
+            document = read()
+        except (models.DocumentError, strict_yaml.StrictParseError) as exc:
+            failures.append(f"{label} is frozen but no longer valid: {exc}")
+            continue
+        if document is None:
+            failures.append(f"{label} is frozen in state.yaml but the file is gone")
+        elif document.digest() != recorded:
+            failures.append(
+                f"{label} has changed since gate 3 froze it (its digest no longer matches the receipt). "
+                "Roll back with `rein revise --to tasks` instead of editing a frozen artifact."
+            )
+    return failures
 
 
 # --- rule 4: gate-approval write protection -----------------------------------

@@ -14,10 +14,17 @@ What the page may do is bounded by principle, not habit: (a) **read** inside the
 — every GET resolves paths server-side from fixed specs, never from the client; (b) run **local,
 side-effect-free diagnostics** whose argv is fixed here (`action_argv`: doctor, tests); (c) record
 **human decisions that already have a single sanctioned CLI write path** (gate approval via
-approve.py — a human privilege exercised by a human clicking — plus events-resolve / revise /
-cycle-close). The client only ever sends an action id and typed parameters; command lines are built
-server-side, so arbitrary command execution is structurally impossible. Phase execution (/req …
-/build) and outward-facing operations (push / PR / merge) are deliberately absent.
+approve.py, the human review, revise / cycle-close). The client only ever sends an action id and
+typed parameters; command lines are built server-side, so arbitrary command execution is
+structurally impossible. Phase execution (/req … /build) and outward-facing operations (push / PR /
+merge) are deliberately absent.
+
+**Write authority** comes from the terminal `rein ui` was started in, and nowhere else: it prints a
+**single-use launch link**, redeeming it mints a session cookie, and only a session may write. A
+process that merely fetches `/` gets a page with no token that declares itself read-only. The
+in-page CSRF token was never authority — anything able to `curl` the page could read it — so what
+the line rests on is the channel, not the click, and not a proof of a human that no repository can
+give (AGENTS.md "Gate rules" 2 states the ceiling).
 
 The page polls `/api/status` for the whole life of a supervised run, and a run is mostly waiting —
 so the endpoint answers `304 Not Modified` against an `ETag` taken over the payload *minus* its
@@ -27,10 +34,10 @@ transferred, nothing re-parsed, and the client re-renders nothing, so whatever t
 actually moves. A backgrounded tab polls lazily.
 
 Safety layers: binds 127.0.0.1 by default, and a non-loopback bind with the write endpoints enabled
-requires an explicit `--allow-remote`; every POST requires the `X-Rein-Token` header whose value
-is generated per server start and embedded only in the served page (a cross-origin page cannot set a
-custom header without a CORS preflight, and no CORS headers are ever sent); `--read-only` disables
-POST entirely — reviewing stays fully readable. Because this page holds that token, *everything*
+requires an explicit `--allow-remote`; every POST requires **both** the session cookie above (the
+authority) and the `X-Rein-Token` header (a CSRF guard — a cross-origin page cannot set a custom
+header without a preflight, and no CORS headers are ever sent); `--read-only` disables POST
+entirely — reviewing stays fully readable. Because this page holds that token, *everything*
 agent-written that reaches it is constructed, never sanitized: deliverable markdown goes through
 mdlite's escape-first renderer (see its threat model), and agent-written identifiers — task ids
 above all, which tasks.yaml is free to spell any way it likes — reach the DOM only as escaped
@@ -59,10 +66,11 @@ import urllib.parse
 import webbrowser
 from collections.abc import Callable
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rein import approve, common, event_chain, human_review, models, review_api, revise, status_api
+from rein import approve, change_request, common, event_chain, human_review, models, review_api, revise, status_api
 from rein import events as events_mod
 from rein import registry as registry_mod
 from rein import repo as repo_mod
@@ -90,6 +98,9 @@ _ASSET_TYPES = {
     "notify.js": _JS,
 }
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+#: Session-scoped (no Max-Age): closing the browser ends the capability, and the next `rein ui`
+#: mints a new launch secret anyway.
+SESSION_COOKIE = "rein_session"
 
 # events.ndjson, parsed at most once per version of the file. Both polled endpoints need the whole
 # log — an escalation's open/closed state depends on a `resolve` that may appear anywhere in it — so
@@ -221,6 +232,31 @@ class DashboardServer(ThreadingHTTPServer):
         self.read_only = read_only
         self.registry_path = registry_path
         self.token = secrets.token_hex(16)
+        # The capability, handed over once at launch through a channel an agent cannot read: the
+        # terminal this server was started from. See the module docstring's "Write authority".
+        self.launch_secret = secrets.token_urlsafe(24)
+        self._sessions: set[str] = set()
+        self._secret_spent = False
+        self._session_lock = threading.Lock()
+
+    def redeem(self, offered: str) -> str | None:
+        """Trade the launch secret for a session id, once. None = not the secret, or already spent.
+
+        Single-use is the detection property. If something else redeems it first, the human's
+        browser lands on a read-only page instead of their dashboard — a theft that announces
+        itself, rather than a second reader nobody notices.
+        """
+        with self._session_lock:
+            if self._secret_spent or not secrets.compare_digest(offered, self.launch_secret):
+                return None
+            self._secret_spent = True
+            session = secrets.token_urlsafe(24)
+            self._sessions.add(session)
+            return session
+
+    def has_session(self, session: str) -> bool:
+        with self._session_lock:
+            return bool(session) and session in self._sessions
 
     def registry(self) -> registry_mod.Registry:
         """The live registry: the backing file when one is set and non-empty, else a pinned view of root."""
@@ -271,18 +307,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _send_json(self, code: HTTPStatus, obj: dict[str, object]) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
+    def _session(self) -> str:
+        """This request's session id, from the cookie. "" when absent or malformed."""
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie") or "")
+        except CookieError:
+            return ""
+        morsel = jar.get(SESSION_COOKIE)
+        return morsel.value if morsel else ""
+
+    def _authorized(self) -> bool:
+        return self.server.has_session(self._session())
+
     def do_GET(self) -> None:
-        if self.path == "/":
-            try:
-                page = (ASSETS_DIR / "index.html").read_text(encoding="utf-8")
-            except OSError as exc:
-                self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"cannot read ui_assets/index.html: {exc}"})
-                return
-            # The per-start token and mode are the only server-rendered values in the page.
-            page = page.replace("__TOKEN__", self.server.token).replace(
-                "__READ_ONLY__", "true" if self.server.read_only else "false"
-            )
-            self._send(HTTPStatus.OK, page.encode("utf-8"), "text/html; charset=utf-8")
+        path, _, query = self.path.partition("?")
+        if path == "/":
+            self._send_page(urllib.parse.parse_qs(query).get("k", [""])[0])
         elif self.path.startswith("/assets/"):
             name = self.path[len("/assets/") :]
             ctype = _ASSET_TYPES.get(name)
@@ -302,10 +343,78 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"projects": reg.entries(), "active": reg.active})
         elif self.path == "/api/events" or self.path.startswith("/api/events?"):
             self._send_events()
+        elif self.path.startswith("/api/gate/") and self.path.endswith("/readiness"):
+            self._send_gate_readiness(self.path[len("/api/gate/") : -len("/readiness")])
         elif self.path.startswith("/api/review/"):
             self._send_review_get(self.path[len("/api/review/") :])
         else:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+
+    def _send_page(self, offered_secret: str) -> None:
+        """Serve the dashboard, redeeming a launch secret into a session when one is presented.
+
+        Without a session the page carries no token and declares itself read-only: fetching `/`
+        buys a viewer, never a way to write.
+        """
+        session = self.server.redeem(offered_secret) if offered_secret else None
+        held = self._authorized()
+        if offered_secret and session is None and not held:
+            # A spent secret presented by a client that does not hold the session it minted —
+            # either the wrong secret, or something else redeemed this one first. The `held`
+            # guard is what keeps this off ordinary reloads: the launch URL stays in the address
+            # bar, so every F5 re-presents a spent secret, and an alarm that fires on F5 is one
+            # the human stops reading.
+            logger.warning(
+                "a launch link was presented that is not valid (wrong, or already redeemed), by a client"
+                " holding no write session. Something else on this machine may have opened the dashboard"
+                " first — restart it."
+            )
+        try:
+            page = (ASSETS_DIR / "index.html").read_text(encoding="utf-8")
+        except OSError as exc:
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"cannot read ui_assets/index.html: {exc}"})
+            return
+
+        authorized = session is not None or held
+        writable = authorized and not self.server.read_only
+        page = page.replace("__TOKEN__", self.server.token if writable else "").replace(
+            "__READ_ONLY__", "false" if writable else "true"
+        )
+        body = page.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if session is not None:
+            # HttpOnly so page scripts cannot read it back out; SameSite=Strict so no other
+            # origin can ride it. Session-scoped: closing the browser ends the capability.
+            self.send_header("Set-Cookie", f"{SESSION_COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_gate_readiness(self, gate: str) -> None:
+        """What stands in this gate's way, and what an approval would cover. Records nothing.
+
+        Read-only and unauthenticated on purpose — reading a gate's state is what `--read-only`
+        exists to allow. Only :meth:`_approve_gate` needs the session.
+        """
+        try:
+            repo = repo_mod.Repo(self.server.active_root())
+            blockers = approve.readiness(repo, gate)
+            subject = approve.approval_subject(repo, gate) if not blockers else None
+        except (approve.ApprovalError, models.DocumentError) as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "gate": gate,
+                "ok": not blockers,
+                "blockers": blockers,
+                "covers": subject,
+                "writable": self._authorized() and not self.server.read_only,
+            },
+        )
 
     def _send_status(self) -> None:
         """The status payload, with an ETag over everything *except* `generated_at`.
@@ -415,7 +524,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if self.server.read_only:
             self._send_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": "server is running with --read-only"})
             return
-        if self.headers.get("X-Rein-Token") != self.server.token:
+        # Both, and the session is the one that matters: it cannot be fetched, only minted by
+        # redeeming the launch secret. The token lives in the page, so it is a CSRF guard.
+        if not self._authorized():
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {
+                    "error": "this page has no write session. Open the dashboard through the launch link printed"
+                    " by `rein ui` — writes are granted only through that link, never by fetching this page."
+                },
+            )
+            return
+        if not secrets.compare_digest(self.headers.get("X-Rein-Token") or "", self.server.token):
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "missing or invalid X-Rein-Token"})
             return
         try:
@@ -423,6 +543,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._approve_gate(self._post_body())
             elif self.path == "/api/run":
                 self._run_action(self._post_body())
+            elif self.path == "/api/changes":
+                self._request_changes(self._post_body())
             elif self.path == "/api/project/select":
                 self._select_project(self._post_body())
             elif self.path.startswith("/api/review/"):
@@ -433,28 +555,56 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(exc.status, {"error": exc.message})
 
     def _approve_gate(self, body: dict[str, object]) -> None:
-        # A button cannot open a gate. Clicking in a localhost UI is not authentication — the
-        # browser proves nothing about who is at the keyboard — so this endpoint reports
-        # readiness, shows what an approval would cover, and hands back the command the human
-        # runs in their own terminal (plan §7.1).
+        """Record the approval the human just made in the pane they read it in.
+
+        Reaching here means the request carried a session — the launch-link handover, the same
+        class of channel as `rein approve`'s TTY requirement.
+
+        `covers` must come back exactly as it was displayed: if the repository moved while the
+        human was reading the digests, this refuses rather than binding a subject nobody was
+        shown — the guard `record_approval` applies to the audit chain, one document further out.
+        """
         gate = str(body.get("gate") or "")
-        root = self.server.active_root()
+        shown = body.get("covers")
+        if not isinstance(shown, dict):
+            raise UiActionError(
+                HTTPStatus.BAD_REQUEST,
+                "an approval has to name what it covers — re-open the gate in the review pane and try again",
+            )
         try:
-            repo = repo_mod.Repo(root)
+            repo = repo_mod.Repo(self.server.active_root())
             blockers = approve.readiness(repo, gate)
-            subject = approve.approval_subject(repo, gate) if not blockers else None
-        except (approve.ApprovalError, models.DocumentError) as exc:
+            if blockers:
+                raise UiActionError(HTTPStatus.CONFLICT, approve.render_blockers(gate, blockers))
+            subject = approve.approval_subject(repo, gate)
+            if {k: str(v) for k, v in shown.items()} != subject:
+                raise UiActionError(
+                    HTTPStatus.CONFLICT,
+                    "the repository moved while this gate was on screen, so the approval would cover different "
+                    "bytes than the ones you read. Re-open the gate and check the digests again.",
+                )
+            approval_id = approve.record_approval(repo, gate, subject, confirmed_via="ui-session")
+        except (approve.ApprovalError, models.DocumentError, store_mod.StoreError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
-        self._send_json(
-            HTTPStatus.OK,
-            {
-                "ok": not blockers,
-                "gate": gate,
-                "blockers": blockers,
-                "covers": subject,
-                "next": [f"rein approve {gate}", "(then type the gate name at the prompt)"],
-            },
-        )
+        logger.warning(f"gate '{gate}' opened from the dashboard ({approval_id})")
+        self._send_json(HTTPStatus.OK, {"ok": True, "gate": gate, "approval_id": approval_id})
+
+    def _request_changes(self, body: dict[str, object]) -> None:
+        """Record "not yet, change this" from the pane the human is already reading in.
+
+        The other direction of the same footer, and cheap for the same reason a change request is
+        cheap everywhere: it only ever narrows what happens next.
+        """
+        try:
+            request_id = change_request.add(
+                repo_mod.Repo(self.server.active_root()),
+                str(body.get("gate") or ""),
+                str(body.get("target") or ""),
+                str(body.get("reason") or ""),
+            )
+        except (change_request.ChangeRequestError, models.DocumentError, store_mod.StoreError) as exc:
+            raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
+        self._send_json(HTTPStatus.OK, {"ok": True, "id": request_id})
 
     # -- Challenge-first human-review writes (plan §21.1) --
     #
@@ -700,9 +850,16 @@ def main(argv: list[str] | None = None) -> int:
         registry_mod.save(reg, reg_path)
 
     server = DashboardServer((args.host, args.port), root=root, read_only=args.read_only, registry_path=reg_path)
-    url = f"http://{args.host}:{server.server_address[1]}/"
+    base = f"http://{args.host}:{server.server_address[1]}/"
+    # The launch link is the whole capability handover, and this terminal is the channel: an
+    # agent's subprocess cannot read what is printed here, and the secret is in no file, no page
+    # and no response body. Read-only servers hand out nothing, so they print the bare URL.
+    url = base if args.read_only else f"{base}?k={server.launch_secret}"
     mode = " (read-only)" if args.read_only else ""
     print(f"Loose Rein dashboard{mode}: {url}  — Ctrl+C to stop")
+    if not args.read_only:
+        print("  This link grants this browser write access (gate approval included) and works once.")
+        print(f"  Anything opening {base} without it gets a read-only page.")
     if open_mode(args.no_open, os.environ.get("TERM_PROGRAM")) == "vscode":
         print("  VS Code detected — open it inside the editor: Ctrl+Shift+P → 'Simple Browser: Show'")
         print("  and paste the URL above (or use the PORTS panel's 'Preview in Editor').")

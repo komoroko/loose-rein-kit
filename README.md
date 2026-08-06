@@ -194,11 +194,15 @@ rein oci build --all --write-config # build all three and pin them into config.y
 rein oci verify                     # every profile's pinned digest is present locally
 ```
 
-That is the whole setup. To do it one image at a time, or to pin by hand:
+That is the whole setup, and it is what `rein init`, `rein next`, `rein doctor` and the dashboard
+all point you at — the wizard offers to run it for you. It needs docker or podman on PATH, builds
+each image, pins the digests, flips the profiles to `kind: oci`, and verifies the pins resolve. To
+do it one image at a time, or to pin by hand:
 
 ```bash
-rein oci list                       # the packaged Containerfiles
-rein oci build --profile python     # builds it, prints the sha256: digest to pin
+rein oci list                                   # the packaged Containerfiles
+rein oci build --profile python --write-config  # builds it, pins it
+rein oci build --profile python                 # or just print the sha256: digest to paste
 ```
 
 `--profile` names a **Containerfile, not an executor profile**: the `quality` profile builds from
@@ -208,11 +212,14 @@ prints the digest and the config key to paste it under. With it, the command rew
 `config.yaml` survives, and it refuses to write a file that no longer parses. Pin before gate ③:
 the config freezes there and the guard refuses it afterwards.
 
-The Containerfiles pin their base image **by digest**, not by the `python:3.13-slim-bookworm` tag.
-Two builds a month apart used to produce different images, which made the digest you pinned a
-record of what happened to be current rather than something reproducible. The apt packages still
-resolve against the live Debian archive, so a rebuild much later can still shift — what the pin
-guarantees is that the interpreter and base filesystem cannot move under an approved review.
+The Containerfiles pin their base image **by digest**, not by the `python:3.13-slim-bookworm` tag,
+and pin `uv` the same way. Two builds a month apart used to produce different images, which made
+the digest you pinned a record of what happened to be current rather than something reproducible.
+A stale tool is the sharper version of the same problem: an old `uv` does not fail on a
+`pyproject.toml` it cannot fully parse, it warns and silently drops the whole `[tool.uv]` table —
+a sandbox-only divergence from your host, buried in a build log. The apt packages still resolve
+against the live Debian archive, so a rebuild much later can still shift; what the pins guarantee
+is that the interpreter, the resolver and the base filesystem cannot move under an approved review.
 
 **A digest binds which image ran; it does not make that image able to run your step.** The
 packaged ones carry python, uv and pytest, run as uid 1000 with a read-only root, and get
@@ -281,28 +288,51 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
    | implementation | `/build`  | autonomous loop (test-green condition) | ④ review/approve completion |
    | verification | `/verify` | run functional + non-functional tests | ⑤ decide on release |
 
-3. **Open a gate** by running `rein approve <gate>` **yourself** — it is the human's
-   command, never the agent's, and it is the only thing that can open one. It checks readiness,
-   prints the digests this approval would cover, and then asks for a confirmation:
+3. **Open a gate** yourself — it is the human's act, never the agent's, and there are two places
+   to do it. Both check readiness first, print the digests the approval would cover, and reach the
+   same single recording path; the receipt records which channel confirmed.
 
    ```bash
    rein approve build            # readiness check, then:
    #   gate 'build' is ready. This approval will cover:
-   #     plan_digest       sha256:…
+   #     plan_digest          sha256:…
    #     attested_chain_root  sha256:…
-   #   Type the gate name to confirm (anything else cancels).
-   #   gate> build
+   #   Approve gate 'build'? [y/N] y
    #   gate 'build' opened (GA-BUILD-a1b2c3d4)
    ```
 
-   The receipt records that *a* human confirmed at that terminal, never *which* — there is no
-   identity-bound mode. A localhost click is not authentication, there is no `--force`, editing a
-   gate line by hand is denied by the guard, and an interactive TTY is required (a piped stdin, a
-   CI job, or an agent's captured subprocess cannot answer the prompt).
-4. **Roll back** on an upstream defect: `/revise <phase>` resets gates from the target onward and
-   marks task impact (`rein revise --impacted T-00x` sets seeds and their transitive
-   dependents to `needs-revision`).
-5. **Check progress** anytime:
+   Or in `rein ui`, from the same pane that just showed you the deliverable — no extra step.
+
+   **What that establishes.** Not that a human approved — nothing in a repository can show that.
+   The receipt records that *a* confirmation happened and over which channel, never *which* human;
+   there is no identity-bound mode. What does hold is narrower and load-bearing: **an approval
+   cannot happen by accident, by default, or by a configuration someone pre-authorized.** Three
+   things carry it — the interactive TTY `rein approve` insists on (a piped stdin, a CI job, or an
+   agent's captured subprocess all fail it), the dashboard's **single-use launch link**, printed to
+   the terminal `rein ui` runs in and readable by nothing that can merely fetch the page, and
+   `rein doctor`'s check that no settings file pre-authorizes a gate-opening verb. There is no
+   `--force`, and editing a gate line by hand is denied by the guard.
+
+4. **Ask for changes** instead, when the deliverable is not right. This is a first-class answer,
+   not a dead end — say no at the prompt, or use the dashboard's *Request changes*:
+
+   ```bash
+   rein changes add requirements --target docs/10-requirements.md#R-3 \
+                                 --reason "the acceptance criterion is unmeasurable"
+   ```
+
+   An open request **holds the gate shut** and lives in `state.yaml`, so it survives the session
+   that raised it rather than evaporating with a chat message. The `--target` anchor is the point:
+   the agent reads the slice it names and fixes that, instead of re-running the phase over the
+   whole document. It answers with `rein changes address <id> --note <what changed>`, which
+   unblocks the gate and puts the note on your approval screen — approving is what closes it.
+   Raising one needs no authority of any kind, which is why the dashboard offers it freely: it can
+   only ever *narrow* what happens next.
+
+5. **Roll back** on an upstream defect *after* a gate was approved: `/revise <phase>` resets gates
+   from the target onward and marks task impact (`rein revise --impacted T-00x` sets seeds and
+   their transitive dependents to `needs-revision`).
+6. **Check progress** anytime:
    - `rein next` — just the next recommended command (`--json` for integrations)
    - `rein status` — leads with **Waiting on you**: everything standing between the repo and
      its next gate, worst first, each with a severity and the command that clears it. The blocking
@@ -322,9 +352,9 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
      reads, fixed diagnostics (doctor, tests), and decision recording (approve / resolve / revise /
      cycle-close); phase execution and push/PR/merge are deliberately absent.
    - `rein dag --mermaid` — render the task dependency diagram
-6. **Ship as a PR**: `rein pr-draft` assembles the PR body from the SSOT into
+7. **Ship as a PR**: `rein pr-draft` assembles the PR body from the SSOT into
    `.rein/pr-draft.md` (read-only); creating/pushing the PR stays yours.
-7. **Close the cycle** after gate ⑤: `rein cycle-close --name <slug>` archives to
+8. **Close the cycle** after gate ⑤: `rein cycle-close --name <slug>` archives to
    `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human
    operation, like opening a gate.
 

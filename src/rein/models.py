@@ -230,6 +230,8 @@ EVENT_ORDER: tuple[str, ...] = (
     "knowledge_gap",
     "gate_approved",
     "gate_revised",
+    "changes_requested",
+    "changes_addressed",
     "plan_frozen",
     "plan_invalidated",
     "task_started",
@@ -255,6 +257,18 @@ EVENT_ORDER: tuple[str, ...] = (
     "cycle_closed",
 )
 EVENT_VALUES = frozenset(EVENT_ORDER)
+
+#: How a gate confirmation reached the tool. Both are the same kind of claim — something with
+#: access to this machine's terminal did it — and neither is proof of a human. Recorded so a
+#: reader can tell them apart rather than seeing an unqualified "approved".
+CONFIRMATION_CHANNELS: tuple[str, ...] = ("terminal", "ui-session")
+CONFIRMATION_CHANNEL_VALUES = frozenset(CONFIRMATION_CHANNELS)
+
+#: A change request's life. `open` holds the gate shut; `addressed` is the agent saying it has
+#: been answered and naming how, which stops it blocking but puts it on the approval screen; a
+#: gate approval closes what it covered. Worst first, like the other ordered vocabularies here.
+CHANGE_REQUEST_STATUS_ORDER: tuple[str, ...] = ("open", "addressed", "resolved")
+CHANGE_REQUEST_STATUS_VALUES = frozenset(CHANGE_REQUEST_STATUS_ORDER)
 
 #: Capabilities the control plane can grant. A leaf agent never receives any of
 #: :data:`CENTRAL_ONLY_CAPABILITIES` (plan §11.3).
@@ -315,6 +329,19 @@ def risk_at_least(risk: str, floor: str) -> bool:
 def max_risk(risks: Iterable[str]) -> str:
     """The highest risk in `risks` (`low` when empty) — the shape effective risk is built from."""
     return max(risks, key=RISK_ORDER.index, default="low")
+
+
+def sandbox_setup_command(build_targets: Sequence[str]) -> str:
+    """The one command that actually sandboxes `build_targets`. "" when there is nothing to do.
+
+    Derived in one place because four surfaces print it — `rein next`, `rein doctor`, the
+    dashboard, and `rein init`. They used to print `rein oci build --profile <first of N>`: one
+    image out of three, without `--write-config`, so the digest still had to be copied out of the
+    terminal by hand. Pure, so the recommendation table stays testable without a repo on disk.
+    """
+    if len(build_targets) > 1:
+        return "rein oci build --all --write-config"
+    return f"rein oci build --profile {build_targets[0]} --write-config" if build_targets else ""
 
 
 # --- errors -------------------------------------------------------------------
@@ -622,6 +649,27 @@ class State:
         return _str(plan, "digest") if isinstance(plan, dict) else ""
 
     @property
+    def plan_config_digest(self) -> str:
+        """What `config.yaml` hashed to when gate ③ froze it. "" before the freeze.
+
+        The pair of :attr:`plan_digest`: gate ③ freezes config.yaml too, because it pins the
+        sandbox and the quality gate a review's evidence is produced in.
+        """
+        plan = self.raw.get("plan")
+        return _str(plan, "config_digest") if isinstance(plan, dict) else ""
+
+    @property
+    def change_requests(self) -> list[Mapping[str, Any]]:
+        """Every change a human asked for instead of approving, oldest first."""
+        value = self.raw.get("change_requests")
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def change_requests_for(self, gate: str, *statuses: str) -> list[Mapping[str, Any]]:
+        """This gate's change requests, filtered to `statuses` (all of them when none is given)."""
+        wanted = frozenset(statuses) if statuses else CHANGE_REQUEST_STATUS_VALUES
+        return [cr for cr in self.change_requests if cr.get("gate") == gate and cr.get("status") in wanted]
+
+    @property
     def execution(self) -> Mapping[str, Any]:
         value = self.raw.get("execution")
         return value if isinstance(value, dict) else {}
@@ -874,6 +922,16 @@ class Config:
     def digest(self) -> str:
         return digests.of(self.raw, drop=digests.VOLATILE_TIMESTAMP_KEYS)
 
+    def toolchain_digest(self) -> str:
+        """Which sandbox each role runs in, as one digest.
+
+        Bound into the gate ③ freeze and into every machine review, so that changing the sandbox
+        a step ran in moves the digest and an approval taken against the old one stops applying.
+        Narrower than :meth:`digest` on purpose: a comment or a budget moving in config.yaml is
+        not a change of the environment the evidence was produced in.
+        """
+        return digests.of({"executors": self.raw.get("executors")})
+
     @property
     def project_name(self) -> str:
         project = self.raw.get("project")
@@ -983,6 +1041,10 @@ class Config:
         recommend `--profile quality`, which no packaged Containerfile answers to.
         """
         return sorted({profile.build_target for profile in self._unsandboxed_profiles()})
+
+    def sandbox_setup_command(self) -> str:
+        """The one command that finishes the job for this config (:func:`sandbox_setup_command`)."""
+        return sandbox_setup_command(self.unsandboxed_build_targets())
 
     def _unsandboxed_profiles(self) -> list[ExecutorProfile]:
         if not isinstance(self.raw.get("executors"), dict):

@@ -292,6 +292,30 @@ def test_check_diff_passes_when_the_gate_is_approved(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+def test_check_diff_catches_a_config_edited_after_the_freeze(tmp_path: Path) -> None:
+    """Rule 2 compares content, not just paths — and it covers both frozen artifacts.
+
+    Gate ③ freezes `config.yaml` for the same reason it freezes `plan.yaml`: it pins the sandbox
+    and the quality gate the evidence will be produced in. Checking only the plan left half the
+    freeze resting on the path rule, which an edit that is made, reverted and re-applied slips
+    straight past.
+    """
+    seed_repo(tmp_path, git=True)  # approved through tasks, plan frozen
+    repo = repo_mod.Repo(tmp_path)
+    documents = store.Store(repo)
+    config, state = documents.read_config(), documents.read_state()
+    assert config is not None and state is not None
+    raw = json.loads(json.dumps(state.raw))
+    raw["plan"]["config_digest"] = config.digest()
+    (tmp_path / ".rein" / "state.yaml").write_bytes(store.dump_yaml(raw))
+    assert gate_guard.check_diff(repo) == 0
+
+    text = (tmp_path / ".rein" / "config.yaml").read_text(encoding="utf-8")
+    (tmp_path / ".rein" / "config.yaml").write_text(text.replace("max_parallel: 3", "max_parallel: 9"), "utf-8")
+    assert gate_guard.check_diff(repo) == 1
+
+
+@pytest.mark.integration
 def test_check_diff_catches_a_gate_flip_with_no_event(tmp_path: Path) -> None:
     """A flip smuggled past the editor hook — a shell redirect, `sed -i` — has no
     gate_approved event, and fails here before it can be committed."""

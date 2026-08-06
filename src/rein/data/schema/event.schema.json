@@ -21,6 +21,8 @@
         "knowledge_gap",
         "gate_approved",
         "gate_revised",
+        "changes_requested",
+        "changes_addressed",
         "plan_frozen",
         "plan_invalidated",
         "task_started",

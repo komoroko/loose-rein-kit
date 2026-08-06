@@ -111,8 +111,15 @@ def next_action(
     plan_missing: bool,
     unsandboxed_profiles: list[str],
     unsandboxed_build_targets: list[str] | None = None,
+    gate_ready: bool | None = None,
+    open_change_requests: int = 0,
 ) -> Recommendation:
-    """The deterministic decision table (first match wins)."""
+    """The deterministic decision table (first match wins).
+
+    `gate_ready` is tri-state, for the same reason `pending_queue`'s `gate_blockers` is: `None`
+    means readiness was **not probed**, which is not the same as probed-and-blocked. Collapsing
+    them would let "we did not look" decide a recommendation.
+    """
     # 1. The audit chain is the substrate every receipt binds. Nothing else matters until it is intact.
     if chain_defects:
         return Recommendation(
@@ -147,15 +154,14 @@ def next_action(
         )
     # 5. Sandboxing is a precondition for running anything, so it precedes the phase rows.
     if unsandboxed_profiles:
-        # `--profile` takes a packaged Containerfile name, and a profile's name is not one:
-        # interpolating `unsandboxed_profiles[0]` recommended `--profile quality`, which fails.
-        targets = unsandboxed_build_targets or unsandboxed_profiles
         return Recommendation(
-            command="rein oci build --profile " + targets[0],
+            command=models.sandbox_setup_command(unsandboxed_build_targets or unsandboxed_profiles),
             kind="fix",
             reason="Profile(s) " + ", ".join(unsandboxed_profiles) + " run repository-derived code on the host. "
-            "Build the packaged sandbox image, pin its digest in config.yaml, and check the image can run the "
-            "step you point at it.",
+            "This builds every packaged image, pins each digest in config.yaml and flips those profiles to "
+            "`kind: oci`. It needs docker or podman on PATH, and the image still has to be able to run the "
+            "step you point it at.",
+            also=("rein doctor",),
         )
     # 6. Events awaiting a human decision block the release gate.
     if current_phase == "verify" and attention_count:
@@ -190,6 +196,32 @@ def next_action(
     if gate is not None:
         index = GATE_ORDER.index(gate) + 1
         if gates.get(gate) != "approved":
+            # A human already read this and said "not yet". The phase command is still the right
+            # recommendation, but the reason has to name what they asked for — otherwise the next
+            # session re-derives the deliverable from scratch and answers nothing.
+            if open_change_requests:
+                return Recommendation(
+                    command=PHASE_COMMAND[current_phase],
+                    kind="reconcile",
+                    reason=f"{open_change_requests} change request(s) you raised are still open, and gate "
+                    f"{index} stays shut until they are. Read them, fix only what each one anchors, and mark "
+                    "each addressed.",
+                    also=(f"rein changes list --gate {gate}",),
+                )
+            # The phase is done and nothing mechanical is left: what remains is a person deciding.
+            # This is the only row producing `approve_gate`, and so the only thing that ever turns
+            # `waiting_on_human` on — the state the dashboard's title, favicon and notification
+            # exist for. It reads the same `gate_blockers` the queue's `gate_ready` row does, so
+            # the board and the recommendation cannot disagree.
+            if gate_ready:
+                return Recommendation(
+                    command=f"rein approve {gate}",
+                    kind="approve_gate",
+                    reason=f"Phase '{current_phase}' is complete and gate {index} ({gate}) has no mechanical "
+                    "blocker left — it is waiting on your decision. Read it in `rein ui` and approve there, or "
+                    "run this yourself at a terminal; an agent never runs it for you.",
+                    also=("rein ui", f"rein approve {gate} --check"),
+                )
             also: tuple[str, ...] = (f"rein approve {gate} --check",)
             if current_phase == "build":
                 also = ("rein build", *also)
@@ -351,14 +383,13 @@ def pending_queue(
             )
         )
     if unsandboxed_profiles:
-        targets = list(unsandboxed_build_targets) or list(unsandboxed_profiles)
         items.append(
             _pending_item(
                 "blocking",
                 "sandbox",
                 ", ".join(unsandboxed_profiles),
                 "profile(s) " + ", ".join(unsandboxed_profiles) + " run repository-derived code on the host",
-                "rein oci build --profile " + targets[0],
+                models.sandbox_setup_command(list(unsandboxed_build_targets) or list(unsandboxed_profiles)),
             )
         )
     if probe_gate is not None and gate_blockers is not None:
@@ -578,6 +609,9 @@ def collect_status(
         plan_missing=plan is None,
         unsandboxed_profiles=unsandboxed_profiles,
         unsandboxed_build_targets=unsandboxed_build_targets,
+        # None when readiness was not probed — the table must not read that as "blocked".
+        gate_ready=None if gate_blockers is None else not gate_blockers,
+        open_change_requests=len(state.change_requests_for(probe_gate, "open")) if state and probe_gate else 0,
     )
     # A /-command only exists inside an agent whose surface was installed; recommending one in a
     # repo with no integration would send the user to a command their agent has never heard of.

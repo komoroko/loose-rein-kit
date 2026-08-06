@@ -194,12 +194,84 @@ def check_integrations(repo: repo_mod.Repo, config: models.Config | None) -> lis
 # --- gate receipts ---------------------------------------------------------------
 
 
+#: Gates approved at or after the freeze. Their receipts bind the *frozen* plan and config, so a
+#: receipt of theirs that names a different digest is a real inconsistency. Gates ① and ② are
+#: deliberately absent: they were approved while the plan was still a draft, and `/design` and
+#: `/tasks` then moved it — legitimately. Comparing their receipts against the live document (as
+#: the obvious reading of "check the digests" would) turns every healthy repository permanently red.
+_POST_FREEZE_GATES = ("tasks", "build", "release")
+
+
+def check_freeze_drift(
+    state: models.State | None, plan: models.Plan | None, config: models.Config | None
+) -> list[Finding]:
+    """Has anything the gate ③ freeze covers moved since? (read-only half of `rein guard` rule 2)
+
+    Separate from :func:`check_receipts`, which answers "does this receipt bind anything". This
+    answers "does what it bound still exist" — a receipt can name every required digest while
+    describing a document that has since been edited.
+
+    Two comparisons, in this order, because they answer different questions: the freeze record in
+    `state.yaml` against the document on disk (did the artifact move?), then each post-freeze
+    receipt against that freeze record (does the approval still describe what was approved?).
+    Reporting the second without the first would name the receipt for a drift the artifact caused.
+    """
+    if state is None:
+        return []
+    if state.plan_status != "frozen":
+        return [Finding("INFO", "gates", f"the plan is '{state.plan_status}' — gate 3 has not frozen it yet")]
+
+    findings: list[Finding] = []
+    frozen = {"plan_digest": state.plan_digest, "config_digest": state.plan_config_digest}
+    for key, label, live in (
+        ("plan_digest", "plan.yaml", plan.digest() if plan is not None else ""),
+        ("config_digest", "config.yaml", config.digest() if config is not None else ""),
+    ):
+        recorded = frozen[key]
+        if not recorded:
+            findings.append(Finding("WARN", "gates", f"the plan is frozen but records no {key} for {label}"))
+        elif not live:
+            findings.append(Finding("FAIL", "gates", f"{label} is frozen in state.yaml but cannot be read"))
+        elif live != recorded:
+            findings.append(
+                Finding(
+                    "FAIL",
+                    "gates",
+                    f"{label} has changed since gate 3 froze it: it now hashes to {live[:19]}… but the "
+                    f"freeze records {recorded[:19]}…. Every gate approved since covers the older bytes — "
+                    "roll back with `rein revise --to tasks` and re-approve rather than editing a frozen artifact.",
+                )
+            )
+        else:
+            findings.append(Finding("PASS", "gates", f"{label} still matches the digest gate 3 froze"))
+
+    for gate in _POST_FREEZE_GATES:
+        if state.gate_status(gate) != "approved":
+            continue
+        receipt = state.gate_receipt(gate) or {}
+        for key, label in (("plan_digest", "plan.yaml"), ("config_digest", "config.yaml")):
+            bound, recorded = receipt.get(key), frozen[key]
+            if not bound or not recorded or bound == recorded:
+                continue
+            findings.append(
+                Finding(
+                    "FAIL",
+                    "gates",
+                    f"gate '{gate}' receipt {receipt.get('approval_id')} binds a {label} digest "
+                    f"({str(bound)[:19]}…) that is not the one the freeze records ({recorded[:19]}…) — "
+                    "the approval was taken against a different document than the one now frozen.",
+                )
+            )
+    return findings
+
+
 def check_receipts(state: models.State | None) -> list[Finding]:
     """Every approved gate must carry a receipt that actually binds something.
 
     `rein guard` refuses a hand-written gate flip at edit and commit stage; this is the read-only
     half — a gate that reached `approved` some other way shows up here as a receipt with nothing
-    in it, rather than as a green board.
+    in it, rather than as a green board. Whether what it bound has since *moved* is
+    :func:`check_freeze_drift`, deliberately a separate question.
     """
     if state is None:
         return []
@@ -286,16 +358,16 @@ def check_sandbox(config: models.Config | None) -> list[Finding]:
     findings: list[Finding] = []
     offenders = config.unsandboxed_code_profiles()
     if offenders:
-        builds = " ; ".join(f"rein oci build --profile {target}" for target in config.unsandboxed_build_targets())
         findings.append(
             Finding(
                 "FAIL",
                 "sandbox",
                 f"profile(s) {', '.join(offenders)} run repository-derived code on the host. A test file is "
-                f"code an agent wrote, and it would run with your credentials. Build the packaged image(s) "
-                f"({builds}), pin each digest in config.yaml, and check that the image can actually run the "
-                "step you pointed at it — the packaged images carry python, uv and pytest, so a step invoking "
-                "`make` or needing a dependency closure needs its own Containerfile first.",
+                f"code an agent wrote, and it would run with your credentials. Run "
+                f"`{config.sandbox_setup_command()}` — it builds each packaged image, pins the digests here and "
+                "flips those profiles to `kind: oci`. Then check that the image can actually run the step you "
+                "pointed at it: the packaged images carry python, uv and pytest, so a step invoking `make` or "
+                "needing a dependency closure needs its own Containerfile first.",
             )
         )
     for name, profile in sorted(config.profiles.items()):
@@ -314,14 +386,25 @@ def check_sandbox(config: models.Config | None) -> list[Finding]:
                 )
             )
 
-    if any(p.is_sandboxed for p in config.profiles.values()):
+    # Checked whenever a sandbox is configured *or still owed*. Gating this on "OCI profiles are
+    # configured" meant a fresh repository — every profile still `kind: host` — was told to build
+    # images and never told it needed a container runtime to do it, so the prerequisite surfaced
+    # only as a failed build several minutes later.
+    if offenders or any(p.is_sandboxed for p in config.profiles.values()):
         runtime = shutil.which("docker") or shutil.which("podman")
-        level, message = (
-            ("PASS", f"container runtime found ({Path(runtime).name})")
-            if runtime
-            else ("FAIL", "no docker/podman on PATH, but OCI profiles are configured")
-        )
-        findings.append(Finding(level, "sandbox", message))
+        if runtime:
+            findings.append(Finding("PASS", "sandbox", f"container runtime found ({Path(runtime).name})"))
+        elif offenders:
+            findings.append(
+                Finding(
+                    "FAIL",
+                    "sandbox",
+                    "no docker/podman on PATH, and the profiles above still need sandboxing — install one "
+                    "first; there is nothing to build the images with.",
+                )
+            )
+        else:
+            findings.append(Finding("FAIL", "sandbox", "no docker/podman on PATH, but OCI profiles are configured"))
     return findings
 
 
@@ -706,6 +789,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_ci(repo)
     findings += check_gate_chain(state)
     findings += check_receipts(state)
+    findings += check_freeze_drift(state, plan, config)
     findings += check_plan(repo, plan, state)
     findings += check_chain(repo)
     rc, head_out = repo._git_rc("rev-parse", "HEAD")

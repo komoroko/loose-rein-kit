@@ -31,6 +31,7 @@ import logging
 import re
 import shlex
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import rein
@@ -269,6 +270,44 @@ def _seed(root: Path, rel: str, content: bytes) -> bool:
     return True
 
 
+def sandbox_step(root: Path, *, offer: bool, ask: Callable[[str], str] | None = None) -> str:
+    """Set the sandboxes up, or say exactly what is owed. Returns a line for the summary.
+
+    Sandboxing is a precondition for everything the lifecycle does — `/build` runs repository
+    code, and a fresh config ships `kind: host`, which is not policy-compliant — yet it used to
+    surface only later, as a `doctor` FAIL. Making it a step of initialization turns it into a
+    question with a default.
+
+    `offer` gates the interactive path: on a TTY we ask (default no — it is a multi-minute
+    build), otherwise we only print the command. Either way the repository is left usable.
+    """
+    from rein import executors, models, oci_cli
+    from rein import store as store_mod
+
+    try:
+        config = store_mod.Store(repo_mod.Repo(root)).read_config()
+    except (models.DocumentError, store_mod.StoreError, OSError):
+        return "sandbox: could not read .rein/config.yaml — run `rein doctor`"
+    if config is None or not config.unsandboxed_code_profiles():
+        return "sandbox: every profile that runs repository code is already sandboxed"
+
+    command = config.sandbox_setup_command()
+    if executors.container_runtime() is None:
+        return (
+            "sandbox: docker/podman not found — install one, then run "
+            f"`{command}` (until then, repository code would run on this host)"
+        )
+    if not offer or ask is None:
+        return f"sandbox: not built yet — run `{command}`"
+
+    print(f"\nSandbox: {', '.join(config.unsandboxed_code_profiles())} would run repository code on this host.")
+    print(f"  Building the packaged images fixes it: `{command}`. It takes a few minutes.")
+    if (ask("  build them now? [y/N]") or "n").strip().lower() not in ("y", "yes"):
+        return f"sandbox: skipped — run `{command}` when you are ready"
+    rc = oci_cli.main(["build", "--all", "--write-config", "--repo", str(root)])
+    return "sandbox: built and pinned" if rc == 0 else f"sandbox: build failed (rc={rc}) — re-run `{command}`"
+
+
 def _switch_branch(root: Path, branch: str) -> str:
     """Create/switch to the work branch (best-effort). Returns a status line for the summary."""
     # symbolic-ref, not rev-parse --abbrev-ref: a fresh `git init` with no commits yet has no
@@ -297,6 +336,7 @@ def run_init(
     test_cmd: str = "",
     check_cmd: str = "",
     mode: str = "auto",
+    offer_sandbox: bool = False,
 ) -> int:
     """Seed the repo (SSOT + docs scaffolds + materialized artifacts + pointer block + lock)."""
     today = datetime.date.today().isoformat()
@@ -371,6 +411,8 @@ def run_init(
         agents_md.write_text(text + install_mod.agents_pointer_block(), encoding="utf-8")
         print("  merge         AGENTS.md (Loose Rein pointer block appended)")
     print(f"  {_switch_branch(root, branch)}")
+    # 6) the sandboxes — the one precondition initialization used to leave for `doctor` to find.
+    print(f"  {sandbox_step(root, offer=offer_sandbox, ask=_ask if offer_sandbox else None)}")
 
     next_step = (
         "Next: run /onboard to map the existing code into docs/05-current-state.md, then start with /req."
@@ -416,7 +458,7 @@ def wizard(root: Path | None = None) -> int:
         return 130
     # branch defaults to build/<name>; source is auto-detected in run_init; the headless CLI keeps
     # its scaffold default (claude -p) — all three are overridable later (flags / `rein agent`).
-    rc = run_init(root, name, f"build/{name}", "")
+    rc = run_init(root, name, f"build/{name}", "", offer_sandbox=True)
     if rc != 0:
         return rc
     if summary:

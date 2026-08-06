@@ -27,7 +27,21 @@ RUN groupadd --gid 1000 runner \
  && useradd --uid 1000 --gid 1000 --create-home --shell /usr/sbin/nologin runner
 
 # uv, so a quality-gate step can install its own pinned dependency closure offline from a lock.
-COPY --from=ghcr.io/astral-sh/uv:0.9.7 /uv /usr/local/bin/uv
+#
+# Pinned by digest like the base image above, and for a sharper reason: a *stale* uv does not
+# fail, it degrades silently. 0.9.7 could not parse a relative `exclude-newer` (uv's own
+# documented supply-chain cooldown idiom), so it printed a warning and dropped the entire
+# `[tool.uv]` table — then re-resolved the dependency set from scratch, ignoring the lockfile's
+# timestamp cutoff. Inside the one place whose entire purpose is "the pinned environment is what
+# the evidence is about", that is a divergence from the host nobody would notice: the warning is
+# buried in a build log, not a failure. It is not specific to `exclude-newer` either — any key in
+# that table an old parser chokes on goes the same way.
+#
+# Not the newest release on purpose: this repository's own `[tool.uv] exclude-newer` sets a
+# one-week cooldown against just-published versions, and a pin that ignores that policy while
+# shipping the image that enforces it would be saying two different things. Revisit at
+# `rein upgrade` — the pin cannot notice on its own that it has aged.
+COPY --from=ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa /uv /usr/local/bin/uv
 
 # The project's own conftest.py, pytest plugins, and PYTHONPATH must never reach the gate:
 # an implementer who can edit a fixture the run loads can make any check pass (E2E-12).

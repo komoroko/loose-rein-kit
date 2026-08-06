@@ -112,6 +112,8 @@ puts four duties on the lead that mode A does in code:
   (`command-preauthorization`) so the smoke step doesn't re-prompt every loop.
 
 ## When all tasks complete (gate ④)
+
+0. **Answer any open change requests first.** Run `rein changes list --gate build --json`. Each one anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong — that anchor is the point. **Read and edit only the slice it names**; do not re-run the phase over the whole deliverable and regenerate text nobody complained about. Then `rein changes address <id> --note <what you changed>`: the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds gate ④ shut, and approving is what closes the addressed ones.
 1. **Generate the grounded review — the artefact gate ④ approves.** Run `rein review
    generate` (bound to the current HEAD). It runs a deterministic Coverage Manifest, a **blind**
    actual-behaviour extraction (never given the plan), the Expected/Actual comparison, and the
@@ -156,8 +158,10 @@ puts four duties on the lead that mode A does in code:
 5. Once a human approves (acknowledging the `approval-presentation`, or an explicit "approve")
    — **running the next command (`/verify`) is not itself approval** — ask the human to run
    `rein approve build` **themselves**. It checks readiness, prints the digests the approval
-   would cover, and asks for the gate name typed at their terminal, recording the confirmation
-   in one receipt. Never edit a gate line yourself and
+   would cover plus any change requests it would close, and asks `[y/N]` at their terminal
+   (default no). They may instead approve in `rein ui`, whose write session comes from the launch
+   link printed to the terminal it runs in; the receipt records which channel confirmed.
+   Declining is recorded as a change request, never lost. Never edit a gate line yourself and
    never run the approve command for them (mechanics: AGENTS.md "Gate rules" 2). Point to
    "next is `/verify`", and after committing the gate's deliverables, suggest
    `session-compaction` (pre-compact check: `.rein/prompts/rules/gate-workflow.md` "Context budget").

@@ -31,22 +31,23 @@ executors:
 # A fresh repository ships `kind: host`, which is NOT policy-compliant: anything that runs
 # repository-derived code, tests, or build scripts must run under an `oci` profile regardless
 # of risk (a test file is code an agent wrote, and it runs with your credentials).
-# `rein doctor` reports this as a FAIL until you fix it. `--profile` names a packaged
-# Containerfile, NOT a profile above — the `quality` profile below builds from `python`, which is
-# what its `containerfile:` key says; `rein oci list` prints the whole set:
+# `rein doctor` reports this as a FAIL until you fix it, and `rein init` offers to do it for you.
 #
 #     rein oci build --all --write-config   # build all three and pin them here
 #
-# That is the whole setup. It builds each packaged Containerfile, writes the resulting digests
-# into the profiles below, and flips them to `kind: oci` — the step people used to do by copying
-# a digest out of the terminal by hand. To do it one at a time, or to pin by hand instead:
+# That is the whole setup, and it is what `rein next`, `rein doctor` and the dashboard all
+# recommend. It needs docker or podman on PATH; it builds each packaged Containerfile, writes the
+# resulting digests into the profiles below, flips them to `kind: oci`, and verifies the pins
+# resolve. To do it one at a time instead — `--profile` names a packaged Containerfile, NOT a
+# profile below, so the `quality` profile builds from `python`, which is what its
+# `containerfile:` key says (`rein oci list` prints the whole set):
 #
-#     rein oci build --profile python       # the quality-gate image
-#     rein oci build --profile reviewer
-#     rein oci build --profile implementer
+#     rein oci build --profile python --write-config       # the quality-gate image
+#     rein oci build --profile reviewer --write-config
+#     rein oci build --profile implementer --write-config
 #
-# Each prints a digest to paste into the matching profile. The pinned digest — never a tag — is
-# what stops the environment a review ran in from changing after that review was approved.
+# Without `--write-config` each prints a digest to paste in by hand. The pinned digest — never a
+# tag — is what stops the environment a review ran in from changing after that review was approved.
 #
 # Pinning is not the whole job: the image has to be able to RUN the step you point at it. The
 # packaged images carry python, uv and pytest and run with `--network none`, so a quality-gate

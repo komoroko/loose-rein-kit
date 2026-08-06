@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import logging
 import re
 import threading
 from collections.abc import Iterator
@@ -94,13 +95,39 @@ def server(repo: Path) -> Iterator[ui.DashboardServer]:
         srv.server_close()
 
 
+def session_for(srv: ui.DashboardServer) -> str:
+    """Redeem this server's launch secret, exactly as opening the printed link does.
+
+    Cached per server because the secret is single-use: a test making two writes is one browser
+    holding one session, not two redemptions.
+    """
+    cached = getattr(srv, "_test_session", None)
+    if cached is None:
+        cached = srv.redeem(srv.launch_secret)
+        assert cached, "the launch secret must be redeemable once"
+        srv._test_session = cached  # type: ignore[attr-defined]
+    return cached
+
+
+def write(srv: ui.DashboardServer, path: str, body: dict[str, object] | None = None) -> tuple[int, bytes]:
+    """An authorized POST: the write session plus the CSRF token, as the real page sends them."""
+    return _request(srv, "POST", path, body, token=srv.token, session=session_for(srv))
+
+
 def _request(
-    srv: ui.DashboardServer, method: str, path: str, body: dict[str, object] | None = None, token: str | None = None
+    srv: ui.DashboardServer,
+    method: str,
+    path: str,
+    body: dict[str, object] | None = None,
+    token: str | None = None,
+    session: str | None = None,
 ) -> tuple[int, bytes]:
     conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
     headers = {"Content-Type": "application/json"}
     if token is not None:
         headers["X-Rein-Token"] = token
+    if session:
+        headers["Cookie"] = f"{ui.SESSION_COOKIE}={session}"
     conn.request(method, path, json.dumps(body) if body is not None else None, headers)
     res = conn.getresponse()
     data = res.read()
@@ -123,14 +150,18 @@ def test_get_status_returns_next_command(server: ui.DashboardServer) -> None:
     status, data = _request(server, "GET", "/api/status")
     assert status == 200
     payload = json.loads(data)
-    assert payload["next"]["command"] == "/req" and payload["project"] == "demo"
+    # This fixture stands at gate ① with nothing mechanical in the way, so the recommendation is
+    # the human's decision — not "/req" again. The dashboard's waiting-state signals key off it.
+    assert payload["next"]["command"] == "rein approve requirements"
+    assert payload["decision"]["waiting_on_human"] is True
+    assert payload["project"] == "demo"
 
 
 def test_get_page_is_offline_self_contained(server: ui.DashboardServer) -> None:
-    status, data = _request(server, "GET", "/")
+    status, data = _request(server, "GET", "/", session=session_for(server))
     page = data.decode("utf-8")
     assert status == 200 and "Loose Rein" in page
-    assert server.token in page  # the POST token is delivered only via the page
+    assert server.token in page  # the POST token reaches a page that holds a write session
     # Offline canary across the page AND every allowlisted asset: no external reference anywhere.
     assets = {name: _request(server, "GET", f"/assets/{name}")[1].decode("utf-8") for name in ui._ASSET_TYPES}
     for name, text in {"index.html": page, **assets}.items():
@@ -329,43 +360,160 @@ def test_post_without_token_is_403(server: ui.DashboardServer) -> None:
 
 
 def test_post_unknown_action_is_400(server: ui.DashboardServer) -> None:
-    status, _ = _request(server, "POST", "/api/run", {"action": "nope", "params": {}}, token=server.token)
+    status, _ = write(server, "/api/run", {"action": "nope", "params": {}})
     assert status == 400
 
 
-def test_post_gate_approve_returns_a_request_and_opens_nothing(server: ui.DashboardServer, repo: Path) -> None:
-    """Clicking in a localhost UI is not authentication: the browser proves nothing about who
-    is at the keyboard, so this endpoint only reports readiness and hands back the command the
-    human runs in their own terminal (plan §7.1)."""
+# --- gate approval, and where the authority to record it comes from ------------------
+#
+# The doctrine this replaces said "a localhost click is not authentication" while embedding the
+# CSRF token in the served page — so anything able to `curl` that page could write, including the
+# gate-④ human-review writes the gate requires. The correction is not about proving a human,
+# which nothing here can do. It is about the channel the capability travels over: the launch link
+# is printed to the terminal `rein ui` runs in, and a captured subprocess cannot read that.
+
+
+def _readiness(srv: ui.DashboardServer, gate: str) -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads(_request(srv, "GET", f"/api/gate/{gate}/readiness")[1])
+    return payload
+
+
+def test_a_gate_is_approved_from_the_pane_that_showed_it(server: ui.DashboardServer, repo: Path) -> None:
     from rein import repo as repo_mod
     from rein import store as store_mod
 
-    status, body = _request(server, "POST", "/api/gate/approve", {"gate": "requirements"}, token=server.token)
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["gate"] == "requirements"
-    assert "type the gate name" in " ".join(payload["next"])
+    ready = _readiness(server, "requirements")
+    assert ready["ok"] and ready["covers"]
 
+    status, body = write(server, "/api/gate/approve", {"gate": "requirements", "covers": ready["covers"]})
+    assert status == 200, body
+    approval_id = json.loads(body)["approval_id"]
+
+    state = store_mod.Store(repo_mod.Repo(repo)).read_state()
+    assert state is not None and state.gate_status("requirements") == "approved"
+    receipt = state.gate_receipt("requirements") or {}
+    assert receipt["approval_id"] == approval_id
+    # The receipt says which channel carried the confirmation rather than flattening both into an
+    # unqualified "approved" — neither is proof of a human, and a later reader must see which.
+    assert receipt["confirmed_via"] == "ui-session"
+
+
+def test_an_approval_that_does_not_name_what_it_covers_is_refused(server: ui.DashboardServer) -> None:
+    assert write(server, "/api/gate/approve", {"gate": "requirements"})[0] == 400
+
+
+def test_an_approval_is_refused_when_the_repository_moved_under_it(server: ui.DashboardServer, repo: Path) -> None:
+    """The digests on screen are what the approval binds. If they moved while the human was
+    reading them, recording would cover bytes nobody saw."""
+    ready = _readiness(server, "requirements")
+    stale = {**ready["covers"], "plan_digest": "sha256:" + "0" * 64}
+    status, body = write(server, "/api/gate/approve", {"gate": "requirements", "covers": stale})
+    assert status == 409
+    assert "moved while this gate was on screen" in json.loads(body)["error"]
+
+
+def test_a_blocked_gate_is_refused_rather_than_recorded(server: ui.DashboardServer, repo: Path) -> None:
+    from rein import repo as repo_mod
+    from rein import store as store_mod
+
+    ready = _readiness(server, "build")
+    assert ready["ok"] is False and ready["blockers"] and ready["covers"] is None
+
+    status, _ = write(server, "/api/gate/approve", {"gate": "build", "covers": {}})
+    assert status == 409
+    state = store_mod.Store(repo_mod.Repo(repo)).read_state()
+    assert state is not None and state.gate_status("build") == "pending"
+
+
+def test_fetching_the_page_yields_no_way_to_write(server: ui.DashboardServer, repo: Path) -> None:
+    """The two-curl attack, and the whole reason the in-page token was never authority: any local
+    process could fetch `/`, read the token out of it, and post."""
+    from rein import repo as repo_mod
+    from rein import store as store_mod
+
+    page = _request(server, "GET", "/")[1].decode("utf-8")
+    assert server.token not in page
+    assert "window.READ_ONLY = true" in page
+
+    ready = _readiness(server, "requirements")
+    status, _ = _request(
+        server, "POST", "/api/gate/approve", {"gate": "requirements", "covers": ready["covers"]}, token=server.token
+    )
+    assert status == 403
     state = store_mod.Store(repo_mod.Repo(repo)).read_state()
     assert state is not None and state.gate_status("requirements") == "pending"
 
 
-def test_post_gate_approve_reports_blockers_rather_than_proceeding(
-    server: ui.DashboardServer,
+def test_the_session_and_the_token_are_both_required(server: ui.DashboardServer) -> None:
+    body: dict[str, object] = {"gate": "requirements", "covers": {}}
+    assert _request(server, "POST", "/api/gate/approve", body, session=session_for(server))[0] == 403
+    assert _request(server, "POST", "/api/gate/approve", body, token=server.token)[0] == 403
+
+
+def test_the_launch_secret_works_once(server: ui.DashboardServer) -> None:
+    """Single use is the detection property: if something else redeems it first, the human's
+    browser lands on a read-only page instead of their dashboard."""
+    assert server.redeem(server.launch_secret)
+    assert server.redeem(server.launch_secret) is None
+
+
+def test_a_wrong_launch_secret_grants_nothing(server: ui.DashboardServer) -> None:
+    assert server.redeem("not-the-secret") is None
+    assert server.has_session("invented") is False
+
+
+def test_the_launch_link_is_what_puts_the_token_in_the_page(server: ui.DashboardServer) -> None:
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+    conn.request("GET", f"/?k={server.launch_secret}")
+    res = conn.getresponse()
+    page = res.read().decode("utf-8")
+    cookie = res.getheader("Set-Cookie") or ""
+    conn.close()
+    assert server.token in page and "window.READ_ONLY = false" in page
+    # HttpOnly so page scripts cannot read it back out; SameSite=Strict so no other origin rides it.
+    assert ui.SESSION_COOKIE in cookie and "HttpOnly" in cookie and "SameSite=Strict" in cookie
+
+
+def test_reloading_the_launch_url_keeps_the_session_and_raises_no_alarm(
+    server: ui.DashboardServer, caplog: pytest.LogCaptureFixture
 ) -> None:
-    status, body = _request(server, "POST", "/api/gate/approve", {"gate": "build"}, token=server.token)
-    assert status == 200
-    payload = json.loads(body)
-    assert payload["ok"] is False
-    assert payload["blockers"]
-    assert payload["covers"] is None
+    """The launch URL stays in the address bar, so every reload re-presents a spent secret.
+
+    Two things have to hold, and the second is what the warning is *for*: the reload must still be
+    writable (the cookie is the authority, not the query string), and it must stay quiet. A theft
+    alarm that fires on F5 is one the human stops reading, which costs the detection property the
+    single-use secret exists to provide.
+    """
+    session = session_for(server)  # the browser's first visit, redeeming the link
+    with caplog.at_level(logging.WARNING, logger="rein.ui"):
+        page = _request(server, "GET", f"/?k={server.launch_secret}", session=session)[1].decode("utf-8")
+    assert server.token in page and "window.READ_ONLY = false" in page
+    assert "opened the dashboard first" not in caplog.text
+
+    # Without the session it is the real anomaly — someone holding a spent secret and nothing else.
+    with caplog.at_level(logging.WARNING, logger="rein.ui"):
+        page = _request(server, "GET", f"/?k={server.launch_secret}")[1].decode("utf-8")
+    assert server.token not in page and "window.READ_ONLY = true" in page
+    assert "opened the dashboard first" in caplog.text
+
+
+def test_a_read_only_server_hands_out_no_session(repo: Path) -> None:
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=repo, read_only=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        page = _request(srv, "GET", f"/?k={srv.launch_secret}")[1].decode("utf-8")
+        assert srv.token not in page
+        assert "window.READ_ONLY = true" in page
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 def test_read_only_server_refuses_posts(repo: Path) -> None:
     srv = ui.DashboardServer(("127.0.0.1", 0), root=repo, read_only=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        status, _ = _request(srv, "POST", "/api/gate/approve", {"gate": "requirements"}, token=srv.token)
+        status, _ = write(srv, "/api/gate/approve", {"gate": "requirements"})
         assert status == 405
         assert _request(srv, "GET", "/api/status")[0] == 200  # reads still work
     finally:
@@ -376,7 +524,7 @@ def test_read_only_server_refuses_posts(repo: Path) -> None:
 def test_main_once_prints_parseable_json(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert ui.main(["--once", "--root", str(repo)]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["next"]["command"] == "/req"
+    assert payload["next"]["command"] == "rein approve requirements"
 
 
 def test_main_refuses_non_loopback_bind_with_writes_enabled(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -621,7 +769,7 @@ def test_the_decision_stage_withholds_evidence_until_the_card_is_answered(review
 
     digest = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
     body = {"challenge_id": "DC-001", "choice": "B", "confidence": "high", "machine_digest": digest}
-    status, data = _request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)
+    status, data = write(review_server, "/api/review/challenge", body)
     assert status == 200 and json.loads(data)["ok"] is True
 
     after = json.loads(_request(review_server, "GET", "/api/review/stage/decision")[1])
@@ -632,7 +780,7 @@ def test_a_human_answer_leaves_the_machine_digest_unchanged(review_server: ui.Da
     # E2E-09: answering a challenge moves the human half, never the machine half.
     before = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
     body = {"challenge_id": "DC-001", "choice": "B", "confidence": "low", "machine_digest": before}
-    data = json.loads(_request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)[1])
+    data = json.loads(write(review_server, "/api/review/challenge", body)[1])
     assert data["machine_digest"] == before
 
 
@@ -640,7 +788,7 @@ def test_a_stale_machine_digest_is_refused_with_409(review_server: ui.DashboardS
     # E2E-08: an answer written against a machine review that has since changed is a conflict.
     stale = "sha256:" + "0" * 64
     body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "confidence": "low", "machine_digest": stale}
-    status, _ = _request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)
+    status, _ = write(review_server, "/api/review/challenge", body)
     assert status == 409
 
 
@@ -649,7 +797,7 @@ def test_an_answer_naming_no_machine_review_is_refused(review_server: ui.Dashboa
     an empty string, so simply omitting the field merged the answer into whatever machine review
     happened to be on disk — the E2E-08 failure, reachable by leaving a field out."""
     body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "confidence": "low"}
-    status, data = _request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)
+    status, data = write(review_server, "/api/review/challenge", body)
     assert status == 400 and b"machine_digest is required" in data
 
 
@@ -658,7 +806,7 @@ def test_an_answer_without_a_confidence_is_refused(review_server: ui.DashboardSe
     whichever fabrication won. How sure the reviewer was is theirs to state or not state at all."""
     digest = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
     body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "machine_digest": digest}
-    status, data = _request(review_server, "POST", "/api/review/challenge", body, token=review_server.token)
+    status, data = write(review_server, "/api/review/challenge", body)
     assert status == 400 and b"confidence is required" in data
 
 
@@ -671,7 +819,7 @@ def _answer_challenge(server: ui.DashboardServer) -> str:
         "confidence": "medium",
         "machine_digest": digest,
     }
-    assert _request(server, "POST", "/api/review/challenge", body, token=server.token)[0] == 200
+    assert write(server, "/api/review/challenge", body)[0] == 200
     return digest
 
 
@@ -685,7 +833,7 @@ def test_a_decision_card_can_be_answered_from_the_pane(review_server: ui.Dashboa
         "reason": "the retry key is not threaded through",
         "machine_digest": digest,
     }
-    status, data = _request(review_server, "POST", "/api/review/decision", body, token=review_server.token)
+    status, data = write(review_server, "/api/review/decision", body)
     assert status == 200, data
     stage = json.loads(_request(review_server, "GET", "/api/review/stage/decision")[1])
     assert stage["decisions"] == [
@@ -705,7 +853,7 @@ def test_an_unanswered_high_risk_card_blocks_the_freeze(review_server: ui.Dashbo
 def test_a_decision_without_a_confidence_is_refused(review_server: ui.DashboardServer) -> None:
     digest = _answer_challenge(review_server)
     body: dict[str, object] = {"card_id": "DC-001", "choice": "A", "machine_digest": digest}
-    status, data = _request(review_server, "POST", "/api/review/decision", body, token=review_server.token)
+    status, data = write(review_server, "/api/review/decision", body)
     assert status == 400 and b"confidence is required" in data
 
 
@@ -772,7 +920,7 @@ def test_get_projects_lists_registry_with_active(multi_server: tuple[ui.Dashboar
 def test_status_follows_the_active_project(multi_server: tuple[ui.DashboardServer, dict[str, Path]]) -> None:
     srv, _ = multi_server
     assert json.loads(_request(srv, "GET", "/api/status")[1])["project"] == "alpha"
-    status, _ = _request(srv, "POST", "/api/project/select", {"name": "beta"}, token=srv.token)
+    status, _ = write(srv, "/api/project/select", {"name": "beta"})
     assert status == 200
     # the switch persisted, so /api/status now reports the beta repo
     assert json.loads(_request(srv, "GET", "/api/status")[1])["project"] == "beta"
@@ -781,7 +929,7 @@ def test_status_follows_the_active_project(multi_server: tuple[ui.DashboardServe
 
 def test_select_unknown_project_is_400(multi_server: tuple[ui.DashboardServer, dict[str, Path]]) -> None:
     srv, _ = multi_server
-    status, _ = _request(srv, "POST", "/api/project/select", {"name": "ghost"}, token=srv.token)
+    status, _ = write(srv, "/api/project/select", {"name": "ghost"})
     assert status == 400
 
 
@@ -795,7 +943,7 @@ def test_pinned_server_reports_single_project_and_refuses_select(server: ui.Dash
     # The `server` fixture builds a registry_path-less (pinned) server from a single repo.
     payload = json.loads(_request(server, "GET", "/api/projects")[1])
     assert len(payload["projects"]) == 1 and payload["projects"][0]["active"] is True
-    status, _ = _request(server, "POST", "/api/project/select", {"name": "whatever"}, token=server.token)
+    status, _ = write(server, "/api/project/select", {"name": "whatever"})
     assert status == 409  # no registry backs a pinned server
 
 
@@ -803,3 +951,36 @@ def test_main_once_does_not_touch_the_registry(repo: Path) -> None:
     # --once is a scripting/inspection path: it prints status and must not mutate user-global state.
     assert ui.main(["--once", "--root", str(repo)]) == 0
     assert not registry.registry_path().exists()
+
+
+# --- requesting changes: the other direction of the same footer ---------------------
+
+
+def test_the_pane_can_record_a_change_request(server: ui.DashboardServer, repo: Path) -> None:
+    """The line this dashboard draws is about direction, not authentication: a change request only
+    ever narrows what happens next, so it rides the same session every write here carries — while
+    approving, which widens, is what the launch-link handover exists to protect."""
+    from rein import approve
+    from rein import repo as repo_mod
+
+    status, body = write(
+        server,
+        "/api/changes",
+        {"gate": "requirements", "target": "docs/10-requirements.md#R-3", "reason": "unmeasurable"},
+    )
+    assert status == 200
+    assert json.loads(body)["id"].startswith("CR-REQUIREMENTS-")
+
+    blockers = approve.readiness(repo_mod.Repo(repo), "requirements")
+    assert any("open change request" in b for b in blockers)
+
+
+def test_a_change_request_still_needs_the_session(server: ui.DashboardServer) -> None:
+    body: dict[str, object] = {"gate": "requirements", "target": "R-3", "reason": "x"}
+    assert _request(server, "POST", "/api/changes", body, token=server.token)[0] == 403
+
+
+def test_an_unanchored_change_request_is_refused(server: ui.DashboardServer) -> None:
+    status, body = write(server, "/api/changes", {"gate": "requirements", "target": "", "reason": "vague"})
+    assert status == 400
+    assert "needs a --target" in json.loads(body)["error"]
