@@ -291,6 +291,22 @@ def test_the_tasks_block_is_entirely_derived(tmp_path: Path) -> None:
     assert [t["id"] for t in tasks["frontier"]] == ["T-002"]  # type: ignore[union-attr]
 
 
+def test_a_done_task_carries_the_commit_that_landed_it(tmp_path: Path) -> None:
+    """The board's "done" is otherwise a word with nothing behind it: the hash is what makes it
+    something a reviewer can go and read."""
+    state = make_state(tasks={"T-001": "done", "T-002": "todo"})
+    state["tasks"]["T-001"]["completed_commit"] = "f" * 40
+    seed_repo(
+        tmp_path,
+        plan=make_plan(tasks=[make_task("T-001"), make_task("T-002", kind="parallel", blocked_by=["T-001"])]),
+        state=state,
+    )
+    rows = status_api.collect_status(repo_mod.Repo(tmp_path))["tasks"]["rows"]  # type: ignore[index]
+    by_id = {r["id"]: r for r in rows}  # type: ignore[union-attr]
+    assert by_id["T-001"]["commit"] == "f" * 40
+    assert by_id["T-002"]["commit"] == ""  # nothing landed it, so the row says nothing
+
+
 # --- the pending queue --------------------------------------------------------
 #
 # The recommendation is first-match, so it stops at one row and cannot answer "how much is

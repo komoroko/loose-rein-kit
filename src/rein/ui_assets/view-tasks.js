@@ -3,6 +3,16 @@
 import { chip, esc, onTaskClick, taskAttr, taskById } from "/assets/api.js";
 
 // ---- dependency graph as inline SVG (no external namespace literal → stays offline-safe) ----
+
+// One arrowhead per edge colour. A marker does not inherit the path's stroke, so the two are
+// separate defs filled from app.css; `orient="auto"` turns them along the curve's end tangent.
+const ARROW_DEFS =
+  '<defs>' +
+  ['dagarw', 'dagarwc'].map(id =>
+    '<marker id="' + id + '" viewBox="0 0 6 6" refX="6" refY="3" markerWidth="6" markerHeight="6" ' +
+    'orient="auto"><path d="M0 0 L6 3 L0 6 z"/></marker>').join("") +
+  '</defs>';
+
 function buildDag(t, byId) {
   const crit = new Set(t.critical_path);
   const pos = {};
@@ -15,11 +25,13 @@ function buildDag(t, byId) {
   let edges = "", nodes = "";
   t.rows.forEach(tk => (tk.blocked_by || []).forEach(dep => {
     if (!pos[dep] || !pos[tk.id]) return;
-    const x1 = X(dep) + nodeW, y1 = Y(dep) + nodeH / 2, x2 = X(tk.id), y2 = Y(tk.id) + nodeH / 2;
+    // The edge stops 3px short of the node so the arrowhead points *at* the border instead of
+    // being buried under it. Direction is the whole point of the head: dep → dependent.
+    const x1 = X(dep) + nodeW, y1 = Y(dep) + nodeH / 2, x2 = X(tk.id) - 3, y2 = Y(tk.id) + nodeH / 2;
     const cx = (x1 + x2) / 2;
     const c = (crit.has(dep) && crit.has(tk.id)) ? " crit" : "";
-    edges += '<path class="edge' + c + '" d="M' + x1 + " " + y1 + " C" + cx + " " + y1 + " " +
-      cx + " " + y2 + " " + x2 + " " + y2 + '"/>';
+    edges += '<path class="edge' + c + '" marker-end="url(#dagarw' + (c ? "c" : "") + ')" d="M' +
+      x1 + " " + y1 + " C" + cx + " " + y1 + " " + cx + " " + y2 + " " + x2 + " " + y2 + '"/>';
   }));
   t.layers.forEach(ids => ids.forEach(id => {
     const tk = byId[id] || { status:"todo" };
@@ -30,7 +42,20 @@ function buildDag(t, byId) {
       '<text x="' + (x + 8) + '" y="' + (y + 21) + '">' + esc(id) + "</text></g>";
   }));
   return '<div class="scroll"><svg class="dag" viewBox="0 0 ' + W + " " + H + '" width="' + W +
-    '" height="' + H + '">' + edges + nodes + "</svg></div>";
+    '" height="' + H + '">' + ARROW_DEFS + edges + nodes + "</svg></div>";
+}
+
+// What the graph's geometry means. The status colours are already keyed by the pills above it, so
+// the legend covers only what nothing else states: the axis, the arrows, and the teal.
+function graphLegend() {
+  const arrow = c =>
+    '<svg width="26" height="8" viewBox="0 0 26 8" aria-hidden="true">' +
+    '<path class="lgline' + c + '" d="M0 4 H19"/><path class="lghead' + c + '" d="M19 1 L25 4 L19 7 z"/></svg>';
+  return '<div class="legend">' +
+    '<span class="li">columns = execution layers (L0 → L1 → …)</span>' +
+    '<span class="li">' + arrow("") + "arrow = blocked_by: the tail must finish first</span>" +
+    '<span class="li">' + arrow(" crit") + "critical path</span>" +
+    "</div>";
 }
 
 export function showTaskDetail(id) {
@@ -39,8 +64,22 @@ export function showTaskDetail(id) {
   // Field names are `_tasks_block`'s rows verbatim: a task answers for `claim_ids`. The older
   // `req`/`test` names never exist in the payload and would always print "—".
   const list = ids => (ids && ids.length ? esc(ids.join(", ")) : "—");
+  // Why a task is on its second attempt. A status alone reads the same whether the build reached
+  // it once or four times; the rest of the record (failure summary, retry budget) is state.yaml's.
+  const h = t.handoff || {};
+  const salvage = { pending: "work-in-progress preserved", restored: "previous work restored",
+                    conflict: "previous work conflicts — left on its branch" };
+  const parts = [h.failed_step ? "last failed at " + esc(h.failed_step) : "",
+                 salvage[h.salvage_state] || ""].filter(Boolean);
+  const handoff = parts.length ? "<dt>carried over</dt><div>" + parts.join(" · ") + "</div>" : "";
+  // The work-branch commit that landed the task, so "done" is something you can go and read.
+  const commit = t.commit
+    ? '<dt>landed in</dt><div class="mono">' + esc(String(t.commit).slice(0, 12)) + "</div>"
+    : "";
   el.innerHTML = '<div class="detail"><b class="mono">' + esc(t.id) + "</b> — " + esc(t.title) +
     "<dt>status / kind / risk</dt><div>" + esc(t.status) + " / " + esc(t.kind) + " / " + esc(t.risk) + "</div>" +
+    commit +
+    handoff +
     '<dt>blockedBy</dt><div class="mono">' + list(t.blocked_by) +
     '</div><dt>claims</dt><div class="mono">' + list(t.claim_ids) + "</div></div>";
 }
@@ -73,7 +112,9 @@ export function renderTasks(d) {
   const order = ["todo", "in-progress", "blocked", "needs-revision", "done"];
   const pills = '<div class="pills">' + order.map(s => '<span class="chip ' + s + '">' + esc(s) + " " +
     (t.counts[s] || 0) + "</span>").join("") + '<span class="pill">total ' + t.total + "</span></div>";
-  const graph = t.rows.length ? layersBar(t, byId) + buildDag(t, byId) : '<div class="empty">(no tasks)</div>';
+  const graph = t.rows.length
+    ? layersBar(t, byId) + graphLegend() + buildDag(t, byId)
+    : '<div class="empty">(no tasks)</div>';
   const frontier = t.frontier.length
     ? '<div class="scroll"><table><tr><th>ID</th><th>Title</th><th>Kind</th><th>fan-out</th></tr>' +
       t.frontier.map(f => '<tr class="clk"' + taskAttr(f.id) + '><td class="mono">' +

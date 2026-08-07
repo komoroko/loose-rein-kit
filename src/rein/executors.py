@@ -179,6 +179,14 @@ class OciExecutor(Executor):
         argv += ["--cpus", str(_int(profile.raw.get("cpu_count"), 2))]
         # An empty, ephemeral HOME: the container cannot read the host's ~/.ssh, ~/.aws, etc.
         argv += ["--env", "HOME=/tmp"]
+        # …which also means git has no config to find, and the repository it is handed is owned by
+        # whoever owns it on the host rather than by the container's fixed uid. Without this, git
+        # refuses the tree as "dubious ownership" and every gate step that shells out to it fails
+        # for a reason that has nothing to do with the code under test. Passed as config
+        # environment (not a file) so it cannot outlive the run or reach the host's git.
+        argv += ["--env", "GIT_CONFIG_COUNT=1"]
+        argv += ["--env", "GIT_CONFIG_KEY_0=safe.directory"]
+        argv += ["--env", "GIT_CONFIG_VALUE_0=*"]
 
         for host_path, container_path, mode in spec.mounts:
             readonly = "true" if mode == "ro" else "false"

@@ -192,6 +192,50 @@
           "note": {
             "type": "string",
             "maxLength": 1000
+          },
+          "handoff": {
+            "description": "What the next attempt at this task inherits from the interrupted one. The implementer's own agent session dies with the terminal that ran it, so this — not a session id — is what survives a crash: which gate step failed, what it said, how much retry budget is actually left, and where the preserved work-in-progress went.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "failed_step": {
+                "description": "The quality-gate step the previous attempt could not get green.",
+                "type": "string",
+                "maxLength": 64
+              },
+              "failure_summary": {
+                "description": "The tail of that step's output, as the next implementer is told it.",
+                "type": "string",
+                "maxLength": 4000
+              },
+              "retries_left": {
+                "description": "Remaining send-back budget per step name. Absent means the step's configured budget is untouched; restoring it is what stops a crash loop from getting infinite retries.",
+                "type": "object",
+                "maxProperties": 32,
+                "additionalProperties": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                }
+              },
+              "salvage_branch": {
+                "description": "The branch an interrupted run's unmerged work was preserved on.",
+                "type": "string",
+                "maxLength": 200
+              },
+              "salvage_state": {
+                "description": "What became of that branch on the next attempt: still waiting to be picked up, merged into the fresh worktree, or left behind because merging it conflicted.",
+                "enum": [
+                  "pending",
+                  "restored",
+                  "conflict"
+                ]
+              },
+              "updated_at": {
+                "type": "string",
+                "maxLength": 64
+              }
+            }
           }
         }
       }

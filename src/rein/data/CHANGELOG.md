@@ -4,6 +4,83 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.2.1] - 2026-08-07
+
+Two reported defects that made `rein build` unusable past its first stumble, one thing the board
+could not say, and one thing no run could tell the next one.
+
+### `rein build` no longer dies at the moment it has something to tell you (#5)
+
+`_escalate()` passed the escalation's *kind* (`blocked`, `no_runnable`, `gate_violation`,
+`integration_red`) straight through as the audit chain's *event type*. None are members of
+`EVENT_ORDER`, so **every escalation path raised out of `event_chain.make`** — a blocked leaf, a
+deadlocked frontier, a gate-guard violation, a red integration gate all killed the orchestrator
+with a traceback instead of recording the escalation and stopping. Escalations are now recorded
+as `knowledge_gap` (what `rein events --summary` lists as still open) with the kind in the
+detail, the same shape `set_task_status` already used for statuses. A batch escalation records
+one subject per task rather than one comma-joined string, which overran the schema's 64-character
+subject at eleven leaves.
+
+### A sandboxed gate step can find its git again (#6)
+
+A leaf runs in a `git worktree`, whose `.git` is a *file* naming the main repository's
+`.git/worktrees/<id>` by absolute host path. The OCI mount bound only the checkout, so that
+redirect pointed at nothing inside the container and **every gate step that shells out to git
+failed identically on every retry, for every leaf** — `pre-commit`, and so `gitleaks`, on a
+typical DoD. Never for a foundation task, which runs on the main checkout. The shared `.git` is
+now bound at its own host path so the existing redirect resolves, and the sandbox passes
+`safe.directory` so git does not refuse the tree it was handed as dubiously owned.
+
+### A build picked up in another terminal continues the work
+
+The implementer's agent session is process-local and dies with the terminal that ran it, and so
+did the failure log and the per-step retry budgets. An interrupted attempt's commits were
+preserved on a salvage branch — and nothing ever read them back. A restarted build therefore
+re-implemented the task from zero, on a fresh branch off the work branch, with a full retry
+allowance it had already spent. `state.yaml.tasks.<id>.handoff` now records which step failed,
+what it said, what budget is actually left, and where the preserved work went; the next attempt
+merges that work into its worktree (reporting a conflict rather than forcing it), inherits the
+remaining budget, and is told in its prompt that it is continuing rather than starting. Mode B's
+lead is asked to keep the same record by hand, since its subagent has no session to resume
+either.
+
+### The task board is readable again
+
+- A running task's DAG node rendered **black**: the stylesheet spelled the class `in_progress`
+  (Mermaid's spelling, where `-` cannot appear in an identifier) while the DOM carries the status
+  verbatim, `in-progress`. It matched no rule and fell through to the SVG default.
+- In the dark palette `done` was *darker* than `todo` and barely separable from the panel, so a
+  finished task read as an empty slot. Status now drives each node's stroke as well as its fill.
+- The layer bar's `done` segment was the only one filled with its border colour, so it never
+  matched its own chip. All five now fill the same way.
+- The graph's edges had no arrowheads and no key, so nothing said which end had to finish first,
+  that a column is an execution layer, or that the teal is the critical path. They do now.
+- A task's detail says what it carried over from an interrupted attempt, and which commit landed it.
+
+### Which commit closed T-NNN is recorded where the schema always said it was
+
+`state.yaml.tasks.<id>.completed_commit` has been in the schema, and named in `dag.py` as one of
+the fields a build mutates, since 0.1.0 — and no code ever wrote it. The commit lived instead in a
+**second** `task_completed` event appended beside the first, which cost twice:
+
+- Everything that counts events counted every finished task twice. `rein events --summary`
+  reported `task_completed×6` for three tasks, and the resume packet — read at the start of every
+  session — printed `tasks completed: 6 (T-001, T-002, T-003)`, a number contradicting the ids
+  next to it.
+- The hash was read from the work branch at logging time, which for a parallel batch is *after*
+  the whole batch has merged and the integration gate has run. All three leaves of a batch
+  recorded the same commit: the last merge, not the one that landed them.
+
+The commit is now written into the task entry and carried in the same event the status writes, one
+per completion, read at the moment that task's commit becomes HEAD. A task sent back for revision
+loses it, since it names the commit that *completed* the task. The dashboard shows it on the task.
+
+### Also
+
+- `rein dag --frontier` is named in `/build` mode B as *the* source of a batch. Mode A already
+  could not start a task with unfinished upstream work at any `max_parallel`; the invariant now
+  has a test, and the mode-B lead is told not to hand-pick what looks ready.
+
 ## [0.2.0] - 2026-08-06
 
 A correctness release, and one doctrine correction. Three reported defects and five rough edges,

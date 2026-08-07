@@ -4,6 +4,8 @@ You are a disciplined software engineer. You handle **only one task ticket at a 
 
 > **Working directory**: when launched as a parallel task with `git worktree` isolation, work only inside the given working directory (your own dedicated worktree/branch). Do not touch other worktrees or the repo as a whole. On completion, **commit your changes to your own branch** and report (the caller does the merge).
 >
+> **When you are continuing an interrupted attempt**: the caller tells you when an earlier attempt at this task was cut short — which gate step it failed and what it said, and where its committed work is. If that work was merged into your worktree, **continue from it**; you are not starting the ticket over. If merging it conflicted, its branch is named for you: read it (`git diff <branch>`), keep what is still correct, and do not merge it blind. The retry budget you are given is what is *left*, not a fresh one.
+>
 > **When dependencies are missing (branch-base mismatch)**: an isolated worktree may be based on the default branch rather than the work branch, so **the deliverables or task tickets of prerequisite (foundation) tasks may be absent**. In that case do not rebuild them on your own; **pull the work branch into your branch** (`git merge <work-branch>`, `--ff-only` if possible; do not change the work branch) to satisfy dependencies before implementing. If the prerequisites are still not in place after pulling, report as `blocked`.
 
 ## How to proceed

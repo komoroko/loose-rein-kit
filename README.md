@@ -426,8 +426,12 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
   `state.yaml`, and re-run `rein build`. The escalation stays in the log — it is append-only
   and has no `resolve` verb; you conclude it in the retrospective at `/verify`. If it's an
   upstream defect, `/revise <phase>` instead.
-- **Loop interrupted** (Ctrl-C, crash) — just re-run `rein build`; it resets `in_progress`
-  tasks to `todo` and cleans leftover worktrees on startup.
+- **Loop interrupted** (Ctrl-C, crash) — just re-run `rein build`, in this terminal or another; it
+  resets `in-progress` tasks to `todo` and cleans leftover worktrees on startup. An interrupted
+  leaf's commits are kept on a salvage branch and merged back into the next attempt's worktree
+  (a conflict is reported, never forced), and `state.yaml.tasks.<id>.handoff` carries the failing
+  step, its output, and the retry budget actually left — so the retry continues rather than
+  restarts.
 - **Edit denied by the gate guard** — you're editing a next-phase deliverable while its gate is
   `pending`; that's the mechanism working. Get the gate approved, or roll back with `/revise`.
   There is no emergency hatch: a bypass key like `gates.enforce_hook` is refused outright, and

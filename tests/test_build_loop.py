@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from rein import build_loop, common, dag, models
+from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import fake_git, make_config, make_plan, make_state, make_task, seed_repo
@@ -79,6 +80,50 @@ def test_the_batch_is_the_same_every_time() -> None:
     first = build_loop.plan_batch(graph, 2)
     for _ in range(5):
         assert build_loop.plan_batch(graph, 2) == first
+
+
+def deep_graph(done: tuple[str, ...] = ()) -> dag.Graph:
+    """Five layers, fanning out and back in, so a batch has plenty of room to get it wrong."""
+    edges = {
+        "T-001": [],
+        "T-002": ["T-001"], "T-003": ["T-001"], "T-004": ["T-001"],
+        "T-005": ["T-002"], "T-006": ["T-002", "T-003"], "T-007": ["T-004"],
+        "T-008": ["T-005", "T-006", "T-007"],
+        "T-009": ["T-008"], "T-010": ["T-008"],
+    }  # fmt: skip
+    return dag.Graph.from_tasks(
+        [
+            dag.Task(
+                tid,
+                f"task {tid}",
+                "foundation" if tid == "T-001" else "parallel",
+                tuple(deps),
+                "done" if tid in done else "todo",
+            )
+            for tid, deps in edges.items()
+        ]
+    )
+
+
+@pytest.mark.parametrize("max_parallel", [1, 3, 100])
+def test_a_batch_never_starts_a_task_whose_upstream_is_unfinished(max_parallel: int) -> None:
+    """The ordering guarantee, at any parallelism: raising max_parallel widens a batch, never
+    the set it may draw from. Consuming the graph layer by layer must never hand out a task with
+    an unfinished dependency, nor two tasks from the same batch that depend on each other."""
+    done: tuple[str, ...] = ()
+    graph = deep_graph()
+    for _ in range(len(graph.tasks) + 1):
+        batch = build_loop.plan_batch(deep_graph(done), max_parallel)
+        if batch is None:
+            break
+        _, tasks = batch
+        assert len(tasks) <= max_parallel
+        ids = {t.id for t in tasks}
+        for task in tasks:
+            assert set(task.blocked_by) <= set(done), f"{task.id} started before {task.blocked_by}"
+            assert not (set(task.blocked_by) & ids), f"{task.id} shares a batch with its own dependency"
+        done += tuple(ids)  # a batch is only ever marked done after it has passed its gate
+    assert set(done) == {t.id for t in graph.tasks}, "every task was reachable"
 
 
 # --- config ------------------------------------------------------------------
@@ -238,6 +283,64 @@ def test_a_status_change_lands_with_the_event_that_explains_it(tmp_path: Path) -
     state = store.read_state()
     assert state is not None and state.task_status["T-001"] == "done"
     assert [e.event for e in store.read_events()] == ["task_completed"]
+
+
+def test_the_commit_that_completed_a_task_is_recorded_once(tmp_path: Path) -> None:
+    """`completed_commit` was in the schema and written by nobody, and the commit lived in a
+    *second* `task_completed` event — so everything that counts events counted every finished task
+    twice (`rein events --summary`, the resume packet's "tasks completed: N")."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "done", commit="a" * 40)
+
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None and raw["tasks"]["T-001"]["completed_commit"] == "a" * 40
+    events = store_mod.Store(repo).read_events()
+    assert [e.event for e in events] == ["task_completed"]
+    assert events[0].detail["commit"] == "a" * 40
+
+
+def test_a_task_that_leaves_done_leaves_its_commit_behind(tmp_path: Path) -> None:
+    """The field says which commit *completed* the task. Sent back for revision, it has none —
+    and a stale hash beside `needs-revision` would name work the board no longer accepts."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "done", commit="b" * 40)
+    build_loop.set_task_status(repo, "T-001", "needs-revision")
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None and "completed_commit" not in raw["tasks"]["T-001"]
+
+
+@pytest.mark.parametrize("commit", ["", "dry-run", "HEAD", "Z" * 40, "abc"])
+def test_only_something_shaped_like_a_commit_is_written(tmp_path: Path, commit: str) -> None:
+    """`ws.head()` returns "" when git is unavailable. Writing that through would put a value in
+    state.yaml that `$defs/commit` rejects, and the next read of the SSOT would fail validation."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "done", commit=commit)
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None and "completed_commit" not in raw["tasks"]["T-001"]
+
+
+def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch's leaves merge one after another, so a hash read once at the end of the batch names
+    the last merge for every member of it — and an integration gate that commits a fix moves it
+    further still. Each leaf's commit is read at its own merge."""
+    loop = orchestrator(tmp_path)
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
+    heads = iter(["a" * 40, "b" * 40, "c" * 40, "d" * 40])
+    recorded: dict[str, str] = {}
+
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": recorded.update({tid: commit}))
+    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: (True, ""))
+    monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
+    monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
+    monkeypatch.setattr(loop, "_integration_gate", lambda merged: (True, ""))
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: next(heads))
+
+    loop._consume_parallel(tasks)
+
+    assert recorded == {"T-001": "a" * 40, "T-002": "b" * 40, "T-003": "c" * 40}
 
 
 def test_starting_a_task_counts_an_attempt(tmp_path: Path) -> None:
@@ -455,6 +558,82 @@ def test_a_previous_failure_is_passed_through_already_summarized() -> None:
     assert "assert 1 == 2" in prompt
 
 
+# --- handoff: what the next attempt inherits ----------------------------------
+
+
+def test_a_failed_attempt_leaves_the_next_one_something_to_go_on(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="check", failure_summary="E  ruff: unused import", retries_left={"check": 1}
+    )
+    handoff = build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001")
+    assert handoff["failed_step"] == "check"
+    assert handoff["failure_summary"] == "E  ruff: unused import"
+    assert handoff["retries_left"] == {"check": 1}
+    assert [e.event for e in store_mod.Store(loop.repo).read_events()] == ["task_failed"]
+
+
+def test_a_restarted_attempt_does_not_get_its_retry_budget_back(tmp_path: Path) -> None:
+    """The point of persisting the budget: a run killed mid-task and restarted came back with a
+    full allowance every time, so a task that can never pass could burn retries forever."""
+    loop = orchestrator(tmp_path)
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="check", failure_summary="still red", retries_left={"check": 0}
+    )
+    inherited = build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001")["retries_left"]
+    assert inherited == {"check": 0}
+
+
+def test_a_handoff_does_not_outlive_the_task_it_describes(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="test", failure_summary="red", retries_left={"test": 2}
+    )
+    build_loop.set_task_status(loop.repo, "T-001", "done")
+    assert build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001") == {}
+
+
+def test_a_handoff_survives_an_ordinary_status_change(tmp_path: Path) -> None:
+    """`in-progress` is written on every attempt, including the one recovering from a crash."""
+    loop = orchestrator(tmp_path)
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="test", failure_summary="red", retries_left={"test": 2}
+    )
+    build_loop.set_task_status(loop.repo, "T-001", "in-progress")
+    assert build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001")["failed_step"] == "test"
+
+
+def test_salvaged_work_is_recorded_where_the_next_attempt_looks(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    build_loop.record_salvage(loop.repo, "T-001", branch="build/x-T-001-salvage-1", salvage_state="pending")
+    handoff = build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001")
+    assert handoff["salvage_branch"] == "build/x-T-001-salvage-1"
+    assert handoff["salvage_state"] == "pending"
+
+
+def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path) -> None:
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    restored = build_prompts.implementer_prompt(
+        task,
+        "",
+        gate_cmds=["make test"],
+        has_baseline=False,
+        handoff={"salvage_branch": "b-T-001-salvage-1", "salvage_state": "restored"},
+    )
+    assert "already been merged" in restored and "b-T-001-salvage-1" in restored
+    conflicted = build_prompts.implementer_prompt(
+        task,
+        "",
+        gate_cmds=["make test"],
+        has_baseline=False,
+        handoff={"salvage_branch": "b-T-001-salvage-1", "salvage_state": "conflict"},
+    )
+    assert "conflicted" in conflicted
+    assert build_prompts.handoff_note({}) == ""  # a first attempt says nothing about a previous one
+
+
 # --- events -------------------------------------------------------------------
 
 
@@ -476,9 +655,35 @@ def test_a_dry_run_records_nothing(tmp_path: Path) -> None:
 
 def test_an_escalation_is_recorded_and_announced(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     loop = orchestrator(tmp_path)
-    loop._escalate("task_failed", "everything is on fire", task="T-001")
+    loop._escalate("blocked", "everything is on fire", task="T-001")
     assert "everything is on fire" in capsys.readouterr().err
-    assert [e.event for e in store_mod.Store(loop.repo).read_events()] == ["task_failed"]
+    events = store_mod.Store(loop.repo).read_events()
+    assert [e.event for e in events] == ["knowledge_gap"]
+    assert events[0].detail["kind"] == "blocked"
+
+
+@pytest.mark.parametrize("kind", ["gate_violation", "no_runnable", "blocked", "integration_red"])
+def test_every_escalation_kind_reaches_the_chain(tmp_path: Path, kind: str) -> None:
+    """The kind is the escalation's vocabulary, not the chain's.
+
+    Passing it through as the event type made `event_chain.make` raise on all four, so the loop
+    died with a traceback at exactly the moment it had something to tell a human.
+    """
+    loop = orchestrator(tmp_path)
+    loop._escalate(kind, f"{kind} happened", task="T-001")
+    events = store_mod.Store(loop.repo).read_events()
+    assert [e.event for e in events] == ["knowledge_gap"]
+    assert events[0].event in events_mod.ATTENTION_EVENTS  # `rein events --summary` lists it as open
+    assert events[0].detail["kind"] == kind
+
+
+def test_a_batch_escalation_records_one_subject_per_task(tmp_path: Path) -> None:
+    """A comma-joined batch of ids overruns the schema's 64-character subject at eleven leaves."""
+    loop = orchestrator(tmp_path)
+    tasks = [dag.Task(f"T-{n:03d}", f"task {n}", "parallel") for n in range(1, 13)]
+    loop._escalate_batch("integration_red", "the merged tree is red", tasks)
+    events = store_mod.Store(loop.repo).read_events()
+    assert events[0].subject_ids == tuple(t.id for t in tasks)
 
 
 def test_there_is_no_resolve_verb() -> None:
@@ -558,6 +763,61 @@ def test_mount_repo_read_only_is_honoured(tmp_path: Path) -> None:
         },
     )
     assert loop._mounts_for(profile, cwd="/repo")[0][2] == "ro"
+
+
+def sandbox_profile(**extra: object) -> models.ExecutorProfile:
+    base = {"kind": "oci", "image": "localhost/x@sha256:" + "a" * 64, "network_profile": "none"}
+    return models.ExecutorProfile("quality", {**base, **extra})
+
+
+def make_linked_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """A worktree's shape on disk: `.git` is a *file* redirecting to the main repo's `.git`."""
+    main_git = tmp_path / "main" / ".git"
+    git_dir = main_git / "worktrees" / "T-001"
+    git_dir.mkdir(parents=True)
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+    checkout = tmp_path / "main" / ".worktrees" / "T-001"
+    checkout.mkdir(parents=True)
+    (checkout / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    return checkout, main_git
+
+
+def test_a_sandboxed_leaf_can_resolve_its_worktree_git(tmp_path: Path) -> None:
+    """A worktree's `.git` file names the main repo's `.git` by absolute host path.
+
+    Mounting only the checkout left that redirect pointing at nothing inside the container, so
+    every gate step that shells out to git failed identically on every retry — for every leaf,
+    and never for a foundation task. The shared `.git` has to be there under its own path.
+    """
+    checkout, main_git = make_linked_worktree(tmp_path)
+    loop = orchestrator(tmp_path / "repo")
+    mounts = loop._mounts_for(sandbox_profile(), cwd=str(checkout))
+    assert mounts == ((checkout, "/work", "rw"), (main_git, str(main_git), "rw"))
+
+
+def test_an_ordinary_checkout_mounts_only_itself(tmp_path: Path) -> None:
+    """`.git` is a real directory there — already inside the mount, so nothing is added."""
+    root = tmp_path / "plain"
+    (root / ".git").mkdir(parents=True)
+    loop = orchestrator(tmp_path / "repo")
+    assert loop._mounts_for(sandbox_profile(), cwd=str(root)) == ((root, "/work", "rw"),)
+
+
+def test_the_shared_git_follows_the_profile_mount_mode(tmp_path: Path) -> None:
+    checkout, main_git = make_linked_worktree(tmp_path)
+    loop = orchestrator(tmp_path / "repo")
+    mounts = loop._mounts_for(sandbox_profile(mount_repo="read_only"), cwd=str(checkout))
+    assert [m[2] for m in mounts] == ["ro", "ro"]
+    assert loop._mounts_for(sandbox_profile(mount_repo="none"), cwd=str(checkout)) == ()
+
+
+def test_a_malformed_worktree_marker_degrades_to_the_old_mount(tmp_path: Path) -> None:
+    """Unreadable metadata reads as "not a worktree" rather than crashing the gate step."""
+    checkout = tmp_path / "broken"
+    checkout.mkdir()
+    (checkout / ".git").write_text("this is not a gitdir pointer\n", encoding="utf-8")
+    loop = orchestrator(tmp_path / "repo")
+    assert loop._mounts_for(sandbox_profile(), cwd=str(checkout)) == ((checkout, "/work", "rw"),)
 
 
 def test_a_host_profile_still_runs_where_it_was_told_to(tmp_path: Path) -> None:

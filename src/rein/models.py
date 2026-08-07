@@ -68,6 +68,10 @@ TASK_KIND_ORDER: tuple[str, ...] = ("foundation", "parallel", "integration")
 TASK_KIND_VALUES = frozenset(TASK_KIND_ORDER)
 TASK_STATUS_ORDER: tuple[str, ...] = ("todo", "in-progress", "blocked", "needs-revision", "done")
 TASK_STATUS_VALUES = frozenset(TASK_STATUS_ORDER)
+# What became of an interrupted attempt's preserved work by the time the next one starts: still
+# waiting to be picked up, merged into the fresh worktree, or left on its branch because merging
+# it conflicted (see state.schema.json `handoff`).
+SALVAGE_STATE_VALUES = frozenset({"pending", "restored", "conflict"})
 
 EXECUTOR_VALUES = frozenset({"oci", "host"})
 
