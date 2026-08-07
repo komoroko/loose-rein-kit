@@ -4,7 +4,7 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
-## [Unreleased]
+## [0.2.1] - 2026-08-07
 
 Two reported defects that made `rein build` unusable past its first stumble, one thing the board
 could not say, and one thing no run could tell the next one.
