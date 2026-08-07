@@ -72,8 +72,13 @@ export function showTaskDetail(id) {
   const parts = [h.failed_step ? "last failed at " + esc(h.failed_step) : "",
                  salvage[h.salvage_state] || ""].filter(Boolean);
   const handoff = parts.length ? "<dt>carried over</dt><div>" + parts.join(" · ") + "</div>" : "";
+  // The work-branch commit that landed the task, so "done" is something you can go and read.
+  const commit = t.commit
+    ? '<dt>landed in</dt><div class="mono">' + esc(String(t.commit).slice(0, 12)) + "</div>"
+    : "";
   el.innerHTML = '<div class="detail"><b class="mono">' + esc(t.id) + "</b> — " + esc(t.title) +
     "<dt>status / kind / risk</dt><div>" + esc(t.status) + " / " + esc(t.kind) + " / " + esc(t.risk) + "</div>" +
+    commit +
     handoff +
     '<dt>blockedBy</dt><div class="mono">' + list(t.blocked_by) +
     '</div><dt>claims</dt><div class="mono">' + list(t.claim_ids) + "</div></div>";

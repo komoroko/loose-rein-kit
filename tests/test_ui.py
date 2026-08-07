@@ -271,7 +271,7 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
     # view-tasks.js: buildDag/layersBar/renderTasks; view-overview.js: renderAttention
     for key in ("rows", "counts", "total", "layers", "critical_path", "frontier"):
         assert key in tasks, f"status.tasks.{key}"
-    for key in ("id", "title", "kind", "status", "risk", "blocked_by", "claim_ids"):
+    for key in ("id", "title", "kind", "status", "risk", "blocked_by", "claim_ids", "handoff", "commit"):
         assert key in tasks["rows"][0], f"status.tasks.rows[].{key}"
     # the pills and the layer bar index counts by the status vocabulary itself
     assert set(tasks["counts"]) == set(models.TASK_STATUS_ORDER)

@@ -41,6 +41,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import uuid
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -259,43 +260,59 @@ def build_lock(repo: repo_mod.Repo) -> store_mod.FileLock:
 # --- task status (through the Central Store) ----------------------------------
 
 
-def set_task_status(repo: repo_mod.Repo, task_id: str, status: str, *, note: str = "") -> None:
+#: What `state.schema.json`'s `$defs/commit` accepts. A hash that fails it is dropped rather than
+#: written: `ws.head()` returns "" when git is unavailable, and a dry run has no commit at all.
+_COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$")
+
+
+def set_task_status(repo: repo_mod.Repo, task_id: str, status: str, *, note: str = "", commit: str = "") -> None:
     """Write one task's status and the event that explains it, in one transaction.
+
+    `commit` is the work-branch commit that landed the task — recorded as `completed_commit` and
+    carried in the same event, so "which commit closed T-NNN" is answerable from either the SSOT
+    or the log without a second event to count twice.
 
     Retried on a lost race with a leaf writing its own task entry through the control plane.
     """
     if status not in models.TASK_STATUS_VALUES:
         raise ValueError(f"unknown task status {status!r}")
-    store_mod.retry_on_stale(lambda: _set_task_status_once(repo, task_id, status, note=note))
+    store_mod.retry_on_stale(lambda: _set_task_status_once(repo, task_id, status, note=note, commit=commit))
 
 
-def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, note: str) -> None:
+def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, note: str, commit: str) -> None:
     store = store_mod.Store(repo)
     state = store.read_state()
     if state is None:
         raise StopLoop("no .rein/state.yaml to record task status in")
     seen = store_mod.read_digest(state)
 
+    landed = commit if status == "done" and _COMMIT_RE.match(commit) else ""
     raw = json.loads(json.dumps(state.raw))
     tasks = raw.setdefault("tasks", {})
     entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
     attempts = entry.get("attempts", 0) if isinstance(entry.get("attempts"), int) else 0
     if status == "in-progress":
         attempts += 1
-    merged = {**entry, "status": status, "attempts": attempts, "note": note}
+    merged = {**entry, "status": status, "attempts": attempts, "note": note, "completed_commit": landed}
     if status == "done":
         # A finished task inherits nothing: keeping the handoff would hand the next cycle a
         # failure summary and a salvage branch for work that has already landed.
         merged.pop("handoff", None)
+    # `completed_commit` is set unconditionally above rather than merged, so a task leaving `done`
+    # loses it: the field says which commit *completed* the task, and a task sent back to todo or
+    # needs-revision has none. The event log keeps the earlier one.
     tasks[task_id] = {k: v for k, v in merged.items() if v != ""}
     raw["updated_at"] = event_chain.now_iso()
 
     event = {"done": "task_completed", "in-progress": "task_started", "blocked": "task_failed"}.get(
         status, "decision_declared"
     )
+    detail = {"status": status, "note": note}
+    if landed:
+        detail["commit"] = landed
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=seen)
-        tx.append(event, cycle_id=state.cycle_id, subject_ids=[task_id], detail={"status": status, "note": note})
+        tx.append(event, cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
 
 
 # --- what the next attempt inherits (through the Central Store) ----------------
@@ -453,12 +470,12 @@ class Orchestrator:
         # loop can progress to completion while the run stays strictly read-only.
         self._sim_status: dict[str, str] = {}
 
-    def _set_status(self, task_id: str, status: str) -> None:
+    def _set_status(self, task_id: str, status: str, *, commit: str = "") -> None:
         if self.dry_run:
             self._sim_status[task_id] = status
             print(f"    [dry-run] {task_id} → {status}")
             return
-        set_task_status(self.repo, task_id, status)
+        set_task_status(self.repo, task_id, status, commit=commit)
 
     def _escalate(self, kind: str, message: str, *, task: str | Sequence[str] = "") -> None:
         """Record something a human has to decide about, and say so on the console.
@@ -922,15 +939,15 @@ class Orchestrator:
     def merge_leaf(self, task: dag.Task, branch: str) -> bool:
         return self.ws.merge_leaf(task.id, branch)
 
-    def _log_task_done(self, task: dag.Task) -> None:
-        """Record a task_done event carrying the work-branch commit that finalized the task.
+    def _landed(self) -> str:
+        """The work-branch commit the caller just created, as `completed_commit`.
 
-        The commit hash is what lets the log answer "which commit closed T-NNN" later (and, for a
-        resolved escalation, "which commit fixed it") without digging through git history by hand.
+        Read at the moment the task's commit becomes HEAD — right after the serial finalize, or
+        right after that one leaf's merge — never once at the end of a batch. A batch's leaves
+        merge one after another, so a hash read after all of them names the last merge for every
+        member of the batch, and an integration gate that commits a fix moves it further still.
         """
-        if self.dry_run:
-            return
-        self._event("task_completed", task.id, {"commit": self.ws.head()})
+        return "" if self.dry_run else self.ws.head()
 
     # -- main loop --
 
@@ -1054,8 +1071,7 @@ class Orchestrator:
                 # without its commit (one commit = one task is the record gate ④ reviews).
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
-            self._log_task_done(task)
-            self._set_status(task.id, "done")
+            self._set_status(task.id, "done", commit=self._landed())
 
     def _consume_parallel(self, tasks: list[dag.Task]) -> None:
         """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
@@ -1075,6 +1091,7 @@ class Orchestrator:
 
         blocked_any = False
         merged: list[dag.Task] = []
+        landed: dict[str, str] = {}
         # Merge deterministically in ascending id order (sequential join).
         for task in sorted(tasks, key=lambda t: t.id):
             ok, log = results[task.id]
@@ -1108,6 +1125,7 @@ class Orchestrator:
                     continue
             if self.merge_leaf(task, branches[task.id]):
                 merged.append(task)  # done is decided after the integration gate below
+                landed[task.id] = self._landed()  # this leaf's merge commit, before the next one
             else:
                 self._set_status(task.id, "blocked")
                 self._cleanup_worktree(task)  # conflict: aborted merge, worktree no longer needed
@@ -1123,8 +1141,7 @@ class Orchestrator:
         ids = ",".join(t.id for t in merged)
         if ok:
             for task in merged:
-                self._set_status(task.id, "done")
-                self._log_task_done(task)
+                self._set_status(task.id, "done", commit=landed.get(task.id, ""))
         else:
             for task in merged:
                 self._set_status(task.id, "blocked")

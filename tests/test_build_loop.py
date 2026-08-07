@@ -285,6 +285,64 @@ def test_a_status_change_lands_with_the_event_that_explains_it(tmp_path: Path) -
     assert [e.event for e in store.read_events()] == ["task_completed"]
 
 
+def test_the_commit_that_completed_a_task_is_recorded_once(tmp_path: Path) -> None:
+    """`completed_commit` was in the schema and written by nobody, and the commit lived in a
+    *second* `task_completed` event — so everything that counts events counted every finished task
+    twice (`rein events --summary`, the resume packet's "tasks completed: N")."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "done", commit="a" * 40)
+
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None and raw["tasks"]["T-001"]["completed_commit"] == "a" * 40
+    events = store_mod.Store(repo).read_events()
+    assert [e.event for e in events] == ["task_completed"]
+    assert events[0].detail["commit"] == "a" * 40
+
+
+def test_a_task_that_leaves_done_leaves_its_commit_behind(tmp_path: Path) -> None:
+    """The field says which commit *completed* the task. Sent back for revision, it has none —
+    and a stale hash beside `needs-revision` would name work the board no longer accepts."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "done", commit="b" * 40)
+    build_loop.set_task_status(repo, "T-001", "needs-revision")
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None and "completed_commit" not in raw["tasks"]["T-001"]
+
+
+@pytest.mark.parametrize("commit", ["", "dry-run", "HEAD", "Z" * 40, "abc"])
+def test_only_something_shaped_like_a_commit_is_written(tmp_path: Path, commit: str) -> None:
+    """`ws.head()` returns "" when git is unavailable. Writing that through would put a value in
+    state.yaml that `$defs/commit` rejects, and the next read of the SSOT would fail validation."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "done", commit=commit)
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None and "completed_commit" not in raw["tasks"]["T-001"]
+
+
+def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A batch's leaves merge one after another, so a hash read once at the end of the batch names
+    the last merge for every member of it — and an integration gate that commits a fix moves it
+    further still. Each leaf's commit is read at its own merge."""
+    loop = orchestrator(tmp_path)
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
+    heads = iter(["a" * 40, "b" * 40, "c" * 40, "d" * 40])
+    recorded: dict[str, str] = {}
+
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": recorded.update({tid: commit}))
+    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: (True, ""))
+    monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
+    monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
+    monkeypatch.setattr(loop, "_integration_gate", lambda merged: (True, ""))
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: next(heads))
+
+    loop._consume_parallel(tasks)
+
+    assert recorded == {"T-001": "a" * 40, "T-002": "b" * 40, "T-003": "c" * 40}
+
+
 def test_starting_a_task_counts_an_attempt(tmp_path: Path) -> None:
     repo = repo_mod.Repo(build_repo(tmp_path))
     build_loop.set_task_status(repo, "T-001", "in-progress")

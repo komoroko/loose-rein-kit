@@ -55,7 +55,25 @@ either.
   matched its own chip. All five now fill the same way.
 - The graph's edges had no arrowheads and no key, so nothing said which end had to finish first,
   that a column is an execution layer, or that the teal is the critical path. They do now.
-- A task's detail says what it carried over from an interrupted attempt.
+- A task's detail says what it carried over from an interrupted attempt, and which commit landed it.
+
+### Which commit closed T-NNN is recorded where the schema always said it was
+
+`state.yaml.tasks.<id>.completed_commit` has been in the schema, and named in `dag.py` as one of
+the fields a build mutates, since 0.1.0 — and no code ever wrote it. The commit lived instead in a
+**second** `task_completed` event appended beside the first, which cost twice:
+
+- Everything that counts events counted every finished task twice. `rein events --summary`
+  reported `task_completed×6` for three tasks, and the resume packet — read at the start of every
+  session — printed `tasks completed: 6 (T-001, T-002, T-003)`, a number contradicting the ids
+  next to it.
+- The hash was read from the work branch at logging time, which for a parallel batch is *after*
+  the whole batch has merged and the integration gate has run. All three leaves of a batch
+  recorded the same commit: the last merge, not the one that landed them.
+
+The commit is now written into the task entry and carried in the same event the status writes, one
+per completion, read at the moment that task's commit becomes HEAD. A task sent back for revision
+loses it, since it names the commit that *completed* the task. The dashboard shows it on the task.
 
 ### Also
 

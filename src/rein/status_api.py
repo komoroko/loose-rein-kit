@@ -274,11 +274,25 @@ def _handoffs(state: models.State | None) -> dict[str, dict[str, str]]:
     return out
 
 
+def _completed_commits(state: models.State | None) -> dict[str, str]:
+    """Per done task, the work-branch commit that landed it — what makes the board's "done" reviewable."""
+    tasks = state.raw.get("tasks") if state else None
+    if not isinstance(tasks, dict):
+        return {}
+    out: dict[str, str] = {}
+    for task_id, entry in tasks.items():
+        commit = entry.get("completed_commit") if isinstance(entry, dict) else None
+        if isinstance(commit, str) and commit:
+            out[str(task_id)] = commit
+    return out
+
+
 def _tasks_block(graph: dag.Graph, state: models.State | None = None) -> dict[str, object]:
     """The task-graph slice of the status object — every value derived, nothing stored."""
     fan = graph.fan_out()
     counts = graph.counts()
     handoffs = _handoffs(state)
+    commits = _completed_commits(state)
     return {
         "counts": {s: counts[s] for s in dag.STATUS_ORDER},
         "total": len(graph.tasks),
@@ -299,6 +313,7 @@ def _tasks_block(graph: dag.Graph, state: models.State | None = None) -> dict[st
                 "claim_ids": list(t.claim_ids),
                 "fan_out": fan[t.id],
                 "handoff": handoffs.get(t.id, {}),
+                "commit": commits.get(t.id, ""),
             }
             for t in graph.tasks
         ],
