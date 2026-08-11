@@ -720,6 +720,41 @@ def check_chain(repo: repo_mod.Repo) -> list[Finding]:
     ]
 
 
+def check_last_run(repo: repo_mod.Repo) -> list[Finding]:
+    """Did the last build run stop because the machine failed, and has nothing succeeded since?
+
+    Worth saying out loud, because this is the state that looks like nothing happened: no task
+    is `blocked`, no escalation is open, and the board reads exactly as it did before the run.
+    Someone coming back to a repository whose build stopped on a session limit at 3am otherwise
+    has to infer that from the absence of progress.
+    """
+    events, _ = event_chain.scan(repo.events)
+    last_abort = next((e for e in reversed(events) if e.event == "run_aborted"), None)
+    if last_abort is None:
+        return []
+    progressed = any(e.seq > last_abort.seq and e.event in ("task_completed", "task_started") for e in events)
+    if progressed:
+        return []
+    detail = last_abort.detail
+    where = str(detail.get("where", "a launch"))
+    reported = str(detail.get("reported", ""))
+    retryable = str(detail.get("fault", "")) == "environment_transient"
+    advice = (
+        "Nothing was marked and no retry budget was spent — re-run `rein build` and it continues "
+        "from the preserved work."
+        if retryable
+        else "Repair what it names first; re-running before that will stop the same way."
+    )
+    return [
+        Finding(
+            "INFO" if retryable else "WARN",
+            "build",
+            f"the last build run stopped at {where} for a machine reason"
+            f"{f' ({reported})' if reported else ''}. {advice}",
+        )
+    ]
+
+
 def check_review(review: models.Review | None, head: str = "") -> list[Finding]:
     if review is None or not review.is_generated:
         return [Finding("INFO", "review", "no machine review generated yet")]
@@ -792,6 +827,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_freeze_drift(state, plan, config)
     findings += check_plan(repo, plan, state)
     findings += check_chain(repo)
+    findings += check_last_run(repo)
     rc, head_out = repo._git_rc("rev-parse", "HEAD")
     findings += check_review(review, head_out.strip() if rc == 0 else "")
     return findings

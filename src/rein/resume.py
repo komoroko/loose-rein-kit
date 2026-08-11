@@ -50,6 +50,10 @@ HEADLINE_EVENTS: dict[str, str] = {
     "cycle_closed": "the cycle closed",
     "task_completed": "tasks completed",
     "task_failed": "tasks failed",
+    # Worth a headline precisely because it asks for nothing but a re-run: someone opening a
+    # fresh terminal after a session limit needs to know the build stopped for the machine's
+    # reasons and left every task where it was, not that something went wrong with the work.
+    "run_aborted": "build runs stopped by the machine (re-runnable)",
     "knowledge_gap": "knowledge gaps recorded",
 }
 

@@ -19,6 +19,7 @@ import pytest
 from rein import dag_trace, doctor, models
 from rein import repo as repo_mod
 from tests._support import (
+    DEMO_CYCLE,
     SANDBOXED_PROFILES,
     chain,
     make_claim,
@@ -648,3 +649,49 @@ def test_the_sandbox_fail_names_a_command_that_finishes_the_job() -> None:
     results = doctor.check_sandbox(models.Config(make_config()))
     fail = next(f for f in results if f.level == "FAIL" and "run repository-derived code" in f.message)
     assert "rein oci build --all --write-config" in fail.message
+
+
+# --- what the last build run came to ------------------------------------------
+
+
+def aborted_chain(
+    *, reported: str = "", fault: str = "environment_transient", then: tuple[str, ...] = ()
+) -> list[models.Event]:
+    """A log whose build run stopped on a machine fault, optionally with progress afterwards."""
+    from rein import event_chain
+
+    built: list[models.Event] = []
+    previous: models.Event | None = None
+    detail = {"fault": fault, "where": "T-018: implementer", "rc": 1, "reported": reported}
+    for name in ("cycle_initialized", "run_aborted", *then):
+        made = event_chain.make(name, DEMO_CYCLE, detail=detail if name == "run_aborted" else None)
+        previous = event_chain.link(previous, made)
+        built.append(previous)
+    return built
+
+
+def test_a_run_the_machine_stopped_is_surfaced_because_nothing_else_shows_it(tmp_path: Path) -> None:
+    """This is the state that looks like nothing happened: no task blocked, no escalation open,
+    the board unchanged. Someone returning to it has nothing to read but the absence of progress.
+    """
+    repo = healthy(tmp_path, events=aborted_chain(reported="resets 3:30am (Asia/Tokyo)"))
+    results = doctor.check_last_run(repo)
+    assert [f.level for f in results] == ["INFO"]
+    assert "3:30am" in results[0].message
+    assert "re-run `rein build`" in results[0].message
+
+
+def test_a_permanent_stop_does_not_invite_a_re_run(tmp_path: Path) -> None:
+    repo = healthy(tmp_path, events=aborted_chain(fault="environment_permanent"))
+    results = doctor.check_last_run(repo)
+    assert [f.level for f in results] == ["WARN"]
+    assert "Repair what it names first" in results[0].message
+
+
+def test_a_run_that_got_going_again_says_nothing(tmp_path: Path) -> None:
+    repo = healthy(tmp_path, events=aborted_chain(then=("task_started", "task_completed")))
+    assert doctor.check_last_run(repo) == []
+
+
+def test_a_repository_that_never_stopped_says_nothing(tmp_path: Path) -> None:
+    assert doctor.check_last_run(healthy(tmp_path, events=chain("cycle_initialized"))) == []
