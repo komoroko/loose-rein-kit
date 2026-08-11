@@ -56,12 +56,21 @@ now land in one transaction. It keeps the handoff by default — a task that can
 earn an unlimited allowance by being reset in a loop — and `--fresh` discards it and says so. It
 does not close the escalation, and it cannot declare a task `done`.
 
-### `autonomous-build-iteration` is mode B's capability, not mode A's
+### One build mode: the interactive re-enactment is gone
 
-It means "re-invoke the procedure each iteration", and the mapping files assigned it to both
-modes. Mode A is one command whose completion is the signal; naming a polling mechanism there
-invites waiting on a run by waking up to look at it. All four mapping surfaces now scope it to
-mode B, and `build.md` says scheduling is for telling a human how it is going.
+`/build` documented a second mode — the lead running the consumption algorithm by hand in
+conversation — and it was not executable. It instructed the lead to keep task statuses in
+`state.yaml`, which `rein guard` denies as machine-written; no verb can mark a task `done`
+anyway; and the control plane that carries a leaf's decisions into the audit chain is served
+only by the orchestrator. It also contradicted the rule the loop exists for — consumption order,
+parallelism, merge and stopping decided in code, not LLM discretion — and none of the recovery
+above (fault classification, exit codes, salvage, handoff) applied to it.
+
+So `rein build` is the implementation phase, and `autonomous-build-iteration` leaves the
+capability vocabulary with it: nothing re-invokes a procedure that is one command. Without a
+headless agent CLI, install one and point the roles at it with `rein agent <cli>`; `rein doctor`
+now checks the configured adapters resolve on PATH — a warning before the build phase, a failure
+once it is open.
 
 ### The security review stops waiting behind the extraction
 
