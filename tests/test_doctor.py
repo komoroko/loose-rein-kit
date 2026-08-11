@@ -580,8 +580,11 @@ def test_a_blocking_security_finding_fails() -> None:
 
 
 def test_a_healthy_repo_has_no_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Healthy is a claim about the repo, so the host's PATH is pinned instead of inherited —
+    otherwise git or an agent CLI missing from the runner decides the result."""
     repo = healthy(tmp_path)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     fails = [f for f in doctor.run_checks(repo) if f.level == "FAIL"]
     assert fails == [], "\n".join(f"{f.area}: {f.message}" for f in fails)
 
