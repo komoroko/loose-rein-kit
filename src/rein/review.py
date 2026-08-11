@@ -27,6 +27,7 @@ import argparse
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -309,40 +310,6 @@ def generate(
 
     relevant = _relevant_code(repo, head, facts.files)
 
-    # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
-    extract_request = actual_extraction.build_request(
-        trusted_base_sha=trusted_base,
-        subject_head_sha=head,
-        diff_text=diff_text,
-        relevant_code=relevant.files,
-        deterministic_facts={
-            "coverage": coverage,
-            "risk_floor": risk_floor,
-            "relevant_code": relevant.as_facts(),
-        },
-    )
-    extraction = actual_extraction.run_extractor(
-        extract_request, reviewer, repo=repo, commit=head, risk_floor=risk_floor
-    )
-
-    # Expected vs Actual — the Actual arrives read-only and digest-bound (§12.3).
-    compare_request = conformance.build_request(
-        expected_model=_expected_model(plan),
-        actual_statements=extraction.actual_statements,
-        actual_digest=extraction.actual_digest,
-    )
-    known_ids = _known_ids(plan, extraction.actual_statements)
-    comparison = conformance.run_comparator(
-        compare_request,
-        reviewer,
-        repo=repo,
-        commit=head,
-        actual_statement_ids=[str(a.get("id")) for a in extraction.actual_statements],
-        known_ids=known_ids,
-        effective_risk=effective,
-        independence=_independence(config),
-    )
-
     security_request = security_review.build_request(
         diff_text=diff_text,
         relevant_code=relevant.files,
@@ -350,16 +317,48 @@ def generate(
         trusted_base_sha=trusted_base,
         subject_head_sha=head,
     )
-    security = security_review.run_security_review(
-        security_request,
-        reviewer,
-        repo=repo,
-        commit=head,
-        # What the last review found blocking. Without it the check below it — a reviewer may not
-        # clear its own block by regenerating and omitting the finding — had nothing to compare
-        # against, so the protection its own docstring describes never once applied.
-        prior_blocking_ids=_prior_blocking_ids(store.read_review()),
-    )
+    # What the last review found blocking. Read here rather than at the call below, because the
+    # call is about to move off this thread and the store is not something to touch from two.
+    prior_blocking = _prior_blocking_ids(store.read_review())
+
+    # The security review reads the diff and the relevant code; it consumes nothing the extractor
+    # or the comparator produce, so it does not have to wait behind them. Three LLM stages at up
+    # to 15 minutes each ran end to end for no reason but the order they were written in.
+    # Determinism is unaffected: the results are merged, and the events appended, in a fixed
+    # order below, and a failure in the extraction still surfaces ahead of one here.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        security_future = pool.submit(
+            security_review.run_security_review,
+            security_request,
+            reviewer,
+            repo=repo,
+            commit=head,
+            # Without it the check below — a reviewer may not clear its own block by
+            # regenerating and omitting the finding — had nothing to compare against, so the
+            # protection its own docstring describes never once applied.
+            prior_blocking_ids=prior_blocking,
+        )
+        try:
+            extraction, comparison = _extract_and_compare(
+                repo,
+                reviewer,
+                plan=plan,
+                config=config,
+                head=head,
+                trusted_base=trusted_base,
+                diff_text=diff_text,
+                relevant=relevant,
+                coverage=coverage,
+                risk_floor=risk_floor,
+                effective=effective,
+            )
+        except BaseException:
+            # The security stage's own failure is not the one to report: this one came first in
+            # the pipeline's order, and reporting whichever thread lost a race would make the
+            # error a reader sees depend on timing.
+            security_future.cancel()
+            raise
+        security = security_future.result()
 
     binding = {
         "change_digest": change,
@@ -396,6 +395,62 @@ def generate(
         tx.append("security_review_generated", cycle_id=cycle, actor=actor)
         tx.append("review_generated", cycle_id=cycle, actor=actor, detail={"change_digest": change})
     return machine
+
+
+def _extract_and_compare(
+    repo: repo_mod.Repo,
+    reviewer: review_policy.Reviewer,
+    *,
+    plan: models.Plan | None,
+    config: models.Config | None,
+    head: str,
+    trusted_base: str,
+    diff_text: str,
+    relevant: RelevantCode,
+    coverage: Mapping[str, Any],
+    risk_floor: str,
+    effective: str,
+) -> tuple[actual_extraction.ExtractionResult, conformance.ComparatorResult]:
+    """The one genuinely sequential pair: the comparator reads what the extractor produced.
+
+    Kept together so the concurrency in `generate` reads as "one chain plus one independent
+    stage" rather than as three calls someone happened to interleave.
+    """
+    # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
+    extract_request = actual_extraction.build_request(
+        trusted_base_sha=trusted_base,
+        subject_head_sha=head,
+        diff_text=diff_text,
+        relevant_code=relevant.files,
+        deterministic_facts={
+            "coverage": coverage,
+            "risk_floor": risk_floor,
+            "relevant_code": relevant.as_facts(),
+        },
+    )
+    extraction = actual_extraction.run_extractor(
+        extract_request, reviewer, repo=repo, commit=head, risk_floor=risk_floor
+    )
+
+    # Expected vs Actual — the Actual arrives read-only and digest-bound (§12.3).
+    compare_request = conformance.build_request(
+        expected_model=_expected_model(plan),
+        actual_statements=extraction.actual_statements,
+        actual_digest=extraction.actual_digest,
+    )
+    known_ids = _known_ids(plan, extraction.actual_statements)
+    comparison = conformance.run_comparator(
+        compare_request,
+        reviewer,
+        repo=repo,
+        commit=head,
+        actual_statement_ids=[str(a.get("id")) for a in extraction.actual_statements],
+        known_ids=known_ids,
+        effective_risk=effective,
+        independence=_independence(config),
+    )
+
+    return extraction, comparison
 
 
 def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str, Any]]) -> list[str]:
