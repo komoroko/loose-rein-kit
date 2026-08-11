@@ -2,8 +2,7 @@
 
 One dispatcher, one implementation per operation: each verb hands its remaining arguments to
 the owning module's entry function, so nothing is implemented twice. The daily verbs stay the
-memorable four (start / next / ui / agent); the rest are the setup and operational commands
-that used to hide behind make targets in the copy-distribution era.
+memorable four (start / next / ui / agent); the rest are the setup and operational commands.
 
 `approve` is the one verb that can open a gate, and it does so only after a human types the
 gate name at an interactive terminal. What keeps an agent out is that it is never

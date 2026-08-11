@@ -14,8 +14,8 @@ quietly accept — and a claim citing an id no heading declares is a dangling re
 evidence that the requirement exists.
 
 **A check with nothing to check is not a pass.** When neither side carries a requirement id the
-thread reports `unknown` and exits 2. An earlier version printed "the thread is whole" against an
-empty plan, which is exactly the self-consistent green this tool exists to refuse.
+thread reports `unknown` and exits 2 — "the thread is whole" against an empty plan is exactly the
+self-consistent green this tool exists to refuse.
 """
 
 from __future__ import annotations

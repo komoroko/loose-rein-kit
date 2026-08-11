@@ -355,7 +355,7 @@ def run_init(
 
     # An unset source is recovered from how this tool was installed (PEP 610), so the wizard
     # need not ask the human to paste a URL they rarely know; a VCS install yields git+<url>,
-    # an editable/local install yields "" (the same as skipping the old question).
+    # an editable/local install yields "".
     if not source:
         source = detect_source()
         if source:
@@ -411,7 +411,7 @@ def run_init(
         agents_md.write_text(text + install_mod.agents_pointer_block(), encoding="utf-8")
         print("  merge         AGENTS.md (Loose Rein pointer block appended)")
     print(f"  {_switch_branch(root, branch)}")
-    # 6) the sandboxes — the one precondition initialization used to leave for `doctor` to find.
+    # 6) the sandboxes — offered here rather than left for `doctor` to find later.
     print(f"  {sandbox_step(root, offer=offer_sandbox, ask=_ask if offer_sandbox else None)}")
 
     next_step = (

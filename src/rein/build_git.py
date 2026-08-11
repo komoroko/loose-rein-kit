@@ -59,8 +59,8 @@ class GitWorkspace:
         self.branch_pattern = branch_pattern
         self._run = run
         # Where this layer reports what it did. Injected rather than imported: git surgery
-        # happens inside leaf worktrees, and a worktree writing its own event log is how a
-        # decision recorded during a parallel build used to disappear (plan §11.1).
+        # happens inside leaf worktrees, and a worktree that writes its own event log loses the
+        # record when it is deleted (plan §11.1).
         self.on_event: EventSink = on_event or (lambda event, subject, detail: None)
         # Where preserved work is reported so the *next* attempt can find it. Injected for the
         # same reason as on_event: this runs inside a worktree that is about to be replaced.
@@ -147,13 +147,11 @@ class GitWorkspace:
 
         Returns the salvage branch it created, or "" when there was nothing to preserve.
 
-        The clean-up used to be unconditional (`worktree remove --force` + `branch -D`), which
-        destroyed a crashed run's committed work — and the branch cleanup_worktree deliberately
-        keeps for human inspection — the moment the loop was re-invoked. Nothing unmerged may be
-        the only copy: an uncommitted diff is finalized onto the leaf branch first (same principle
-        as finalize_commit's), and a branch holding commits the work branch does not have is
-        renamed to a salvage name instead of deleted (recorded as a branch_salvaged event). A
-        fully-merged branch is deleted as before — its content is already in the work branch.
+        Nothing unmerged may be the only copy, so the clean-up is conditional: an uncommitted
+        diff is finalized onto the leaf branch first (same principle as finalize_commit's), and a
+        branch holding commits the work branch does not have is renamed to a salvage name instead
+        of deleted (recorded as a branch_salvaged event). A fully-merged branch is deleted — its
+        content is already in the work branch.
         """
         if Path(path).is_dir() and not self.finalize_commit(path, f"{task_id}: WIP (salvaged at restart)"):
             # The tree may hold the only copy of the previous run's diff — stop rather than destroy it

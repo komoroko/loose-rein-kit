@@ -342,9 +342,9 @@ def sandbox_setup_command(build_targets: Sequence[str]) -> str:
     """The one command that actually sandboxes `build_targets`. "" when there is nothing to do.
 
     Derived in one place because four surfaces print it — `rein next`, `rein doctor`, the
-    dashboard, and `rein init`. They used to print `rein oci build --profile <first of N>`: one
-    image out of three, without `--write-config`, so the digest still had to be copied out of the
-    terminal by hand. Pure, so the recommendation table stays testable without a repo on disk.
+    dashboard, and `rein init` — so none of them can name one image out of three, or leave off
+    `--write-config` and send the human to copy a digest out of the terminal. Pure, so the
+    recommendation table stays testable without a repo on disk.
     """
     if len(build_targets) > 1:
         return "rein oci build --all --write-config"

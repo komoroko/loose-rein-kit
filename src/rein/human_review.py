@@ -184,10 +184,8 @@ def challenges_complete(review: models.Review, human: Mapping[str, Any]) -> bool
 def stage_settled(review: models.Review, human: Mapping[str, Any], stage: str) -> bool | None:
     """Whether `stage` holds a recorded human judgement — True, False, or None for "not trackable".
 
-    A tick on a review screen has to mean something the repository can show afterwards. The pane
-    used to tick a deliverable the moment it was *selected*, which recorded nothing except that a
-    mouse moved; `human.session.completed_stages` was never written by anything, so the server's own
-    `complete` flag was permanently false as well.
+    A tick on a review screen has to mean something the repository can show afterwards — ticking a
+    deliverable the moment it is *selected* records nothing except that a mouse moved.
 
     So completion is derived from the artefacts a stage actually produces: an answered challenge set,
     an answered decision set, a frozen review. The reading stages produce nothing, and None says so
@@ -310,13 +308,11 @@ def _largest_partition_bytes(review: models.Review) -> int:
 def budget_actuals(review: models.Review, human: Mapping[str, Any]) -> dict[str, int]:
     """The measured value for each budget line, derived from the review content (plan §14.10).
 
-    `max_diff_bytes_per_partition` used to be hardcoded to 0 here, on the reasoning that the
-    detector partitions rather than truncates so the limit was already enforced upstream. It was
-    not: `diff_facts` raises a `partitioned` flag past a *line* count and never measured bytes, so
-    the one budget denominated in bytes had a constant actual and could not be exceeded by any
-    change of any size. It is now measured from the coverage manifest, which is what makes "a blown
-    budget splits the scope" — stated in config.yaml, gate-workflow.md and review.schema.json —
-    something that can actually happen.
+    `max_diff_bytes_per_partition` is measured from the coverage manifest, not assumed enforced
+    upstream: `diff_facts` raises its `partitioned` flag past a *line* count and never measures
+    bytes, so a constant actual here would make the one byte-denominated budget impossible to
+    exceed by a change of any size — and "a blown budget splits the scope" (config.yaml,
+    gate-workflow.md, review.schema.json) something that could never happen.
     """
     return {
         "max_critical_decisions": sum(1 for c in _machine_list(review, "decision_cards") if _risk(c) == "critical"),

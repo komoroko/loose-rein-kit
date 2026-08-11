@@ -341,9 +341,9 @@ def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, not
 # --- what the next attempt inherits (through the Central Store) ----------------
 #
 # The implementer's own agent session is process-local and dies with the terminal that ran it, so
-# a build restarted from another terminal used to begin the task cold: full retry budget, empty
-# failure log, and the previous attempt's committed work stranded on a salvage branch nothing
-# read back. What survives a crash has to be written down, which is what this is.
+# what a build restarted from another terminal inherits has to be written down: which gate step
+# failed, what it said, how much of the budget is left, and the salvage branch holding the
+# interrupted attempt's commits.
 
 #: Caps mirroring state.schema.json's `handoff`, so a long gate log cannot make state.yaml
 #: unwritable at exactly the moment it is carrying a failure.
@@ -645,9 +645,8 @@ class Orchestrator:
         (--resume) so the implementer keeps its own context across its retries instead of
         re-reading ticket/design/code cold. A failed resume falls back to one fresh launch
         (session files can expire) rather than stopping the loop on a continuity optimization —
-        but only when a fresh launch could plausibly do better. Under an exhausted session limit
-        or a CLI that is not on PATH the fallback used to fire unconditionally, spending a second
-        doomed launch on the one failure mode where nothing was going to launch at all.
+        but only when a fresh launch could plausibly do better. An exhausted session limit or a
+        CLI that is not on PATH gets no second attempt: nothing was going to launch.
         """
         if self.dry_run:
             print(f"    [dry-run] launch implementer (cwd={cwd}) task={task.id}")
@@ -1068,9 +1067,9 @@ class Orchestrator:
         """Say on the console, and in the chain, that the machine is what stopped this run.
 
         `run_aborted` is deliberately not one of `events.ATTENTION_EVENTS`: it asks nobody to
-        judge the work, it asks for a re-run. Recording it as a `knowledge_gap` — which is what
-        the old escalation path did — put a permanent "unresolved escalation" on gate ⑤'s
-        screen for a machine's bad afternoon, in a log that is append-only by design.
+        judge the work, it asks for a re-run. A `knowledge_gap` here would leave a permanent
+        "unresolved escalation" on gate ⑤'s screen for a machine's bad afternoon, in a log that
+        is append-only by design.
         """
         logger.error(fault.summary())
         self._event(

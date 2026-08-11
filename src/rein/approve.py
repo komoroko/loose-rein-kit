@@ -13,8 +13,8 @@ Three steps, in this order, none skippable:
      plan** in that same transaction: `state.plan` gains `frozen` plus the digests the freeze
      covers, which is what `rein build` requires and what `rein guard` rule 2 protects.
 
-`--force` does not exist and is not coming back, and neither does `--by`: an identity you can
-type is not an identity, so the receipt records that *a* human confirmed, never which one.
+There is no `--force` and no `--by`: an identity you can type is not an identity, so the
+receipt records that *a* human confirmed, never which one.
 
 **Nothing here proves a human approved, and this module never claims it does** — an agent driving
 a pty can answer a prompt. What holds is the narrower claim AGENTS.md "Gate rules" 2 states: an
@@ -336,9 +336,8 @@ def record_approval(
             "confirmed_at": event_chain.now_iso(),
             # Which channel carried the confirmation, never who (models.CONFIRMATION_CHANNELS).
             "confirmed_via": confirmed_via,
-            # The root the approval *lands* on, not the one it was confirmed against. Recording
-            # `root_before` here made the two fields identical and the second one unmatchable:
-            # this very transaction appends `gate_approved`, so the chain necessarily moves.
+            # The root the approval *lands* on, not the one it was confirmed against: this very
+            # transaction appends `gate_approved`, so the chain necessarily moves.
             "result_chain_root": tx.projected_chain_root(),
         }
         receipt.update({key: subject[key] for key in _RECEIPT_DIGESTS if subject.get(key)})

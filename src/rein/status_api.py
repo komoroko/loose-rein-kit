@@ -333,12 +333,12 @@ def pending_decision(
 ) -> dict[str, object]:
     """The one decision currently waiting on a human, as an identity plus the smallest next action.
 
-    The dashboard used to notify per *event*: a gate becoming current, an escalation opening, a task
-    going needs-revision and a build finishing were four separate pings, two of which were the same
-    decision seen from different angles and one of which was not a decision at all. What a person
-    needs to be interrupted for is "there is something only you can settle, and here is the one
-    command that settles it" — so the signal is derived once, here, from the same decision table
-    `rein next` prints, and it carries an `id` that changes only when the decision itself does.
+    Notifying per *event* would ping four times for a gate becoming current, an escalation
+    opening, a task going needs-revision and a build finishing — two of them the same decision
+    from different angles, one of them not a decision at all. What a person needs to be
+    interrupted for is "there is something only you can settle, and here is the one command that
+    settles it" — so the signal is derived once, here, from the same decision table `rein next`
+    prints, and it carries an `id` that changes only when the decision itself does.
 
     The queue does **not** get to pick the decision. Interrupting on whatever happens to sort first
     would make the notification jitter every time an unrelated row appeared above it, and it would

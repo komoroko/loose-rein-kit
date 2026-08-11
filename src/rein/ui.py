@@ -22,8 +22,8 @@ merge) are deliberately absent.
 **Write authority** comes from the terminal `rein ui` was started in, and nowhere else: it prints a
 **single-use launch link**, redeeming it mints a session cookie, and only a session may write. A
 process that merely fetches `/` gets a page with no token that declares itself read-only. The
-in-page CSRF token was never authority — anything able to `curl` the page could read it — so what
-the line rests on is the channel, not the click, and not a proof of a human that no repository can
+in-page CSRF token is not authority — anything able to `curl` the page can read it — so what the
+line rests on is the channel, not the click, and not a proof of a human that no repository can
 give (AGENTS.md "Gate rules" 2 states the ceiling).
 
 The page polls `/api/status` for the whole life of a supervised run, and a run is mostly waiting —
@@ -636,10 +636,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         apply: Callable[[models.Review, dict[str, object]], dict[str, object]],
     ) -> None:
         """Persist one human-half change through the Store, guarding staleness and recording why."""
-        # Required, not optional: `assert_machine_current` used to wave through an empty digest,
-        # so a client that simply omitted the field — a stale tab, a script, a retried request —
-        # got its answers merged into whatever machine review happened to be on disk. That is the
-        # exact E2E-08 failure the guard exists to stop, reachable by leaving a field out.
+        # Required, not optional: an empty digest waved through would let a client that simply
+        # omitted the field — a stale tab, a script, a retried request — merge its answers into
+        # whatever machine review is on disk, the exact E2E-08 failure the guard exists to stop.
         expected = str(body.get("machine_digest") or "")
         if not expected:
             raise UiActionError(
@@ -676,9 +675,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
 
     def _review_challenge(self, body: dict[str, object]) -> None:
-        # `confidence` used to default to "low" here while the pane sent a hardcoded "medium", so the
-        # recorded number was whichever of two fabrications won. How sure the reviewer was is theirs
-        # to state; a server that guesses it is writing a human judgement nobody made.
+        # No default for `confidence`: how sure the reviewer was is theirs to state, and a server
+        # that guesses it is writing a human judgement nobody made.
         cid, choice = str(body.get("challenge_id") or ""), str(body.get("choice") or "")
         confidence, rationale = str(body.get("confidence") or ""), str(body.get("rationale") or "")
         if not confidence:

@@ -470,10 +470,10 @@ def _prior_blocking_ids(review: models.Review | None) -> list[str]:
 def _effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> str:
     """The change's effective risk: the max of every contributor (plan §13.5).
 
-    The detector's `risk_floor` alone was what the comparator used to be handed, which left the
-    frozen plan's own judgment out of it — a change touching a `critical` claim read as `low`
-    if no regex happened to fire. The plan supplies claim and task risk; everything else comes
-    off the deterministic signals, so an AI cannot argue any of it down.
+    The detector's `risk_floor` alone would leave the frozen plan's own judgment out of it — a
+    change touching a `critical` claim reading as `low` because no regex fired. So the plan
+    supplies claim and task risk; everything else comes off the deterministic signals, so an AI
+    cannot argue any of it down.
     """
     claim_risk = models.max_risk([c.risk for c in plan.claims]) if plan is not None else "low"
     task_risk = models.max_risk([t.risk for t in plan.tasks]) if plan is not None else "low"
@@ -484,12 +484,11 @@ def _effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> st
 def _independence(config: models.Config | None) -> dict[str, Any]:
     """The declared reviewer groups, read from the config that declares them.
 
-    This used to throw its argument away and return one hardcoded group for both roles, so the
-    rule `review_policy.independence_ok` enforces — the Actual Extractor and the Comparator must
-    not be the same opinion — always failed on a critical change, and `independence_group`, the
-    whole substitute for buying a second AI provider, reached nothing but a
-    `doctor` warning. An unset group stays empty rather than being invented: the check refuses a
-    critical review that cannot name its two groups, which is the right answer.
+    `independence_group` is the whole substitute for buying a second AI provider, so it is read
+    from the config rather than assumed: `review_policy.independence_ok` — the Actual Extractor
+    and the Comparator must not be the same opinion — has nothing to enforce otherwise. An unset
+    group stays empty rather than being invented: the check refuses a critical review that cannot
+    name its two groups, which is the right answer.
     """
     if config is None:
         return {"actual_extractor": {"group": ""}, "comparator": {"group": ""}}
@@ -549,12 +548,10 @@ def _adapter_reviewer(repo: repo_mod.Repo, role: str = "code_reviewer") -> revie
     the single JSON document the stage validators parse. Every stage revalidates the output, so
     this is a transport, not a trust boundary.
 
-    `role` is a real parameter now. It used to read `agents.reviewer`, which the config schema
-    does not define (`additionalProperties: false`), so the lookup always missed, always fell
-    back to `claude`, and one callable served every stage — the same session answering as the
-    Actual Extractor and as the Comparator, which is the independence violation §12.4 exists to
-    prevent. It also *sends* the request on stdin, as the docstring always claimed; passing a
-    whole diff as an argv element hits E2BIG on a large change.
+    `role` selects the adapter, so each stage gets its own: one callable serving every stage
+    means the same session answers as the Actual Extractor and as the Comparator, the
+    independence violation §12.4 exists to prevent. The request goes on stdin — a whole diff as
+    an argv element hits E2BIG on a large change.
     """
     from rein import build_loop
 

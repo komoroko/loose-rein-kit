@@ -119,10 +119,9 @@ def apply_switch(text: str, adapter: str, roles: tuple[str, ...], group: str = "
 def independence_status(config: models.Config) -> tuple[str, list[str]]:
     """(level, messages) for the actual-extractor / comparator pair. `PASS` means distinct.
 
-    The level is decided **here**, where the branches are, and returned rather than inferred.
-    `doctor` used to recover it by searching the message text for "share the independence
-    group" — so rewording a sentence in this module could silently downgrade a FAIL to a WARN
-    with no test anywhere going red.
+    The level is decided **here**, where the branches are, and returned rather than inferred:
+    recovering it from the message text would let a reworded sentence in this module silently
+    downgrade a FAIL to a WARN with no test anywhere going red.
 
     `FAIL` blocks a critical change: an extractor and a comparator on one model share its blind
     spots, so the comparison is not a check. `WARN` is the honest middle — two models of one
