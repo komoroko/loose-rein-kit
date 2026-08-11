@@ -135,3 +135,10 @@ def test_events_since_narrows_the_log_but_never_the_chain_root(repo: Path) -> No
     assert events_mod.main(["--since", "1", "--repo", str(repo)]) == 0
     # the narrowing is a view over the same records, not a different chain
     assert event_chain.chain_root(events) == full_root
+
+
+def test_a_run_the_machine_stopped_gets_a_headline() -> None:
+    """Someone opening a fresh terminal after a session limit needs to know the build stopped
+    for the machine's reasons and left every task where it was — the board looks unchanged, so
+    nothing else in the packet would say so."""
+    assert "re-runnable" in resume.HEADLINE_EVENTS["run_aborted"]

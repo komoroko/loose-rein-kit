@@ -112,11 +112,10 @@ def runtime_home() -> tuple[Path, bool]:
 def read_digest(document: Any) -> str:
     """The optimistic-concurrency token for a document object the caller has just read.
 
-    Taken from the mapping the caller actually holds, never from a fresh read of the file.
-    Re-reading the document inside the transaction — which is what every caller used to do —
-    compares the file against itself, so :class:`StaleWriteError` can never fire and the lost
-    update it exists to catch goes through silently. ``None`` means "absent", matching
-    :meth:`Store.document_digest`.
+    Taken from the mapping the caller actually holds, never from a fresh read of the file:
+    re-reading the document inside the transaction compares the file against itself, so
+    :class:`StaleWriteError` can never fire and the lost update it exists to catch goes through
+    silently. ``None`` means "absent", matching :meth:`Store.document_digest`.
     """
     raw = getattr(document, "raw", None)
     return digests.of(raw) if raw is not None else ""

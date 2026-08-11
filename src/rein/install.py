@@ -108,10 +108,10 @@ def claude_import_block() -> str:
         "the rules' capability vocabulary as: `phase-invocation` → the /req … /status slash\n"
         "commands; `structured-question` → AskUserQuestion; `notify-and-wait` → PushNotification;\n"
         "`approval-presentation` → plan mode + ExitPlanMode; `session-compaction` → /compact\n"
-        "(human-run); `role-delegation` → the subagents in .claude/agents/ (worktree-isolated\n"
-        "parallel leaves); `autonomous-build-iteration` → /loop /build, or headless\n"
-        "`rein build`; `command-preauthorization` → permissions.allow in\n"
-        ".claude/settings.json. The operating rules are imported from:\n"
+        "(human-run); `role-delegation` → the subagents in .claude/agents/;\n"
+        "`command-preauthorization` → permissions.allow in\n"
+        ".claude/settings.json. The implementation phase is `rein build` — one command whose\n"
+        "completion is the signal, so never poll it. The operating rules are imported from:\n"
         f"@{REIN_RULES_PATH}\n"
     )
 

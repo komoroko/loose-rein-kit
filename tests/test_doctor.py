@@ -12,6 +12,7 @@ finds is a doctor whose findings nobody reads.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ import pytest
 from rein import dag_trace, doctor, models
 from rein import repo as repo_mod
 from tests._support import (
+    DEMO_CYCLE,
     SANDBOXED_PROFILES,
     chain,
     make_claim,
@@ -371,6 +373,32 @@ def test_two_providers_pass_cleanly() -> None:
     assert doctor.check_independence(models.Config(config))[0].level == "PASS"
 
 
+def _no_adapter_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "claude" else f"/usr/bin/{name}")
+
+
+def test_a_missing_adapter_only_warns_before_the_build_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rein build` is the only implementation path, but nothing has needed the CLI yet."""
+    _no_adapter_on_path(monkeypatch)
+    results = doctor.check_adapters(models.Config(make_config()), models.State({"current_phase": "tasks"}))
+    assert [f.level for f in results] == ["WARN"]
+    assert "rein agent <cli>" in results[0].message
+
+
+def test_a_missing_adapter_fails_once_the_build_phase_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_adapter_on_path(monkeypatch)
+    results = doctor.check_adapters(models.Config(make_config()), models.State({"current_phase": "build"}))
+    assert [f.level for f in results] == ["FAIL"]
+
+
+def test_an_adapter_this_release_cannot_launch_fails_whatever_is_on_path() -> None:
+    config = make_config()
+    config["agents"]["implementer"]["adapter"] = "cursor"  # type: ignore[index]
+    results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
+    assert results[0].level == "FAIL"
+    assert "'cursor'" in results[0].message
+
+
 def test_the_runtime_fallback_warns_that_it_is_weaker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     repo = healthy(tmp_path)
@@ -552,8 +580,11 @@ def test_a_blocking_security_finding_fails() -> None:
 
 
 def test_a_healthy_repo_has_no_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Healthy is a claim about the repo, so the host's PATH is pinned instead of inherited —
+    otherwise git or an agent CLI missing from the runner decides the result."""
     repo = healthy(tmp_path)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     fails = [f for f in doctor.run_checks(repo) if f.level == "FAIL"]
     assert fails == [], "\n".join(f"{f.area}: {f.message}" for f in fails)
 
@@ -648,3 +679,49 @@ def test_the_sandbox_fail_names_a_command_that_finishes_the_job() -> None:
     results = doctor.check_sandbox(models.Config(make_config()))
     fail = next(f for f in results if f.level == "FAIL" and "run repository-derived code" in f.message)
     assert "rein oci build --all --write-config" in fail.message
+
+
+# --- what the last build run came to ------------------------------------------
+
+
+def aborted_chain(
+    *, reported: str = "", fault: str = "environment_transient", then: tuple[str, ...] = ()
+) -> list[models.Event]:
+    """A log whose build run stopped on a machine fault, optionally with progress afterwards."""
+    from rein import event_chain
+
+    built: list[models.Event] = []
+    previous: models.Event | None = None
+    detail = {"fault": fault, "where": "T-018: implementer", "rc": 1, "reported": reported}
+    for name in ("cycle_initialized", "run_aborted", *then):
+        made = event_chain.make(name, DEMO_CYCLE, detail=detail if name == "run_aborted" else None)
+        previous = event_chain.link(previous, made)
+        built.append(previous)
+    return built
+
+
+def test_a_run_the_machine_stopped_is_surfaced_because_nothing_else_shows_it(tmp_path: Path) -> None:
+    """This is the state that looks like nothing happened: no task blocked, no escalation open,
+    the board unchanged. Someone returning to it has nothing to read but the absence of progress.
+    """
+    repo = healthy(tmp_path, events=aborted_chain(reported="resets 3:30am (Asia/Tokyo)"))
+    results = doctor.check_last_run(repo)
+    assert [f.level for f in results] == ["INFO"]
+    assert "3:30am" in results[0].message
+    assert "re-run `rein build`" in results[0].message
+
+
+def test_a_permanent_stop_does_not_invite_a_re_run(tmp_path: Path) -> None:
+    repo = healthy(tmp_path, events=aborted_chain(fault="environment_permanent"))
+    results = doctor.check_last_run(repo)
+    assert [f.level for f in results] == ["WARN"]
+    assert "Repair what it names first" in results[0].message
+
+
+def test_a_run_that_got_going_again_says_nothing(tmp_path: Path) -> None:
+    repo = healthy(tmp_path, events=aborted_chain(then=("task_started", "task_completed")))
+    assert doctor.check_last_run(repo) == []
+
+
+def test_a_repository_that_never_stopped_says_nothing(tmp_path: Path) -> None:
+    assert doctor.check_last_run(healthy(tmp_path, events=chain("cycle_initialized"))) == []

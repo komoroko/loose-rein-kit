@@ -4,6 +4,82 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.2.2] - 2026-08-12
+
+One reported defect, and the two things it turned out to be sitting on: a category error in what
+the loop is allowed to record, and a recovery path that was complete but unreachable.
+
+### `rein build` no longer records a machine's failure as a task's verdict (#8)
+
+Every agent-launch site raised `StopLoop` on any nonzero rc — an exhausted session limit, a
+`claude` that is not on PATH, a supervisor's SIGTERM — which unwound past the step retry budgets
+and marked the task `blocked` on its **first** invocation, with none of the budget the pipeline
+already has machinery for. `_run_cmd_step` made the same mistake from the other side, summarizing
+an `ExecutorError` (no container runtime, an unpinned image) as if the code had failed the gate.
+
+Two consequences, and the second is the worse one. `task_failed` and `knowledge_gap` are both
+`ATTENTION_EVENTS`, so a rate limit left a permanent unresolved escalation on gate ⑤'s screen, in
+a log that is append-only by design. And `blocked` takes a task off the frontier — which is the
+one place 0.2.1's salvage/restore machinery can ever run from. **A build stopped by a session
+limit therefore parked the task somewhere no re-run would collect it**: the recovery was finished
+and could not be reached.
+
+The line is now drawn once, in `faults.py`, as a pure function of `(rc, output)`. An agent launch
+can never be classified as the code's fault — launching produces no quality-gate verdict, so a
+nonzero rc is by construction about the machine — and a cmd step is the code's fault unless it
+could not be run at all. An environment fault leaves the task exactly as it was found (status,
+attempts, retry budget, handoff), keeps its worktree standing for the next run to salvage, and
+stops the run rather than feeding the next task to the same broken machine. Leaves that did pass
+their gate still finalize, gate-check and merge: their evidence is real.
+
+### An unattended re-run can tell "wait" from "give up"
+
+A session limit on a build of any length is close to certain, and people meet it unattended —
+something re-runs `rein build` from another terminal afterwards. The exit code is all that
+decision has to go on, and it conflated "the gate is unapproved" with "another run holds the
+lock". Now: `0` done, `1` a real verdict needs a human, `2` repair something first, `3` nothing is
+broken, re-run later. `3` covers capacity exhaustion, an external signal, and a held build lock.
+
+The loop does **not** sleep on a capacity limit: one that lifts in hours has no business holding
+the build lock and a set of worktrees, so it exits at once and the waiting belongs to whatever
+re-runs it (both READMEs and `build.md` carry the supervisor loop). `rein resume` and `rein
+doctor` report the stop when you come back, because a run that marks nothing correctly leaves a
+repository that looks exactly as it did before.
+
+### `rein task reset` — the write path `state.yaml`'s own rule presumes
+
+`state.yaml` is written only inside a Central Store transaction and `rein guard` denies a hand
+edit, but a human deciding a blocked task should be tried again had nowhere to record that. The
+troubleshooting section told them to edit `state.yaml`, which the guard refuses; what was left
+was calling an internal function from a Python shell. The status change and the typed `--reason`
+now land in one transaction. It keeps the handoff by default — a task that cannot pass must not
+earn an unlimited allowance by being reset in a loop — and `--fresh` discards it and says so. It
+does not close the escalation, and it cannot declare a task `done`.
+
+### One build mode: the interactive re-enactment is gone
+
+`/build` documented a second mode — the lead running the consumption algorithm by hand in
+conversation — and it was not executable. It instructed the lead to keep task statuses in
+`state.yaml`, which `rein guard` denies as machine-written; no verb can mark a task `done`
+anyway; and the control plane that carries a leaf's decisions into the audit chain is served
+only by the orchestrator. It also contradicted the rule the loop exists for — consumption order,
+parallelism, merge and stopping decided in code, not LLM discretion — and none of the recovery
+above (fault classification, exit codes, salvage, handoff) applied to it.
+
+So `rein build` is the implementation phase, and `autonomous-build-iteration` leaves the
+capability vocabulary with it: nothing re-invokes a procedure that is one command. Without a
+headless agent CLI, install one and point the roles at it with `rein agent <cli>`; `rein doctor`
+now checks the configured adapters resolve on PATH — a warning before the build phase, a failure
+once it is open.
+
+### The security review stops waiting behind the extraction
+
+`rein review generate` runs three LLM stages at up to fifteen minutes each. The comparator
+genuinely reads what the blind extractor produced; the security review reads only the diff and
+the relevant code and ran last for no reason but the order the calls were written in. It now runs
+alongside the chain. An optimization, not a correctness fix — the review's independence
+properties are unchanged, and the results merge and the events append in a fixed order.
+
 ## [0.2.1] - 2026-08-07
 
 Two reported defects that made `rein build` unusable past its first stumble, one thing the board

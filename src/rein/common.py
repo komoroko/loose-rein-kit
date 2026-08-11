@@ -188,6 +188,28 @@ def summarize_failure(cmd: str, rc: int, output: str) -> str:
     return "\n".join(out_lines)
 
 
+# --- how a build run ends -----------------------------------------------------
+#
+# `rein build` is routinely driven by something that will decide, unattended, whether to run it
+# again — a supervisor script, a scheduler, an agent's session that has just been restarted. That
+# decision is only ever as good as what the exit code says, so the codes separate the three
+# answers rather than the three internal causes:
+
+#: Every task is done. Nothing to re-run.
+EXIT_DONE = 0
+#: A task could not pass the quality gate, or the frontier is empty with work left. The verdict
+#: is real and a human has to act on it — re-running changes nothing.
+EXIT_HUMAN_NEEDED = 1
+#: The run refused to start, or the machine failed in a way waiting cannot fix (an unapproved
+#: gate, a draft plan, an agent CLI that is not on PATH, an unpinned sandbox image). Repair the
+#: named thing first; re-running before that is wasted.
+EXIT_CANNOT_PROCEED = 2
+#: The machine failed in a way time alone fixes — agent capacity exhausted, a supervisor's
+#: SIGTERM, another run holding the build lock. **No task was marked**, no retry budget was
+#: spent, and preserved work is waiting: re-run later and it continues from where it stopped.
+EXIT_RETRY_LATER = 3
+
+
 class StopLoop(Exception):
     """A cause to stop the build loop and escalate to the human. `code` is the exit code.
 
@@ -195,6 +217,6 @@ class StopLoop(Exception):
     defined here so neither has to import the other for it.
     """
 
-    def __init__(self, message: str, code: int = 1) -> None:
+    def __init__(self, message: str, code: int = EXIT_HUMAN_NEEDED) -> None:
         super().__init__(message)
         self.code = code

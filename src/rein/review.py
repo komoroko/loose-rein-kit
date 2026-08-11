@@ -27,6 +27,7 @@ import argparse
 import json
 import logging
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -309,40 +310,6 @@ def generate(
 
     relevant = _relevant_code(repo, head, facts.files)
 
-    # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
-    extract_request = actual_extraction.build_request(
-        trusted_base_sha=trusted_base,
-        subject_head_sha=head,
-        diff_text=diff_text,
-        relevant_code=relevant.files,
-        deterministic_facts={
-            "coverage": coverage,
-            "risk_floor": risk_floor,
-            "relevant_code": relevant.as_facts(),
-        },
-    )
-    extraction = actual_extraction.run_extractor(
-        extract_request, reviewer, repo=repo, commit=head, risk_floor=risk_floor
-    )
-
-    # Expected vs Actual — the Actual arrives read-only and digest-bound (§12.3).
-    compare_request = conformance.build_request(
-        expected_model=_expected_model(plan),
-        actual_statements=extraction.actual_statements,
-        actual_digest=extraction.actual_digest,
-    )
-    known_ids = _known_ids(plan, extraction.actual_statements)
-    comparison = conformance.run_comparator(
-        compare_request,
-        reviewer,
-        repo=repo,
-        commit=head,
-        actual_statement_ids=[str(a.get("id")) for a in extraction.actual_statements],
-        known_ids=known_ids,
-        effective_risk=effective,
-        independence=_independence(config),
-    )
-
     security_request = security_review.build_request(
         diff_text=diff_text,
         relevant_code=relevant.files,
@@ -350,16 +317,48 @@ def generate(
         trusted_base_sha=trusted_base,
         subject_head_sha=head,
     )
-    security = security_review.run_security_review(
-        security_request,
-        reviewer,
-        repo=repo,
-        commit=head,
-        # What the last review found blocking. Without it the check below it — a reviewer may not
-        # clear its own block by regenerating and omitting the finding — had nothing to compare
-        # against, so the protection its own docstring describes never once applied.
-        prior_blocking_ids=_prior_blocking_ids(store.read_review()),
-    )
+    # What the last review found blocking. Read here rather than at the call below, because the
+    # call is about to move off this thread and the store is not something to touch from two.
+    prior_blocking = _prior_blocking_ids(store.read_review())
+
+    # The security review reads the diff and the relevant code; it consumes nothing the extractor
+    # or the comparator produce, so it does not have to wait behind them. Three LLM stages at up
+    # to 15 minutes each ran end to end for no reason but the order they were written in.
+    # Determinism is unaffected: the results are merged, and the events appended, in a fixed
+    # order below, and a failure in the extraction still surfaces ahead of one here.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        security_future = pool.submit(
+            security_review.run_security_review,
+            security_request,
+            reviewer,
+            repo=repo,
+            commit=head,
+            # Without it the check below — a reviewer may not clear its own block by
+            # regenerating and omitting the finding — had nothing to compare against, so the
+            # protection its own docstring describes never once applied.
+            prior_blocking_ids=prior_blocking,
+        )
+        try:
+            extraction, comparison = _extract_and_compare(
+                repo,
+                reviewer,
+                plan=plan,
+                config=config,
+                head=head,
+                trusted_base=trusted_base,
+                diff_text=diff_text,
+                relevant=relevant,
+                coverage=coverage,
+                risk_floor=risk_floor,
+                effective=effective,
+            )
+        except BaseException:
+            # The security stage's own failure is not the one to report: this one came first in
+            # the pipeline's order, and reporting whichever thread lost a race would make the
+            # error a reader sees depend on timing.
+            security_future.cancel()
+            raise
+        security = security_future.result()
 
     binding = {
         "change_digest": change,
@@ -398,6 +397,62 @@ def generate(
     return machine
 
 
+def _extract_and_compare(
+    repo: repo_mod.Repo,
+    reviewer: review_policy.Reviewer,
+    *,
+    plan: models.Plan | None,
+    config: models.Config | None,
+    head: str,
+    trusted_base: str,
+    diff_text: str,
+    relevant: RelevantCode,
+    coverage: Mapping[str, Any],
+    risk_floor: str,
+    effective: str,
+) -> tuple[actual_extraction.ExtractionResult, conformance.ComparatorResult]:
+    """The one genuinely sequential pair: the comparator reads what the extractor produced.
+
+    Kept together so the concurrency in `generate` reads as "one chain plus one independent
+    stage" rather than as three calls someone happened to interleave.
+    """
+    # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
+    extract_request = actual_extraction.build_request(
+        trusted_base_sha=trusted_base,
+        subject_head_sha=head,
+        diff_text=diff_text,
+        relevant_code=relevant.files,
+        deterministic_facts={
+            "coverage": coverage,
+            "risk_floor": risk_floor,
+            "relevant_code": relevant.as_facts(),
+        },
+    )
+    extraction = actual_extraction.run_extractor(
+        extract_request, reviewer, repo=repo, commit=head, risk_floor=risk_floor
+    )
+
+    # Expected vs Actual — the Actual arrives read-only and digest-bound (§12.3).
+    compare_request = conformance.build_request(
+        expected_model=_expected_model(plan),
+        actual_statements=extraction.actual_statements,
+        actual_digest=extraction.actual_digest,
+    )
+    known_ids = _known_ids(plan, extraction.actual_statements)
+    comparison = conformance.run_comparator(
+        compare_request,
+        reviewer,
+        repo=repo,
+        commit=head,
+        actual_statement_ids=[str(a.get("id")) for a in extraction.actual_statements],
+        known_ids=known_ids,
+        effective_risk=effective,
+        independence=_independence(config),
+    )
+
+    return extraction, comparison
+
+
 def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str, Any]]) -> list[str]:
     ids = [str(a.get("id")) for a in actual_statements]
     if plan is not None:
@@ -415,10 +470,10 @@ def _prior_blocking_ids(review: models.Review | None) -> list[str]:
 def _effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> str:
     """The change's effective risk: the max of every contributor (plan §13.5).
 
-    The detector's `risk_floor` alone was what the comparator used to be handed, which left the
-    frozen plan's own judgment out of it — a change touching a `critical` claim read as `low`
-    if no regex happened to fire. The plan supplies claim and task risk; everything else comes
-    off the deterministic signals, so an AI cannot argue any of it down.
+    The detector's `risk_floor` alone would leave the frozen plan's own judgment out of it — a
+    change touching a `critical` claim reading as `low` because no regex fired. So the plan
+    supplies claim and task risk; everything else comes off the deterministic signals, so an AI
+    cannot argue any of it down.
     """
     claim_risk = models.max_risk([c.risk for c in plan.claims]) if plan is not None else "low"
     task_risk = models.max_risk([t.risk for t in plan.tasks]) if plan is not None else "low"
@@ -429,12 +484,11 @@ def _effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> st
 def _independence(config: models.Config | None) -> dict[str, Any]:
     """The declared reviewer groups, read from the config that declares them.
 
-    This used to throw its argument away and return one hardcoded group for both roles, so the
-    rule `review_policy.independence_ok` enforces — the Actual Extractor and the Comparator must
-    not be the same opinion — always failed on a critical change, and `independence_group`, the
-    whole substitute for buying a second AI provider, reached nothing but a
-    `doctor` warning. An unset group stays empty rather than being invented: the check refuses a
-    critical review that cannot name its two groups, which is the right answer.
+    `independence_group` is the whole substitute for buying a second AI provider, so it is read
+    from the config rather than assumed: `review_policy.independence_ok` — the Actual Extractor
+    and the Comparator must not be the same opinion — has nothing to enforce otherwise. An unset
+    group stays empty rather than being invented: the check refuses a critical review that cannot
+    name its two groups, which is the right answer.
     """
     if config is None:
         return {"actual_extractor": {"group": ""}, "comparator": {"group": ""}}
@@ -494,12 +548,10 @@ def _adapter_reviewer(repo: repo_mod.Repo, role: str = "code_reviewer") -> revie
     the single JSON document the stage validators parse. Every stage revalidates the output, so
     this is a transport, not a trust boundary.
 
-    `role` is a real parameter now. It used to read `agents.reviewer`, which the config schema
-    does not define (`additionalProperties: false`), so the lookup always missed, always fell
-    back to `claude`, and one callable served every stage — the same session answering as the
-    Actual Extractor and as the Comparator, which is the independence violation §12.4 exists to
-    prevent. It also *sends* the request on stdin, as the docstring always claimed; passing a
-    whole diff as an argv element hits E2BIG on a large change.
+    `role` selects the adapter, so each stage gets its own: one callable serving every stage
+    means the same session answers as the Actual Extractor and as the Comparator, the
+    independence violation §12.4 exists to prevent. The request goes on stdin — a whole diff as
+    an argv element hits E2BIG on a large change.
     """
     from rein import build_loop
 

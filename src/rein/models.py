@@ -241,6 +241,9 @@ EVENT_ORDER: tuple[str, ...] = (
     "task_started",
     "task_failed",
     "task_completed",
+    # The run stopped because the machine failed, not because any task did. Deliberately outside
+    # `events.ATTENTION_EVENTS`: it asks nobody to judge the work, it asks for a re-run.
+    "run_aborted",
     "decision_declared",
     "coverage_generated",
     "actual_extraction_started",
@@ -339,9 +342,9 @@ def sandbox_setup_command(build_targets: Sequence[str]) -> str:
     """The one command that actually sandboxes `build_targets`. "" when there is nothing to do.
 
     Derived in one place because four surfaces print it — `rein next`, `rein doctor`, the
-    dashboard, and `rein init`. They used to print `rein oci build --profile <first of N>`: one
-    image out of three, without `--write-config`, so the digest still had to be copied out of the
-    terminal by hand. Pure, so the recommendation table stays testable without a repo on disk.
+    dashboard, and `rein init` — so none of them can name one image out of three, or leave off
+    `--write-config` and send the human to copy a digest out of the terminal. Pure, so the
+    recommendation table stays testable without a repo on disk.
     """
     if len(build_targets) > 1:
         return "rein oci build --all --write-config"
@@ -970,6 +973,16 @@ class Config:
     @property
     def agent_timeout_sec(self) -> int:
         return self._int(self.execution, "agent_timeout_sec", 3600)
+
+    @property
+    def launch_retries(self) -> int:
+        """The whole run's allowance for retrying a launch the machine, not the code, failed.
+
+        Run-scoped rather than per-task on purpose: a session limit or a missing binary is a
+        property of the machine, and spending a task's budget on it would charge the code for
+        something it did not do.
+        """
+        return self._int(self.execution, "launch_retries", 2)
 
     @property
     def profiles(self) -> dict[str, ExecutorProfile]:

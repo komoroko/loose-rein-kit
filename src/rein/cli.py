@@ -2,8 +2,7 @@
 
 One dispatcher, one implementation per operation: each verb hands its remaining arguments to
 the owning module's entry function, so nothing is implemented twice. The daily verbs stay the
-memorable four (start / next / ui / agent); the rest are the setup and operational commands
-that used to hide behind make targets in the copy-distribution era.
+memorable four (start / next / ui / agent); the rest are the setup and operational commands.
 
 `approve` is the one verb that can open a gate, and it does so only after a human types the
 gate name at an interactive terminal. What keeps an agent out is that it is never
@@ -48,6 +47,7 @@ VERBS: dict[str, str] = {
     "revise": "revise",
     "review": "review",
     "build": "build_loop",
+    "task": "task_cmd",
     "doctor": "doctor",
     "events": "events",
     "cycle-close": "cycle",
@@ -94,6 +94,7 @@ operations:
   revise --to <phase> ...      roll back upstream (gates reset in a chain)
   review generate|complete|show  the grounded machine review (gate ④'s evidence)
   build [--dry-run]            the deterministic /build orchestrator
+  task reset <id> --reason …   put a blocked task back on the frontier (recorded, never hand-edited)
   dag [--render|--trace|...]   derive/inspect the task DAG (read-only; /tasks & /status use it)
   doctor                       read-only diagnosis: format, integrations, sandbox, plan, review
   events [--summary|--verify]  read the hash-chained audit log (read-only)

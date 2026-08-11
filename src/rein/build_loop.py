@@ -14,7 +14,17 @@ The determinism boundary:
   - Non-deterministic (LLM): the code, and the review step's fixes → absorbed by "re-run the
     preceding cmd steps after an agent step; retry until green, else blocked".
 
-Three properties are load-bearing:
+Four properties are load-bearing:
+
+**The loop records only verdicts it earned.** A task status is evidence *about the task*; an
+agent CLI missing from PATH, a session limit that resets at 3am, a supervisor's SIGTERM are
+facts about the machine. They never share a code path, a status, or an event here (:mod:`rein.
+faults` draws the line). An environment fault leaves every task exactly as it found it —
+status, attempts, retry budget, handoff — and stops the run, because the next task would fail
+the same way. What that buys is not tidiness: `blocked` takes a task off the frontier, so a task
+blocked for a machine's reason never reaches the salvage/restore path in :mod:`rein.build_git`
+that exists to continue it, and the run's `task_failed` + `knowledge_gap` sit in an append-only
+chain that gate ⑤ counts as unresolved escalations forever.
 
 **The loop produces no gate-④ evidence.** Gate ④ approves a *grounded review* — a blind
 actual-behaviour extraction compared against the frozen plan, with a coverage manifest — and a
@@ -42,6 +52,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 import uuid
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -57,6 +69,7 @@ from rein import (
     dag,
     event_chain,
     executors,
+    faults,
     gate_guard,
     models,
     strict_yaml,
@@ -67,6 +80,14 @@ from rein import store as store_mod
 logger = logging.getLogger(__name__)
 
 StopLoop = common.StopLoop
+EnvironmentFault = faults.EnvironmentFault
+
+#: How long the loop waits between retries of a launch the machine failed, by attempt. Seconds,
+#: not hours: this covers a blip (a signal, a momentary timeout), never a capacity limit — one
+#: that resets at 3am is not something a process should sit on holding the build lock and a set
+#: of worktrees. That wait belongs to whatever will re-run `rein build`, which is why capacity
+#: exhaustion skips these retries entirely and exits with `EXIT_RETRY_LATER` straight away.
+_LAUNCH_BACKOFF_SEC: tuple[float, ...] = (5.0, 15.0, 30.0)
 
 #: Where a sandboxed gate step sees the tree it is testing. One constant, so the mount and the
 #: working directory cannot disagree about where the repository is.
@@ -178,6 +199,7 @@ class Config:
     timeout_cmd: float | None
     timeout_agent: float | None
     adapter_argv: tuple[str, ...]
+    launch_retries: int
 
     @property
     def gate_cmds(self) -> list[str]:
@@ -234,6 +256,7 @@ class Config:
             timeout_cmd=float(config.command_timeout_sec) or None,
             timeout_agent=float(config.agent_timeout_sec) or None,
             adapter_argv=argv,
+            launch_retries=max(0, config.launch_retries),
         )
 
     @classmethod
@@ -318,9 +341,9 @@ def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, not
 # --- what the next attempt inherits (through the Central Store) ----------------
 #
 # The implementer's own agent session is process-local and dies with the terminal that ran it, so
-# a build restarted from another terminal used to begin the task cold: full retry budget, empty
-# failure log, and the previous attempt's committed work stranded on a salvage branch nothing
-# read back. What survives a crash has to be written down, which is what this is.
+# what a build restarted from another terminal inherits has to be written down: which gate step
+# failed, what it said, how much of the budget is left, and the salvage branch holding the
+# interrupted attempt's commits.
 
 #: Caps mirroring state.schema.json's `handoff`, so a long gate log cannot make state.yaml
 #: unwritable at exactly the moment it is carrying a failure.
@@ -424,6 +447,14 @@ def plan_batch(graph: dag.Graph, max_parallel: int) -> tuple[str, list[dag.Task]
       ("serial", [one foundation task])       — foundation / high fan-out is finalized serially
       ("parallel", [leaf tasks, ≤max_parallel]) — independent leaves are launched in parallel in isolation
       None                                    — the frontier is empty
+
+    A batch is a barrier: the caller waits for all of it before recomputing the frontier, so a
+    slot freed by a quick leaf idles until the slowest one in the batch finishes. That cost is
+    **deliberate, not an oversight**. Refilling slots as leaves complete would make batch
+    membership — and with it the merge order and what the integration gate verifies as one tree —
+    depend on which leaf happened to finish first. Determinism here is a reviewability property,
+    not a performance one: it is what lets someone predict this loop instead of interviewing it.
+    Utilization is the cheaper thing to give up.
     """
     ordered = graph.order_frontier()
     if not ordered:
@@ -432,6 +463,20 @@ def plan_batch(graph: dag.Graph, max_parallel: int) -> tuple[str, list[dag.Task]
     if foundations:
         return ("serial", [foundations[0]])
     return ("parallel", ordered[:max_parallel])
+
+
+@dataclass(frozen=True)
+class LeafOutcome:
+    """What one parallel leaf's run came to.
+
+    Three outcomes, not two, and the third is the point: `fault` set means the leaf produced
+    **no verdict at all** — the machine failed under it — so the caller must neither merge it nor
+    mark it. `ok=False` with no fault is a real verdict: the code could not pass the gate.
+    """
+
+    ok: bool
+    log: str = ""
+    fault: EnvironmentFault | None = None
 
 
 # --- orchestrator body ------------------------------------------------------
@@ -469,6 +514,12 @@ class Orchestrator:
         # Dry-run status overlay: the simulated statuses live here instead of tasks.yaml, so the
         # loop can progress to completion while the run stays strictly read-only.
         self._sim_status: dict[str, str] = {}
+        # The run's allowance for retrying a launch the *machine* failed. One counter for the
+        # whole run, guarded because parallel leaves draw on it at the same time: an environment
+        # fault is a property of the machine, so a per-task budget would let one broken
+        # environment be re-discovered max_parallel times over.
+        self._launch_retries_left = config.launch_retries
+        self._launch_lock = threading.Lock()
 
     def _set_status(self, task_id: str, status: str, *, commit: str = "") -> None:
         if self.dry_run:
@@ -476,6 +527,40 @@ class Orchestrator:
             print(f"    [dry-run] {task_id} → {status}")
             return
         set_task_status(self.repo, task_id, status, commit=commit)
+
+    # -- launching an agent (the machine's side of the boundary) --
+
+    def _spend_launch_retry(self) -> bool:
+        """Take one from the run's launch allowance. False when it is empty."""
+        with self._launch_lock:
+            if self._launch_retries_left <= 0:
+                return False
+            self._launch_retries_left -= 1
+            return True
+
+    def _launch(self, argv: list[str], *, cwd: str, where: str, env: dict[str, str] | None = None) -> str:
+        """One agent-CLI launch, retried while it is the machine that keeps failing.
+
+        Returns the launch's output. Raises :class:`faults.EnvironmentFault` — never `StopLoop`
+        — when the launch cannot be made to happen, because "the agent never ran" is not a
+        verdict about any task and must not be caught by anything that treats it as one.
+
+        Capacity exhaustion skips the retries: waiting seconds cannot fix a limit that lifts in
+        hours, and sitting on the build lock until it does would make the run un-restartable from
+        anywhere else. It exits to the caller immediately so a supervisor can do the waiting.
+        """
+        attempt = 0
+        while True:
+            rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
+            if rc == 0:
+                return out
+            fault = faults.classify_launch(rc, out)
+            if fault is faults.Fault.ENV_PERMANENT or faults.is_capacity(out) or not self._spend_launch_retry():
+                raise EnvironmentFault(fault, where=where, rc=rc, output=out)
+            delay = _LAUNCH_BACKOFF_SEC[min(attempt, len(_LAUNCH_BACKOFF_SEC) - 1)]
+            print(f"    [launch] {where}: the launch failed (rc={rc}) for a machine reason; retrying in {delay:g}s")
+            time.sleep(delay)
+            attempt += 1
 
     def _escalate(self, kind: str, message: str, *, task: str | Sequence[str] = "") -> None:
         """Record something a human has to decide about, and say so on the console.
@@ -559,33 +644,32 @@ class Orchestrator:
         With a session id, the first launch stamps it (--session-id) and a retry resumes it
         (--resume) so the implementer keeps its own context across its retries instead of
         re-reading ticket/design/code cold. A failed resume falls back to one fresh launch
-        (session files can expire) rather than stopping the loop on a continuity optimization.
+        (session files can expire) rather than stopping the loop on a continuity optimization —
+        but only when a fresh launch could plausibly do better. An exhausted session limit or a
+        CLI that is not on PATH gets no second attempt: nothing was going to launch.
         """
         if self.dry_run:
             print(f"    [dry-run] launch implementer (cwd={cwd}) task={task.id}")
             return
         prompt = self._implementer_prompt(task, failure_log)
+        where = f"{task.id}: implementer"
         flags = list(write_flags(self.config.adapter_argv))
         flags += (["--resume", session] if resume else ["--session-id", session]) if session else []
-        env = self._leaf_env(task)
-        rc, out = _run(
-            [*self.config.adapter_argv, *flags, prompt],
+        try:
+            self._launch([*self.config.adapter_argv, *flags, prompt], cwd=cwd, where=where, env=self._leaf_env(task))
+            return
+        except EnvironmentFault as fault:
+            if not resume or not fault.retryable or faults.is_capacity(fault.output):
+                raise
+            print(f"    [resume] {task.id}: resuming session failed (rc={fault.rc}); relaunching fresh")
+        # A fresh token: the first one was spent on the launch that failed, and the server
+        # accepts each nonce once.
+        self._launch(
+            [*self.config.adapter_argv, *write_flags(self.config.adapter_argv), prompt],
             cwd=cwd,
-            timeout=self.config.timeout_agent,
-            env=env,
+            where=where,
+            env=self._leaf_env(task),
         )
-        if rc != 0 and resume:
-            print(f"    [resume] {task.id}: resuming session failed (rc={rc}); relaunching fresh")
-            # A fresh token: the first one was spent on the launch that failed, and the server
-            # accepts each nonce once.
-            rc, out = _run(
-                [*self.config.adapter_argv, *write_flags(self.config.adapter_argv), prompt],
-                cwd=cwd,
-                timeout=self.config.timeout_agent,
-                env=self._leaf_env(task),
-            )
-        if rc != 0:
-            raise StopLoop(f"{task.id}: failed to launch implementer (rc={rc})\n{out[-1000:]}")
 
     def _leaf_env(self, task: dag.Task) -> dict[str, str] | None:
         """The environment an implementer runs with: the control socket and a scoped token.
@@ -661,17 +745,21 @@ class Orchestrator:
         """
         before = self._tree_state(cwd)
         argv = step.agent_argv or self.config.adapter_argv
-        rc, out = _run(
+        self._launch(
             [*argv, *write_flags(argv), self._review_prompt(task, cwd, base)],
             cwd=cwd,
-            timeout=self.config.timeout_agent,
+            where=f"{task.id}: the '{step.name}' agent step",
         )
-        if rc != 0:
-            raise StopLoop(f"{task.id}: failed to launch the review agent step (rc={rc})\n{out[-1000:]}")
         return self._tree_state(cwd) != before
 
     def _run_cmd_step(self, step: GateStep, cwd: str) -> str:
         """Run one cmd step in its executor profile. "" on pass, a compact failure otherwise.
+
+        Raises :class:`faults.EnvironmentFault` when the step could not be *run* — no container
+        runtime, an unpinned or missing sandbox image, a command that is not on PATH. Those used
+        to be summarized as if the code had failed the gate, which charged the step's retry
+        budget and eventually blocked the task for a verdict nothing had reached: the same
+        category error as a failed agent launch, on the other side of the pipeline.
 
         An argv list, never a shell string: a pipe or a redirect has to live in a script a
         reviewer can read, not in a config value nobody parses the same way twice.
@@ -690,11 +778,17 @@ class Orchestrator:
             workdir=_SANDBOX_WORKDIR if profile.is_sandboxed else cwd,
             timeout_sec=self.config.timeout_cmd,
         )
+        where = f"gate step '{step.name}'"
         try:
             result = executors.for_profile(profile).run(spec)
         except executors.ExecutorError as exc:
-            return summarize_failure(step.display, 1, str(exc))
-        return "" if result.exit_code == 0 else summarize_failure(step.display, result.exit_code, result.output)
+            raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
+        if result.exit_code == 0:
+            return ""
+        fault = faults.classify_step(result.exit_code, result.output)
+        if fault.is_environment:
+            raise EnvironmentFault(fault, where=where, rc=result.exit_code, output=result.output)
+        return summarize_failure(step.display, result.exit_code, result.output)
 
     def _profile_for(self, step: GateStep) -> models.ExecutorProfile:
         """The profile a step runs in: its own, else `executors.quality_gate_profile`, else host.
@@ -825,17 +919,15 @@ class Orchestrator:
         return build_prompts.integration_fix_prompt(ids, failure_log, gate_cmds=self.config.gate_cmds)
 
     def _invoke_integration_fixer(self, ids: str, failure_log: str) -> None:
-        rc, out = _run(
+        self._launch(
             [
                 *self.config.adapter_argv,
                 *write_flags(self.config.adapter_argv),
                 self._integration_fix_prompt(ids, failure_log),
             ],
             cwd=self.root,
-            timeout=self.config.timeout_agent,
+            where=f"{ids}: the integration fixer",
         )
-        if rc != 0:
-            raise StopLoop(f"{ids}: failed to launch the integration fixer (rc={rc})\n{out[-1000:]}")
 
     def _integration_gate(self, tasks: list[dag.Task]) -> tuple[bool, str]:
         """Re-verify the merged/integrated state of the work branch after a multi-leaf join.
@@ -891,16 +983,21 @@ class Orchestrator:
     def _add_worktree(self, task: dag.Task) -> str:
         return self.ws.add_worktree(task.id, str(self._handoff_for(task).get("salvage_branch", "")))
 
-    def _safe_run_task(self, task: dag.Task, cwd: str) -> tuple[bool, str]:
-        """Call _run_task_to_done safely from a thread. Convert exceptions to (False, log).
+    def _safe_run_task(self, task: dag.Task, cwd: str) -> LeafOutcome:
+        """Call _run_task_to_done safely from a thread, so one leaf cannot strand the batch.
 
-        So that one leaf's failure (e.g. implementer launch failure) does not drag down the whole parallel batch and
-        leave other tasks stuck in in_progress, deadlocking.
+        A `StopLoop` becomes a failed verdict; an `EnvironmentFault` is carried out **as itself**
+        so the caller can tell "this leaf's code did not pass" from "no one ever asked this
+        leaf's code anything". Flattening the second into the first is what marked tasks blocked
+        for a rate limit.
         """
         try:
-            return self._run_task_to_done(task, cwd=cwd)
+            ok, log = self._run_task_to_done(task, cwd=cwd)
+            return LeafOutcome(ok=ok, log=log)
+        except EnvironmentFault as fault:
+            return LeafOutcome(ok=False, log=fault.summary(), fault=fault)
         except StopLoop as exc:
-            return False, str(exc)
+            return LeafOutcome(ok=False, log=str(exc))
 
     def _finalize_commit(self, cwd: str, message: str) -> bool:
         return self.ws.finalize_commit(cwd, message)
@@ -966,22 +1063,48 @@ class Orchestrator:
                 self._set_status(task.id, "todo")
                 print(f"  [recover] {task.id}: reset in-progress -> todo (resuming from an interruption)")
 
+    def _record_abort(self, fault: EnvironmentFault) -> None:
+        """Say on the console, and in the chain, that the machine is what stopped this run.
+
+        `run_aborted` is deliberately not one of `events.ATTENTION_EVENTS`: it asks nobody to
+        judge the work, it asks for a re-run. A `knowledge_gap` here would leave a permanent
+        "unresolved escalation" on gate ⑤'s screen for a machine's bad afternoon, in a log that
+        is append-only by design.
+        """
+        logger.error(fault.summary())
+        self._event(
+            "run_aborted",
+            self.cycle_id,
+            {
+                "fault": fault.fault.value,
+                "where": fault.where[:64],
+                "rc": fault.rc,
+                "capacity": faults.is_capacity(fault.output),
+                "reported": faults.reset_hint(fault.output),
+            },
+        )
+
+    def _abort_run(self, fault: EnvironmentFault) -> int:
+        """End the run because the machine failed. Record it; mark no task."""
+        self._record_abort(fault)
+        return common.EXIT_RETRY_LATER if fault.retryable else common.EXIT_CANNOT_PROCEED
+
     def run(self) -> int:
         if self.state is None:
             logger.error("no .rein/state.yaml — run `rein init` first")
-            return 2
+            return common.EXIT_CANNOT_PROCEED
         if self.state.gate_status("tasks") != "approved":
             logger.error(
                 "gate 3 (tasks) is not approved, so there is no frozen plan to build against. "
                 "Finish /tasks and get the plan approved first."
             )
-            return 2
+            return common.EXIT_CANNOT_PROCEED
         if self.state.plan_status != "frozen":
             logger.error(
                 f"the plan is '{self.state.plan_status}', not 'frozen'. Gate 3's approval freezes it; "
                 "building against a draft would implement a plan nobody signed for."
             )
-            return 2
+            return common.EXIT_CANNOT_PROCEED
         if not self.dry_run and self.branch in ("", "HEAD"):
             # work_branch falls back to "HEAD" when git is unavailable/detached; creating worktrees
             # or committing against that would land the work on an arbitrary base.
@@ -989,7 +1112,7 @@ class Orchestrator:
                 "cannot determine the work branch (git unavailable or detached HEAD) — "
                 "fill `branch:` in state.md or check out the work branch first."
             )
-            return 2
+            return common.EXIT_CANNOT_PROCEED
         if self.dry_run:
             return self._run_loop()  # read-only: no lock either, and no contention to guard against
         try:
@@ -1000,8 +1123,11 @@ class Orchestrator:
                 self.control = server
                 return self._run_loop()
         except store_mod.LockUnavailableError as exc:
+            # Retry-later, not cannot-proceed: nothing here is broken, another run simply has the
+            # repository. A supervisor restarting `rein build` races the previous process's
+            # shutdown often enough that reading this as fatal would stop the loop for good.
             logger.error(f"another build run holds the lock: {exc}")
-            return 2
+            return common.EXIT_RETRY_LATER
 
     def _run_loop(self) -> int:
         self._recover_in_progress()
@@ -1020,7 +1146,7 @@ class Orchestrator:
                     "no_runnable",
                     f"No runnable tasks and {unfinished} unfinished ({', '.join(blocked)}). Help needed.",
                 )
-                return 1
+                return common.EXIT_HUMAN_NEEDED
 
             mode, tasks = batch
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
@@ -1032,6 +1158,10 @@ class Orchestrator:
             except StopLoop as exc:
                 logger.error(str(exc))
                 return exc.code
+            except EnvironmentFault as fault:
+                # Never start the next batch into the same broken environment: whatever stopped
+                # this launch would stop the next one, one wasted task at a time.
+                return self._abort_run(fault)
             # Recompute at the top of the loop after each batch (reassemble the chain).
 
     def _consume_serial(self, tasks: list[dag.Task]) -> None:
@@ -1040,7 +1170,15 @@ class Orchestrator:
             self._set_status(task.id, "in-progress")
             print(f"  [serial] {task.id} {task.title}")
             pre_head = "" if self.dry_run else self.ws.head()
-            ok, log = self._run_task_to_done(task, cwd=self.root, base=pre_head)
+            try:
+                ok, log = self._run_task_to_done(task, cwd=self.root, base=pre_head)
+            except EnvironmentFault:
+                # No verdict was reached, so none is recorded: back to `todo` with its attempts,
+                # retry budgets and handoff intact, and the tree left as it stands for the next
+                # run's finalize/salvage to pick up. `blocked` here would take the task off the
+                # frontier, which is precisely what stops a re-run from ever continuing it.
+                self._set_status(task.id, "todo")
+                raise
             if not ok:
                 self._set_status(task.id, "blocked")
                 self._escalate(
@@ -1078,12 +1216,18 @@ class Orchestrator:
 
         Worktree creation is done serially on the main thread (avoiding .git index.lock contention);
         only the implementation is parallelized.
+
+        A leaf the machine stopped is not a leaf that failed: it goes back to `todo` and keeps
+        its worktree, so the next run's `add_worktree` finalizes and salvages it and the
+        implementer continues rather than restarts. The batch is still played out to the end
+        first — leaves that did pass their gate earned their merge, and throwing that away
+        because a *different* leaf hit a session limit would be its own kind of dishonesty.
         """
         for task in tasks:
             self._set_status(task.id, "in-progress")
         # Worktree creation is serial (avoid git lock contention). The implementation is run in parallel after.
         branches = {task.id: self._add_worktree(task) for task in tasks}
-        results: dict[str, tuple[bool, str]] = {}
+        results: dict[str, LeafOutcome] = {}
         with ThreadPoolExecutor(max_workers=max(1, self.config.max_parallel)) as pool:
             futures = {pool.submit(self._safe_run_task, t, self._worktree_path(t)): t for t in tasks}
             for future, task in futures.items():
@@ -1092,9 +1236,17 @@ class Orchestrator:
         blocked_any = False
         merged: list[dag.Task] = []
         landed: dict[str, str] = {}
+        # The first fault in id order, so which one is reported does not depend on thread timing.
+        fault = next((results[t.id].fault for t in sorted(tasks, key=lambda t: t.id) if results[t.id].fault), None)
         # Merge deterministically in ascending id order (sequential join).
         for task in sorted(tasks, key=lambda t: t.id):
-            ok, log = results[task.id]
+            outcome = results[task.id]
+            ok, log = outcome.ok, outcome.log
+            if outcome.fault is not None:
+                # No verdict: no status, no escalation, and the worktree stays where it is.
+                self._set_status(task.id, "todo")
+                print(f"  [aborted] {task.id}: the machine stopped this leaf — left todo, work preserved")
+                continue
             if not ok:
                 self._set_status(task.id, "blocked")
                 self._escalate(
@@ -1135,6 +1287,11 @@ class Orchestrator:
         # Not a knob any more: each leaf was green only in isolation, so a batch that merged
         # two or more of them has never been verified as one tree until now.
         if len(merged) >= 2:
+            # An EnvironmentFault here propagates with the merged tasks still `in-progress`, and
+            # that is the honest state: they merged, but nothing has verified the combined tree.
+            # The next run resets them to `todo` and re-plays them, which re-runs the integration
+            # gate. Duplicated work, never a skipped verification — marking them `done` would be
+            # the other way round, and nothing would ever come back to check.
             ok, log = self._integration_gate(merged)
         else:
             ok, log = True, ""
@@ -1153,7 +1310,14 @@ class Orchestrator:
             )
             blocked_any = True
         if blocked_any:
-            raise StopLoop("A blocked task occurred. Human intervention needed.", code=1)
+            # A real verdict outranks a machine fault when both happened: re-running clears the
+            # fault but never the blocked task, so the human has to look either way. The fault is
+            # still recorded — it explains a leaf that came back `todo` with nothing said about it.
+            if fault is not None:
+                self._record_abort(fault)
+            raise StopLoop("A blocked task occurred. Human intervention needed.", code=common.EXIT_HUMAN_NEEDED)
+        if fault is not None:
+            raise fault
 
     # -- handing over to the review pipeline -----------------------------------
 
@@ -1183,7 +1347,7 @@ class Orchestrator:
             "\nThis loop cannot open gate 4, and neither can anything but a human: a gate opens only on\n"
             "the gate name typed at an interactive terminal, recorded by `rein approve` itself."
         )
-        return 0
+        return common.EXIT_DONE
 
 
 def main(argv: list[str] | None = None) -> int:

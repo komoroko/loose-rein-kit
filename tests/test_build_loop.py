@@ -13,11 +13,12 @@ and hands over to the review pipeline.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
 
-from rein import build_loop, common, dag, models
+from rein import build_loop, common, dag, executors, faults, models
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -330,7 +331,7 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": recorded.update({tid: commit}))
     monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
-    monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: (True, ""))
+    monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
     monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
@@ -470,12 +471,18 @@ def test_the_handover_does_not_offer_to_approve(tmp_path: Path, capsys: pytest.C
 
 
 def test_two_runs_cannot_overlap(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """…and says so as retry-later, not as a refusal.
+
+    Nothing is broken when another run holds the repository, and a supervisor restarting the
+    build races the previous process's shutdown often enough that reading it as fatal would end
+    the loop for good.
+    """
     root = build_repo(tmp_path)
     repo = repo_mod.Repo(root)
     store_mod.ensure_private_dir(store_mod.Store(repo).runtime)
     with build_loop.build_lock(repo):
         config = build_loop.Config.load(repo)
-        assert build_loop.Orchestrator(config, dry_run=False, repo=repo).run() == 2
+        assert build_loop.Orchestrator(config, dry_run=False, repo=repo).run() == common.EXIT_RETRY_LATER
     assert "holds the lock" in capsys.readouterr().err
 
 
@@ -842,3 +849,207 @@ def test_a_host_profile_still_runs_where_it_was_told_to(tmp_path: Path) -> None:
         monkeypatch.undo()
     assert record == [["make", "test"]]
     assert seen["cwd"] == str(tmp_path)
+
+
+# --- environment faults: the machine's failures are not the code's ------------
+#
+# The loop records verdicts it earned. These pin the consequence of getting that wrong: a task
+# `blocked` for a rate limit leaves the frontier, and a task off the frontier never reaches the
+# salvage/restore path that exists to continue it — so an auto-restarted build never picks it up.
+
+SESSION_LIMIT = (1, "You've hit your session limit · resets 3:30am (Asia/Tokyo)")
+NO_SUCH_CLI = (127, "could not run 'claude': [Errno 2] No such file or directory: 'claude'")
+
+
+def launch_failing(result: tuple[int, str], record: list[list[str]] | None = None) -> object:
+    """A `build_loop._run` that fails every agent-CLI launch and lets git through."""
+
+    def _run(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
+        if record is not None:
+            record.append(cmd)
+        return (0, "") if cmd and cmd[0] == "git" else result
+
+    return _run
+
+
+def test_a_launch_the_machine_failed_leaves_the_task_where_it_found_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not `blocked`: nothing judged this task's code, so nothing may say it was judged.
+
+    The status is the load-bearing half. `blocked` takes the task off the frontier, and the
+    salvage/restore machinery in build_git only ever runs for a task the frontier hands back.
+    """
+    loop = orchestrator(tmp_path, config=make_config(launch_retries=0))
+    monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT))
+
+    with pytest.raises(build_loop.EnvironmentFault):
+        loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
+
+    raw = store_mod.Store(loop.repo).read_raw("state")
+    assert raw is not None
+    entry = raw["tasks"]["T-001"]
+    assert entry["status"] == "todo"
+    assert "handoff" not in entry  # no retry budget was spent, so none was written down
+
+
+def test_a_launch_failure_writes_no_verdict_into_the_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`task_failed` and `knowledge_gap` are both `ATTENTION_EVENTS`, and the chain is
+    append-only: a machine's bad afternoon would sit on gate ⑤'s screen as an unresolved
+    escalation for the life of the repository."""
+    loop = orchestrator(tmp_path, config=make_config(launch_retries=0))
+    monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT))
+
+    with pytest.raises(build_loop.EnvironmentFault) as caught:
+        loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
+    loop._record_abort(caught.value)
+
+    recorded = [e.event for e in store_mod.Store(loop.repo).read_events()]
+    assert "run_aborted" in recorded
+    assert not [e for e in recorded if e in events_mod.ATTENTION_EVENTS]
+
+
+def test_capacity_exhaustion_asks_to_be_re_run_and_a_missing_cli_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit code is what an unattended supervisor decides on, so the two must differ."""
+    for result, expected in ((SESSION_LIMIT, common.EXIT_RETRY_LATER), (NO_SUCH_CLI, common.EXIT_CANNOT_PROCEED)):
+        loop = orchestrator(tmp_path / str(expected), config=make_config(launch_retries=0))
+        monkeypatch.setattr(build_loop, "_run", launch_failing(result))
+        assert loop._run_loop() == expected
+
+
+def test_an_exhausted_session_is_not_retried_in_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A limit that lifts in hours is not something to sit on holding the build lock: it exits
+    at once so whatever re-runs `rein build` can do the waiting."""
+    record: list[list[str]] = []
+    loop = orchestrator(tmp_path, config=make_config(launch_retries=3))
+    monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT, record))
+    monkeypatch.setattr(time, "sleep", lambda _: pytest.fail("a capacity limit must not be slept on"))
+
+    assert loop._run_loop() == common.EXIT_RETRY_LATER
+    assert len([c for c in record if c[0] == "claude"]) == 1
+
+
+def test_a_blip_is_retried_from_the_runs_own_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The budget belongs to the run, not to a task: an environment fault is a property of the
+    machine, so a per-task allowance would let one broken machine be re-discovered per task."""
+    record: list[list[str]] = []
+    slept: list[float] = []
+    loop = orchestrator(tmp_path, config=make_config(launch_retries=2))
+    monkeypatch.setattr(build_loop, "_run", launch_failing((143, ""), record))
+    monkeypatch.setattr(time, "sleep", slept.append)
+
+    assert loop._run_loop() == common.EXIT_RETRY_LATER
+    assert len([c for c in record if c[0] == "claude"]) == 3  # the launch plus its two retries
+    assert len(slept) == 2
+    assert loop._launch_retries_left == 0
+
+
+def test_a_step_that_could_not_run_does_not_charge_the_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same category error, on the other side of the pipeline: `ExecutorError` means no
+    container runtime / no pinned image, and was being summarized as a failed quality gate."""
+    loop = orchestrator(tmp_path)
+
+    class Boom:
+        def run(self, spec: object) -> object:
+            raise executors.ExecutorError("no container runtime (docker/podman) on PATH")
+
+    monkeypatch.setattr(executors, "for_profile", lambda profile: Boom())
+    step = build_loop.GateStep(name="test", kind="command", command=("make", "test"))
+    with pytest.raises(build_loop.EnvironmentFault) as caught:
+        loop._run_cmd_step(step, cwd=str(tmp_path))
+    assert not caught.value.retryable
+
+
+def test_a_stopped_leaf_keeps_its_worktree_while_its_batchmates_still_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two facts in one batch: the leaf that passed earned its merge, and the leaf the machine
+    stopped goes back to `todo` with its worktree intact — which is exactly what the next run's
+    `add_worktree` finalizes and salvages so the implementer continues instead of restarting."""
+    loop = orchestrator(tmp_path)
+    tasks = [
+        dag.Task(id="T-001", title="leaf A", kind="parallel"),
+        dag.Task(id="T-002", title="leaf B", kind="parallel"),
+    ]
+    fault = build_loop.EnvironmentFault(
+        faults.Fault.ENV_TRANSIENT, where="T-002: implementer", rc=1, output=SESSION_LIMIT[1]
+    )
+    outcomes = {"T-001": build_loop.LeafOutcome(ok=True), "T-002": build_loop.LeafOutcome(ok=False, fault=fault)}
+    statuses: list[tuple[str, str]] = []
+    cleaned: list[str] = []
+    merged: list[str] = []
+
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": statuses.append((tid, status)))
+    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
+    monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
+    monkeypatch.setattr(loop, "_cleanup_worktree", lambda task: cleaned.append(task.id))
+
+    def record_merge(task: dag.Task, branch: str) -> bool:
+        merged.append(task.id)
+        return True
+
+    monkeypatch.setattr(loop, "merge_leaf", record_merge)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "a" * 40)
+
+    with pytest.raises(build_loop.EnvironmentFault):
+        loop._consume_parallel(tasks)
+
+    assert merged == ["T-001"]
+    assert ("T-001", "done") in statuses
+    assert ("T-002", "todo") in statuses
+    assert not [s for s in statuses if s == ("T-002", "blocked")]
+    assert cleaned == []  # the stopped leaf's tree is the next run's salvage source
+
+
+def test_a_real_verdict_outranks_a_machine_fault_in_the_same_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-running clears the fault but never the blocked task, so the human has to look either
+    way — and the fault is still recorded, because it explains the leaf that came back `todo`."""
+    loop = orchestrator(tmp_path)
+    tasks = [
+        dag.Task(id="T-001", title="leaf A", kind="parallel"),
+        dag.Task(id="T-002", title="leaf B", kind="parallel"),
+    ]
+    fault = build_loop.EnvironmentFault(
+        faults.Fault.ENV_TRANSIENT, where="T-002: implementer", rc=1, output=SESSION_LIMIT[1]
+    )
+    outcomes = {
+        "T-001": build_loop.LeafOutcome(ok=False, log="gate red"),
+        "T-002": build_loop.LeafOutcome(ok=False, fault=fault),
+    }
+    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
+    monkeypatch.setattr(loop, "_cleanup_worktree", lambda task: None)
+
+    with pytest.raises(build_loop.StopLoop) as caught:
+        loop._consume_parallel(tasks)
+    assert caught.value.code == common.EXIT_HUMAN_NEEDED
+    recorded = [e.event for e in store_mod.Store(loop.repo).read_events()]
+    assert "run_aborted" in recorded
+
+
+def test_a_stale_session_still_falls_back_but_an_exhausted_one_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The resume fallback exists because session files expire. It used to fire on any nonzero
+    rc, spending a second doomed launch on the one failure where nothing was going to launch."""
+    loop = orchestrator(tmp_path, config=make_config(launch_retries=0))
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+
+    stale: list[list[str]] = []
+    monkeypatch.setattr(build_loop, "_run", launch_failing((1, "session not found"), stale))
+    with pytest.raises(build_loop.EnvironmentFault):
+        loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="", session="s-1", resume=True)
+    assert len([c for c in stale if c[0] == "claude"]) == 2  # the resume, then one fresh launch
+
+    exhausted: list[list[str]] = []
+    monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT, exhausted))
+    with pytest.raises(build_loop.EnvironmentFault):
+        loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="", session="s-2", resume=True)
+    assert len([c for c in exhausted if c[0] == "claude"]) == 1

@@ -8,6 +8,7 @@ the wiring writes a schema-valid review.yaml and resets the human half.
 from __future__ import annotations
 
 import subprocess
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -231,3 +232,46 @@ def test_prior_blocking_findings_are_carried_into_the_next_security_review() -> 
     stored = models.Review(make_review(generated=True, security_findings=[finding]))
     assert review._prior_blocking_ids(stored) == ["SEC-001"]
     assert review._prior_blocking_ids(None) == []
+
+
+# --- the pipeline's shape -----------------------------------------------------
+
+
+def test_the_security_stage_does_not_wait_behind_the_extraction(review_repo: Path) -> None:
+    """It reads the diff and the relevant code and consumes nothing the extractor produces, so
+    three stages at up to fifteen minutes each ran end to end for no reason but the order they
+    were written in. Pinned by the one observable consequence: the security request is issued
+    before the extraction has answered.
+    """
+    started = threading.Event()
+    order: list[str] = []
+    lock = threading.Lock()
+
+    def reviewer(request: Mapping[str, Any]) -> str:
+        facts = request.get("deterministic_facts")
+        security = isinstance(facts, dict) and "signals" in facts
+        with lock:
+            order.append("security" if security else "chain")
+        if security:
+            started.set()
+        else:
+            # The extractor/comparator chain refuses to answer until the security stage has been
+            # asked. If they were serial this would deadlock, which is exactly the point.
+            assert started.wait(timeout=10), "the security stage never started while the chain was running"
+        return _fake_reviewer(request)
+
+    machine = review.generate(repo_mod.Repo(review_repo), reviewer)
+
+    assert "security" in order
+    assert "findings" in machine["security"]  # the stage answered, off the chain's thread
+
+
+def test_the_review_is_the_same_document_whatever_the_stages_race(review_repo: Path) -> None:
+    """Concurrency buys wall-clock time and must buy nothing else: the merge order and the event
+    order are fixed, so two generations of the same HEAD assemble identically."""
+    repo = repo_mod.Repo(review_repo)
+    first = review.generate(repo, _fake_reviewer)
+    second = review.generate(repo, _fake_reviewer)
+    for machine in (first, second):
+        machine["binding"].pop("generated_at", None)
+    assert first == second

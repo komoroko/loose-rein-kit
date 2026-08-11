@@ -1,5 +1,5 @@
 ---
-description: Phase 4 implementation. Consume tasks autonomously (`autonomous-build-iteration`). Each task's condition to advance is green tests.
+description: Phase 4 implementation. Consume the task DAG with `rein build`. Each task's condition to advance is green tests.
 agent: agent
 ---
 
