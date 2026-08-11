@@ -244,10 +244,14 @@ def make_config(
     guard_paths: list[dict[str, str]] | None = None,
     profiles: dict[str, dict[str, Any]] | None = None,
     max_parallel: int = 3,
+    launch_retries: int | None = None,
 ) -> dict[str, Any]:
+    execution: dict[str, Any] = {"max_parallel": max_parallel, "worktree_dir": ".worktrees"}
+    if launch_retries is not None:
+        execution["launch_retries"] = launch_retries
     body: dict[str, Any] = {
         "project": {"name": project, "work_branch": branch},
-        "execution": {"max_parallel": max_parallel, "worktree_dir": ".worktrees"},
+        "execution": execution,
         "executors": {
             "implementer_profile": "implementer",
             "reviewer_profile": "reviewer",

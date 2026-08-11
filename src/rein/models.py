@@ -241,6 +241,9 @@ EVENT_ORDER: tuple[str, ...] = (
     "task_started",
     "task_failed",
     "task_completed",
+    # The run stopped because the machine failed, not because any task did. Deliberately outside
+    # `events.ATTENTION_EVENTS`: it asks nobody to judge the work, it asks for a re-run.
+    "run_aborted",
     "decision_declared",
     "coverage_generated",
     "actual_extraction_started",
@@ -970,6 +973,16 @@ class Config:
     @property
     def agent_timeout_sec(self) -> int:
         return self._int(self.execution, "agent_timeout_sec", 3600)
+
+    @property
+    def launch_retries(self) -> int:
+        """The whole run's allowance for retrying a launch the machine, not the code, failed.
+
+        Run-scoped rather than per-task on purpose: a session limit or a missing binary is a
+        property of the machine, and spending a task's budget on it would charge the code for
+        something it did not do.
+        """
+        return self._int(self.execution, "launch_retries", 2)
 
     @property
     def profiles(self) -> dict[str, ExecutorProfile]:

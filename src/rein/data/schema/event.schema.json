@@ -28,6 +28,7 @@
         "task_started",
         "task_failed",
         "task_completed",
+        "run_aborted",
         "decision_declared",
         "coverage_generated",
         "actual_extraction_started",

@@ -53,6 +53,12 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 86400
+        },
+        "launch_retries": {
+          "description": "How many times one run retries an agent launch that failed for a machine reason (capacity exhausted, a supervisor's signal, a timeout). Belongs to the run, not to a task: an environment fault is not a property of whatever task happened to be running. Task and step retry budgets are never charged for it.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
         }
       }
     },
