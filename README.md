@@ -130,9 +130,9 @@ Install the CLI so its hooks resolve on PATH:
 uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@v0.1.0'   # provides `rein`
 ```
 
-Mode A (`rein build`) additionally needs a **headless agent CLI** — `claude -p` by default;
-switch with `rein agent codex` (sets the role's adapter in `.rein/config.yaml`;
-`gemini` and custom commands work too). Without one, use interactive mode B (see "Agent support").
+The implementation phase (`rein build`) additionally needs a **headless agent CLI** — `claude -p`
+by default; switch with `rein agent codex` (sets the role's adapter in `.rein/config.yaml`;
+`gemini` also works). Without one `rein build` refuses to start, and `rein doctor` says so.
 
 Seed a repository — the same command for a **greenfield** and a **brownfield** repo (brownfield is
 auto-detected; see "Adopting into an existing repository"):
@@ -366,18 +366,15 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
 
 ### Running the implementation phase autonomously
 
-Two modes with identical behavior (DoD, parallelism/merge). Canon: `.rein/prompts/commands/build.md` + `AGENTS.md`.
+Canon: `.rein/prompts/commands/build.md` + `AGENTS.md`.
 
-**A. Deterministic (recommended) — `rein build`.** The orchestrator decides which tasks, at
-what parallelism, in what merge order, and when to stop — deterministically from `config.yaml` +
-`plan.yaml` + `state.yaml`, not by LLM discretion (`--dry-run` checks the control flow without calling the agent
-CLI/git).
+**`rein build`** decides which tasks, at what parallelism, in what merge order, and when to stop —
+deterministically from `config.yaml` + `plan.yaml` + `state.yaml`, not by LLM discretion
+(`--dry-run` checks the control flow without calling the agent CLI/git). There is no hand-driven
+equivalent: `state.yaml` is machine-written (`rein guard` denies edits to it) and a leaf's
+decisions reach the audit chain only through the control plane the orchestrator serves.
 
-**B. Interactive** — the lead re-enacts mode A in conversation (the only mode without a headless
-CLI): Claude Code drives it with `/loop /build`; Copilot re-invokes `/build` per iteration; Codex
-re-runs the `/build` procedure.
-
-Both share:
+The rules:
 
 - A task is done only after **passing the quality-gate pipeline** — `quality_gate` in
   `config.yaml` is the **single DoD definition** (default: `test` → `check` → a
@@ -518,8 +515,8 @@ The rules (`AGENTS.md`) and procedures (`.rein/prompts/`) name human-interaction
 | gate enforcement | PreToolUse hook + commit-stage check | same hook via agent hooks (preview) + commit-stage check | same hook on `apply_patch` (`.codex/hooks.json`) + commit-stage check |
 | structured questions | AskUserQuestion | numbered options in chat | numbered options in chat |
 | approval presentation | plan mode + ExitPlanMode | Plan mode / explicit "approve" | explicit "approve" |
-| role delegation | subagents, worktree-parallel | custom agents `@architect` … | subagents (`.codex/agents/*.toml`), explicit, serial |
-| autonomous build | `/loop /build` (B) · `rein build` (A) | re-invoke `/build` (B) · `rein build` (A) | re-invoke `$build` (B) · `rein build` (A) |
+| role delegation | subagents | custom agents `@architect` … | subagents (`.codex/agents/*.toml`), explicit |
+| autonomous build | `rein build` | `rein build` | `rein build` |
 | pending-gate notification | PushNotification | end of turn | end of turn |
 
 An agent with no mapping of its own (one that only reads AGENTS.md) follows the degradation

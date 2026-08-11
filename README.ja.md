@@ -133,10 +133,10 @@ Loose Rein 自体が複数エージェントのオーケストレーションで
 uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@v0.1.0'   # `rein` コマンドが入る
 ```
 
-モード A(`rein build`)には、**ヘッドレスで動くエージェント CLI** も要る。既定は
+実装フェーズ(`rein build`)には、**ヘッドレスで動くエージェント CLI** も要る。既定は
 `claude -p`、`rein agent codex` で切り替えられる(そのロールの adapter を `.rein/config.yaml`
-に設定する。`gemini` や任意のコマンドも指定できる)。用意できない場合は対話型のモード B を使う
-(「エージェント対応」参照)。
+に設定する。`gemini` も使える)。用意できない場合 `rein build` は起動を拒否し、`rein doctor` が
+それを指摘する。
 
 次にリポジトリを初期化する。**greenfield**(新規)でも **brownfield**(既存)でもコマンドは同じで、
 brownfield は自動判定される(詳細は「既存リポジトリへの導入」):
@@ -368,18 +368,15 @@ Loose Rein はこれらを読んで診断するだけで、設定はしない。
 
 ### 実装フェーズを自律で回す
 
-モードは2つあり、挙動(DoD、並列・マージの規則)はどちらも同じ。正式な手順は
-`.rein/prompts/commands/build.md` と `AGENTS.md`。
+正式な手順は `.rein/prompts/commands/build.md` と `AGENTS.md`。
 
-**A. 確定実行(推奨)— `rein build`。** どのタスクを・何並列で・どの順にマージし・いつ
-止めるかを、オーケストレータが `config.yaml`・`plan.yaml`・`state.yaml` から決定論的に決める。LLM の裁量には
-依存しない(`--dry-run` を付けると、エージェント CLI や git を呼ばずに制御フローだけ確認できる)。
+**`rein build`** が、どのタスクを・何並列で・どの順にマージし・いつ止めるかを、
+`config.yaml`・`plan.yaml`・`state.yaml` から決定論的に決める。LLM の裁量には依存しない
+(`--dry-run` を付けると、エージェント CLI や git を呼ばずに制御フローだけ確認できる)。
+手で同じことをする経路は無い — `state.yaml` は機械が書くもので(`rein guard` が手編集を拒否する)、
+葉タスクの判断が監査チェーンに届く経路はオーケストレータが立てる control plane だけだからである。
 
-**B. 対話ループ** — リード役のエージェントが会話の中でモード A と同じ手順を再現する。ヘッドレス
-CLI がない環境で使える唯一のモード。Claude Code は `/loop /build`、Copilot は `/build` を繰り返し
-起動、Codex は `/build` の手順を再実行する。
-
-両モードに共通するルール:
+ルール:
 
 - タスクは**品質ゲートのパイプラインをすべて通過して**はじめて完了になる。`config.yaml` の
   `quality_gate` が **DoD の唯一の定義**(既定: `test` → `check` → `/code-review` +
@@ -525,8 +522,8 @@ finalize・salvage するので、実装者は**やり直しではなく続き�
 | ゲート強制 | PreToolUse フック + コミット段のチェック | 同じフックを agent hooks(preview)で + コミット段のチェック | 同じフックを `apply_patch` に(`.codex/hooks.json`)+ コミット段のチェック |
 | 人間への構造化質問 | AskUserQuestion | チャットで番号付きの選択肢 | チャットで番号付きの選択肢 |
 | 承認の提示 | plan mode + ExitPlanMode | Plan モード / 明示的な「approve」 | 明示的な「approve」 |
-| ロール委譲 | subagents(worktree で並列) | custom agents `@architect` など | subagents(`.codex/agents/*.toml`、明示委譲・直列) |
-| 自律ビルド | `/loop /build`(B)・`rein build`(A) | `/build` を反復(B)・`rein build`(A) | `$build` を反復(B)・`rein build`(A) |
+| ロール委譲 | subagents | custom agents `@architect` など | subagents(`.codex/agents/*.toml`、明示委譲) |
+| 自律ビルド | `rein build` | `rein build` | `rein build` |
 | ゲート待ちの通知 | PushNotification | ターン終了時に明示 | ターン終了時に明示 |
 
 対応表を持たないエージェント(AGENTS.md だけを読むもの)は、`AGENTS.md` の能力ボキャブラリ表に
