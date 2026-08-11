@@ -48,6 +48,7 @@ VERBS: dict[str, str] = {
     "revise": "revise",
     "review": "review",
     "build": "build_loop",
+    "task": "task_cmd",
     "doctor": "doctor",
     "events": "events",
     "cycle-close": "cycle",
@@ -94,6 +95,7 @@ operations:
   revise --to <phase> ...      roll back upstream (gates reset in a chain)
   review generate|complete|show  the grounded machine review (gate ④'s evidence)
   build [--dry-run]            the deterministic /build orchestrator
+  task reset <id> --reason …   put a blocked task back on the frontier (recorded, never hand-edited)
   dag [--render|--trace|...]   derive/inspect the task DAG (read-only; /tasks & /status use it)
   doctor                       read-only diagnosis: format, integrations, sandbox, plan, review
   events [--summary|--verify]  read the hash-chained audit log (read-only)
