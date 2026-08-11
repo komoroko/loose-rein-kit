@@ -1,15 +1,15 @@
 # /build — Implementation phase (autonomous loop consumption)
 
 (Phase-scoped rules — gate self-assessment, approval-wait, context budget: read `.rein/prompts/rules/gate-workflow.md` before starting.)
-(Capability terms like `role-delegation` resolve per AGENTS.md "Capability vocabulary" and your agent's capability mapping.)
+(Capability terms like `approval-presentation` resolve per AGENTS.md "Capability vocabulary" and your agent's capability mapping.)
 
 ## Prerequisite gate check (always first)
 Read `.rein/state.yaml` and confirm `gates.tasks == approved`.
 If unapproved, do not work; say "please approve `/tasks` first" and stop.
 
-## The consumption algorithm (one definition, both modes)
+## The consumption algorithm
 
-Both modes run the same deterministic loop — only who runs the machinery differs. Compute the
+Compute the
 frontier (todo tasks whose `blockedBy` are all done) → sort the consumption order
 (foundation/high fan-out first — the sooner done, the more leaves free up; then the critical
 path) → foundation tasks run serially on the work branch (isolating them would strand
@@ -33,13 +33,20 @@ mark the merged tasks `done` → recompute. Empty frontier
 with unfinished tasks = all blocked/needs-revision → escalate and stop; all done → gate ④
 below. **Only the human opens `gates.build`.**
 
-### A. Deterministic execution (recommended; requires a headless agent CLI) — `rein build`
+## Running it — `rein build`
 The installed orchestrator runs the algorithm **in code** from `.rein/config.yaml`,
 `plan.yaml`, and `state.yaml` — not LLM discretion. It launches its implementer/reviewer agents
 headless in the **OCI sandbox** via the adapters set by `rein agent <role> <cli>` (default
 `claude`), so the requirement is **that CLI installed and authenticated** — any agent (or the
 human in a terminal) may invoke `rein build`. At the
 start it code-checks `gates.tasks == approved` and stops doing nothing if unapproved.
+
+**This is the only way the implementation phase runs.** There is no hand-driven equivalent: the
+loop's guarantees are the code's, `state.yaml` is machine-written (`rein guard` denies edits to
+it), and a leaf's decisions reach the audit chain only through the control plane the orchestrator
+serves. With no headless CLI on the machine, install one and point the roles at it with
+`rein agent <cli>` (`claude` / `codex` / `gemini`, or any command); until then `rein build`
+refuses with exit `2` naming what is missing.
 
 ```
 rein build              # run
@@ -83,62 +90,7 @@ retry is forced fresh); the `review` step, the integration fixer, and the securi
 always run in **fresh contexts, independent of the implementer** — independent verification
 is the point; never fold them into the implementer's session.
 
-### B. Interactive loop — `autonomous-build-iteration` of /build (fallback: the lead runs the algorithm by hand)
-For when the orchestrator can't run (no headless CLI on the machine) or the human wants to
-drive in conversation. Start it with your environment's `autonomous-build-iteration` mechanism
-(see your capability mapping), or simply repeat the algorithm above iteration by iteration
-until the frontier is empty. Leaves go by **`role-delegation` to the `implementer` role with
-`git worktree` isolation**, each reporting its branch name for the merge; merge conflicts are
-resolved by the implementer at the merge point — *if your environment cannot delegate or
-isolate, run the leaves serially on the work branch, adopting the implementer role inline per
-its role file*. Behavior is identical to A — what changes is who runs the machinery, which
-puts five duties on the lead that mode A does in code:
-
-0. **Take the batch from `rein dag --frontier`, never from your own reading of the plan.** It
-   returns only tasks whose every `blocked_by` is already `done`, in consumption order, so a
-   task cannot be started on top of unfinished upstream work and no two tasks in one batch can
-   depend on each other. Reading the DAG yourself and picking what "looks ready" is the one way
-   to break an ordering mode A cannot break — cap the batch at `max_parallel` and take the
-   prefix.
-1. **Run every gate decision yourself and read its exit status.** A delegated implementer's
-   textual "green" report is not evidence, even when it pastes output — summarized or elided
-   pastes have hidden real failures. Run the pipeline steps in the algorithm's order yourself
-   (reds go back to the implementer within each step's `retries` budget), **including the
-   integration gate after the ascending-id merges** — by hand, it is the effective backstop
-   against green-report inaccuracy.
-2. **Check each worktree's branch base.** A delegated worktree may branch from the default
-   branch rather than the work branch; the implementer then lacks the foundation tasks'
-   deliverables and must first pull the work branch in (`git merge`, `--ff-only` if possible)
-   before implementing. (Mode A branches from the work branch, so this never arises there.)
-3. **Keep the records by hand.** Statuses (`in-progress` → `done`/`blocked`) in `state.yaml.tasks` as
-   you go — never `done` with any DoD step unmet, and **never `blocked` for something the code
-   did not do**: if your own session is cut off by a usage limit, or a delegated implementer
-   never ran, leave the task `todo` with its handoff written and stop. `blocked` takes it off
-   the frontier, and a task off the frontier is one the next session will not pick back up.
-   Blocked/needs-revision recorded through the
-   control plane (`rein decision add` / `rein knowledge-gap add` — the write paths that
-   reach the audit chain; `rein events` is read-only); per-task commits
-   **`T-NNN: <summary>`** (one commit = one task — the worktree's commits are exactly that
-   task's diff, which is what scopes the review step); merged worktrees cleaned up; `state.yaml`
-   and its `updated_at` refreshed each iteration. A newly discovered dependency or task
-   split is a plan change — take it through `/revise` (the plan is frozen at gate ③); an upstream (requirements/design) defect is
-   `needs-revision` + escalation — never fixed on your own; roll back via `/revise` at the
-   human's discretion.
-   **Write down what a re-run would need.** A delegated implementer's context dies with the
-   session, so before you delegate a task read `state.yaml.tasks.<id>.handoff` and pass what it
-   holds into the delegation (which gate step failed last, what it said, how much of the step's
-   `retries` budget is actually left, and any salvage branch holding an interrupted attempt's
-   commits). When an iteration ends with a task unfinished, record the same there. Without it a
-   build picked up in another terminal starts the task cold, with a full budget it has already
-   spent. (Mode A writes and reads this record itself.)
-4. **Session hygiene.** At a layer boundary, when the conversation is heavy with re-run
-   output, you may suggest `session-compaction` — only when no task is `in-progress`, merges
-   are committed and marked `done`, and observations are recorded in tickets / `state.yaml`
-   (pre-compact check: `.rein/prompts/rules/gate-workflow.md` "Context budget"; the SSOT rehydrates the next iteration).
-   Never mid-retry or while a worktree awaits its merge. (Mode A runs in separate processes
-   and needs none of this.)
-
-## Quality-gate step notes (both modes)
+## Quality-gate step notes
 
 - **`check`** = the project's lint / format / type-check command (lint / format / type-check,
   all of it). Auto-fixable hooks (ruff/format) resolve on the re-run; manual fixes (mypy, tsc)
@@ -193,7 +145,7 @@ puts five duties on the lead that mode A does in code:
    high/critical Decision Cards block the freeze; say so rather than presenting the gate.
    - **Smoke-step check**: if the deliverable is runnable (CLI, server, …) and
      `quality_gate`'s `smoke.run` is still empty, say so explicitly at the gate — the DoD ran
-     without a launch check — and propose the command to fill in plus `required: true` (mode A
+     without a launch check — and propose the command to fill in plus `required: true` (the loop
      prints this nudge mechanically at gate ④; with `required: true` set, an empty run refuses
      to build at all — an unnoticed empty smoke silently defeats its purpose).
    - **Always present a self-assessment as well** (`.rein/prompts/rules/gate-workflow.md` "Gate self-assessment"),
@@ -214,11 +166,3 @@ puts five duties on the lead that mode A does in code:
    never run the approve command for them (mechanics: AGENTS.md "Gate rules" 2). Point to
    "next is `/verify`", and after committing the gate's deliverables, suggest
    `session-compaction` (pre-compact check: `.rein/prompts/rules/gate-workflow.md` "Context budget").
-
-## Monitoring long-running loops (optional)
-**Not for waiting.** Mode A is a single command whose completion is the signal, so scheduling
-wake-ups to check whether it has finished buys nothing and costs a session's context every time.
-Use a scheduling mechanism here for one thing only: if the human asked to be told how it is
-going, notify them of progress periodically (equivalent to /status). If they want the run
-retried after a capacity stop, that is the supervisor loop in mode A above — a shell loop on the
-exit code, not an agent waking itself up.

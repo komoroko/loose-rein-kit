@@ -7,15 +7,15 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.2.2
   files:
-    AGENTS.rein.md: sha256:6bd09837a24a3d770289ff49231d2f649bf6d90b347b7686a5ec7948d287abd1
+    AGENTS.rein.md: sha256:f8af62ee672722ae93370c989131b440db648b184abd1527c554a1fa0d333efc
     oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
     oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
     oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
     prompts/agents/adversarial-reviewer.md: sha256:8b0e688e806832019a24128f00098757090826ff3147dc533b3ce2eea4fdebe3
     prompts/agents/architect.md: sha256:d36360652d81f2dcfae8861557cd49a679f2f29241551b13e4aa5364ffbf6479
-    prompts/agents/implementer.md: sha256:c38dd828b7f651863f6c1af8e68ad5afb149531cc16f0810b4200cfaf889fae5
+    prompts/agents/implementer.md: sha256:44c3fd375f9b91dfc142946d41016e716d348914279ede231a2c9cfdb3e22669
     prompts/agents/requirements-analyst.md: sha256:f856541626e80f3439a3681c70a9ab09f557b0e3dc5c4ddd229f214b5f8efab3
-    prompts/commands/build.md: sha256:2e28ab8d61c30c2dbd8f883f17ba1badc49633783b13ab0a83bf81dfa00935bb
+    prompts/commands/build.md: sha256:e4c344fd1337cc3400d03a151213f8fb01381745354f9aa258a5a9499341818f
     prompts/commands/design.md: sha256:3bf7ef48617e14213f5745a487c3b879636c2021f12a7723f96fa621ac5e63dd
     prompts/commands/onboard.md: sha256:47fd4093b4eda0b469312622f19b0152d2bde1374670976966fd7aa22495ce23
     prompts/commands/req.md: sha256:f2af1509ee5896c8ba4d50706fbd3edd087c24b67df8e5c54cbd5ef8635de7bf
@@ -38,7 +38,7 @@ integrations:
       .claude/agents/architect.md: sha256:1e2741a798214f280a12c08acd3d8459611a0fbc1da60223ed5a6021a0d364c1
       .claude/agents/implementer.md: sha256:149053480e7daee81f1de0ea6ea8eece70f77bfb8b2a8d6706c9b714b8ee425a
       .claude/agents/requirements-analyst.md: sha256:485e3ab2a53565ab57aeb79d0377cca2bf5841006c68ae153267c62445dcaca3
-      .claude/commands/build.md: sha256:f11d7162b7df57be32232eb9766ddcf1c79ae0d1c5689fd7a6afcd17e991e228
+      .claude/commands/build.md: sha256:a6ab1c54fea7ea878c45f9981ad91aa6d230c5a04e4a694db6079176742f6cf7
       .claude/commands/design.md: sha256:6791ceb2702b407d07cd965b4a71f48099f0152418c708d33ba498d498a8960f
       .claude/commands/onboard.md: sha256:a0729659686db58949fcaabf4ba363731d094f5ae804892535120b43a47576c7
       .claude/commands/req.md: sha256:07a60e8ce4a80459c4dada309924a10e984ea9cb9dd00dc2d0726beb3c34bd15
@@ -54,7 +54,7 @@ integrations:
     version: 0.2.2
     installed_at: '2026-08-04'
     files:
-      .agents/skills/build/SKILL.md: sha256:ac87ec52222a89be85fddc012a42d761abc2220c4e291e12fb12189aaa1d5cf9
+      .agents/skills/build/SKILL.md: sha256:fe72706426bcbb74f939842df53b792ca5c1bba52d3bf1909cb74b0e0ed0f09c
       .agents/skills/design/SKILL.md: sha256:a2cf5158ad10c9405c5d48f964efd89683f3bdba48bbd85583d9ab842423834e
       .agents/skills/onboard/SKILL.md: sha256:5db6e1e3941273e6bcf3f1e3bbd67b58182a5232e5b26275dfce833df4371aa6
       .agents/skills/req/SKILL.md: sha256:fae6c760594e9f041cef373f6b3493101ee1a44eacb5cf5f888b468c96d41876
@@ -67,7 +67,7 @@ integrations:
       .codex/agents/implementer.toml: sha256:1c93b60464227ec637eed7290f3bb6d2a6f8c5d39bb904f131557a2ebf780b6b
       .codex/agents/requirements-analyst.toml: sha256:9249d1d6d8632d2fec155ec3577b802e723ea3b2235c8ae87389d08cde865038
       .codex/hooks.json: sha256:e78f4e7bf63b3c5fca54b9c341ac9898f2ba18497bc158bd3ea7aaea8f663c40
-      .codex/rein.md: sha256:5c43a3a872349dc07df17d895d2c7798d137bff1d1c2ee3bf9fcff14d7332aa7
+      .codex/rein.md: sha256:00ba6a6fadf46d2c8e635a8d26fad2d88f445fe52e065e19d9d195d087351af6
   copilot:
     version: 0.2.2
     installed_at: '2026-08-04'
@@ -77,8 +77,8 @@ integrations:
       .github/agents/implementer.agent.md: sha256:b1953ab17a6c7ef6b671c8fa148746ca3864ab40499503eba21ec1f8b3e05921
       .github/agents/requirements-analyst.agent.md: sha256:b73ca2bbc692eabb91767be46efcdb5bead1cb876d6602f90fb58d2980faeed5
       .github/hooks/rein.json: sha256:2eacdbf36f1c05dfcf5266383b57dbf46f31306cfb5d93d93bc6926b0b3f7949
-      .github/instructions/rein.instructions.md: sha256:b9bcd967c28d41c99fb142118c056d12502418abd9c83fdb7d5683aadabcac72
-      .github/prompts/build.prompt.md: sha256:0a4dce0d3d2db43f0fae1a8200d5d290e134d0deca1cddfac4c4af0d6ba13621
+      .github/instructions/rein.instructions.md: sha256:219f127c0d86828a0082d5442000853a2c9b20e81ea5267b86aacda94bbcd862
+      .github/prompts/build.prompt.md: sha256:11e784509cfc9694d9256f3299e36663452a4b89aab03377027b0f04d14636e5
       .github/prompts/design.prompt.md: sha256:0e899f78a22a8671e7e5bb991727d461418887fbb24b4cfecfdd8ff667b65544
       .github/prompts/onboard.prompt.md: sha256:6c590a600ebd0e5b4a17121e5b4eef4931a3d110ad88abffdcc4bb0b0594be6e
       .github/prompts/req.prompt.md: sha256:3159467287083c947e6bce166e19dded4075f47b8440617ed79c82330d67d0d5

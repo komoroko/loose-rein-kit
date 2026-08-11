@@ -13,8 +13,7 @@ This file only maps AGENTS.md's capability vocabulary onto Codex mechanisms.
 | `notify-and-wait` | end the turn with an explicit "waiting on gate N approval" summary (there is no push channel) |
 | `approval-presentation` | present the summary and ask for an explicit "approve" |
 | `session-compaction` | `/compact`, or a fresh session; the next command rehydrates from the SSOT (`.rein/state.yaml`, `plan.yaml`, `docs/**`) |
-| `role-delegation` | subagents `.codex/agents/*.toml` — delegate **explicitly**; Codex never auto-spawns a custom agent. Parallel leaves degrade to serial (no worktree isolation is wired for Codex) |
-| `autonomous-build-iteration` | re-invoke `$build` each iteration — **mode B only**. Mode A is `rein build`: one command whose completion is the signal, never polled; retry-after-capacity is a shell loop on its exit code |
+| `role-delegation` | subagents `.codex/agents/*.toml` — delegate **explicitly**; Codex never auto-spawns a custom agent |
 | `command-preauthorization` | `approval_policy` / `sandbox_mode` in `.codex/config.toml` — coarse by nature: Codex has no per-command allowlist |
 
 Notes:
@@ -25,9 +24,10 @@ Notes:
 - `command-preauthorization` is **not** what keeps gate rule 2. `rein approve` refuses unless it
   is at an interactive terminal, where it asks for the gate name to be typed out. No Codex
   setting can hand an agent a gate.
-- **Headless mode A (`rein build`) requires a headless agent CLI** (installed and
+- **The implementation phase is `rein build`, and needs a headless agent CLI** (installed and
   authenticated) — the orchestrator launches the CLI named by `agents.implementer.adapter`
-  (`claude` by default; `codex` / `gemini` also work).
+  (`claude` by default; `codex` / `gemini` also work). It is one command whose completion is the
+  signal, never polled; retry-after-capacity is a shell loop on its exit code.
 - The security review before gate ④ / at `/verify`: perform a security-focused review pass; it is
   recorded in `review.yaml`'s `machine.security` by `rein review generate`, bound to the
   reviewed HEAD, and summarized in the test plan's security column.

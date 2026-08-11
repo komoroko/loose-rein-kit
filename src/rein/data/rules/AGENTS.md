@@ -25,8 +25,7 @@ agent-specific tool.
 | `notify-and-wait` | flag a pending decision, then stop | state it, end the turn |
 | `approval-presentation` | present a deliverable for approval | ask for an explicit "approve" |
 | `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
-| `role-delegation` | delegate to a role agent (analyst/architect/implementer/reviewer) | adopt the role inline, then return; parallel leaves go serial |
-| `autonomous-build-iteration` | drive `/build` without per-iteration prompts | re-invoke the procedure each iteration |
+| `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |
 | `command-preauthorization` | pre-authorize known-safe commands | approve each interactively |
 
 ## Language
