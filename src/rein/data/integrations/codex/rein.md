@@ -14,7 +14,7 @@ This file only maps AGENTS.md's capability vocabulary onto Codex mechanisms.
 | `approval-presentation` | present the summary and ask for an explicit "approve" |
 | `session-compaction` | `/compact`, or a fresh session; the next command rehydrates from the SSOT (`.rein/state.yaml`, `plan.yaml`, `docs/**`) |
 | `role-delegation` | subagents `.codex/agents/*.toml` — delegate **explicitly**; Codex never auto-spawns a custom agent. Parallel leaves degrade to serial (no worktree isolation is wired for Codex) |
-| `autonomous-build-iteration` | re-invoke `$build` each iteration (mode B); headless mode A is `rein build` |
+| `autonomous-build-iteration` | re-invoke `$build` each iteration — **mode B only**. Mode A is `rein build`: one command whose completion is the signal, never polled; retry-after-capacity is a shell loop on its exit code |
 | `command-preauthorization` | `approval_policy` / `sandbox_mode` in `.codex/config.toml` — coarse by nature: Codex has no per-command allowlist |
 
 Notes:

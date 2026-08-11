@@ -18,7 +18,7 @@ maps AGENTS.md's capability vocabulary onto VS Code Copilot mechanisms.
 | `approval-presentation` | present the summary in Plan mode or plain chat and ask for an explicit "approve" |
 | `session-compaction` | the human starts a new chat; the next command rehydrates from the SSOT (`.rein/state.yaml`, `plan.yaml`, `docs/**`) |
 | `role-delegation` | custom agents `@requirements-analyst` / `@architect` / `@implementer` / `@adversarial-reviewer` (`.github/agents/*.agent.md`); if delegation is unavailable, adopt the role inline per its file in `.rein/prompts/agents/` — parallel leaves degrade to serial |
-| `autonomous-build-iteration` | re-invoke the `/build` prompt each iteration (no /loop equivalent); the lead re-enacts mode B by hand |
+| `autonomous-build-iteration` | re-invoke the `/build` prompt each iteration (no /loop equivalent); the lead re-enacts **mode B** by hand. Mode A is `rein build`: one command whose completion is the signal, never polled |
 | `command-preauthorization` | VS Code's tool-approval settings (allow the `rein <verb>` commands) |
 
 Notes:

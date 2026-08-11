@@ -19,8 +19,11 @@ pipeline `quality_gate` in `.rein/config.yaml` — the single definition of the 
 (default: `test` → `check` → `review` → `smoke`). A task has no `test` command of its own: the
 DoD is shared and runs in a sealed sandbox, never a command the implementer chose for itself.
 Each `cmd` step is gate-decided by exit code; a fail goes back to the implementer up to **that
-step's own `retries` budget** (over the budget → `blocked`) → **gate-check every path the task
-changed** (merge-stage gate guard — a pending-gate path escalates as `gate_violation` and
+step's own `retries` budget** (over the budget → `blocked`) — but **only a failure the code
+earned counts**: an agent that never launched (capacity exhausted, the CLI not on PATH, a
+supervisor's signal) or a step that could not be run at all (no container runtime, no pinned
+image) produced no verdict, so it spends no budget, marks no task, and stops the run instead
+→ **gate-check every path the task changed** (merge-stage gate guard — a pending-gate path escalates as `gate_violation` and
 blocks the task instead of landing) → merge into work sequentially in **ascending-id order** →
 **when a batch merged 2+ leaves, re-run the cmd steps once on the merged work branch** — the
 integration gate, not a knob: each leaf was green only in isolation and the combined file set can
@@ -42,6 +45,35 @@ start it code-checks `gates.tasks == approved` and stops doing nothing if unappr
 rein build              # run
 rein build --dry-run   # check just the control flow without calling the agent CLI/git
 ```
+
+**`rein build` is one command, not an iteration** — it runs the whole algorithm to completion
+and its exit is the signal. Never schedule wake-ups to poll a run in progress; wait for the
+command. The exit code says what to do next, and is meant for an unattended supervisor as much
+as a human:
+
+| code | meaning | what to do |
+|---|---|---|
+| `0` | every task is done | go to gate ④ |
+| `1` | a task could not pass the gate, or the frontier is empty with work left | a human reads the escalation |
+| `2` | it refused to start, or the machine failed in a way waiting cannot fix (gate ③ unapproved, plan not frozen, the agent CLI not on PATH, an unpinned sandbox image) | repair what it names |
+| `3` | the machine failed in a way time fixes — agent capacity exhausted, a signal, another run holding the lock. **No task was marked and no retry budget was spent** | re-run later; it continues from the preserved work |
+
+A **session/usage limit is a normal event**, not an incident: on a run of any length it is close
+to certain. The loop exits `3` immediately rather than sleeping on it — a limit that lifts in
+hours has no business holding the build lock and a set of worktrees — so the waiting belongs to
+whatever re-runs the command:
+
+```sh
+while :; do
+  rein build && break
+  rc=$?; [ "$rc" -eq 3 ] || exit "$rc"   # anything else needs a human
+  sleep 900
+done
+```
+
+A run stopped that way leaves each unfinished task `todo` with its worktree in place; the next
+run finalizes and salvages that work onto the leaf's branch and the implementer **continues**
+rather than restarting. `rein resume` and `rein doctor` both say so when you come back.
 
 The non-deterministic parts are each task's implementation code content and the `review` agent
 step's fixes. Both are absorbed deterministically: after an agent step changes code, the
@@ -79,7 +111,11 @@ puts five duties on the lead that mode A does in code:
    deliverables and must first pull the work branch in (`git merge`, `--ff-only` if possible)
    before implementing. (Mode A branches from the work branch, so this never arises there.)
 3. **Keep the records by hand.** Statuses (`in-progress` → `done`/`blocked`) in `state.yaml.tasks` as
-   you go — never `done` with any DoD step unmet; blocked/needs-revision recorded through the
+   you go — never `done` with any DoD step unmet, and **never `blocked` for something the code
+   did not do**: if your own session is cut off by a usage limit, or a delegated implementer
+   never ran, leave the task `todo` with its handoff written and stop. `blocked` takes it off
+   the frontier, and a task off the frontier is one the next session will not pick back up.
+   Blocked/needs-revision recorded through the
    control plane (`rein decision add` / `rein knowledge-gap add` — the write paths that
    reach the audit chain; `rein events` is read-only); per-task commits
    **`T-NNN: <summary>`** (one commit = one task — the worktree's commits are exactly that
@@ -180,6 +216,9 @@ puts five duties on the lead that mode A does in code:
    `session-compaction` (pre-compact check: `.rein/prompts/rules/gate-workflow.md` "Context budget").
 
 ## Monitoring long-running loops (optional)
-When running long in the background, you may periodically notify the human of progress
-(equivalent to /status) if your environment has a scheduling mechanism (see your capability
-mapping).
+**Not for waiting.** Mode A is a single command whose completion is the signal, so scheduling
+wake-ups to check whether it has finished buys nothing and costs a session's context every time.
+Use a scheduling mechanism here for one thing only: if the human asked to be told how it is
+going, notify them of progress periodically (equivalent to /status). If they want the run
+retried after a capacity stop, that is the supervisor loop in mode A above — a shell loop on the
+exit code, not an agent waking itself up.

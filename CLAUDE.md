@@ -15,7 +15,7 @@ capability vocabulary onto Claude Code's mechanisms.
 | `approval-presentation` | plan mode + `ExitPlanMode`; outside plan mode, present the summary and ask for an explicit "approve" |
 | `session-compaction` | `/compact` (human-run; the agent only suggests it) |
 | `role-delegation` | subagents in `.claude/agents/` (`requirements-analyst`, `architect`, `implementer`, `adversarial-reviewer`); parallel leaves use `isolation: "worktree"` |
-| `autonomous-build-iteration` | `/loop /build` (mode B) — and headless mode A, `rein build`, which drives the reviewer/implementer adapters set by `rein agent <role> <cli>` |
+| `autonomous-build-iteration` | `/loop /build` — **mode B only**. Mode A is headless `rein build` (driving the adapters set by `rein agent <role> <cli>`): one command whose completion is the signal, so never schedule wake-ups to poll it; retry-after-capacity is a shell loop on its exit code (build.md) |
 | `command-preauthorization` | `permissions.allow` in `.claude/settings.json` |
 
 Claude Code also carries the **mechanism layer** of the gates: the PreToolUse hook in

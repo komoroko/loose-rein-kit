@@ -390,6 +390,39 @@ Both share:
   against the gate rules — a violation escalates (`gate_violation`) and blocks instead of landing.
 - An unsolvable task → `blocked`; an upstream defect → `needs-revision`, escalated, loop stops.
   The orchestrator **never touches `gates.build`** (only the human opens a gate).
+- **A machine's failure is never recorded as a task's verdict.** An agent that never launched
+  (capacity exhausted, the CLI not on PATH, a supervisor's signal) or a step that could not be
+  run at all (no container runtime, no pinned image) produced no judgement about the code, so it
+  spends no retry budget, marks no task, and stops the run. Leaves that did pass still merge.
+
+#### Exit codes, and running it unattended
+
+`rein build` is one command, not an iteration: its exit is the signal, so nothing should poll a
+run in progress. The code says what to do next.
+
+| code | meaning | what to do |
+|---|---|---|
+| `0` | every task is done | go to gate ④ |
+| `1` | a task could not pass the gate, or the frontier is empty with work left | a human reads the escalation |
+| `2` | it refused to start, or the machine failed in a way waiting cannot fix | repair what it names |
+| `3` | the machine failed in a way time fixes — capacity exhausted, a signal, another run holding the lock. **Nothing was marked, no budget spent** | re-run later; it continues |
+
+An agent **session or usage limit is a normal event** on a run of any length, not an incident.
+The loop exits `3` at once rather than sleeping on it — a limit that lifts in hours has no
+business holding the build lock and a set of worktrees — so the waiting belongs to whatever
+re-runs the command:
+
+```sh
+while :; do
+  rein build && break
+  rc=$?; [ "$rc" -eq 3 ] || exit "$rc"   # anything else needs a human
+  sleep 900
+done
+```
+
+Each unfinished task is left `todo` with its worktree in place; the next run finalizes and
+salvages that work onto the leaf's branch, so the implementer **continues rather than
+restarts**. `rein resume` and `rein doctor` both report the stop when you come back.
 
 > **DoD commands are the project's own**: `quality_gate` names them once (the shipped
 > defaults `make test` / `make check` are placeholders — `rein init` fills detected commands
@@ -422,10 +455,19 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
   escalations, review freshness, sandbox pinning, lock health, schema validation). Most situations below
   surface here.
 - **A task went `blocked`** — the quality gate failed within its retry budget. Read the escalation
-  (`rein events --render`), fix the cause (or the ticket), set `status` back to `todo` in
-  `state.yaml`, and re-run `rein build`. The escalation stays in the log — it is append-only
-  and has no `resolve` verb; you conclude it in the retrospective at `/verify`. If it's an
-  upstream defect, `/revise <phase>` instead.
+  (`rein events --render`), fix the cause (or the ticket), then put the task back on the frontier
+  with **`rein task reset T-NNN --reason "…"`** and re-run `rein build`. (Not by editing
+  `state.yaml`: it is written only inside a Central Store transaction, and `rein guard` denies
+  the hand edit. The verb is that transaction, with your reason recorded beside the change; it
+  keeps the handoff so the retry budget is not silently refilled — `--fresh` discards it and
+  says so.) The escalation stays in the log — it is append-only and has no `resolve` verb; you
+  conclude it in the retrospective at `/verify`. If it's an upstream defect, `/revise <phase>`
+  instead.
+- **The run stopped and nothing looks wrong** — no task blocked, no escalation, the board
+  unchanged. That is a machine failure, not a task's: an agent capacity limit, a killed process,
+  a missing CLI. `rein doctor` and `rein resume` name it. If it exited `3`, just re-run
+  `rein build` when capacity is back — every task kept its status and retry budget, and the
+  preserved work is picked up automatically.
 - **Loop interrupted** (Ctrl-C, crash) — just re-run `rein build`, in this terminal or another; it
   resets `in-progress` tasks to `todo` and cleans leftover worktrees on startup. An interrupted
   leaf's commits are kept on a salvage branch and merged back into the next attempt's worktree

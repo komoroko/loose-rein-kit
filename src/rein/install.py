@@ -109,8 +109,9 @@ def claude_import_block() -> str:
         "commands; `structured-question` → AskUserQuestion; `notify-and-wait` → PushNotification;\n"
         "`approval-presentation` → plan mode + ExitPlanMode; `session-compaction` → /compact\n"
         "(human-run); `role-delegation` → the subagents in .claude/agents/ (worktree-isolated\n"
-        "parallel leaves); `autonomous-build-iteration` → /loop /build, or headless\n"
-        "`rein build`; `command-preauthorization` → permissions.allow in\n"
+        "parallel leaves); `autonomous-build-iteration` → /loop /build, and only for /build's\n"
+        "mode B — mode A's `rein build` is one command whose completion is the signal, so never\n"
+        "poll it; `command-preauthorization` → permissions.allow in\n"
         ".claude/settings.json. The operating rules are imported from:\n"
         f"@{REIN_RULES_PATH}\n"
     )
