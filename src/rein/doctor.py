@@ -425,6 +425,47 @@ def check_independence(config: models.Config | None) -> list[Finding]:
     return [Finding(level, "review", w) for w in warnings]
 
 
+def check_adapters(config: models.Config | None, state: models.State | None) -> list[Finding]:
+    """The agent CLIs `rein build` launches.
+
+    The implementation phase has no hand-driven equivalent, so an adapter that is not on PATH is
+    simply what stops the build from starting — a precondition worth naming here rather than
+    leaving to the run's exit `2`.
+    """
+    if config is None:
+        return []
+    from rein import agent_cli, build_loop
+
+    findings: list[Finding] = []
+    binaries: dict[str, list[str]] = {}
+    for role in agent_cli.ROLES:
+        adapter = config.adapter(role) or "claude"
+        argv = build_loop.ADAPTERS.get(adapter)
+        if argv is None:
+            known = ", ".join(sorted(build_loop.ADAPTERS))
+            findings.append(
+                Finding("FAIL", "agents", f"agents.{role}.adapter is {adapter!r} — known adapters: {known}")
+            )
+        else:
+            binaries.setdefault(argv[0], []).append(role)
+    # Before the build phase a missing CLI is normal: nothing has needed it yet.
+    level = "FAIL" if state is not None and state.current_phase == "build" else "WARN"
+    for binary, roles in sorted(binaries.items()):
+        who = ", ".join(roles)
+        if shutil.which(binary):
+            findings.append(Finding("PASS", "agents", f"{binary} found on PATH ({who})"))
+        else:
+            findings.append(
+                Finding(
+                    level,
+                    "agents",
+                    f"{binary} not found on PATH — `rein build` launches it for {who}. "
+                    "Install it, or point the roles elsewhere with `rein agent <cli>`",
+                )
+            )
+    return findings
+
+
 def check_binaries() -> list[Finding]:
     findings: list[Finding] = []
     for name, level, why in (
@@ -439,8 +480,7 @@ def check_binaries() -> list[Finding]:
     return findings
 
 
-#: Hook host → how it is named to a human. Three hosts now, so "the other one" is no longer a
-#: thing that can be said.
+#: Hook host → how it is named to a human.
 _HOST_LABEL = {"claude": "Claude Code", "copilot": "VS Code Copilot", "codex": "Codex"}
 
 
@@ -819,6 +859,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_runtime(repo)
     findings += check_sandbox(config)
     findings += check_independence(config)
+    findings += check_adapters(config, state)
     findings += check_hook(repo)
     findings += check_preauthorization(repo)
     findings += check_ci(repo)

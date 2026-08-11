@@ -12,6 +12,7 @@ finds is a doctor whose findings nobody reads.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -370,6 +371,32 @@ def test_two_providers_pass_cleanly() -> None:
     config = make_config()
     config["agents"]["comparator"]["independence_group"] = "openai/gpt"  # type: ignore[index]
     assert doctor.check_independence(models.Config(config))[0].level == "PASS"
+
+
+def _no_adapter_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "claude" else f"/usr/bin/{name}")
+
+
+def test_a_missing_adapter_only_warns_before_the_build_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rein build` is the only implementation path, but nothing has needed the CLI yet."""
+    _no_adapter_on_path(monkeypatch)
+    results = doctor.check_adapters(models.Config(make_config()), models.State({"current_phase": "tasks"}))
+    assert [f.level for f in results] == ["WARN"]
+    assert "rein agent <cli>" in results[0].message
+
+
+def test_a_missing_adapter_fails_once_the_build_phase_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    _no_adapter_on_path(monkeypatch)
+    results = doctor.check_adapters(models.Config(make_config()), models.State({"current_phase": "build"}))
+    assert [f.level for f in results] == ["FAIL"]
+
+
+def test_an_adapter_this_release_cannot_launch_fails_whatever_is_on_path() -> None:
+    config = make_config()
+    config["agents"]["implementer"]["adapter"] = "cursor"  # type: ignore[index]
+    results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
+    assert results[0].level == "FAIL"
+    assert "'cursor'" in results[0].message
 
 
 def test_the_runtime_fallback_warns_that_it_is_weaker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
