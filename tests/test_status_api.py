@@ -307,6 +307,83 @@ def test_a_done_task_carries_the_commit_that_landed_it(tmp_path: Path) -> None:
     assert by_id["T-002"]["commit"] == ""  # nothing landed it, so the row says nothing
 
 
+# --- attention: a since-resolved task_failed/knowledge_gap must not linger forever -------------
+
+
+def _chain_with_subjects(*specs: tuple[str, tuple[str, ...]]) -> list[models.Event]:
+    """Like `_support.chain`, but each entry also carries the `subject_ids` this module needs."""
+    from rein import event_chain
+
+    built: list[models.Event] = []
+    previous: models.Event | None = None
+    for name, subjects in specs:
+        linked = event_chain.link(previous, event_chain.make(name, "demo-cycle", subject_ids=subjects))
+        built.append(linked)
+        previous = linked
+    return built
+
+
+def test_a_task_failed_for_a_now_done_task_is_not_pending_attention(tmp_path: Path) -> None:
+    """T-020 in the wild: three `task_failed` events from earlier attempts, the task later
+    reaches `done` — `rein status` must stop asking a human to look at it."""
+    seed_repo(
+        tmp_path,
+        events=_chain_with_subjects(("task_failed", ("T-001",)), ("knowledge_gap", ("T-001",))),
+        state=make_state(tasks={"T-001": "done"}),
+    )
+    status = status_api.collect_status(repo_mod.Repo(tmp_path))
+    queue = status["pending"]
+    assert isinstance(queue, list)
+    assert not [item for item in queue if item["kind"] == "escalation"]
+
+
+def test_a_task_failed_for_a_still_blocked_task_still_shows(tmp_path: Path) -> None:
+    seed_repo(
+        tmp_path,
+        events=_chain_with_subjects(("task_failed", ("T-001",))),
+        state=make_state(tasks={"T-001": "blocked"}),
+    )
+    status = status_api.collect_status(repo_mod.Repo(tmp_path))
+    queue = status["pending"]
+    assert isinstance(queue, list)
+    assert [item for item in queue if item["kind"] == "escalation"]
+
+
+def test_a_batch_task_failed_stays_until_every_named_task_is_done(tmp_path: Path) -> None:
+    """One event can name several tasks (a batch escalation) — it must not be dropped just
+    because *some* of them finished."""
+    seed_repo(
+        tmp_path,
+        events=_chain_with_subjects(("task_failed", ("T-001", "T-002"))),
+        state=make_state(tasks={"T-001": "done", "T-002": "blocked"}),
+    )
+    status = status_api.collect_status(repo_mod.Repo(tmp_path))
+    queue = status["pending"]
+    assert isinstance(queue, list)
+    assert [item for item in queue if item["kind"] == "escalation"]
+
+
+def test_plan_invalidated_is_never_auto_suppressed(tmp_path: Path) -> None:
+    """No task subject to check against — this stays a human's call regardless of task status,
+    same as before this change (`plan_invalidated`'s conventional subject is `-`, not a task)."""
+    seed_repo(
+        tmp_path,
+        events=_chain_with_subjects(("plan_invalidated", ())),
+        state=make_state(tasks={"T-001": "done"}),
+    )
+    status = status_api.collect_status(repo_mod.Repo(tmp_path))
+    queue = status["pending"]
+    assert isinstance(queue, list)
+    assert [item for item in queue if item["kind"] == "escalation"]
+
+
+def test_task_outcome_resolved_is_scoped_to_task_failed_and_knowledge_gap() -> None:
+    from rein import event_chain
+
+    review_failed = event_chain.make("review_failed", "demo-cycle", subject_ids=("T-001",))
+    assert not status_api._task_outcome_resolved(review_failed, {"T-001": "done"})
+
+
 # --- the pending queue --------------------------------------------------------
 #
 # The recommendation is first-match, so it stops at one row and cannot answer "how much is
