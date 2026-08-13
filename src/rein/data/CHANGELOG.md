@@ -4,6 +4,83 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.2.3] - 2026-08-14
+
+Six pieces of friction from one long `rein build` run against a real product repository, and
+what each one turned out to actually be.
+
+### A `network: none` step's own dependency failure no longer burns its retry budget
+
+Every sandboxed step runs with no network (plan §10.2), so a `test`/`check` command that needed
+to resolve a hostname mid-run — a dependency the pinned image never baked in — failed the same
+way on every retry, and `classify_step` (`faults.py`) had no way to tell that from the code
+actually being wrong: it charged the step's retry budget like any other content failure. A
+narrow, literal set of OS/resolver strings (glibc's "Temporary failure in resolving", curl's
+"Could not resolve host", Node's `ENOTFOUND`, and their kin — not a guess at arbitrary build-tool
+output, the thing this module has always refused to do) now reads this as `ENV_PERMANENT`: no
+budget spent, and the console message says what actually fixes it — bake the dependency into the
+pinned image.
+
+### A gate-guarded edit inside a worktree is caught right after the implementer runs, not only at merge
+
+`config.yaml` (and anything else `guard.paths` protects) was already checked before a leaf's
+commits reached the work branch — but only once, at merge time. A task that never got that far —
+blocked on a later content failure, or the run stopped by an environment fault first — could
+carry an unnoticed violation in an unmerged worktree indefinitely, found only by running
+`rein doctor` by hand. The same check now also runs immediately after each attempt's
+implementer, for both worktree leaves and serial/foundation tasks, so the gap between "the edit
+happened" and "something looked" is one attempt, not "until someone thinks to check."
+
+### A custom OCI profile can build from the repository, not only a packaged Containerfile
+
+Three Containerfiles ship with the package; a repository with an unrelated stack (a web
+frontend, an infra `cdk synth` step) had no way to sandbox it. A profile can now set
+`dockerfile:` — a repo-relative path, frozen alongside the rest of `config.yaml` at gate ③ like
+everything else there — and `rein oci build --profile <name>` builds it exactly as it would a
+packaged one. Deliberately not a `build_command:` — a Dockerfile stays declarative; an arbitrary
+shell command in a frozen config is a bigger door than this needed to open.
+
+### A quality-gate step can be scoped to the paths it actually applies to
+
+The DoD's "no opt-out knob" was, and stays, about implementers: nothing here lets a task choose
+its own gate. But an operator deciding *at gate 3* that the Playwright suite has no business
+running for a commit that only touched the Python backend was never the same thing, and the
+schema had no way to say it. A `quality_gate` step can now name `paths:` (fnmatch-style globs);
+`_steps_for` skips it for a task whose diff does not intersect them. A step naming no `paths:`
+is unchanged — every packaged step still runs for every task — and an unresolved diff (a fresh
+worktree, dry-run) is never read as an empty one: it runs the full DoD rather than guess a scope
+that was never decided.
+
+### `rein doctor` checks that a pinned image is actually present, not just shaped like one
+
+`check_sandbox` verified a profile named a well-formed digest and that a container runtime
+existed on PATH — never whether an image under that digest was actually sitting in the local
+store. `executors.verify_pinned` already existed and answered exactly that (`rein oci verify`
+already used it); `doctor` now calls it too, WARNing when the image has simply never been built
+here yet and FAILing when a local image exists under a *different* digest than the pin — the
+sharper, config-actually-drifted case.
+
+### `rein status` stops asking about a `task_failed` the task has since lived down
+
+`task_failed`/`knowledge_gap` are `ATTENTION_EVENTS`, and the chain that records them is
+append-only by design — but "waiting on you" read that list straight off the chain with no
+regard for what happened after. A task that failed three times and then reached `done` kept
+every one of those three events on the board forever. `rein status` (not the log itself, and not
+`rein events --summary`, which stays a faithful, unfiltered view of the chain) now drops a
+`task_failed`/`knowledge_gap` from the queue once every task it named has reached `done` — a
+batch event naming several tasks stays until all of them have. Everything else (a review-pipeline
+escalation, `plan_invalidated`) is unaffected: closing those is still a signed disposition in
+`review.yaml`, never an inference this command is positioned to make for them.
+
+### Also: `--impacted`'s seed is the scoping decision, not a mechanism to fix
+
+A related report — a config change appeared to invalidate the entire task DAG — turned out not
+to be a bug: no automatic, config-driven invalidation exists anywhere in this codebase.
+`rein revise --impacted` only ever marks the seeds named on the command line and their
+transitive dependents; naming an early foundation task pulls in most of the plan because that is
+what the closure is for, not because the tool guessed too broadly. README clarified rather than
+code changed.
+
 ## [0.2.2] - 2026-08-12
 
 One reported defect, and the two things it turned out to be sitting on: a category error in what
