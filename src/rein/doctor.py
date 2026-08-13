@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import rein
-from rein import common, dag, dag_trace, event_chain, install, models, strict_yaml
+from rein import common, dag, dag_trace, event_chain, executors, install, models, strict_yaml
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -394,6 +394,20 @@ def check_sandbox(config: models.Config | None) -> list[Finding]:
         runtime = shutil.which("docker") or shutil.which("podman")
         if runtime:
             findings.append(Finding("PASS", "sandbox", f"container runtime found ({Path(runtime).name})"))
+            for name, profile in sorted(config.profiles.items()):
+                if not profile.is_sandboxed or not profile.image_digest:
+                    continue  # covered above: not sandboxed, or already flagged as unpinned
+                ok, message = executors.verify_pinned(profile, runtime=runtime)
+                if ok:
+                    findings.append(Finding("PASS", "sandbox", f"profile '{name}': {message}"))
+                elif "no local image" in message:
+                    # Not built here yet — expected on a fresh checkout, actionable before
+                    # `rein build` opens rather than broken right now.
+                    findings.append(Finding("WARN", "sandbox", f"profile '{name}': {message}"))
+                else:
+                    # A local image exists under a digest that does not match the pin — the
+                    # config drifted from what gate 3 froze, or was rebuilt without re-pinning.
+                    findings.append(Finding("FAIL", "sandbox", f"profile '{name}': {message}"))
         elif offenders:
             findings.append(
                 Finding(
