@@ -214,6 +214,13 @@ rein oci build --profile python                 # digest だけ表示して手�
 コメントは1つも失われず、パースできなくなる書き込みは拒否する。pin は gate ③ より前に済ませる
 こと。そこで config が凍結され、以降はガードが編集を拒否する。
 
+同梱の3つの Containerfile だけでは、タスクが触りうる全スタック(web フロントエンド、infra の
+`cdk synth` ステップなど)を賄いきれないこともある。そのときはプロファイルに `dockerfile:` —
+リポジトリ相対パス(例: `.rein/oci/web_quality/Containerfile`)、gate ③ で `config.yaml` の
+他の部分と一緒に凍結される — を設定すればよい。`rein oci build --profile <そのプロファイル名>`
+は、同梱のものとまったく同じようにそこからビルドする。1つのプロファイルに `containerfile:` と
+`dockerfile:` を同時に指定することはできない。
+
 Containerfile はベースイメージを `python:3.13-slim-bookworm` というタグではなく **digest で
 固定**し、`uv` も同じように固定する。以前は1ヶ月空けてビルドすると別のイメージができ、pin した
 digest は再現性の保証ではなく「たまたま焼けたもの」の記録でしかなかった。古いツールはこれの

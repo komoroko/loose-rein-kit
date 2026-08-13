@@ -165,6 +165,14 @@
           },
           "required": {
             "type": "boolean"
+          },
+          "paths": {
+            "description": "Glob patterns (fnmatch-style: `*` matches any run of characters, including `/`) restricting this step to tasks whose changed files match at least one. Absent or empty: every task runs it — the default, and the only knob here, frozen at gate 3 like the rest of config.yaml, never something a task's own ticket sets.",
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/$defs/pathGlob"
+            }
           }
         },
         "allOf": [
@@ -321,6 +329,11 @@
       "maxLength": 512,
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
     },
+    "pathGlob": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._*?][A-Za-z0-9._/@+*?-]*$"
+    },
     "envName": {
       "type": "string",
       "maxLength": 128,
@@ -346,10 +359,14 @@
           "pattern": "^[a-z0-9][a-zA-Z0-9._/:-]*@sha256:[0-9a-f]{64}$"
         },
         "containerfile": {
-          "description": "Name of a packaged Containerfile under data/oci/<name>/, built locally by `rein oci build`. A bootstrap convenience — the pinned `image` digest above stays the binding fact.",
+          "description": "Name of a packaged Containerfile under data/oci/<name>/, built locally by `rein oci build`. A bootstrap convenience — the pinned `image` digest above stays the binding fact. Mutually exclusive with `dockerfile`.",
           "type": "string",
           "maxLength": 64,
           "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "dockerfile": {
+          "description": "Repository-relative path to a custom Containerfile (e.g. .rein/oci/web_quality/Containerfile), built locally by `rein oci build --profile <name>` instead of a packaged one. Already a frozen path once gate 3 freezes config.yaml. Mutually exclusive with `containerfile`; the pinned `image` digest above stays the binding fact.",
+          "$ref": "#/$defs/repoPath"
         },
         "mount_repo": {
           "enum": [
@@ -410,6 +427,14 @@
             "required": [
               "image",
               "network_profile"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "containerfile",
+              "dockerfile"
             ]
           }
         }

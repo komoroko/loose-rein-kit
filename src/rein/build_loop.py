@@ -48,6 +48,7 @@ event, or lock is written — running it never changes what a later real run see
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import logging
 import os
@@ -175,6 +176,10 @@ class GateStep:
     #: `code_reviewer` — two roles the operator configured separately become one process.
     agent_role: str = ""
     agent_argv: tuple[str, ...] = ()
+    #: Glob patterns (fnmatch-style) restricting this step to a matching diff. Empty: every
+    #: task, unconditionally — frozen at gate 3 alongside the rest of config.yaml, never a knob
+    #: a task's own ticket sets (`models.GateStep.matches_paths`).
+    paths: tuple[str, ...] = ()
 
     @property
     def runnable(self) -> bool:
@@ -183,6 +188,11 @@ class GateStep:
     @property
     def display(self) -> str:
         return " ".join(self.command) if self.command else f"<{self.kind}:{self.name}>"
+
+    def matches_paths(self, changed: Sequence[str]) -> bool:
+        if not self.paths or not changed:
+            return True
+        return any(fnmatch.fnmatch(path, pattern) for path in changed for pattern in self.paths)
 
 
 @dataclass(frozen=True)
@@ -237,6 +247,7 @@ class Config:
                 # An agent step launches the role it declares. The schema already requires
                 # `agent_role` here; resolving it is what makes the declaration true.
                 agent_argv=cls._argv_for(config, step.agent_role) if step.kind == "agent" and step.agent_role else (),
+                paths=step.paths,
             )
             for step in config.quality_gate
         )
@@ -465,18 +476,35 @@ def plan_batch(graph: dag.Graph, max_parallel: int) -> tuple[str, list[dag.Task]
     return ("parallel", ordered[:max_parallel])
 
 
+class GateViolationFault(Exception):
+    """An attempt edited a gate-guarded path while its prerequisite gate is still pending.
+
+    Raised as soon as `_run_task_to_done` sees it — right after the implementer runs, inside the
+    retry loop — rather than waiting for the finalize/merge-stage check that already existed to
+    be the only thing that ever looked. A worktree that never reaches merge (blocked on a later
+    content failure, or the run stopped by an environment fault first) used to carry the
+    violation undetected until someone ran `rein doctor` by hand.
+    """
+
+    def __init__(self, violations: list[tuple[str, str]]) -> None:
+        self.violations = violations
+        super().__init__(f"{len(violations)} gate-guarded path(s) changed while the gate is pending")
+
+
 @dataclass(frozen=True)
 class LeafOutcome:
     """What one parallel leaf's run came to.
 
-    Three outcomes, not two, and the third is the point: `fault` set means the leaf produced
-    **no verdict at all** — the machine failed under it — so the caller must neither merge it nor
-    mark it. `ok=False` with no fault is a real verdict: the code could not pass the gate.
+    Four outcomes, not two: `fault` set means the leaf produced **no verdict at all** — the
+    machine failed under it — so the caller must neither merge it nor mark it. `violations` set
+    means a gate-guarded path changed early, caught before merge rather than at it. `ok=False`
+    with neither is a real verdict: the code could not pass the gate.
     """
 
     ok: bool
     log: str = ""
     fault: EnvironmentFault | None = None
+    violations: list[tuple[str, str]] | None = None
 
 
 # --- orchestrator body ------------------------------------------------------
@@ -703,13 +731,21 @@ class Orchestrator:
         """The gate steps actually run. All of them: the DoD has no opt-out knob."""
         return self.config.steps
 
-    def _steps_for(self, task: dag.Task) -> tuple[GateStep, ...]:
-        """The gate steps for one task — the shared DoD, identically for every task.
+    def _steps_for(self, task: dag.Task, cwd: str = "", base: str = "") -> tuple[GateStep, ...]:
+        """The gate steps for one task: the shared DoD, minus any step whose `paths:` this
+        task's diff does not touch.
 
-        Per-task steps would be a knob an implementer could turn on its own work; the whole
-        point of the DoD is that it is not one.
+        Still not a knob an implementer can turn: `paths:` is frozen at gate 3 in config.yaml
+        alongside every other DoD step, not read from the task or its ticket. A step naming no
+        `paths:` — every packaged step ships this way — runs for every task exactly as before.
+        The diff is computed fresh (`_review_scope`, the same source the review prompt's scope
+        uses) so an empty/unresolved diff (a fresh worktree, dry-run, no `cwd` given) runs every
+        step rather than guessing an empty scope means nothing to check.
         """
-        return self._steps_effective
+        if not cwd:
+            return self._steps_effective
+        changed, _ = self._review_scope(task, cwd, base)
+        return tuple(step for step in self._steps_effective if step.matches_paths(changed))
 
     def _review_scope(self, task: dag.Task, cwd: str, base: str) -> tuple[list[str], str]:
         """The changed-path list + exact diff command that scope the review step's read.
@@ -840,7 +876,7 @@ class Orchestrator:
         An agent step's fixes invalidate the evidence of the cmd steps that already passed,
         so those are re-run whenever it changed the tree (deterministic re-verification).
         """
-        steps = self._steps_for(task)
+        steps = self._steps_for(task, cwd, base)
         if self.dry_run:
             shown = " → ".join(f"{s.name}({s.kind})" for s in steps)
             print(f"    [dry-run] quality gate: {shown} (cwd={cwd})")
@@ -870,7 +906,7 @@ class Orchestrator:
         that step's budget. Returns (ok, log); ok=False means some step's budget ran out
         (the caller marks the task blocked).
         """
-        budgets = {s.name: s.retries for s in self._steps_for(task) if s.kind == "command"}
+        budgets = {s.name: s.retries for s in self._steps_for(task, cwd, base) if s.kind == "command"}
         # What an earlier, interrupted attempt left behind. Restoring the budgets is the load-
         # bearing half: a run killed mid-task and restarted otherwise came back with a full
         # allowance every time, so a task that can never pass could burn retries forever.
@@ -889,6 +925,11 @@ class Orchestrator:
         resume = False
         while True:
             self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume)
+            if not self.dry_run:
+                changed, _ = self._review_scope(task, cwd, base)
+                violations = self._gate_violations(changed)
+                if violations:
+                    raise GateViolationFault(violations)
             failed, failure_log = self._run_pipeline(task, cwd, base)
             if failed is None:
                 return True, ""
@@ -996,6 +1037,8 @@ class Orchestrator:
             return LeafOutcome(ok=ok, log=log)
         except EnvironmentFault as fault:
             return LeafOutcome(ok=False, log=fault.summary(), fault=fault)
+        except GateViolationFault as exc:
+            return LeafOutcome(ok=False, log=str(exc), violations=exc.violations)
         except StopLoop as exc:
             return LeafOutcome(ok=False, log=str(exc))
 
@@ -1179,6 +1222,19 @@ class Orchestrator:
                 # frontier, which is precisely what stops a re-run from ever continuing it.
                 self._set_status(task.id, "todo")
                 raise
+            except GateViolationFault as exc:
+                # Caught right after this attempt's implementer ran, rather than only at the
+                # finalize check below — a task that never gets that far (blocked on a later
+                # content failure) must not carry an undetected violation until `doctor` is run
+                # by hand.
+                self._set_status(task.id, "blocked")
+                self._escalate_gate_violation(
+                    task.id, "its work-branch changes (caught before finalize)", exc.violations
+                )
+                raise StopLoop(
+                    f"{task.id}: changed gate-guarded paths while their gate is pending. Human intervention needed.",
+                    code=1,
+                ) from exc
             if not ok:
                 self._set_status(task.id, "blocked")
                 self._escalate(
@@ -1246,6 +1302,12 @@ class Orchestrator:
                 # No verdict: no status, no escalation, and the worktree stays where it is.
                 self._set_status(task.id, "todo")
                 print(f"  [aborted] {task.id}: the machine stopped this leaf — left todo, work preserved")
+                continue
+            if outcome.violations:
+                self._set_status(task.id, "blocked")
+                self._escalate_gate_violation(task.id, "its worktree changes (caught before merge)", outcome.violations)
+                self._cleanup_worktree(task)  # not merged; the branch keeps the diff for review
+                blocked_any = True
                 continue
             if not ok:
                 self._set_status(task.id, "blocked")

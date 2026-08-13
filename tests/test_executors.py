@@ -7,6 +7,8 @@ test that actually builds an image is behind the `integration` marker.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from rein import common, executors, models
@@ -211,3 +213,43 @@ def test_build_image_produces_a_pinned_digest() -> None:
     profile = _oci_profile(image=f"localhost/rein-python@{digest}")
     ok, message = executors.verify_pinned(profile)
     assert ok, message  # the message names the branch that failed — an `assert ok` alone cannot
+
+
+# --- a custom, repository-local Containerfile (a `dockerfile:` profile) --------
+
+
+def test_build_image_from_dockerfile_refuses_up_front_with_no_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(executors, "container_runtime", lambda: None)
+    dockerfile = tmp_path / "Containerfile"
+    dockerfile.write_text("FROM scratch\n")
+    with pytest.raises(executors.ExecutorError, match="no container runtime"):
+        executors.build_image_from_dockerfile(dockerfile)
+
+
+def test_build_image_from_dockerfile_reports_a_missing_file(tmp_path: Path) -> None:
+    with pytest.raises(executors.ExecutorError, match="no Containerfile at"):
+        executors.build_image_from_dockerfile(tmp_path / "does-not-exist", runtime="docker")
+
+
+@pytest.mark.integration
+def test_build_image_from_dockerfile_produces_a_pinned_digest(tmp_path: Path) -> None:
+    """A custom OCI profile builds from the repository, not `data/oci/<name>/`. Based on the same
+    pinned base image the packaged Containerfiles use — already pulled by that integration test,
+    so this adds no new network dependency — rather than `FROM scratch`, whose config digest and
+    image ID diverge under buildx on some engines, which is a `docker build` quirk orthogonal to
+    what this test is checking."""
+    if executors.container_runtime() is None:
+        pytest.skip("no container runtime on PATH")
+    dockerfile = tmp_path / "Containerfile"
+    dockerfile.write_text(
+        "FROM docker.io/library/python:3.13-slim-bookworm@"
+        "sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8d64\n"
+        "LABEL rein-test=1\n"
+    )
+    digest = executors.build_image_from_dockerfile(dockerfile)
+    assert digest.startswith("sha256:")
+    profile = _oci_profile(image=f"localhost/rein-{tmp_path.name}@{digest}")
+    ok, message = executors.verify_pinned(profile)
+    assert ok, message

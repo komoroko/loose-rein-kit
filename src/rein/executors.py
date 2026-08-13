@@ -263,6 +263,35 @@ def build_image(name: str, *, tag: str | None = None, runtime: str | None = None
         return _image_digest(engine, image_tag, iid_file)
 
 
+def build_image_from_dockerfile(dockerfile: Path, *, tag: str | None = None, runtime: str | None = None) -> str:
+    """Build a repository-local Containerfile and return its `sha256:` image digest.
+
+    A custom OCI profile (`dockerfile:` in config, not the packaged `containerfile:` name) lives
+    in the repository — already a frozen path once gate 3 freezes config.yaml — so unlike
+    :func:`build_image` there is nothing to extract from package data: the build context is
+    simply the Containerfile's own directory on disk.
+    """
+    engine = runtime or container_runtime()
+    if engine is None:
+        raise ExecutorError("no container runtime (docker/podman) on PATH")
+    if not dockerfile.is_file():
+        raise ExecutorError(f"no Containerfile at {dockerfile}")
+
+    import tempfile
+
+    context = dockerfile.parent
+    image_tag = tag or f"localhost/rein-{context.name}:local"
+    with tempfile.TemporaryDirectory() as workdir:
+        iid_file = Path(workdir) / "iid"
+        rc, out = common.run(
+            [engine, "build", "-t", image_tag, "--iidfile", str(iid_file), "-f", str(dockerfile), str(context)],
+            timeout=1800,
+        )
+        if rc != 0:
+            raise ExecutorError(f"building {dockerfile} failed (rc={rc}):\n{out[-2000:]}")
+        return _image_digest(engine, image_tag, iid_file)
+
+
 def _image_digest(engine: str, image_tag: str, iid_file: Path) -> str:
     """The image's content digest (`sha256:...`), from the iidfile or an inspect."""
     try:

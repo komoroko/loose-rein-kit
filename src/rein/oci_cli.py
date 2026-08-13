@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 
 from rein import common, executors, models
 from rein import repo as repo_mod
@@ -33,6 +34,24 @@ def _profiles_built_from(containerfile: str, repo_arg: str | None) -> list[str]:
         return [containerfile]
     named = sorted(name for name, profile in config.profiles.items() if profile.containerfile == containerfile)
     return named or [containerfile]
+
+
+def _custom_dockerfile(profile_name: str, repo_arg: str | None) -> tuple[repo_mod.Repo, Path] | None:
+    """`(repo, path)` when `--profile profile_name` names a configured `dockerfile:` profile.
+
+    None for anything else — no config, no such profile, or a profile that uses a packaged
+    `containerfile:` instead — so the caller falls back to the packaged-Containerfile lookup
+    exactly as before.
+    """
+    try:
+        repo = repo_mod.get(repo_arg)
+        config = models.Config.parse(repo.path(".rein/config.yaml").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - no readable config means nothing to route custom-built
+        return None
+    profile = config.profiles.get(profile_name)
+    if profile is None or not profile.dockerfile:
+        return None
+    return repo, repo.path(profile.dockerfile)
 
 
 def pin_profiles(text: str, pins: dict[str, str]) -> tuple[str, list[str]]:
@@ -96,7 +115,13 @@ def main(argv: list[str] | None = None) -> int:
 
     build = sub.add_parser("build", help="build a packaged Containerfile locally and print its digest")
     target = build.add_mutually_exclusive_group(required=True)
-    target.add_argument("--profile", help=f"one of: {', '.join(executors.containerfile_names())}")
+    target.add_argument(
+        "--profile",
+        help=(
+            f"one of the packaged Containerfiles ({', '.join(executors.containerfile_names())}), "
+            "or an executor_profiles name that sets `dockerfile:`"
+        ),
+    )
     target.add_argument("--all", action="store_true", help="build every packaged Containerfile")
     build.add_argument(
         "--write-config",
@@ -128,22 +153,38 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
-        names = list(executors.containerfile_names()) if args.all else [args.profile]
         pins: dict[str, str] = {}
-        for index, name in enumerate(names, start=1):
-            # Progress goes out before the build, not after. `common.run` captures the engine's
-            # output, so a three-image build otherwise prints nothing for several minutes and
-            # looks hung at exactly the moment a first-time user is least sure it is working.
-            print(f"[{index}/{len(names)}] building rein-{name} (this can take a few minutes)…", flush=True)
+        custom = None if args.all else _custom_dockerfile(args.profile, args.repo)
+        if custom is not None:
+            # `--profile <name>` named a configured `dockerfile:` profile, not a packaged
+            # Containerfile — build from the repository instead of `data/oci/<name>/`.
+            repo, dockerfile_path = custom
+            rel = repo.rel(dockerfile_path) or str(dockerfile_path)
+            print(f"[1/1] building '{args.profile}' from {rel} (this can take a few minutes)…", flush=True)
             try:
-                digest = executors.build_image(name)
+                digest = executors.build_image_from_dockerfile(dockerfile_path)
             except executors.ExecutorError as exc:
                 logger.error(str(exc))
                 return 1
-            image = f"localhost/rein-{name}@{digest}"
-            print(f"built rein-{name}\ndigest: {digest}")
-            for profile_name in _profiles_built_from(name, args.repo):
-                pins[profile_name] = image
+            print(f"built {args.profile}\ndigest: {digest}")
+            pins[args.profile] = f"localhost/rein-{args.profile}@{digest}"
+        else:
+            names = list(executors.containerfile_names()) if args.all else [args.profile]
+            for index, name in enumerate(names, start=1):
+                # Progress goes out before the build, not after. `common.run` captures the
+                # engine's output, so a three-image build otherwise prints nothing for several
+                # minutes and looks hung at exactly the moment a first-time user is least sure
+                # it is working.
+                print(f"[{index}/{len(names)}] building rein-{name} (this can take a few minutes)…", flush=True)
+                try:
+                    digest = executors.build_image(name)
+                except executors.ExecutorError as exc:
+                    logger.error(str(exc))
+                    return 1
+                image = f"localhost/rein-{name}@{digest}"
+                print(f"built rein-{name}\ndigest: {digest}")
+                for profile_name in _profiles_built_from(name, args.repo):
+                    pins[profile_name] = image
         if not args.write_config:
             where = ", ".join(f"executor_profiles.{key}" for key in sorted(pins))
             print(f"\nPin these in .rein/config.yaml under {where}:")

@@ -55,6 +55,50 @@ def test_an_unreadable_config_falls_back_rather_than_failing_a_good_build(tmp_pa
     assert oci_cli._profiles_built_from("python", str(tmp_path)) == ["python"]
 
 
+# --- a custom, repository-local Containerfile (a `dockerfile:` profile) --------
+
+
+def test_custom_dockerfile_profile_is_found(tmp_path: Path) -> None:
+    rel = ".rein/oci/web_quality/Containerfile"
+    (tmp_path / rel).parent.mkdir(parents=True)
+    (tmp_path / rel).write_text("FROM scratch\n")
+    root = _repo_with({"web_quality": {"kind": "host", "dockerfile": rel}}, tmp_path)
+    found = oci_cli._custom_dockerfile("web_quality", str(root))
+    assert found is not None
+    repo, path = found
+    assert path == root / rel
+
+
+def test_custom_dockerfile_is_none_for_a_packaged_profile(tmp_path: Path) -> None:
+    root = _repo_with({"quality": {"kind": "host", "containerfile": "python"}}, tmp_path)
+    assert oci_cli._custom_dockerfile("quality", str(root)) is None
+
+
+def test_custom_dockerfile_is_none_for_an_unknown_profile(tmp_path: Path) -> None:
+    root = _repo_with({"quality": {"kind": "host", "containerfile": "python"}}, tmp_path)
+    assert oci_cli._custom_dockerfile("nope", str(root)) is None
+
+
+def test_build_routes_a_configured_dockerfile_profile_to_the_repo_local_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--profile web_quality` must not be looked up against the packaged Containerfiles once
+    config says it builds from a repo-local Dockerfile."""
+    rel = ".rein/oci/web_quality/Containerfile"
+    root = _repo_with({"web_quality": {"kind": "host", "dockerfile": rel}}, tmp_path)
+    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (root / rel).write_text("FROM scratch\n")
+    monkeypatch.setattr(executors, "container_runtime", lambda: "docker")
+    monkeypatch.setattr(
+        executors,
+        "build_image",
+        lambda *a, **k: pytest.fail("must not build a packaged Containerfile for a dockerfile profile"),  # noqa: ARG005
+    )
+    digest = "sha256:" + "a" * 64
+    monkeypatch.setattr(executors, "build_image_from_dockerfile", lambda *a, **k: digest)  # noqa: ARG005
+    assert oci_cli.main(["build", "--profile", "web_quality", "--repo", str(root)]) == 0
+
+
 def test_every_shipped_profile_names_a_containerfile_that_exists() -> None:
     """`containerfile:` is the mapping every instruction site now reads, so a profile pointing at
     a Containerfile that does not ship would reintroduce the unrunnable command."""
