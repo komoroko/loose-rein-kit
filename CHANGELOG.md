@@ -33,8 +33,8 @@ happened" and "something looked" is one attempt, not "until someone thinks to ch
 
 ### A custom OCI profile can build from the repository, not only a packaged Containerfile
 
-Three Containerfiles ship with the package; a repository with an unrelated stack (a web
-frontend, an infra `cdk synth` step) had no way to sandbox it. A profile can now set
+Three Containerfiles ship with the package; a repository with a stack none of them cover had no
+way to sandbox it. A profile can now set
 `dockerfile:` — a repo-relative path, frozen alongside the rest of `config.yaml` at gate ③ like
 everything else there — and `rein oci build --profile <name>` builds it exactly as it would a
 packaged one. Deliberately not a `build_command:` — a Dockerfile stays declarative; an arbitrary
@@ -43,9 +43,9 @@ shell command in a frozen config is a bigger door than this needed to open.
 ### A quality-gate step can be scoped to the paths it actually applies to
 
 The DoD's "no opt-out knob" was, and stays, about implementers: nothing here lets a task choose
-its own gate. But an operator deciding *at gate 3* that the Playwright suite has no business
-running for a commit that only touched the Python backend was never the same thing, and the
-schema had no way to say it. A `quality_gate` step can now name `paths:` (fnmatch-style globs);
+its own gate. But an operator deciding *at gate 3* that one stack's suite has no business running
+for a commit that never touched it was never the same thing, and the schema had no way to say it.
+A `quality_gate` step can now name `paths:` (fnmatch-style globs);
 `_steps_for` skips it for a task whose diff does not intersect them. A step naming no `paths:`
 is unchanged — every packaged step still runs for every task — and an unresolved diff (a fresh
 worktree, dry-run) is never read as an empty one: it runs the full DoD rather than guess a scope

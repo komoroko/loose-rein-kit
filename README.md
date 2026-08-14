@@ -212,12 +212,12 @@ prints the digest and the config key to paste it under. With it, the command rew
 `config.yaml` survives, and it refuses to write a file that no longer parses. Pin before gate ③:
 the config freezes there and the guard refuses it afterwards.
 
-None of the three packaged Containerfiles fit every stack a task might touch (a web frontend, an
-infra `cdk synth` step). A profile can instead set `dockerfile:` — a repo-relative path (e.g.
-`.rein/oci/web_quality/Containerfile`), already frozen alongside the rest of `config.yaml` once
-gate ③ freezes it — and `rein oci build --profile <that profile's name>` builds from it exactly
-as it would a packaged one. `containerfile:` and `dockerfile:` are mutually exclusive on one
-profile.
+None of the three packaged Containerfiles fit every stack a repository might mix in — a task can
+touch a toolchain none of them were built for. A profile can instead set `dockerfile:` — a
+repo-relative path (e.g. `.rein/oci/custom/Containerfile`), already frozen alongside the rest of
+`config.yaml` once gate ③ freezes it — and `rein oci build --profile <that profile's name>`
+builds from it exactly as it would a packaged one. `containerfile:` and `dockerfile:` are
+mutually exclusive on one profile.
 
 The Containerfiles pin their base image **by digest**, not by the `python:3.13-slim-bookworm` tag,
 and pin `uv` the same way. Two builds a month apart used to produce different images, which made
@@ -393,8 +393,8 @@ The rules:
   Each step has its own retry budget; exhausting it → `blocked`. Set the smoke step
   `required: true` once the deliverable is runnable, so a forgotten launch check refuses to build.
   A step can name `paths:` (glob patterns) to run only for a task whose diff touches them — a
-  repo with several unrelated stacks (Python backend, a web frontend, infra `cdk synth`) is not
-  forced to pay every stack's cost on every task. This is a config decision frozen at gate ③, not
+  repo that mixes several independently-testable stacks is not forced to pay every stack's cost
+  on every task. This is a config decision frozen at gate ③, not
   a knob a task's own ticket can turn: a step naming no `paths:` still runs for every task, and
   an unresolved diff (a fresh worktree, before anything has changed yet) never reads as "nothing
   applies" — it runs the full DoD.

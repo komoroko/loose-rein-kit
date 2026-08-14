@@ -24,7 +24,7 @@ prompts:
     prompts/commands/tasks.md: sha256:80e97155727272f0f4285169433a9479dce23270432f4bc9f35a8e23342b8a12
     prompts/commands/verify.md: sha256:122388545f7ddf80654d03069efe178b3750b0b61ddb6d20e0fbce042f2124f0
     prompts/rules/gate-workflow.md: sha256:977e8390afc30dc3127c4158ab3197beef871001e1c0745adfc312fc93728ea6
-    schema/config.schema.json: sha256:e07fe366eb2bbdce37d160858b2c1ae48dcadb39c9294743f0a0244b5811102f
+    schema/config.schema.json: sha256:a601a482f880366928024bddaa6dd959e88bbb183b544f2753cc18bf28d78f73
     schema/event.schema.json: sha256:bda939e7230db2459918a083f8dfa329b4b2ed8fda2220e63f09234e179aca9a
     schema/plan.schema.json: sha256:3a7bd51bdec0eff2bb51f8d49302fa9358a051803a0200955ba9522227ccda03
     schema/review.schema.json: sha256:74deb11f1fc99c8418c234eddc676ab487d4e6d682eac80a03f425cdcd1ad2e8

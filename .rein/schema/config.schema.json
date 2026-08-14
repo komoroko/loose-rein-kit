@@ -365,7 +365,7 @@
           "pattern": "^[a-z0-9][a-z0-9_-]*$"
         },
         "dockerfile": {
-          "description": "Repository-relative path to a custom Containerfile (e.g. .rein/oci/web_quality/Containerfile), built locally by `rein oci build --profile <name>` instead of a packaged one. Already a frozen path once gate 3 freezes config.yaml. Mutually exclusive with `containerfile`; the pinned `image` digest above stays the binding fact.",
+          "description": "Repository-relative path to a custom Containerfile (e.g. .rein/oci/custom/Containerfile), built locally by `rein oci build --profile <name>` instead of a packaged one. Already a frozen path once gate 3 freezes config.yaml. Mutually exclusive with `containerfile`; the pinned `image` digest above stays the binding fact.",
           "$ref": "#/$defs/repoPath"
         },
         "mount_repo": {
