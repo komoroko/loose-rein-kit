@@ -15,7 +15,7 @@ prompts:
     prompts/agents/architect.md: sha256:d36360652d81f2dcfae8861557cd49a679f2f29241551b13e4aa5364ffbf6479
     prompts/agents/implementer.md: sha256:44c3fd375f9b91dfc142946d41016e716d348914279ede231a2c9cfdb3e22669
     prompts/agents/requirements-analyst.md: sha256:f856541626e80f3439a3681c70a9ab09f557b0e3dc5c4ddd229f214b5f8efab3
-    prompts/commands/build.md: sha256:e4c344fd1337cc3400d03a151213f8fb01381745354f9aa258a5a9499341818f
+    prompts/commands/build.md: sha256:8118c8c66c8132d433ef5662f7234b2f1e78d871ac1c599195593ccf0fc08975
     prompts/commands/design.md: sha256:3bf7ef48617e14213f5745a487c3b879636c2021f12a7723f96fa621ac5e63dd
     prompts/commands/onboard.md: sha256:47fd4093b4eda0b469312622f19b0152d2bde1374670976966fd7aa22495ce23
     prompts/commands/req.md: sha256:f2af1509ee5896c8ba4d50706fbd3edd087c24b67df8e5c54cbd5ef8635de7bf

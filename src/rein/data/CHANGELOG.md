@@ -6,7 +6,7 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.2.3] - 2026-08-14
 
-Six pieces of friction from one long `rein build` run against a real product repository, and
+Eight pieces of friction from one long `rein build` run against a real product repository, and
 what each one turned out to actually be.
 
 ### A `network: none` step's own dependency failure no longer burns its retry budget
@@ -80,6 +80,28 @@ to be a bug: no automatic, config-driven invalidation exists anywhere in this co
 transitive dependents; naming an early foundation task pulls in most of the plan because that is
 what the closure is for, not because the tool guessed too broadly. README clarified rather than
 code changed.
+
+### `rein build --supervise` carries the documented retry-while-loop in-process
+
+`EXIT_RETRY_LATER` (3) has always meant "nothing was marked, nothing was spent, re-run later" —
+and the docs have shown the same few-line shell loop since 0.2.2 for whatever does that
+re-running. In practice that loop only works for as long as something keeps it alive: a
+terminal, a session, a person who remembers to come back. A run that stops on a capacity or
+lock fault with nothing outside it watching just stays stopped — for as long as nobody notices,
+not for as long as the fault takes to clear. `--supervise` (with `--supervise-interval-sec`,
+default 900) is the same recipe carried inside `rein build` itself: on 3, sleep and call the
+loop again against the repository's current state; on anything else, return immediately. One
+long-lived process instead of a hand-rolled wrapper that has to be re-created correctly, and
+survive intact, every time it is needed.
+
+### `rein doctor` escalates a retryable stop nobody has come back to
+
+`check_last_run` already said when the last run stopped on a machine fault and nothing has
+progressed since — but a stop from five minutes ago and one from a day ago read identically. A
+retryable stop that has sat unattended well past when its own kind of fault would normally have
+cleared now escalates from an informational note to a warning, naming `--supervise` as the fix
+that would have kept it from happening at all. The comparison is against event timestamps only —
+never the fault's own free-text "resets at…" report, which stays exactly as unparsed as before.
 
 ## [0.2.2] - 2026-08-12
 
