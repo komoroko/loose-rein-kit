@@ -426,9 +426,13 @@ run in progress. The code says what to do next.
 An agent **session or usage limit is a normal event** on a run of any length, not an incident.
 The loop exits `3` at once rather than sleeping on it — a limit that lifts in hours has no
 business holding the build lock and a set of worktrees — so the waiting belongs to whatever
-re-runs the command:
+re-runs the command. `rein build --supervise` carries exactly this recipe in-process (same
+semantics, only `3` is retried, each attempt a fresh run against the current `state.yaml`):
 
 ```sh
+rein build --supervise   # [--supervise-interval-sec N], default 900
+
+# equivalent, if something outside `rein` should own the interval/backoff instead:
 while :; do
   rein build && break
   rc=$?; [ "$rc" -eq 3 ] || exit "$rc"   # anything else needs a human

@@ -68,9 +68,15 @@ as a human:
 A **session/usage limit is a normal event**, not an incident: on a run of any length it is close
 to certain. The loop exits `3` immediately rather than sleeping on it — a limit that lifts in
 hours has no business holding the build lock and a set of worktrees — so the waiting belongs to
-whatever re-runs the command:
+whatever re-runs the command. `rein build --supervise` carries exactly this recipe in-process
+(same semantics — only `3` is retried, each attempt a fresh run against the current
+`state.yaml`), so unattended progress survives a session limit even when nothing outside the
+process itself is watching to restart it:
 
 ```sh
+rein build --supervise   # [--supervise-interval-sec N], default 900
+
+# equivalent, if something outside `rein` should own the interval/backoff instead:
 while :; do
   rein build && break
   rc=$?; [ "$rc" -eq 3 ] || exit "$rc"   # anything else needs a human

@@ -1427,8 +1427,29 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true", help="run only the control flow without calling the agent CLI or git"
     )
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    parser.add_argument(
+        "--supervise",
+        action="store_true",
+        help=(
+            "on EXIT_RETRY_LATER (3), sleep and re-run in this same process instead of exiting — "
+            "the documented while-loop recipe, built in. Returns as soon as a run returns "
+            "anything other than 3."
+        ),
+    )
+    parser.add_argument(
+        "--supervise-interval-sec",
+        type=int,
+        default=900,
+        help="seconds to sleep between retries under --supervise (default: 900, the documented recipe's interval)",
+    )
     args = parser.parse_args(argv)
     common.configure_logging()
+    if args.supervise and args.dry_run:
+        logger.error("--supervise and --dry-run are mutually exclusive — a supervised run has to call the real loop")
+        return 2
+    if args.supervise and args.supervise_interval_sec < 1:
+        logger.error("--supervise-interval-sec must be at least 1")
+        return 2
     try:
         repo = repo_mod.get(args.repo)
     except repo_mod.RepoNotFoundError as exc:
@@ -1447,7 +1468,30 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, models.DocumentError, strict_yaml.StrictParseError) as exc:
         logger.error(f"cannot load .rein/config.yaml: {exc} — `rein doctor` validates it")
         return 1
-    return Orchestrator(config, dry_run=args.dry_run, repo=repo).run()
+    if not args.supervise:
+        return Orchestrator(config, dry_run=args.dry_run, repo=repo).run()
+    return _supervise(config, repo, args.supervise_interval_sec)
+
+
+def _supervise(config: Config, repo: repo_mod.Repo, interval_sec: int) -> int:
+    """Re-run the build loop on `EXIT_RETRY_LATER` until it returns anything else.
+
+    Formalizes the while-loop recipe `build.md` has documented since 0.2.2 — same semantics
+    (only `EXIT_RETRY_LATER` is retried; 0/1/2 return immediately), carried inside one
+    long-lived process instead of a hand-written shell wrapper someone has to remember to start
+    again every time it or its parent session dies. Each iteration is a fresh `Orchestrator`,
+    so it sees `state.yaml` as it stands and takes/releases the build lock exactly as a
+    standalone `rein build` would — nothing here changes what one run does, only whether
+    something is still watching after it returns 3.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        rc = Orchestrator(config, dry_run=False, repo=repo).run()
+        if rc != common.EXIT_RETRY_LATER:
+            return rc
+        logger.info(f"[supervise] attempt {attempt}: capacity/lock retry — sleeping {interval_sec}s")
+        time.sleep(interval_sec)
 
 
 if __name__ == "__main__":

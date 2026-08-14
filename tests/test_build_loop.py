@@ -1055,6 +1055,70 @@ def test_capacity_exhaustion_asks_to_be_re_run_and_a_missing_cli_does_not(
         assert loop._run_loop() == expected
 
 
+# --- --supervise: the documented while-loop recipe, carried in-process -------
+
+
+def test_supervise_retries_on_exit_retry_later_until_something_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only `EXIT_RETRY_LATER` is retried; each attempt is a fresh `Orchestrator(...)` call, so
+    this changes nothing about what one run does — only whether something is still watching
+    after it returns 3."""
+    root = build_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+    config = build_loop.Config.load(repo)
+    codes = iter([common.EXIT_RETRY_LATER, common.EXIT_RETRY_LATER, common.EXIT_DONE])
+    seen_dry_run: list[bool] = []
+
+    class FakeOrchestrator:
+        def __init__(self, config: object, dry_run: bool, repo: object) -> None:
+            seen_dry_run.append(dry_run)
+
+        def run(self) -> int:
+            return next(codes)
+
+    monkeypatch.setattr(build_loop, "Orchestrator", FakeOrchestrator)
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+
+    assert build_loop._supervise(config, repo, interval_sec=7) == common.EXIT_DONE
+    assert slept == [7, 7]
+    assert seen_dry_run == [False, False, False]  # --supervise never runs the loop read-only
+
+
+@pytest.mark.parametrize("rc", [common.EXIT_DONE, common.EXIT_HUMAN_NEEDED, common.EXIT_CANNOT_PROCEED])
+def test_supervise_returns_immediately_on_anything_but_retry_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int
+) -> None:
+    """A verdict a human has to act on, or a finished run, is not something to sit on — only
+    `EXIT_RETRY_LATER` is the machine's own "nothing to see, try later"."""
+    root = build_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+    config = build_loop.Config.load(repo)
+
+    class FakeOrchestrator:
+        def __init__(self, config: object, dry_run: bool, repo: object) -> None:
+            pass
+
+        def run(self) -> int:
+            return rc
+
+    monkeypatch.setattr(build_loop, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(time, "sleep", lambda _: pytest.fail("must not sleep on a non-retry-later exit"))
+
+    assert build_loop._supervise(config, repo, interval_sec=1) == rc
+
+
+def test_main_rejects_supervise_with_dry_run() -> None:
+    """A supervised run has to call the real loop; the two are a contradiction, not a fast
+    no-op dry check repeated forever."""
+    assert build_loop.main(["--supervise", "--dry-run"]) == 2
+
+
+def test_main_rejects_a_non_positive_supervise_interval() -> None:
+    assert build_loop.main(["--supervise", "--supervise-interval-sec", "0"]) == 2
+
+
 def test_an_exhausted_session_is_not_retried_in_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A limit that lifts in hours is not something to sit on holding the build lock: it exits
     at once so whatever re-runs `rein build` can do the waiting."""
