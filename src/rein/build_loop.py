@@ -1073,6 +1073,17 @@ class Orchestrator:
             task=task_id,
         )
 
+    def _block_for_gate_violation(self, task_id: str, where: str, violations: list[tuple[str, str]]) -> None:
+        """Block `task_id`: it touched a gate-guarded path while a prerequisite gate is pending.
+
+        Shared by every place that runs this same check — right after an attempt's implementer
+        (`_run_task_to_done`) and the pre-existing finalize/merge-time check — so serial and
+        parallel each have one call site for "early" and one for "final" rather than four
+        separate copies of set-status-and-escalate.
+        """
+        self._set_status(task_id, "blocked")
+        self._escalate_gate_violation(task_id, where, violations)
+
     def _cleanup_worktree(self, task: dag.Task) -> None:
         self.ws.cleanup_worktree(task.id)
 
@@ -1227,8 +1238,7 @@ class Orchestrator:
                 # finalize check below — a task that never gets that far (blocked on a later
                 # content failure) must not carry an undetected violation until `doctor` is run
                 # by hand.
-                self._set_status(task.id, "blocked")
-                self._escalate_gate_violation(
+                self._block_for_gate_violation(
                     task.id, "its work-branch changes (caught before finalize)", exc.violations
                 )
                 raise StopLoop(
@@ -1249,8 +1259,7 @@ class Orchestrator:
             if not self.dry_run and pre_head:
                 violations = self._gate_violations(self._changed_since(pre_head))
                 if violations:
-                    self._set_status(task.id, "blocked")
-                    self._escalate_gate_violation(task.id, "its work-branch changes", violations)
+                    self._block_for_gate_violation(task.id, "its work-branch changes", violations)
                     raise StopLoop(
                         f"{task.id}: changed gate-guarded paths while their gate is pending "
                         f"(commits since {pre_head[:12]} stay on the branch for review). "
@@ -1304,8 +1313,9 @@ class Orchestrator:
                 print(f"  [aborted] {task.id}: the machine stopped this leaf — left todo, work preserved")
                 continue
             if outcome.violations:
-                self._set_status(task.id, "blocked")
-                self._escalate_gate_violation(task.id, "its worktree changes (caught before merge)", outcome.violations)
+                self._block_for_gate_violation(
+                    task.id, "its worktree changes (caught before merge)", outcome.violations
+                )
                 self._cleanup_worktree(task)  # not merged; the branch keeps the diff for review
                 blocked_any = True
                 continue
@@ -1332,8 +1342,7 @@ class Orchestrator:
             if not self.dry_run:
                 violations = self._gate_violations(self._branch_changed_paths(branches[task.id]))
                 if violations:
-                    self._set_status(task.id, "blocked")
-                    self._escalate_gate_violation(task.id, f"leaf branch {branches[task.id]}", violations)
+                    self._block_for_gate_violation(task.id, f"leaf branch {branches[task.id]}", violations)
                     self._cleanup_worktree(task)  # not merged; the branch keeps the diff for review
                     blocked_any = True
                     continue

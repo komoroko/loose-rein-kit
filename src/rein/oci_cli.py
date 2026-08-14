@@ -19,6 +19,20 @@ from rein import repo as repo_mod
 logger = logging.getLogger(__name__)
 
 
+def _read_config(repo_arg: str | None) -> tuple[repo_mod.Repo, models.Config] | None:
+    """The repo and its parsed config.yaml, or None when either could not be read.
+
+    Shared by every lookup below that would rather degrade than fail a build over a config it
+    only wanted to consult for a hint or a routing decision.
+    """
+    try:
+        repo = repo_mod.get(repo_arg)
+        config = models.Config.parse(repo.path(".rein/config.yaml").read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - an unreadable config just means nothing to look up against
+        return None
+    return repo, config
+
+
 def _profiles_built_from(containerfile: str, repo_arg: str | None) -> list[str]:
     """The executor profiles this Containerfile is the image for, per their `containerfile:` key.
 
@@ -27,11 +41,10 @@ def _profiles_built_from(containerfile: str, repo_arg: str | None) -> list[str]:
     that does not exist. Falls back to the Containerfile's own name when there is no readable
     config to ask — a printed hint is not worth failing a successful build over.
     """
-    try:
-        repo = repo_mod.get(repo_arg)
-        config = models.Config.parse(repo.path(".rein/config.yaml").read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - any unreadable config just means we cannot narrow the hint
+    found = _read_config(repo_arg)
+    if found is None:
         return [containerfile]
+    _repo, config = found
     named = sorted(name for name, profile in config.profiles.items() if profile.containerfile == containerfile)
     return named or [containerfile]
 
@@ -43,11 +56,10 @@ def _custom_dockerfile(profile_name: str, repo_arg: str | None) -> tuple[repo_mo
     `containerfile:` instead — so the caller falls back to the packaged-Containerfile lookup
     exactly as before.
     """
-    try:
-        repo = repo_mod.get(repo_arg)
-        config = models.Config.parse(repo.path(".rein/config.yaml").read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 - no readable config means nothing to route custom-built
+    found = _read_config(repo_arg)
+    if found is None:
         return None
+    repo, config = found
     profile = config.profiles.get(profile_name)
     if profile is None or not profile.dockerfile:
         return None

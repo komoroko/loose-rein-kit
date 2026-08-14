@@ -551,20 +551,26 @@ def _review_block(review: models.Review | None) -> dict[str, object]:
     }
 
 
+#: `ATTENTION_EVENTS` a task's own later success can retire. Both are `build_loop.py`'s per-
+#: attempt verdicts about a task (never a review-pipeline escalation or `plan_invalidated`), so
+#: a status this function reads is actually authoritative over what they reported.
+_TASK_SCOPED_ATTENTION_EVENTS = frozenset({"task_failed", "knowledge_gap"})
+
+
 def _task_outcome_resolved(event: models.Event, task_status: Mapping[str, str]) -> bool:
     """Has the task(s) this event named since reached `done`, making the event's own report stale?
 
-    Only `task_failed`/`knowledge_gap` are eligible — the two `build_loop.py` emits once per
-    failed attempt, each naming the task it is about. A later successful attempt is the event's
-    own resolution: the outcome it reported no longer holds, so it stops being something to wait
-    on. `events.ndjson` itself is untouched — this only narrows what `rein status` surfaces as
-    still pending, the same way `pending_queue`'s other rows are all derived, never stored.
+    A later successful attempt is the event's own resolution: the outcome it reported no longer
+    holds, so it stops being something to wait on. `events.ndjson` itself is untouched — this
+    only narrows what `rein status` surfaces as still pending, the same way `pending_queue`'s
+    other rows are all derived, never stored.
 
-    Anything else (a review-pipeline escalation, `plan_invalidated` with no task subject) is
-    never auto-suppressed: closing those is a signed disposition in `review.yaml`, not an
-    inference from a task status this function has no business making for them.
+    Anything outside `_TASK_SCOPED_ATTENTION_EVENTS` (a review-pipeline escalation,
+    `plan_invalidated` with no task subject) is never auto-suppressed: closing those is a signed
+    disposition in `review.yaml`, not an inference from a task status this function has no
+    business making for them.
     """
-    if event.event not in ("task_failed", "knowledge_gap"):
+    if event.event not in _TASK_SCOPED_ATTENTION_EVENTS:
         return False
     if not event.subject_ids:
         return False
