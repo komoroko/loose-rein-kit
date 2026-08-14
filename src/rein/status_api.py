@@ -551,6 +551,32 @@ def _review_block(review: models.Review | None) -> dict[str, object]:
     }
 
 
+#: `ATTENTION_EVENTS` a task's own later success can retire. Both are `build_loop.py`'s per-
+#: attempt verdicts about a task (never a review-pipeline escalation or `plan_invalidated`), so
+#: a status this function reads is actually authoritative over what they reported.
+_TASK_SCOPED_ATTENTION_EVENTS = frozenset({"task_failed", "knowledge_gap"})
+
+
+def _task_outcome_resolved(event: models.Event, task_status: Mapping[str, str]) -> bool:
+    """Has the task(s) this event named since reached `done`, making the event's own report stale?
+
+    A later successful attempt is the event's own resolution: the outcome it reported no longer
+    holds, so it stops being something to wait on. `events.ndjson` itself is untouched — this
+    only narrows what `rein status` surfaces as still pending, the same way `pending_queue`'s
+    other rows are all derived, never stored.
+
+    Anything outside `_TASK_SCOPED_ATTENTION_EVENTS` (a review-pipeline escalation,
+    `plan_invalidated` with no task subject) is never auto-suppressed: closing those is a signed
+    disposition in `review.yaml`, not an inference from a task status this function has no
+    business making for them.
+    """
+    if event.event not in _TASK_SCOPED_ATTENTION_EVENTS:
+        return False
+    if not event.subject_ids:
+        return False
+    return all(task_status.get(subject) == "done" for subject in event.subject_ids)
+
+
 def collect_status(
     root: str | Path | repo_mod.Repo = ".",
     *,
@@ -617,7 +643,10 @@ def collect_status(
     events, defects = (events_scanner or event_chain.scan)(repo.events)
     if defects:
         warnings.append(f"the audit chain has {len(defects)} defect(s)")
-    attention = [e for e in events if e.event in events_mod.ATTENTION_EVENTS]
+    task_status = state.task_status if state else {}
+    attention = [
+        e for e in events if e.event in events_mod.ATTENTION_EVENTS and not _task_outcome_resolved(e, task_status)
+    ]
 
     template_mode = config.template_mode if config else False
     placeholders = _is_placeholder(state.project) if state else True

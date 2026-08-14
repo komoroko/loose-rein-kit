@@ -86,6 +86,31 @@ def test_the_unlaunchable_marker_needs_both_halves() -> None:
     assert faults.classify_step(127, "log line\ncould not run 'x': ...") is faults.Fault.CONTENT
 
 
+@pytest.mark.parametrize(
+    "output",
+    [
+        "pip._vendor.urllib3.exceptions.NewConnectionError: Temporary failure in resolving 'pypi.org'",
+        "socket.gaierror: [Errno -2] Name or service not known",
+        "npm error code ENOTFOUND\nnpm error errno ENOTFOUND\n"
+        "npm error network request to https://registry.npmjs.org failed, reason: getaddrinfo ENOTFOUND",
+        "curl: (6) Could not resolve host: github.com",
+        "connect: Network is unreachable",
+    ],
+)
+def test_a_dns_or_network_unreachable_step_is_the_sandboxs_fault(output: str) -> None:
+    """`network: none` fails a dependency-resolving step the same way on every retry — that is a
+    fact about the sandbox policy, not the code, so it must not spend the step's retry budget."""
+    assert faults.classify_step(1, output) is faults.Fault.ENV_PERMANENT
+
+
+def test_an_ordinary_content_failure_is_not_read_as_network() -> None:
+    """`ConnectionError`/timeout-shaped words alone must not trip this — only the OS/tooling
+    resolver's own unambiguous strings do, so a test asserting its own connection-handling logic
+    is not misclassified."""
+    assert faults.classify_step(1, "ConnectionError: could not connect (mocked)") is faults.Fault.CONTENT
+    assert not faults.is_network_unreachable("2 failed, 40 passed")
+
+
 # --- capacity, and what a human is told ---------------------------------------
 
 
@@ -149,3 +174,18 @@ def test_a_permanent_fault_does_not_invite_a_re_run() -> None:
     fault = faults.EnvironmentFault(faults.Fault.ENV_PERMANENT, where="T-001: implementer", rc=127, output=UNLAUNCHABLE)
     assert not fault.retryable
     assert "will not help" in fault.summary()
+
+
+def test_a_network_unreachable_fault_points_at_the_pinned_image_not_a_re_run() -> None:
+    """A retry cannot fix a `network: none` sandbox — the advice must say what actually helps
+    (bake the dependency into the image), not tell someone to wait or just try again."""
+    fault = faults.EnvironmentFault(
+        faults.Fault.ENV_PERMANENT,
+        where="gate step 'test'",
+        rc=1,
+        output="pip.exceptions.NewConnectionError: Temporary failure in resolving 'pypi.org'",
+    )
+    summary = fault.summary()
+    assert not fault.retryable
+    assert "pinned image" in summary
+    assert "Nothing was marked" not in summary

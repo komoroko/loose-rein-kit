@@ -212,6 +212,13 @@ prints the digest and the config key to paste it under. With it, the command rew
 `config.yaml` survives, and it refuses to write a file that no longer parses. Pin before gate ③:
 the config freezes there and the guard refuses it afterwards.
 
+None of the three packaged Containerfiles fit every stack a repository might mix in — a task can
+touch a toolchain none of them were built for. A profile can instead set `dockerfile:` — a
+repo-relative path (e.g. `.rein/oci/custom/Containerfile`), already frozen alongside the rest of
+`config.yaml` once gate ③ freezes it — and `rein oci build --profile <that profile's name>`
+builds from it exactly as it would a packaged one. `containerfile:` and `dockerfile:` are
+mutually exclusive on one profile.
+
 The Containerfiles pin their base image **by digest**, not by the `python:3.13-slim-bookworm` tag,
 and pin `uv` the same way. Two builds a month apart used to produce different images, which made
 the digest you pinned a record of what happened to be current rather than something reproducible.
@@ -331,7 +338,11 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
 
 5. **Roll back** on an upstream defect *after* a gate was approved: `/revise <phase>` resets gates
    from the target onward and marks task impact (`rein revise --impacted T-00x` sets seeds and
-   their transitive dependents to `needs-revision`).
+   their transitive dependents to `needs-revision`). There is no automatic, config-driven
+   invalidation — only `--impacted`'s named seeds and their dependents ever move. Pick seeds
+   narrowly: naming an early foundation task pulls in everything that (transitively) depends on
+   it, which for most DAGs is most of the plan — that is the closure doing its job, not a bug, but
+   it means the seed choice is the actual scoping decision to get right.
 6. **Check progress** anytime:
    - `rein next` — just the next recommended command (`--json` for integrations)
    - `rein status` — leads with **Waiting on you**: everything standing between the repo and
@@ -381,10 +392,18 @@ The rules:
   `/code-review`+`/simplify` review step → a real-launch smoke test for runnable deliverables).
   Each step has its own retry budget; exhausting it → `blocked`. Set the smoke step
   `required: true` once the deliverable is runnable, so a forgotten launch check refuses to build.
+  A step can name `paths:` (glob patterns) to run only for a task whose diff touches them — a
+  repo that mixes several independently-testable stacks is not forced to pay every stack's cost
+  on every task. This is a config decision frozen at gate ③, not
+  a knob a task's own ticket can turn: a step naming no `paths:` still runs for every task, and
+  an unresolved diff (a fresh worktree, before anything has changed yet) never reads as "nothing
+  applies" — it runs the full DoD.
 - **Parallel leaves run isolated** via `git worktree` (up to 3, `max_parallel`), merged into the
   work branch in ascending-id order. After a batch merges ≥2 leaves, the cmd steps re-run on the
-  merged branch (integration gate). Before any merge, every path a task changed is re-checked
-  against the gate rules — a violation escalates (`gate_violation`) and blocks instead of landing.
+  merged branch (integration gate). Every path a task changed is re-checked against the gate
+  rules right after its implementer runs — not only at merge, so a worktree that never gets that
+  far still cannot carry an undetected gate violation — and again before any merge; a violation
+  escalates (`gate_violation`) and blocks instead of landing.
 - An unsolvable task → `blocked`; an upstream defect → `needs-revision`, escalated, loop stops.
   The orchestrator **never touches `gates.build`** (only the human opens a gate).
 - **A machine's failure is never recorded as a task's verdict.** An agent that never launched
@@ -407,9 +426,13 @@ run in progress. The code says what to do next.
 An agent **session or usage limit is a normal event** on a run of any length, not an incident.
 The loop exits `3` at once rather than sleeping on it — a limit that lifts in hours has no
 business holding the build lock and a set of worktrees — so the waiting belongs to whatever
-re-runs the command:
+re-runs the command. `rein build --supervise` carries exactly this recipe in-process (same
+semantics, only `3` is retried, each attempt a fresh run against the current `state.yaml`):
 
 ```sh
+rein build --supervise   # [--supervise-interval-sec N], default 900
+
+# equivalent, if something outside `rein` should own the interval/backoff instead:
 while :; do
   rein build && break
   rc=$?; [ "$rc" -eq 3 ] || exit "$rc"   # anything else needs a human

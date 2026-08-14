@@ -93,7 +93,7 @@ operations:
   oci build|verify             build the sandbox images and pin their digests
   revise --to <phase> ...      roll back upstream (gates reset in a chain)
   review generate|complete|show  the grounded machine review (gate ④'s evidence)
-  build [--dry-run]            the deterministic /build orchestrator
+  build [--dry-run|--supervise]  the deterministic /build orchestrator (--supervise: retry in-process on exit 3)
   task reset <id> --reason …   put a blocked task back on the frontier (recorded, never hand-edited)
   dag [--render|--trace|...]   derive/inspect the task DAG (read-only; /tasks & /status use it)
   doctor                       read-only diagnosis: format, integrations, sandbox, plan, review

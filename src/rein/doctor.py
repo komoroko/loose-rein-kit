@@ -27,10 +27,11 @@ import logging
 import re
 import shutil
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import rein
-from rein import common, dag, dag_trace, event_chain, install, models, strict_yaml
+from rein import common, dag, dag_trace, event_chain, executors, install, models, strict_yaml
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -394,6 +395,20 @@ def check_sandbox(config: models.Config | None) -> list[Finding]:
         runtime = shutil.which("docker") or shutil.which("podman")
         if runtime:
             findings.append(Finding("PASS", "sandbox", f"container runtime found ({Path(runtime).name})"))
+            for name, profile in sorted(config.profiles.items()):
+                if not profile.is_sandboxed or not profile.image_digest:
+                    continue  # covered above: not sandboxed, or already flagged as unpinned
+                ok, message = executors.verify_pinned(profile, runtime=runtime)
+                if ok:
+                    findings.append(Finding("PASS", "sandbox", f"profile '{name}': {message}"))
+                elif "no local image" in message:
+                    # Not built here yet — expected on a fresh checkout, actionable before
+                    # `rein build` opens rather than broken right now.
+                    findings.append(Finding("WARN", "sandbox", f"profile '{name}': {message}"))
+                else:
+                    # A local image exists under a digest that does not match the pin — the
+                    # config drifted from what gate 3 froze, or was rebuilt without re-pinning.
+                    findings.append(Finding("FAIL", "sandbox", f"profile '{name}': {message}"))
         elif offenders:
             findings.append(
                 Finding(
@@ -760,6 +775,25 @@ def check_chain(repo: repo_mod.Repo) -> list[Finding]:
     ]
 
 
+#: How long a retryable abort can sit unattended before "wait for the reset" reads as "nobody
+#: is re-running this" instead. A few multiples of the documented/--supervise retry interval
+#: (900s) — long enough that a normal capacity-limit reset has already passed.
+_STALE_ABORT_AFTER_SEC = 3 * 60 * 60
+
+
+def _seconds_since(ts: str) -> float | None:
+    """Wall-clock seconds between `ts` (an event's ISO-8601 timestamp) and now, or None if
+    unparseable. Never touches the fault's own free-text `reported` field — that stays quoted,
+    never parsed (see `faults.reset_hint`); this only compares event timestamps."""
+    try:
+        when = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None
+    return (datetime.now(timezone.utc) - when).total_seconds()
+
+
 def check_last_run(repo: repo_mod.Repo) -> list[Finding]:
     """Did the last build run stop because the machine failed, and has nothing succeeded since?
 
@@ -779,15 +813,25 @@ def check_last_run(repo: repo_mod.Repo) -> list[Finding]:
     where = str(detail.get("where", "a launch"))
     reported = str(detail.get("reported", ""))
     retryable = str(detail.get("fault", "")) == "environment_transient"
-    advice = (
-        "Nothing was marked and no retry budget was spent — re-run `rein build` and it continues "
-        "from the preserved work."
-        if retryable
-        else "Repair what it names first; re-running before that will stop the same way."
-    )
+    idle_sec = _seconds_since(last_abort.ts)
+    stale = retryable and idle_sec is not None and idle_sec >= _STALE_ABORT_AFTER_SEC
+    if stale:
+        assert idle_sec is not None  # `stale` is only True when the check above already held
+        advice = (
+            f"Nothing has re-run it in over {int(idle_sec // 3600)}h — well past any capacity "
+            "limit that reports a same-day reset. Nothing is retrying this: run `rein build` "
+            "(or `rein build --supervise` so a future stop like this one keeps retrying itself)."
+        )
+    elif retryable:
+        advice = (
+            "Nothing was marked and no retry budget was spent — re-run `rein build` and it "
+            "continues from the preserved work."
+        )
+    else:
+        advice = "Repair what it names first; re-running before that will stop the same way."
     return [
         Finding(
-            "INFO" if retryable else "WARN",
+            "WARN" if (stale or not retryable) else "INFO",
             "build",
             f"the last build run stopped at {where} for a machine reason"
             f"{f' ({reported})' if reported else ''}. {advice}",

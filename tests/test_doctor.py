@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import dag_trace, doctor, models
+from rein import common, dag_trace, doctor, models
 from rein import repo as repo_mod
 from tests._support import (
     DEMO_CYCLE,
@@ -349,6 +349,50 @@ def test_an_oci_profile_with_no_pinned_digest_fails() -> None:
     profiles = {"quality": {"kind": "oci", "network_profile": "none"}}
     config = models.Config(make_config(profiles={**SANDBOXED_PROFILES, **profiles}))
     assert any(f.level == "FAIL" and "no digest-pinned image" in f.message for f in doctor.check_sandbox(config))
+
+
+def test_check_sandbox_warns_when_the_pinned_image_is_not_built_locally(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh checkout has not run `rein oci build` yet — that is expected, not broken."""
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    monkeypatch.setattr(common, "run", lambda argv, **kwargs: (1, "Error: No such object"))
+    config = models.Config(make_config(profiles=SANDBOXED_PROFILES))
+    results = doctor.check_sandbox(config)
+    warns = [f for f in results if f.level == "WARN" and "no local image" in f.message]
+    assert len(warns) == len(SANDBOXED_PROFILES)
+    assert not [f for f in results if f.level == "FAIL"]
+
+
+def test_check_sandbox_fails_when_the_local_image_does_not_match_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A local image exists under a different digest than the pin — the config drifted from what
+    gate 3 froze (or was rebuilt without re-pinning), and doctor must not need a human to already
+    suspect that before it says so."""
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    installed = "sha256:" + "b" * 64
+    profile_image = SANDBOXED_PROFILES["implementer"]["image"]
+    monkeypatch.setattr(
+        common,
+        "run",
+        lambda argv, **kwargs: (0, installed) if argv[-1] == profile_image else (1, "Error: No such object"),
+    )
+    config = models.Config(make_config(profiles=SANDBOXED_PROFILES))
+    results = doctor.check_sandbox(config)
+    fails = [f for f in results if f.level == "FAIL" and "profile 'implementer'" in f.message]
+    assert len(fails) == 1
+    assert "does not match the pinned" in fails[0].message
+
+
+def test_check_sandbox_passes_when_the_local_image_matches_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
+    digest = SANDBOXED_PROFILES["implementer"]["image"].rpartition("@")[2]
+    monkeypatch.setattr(
+        common,
+        "run",
+        lambda argv, **kwargs: (0, digest) if argv[-1] == digest else (1, "Error: No such object"),
+    )
+    config = models.Config(make_config(profiles=SANDBOXED_PROFILES))
+    results = doctor.check_sandbox(config)
+    passes = [f for f in results if f.level == "PASS" and "profile 'implementer':" in f.message]
+    assert passes and "pinned image is present" in passes[0].message
 
 
 def test_a_shared_independence_group_fails() -> None:
@@ -725,3 +769,33 @@ def test_a_run_that_got_going_again_says_nothing(tmp_path: Path) -> None:
 
 def test_a_repository_that_never_stopped_says_nothing(tmp_path: Path) -> None:
     assert doctor.check_last_run(healthy(tmp_path, events=chain("cycle_initialized"))) == []
+
+
+def aborted_chain_stale(hours_ago: float, *, reported: str = "") -> list[models.Event]:
+    """Like `aborted_chain`, but the `run_aborted` event's timestamp is backdated — simulating
+    a capacity-limit stop nobody has re-run `rein build` since."""
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+
+    from rein import event_chain
+
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+    detail = {"fault": "environment_transient", "where": "T-018: implementer", "rc": 1, "reported": reported}
+    cycle_event = event_chain.link(None, event_chain.make("cycle_initialized", DEMO_CYCLE))
+    abort = replace(event_chain.make("run_aborted", DEMO_CYCLE, detail=detail), ts=old_ts)
+    return [cycle_event, event_chain.link(cycle_event, abort)]
+
+
+def test_a_retryable_stop_nobody_has_re_run_in_hours_is_escalated(tmp_path: Path) -> None:
+    """A capacity limit that "resets in a few hours" and gets no re-run for the better part of a
+    day is no longer "wait for it" — it is "nobody is watching this"."""
+    repo = healthy(tmp_path, events=aborted_chain_stale(4, reported="resets 3pm (Asia/Tokyo)"))
+    results = doctor.check_last_run(repo)
+    assert [f.level for f in results] == ["WARN"]
+    assert "--supervise" in results[0].message
+
+
+def test_a_retryable_stop_still_within_the_window_stays_informational(tmp_path: Path) -> None:
+    repo = healthy(tmp_path, events=aborted_chain_stale(0.1))
+    results = doctor.check_last_run(repo)
+    assert [f.level for f in results] == ["INFO"]

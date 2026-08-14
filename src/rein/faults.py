@@ -27,6 +27,14 @@ command could not be run at all. The boundary is stated rather than papered over
 where `make` exists but an inner tool does not exits 127 from make itself, with none of the
 markers below, and is classified CONTENT. Detecting that would mean parsing every build tool's
 output, which is exactly the kind of guessing this module refuses to do.
+
+One narrow exception: every sandboxed step runs with `network: none` (`executors.py`), so a step
+that needs to resolve a hostname — an install step whose dependency closure was not baked into
+the pinned image — fails the same way on every retry, which is a fact about the sandbox's network
+policy, not the code. The markers for that (below) are OS/resolver strings (glibc's "Temporary
+failure in resolving", Node's `ENOTFOUND`, curl's "Could not resolve host") that an application's
+own test output does not plausibly produce on its own — narrow enough not to be the guessing this
+module otherwise refuses.
 """
 
 from __future__ import annotations
@@ -71,6 +79,20 @@ _UNAUTHENTICATED_RE = re.compile(
     | \bnot\ logged\ in\b
     | \bplease\ (?:run\ )?log\ ?in\b
     | \bunauthorized\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+#: A sandboxed step always runs with no network — these are the OS/tooling resolver's own words
+#: for "could not reach the network", not a guess at what an application's test output means.
+_NETWORK_UNREACHABLE_RE = re.compile(
+    r"""
+      \btemporary\ failure\ in\ resolving\b
+    | \bname\ or\ service\ not\ known\b
+    | \bnetwork\ is\ unreachable\b
+    | \bcould\ not\ resolve\ host\b
+    | \bnodename\ nor\ servname\ provided\b
+    | \bENOTFOUND\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
@@ -127,16 +149,26 @@ def classify_step(rc: int, output: str) -> Fault:
     """Classify a failed quality-gate command step. CONTENT unless it could not be run at all.
 
     A timeout stays CONTENT on purpose: a test suite that hangs is a fact about the code, and
-    the retry budget the step already carries is the right place for it.
+    the retry budget the step already carries is the right place for it. A DNS/network-unreachable
+    failure is ENV_PERMANENT, not ENV_TRANSIENT: `network: none` is a fixed sandbox policy, so
+    the step fails the same way on every retry until the dependency is baked into the pinned
+    image — waiting does not help, unlike a launch's capacity limit.
     """
     if rc == 0:
         raise ValueError("classify_step is for a failed step (rc != 0)")
-    return Fault.ENV_PERMANENT if _unlaunchable(rc, output) else Fault.CONTENT
+    if _unlaunchable(rc, output) or is_network_unreachable(output):
+        return Fault.ENV_PERMANENT
+    return Fault.CONTENT
 
 
 def is_capacity(output: str) -> bool:
     """Does this output look like the agent ran out of capacity rather than out of luck?"""
     return bool(_CAPACITY_RE.search(output))
+
+
+def is_network_unreachable(output: str) -> bool:
+    """Does this output look like a DNS/connection failure from a `network: none` sandbox?"""
+    return bool(_NETWORK_UNREACHABLE_RE.search(output))
 
 
 def reset_hint(output: str) -> str:
@@ -171,13 +203,21 @@ class EnvironmentFault(Exception):
     def summary(self) -> str:
         """One console-ready paragraph: what failed, why, and what the reader should do."""
         reset = reset_hint(self.output)
+        network = is_network_unreachable(self.output)
         cause = "agent capacity" if is_capacity(self.output) else f"rc={self.rc}"
-        advice = (
-            "Nothing was marked: every task keeps the status and the retry budget it had. "
-            "Re-run `rein build` when it clears — it resumes from the preserved work."
-            if self.retryable
-            else "Re-running will not help until this is repaired."
-        )
+        if network:
+            advice = (
+                "The sandbox runs with network: none, so this fails the same way on every "
+                "retry — bake the dependency into the pinned image (see the packaged "
+                "Containerfiles) rather than resolving it at test time."
+            )
+        elif self.retryable:
+            advice = (
+                "Nothing was marked: every task keeps the status and the retry budget it had. "
+                "Re-run `rein build` when it clears — it resumes from the preserved work."
+            )
+        else:
+            advice = "Re-running will not help until this is repaired."
         lines = [f"{self.where}: {cause} — the launch never produced a quality-gate verdict.", advice]
         if reset:
             lines.append(f"The CLI said: {reset}")

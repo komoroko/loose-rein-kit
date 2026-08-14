@@ -344,6 +344,32 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     assert recorded == {"T-001": "a" * 40, "T-002": "b" * 40, "T-003": "c" * 40}
 
 
+def test_a_leaf_gate_violation_blocks_without_merging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worktree that edited a gate-guarded path is blocked and never merged — caught by the
+    time `_safe_run_task` returns, not only at the old merge-time check."""
+    loop = orchestrator(tmp_path)
+    task = dag.Task(id="T-002", title="leaf", kind="parallel")
+    violations = [("docs/10-requirements.md", "gate 'requirements' is pending")]
+
+    monkeypatch.setattr(loop, "_add_worktree", lambda t: f"build/x-{t.id}")
+    monkeypatch.setattr(
+        loop, "_safe_run_task", lambda t, cwd: build_loop.LeafOutcome(ok=False, log="x", violations=violations)
+    )
+    monkeypatch.setattr(loop, "merge_leaf", lambda t, branch: pytest.fail("must not merge a violating leaf"))  # noqa: ARG005
+    cleaned: list[str] = []
+    monkeypatch.setattr(loop, "_cleanup_worktree", lambda t: cleaned.append(t.id))
+    escalated: list[tuple[object, ...]] = []
+    monkeypatch.setattr(loop, "_escalate_gate_violation", lambda *a: escalated.append(a))
+
+    with pytest.raises(build_loop.StopLoop):
+        loop._consume_parallel([task])
+
+    raw = store_mod.Store(loop.repo).read_raw("state")
+    assert raw is not None and raw["tasks"]["T-002"]["status"] == "blocked"
+    assert cleaned == ["T-002"]
+    assert escalated == [("T-002", "its worktree changes (caught before merge)", violations)]
+
+
 def test_starting_a_task_counts_an_attempt(tmp_path: Path) -> None:
     repo = repo_mod.Repo(build_repo(tmp_path))
     build_loop.set_task_status(repo, "T-001", "in-progress")
@@ -533,6 +559,93 @@ def test_the_task_pipeline_is_the_configured_dod(tmp_path: Path) -> None:
     loop = orchestrator(tmp_path)
     task = dag.Task(id="T-001", title="t", kind="foundation")
     assert [s.name for s in loop._steps_for(task)] == ["test", "check"]
+
+
+# --- path-scoped quality-gate steps (frozen at gate 3, never an implementer's choice) ----------
+
+
+def _paths_scoped_config() -> dict[str, object]:
+    return make_config(
+        quality_gate=[
+            {
+                "name": "test",
+                "kind": "command",
+                "command": ["make", "test"],
+                "executor_profile": "quality",
+                "retries": 2,
+                "required": True,
+            },
+            {
+                "name": "web",
+                "kind": "command",
+                "command": ["npm", "test"],
+                "executor_profile": "quality",
+                "retries": 2,
+                "paths": ["web/*"],
+            },
+        ]
+    )
+
+
+def test_a_paths_scoped_step_is_skipped_when_the_diff_does_not_touch_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = orchestrator(tmp_path, config=_paths_scoped_config())
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (["backend/app.py"], ""))
+    task = dag.Task(id="T-001", title="t", kind="parallel")
+    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf", base="")] == ["test"]
+
+
+def test_a_paths_scoped_step_runs_when_the_diff_touches_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path, config=_paths_scoped_config())
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (["web/app.tsx"], ""))
+    task = dag.Task(id="T-001", title="t", kind="parallel")
+    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf", base="")] == ["test", "web"]
+
+
+def test_paths_scoping_never_activates_without_a_cwd(tmp_path: Path) -> None:
+    """No `cwd` (the pre-existing call shape) means no diff was computed — degrade to the full
+    DoD rather than silently narrowing on nothing."""
+    loop = orchestrator(tmp_path, config=_paths_scoped_config())
+    task = dag.Task(id="T-001", title="t", kind="parallel")
+    assert [s.name for s in loop._steps_for(task)] == ["test", "web"]
+
+
+def test_paths_scoping_runs_everything_when_the_diff_is_unresolved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty diff (a fresh worktree, dry-run) must not read as an empty scope — that would
+    silently skip a step nobody decided to skip."""
+    loop = orchestrator(tmp_path, config=_paths_scoped_config())
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: ([], ""))
+    task = dag.Task(id="T-001", title="t", kind="parallel")
+    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf", base="")] == ["test", "web"]
+
+
+def test_gate_step_matches_paths_is_fnmatch_style(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path, config=_paths_scoped_config())
+    web_step = next(s for s in loop.config.steps if s.name == "web")
+    assert web_step.matches_paths(["web/app.tsx"])
+    assert not web_step.matches_paths(["backend/app.py"])
+    assert web_step.matches_paths([])  # empty diff is unresolved, not "resolved to nothing" — fail open
+
+
+def test_a_gate_violation_is_caught_right_after_the_implementer_spending_no_retry_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worktree edit to a gate-guarded path must not wait for a cmd step to fail (spending its
+    retry budget) or for merge — it is checked, and raised, before the pipeline even runs."""
+    loop = orchestrator(tmp_path)
+    violations = [("docs/10-requirements.md", "gate 'requirements' is pending")]
+    monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: None)
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (["docs/10-requirements.md"], ""))
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: violations)
+    monkeypatch.setattr(loop, "_run_pipeline", lambda *a, **k: pytest.fail("must not reach the pipeline"))  # noqa: ARG005
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    with pytest.raises(build_loop.GateViolationFault) as caught:
+        loop._run_task_to_done(task, cwd=str(tmp_path), base="a" * 40)
+    assert caught.value.violations == violations
 
 
 # --- the implementer prompt ---------------------------------------------------
@@ -872,6 +985,29 @@ def launch_failing(result: tuple[int, str], record: list[list[str]] | None = Non
     return _run
 
 
+def test_a_serial_gate_violation_blocks_before_finalize(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A foundation task that edited a gate-guarded path is blocked and stops the run — caught
+    right after its implementer ran, not only at the old finalize-time check."""
+    loop = orchestrator(tmp_path)
+    violations = [("docs/10-requirements.md", "gate 'requirements' is pending")]
+
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "a" * 40)
+
+    def _raise(*_a: object, **_k: object) -> tuple[bool, str]:
+        raise build_loop.GateViolationFault(violations)
+
+    monkeypatch.setattr(loop, "_run_task_to_done", _raise)
+    escalated: list[tuple[object, ...]] = []
+    monkeypatch.setattr(loop, "_escalate_gate_violation", lambda *a: escalated.append(a))
+
+    with pytest.raises(build_loop.StopLoop):
+        loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
+
+    raw = store_mod.Store(loop.repo).read_raw("state")
+    assert raw is not None and raw["tasks"]["T-001"]["status"] == "blocked"
+    assert escalated == [("T-001", "its work-branch changes (caught before finalize)", violations)]
+
+
 def test_a_launch_the_machine_failed_leaves_the_task_where_it_found_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -917,6 +1053,70 @@ def test_capacity_exhaustion_asks_to_be_re_run_and_a_missing_cli_does_not(
         loop = orchestrator(tmp_path / str(expected), config=make_config(launch_retries=0))
         monkeypatch.setattr(build_loop, "_run", launch_failing(result))
         assert loop._run_loop() == expected
+
+
+# --- --supervise: the documented while-loop recipe, carried in-process -------
+
+
+def test_supervise_retries_on_exit_retry_later_until_something_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only `EXIT_RETRY_LATER` is retried; each attempt is a fresh `Orchestrator(...)` call, so
+    this changes nothing about what one run does — only whether something is still watching
+    after it returns 3."""
+    root = build_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+    config = build_loop.Config.load(repo)
+    codes = iter([common.EXIT_RETRY_LATER, common.EXIT_RETRY_LATER, common.EXIT_DONE])
+    seen_dry_run: list[bool] = []
+
+    class FakeOrchestrator:
+        def __init__(self, config: object, dry_run: bool, repo: object) -> None:
+            seen_dry_run.append(dry_run)
+
+        def run(self) -> int:
+            return next(codes)
+
+    monkeypatch.setattr(build_loop, "Orchestrator", FakeOrchestrator)
+    slept: list[float] = []
+    monkeypatch.setattr(time, "sleep", slept.append)
+
+    assert build_loop._supervise(config, repo, interval_sec=7) == common.EXIT_DONE
+    assert slept == [7, 7]
+    assert seen_dry_run == [False, False, False]  # --supervise never runs the loop read-only
+
+
+@pytest.mark.parametrize("rc", [common.EXIT_DONE, common.EXIT_HUMAN_NEEDED, common.EXIT_CANNOT_PROCEED])
+def test_supervise_returns_immediately_on_anything_but_retry_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rc: int
+) -> None:
+    """A verdict a human has to act on, or a finished run, is not something to sit on — only
+    `EXIT_RETRY_LATER` is the machine's own "nothing to see, try later"."""
+    root = build_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+    config = build_loop.Config.load(repo)
+
+    class FakeOrchestrator:
+        def __init__(self, config: object, dry_run: bool, repo: object) -> None:
+            pass
+
+        def run(self) -> int:
+            return rc
+
+    monkeypatch.setattr(build_loop, "Orchestrator", FakeOrchestrator)
+    monkeypatch.setattr(time, "sleep", lambda _: pytest.fail("must not sleep on a non-retry-later exit"))
+
+    assert build_loop._supervise(config, repo, interval_sec=1) == rc
+
+
+def test_main_rejects_supervise_with_dry_run() -> None:
+    """A supervised run has to call the real loop; the two are a contradiction, not a fast
+    no-op dry check repeated forever."""
+    assert build_loop.main(["--supervise", "--dry-run"]) == 2
+
+
+def test_main_rejects_a_non_positive_supervise_interval() -> None:
+    assert build_loop.main(["--supervise", "--supervise-interval-sec", "0"]) == 2
 
 
 def test_an_exhausted_session_is_not_retried_in_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

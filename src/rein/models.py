@@ -844,6 +844,11 @@ class ExecutorProfile:
         return _str(self.raw, "containerfile")
 
     @property
+    def dockerfile(self) -> str:
+        """Repo-relative path to a custom Containerfile ("" when this profile uses a packaged one)."""
+        return _str(self.raw, "dockerfile")
+
+    @property
     def build_target(self) -> str:
         """The `rein oci build --profile <x>` argument that builds this profile's image.
 
@@ -904,6 +909,17 @@ class GateStep:
     @property
     def required(self) -> bool:
         return self.raw.get("required") is not False
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        """Glob patterns scoping this step to matching changed paths (empty: every task).
+
+        Frozen at gate 3 like the rest of config.yaml — a human decision, never a knob a task's
+        own ticket sets, which is what would let an implementer turn its own gate down. Matching
+        happens in `build_loop.GateStep.matches_paths`, against the normalized step this parses
+        into.
+        """
+        return _ids(self.raw, "paths")
 
 
 @dataclass(frozen=True)
