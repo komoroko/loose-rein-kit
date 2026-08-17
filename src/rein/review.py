@@ -77,6 +77,51 @@ def _diff(repo: repo_mod.Repo, base: str, head: str) -> str:
     return out
 
 
+def fold_mechanical(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tuple[str, list[str]]:
+    """The diff with lockfile and generated-file *bodies* replaced by one line each.
+
+    A lockfile's eight hundred changed lines say one thing — the dependencies moved — and they say
+    it by burying the twelve lines of hand-written code in the same diff. Every reviewer here was
+    handed the raw whole, twice over (the extractor and the security reviewer each get their own
+    copy), and the meaningful change was somewhere in the middle of it.
+
+    This is redaction, not summarisation and not priming: nothing is described, interpreted, or
+    added. What replaces the hunks is the fact that they were there and how many lines they were,
+    which is exactly what `diff_facts` already tells the Coverage Manifest — and the manifest goes
+    on reporting these files as *not semantically analysed*, so the review stays `insufficient`
+    for the same reason it always was. The honesty property is untouched; only the token cost of
+    printing the bytes is gone.
+
+    Returns `(text, folded_paths)`.
+    """
+    mechanical = {f.path for f in files if diff_facts.classify_path(f.path) in diff_facts.MECHANICAL_KINDS}
+    if not mechanical:
+        return diff_text, []
+    kept: list[str] = []
+    folded: list[str] = []
+    current: str | None = None
+    hunk_lines = 0
+    for line in diff_text.splitlines(keepends=True):
+        header = diff_facts._DIFF_GIT.match(line.rstrip("\n"))
+        if header:
+            if current is not None:
+                kept.append(f"@@ {hunk_lines} line(s) of mechanical change, body withheld @@\n")
+            path = header.group("b")
+            current = path if path in mechanical else None
+            hunk_lines = 0
+            if current is not None:
+                folded.append(current)
+            kept.append(line)
+            continue
+        if current is None:
+            kept.append(line)
+        else:
+            hunk_lines += 1
+    if current is not None:
+        kept.append(f"@@ {hunk_lines} line(s) of mechanical change, body withheld @@\n")
+    return "".join(kept), folded
+
+
 def _exists(repo: repo_mod.Repo, ref: str) -> bool:
     return bool(ref) and repo._git_rc("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")[0] == 0
 
@@ -87,6 +132,11 @@ def _resolve_base(repo: repo_mod.Repo, plan: models.Plan | None, base: str | Non
     Each candidate is verified to exist in *this* repository before it is used — a plan carrying a
     base commit that is not present here (a fork, a shallow clone) falls back rather than failing the
     whole review on a `git diff` against a missing object.
+
+    There is deliberately no last-resort fallback to HEAD. That used to be the final branch, and
+    it is the one answer that is never right: `git diff HEAD..HEAD` is empty, so every reviewer
+    would be handed a change of nothing and would report, honestly and uselessly, that they found
+    nothing wrong with it. A base that cannot be resolved is a review that cannot be taken.
     """
     if _exists(repo, base or ""):
         return base or ""
@@ -95,8 +145,11 @@ def _resolve_base(repo: repo_mod.Repo, plan: models.Plan | None, base: str | Non
     for candidate in ("main", "master"):
         if _exists(repo, candidate):
             return repo._git_rc("rev-parse", candidate)[1].strip()
-    rc, out = repo._git_rc("rev-parse", "HEAD")
-    return out.strip() if rc == 0 else "HEAD"
+    raise ReviewError(
+        "cannot resolve a base commit to review against: the plan's `cycle.base_commit` is not in "
+        "this repository and neither `main` nor `master` exists here. Set `cycle.base_commit` to a "
+        "commit this checkout has — reviewing HEAD against itself would report an empty change."
+    )
 
 
 # -- the code the reviewers are allowed to read -------------------------------
@@ -142,6 +195,11 @@ def _relevant_code(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.Di
     budget = RELEVANT_CODE_TOTAL_CHARS
     for file in files:
         if file.binary:
+            continue
+        if diff_facts.classify_path(file.path) in diff_facts.MECHANICAL_KINDS:
+            # A lockfile's whole body, on top of its whole diff. Neither was ever going to be read
+            # as code, and the manifest already reports it as not semantically analysed.
+            omitted.append(file.path)
             continue
         rc, text = repo._git_rc("show", f"{head}:{file.path}")
         if rc != 0:  # deleted at head — the diff carries what it was, and there is nothing to read
@@ -303,23 +361,33 @@ def generate(
     change = change_digest(repo, head)
     diff_text = _diff(repo, trusted_base, head)
 
+    # The manifest reads the *whole* diff, always: what it measures is how much of the change
+    # could be analysed, and folding a file before counting it would be measuring the fold.
     facts = diff_facts.analyze(diff_text)
     coverage = facts.coverage.to_manifest()
     risk_floor = facts.risk_floor
     effective = _effective_risk(facts, plan)
 
+    # The reviewers read the folded one. `change_digest` above is over the committed tree, so
+    # neither this nor `relevant`'s omissions can move what the review is bound to.
+    reviewable, folded = fold_mechanical(diff_text, facts.files)
     relevant = _relevant_code(repo, head, facts.files)
 
     security_request = security_review.build_request(
-        diff_text=diff_text,
+        diff_text=reviewable,
         relevant_code=relevant.files,
-        deterministic_facts={"signals": [h.signal for h in facts.signals], "relevant_code": relevant.as_facts()},
+        deterministic_facts={
+            "signals": [h.signal for h in facts.signals],
+            "relevant_code": relevant.as_facts(),
+            "mechanical_bodies_withheld": folded,
+        },
         trusted_base_sha=trusted_base,
         subject_head_sha=head,
     )
-    # What the last review found blocking. Read here rather than at the call below, because the
-    # call is about to move off this thread and the store is not something to touch from two.
-    prior_blocking = _prior_blocking_ids(store.read_review())
+    # What the last review found blocking *about this same base*. Read here rather than at the
+    # call below, because the call is about to move off this thread and the store is not something
+    # to touch from two.
+    prior_blocking = _prior_blocking_ids(store.read_review(), trusted_base)
 
     # The security review reads the diff and the relevant code; it consumes nothing the extractor
     # or the comparator produce, so it does not have to wait behind them. Three LLM stages at up
@@ -346,7 +414,7 @@ def generate(
                 config=config,
                 head=head,
                 trusted_base=trusted_base,
-                diff_text=diff_text,
+                diff_text=reviewable,
                 relevant=relevant,
                 coverage=coverage,
                 risk_floor=risk_floor,
@@ -371,12 +439,14 @@ def generate(
         "subject_head_sha": head,
         "generated_at": event_chain.now_iso(),
     }
+    gaps = _coverage_gaps(comparison.actual_coverage_gaps)
     machine = assemble(
         binding=binding,
         coverage=coverage,
         actual_statements=extraction.actual_statements,
         claims=comparison.claims,
-        gaps=_coverage_gaps(comparison.actual_coverage_gaps),
+        gaps=gaps,
+        extra_behaviors=_extra_behaviors(comparison.extra_behaviors, gaps=gaps),
         security=security.to_section(),
         effective_risk=effective,
         plan=plan,
@@ -460,9 +530,26 @@ def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str
     return ids
 
 
-def _prior_blocking_ids(review: models.Review | None) -> list[str]:
-    """The blocking security findings the previous review recorded, if there was one."""
-    if review is None:
+def _prior_blocking_ids(review: models.Review | None, trusted_base: str) -> list[str]:
+    """The blocking findings the previous review recorded **about the same base**, if any.
+
+    The carry-over exists so a reviewer cannot clear its own block by regenerating and quietly
+    omitting the finding. That is right, and it was being applied by id alone — with nothing
+    anywhere saying which *change* the finding was about. So a review taken against base A kept
+    blocking a regeneration against base B: a different diff, sometimes not containing the code
+    the finding named, and the only way past it was for the reviewer to re-assert a finding it
+    could no longer see.
+
+    A finding is a statement about a change. Change the base and it is a statement about
+    something else, so it does not carry — and `binding.trusted_base_sha` is what says so. An
+    absent or unequal base means no carry-over, which is the safe direction here: the new review
+    is free to find what is actually there, and the *new* base's own findings will then carry
+    forward normally.
+    """
+    if review is None or not trusted_base:
+        return []
+    recorded = str(review.raw.get("machine", {}).get("binding", {}).get("trusted_base_sha", ""))
+    if not recorded or recorded != trusted_base:
         return []
     return [str(f.get("id", "")) for f in review.blocking_security_findings]
 
@@ -518,6 +605,43 @@ def _coverage_gaps(gaps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 "blocking": bool(gap.get("blocking", False)),
             }
         )
+    return out
+
+
+def _extra_behaviors(
+    extras: Sequence[Mapping[str, Any]],
+    *,
+    gaps: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Comparator-reported extra behaviours, shaped as review.yaml records.
+
+    Behaviour in the code that no claim in the plan accounts for — the section that answers "did
+    it build something nobody asked for?", and the reason the summary is allowed to say "extra
+    behaviours: 0". It was assembled from a parameter no call site ever passed, so that zero was
+    an empty list's length rather than a reading, in exactly the place this product refuses prose
+    over evidence. Now it is what the Comparator found, or nothing.
+
+    Statement ids continue past the gaps' rather than restarting at 1: both lists become decision
+    cards, and two subjects sharing a `statement_id` would put one's question against the other's
+    options.
+    """
+    first = decision_cards.next_statement_index(g.get("statement_id") for g in gaps)
+    out: list[dict[str, Any]] = []
+    for offset, extra in enumerate(extras):
+        record = {
+            "id": str(extra.get("id", f"EXTRA-{offset + 1:03d}")),
+            "statement_id": str(extra.get("statement_id", f"STMT-{first + offset:03d}")),
+            "category": str(extra.get("category", "")),
+            "risk": str(extra.get("risk", "medium")),
+            # Both default to the answerable direction. `grounded: true` is what takes an extra
+            # behaviour off the human's list, so an omitted flag must not be the thing that does it.
+            "grounded": extra.get("grounded") is True,
+            "blocking": extra.get("blocking") is True,
+        }
+        anchors = [str(a) for a in extra.get("actual_statement_ids", ()) or ()]
+        if anchors:
+            record["actual_statement_ids"] = anchors
+        out.append(record)
     return out
 
 

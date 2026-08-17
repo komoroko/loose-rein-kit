@@ -419,15 +419,20 @@ _IGNORE_SECTION_END_RE = re.compile(r"^# ---- ")
 def runtime_artifacts(config_text: str) -> set[str]:
     """The artifacts the tool writes *into* the repository, derived from the code that writes them.
 
-    There are two, and they come from opposite places: the worktree directory is configurable
-    (`execution.worktree_dir`), the PR draft is a constant (`pr_draft.OUT_PATH`). Deriving both
-    instead of listing them is the whole point — a hand-written ignore list outlives what it
-    describes, which is how .gitignore came to name three `build-loop.*` files for releases after
-    the loop's locks and journal moved to $XDG_RUNTIME_DIR, outside the repository entirely.
+    They come from opposite places: the worktree directory is configurable
+    (`execution.worktree_dir`), the PR draft and the dossier directory are constants
+    (`pr_draft.OUT_PATH`, `dossier.RELATIVE_PATH`). Deriving them all instead of listing them is
+    the whole point — a hand-written ignore list outlives what it describes, which is how
+    .gitignore came to name three `build-loop.*` files for releases after the loop's locks and
+    journal moved to $XDG_RUNTIME_DIR, outside the repository entirely.
     """
-    from rein import pr_draft
+    from rein import dossier, pr_draft
 
-    return {models.Config.parse(config_text).worktree_dir.rstrip("/") + "/", pr_draft.OUT_PATH}
+    return {
+        models.Config.parse(config_text).worktree_dir.rstrip("/") + "/",
+        pr_draft.OUT_PATH,
+        dossier.RELATIVE_PATH.rstrip("/") + "/",
+    }
 
 
 def _ignore_section(gitignore_text: str) -> list[str] | None:

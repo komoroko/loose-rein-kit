@@ -40,7 +40,10 @@ _AGENTS = (
     "kinds: foundation / parallel / integration. "
     "gates: requirements, design, tasks, build, release. steps: test, review.\n"
 )
-_TASKS_CMD = "kind: foundation | parallel | integration. status: todo in-progress blocked needs-revision done.\n"
+_TASKS_CMD = (
+    "kind: foundation | parallel | integration. "
+    "status: todo in-progress blocked needs-revision awaiting-evidence done.\n"
+)
 _DOD_PROSE = "the pipeline runs test then review.\n"  # every prose copy of the DoD must echo the step names
 
 

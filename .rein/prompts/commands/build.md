@@ -14,10 +14,23 @@ frontier (todo tasks whose `blockedBy` are all done) → sort the consumption or
 (foundation/high fan-out first — the sooner done, the more leaves free up; then the critical
 path) → foundation tasks run serially on the work branch (isolating them would strand
 derivatives on a stale base); independent leaves run in `git worktree` isolation (never
-subtree) at up to `max_parallel` (default 3) in parallel → for each task, run the quality-gate
+subtree) at up to `max_parallel` (default 3) in parallel → each agent is handed a **dossier**
+(`.rein/work/T-NNN.json`, assembled fresh per launch) carrying the claims the task answers and
+what each asserts, its declared `scope`, the changed paths already split into source / tests /
+mechanical churn, and what earlier attempts tried — the loop derives those in code, so no agent
+re-derives them → **read what the attempt produced before asking the gate anything**: an empty
+diff is `no_implementation`, a change outside the plan's declared `scope` is `scope_violation`,
+and an implementer that ended `rein report --outcome blocked` / `needs-revision` parks the task —
+in all three cases without spending a reviewer or a test suite on a question nobody asked, and
+`--touched` naming paths the diff does not contain is itself a finding → then run the quality-gate
 pipeline `quality_gate` in `.rein/config.yaml` — the single definition of the DoD
 (default: `test` → `check` → `review` → `smoke`). A task has no `test` command of its own: the
 DoD is shared and runs in a sealed sandbox, never a command the implementer chose for itself.
+A step already established green against **this exact tree, in this exact image** is reused
+rather than re-run (the evidence ledger); a tree that moved by a byte has never been checked.
+After the DoD, the task's own **`acceptance`** criteria are established the same way — a failing
+one returns through the same channel a red gate step does, so it inherits the send-back budget
+rather than growing a second one beside it.
 Each `cmd` step is gate-decided by exit code; a fail goes back to the implementer up to **that
 step's own `retries` budget** (over the budget → `blocked`) — but **only a failure the code
 earned counts**: an agent that never launched (capacity exhausted, the CLI not on PATH, a
@@ -29,7 +42,10 @@ blocks the task instead of landing) → merge into work sequentially in **ascend
 integration gate, not a knob: each leaf was green only in isolation and the combined file set can
 still be red. A red goes to a fixer within the step's `retries` budget, else the batch's tasks
 block; a single-leaf join skips it (its tree is identical to the already-verified worktree) →
-mark the merged tasks `done` → recompute. Empty frontier
+mark the merged tasks `done`, **each carrying the tree its DoD was established on** (`evidence`
+in `state.yaml`) — or **`awaiting-evidence`** when a criterion nobody here can establish is still
+open, which merges the work (it passed everything) and parks only the task, since gate ④ cannot
+open while a task is unfinished → recompute. Empty frontier
 with unfinished tasks = all blocked/needs-revision → escalate and stop; all done → gate ④
 below. **Only the human opens `gates.build`.**
 
@@ -52,6 +68,12 @@ refuses with exit `2` naming what is missing.
 rein build              # run
 rein build --dry-run   # check just the control flow without calling the agent CLI/git
 ```
+
+It refuses to start (exit `2`) when a document it would send an agent to read has moved since
+gate ③ froze it, or has uncommitted changes. The second is the one with no other symptom: a
+parallel leaf is cut from the work branch's tip and reads only what is committed there, so an
+uncommitted ticket edit reached no task at all while its author watched the new version on
+screen. Commit it, or roll back with `rein revise --to tasks` if the approval no longer covers it.
 
 **`rein build` is one command, not an iteration** — it runs the whole algorithm to completion
 and its exit is the signal. Never schedule wake-ups to poll a run in progress; wait for the
@@ -104,9 +126,17 @@ is the point; never fold them into the implementer's session.
   config steps.
 - **`review`** applies the **`/code-review`** (bugs/correctness) and **`/simplify`** (reuse/
   simplification/efficiency — including stripping what the ticket's acceptance criteria do not
-  require: speculative generality, unused knobs/hooks; YAGNI) disciplines and fixes findings
-  in place; if code changed, the already-passed cmd steps are re-run. (In an environment
-  without those commands, perform an equivalent review pass along the same two axes.)
+  require: speculative generality, unused knobs/hooks; YAGNI) disciplines. **It reports; it does
+  not repair, and it is launched without write access.** Findings go to
+  `.rein/work/T-NNN.findings.json`; the implementer resolves the `must_fix` ones within the
+  step's own `retries` budget and the reviewer looks again. That costs one launch per round and
+  buys a review somebody other than its author had to act on — and a reviewer that no longer
+  re-runs the suite the caller runs anyway. A review whose findings cannot be read stops the
+  step: an unreadable answer is not an answer that found nothing.
+- **`stage:`** on any step says where it runs — `task`, `integration`, or `both` (the default and
+  what every step has always done). It moves *when* a step runs, never whether: a fast focused
+  suite can guard each task while the whole one runs once over the join, instead of every attempt
+  of every task re-establishing the whole thing.
 - **`smoke` (runnable deliverables only)** — for CLI, server, etc., minimally confirm it
   actually launches and the main commands/endpoints work. Tests can be green while the launch
   path (packaging, entry point, dependency resolution) is broken; this catches that within

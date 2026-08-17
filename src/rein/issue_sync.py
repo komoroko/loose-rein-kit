@@ -199,6 +199,7 @@ _STATUS_COLORS = {
     "in_progress": "bf8700",
     "blocked": "cf222e",
     "needs-revision": "e16f24",
+    "awaiting-evidence": "7057c4",
     "done": "1a7f37",
 }
 _PHASE_COLORS = {"requirements": "8250df", "design": "0969da", "build": "1a7f37", "verify": "cf222e"}

@@ -45,7 +45,7 @@ import os
 import socket
 import socketserver
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -234,13 +234,56 @@ class Request:
         )
 
 
-def _decision_event(capability: str) -> str:
+def _decision_event(capability: str, status: str = "") -> str:
+    """The audit event one capability produces.
+
+    `task.status` names the event after the status it writes rather than always `task_started`:
+    an implementer reporting that it is blocked has to reach `rein events --summary` as something
+    a human is asked about, and `task_started` is not that.
+    """
+    if capability == "task.status":
+        return {"done": "task_completed", "blocked": "task_failed", "needs-revision": "knowledge_gap"}.get(
+            status, "task_started"
+        )
     return {
         "decision.declare": "decision_declared",
         "knowledge_gap.create": "knowledge_gap",
-        "task.status": "task_started",
         "event.append": "decision_declared",
     }[capability]
+
+
+#: Caps mirroring `state.schema.json`'s `handoff.report`. An agent's own text is untrusted input
+#: like any other: a report long enough to make `state.yaml` unwritable would take the loop down
+#: at exactly the moment it was carrying the reason.
+_REPORT_SUMMARY_MAX = 2000
+_REPORT_PATH_MAX = 512
+_REPORT_TOUCHED_MAX = 128
+
+#: What an implementer's own outcome means for the task's status. `implemented` claims nothing —
+#: it leaves the status where the loop put it, and the quality gate decides. The other two only
+#: ever *narrow* what happens next, which is why an agent is allowed to write them at all.
+_OUTCOME_STATUS: dict[str, str] = {
+    "implemented": "in-progress",
+    "blocked": "blocked",
+    "needs-revision": "needs-revision",
+}
+
+
+def _report_patch(args: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The `handoff.report` payload for a `task.status` call, or None when there is no report."""
+    outcome = str(args.get("outcome") or "")
+    if outcome not in models.AGENT_OUTCOME_VALUES:
+        return None
+    touched = args.get("touched")
+    paths = [str(p)[:_REPORT_PATH_MAX] for p in touched][:_REPORT_TOUCHED_MAX] if isinstance(touched, list) else []
+    report: dict[str, Any] = {
+        "outcome": outcome,
+        "summary": str(args.get("summary") or "")[:_REPORT_SUMMARY_MAX],
+        "at": event_chain.now_iso(),
+    }
+    if paths:
+        report["touched"] = paths
+    return report
 
 
 #: The `run_id` a direct (non-socket) call carries. The audit record's actor is read by a human
@@ -296,20 +339,34 @@ def _apply_request_once(repo: repo_mod.Repo, token: Token, request: Request) -> 
     escalates = request.capability == "decision.declare" and models.risk_at_least(risk, ESCALATION_FLOOR)
 
     raw = json.loads(json.dumps(state.raw))
-    if escalates or request.capability == "task.status":
+    status = ""
+    writes_state = escalates or request.capability == "task.status"
+    if writes_state:
         status = "needs-revision" if escalates else str(args.get("status") or "in-progress")
         if status not in models.TASK_STATUS_VALUES:
             raise ControlPlaneError(f"unknown task status {status!r}")
         tasks = raw.setdefault("tasks", {})
         entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
-        tasks[task_id] = {**entry, "status": status}
+        updated = {**entry, "status": status}
+        # An implementer's own account of its attempt rides along with the status it set. It is
+        # stored beside the handoff the *next* attempt inherits, not merged into the verdict:
+        # `touched` is a claim the loop checks against the real diff, never a substitute for it.
+        report = _report_patch(args) if request.capability == "task.status" else None
+        if report is not None:
+            previous = entry.get("handoff")
+            handoff = dict(previous) if isinstance(previous, dict) else {}
+            handoff["report"] = report
+            handoff["updated_at"] = report["at"]
+            updated["handoff"] = handoff
+            detail = {**detail, "outcome": report["outcome"]}
+        tasks[task_id] = updated
         raw["updated_at"] = event_chain.now_iso()
 
     with store.transaction() as tx:
-        if escalates or request.capability == "task.status":
+        if writes_state:
             tx.write("state", raw, expect_digest=seen)
         tx.append(
-            _decision_event(request.capability),
+            _decision_event(request.capability, status),
             cycle_id=state.cycle_id,
             actor="canonical-checkout" if token.run_id == LOCAL_RUN else f"leaf:{token.task_id}",
             subject_ids=[task_id],
@@ -511,7 +568,73 @@ def route(repo: repo_mod.Repo, capability: str, args: dict[str, Any]) -> dict[st
     return call(socket_path, Request(capability=capability, token=raw_token, args=args))
 
 
-# --- the CLI (`rein decision add` / `rein knowledge-gap add`) ---------
+# --- the CLI (`rein decision add` / `rein knowledge-gap add` / `rein report`) ---------
+
+
+def report_main(argv: list[str] | None = None) -> int:
+    """`rein report --outcome …` — how an implementer ends its attempt.
+
+    The one channel by which an agent says what became of the work it was given. Before this
+    existed the loop had a single bit to go on — the process exited — so an implementer that
+    could not write a byte and said so plainly was indistinguishable from one that finished:
+    both produced a clean tree and an exit code of zero, and the reason lived only in output
+    the loop discarded.
+
+    It reaches the *canonical* store even from a leaf worktree, over the same control plane and
+    the same capability token as every other leaf record, so a report survives the worktree it
+    was written in. And it can only ever narrow what happens next: `blocked` and `needs-revision`
+    park the task, `implemented` claims nothing and merely opens the quality gate, and there is
+    no outcome that marks anything done. Exit 2 when the report parked the task — the same
+    convention `rein decision add` uses for an escalation.
+    """
+    parser = argparse.ArgumentParser(
+        prog="rein report",
+        description="report the outcome of one task attempt into the central audit chain",
+    )
+    parser.add_argument("--task", default="", help="the task this reports on (default: the token's task)")
+    parser.add_argument(
+        "--outcome",
+        required=True,
+        choices=list(models.AGENT_OUTCOME_ORDER),
+        help="implemented = done what the ticket asked; blocked = stuck (say why in --summary); "
+        "needs-revision = the ticket or design is wrong",
+    )
+    parser.add_argument("--summary", default="", help="what you did, or what stopped you — a human reads this")
+    parser.add_argument(
+        "--touched",
+        default=[],
+        nargs="*",
+        help="the repo-relative paths you changed (checked against the real diff)",
+    )
+    parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    args = parser.parse_args(argv)
+    common.configure_logging()
+    if args.outcome != "implemented" and not args.summary.strip():
+        logger.error(f"--outcome {args.outcome} needs a --summary: an unexplained stop is what this verb exists to end")
+        return 1
+    try:
+        repo = repo_mod.get(args.repo)
+    except repo_mod.RepoNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+    try:
+        result = route(
+            repo,
+            "task.status",
+            {
+                "task": args.task,
+                "status": _OUTCOME_STATUS[args.outcome],
+                "outcome": args.outcome,
+                "summary": args.summary,
+                "touched": list(args.touched),
+                "statement": args.summary,
+            },
+        )
+    except (ControlPlaneError, models.DocumentError, store_mod.StoreError) as exc:
+        logger.error(str(exc))
+        return 1
+    print(result.get("note", "recorded"))
+    return 2 if args.outcome != "implemented" else 0
 
 
 def _build_parser(prog: str, capability: str) -> argparse.ArgumentParser:

@@ -70,27 +70,39 @@ def run_security_review(
 ) -> SecurityResult:
     """Run the security reviewer and validate its findings (plan §12.5, §12.7).
 
-    `prior_blocking_ids` are the blocking findings from the previous review: a regeneration that
-    silently drops one — without the finding being resolved elsewhere — is a reviewer clearing
-    its own block, which the policy refuses (plan §12.7).
+    `prior_blocking_ids` are the blocking findings the previous review recorded *about the same
+    base* (`review._prior_blocking_ids`). A regeneration that drops one, or that re-emits it with
+    `blocking: false`, is a reviewer clearing its own block, and the policy refuses both — the
+    second was the wider door: the check compared id sets, so re-listing `SEC-001` as
+    non-blocking satisfied it exactly as well as fixing the finding did.
+
+    Each finding also records the base and head it was found against. A finding is a statement
+    about a change, and until now nothing in the document said which one.
     """
     document = review_policy.parse_reviewer_output(reviewer(request), what="security review")
     raw = document.get("findings")
     if not isinstance(raw, list):
         raise SecurityReviewError("security review: `findings` must be a list")
 
+    first_seen = {
+        "trusted_base_sha": str(request.get("trusted_base_sha", "")),
+        "subject_head_sha": str(request.get("subject_head_sha", "")),
+    }
     problems: list[str] = []
     findings: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    still_blocking: set[str] = set()
     for index, finding in enumerate(raw):
         if not isinstance(finding, Mapping):
             problems.append(f"findings[{index}] is not a mapping")
             continue
         problems += _validate_finding(finding, repo=repo, commit=commit)
-        seen.add(str(finding.get("id", "")))
-        findings.append(dict(finding))
+        fid = str(finding.get("id", ""))
+        problems += review_policy.reject_blocking_removal(fid, finding.get("blocking"), fid in set(prior_blocking_ids))
+        if finding.get("blocking") is True:
+            still_blocking.add(fid)
+        findings.append({**dict(finding), "first_seen": {k: v for k, v in first_seen.items() if v}})
 
-    dropped = sorted(set(prior_blocking_ids) - seen)
+    dropped = sorted(set(prior_blocking_ids) - still_blocking)
     if dropped:
         problems.append(
             f"the review dropped previously blocking finding(s) {dropped} — a reviewer cannot clear its own block; "

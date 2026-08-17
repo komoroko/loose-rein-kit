@@ -58,6 +58,8 @@ VERBS: dict[str, str] = {
     "policy-check": "policy_check",
     "decision": "control_plane",
     "knowledge-gap": "control_plane:knowledge_gap_main",
+    "report": "control_plane:report_main",
+    "evidence": "evidence_cmd",
     "dag": "dag",
 }
 
@@ -101,6 +103,8 @@ operations:
   cycle-close --name <slug>    archive the finished delta cycle and reset
   issue-sync [--dry-run]       one-way mirror of plan.yaml's tasks -> GitHub Issues (opt-in)
   pr-draft [args]              assemble a PR body from the SSOT (read-only)
+  evidence show|record         acceptance evidence this loop cannot obtain (record what you observed)
+  report --outcome … --summary …  how an implementer ends its attempt (implemented|blocked|needs-revision)
   decision add --statement …   record an implementation decision (routes via the control plane)
   knowledge-gap add …          record what could not be found out
   guard [--check-diff]         the gate-guard hook / commit-stage check

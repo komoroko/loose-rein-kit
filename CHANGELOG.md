@@ -4,6 +4,265 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.0] - 2026-08-17
+
+`rein build` decided a task by asking one question — did the quality gate pass? — of a process it
+had launched and then stopped listening to. This release replaces that with evidence: what the
+attempt produced, what the attempt said, and what the verdict was reached on.
+
+### A task that changed nothing is no longer `done`
+
+The loop discarded a launch's output, never looked at the diff, and treated a clean tree as a
+successful no-op commit. So an implementer whose sandbox refused to let it write produced an exit
+code of zero and a green gate over the code that was already there, and the run recorded `done`
+with the *pre-existing* HEAD as the task's completing commit. Nothing in the whole path was a
+statement about the task.
+
+An attempt is now read before the gate is asked anything. An empty diff escalates as
+`no_implementation` and blocks the task; a report naming paths the diff does not contain
+escalates as `report_mismatch`. Neither spends a step's retry budget, because no step ran.
+
+### `rein report` — how an implementer ends its attempt
+
+The `task.status` capability had been in `LEAF_CAPABILITIES` since the control plane landed, with
+no verb that reached it: an agent's only channel was its exit code. `rein report --outcome
+implemented|blocked|needs-revision --summary …` is that verb. It goes over the same control plane
+and the same capability token as every other leaf record, so a report survives the worktree it was
+written in, and it can only ever *narrow* what happens next — `blocked` and `needs-revision` park
+the task **before** a reviewer or a full test suite is spent on an attempt that already answered,
+and there is no outcome an agent can report that finishes anything. `--touched` is a claim,
+checked against the real diff.
+
+The implementer role no longer pastes verbatim `make test` output as evidence. The caller re-runs
+the DoD itself and decides by exit status, so a green the agent pastes is a green nobody counts —
+it was pure token cost standing in for a channel that did not exist.
+
+### Diagnostics survive the terminal, without becoming verdicts
+
+`handoff.last_agent` keeps what the last launch actually said (role, adapter, rc, session, output
+tail); `handoff.last_fault` keeps the environment fault that stopped one. The second matters most:
+an environment fault reaches no verdict *by design* — no status moves, no budget is spent — and
+that was being enforced by recording nothing at all, so the reason existed only in a terminal that
+has since closed. Diagnostics ride along with the next status write rather than getting a
+transaction of their own; a store write here must record *why*, and "an agent produced output" is
+not a line a hash-chained log should carry.
+
+### The evidence ledger: `done` says what it was established on, and a fact is established once
+
+`state.yaml`'s `tasks.<id>.evidence` records the content fingerprint a task's `done` was reached
+on and which gate steps were green against it, written in the same transaction as the status. A
+task leaving `done` loses it, for the same reason `completed_commit` is dropped.
+
+Alongside it, a content-addressed cache outside the working tree
+(`$XDG_CACHE_HOME/rein/<repo_id>/evidence.jsonl`) skips a step already green on this exact tree in
+this exact image. It decides nothing: only greens are recorded, an unknown fingerprint never
+matches, and losing the file costs time and nothing else. `REIN_NO_CACHE=1` turns it off.
+
+### The per-task reviewer reports; it no longer repairs
+
+It was launched with write access and told to apply its own fixes. Two things followed. One
+participant both judged a change and edited the judgement away — the failure mode this repository
+names in every other context and had built into its own quality gate. And the tree moved
+underneath the gate, so every already-passed step had to be re-run behind it, on top of the suite
+the reviewer had been told to get green itself: the same tests, three times, for one verdict.
+
+Now it is launched read-only, writes findings to `.rein/work/T-NNN.findings.json`, and is told
+plainly not to run the gate commands — the caller re-runs them and decides by exit status, so a
+green the reviewer reports is a green nobody counts. `must_fix` findings go to the implementer
+within the step's own `retries` budget and the reviewer looks again; `consider` stops nothing and
+is carried to gate ④. A review whose findings cannot be read stops the step rather than passing
+it: an unreadable answer is not an answer that found nothing.
+
+### `stage:` — where a DoD step runs
+
+A step can name `stage: task`, `integration`, or `both` (the default, and what every step has
+always done). It moves *when* a step runs, never whether: a fast focused suite guards each task
+while the whole one runs once over the join, instead of every attempt of every task
+re-establishing the entire thing. Frozen at gate ③ like `paths:`, so it is an operator's decision
+about the DoD's shape and never a task's opt-out.
+
+### A lockfile's body no longer reaches the reviewers
+
+`rein review generate` handed the extractor and the security reviewer the raw whole diff — each
+its own copy — so eight hundred lines saying "the dependencies moved" arrived twice, with the
+twelve lines of hand-written code somewhere in the middle. Mechanical files (lockfiles, generated
+files) now reach them as a header and a line count, and their head-side bodies are not sent at
+all. This is redaction, not summarisation: nothing is described or interpreted, and **the Coverage
+Manifest still reads the whole diff** — what it measures is how much of the change could be
+analysed, and folding a file before counting it would be measuring the fold. A dependency change
+goes on making the coverage `insufficient` for exactly the reason it always did.
+
+### The run measures what it put in front of a model
+
+The loop composes every prompt itself, so the input is the one thing it can count exactly. It now
+does, by role, and prints it at the end of the run and at gate ④ beside the ledger's reuse count.
+Gate ④'s review budget has always been measured rather than declared; the build side of the run
+had no number at all, which is why "we are re-sending too much" could only ever be an impression.
+Bytes, not tokens — a token count belongs to a tokenizer nobody here owns, and reporting an
+estimate as a measurement is the habit this codebase is built against.
+
+### A task's acceptance criteria are in the plan, and something checks them
+
+They lived as markdown checkboxes in `docs/tasks/T-NNN.md`, which nothing parsed. So "the
+acceptance criteria are met" was an assertion by the agent that had just written the code,
+standing beside a quality gate that only ever answered a different question — is this code
+*sound*, not did it do what it was *for*.
+
+`plan.yaml` tasks now carry `acceptance: [{id, statement, evidence}]`, and the loop establishes
+them after the DoD. This is **not** a task choosing its own gate: the shared DoD runs unchanged
+either way, and a human freezes the list at gate ③ exactly like the rest of the plan. Evidence
+comes in three kinds — `command` (an argv run in a sandboxed profile, decided by exit status),
+`artifact` (the named paths must exist), and `external`. A criterion with no `evidence` at all
+is prose, which most criteria honestly are; it establishes nothing and blocks nothing, and gate
+④ is where a human reads it. A failing criterion returns through the same channel a red gate step
+does, so it inherits the send-back budget rather than growing a second one beside it.
+
+### `awaiting-evidence`: neither failed nor done
+
+`external` says up front that this loop cannot establish something — a staging check, a device,
+a person. Both other answers would be a lie: `blocked` says the code failed, and `done` claims an
+observation nobody made. So the work **merges** (it passed the entire DoD; nothing about it is in
+question) and the task parks at `awaiting-evidence`, off the frontier, with gate ④ held shut by
+the unfinished task. Merging first is what makes the observation possible at all — nobody can
+check a staging deployment of code that only exists on an unmerged leaf branch.
+
+`rein evidence show` lists what is waiting; `rein evidence record --task --ac --note` records what
+somebody saw. It runs from the canonical checkout only and needs a terminal — an implementer that
+could record its own acceptance would be signing off on its own work — and the record binds the
+content fingerprint it was made against, so changing the code retires it. The next `rein build`
+promotes the task on the spot rather than re-running an implementer over merged, verified code
+whose one missing piece was a person looking at a screen.
+
+### The tree fingerprint stopped counting `.rein/` — and stopped being silently constant
+
+Two defects in what "the same tree" means, both found by the acceptance work:
+
+`.rein/` was part of the fingerprint, so the act of recording that a step had passed changed the
+tree it had passed against. Orchestration state is not the product — the same reason
+`finalize_commit` has always excluded it from a task commit.
+
+And the committed half was read with `git ls-tree -r` where `parse_ls_tree` requires `-z`. Fed
+the unseparated form it parsed the entire listing as **one** entry whose path began `.rein/`, so
+the exclusion dropped everything and every tree in every repository hashed identically. A
+fingerprint that is silently constant is worse than none; there is now an explicit check for the
+empty parse that produced it. The committed half is also hashed by path/mode/blob id rather than
+by commit id, so a salvage merge that changes not one byte no longer invalidates every fact
+established about that content.
+
+### The prose an agent reads is pinned, and an uncommitted edit stops the build
+
+`plan.yaml` was frozen by digest at gate ③. The documents an implementer is actually *sent to
+read* — its ticket, the design document, the baseline — were bound to nothing, so an edit after
+the approval changed what got built and left no trace that it had. The freeze now records
+`plan.sources`: every such document, digested. `rein doctor` reports a drifted one, and `rein
+build` refuses to start (exit `2`) rather than implementing text nobody approved.
+
+The second half had no symptom at all. A parallel leaf is created with `git worktree add <path>
+<branch>` and therefore reads what is *committed* on the work branch — so an uncommitted ticket
+edit reached no task, silently, while its author watched the new version on screen. The build now
+names that too, and asks for a commit.
+
+### The per-task dossier: the loop derives, agents stop re-deriving
+
+Every agent was handed a pointer and sent to find things out. The implementer got
+`docs/tasks/T-004.md` and `docs/20-design.md` as *paths*, and read them cold on every launch —
+and on every retry, for any CLI that cannot resume. The reviewer got a path list and re-surveyed
+the diff. Each was re-establishing, from the repository, facts the orchestrator had already
+computed and dropped: what the claims this task answers actually say, the scope the plan gave it,
+which changed paths are source and which are 800 lines of lockfile, what the last four attempts
+tried.
+
+`.rein/work/T-NNN.json` is those facts, assembled fresh per launch and handed over. Two
+consequences of the same change: fewer tokens, because nothing is read twice, and better answers,
+because what the loop knows stopped being something the model has to guess at. The reviewer is
+also told plainly not to run the gate commands — the caller re-runs them itself and decides by
+exit status, so a suite the reviewer ran was a suite run twice for one verdict.
+
+Gate ④'s blind extractor never receives one. Re-deriving everything without ever seeing the plan
+is the point of that stage, not an oversight.
+
+### The scope in the plan is checked, not just requested
+
+`plan.yaml` has carried `task.scope.include` / `exclude` since the schema was written, and
+nothing read them: "do not reach into other tasks' territory" was an instruction in a prompt.
+A diff outside the declared scope now blocks the task as a `scope_violation` — a scope change to
+an approved plan is a human's decision. A task with no declared scope stays unbounded, which is
+what an empty `include` has always meant.
+
+### An adapter declares what it can do, and `doctor` can reason about it
+
+Two hard-coded dicts and one `adapter == "claude"` test decided whether an implementer could
+write a byte, whether a retry continued its session, and — silently — nothing at all about the
+fact that `codex` brings its own process sandbox. `ADAPTER_TABLE` makes each of those a field, so:
+
+- **Nested sandboxes are named.** Inside a container, `codex exec --sandbox workspace-write`
+  needs kernel features the outer sandbox has already dropped, and it fails exactly where the
+  agent writes — reaching the run as a task that produced no change, a symptom pointing nowhere
+  near its cause. `doctor` now WARNs on the combination and says what to do about it.
+- **A CLI that cannot resume says what that costs.** Not a defect — it is what the CLI offers —
+  but a `codex` implementer re-reads its ticket, its design slice and the code on every retry,
+  and nothing anywhere said so.
+
+Roles also reach the agent as `REIN_ROLE` / `REIN_TASK_ID` / `REIN_RUN_ID` / `REIN_SANDBOX`
+rather than being inferred from the shape of a prompt.
+
+### A security finding no longer follows the review onto a different base
+
+A blocking finding was carried into the next `rein review generate` by **id alone**. So one taken
+against base A kept blocking a regeneration against base B — a different diff, sometimes not even
+containing the code the finding named — and the only way past it was for the reviewer to
+re-assert something it could no longer see. The carry-over is now conditional on
+`binding.trusted_base_sha` matching, each finding records the `first_seen` base and head it is a
+statement about, and the check itself was widened: it compared id sets, so re-listing `SEC-001`
+with `blocking: false` cleared the block exactly as well as fixing it did.
+`review_policy.reject_blocking_removal` — written for this and never called from anywhere — is
+wired in.
+
+Relatedly, `_resolve_base` no longer falls back to HEAD. That was the last branch, and it is the
+one answer that is never right: `git diff HEAD..HEAD` is empty, so every reviewer would be handed
+a change of nothing and would report, honestly and uselessly, that they found nothing wrong.
+
+### "Extra behaviours: 0" is now a reading rather than an empty list's length
+
+`machine.extra_behaviors` — behaviour present in the code that no claim in the plan accounts for,
+the section that answers *did it build something nobody asked for* — was defined in the schema,
+consumed by the decision cards, the review budget, `pr_draft` and `doctor`, and **written by
+nobody**: `assemble` took it as a parameter that the one real call site never passed. So a review
+whose Coverage Manifest came back sufficient reported "extra behaviours: 0" every time, from a
+list that could not have held anything. That is prose standing in for evidence, in the place this
+product least tolerates it.
+
+The Comparator now reports them, because it is the only participant that sees both the Expected
+Model and the Actual. Each one must name the Actual Statements it was read from: no claim accounts
+for an extra behaviour — that is what makes it extra — so the plan cannot check the citation, and
+the Actual is the only thing left that can. An unanchored entry is refused, as is a category
+outside the declared list; there is no neutral category that would be honest, so filing one under
+an invented name is worse than refusing it. An omitted `grounded` reads as `false`, since
+`grounded: true` is what takes an extra behaviour off the human's list and an absent flag must not
+be the thing that does it. The change's risk floor is deliberately *not* applied here: a claim's
+risk restates the change's, but an extra behaviour's risk is a property of that behaviour.
+
+### `rein doctor` stops implying that two models are mandatory
+
+Independence is required for a **critical** review, and between the actual-extractor and the
+comparator only — never between the implementer and the code reviewer, which the shipped config
+points at the same CLI. Reporting an undeclared pair as a FAIL regardless of the plan made the
+whole thing read as a hard requirement on a template whose plan has no claims in it at all. A
+shared group stays a FAIL; an undeclared pair is a WARN until a `critical` claim needs it.
+
+### "Did the tree change?" is now a content question
+
+`tree_state` compared HEAD plus `git status --porcelain` — a list of names and status codes. A
+second edit to a file that was already modified left it byte-identical, so the agent step's
+"nothing changed" short-circuit skipped re-running the passed cmd steps over a tree that had in
+fact moved. It is replaced by `fingerprint()`: HEAD, the full tracked diff including binaries, and
+the blob ids of untracked files. Unavailable or truncated comes back as `""`, which reads as
+"changed" and as a cache miss — the direction that costs a re-run rather than a verdict.
+
+A leaf's changed-path set now includes its uncommitted work as well as its commits. The
+implementer is told to commit and `finalize_commit` exists precisely because it sometimes does
+not, so "produced nothing" and "has not committed yet" had been the same answer.
+
 ## [0.2.3] - 2026-08-14
 
 Eight pieces of friction from one long `rein build` run against a real product repository, and

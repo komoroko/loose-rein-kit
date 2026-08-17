@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from rein import models, review
+from rein import diff_facts, models, review
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import make_config, make_plan, make_state, seed_repo
@@ -105,6 +105,82 @@ def test_generate_writes_a_schema_valid_review_and_resets_human(review_repo: Pat
     assert stored is not None and stored.is_generated
     assert stored.human_status == "not_started"  # a fresh machine review is a fresh review
     assert stored.machine.get("binding", {}).get("subject_head_sha")
+
+
+@pytest.mark.integration
+def test_an_extra_behavior_the_comparator_found_reaches_the_review(review_repo: Path) -> None:
+    """`extra_behaviors` is the section that answers "did it build something nobody asked for?".
+
+    It was assembled from a parameter no call site ever passed, so the summary's "extra
+    behaviours: 0" was an empty list's length rather than a reading — prose standing in for
+    evidence, in the one product that refuses that everywhere else.
+    """
+    import json
+
+    (review_repo / "src").mkdir(exist_ok=True)
+    (review_repo / "src" / "app.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "app")
+    blob = _git(review_repo, "rev-parse", "HEAD:src/app.py")
+
+    def reviewer(request: Mapping[str, Any]) -> str:
+        if "expected_model" in request:
+            return json.dumps(
+                {
+                    "claims": [],
+                    "actual_digest": request["actual_digest"],
+                    "extra_behaviors": [
+                        {
+                            "id": "EXTRA-001",
+                            "category": "retry_timeout_fallback",
+                            "risk": "high",
+                            "grounded": False,
+                            "blocking": True,
+                            "actual_statement_ids": ["AST-001"],
+                        }
+                    ],
+                }
+            )
+        facts = request.get("deterministic_facts", {})
+        if isinstance(facts, dict) and "signals" in facts:
+            return json.dumps({"findings": []})
+        return json.dumps(
+            {
+                "actual_statements": [
+                    {
+                        "id": "AST-001",
+                        "statement": "retries three times before giving up",
+                        "category": "control_flow",
+                        "confidence": "medium",
+                        "code_anchors": [
+                            {"path": "src/app.py", "start_line": 1, "end_line": 2, "blob": f"git-blob:{blob}"}
+                        ],
+                    }
+                ],
+                "coverage": {"analyzed_files": 1},
+            }
+        )
+
+    machine = review.generate(repo_mod.Repo(review_repo), reviewer)
+    assert models.schema_errors({"machine": machine, "human": {"status": "not_started"}}, "review") == []
+    assert [e["id"] for e in machine["extra_behaviors"]] == ["EXTRA-001"]
+    # Ungrounded, so it becomes a question a human has to answer — not a count in a summary.
+    subjects = {s["applicability"]["subject_id"] for s in machine.get("statements", [])}
+    assert "EXTRA-001" in subjects
+
+
+def test_extra_behavior_statement_ids_continue_past_the_gaps() -> None:
+    """Both lists become decision-card subjects; a shared id puts one's question on the other's options."""
+    gaps = review._coverage_gaps([{"id": "GAP-001"}, {"id": "GAP-002"}])
+    extras = review._extra_behaviors([{"id": "EXTRA-001", "category": "new_default"}], gaps=gaps)
+    assert [g["statement_id"] for g in gaps] == ["STMT-001", "STMT-002"]
+    assert extras[0]["statement_id"] == "STMT-003"
+
+
+def test_an_extra_behavior_that_omits_grounded_still_reaches_a_human() -> None:
+    """`grounded: true` is what takes it off the human's list, so an absent flag must not do that."""
+    extras = review._extra_behaviors([{"id": "EXTRA-001", "category": "persistence"}], gaps=[])
+    assert extras[0]["grounded"] is False
 
 
 @pytest.mark.integration
@@ -217,21 +293,40 @@ def test_an_unset_independence_group_is_empty_not_invented() -> None:
     assert review._independence(None) == {"actual_extractor": {"group": ""}, "comparator": {"group": ""}}
 
 
+BASE_A, BASE_B = "a" * 40, "b" * 40
+
+BLOCKING_FINDING = {
+    "id": "SEC-001",
+    "severity": "high",
+    "category": "credential_exposure",
+    "attack_scenario": "the reviewer container reaches a host credential",
+    "blocking": True,
+}
+
+
+def _stored_review(base: str) -> models.Review:
+    from tests._support import make_review
+
+    return models.Review(make_review(generated=True, security_findings=[BLOCKING_FINDING], base_sha=base))
+
+
 def test_prior_blocking_findings_are_carried_into_the_next_security_review() -> None:
     """A reviewer may not clear its own block by regenerating and omitting the finding — but
     nothing passed the previous findings in, so the check had nothing to compare against."""
-    from tests._support import make_review
+    assert review._prior_blocking_ids(_stored_review(BASE_A), BASE_A) == ["SEC-001"]
+    assert review._prior_blocking_ids(None, BASE_A) == []
 
-    finding = {
-        "id": "SEC-001",
-        "severity": "high",
-        "category": "credential_exposure",
-        "attack_scenario": "the reviewer container reaches a host credential",
-        "blocking": True,
-    }
-    stored = models.Review(make_review(generated=True, security_findings=[finding]))
-    assert review._prior_blocking_ids(stored) == ["SEC-001"]
-    assert review._prior_blocking_ids(None) == []
+
+def test_a_blocking_finding_does_not_follow_the_review_onto_a_different_base() -> None:
+    """A finding is a statement about a change. Change the base and it is about something else.
+
+    Carried by id alone, a finding taken against base A kept blocking a regeneration against
+    base B — a different diff, sometimes not even containing the code the finding named — and the
+    only way past it was for the reviewer to re-assert something it could no longer see.
+    """
+    assert review._prior_blocking_ids(_stored_review(BASE_A), BASE_B) == []
+    # A review that never recorded a base cannot claim to be about this one either.
+    assert review._prior_blocking_ids(_stored_review(""), BASE_A) == []
 
 
 # --- the pipeline's shape -----------------------------------------------------
@@ -275,3 +370,59 @@ def test_the_review_is_the_same_document_whatever_the_stages_race(review_repo: P
     for machine in (first, second):
         machine["binding"].pop("generated_at", None)
     assert first == second
+
+
+# --- what the reviewers are actually handed ------------------------------------
+
+_LOCKFILE_DIFF = """diff --git a/src/api.py b/src/api.py
+index 1111111..2222222 100644
+--- a/src/api.py
++++ b/src/api.py
+@@ -1,2 +1,3 @@
+ def handle():
++    validate(request)
+     return ok()
+diff --git a/uv.lock b/uv.lock
+index 3333333..4444444 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1,4 +1,4 @@
+-version = "1"
+-name = "a"
++version = "2"
++name = "b"
+"""
+
+
+def test_a_lockfiles_body_is_withheld_and_the_code_is_not() -> None:
+    """Eight hundred lines saying "the dependencies moved" bury the twelve that say anything.
+
+    Redaction, not summarisation: nothing is described or interpreted, and what replaces the hunk
+    is the fact that it was there and how big it was.
+    """
+    files = diff_facts.parse_diff(_LOCKFILE_DIFF)
+    folded, paths = review.fold_mechanical(_LOCKFILE_DIFF, files)
+
+    assert paths == ["uv.lock"]
+    assert "validate(request)" in folded, "the hand-written change must survive intact"
+    assert 'version = "2"' not in folded, "the lockfile body was not withheld"
+    assert "uv.lock" in folded, "the reader still has to be told the lockfile changed"
+    assert "line(s) of mechanical change, body withheld" in folded
+
+
+def test_a_change_with_nothing_mechanical_is_passed_through_untouched() -> None:
+    plain = "diff --git a/src/api.py b/src/api.py\n@@ -1 +1 @@\n-a\n+b\n"
+    assert review.fold_mechanical(plain, diff_facts.parse_diff(plain)) == (plain, [])
+
+
+def test_the_coverage_manifest_still_reads_the_whole_diff() -> None:
+    """The honesty property the folding must not touch.
+
+    What the manifest measures is how much of the change could be analysed; folding a file before
+    counting it would be measuring the fold. A dependency change goes on making the coverage
+    `insufficient` for exactly the reason it always did.
+    """
+    facts = diff_facts.analyze(_LOCKFILE_DIFF)
+    manifest = facts.coverage.to_manifest()
+    assert manifest["coverage_status"] == "insufficient"
+    assert manifest["dependency_semantics_analyzed"] is False

@@ -152,6 +152,15 @@ def next_action(
             reason="needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve gate 3.",
             also=("rein dag --render",),
         )
+    # 4b. A task waiting on evidence nothing here can produce. Re-running the build cannot move
+    # it, so recommending one would send a person round a loop that has already finished.
+    if counts is not None and counts.get("awaiting-evidence", 0) > 0:
+        return Recommendation(
+            command="rein evidence show",
+            kind="evidence",
+            reason="tasks are waiting on acceptance evidence this loop cannot obtain; observe it and record it "
+            "with `rein evidence record`.",
+        )
     # 5. Sandboxing is a precondition for running anything, so it precedes the phase rows.
     if unsandboxed_profiles:
         return Recommendation(
@@ -365,7 +374,20 @@ def pending_decision(
 PENDING_SEVERITY_ORDER: tuple[str, ...] = ("blocking", "attention", "info")
 
 #: Task statuses that a human, not the loop, has to move.
-_STUCK_TASK_STATUS: dict[str, str] = {"needs-revision": "task_revision", "blocked": "task_blocked"}
+_STUCK_TASK_STATUS: dict[str, str] = {
+    "needs-revision": "task_revision",
+    "blocked": "task_blocked",
+    "awaiting-evidence": "task_awaiting_evidence",
+}
+
+#: What each stuck status actually asks of the person reading the board. Three statuses, three
+#: different asks — pointing all of them at the same command would be the board saying "something
+#: is wrong" and nothing more.
+_STUCK_TASK_ACTION: dict[str, str] = {
+    "task_revision": "/tasks",
+    "task_blocked": "rein dag --render",
+    "task_awaiting_evidence": "rein evidence show",
+}
 
 
 def _pending_item(severity: str, kind: str, subject: str, headline: str, action: str) -> dict[str, str]:
@@ -469,7 +491,7 @@ def pending_queue(
                 kind,
                 task_id,
                 f"{task_id} is {row.get('status')}: {row.get('title')}",
-                "/tasks" if kind == "task_revision" else "rein dag --render",
+                _STUCK_TASK_ACTION[kind],
             )
         )
     # Warnings are deliberately absent: a warning is a diagnostic about reading the repository,

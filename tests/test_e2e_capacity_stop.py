@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -78,7 +79,7 @@ def implementer_writing(root: Path, *, stop_on: str = "") -> object:
     return _run
 
 
-def status_of(repo: repo_mod.Repo, task_id: str) -> dict[str, object]:
+def status_of(repo: repo_mod.Repo, task_id: str) -> dict[str, Any]:
     raw = store_mod.Store(repo).read_raw("state")
     assert raw is not None
     return dict(raw["tasks"].get(task_id, {}))
@@ -104,7 +105,11 @@ def test_a_session_limit_stops_the_run_without_losing_the_batch_or_the_work(
     # because that is what the next run finalizes and salvages.
     stopped = status_of(repo, "T-002")
     assert stopped["status"] == "todo"
-    assert "handoff" not in stopped  # no retry budget was spent, so none was written down
+    # No retry budget was spent, so nothing that is a *verdict* about this task was written down —
+    # while the reason the machine stopped is kept, in the keys that are diagnostics.
+    handoff = stopped.get("handoff", {})
+    assert not {"retries_left", "failed_step", "failure_summary"} & set(handoff)
+    assert "session limit" in handoff["last_fault"]["output_tail"]
     assert (repo.root / ".worktrees" / "T-002" / "T-002.py").exists()
 
     events = [e.event for e in store_mod.Store(repo).read_events()]

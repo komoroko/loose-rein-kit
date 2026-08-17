@@ -799,3 +799,78 @@ def test_a_retryable_stop_still_within_the_window_stays_informational(tmp_path: 
     repo = healthy(tmp_path, events=aborted_chain_stale(0.1))
     results = doctor.check_last_run(repo)
     assert [f.level for f in results] == ["INFO"]
+
+
+# --- what the *plan* needs, versus what the config declares ----------------------
+
+
+def test_an_undeclared_independence_pair_is_a_warning_until_a_critical_claim_needs_it() -> None:
+    """Independence is required for a *critical* review, and for one pair of roles only.
+
+    Reporting an unset pair as a FAIL regardless of the plan is what made the whole thing read as
+    "the implementer and the reviewer must be different models" — on a template whose plan has no
+    claims in it at all, and where those two roles are not the pair in question.
+    """
+    config = make_config()
+    for role in ("actual_extractor", "comparator"):
+        config["agents"][role].pop("independence_group", None)  # type: ignore[index]
+
+    results = doctor.check_independence(models.Config(config), models.Plan(make_plan()))
+    assert [f.level for f in results] == ["WARN"]
+    assert "No claim in this plan is `critical`" in results[0].message
+
+
+def test_an_undeclared_independence_pair_fails_once_a_critical_claim_exists() -> None:
+    config = make_config()
+    for role in ("actual_extractor", "comparator"):
+        config["agents"][role].pop("independence_group", None)  # type: ignore[index]
+    plan = make_plan(claims=[{"id": "C-001", "statement": "it holds", "risk": "critical"}])
+
+    results = doctor.check_independence(models.Config(config), models.Plan(plan))
+    assert [f.level for f in results] == ["FAIL"]
+
+
+def test_a_shared_group_stays_a_failure_whatever_the_plan_says() -> None:
+    """A plan change cannot make one group into two: that is a configuration, not a judgement."""
+    config = make_config()
+    config["agents"]["comparator"]["independence_group"] = "claude/opus"  # type: ignore[index]
+    results = doctor.check_independence(models.Config(config), models.Plan(make_plan()))
+    assert results[0].level == "FAIL"
+
+
+# --- the adapter capability record -----------------------------------------------
+
+
+def test_a_self_sandboxing_adapter_inside_a_container_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The double isolation that surfaced as "the task changed nothing".
+
+    `codex exec` sandboxes itself; inside a container that inner sandbox needs kernel features
+    the outer one dropped, so it fails exactly where the agent writes. The symptom points nowhere
+    near the cause, which is the whole reason this has to be said out loud.
+    """
+    monkeypatch.setattr(doctor, "running_containerized", lambda: True)
+    config = make_config()
+    config["agents"]["implementer"]["adapter"] = "codex"  # type: ignore[index]
+
+    results = doctor.check_nested_sandbox(models.Config(config))
+    assert [f.level for f in results] == ["WARN"]
+    assert "establishes its own sandbox" in results[0].message
+
+
+def test_no_nested_sandbox_finding_on_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(doctor, "running_containerized", lambda: False)
+    config = make_config()
+    config["agents"]["implementer"]["adapter"] = "codex"  # type: ignore[index]
+    assert doctor.check_nested_sandbox(models.Config(config)) == []
+
+
+def test_an_adapter_that_cannot_resume_says_what_that_costs() -> None:
+    """Not a defect — it is what the CLI offers — but it was invisible, and it is the largest
+    avoidable cost in a long build."""
+    config = make_config()
+    config["agents"]["implementer"]["adapter"] = "codex"  # type: ignore[index]
+    results = doctor.check_retry_continuity(models.Config(config))
+    assert [f.level for f in results] == ["INFO"]
+    assert "fresh launch" in results[0].message
+
+    assert doctor.check_retry_continuity(models.Config(make_config()))[0].level == "PASS"

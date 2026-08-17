@@ -235,6 +235,84 @@ def test_comparator_accepts_a_clean_comparison() -> None:
     assert result.claims[0]["claim_id"] == "C-001"
 
 
+def _extra(**over: Any) -> dict[str, Any]:
+    base = {
+        "id": "EXTRA-001",
+        "category": "retry_timeout_fallback",
+        "risk": "medium",
+        "grounded": False,
+        "blocking": False,
+        "actual_statement_ids": ["AST-001"],
+    }
+    return {**base, **over}
+
+
+def test_comparator_carries_the_extra_behaviors_it_found() -> None:
+    payload = {"claims": [], "extra_behaviors": [_extra()]}
+    result = conformance.run_comparator(
+        _comparator_request(),
+        fake(payload),
+        repo=repo_mod.Repo(Path("/x")),
+        commit="HEAD",
+        actual_statement_ids=["AST-001"],
+        known_ids=[],
+        effective_risk="high",
+        independence=_DISTINCT,
+    )
+    assert [e["id"] for e in result.extra_behaviors] == ["EXTRA-001"]
+
+
+def test_an_extra_behavior_must_name_the_code_it_was_read_from() -> None:
+    """Unanchored, it is the Comparator describing code nobody read.
+
+    No claim accounts for an extra behaviour — that is what makes it extra — so the plan cannot
+    check the citation. The Actual is the only thing left that can.
+    """
+    payload = {"claims": [], "extra_behaviors": [_extra(actual_statement_ids=[])]}
+    with pytest.raises(conformance.ComparatorError, match="names no Actual Statement"):
+        conformance.run_comparator(
+            _comparator_request(),
+            fake(payload),
+            repo=repo_mod.Repo(Path("/x")),
+            commit="HEAD",
+            actual_statement_ids=["AST-001"],
+            known_ids=[],
+            effective_risk="high",
+            independence=_DISTINCT,
+        )
+
+
+def test_an_extra_behavior_cannot_cite_a_statement_the_extractor_never_produced() -> None:
+    payload = {"claims": [], "extra_behaviors": [_extra(actual_statement_ids=["AST-404"])]}
+    with pytest.raises(conformance.ComparatorError, match="never produced"):
+        conformance.run_comparator(
+            _comparator_request(),
+            fake(payload),
+            repo=repo_mod.Repo(Path("/x")),
+            commit="HEAD",
+            actual_statement_ids=["AST-001"],
+            known_ids=[],
+            effective_risk="high",
+            independence=_DISTINCT,
+        )
+
+
+def test_an_unclassified_extra_behavior_is_refused_not_defaulted() -> None:
+    """There is no honest neutral category, so filing it under an invented one is worse than refusing."""
+    payload = {"claims": [], "extra_behaviors": [_extra(category="it_seemed_useful")]}
+    with pytest.raises(conformance.ComparatorError, match="not one this release classifies"):
+        conformance.run_comparator(
+            _comparator_request(),
+            fake(payload),
+            repo=repo_mod.Repo(Path("/x")),
+            commit="HEAD",
+            actual_statement_ids=["AST-001"],
+            known_ids=[],
+            effective_risk="high",
+            independence=_DISTINCT,
+        )
+
+
 # --- security reviewer (plan §12.5) -------------------------------------------
 
 
@@ -252,9 +330,36 @@ def test_security_review_refuses_to_drop_a_prior_blocking_finding() -> None:
         )
 
 
+def test_security_review_refuses_to_downgrade_a_prior_blocking_finding() -> None:
+    """The wider door the id-set check left open.
+
+    "Did the review drop the finding?" was answered by comparing id sets, and every returned
+    finding joined that set regardless of its `blocking` value. So re-listing `SEC-1` as
+    non-blocking satisfied the check exactly as well as fixing it did — which is the one thing a
+    reviewer is not allowed to do to its own block.
+    """
+    payload = {
+        "findings": [{"id": "SEC-1", "severity": "high", "attack_scenario": "reaches a host cred", "blocking": False}]
+    }
+    with pytest.raises(security_review.SecurityReviewError, match="cannot clear a blocking flag"):
+        security_review.run_security_review(
+            {}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD", prior_blocking_ids=["SEC-1"]
+        )
+
+
 def test_security_review_accepts_a_well_formed_finding() -> None:
     payload = {
         "findings": [{"id": "SEC-1", "severity": "high", "attack_scenario": "reaches a host cred", "blocking": True}]
     }
     result = security_review.run_security_review({}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD")
     assert len(result.blocking) == 1
+
+
+def test_a_finding_records_the_change_it_is_a_statement_about() -> None:
+    """A finding with no base is a finding that cannot be told apart from one about other code."""
+    payload = {
+        "findings": [{"id": "SEC-1", "severity": "high", "attack_scenario": "reaches a host cred", "blocking": True}]
+    }
+    request = {"trusted_base_sha": "a" * 40, "subject_head_sha": "b" * 40}
+    result = security_review.run_security_review(request, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD")
+    assert result.findings[0]["first_seen"] == {"trusted_base_sha": "a" * 40, "subject_head_sha": "b" * 40}

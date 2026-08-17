@@ -90,6 +90,17 @@
         "toolchain_digest": {
           "$ref": "#/$defs/digest"
         },
+        "sources": {
+          "description": "The prose the implementation phase reads — the task tickets and the design/requirements documents — digested at the gate ③ freeze, keyed by repo-relative path. plan.yaml is frozen with a digest; the documents an implementer is actually sent to read were bound to nothing, so a ticket edited after the freeze changed what got built with no record that it had. Worse, a parallel leaf is cut from the work branch's tip and reads only what is committed, so an *uncommitted* edit changed nothing at all and said nothing either.",
+          "type": "object",
+          "maxProperties": 1024,
+          "propertyNames": {
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/digest"
+          }
+        },
         "frozen_at": {
           "type": "string",
           "maxLength": 64
@@ -173,13 +184,46 @@
         ],
         "properties": {
           "status": {
+            "description": "`awaiting-evidence` is neither a failure nor a completion: the task's acceptance criteria include evidence this loop cannot obtain (a staging check, a device, a person), so nothing has judged it. It sits off the frontier until a human records the observation with `rein evidence record`.",
             "enum": [
               "todo",
               "in-progress",
               "blocked",
               "needs-revision",
+              "awaiting-evidence",
               "done"
             ]
+          },
+          "acceptance": {
+            "description": "Acceptance criteria established outside this loop, each bound to the tree it was observed against — so an observation cannot outlive the code it was about, the same rule every other piece of evidence here follows. Written by `rein evidence record` from the canonical checkout only: an agent that can record its own acceptance has not been checked by anyone.",
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "tree"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^A-[0-9]+$"
+                },
+                "tree": {
+                  "$ref": "#/$defs/digest"
+                },
+                "note": {
+                  "description": "What was observed, and where. A human reads this beside the gate ④ decision.",
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "recorded_at": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              }
+            }
           },
           "attempts": {
             "type": "integer",
@@ -193,8 +237,91 @@
             "type": "string",
             "maxLength": 1000
           },
+          "evidence": {
+            "description": "Why this task is done — the auditable half of the evidence ledger. `done` used to mean \"the implementer process exited and the gate was green\", which a task that changed nothing satisfied. It now means \"these steps were established green against exactly this tree\", and the tree is a content fingerprint, so a verdict cannot outlive the code it was about. Written in the same transaction that marks the task done; the reuse half of the ledger is a disposable cache outside the working tree and is never consulted for this.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "tree": {
+                "description": "The content fingerprint the verdict was reached on (HEAD + tracked modifications + untracked blobs).",
+                "$ref": "#/$defs/digest"
+              },
+              "base": {
+                "description": "What that tree is a change to.",
+                "$ref": "#/$defs/commit"
+              },
+              "steps": {
+                "description": "The quality-gate steps established green against that tree, in the order they ran.",
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "maxLength": 64
+                    },
+                    "image": {
+                      "description": "The pinned image the step ran in — \"make test was green\" is not a fact about the code alone.",
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "reused": {
+                      "description": "True when the ledger already held this exact fact and the step was not re-run.",
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "acceptance": {
+                "description": "The task's own acceptance criteria established against that tree, and how each one was.",
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "id"
+                  ],
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^A-[0-9]+$"
+                    },
+                    "kind": {
+                      "enum": [
+                        "command",
+                        "artifact",
+                        "external"
+                      ]
+                    },
+                    "reused": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              },
+              "reported": {
+                "description": "What the implementer said about its own work, before anything was checked. Kept beside the verified facts rather than instead of them.",
+                "enum": [
+                  "implemented",
+                  "blocked",
+                  "needs-revision",
+                  "none"
+                ]
+              },
+              "updated_at": {
+                "type": "string",
+                "maxLength": 64
+              }
+            }
+          },
           "handoff": {
-            "description": "What the next attempt at this task inherits from the interrupted one. The implementer's own agent session dies with the terminal that ran it, so this — not a session id — is what survives a crash: which gate step failed, what it said, how much retry budget is actually left, and where the preserved work-in-progress went.",
+            "description": "What the next attempt at this task inherits from the interrupted one. The implementer's own agent session dies with the terminal that ran it, so this — not a session id — is what survives a crash: which gate step failed, what it said, how much retry budget is actually left, where the preserved work-in-progress went, and what the last agent launch actually said before it stopped.",
             "type": "object",
             "additionalProperties": false,
             "properties": {
@@ -230,6 +357,128 @@
                   "restored",
                   "conflict"
                 ]
+              },
+              "report": {
+                "description": "What the last implementer said, in its own words, through `rein report`. A claim, not a verdict: the loop checks `touched` against the real diff and treats a disagreement as a finding. Its value is diagnostic — an implementer that stopped because its own sandbox refused to let it write says so here, instead of the run degrading to \"the tree did not change\" with no reason attached.",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "outcome": {
+                    "enum": [
+                      "implemented",
+                      "blocked",
+                      "needs-revision"
+                    ]
+                  },
+                  "summary": {
+                    "type": "string",
+                    "maxLength": 2000
+                  },
+                  "touched": {
+                    "description": "The paths the implementer says it changed.",
+                    "type": "array",
+                    "maxItems": 128,
+                    "items": {
+                      "type": "string",
+                      "maxLength": 512
+                    }
+                  },
+                  "at": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                }
+              },
+              "review": {
+                "description": "What the independent reviewer said about the last attempt. Carried so the next launch reads it instead of the reviewer re-deriving the same objection, and so `consider` findings — which stop nothing — still reach the human at gate ④ rather than dying with the session that produced them.",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "findings": {
+                    "type": "array",
+                    "maxItems": 50,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "severity": {
+                          "enum": [
+                            "must_fix",
+                            "consider"
+                          ]
+                        },
+                        "statement": {
+                          "type": "string",
+                          "maxLength": 2000
+                        },
+                        "anchor": {
+                          "type": "string",
+                          "maxLength": 512
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "last_agent": {
+                "description": "Diagnostics from the last agent launch for this task — never a verdict about it. The loop used to discard a successful launch's output entirely, so an implementer that reported \"blocked: my sandbox will not let me write\" reached the human as nothing at all.",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "role": {
+                    "type": "string",
+                    "maxLength": 64
+                  },
+                  "adapter": {
+                    "type": "string",
+                    "maxLength": 64
+                  },
+                  "rc": {
+                    "type": "integer",
+                    "minimum": -256,
+                    "maximum": 256
+                  },
+                  "session": {
+                    "type": "string",
+                    "maxLength": 128
+                  },
+                  "output_tail": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "at": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                }
+              },
+              "last_fault": {
+                "description": "The last environment fault this task hit. Recorded precisely because it is *not* a verdict: no status changes and no retry budget is spent, so without this the reason would exist only in a terminal that has since closed.",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "maxLength": 64
+                  },
+                  "where": {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  "rc": {
+                    "type": "integer",
+                    "minimum": -256,
+                    "maximum": 256
+                  },
+                  "output_tail": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "at": {
+                    "type": "string",
+                    "maxLength": 64
+                  }
+                }
               },
               "updated_at": {
                 "type": "string",

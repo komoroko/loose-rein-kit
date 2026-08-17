@@ -30,6 +30,7 @@
     },
     "claimId": { "type": "string", "pattern": "^C-[0-9]{3,}$" },
     "taskId": { "type": "string", "pattern": "^T-[0-9]{3,}$" },
+    "acceptanceId": { "type": "string", "pattern": "^A-[0-9]+$" },
     "artifactRef": {
       "type": "object",
       "additionalProperties": false,
@@ -96,6 +97,44 @@
           "properties": {
             "include": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/repoPath" } },
             "exclude": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/repoPath" } }
+          }
+        },
+        "acceptance": {
+          "description": "This task's own bar, in a form something can check. Acceptance criteria used to live only as markdown checkboxes in `docs/tasks/T-NNN.md`, which nothing parsed — so 'the acceptance criteria are met' was an assertion by the agent that wrote the code. Stating them here does NOT let a task pick its own quality gate: the shared DoD in config.yaml still runs, unchanged, and this list is frozen by a human at gate ③ exactly like everything else in the plan.",
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/acceptance" }
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "statement"],
+      "properties": {
+        "id": { "$ref": "#/$defs/acceptanceId" },
+        "statement": {
+          "description": "One criterion, stated so that it could be false.",
+          "$ref": "#/$defs/text"
+        },
+        "evidence": {
+          "description": "How this criterion is established. Absent means it is prose only — most criteria are, and that is honest; it simply contributes no evidence and is left to the gate ④ review.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": {
+              "description": "`command` runs an argv in a sandboxed profile and is decided by exit status. `artifact` requires the named paths to exist. `external` is evidence this loop cannot obtain — a staging check, a device, a person — so a task carrying one reaches `awaiting-evidence` rather than `done`, and a human records the observation with `rein evidence record`.",
+              "enum": ["command", "artifact", "external"]
+            },
+            "command": {
+              "description": "An argv array, never a shell string — the same rule the quality gate follows, for the same reason.",
+              "type": "array",
+              "maxItems": 32,
+              "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+            },
+            "executor_profile": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "paths": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/repoPath" } }
           }
         }
       }

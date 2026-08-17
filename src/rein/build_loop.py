@@ -56,7 +56,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -68,7 +68,10 @@ from rein import (
     common,
     control_plane,
     dag,
+    digests,
+    dossier,
     event_chain,
+    evidence,
     executors,
     faults,
     gate_guard,
@@ -124,27 +127,77 @@ def _worktree_common_git_dir(checkout: Path) -> Path | None:
         return None
 
 
-#: Adapter name → the argv that launches it headless, with the prompt appended last. An interim
-#: registry: PR-D replaces it with the executor profiles, which run the same adapters inside a
-#: sandbox rather than on the host.
-ADAPTERS: dict[str, tuple[str, ...]] = {
-    "claude": ("claude", "-p"),
-    "codex": ("codex", "exec"),
-    "gemini": ("gemini", "-p"),
+@dataclass(frozen=True)
+class Adapter:
+    """What one agent CLI can do, as a declaration rather than as branches spread through the loop.
+
+    This started as two hard-coded dicts and one `if adapter == "claude"`, and every one of them
+    was load-bearing in a way nothing could see from outside. The write flags decided whether an
+    implementer could change a byte; the claude test decided whether a retry re-read the whole
+    ticket from cold; and nothing recorded that `codex` brings its own process sandbox — which is
+    what fails, unfixably, when `rein` is itself already running inside a container.
+
+    Making these fields lets `doctor` reason about the combination instead of the operator
+    discovering it as a task that mysteriously changed nothing.
+    """
+
+    name: str
+    #: How to launch it headless. The prompt is appended as the last argv element.
+    argv: tuple[str, ...]
+    #: What makes it able to change the tree. Empty when it can already. `codex exec` runs
+    #: read-only unless told otherwise, so without this every task produced an empty diff and
+    #: nothing said why. The review transport in `review.py` deliberately never gets these — a
+    #: reviewer that cannot write is the point.
+    write_flags: tuple[str, ...] = ()
+    #: How to stamp a launch with a session id, and how to resume that id. Both empty means the
+    #: CLI gets a fresh launch per retry: it re-reads its ticket, its design slice and the code
+    #: from cold every time, which is the single largest avoidable cost in a long build.
+    #: `codex` is empty on purpose and not for lack of a resume verb — it has one, but it resumes
+    #: *the last session*, and with `max_parallel` leaves in flight there is no way to say which
+    #: session that is. Guessing would hand one leaf another leaf's context.
+    session_flags: tuple[str, ...] = ()
+    resume_flags: tuple[str, ...] = ()
+    #: Whether the CLI establishes its own process isolation (seccomp/landlock/bwrap) around the
+    #: work it does. Two nested sandboxes is not twice as safe: the inner one needs kernel
+    #: features the outer one has already dropped, and it fails at the point where the agent tries
+    #: to write, with a message that reaches nobody.
+    own_sandbox: bool = False
+
+    @property
+    def resumable(self) -> bool:
+        return bool(self.session_flags and self.resume_flags)
+
+
+#: Every agent CLI this release knows how to launch.
+ADAPTER_TABLE: dict[str, Adapter] = {
+    "claude": Adapter(
+        name="claude",
+        argv=("claude", "-p"),
+        session_flags=("--session-id",),
+        resume_flags=("--resume",),
+    ),
+    "codex": Adapter(
+        name="codex",
+        argv=("codex", "exec"),
+        write_flags=("--sandbox", "workspace-write"),
+        own_sandbox=True,
+    ),
+    "gemini": Adapter(name="gemini", argv=("gemini", "-p")),
 }
 
-#: Flags added only to the launches that are *expected* to change the tree. `codex exec` runs in a
-#: read-only sandbox unless told otherwise, so the implementer and the agent gate step could not
-#: write a byte — the loop would start, every task would produce an empty diff, and nothing would
-#: say why. Stating the level explicitly is right under either default.
-#: The review transport in `review.py` deliberately does not get these: a reviewer that cannot
-#: write is the point, not an oversight.
-WRITE_FLAGS: dict[str, tuple[str, ...]] = {"codex": ("--sandbox", "workspace-write")}
+#: Adapter name → launch argv. Kept because most callers want only this.
+ADAPTERS: dict[str, tuple[str, ...]] = {name: a.argv for name, a in ADAPTER_TABLE.items()}
+
+
+def adapter_for(argv: Sequence[str]) -> Adapter | None:
+    """The capability record of whatever CLI `argv` launches, or None for an unknown one."""
+    return ADAPTER_TABLE.get(argv[0]) if argv else None
 
 
 def write_flags(argv: tuple[str, ...]) -> tuple[str, ...]:
     """The write-enabling flags for the CLI `argv` launches, keyed on the CLI's own name."""
-    return WRITE_FLAGS.get(argv[0], ()) if argv else ()
+    adapter = adapter_for(argv)
+    return adapter.write_flags if adapter else ()
 
 
 @dataclass(frozen=True)
@@ -180,6 +233,9 @@ class GateStep:
     #: task, unconditionally — frozen at gate 3 alongside the rest of config.yaml, never a knob
     #: a task's own ticket sets (`models.GateStep.matches_paths`).
     paths: tuple[str, ...] = ()
+    #: Where this step runs: `task`, `integration`, or `both`. Never "whether" — every configured
+    #: step still runs; this is how often the same confidence gets bought.
+    stage: str = "both"
 
     @property
     def runnable(self) -> bool:
@@ -248,6 +304,7 @@ class Config:
                 # `agent_role` here; resolving it is what makes the declaration true.
                 agent_argv=cls._argv_for(config, step.agent_role) if step.kind == "agent" and step.agent_role else (),
                 paths=step.paths,
+                stage=step.stage,
             )
             for step in config.quality_gate
         )
@@ -299,21 +356,53 @@ def build_lock(repo: repo_mod.Repo) -> store_mod.FileLock:
 _COMMIT_RE = re.compile(r"^[0-9a-f]{7,64}$")
 
 
-def set_task_status(repo: repo_mod.Repo, task_id: str, status: str, *, note: str = "", commit: str = "") -> None:
+def set_task_status(
+    repo: repo_mod.Repo,
+    task_id: str,
+    status: str,
+    *,
+    note: str = "",
+    commit: str = "",
+    evidence: Mapping[str, Any] | None = None,
+    handoff: Mapping[str, Any] | None = None,
+) -> None:
     """Write one task's status and the event that explains it, in one transaction.
 
     `commit` is the work-branch commit that landed the task — recorded as `completed_commit` and
     carried in the same event, so "which commit closed T-NNN" is answerable from either the SSOT
     or the log without a second event to count twice.
 
+    `evidence` is what makes a `done` mean anything: the content fingerprint the verdict was
+    reached on and the gate steps established green against it. It is written in this same
+    transaction rather than a later one, so there is no window in which a task is done and
+    nothing says on what.
+
+    `handoff` is a diagnostic patch riding along — what the last agent launch said, or the fault
+    that stopped it. It travels with a status write rather than getting a write of its own,
+    because a transaction here must record *why*, and "an agent produced some output" is not a
+    reason a hash-chained log should carry a line for.
+
     Retried on a lost race with a leaf writing its own task entry through the control plane.
     """
     if status not in models.TASK_STATUS_VALUES:
         raise ValueError(f"unknown task status {status!r}")
-    store_mod.retry_on_stale(lambda: _set_task_status_once(repo, task_id, status, note=note, commit=commit))
+    store_mod.retry_on_stale(
+        lambda: _set_task_status_once(
+            repo, task_id, status, note=note, commit=commit, evidence=evidence or {}, handoff=handoff or {}
+        )
+    )
 
 
-def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, note: str, commit: str) -> None:
+def _set_task_status_once(
+    repo: repo_mod.Repo,
+    task_id: str,
+    status: str,
+    *,
+    note: str,
+    commit: str,
+    evidence: Mapping[str, Any],
+    handoff: Mapping[str, Any],
+) -> None:
     store = store_mod.Store(repo)
     state = store.read_state()
     if state is None:
@@ -328,10 +417,23 @@ def _set_task_status_once(repo: repo_mod.Repo, task_id: str, status: str, *, not
     if status == "in-progress":
         attempts += 1
     merged = {**entry, "status": status, "attempts": attempts, "note": note, "completed_commit": landed}
-    if status == "done":
-        # A finished task inherits nothing: keeping the handoff would hand the next cycle a
-        # failure summary and a salvage branch for work that has already landed.
+    if status in {"done", "awaiting-evidence"}:
+        # Both mean the same thing about the code — the whole DoD was established against this
+        # tree — and differ only in whether an observation nobody here could make is outstanding.
+        # So both carry the record, and a promotion from one to the other keeps the one already
+        # written rather than needing the run that established it to still be alive.
         merged.pop("handoff", None)
+        previous = entry.get("evidence")
+        carried: Mapping[str, Any] = evidence or (previous if isinstance(previous, dict) else {})
+        merged["evidence"] = {**dict(carried), "updated_at": event_chain.now_iso()}
+    else:
+        # The record says why this task *is* done. A task that leaves `done` has no such record,
+        # the same reason `completed_commit` is dropped rather than merged.
+        merged.pop("evidence", None)
+        if handoff:
+            previous = entry.get("handoff")
+            carried = dict(previous) if isinstance(previous, dict) else {}
+            merged["handoff"] = {**carried, **dict(handoff), "updated_at": event_chain.now_iso()}
     # `completed_commit` is set unconditionally above rather than merged, so a task leaving `done`
     # loses it: the field says which commit *completed* the task, and a task sent back to todo or
     # needs-revision has none. The event log keeps the earlier one.
@@ -428,6 +530,47 @@ def record_salvage(repo: repo_mod.Repo, task_id: str, *, branch: str, salvage_st
     )
 
 
+def agent_launch_note(*, role: str, adapter: str, rc: int, output: str, session: str = "") -> dict[str, Any]:
+    """What the last agent launch actually said, shaped for `handoff.last_agent`.
+
+    The loop used to throw a successful launch's output away the moment it returned, which is how
+    an implementer that ended with *"bwrap: setting up uid map: Permission denied"* reached the
+    operator as a task that simply changed nothing. The tail is kept rather than the whole stream:
+    an agent's closing words are where it says what stopped it, and `state.yaml` has to stay
+    writable at exactly the moment it is carrying a failure.
+
+    A note is *carried* to the next status write rather than written on its own. A launch is not a
+    state change, and this repository has no event-less write path on purpose — so an event per
+    launch would be the alternative, in a log that deliberately never rotates.
+    """
+    return {
+        "role": role[:_HANDOFF_STEP_MAX],
+        "adapter": adapter[:_HANDOFF_STEP_MAX],
+        "rc": max(-256, min(256, rc)),
+        "session": session[:128],
+        "output_tail": output[-_HANDOFF_SUMMARY_MAX:],
+        "at": event_chain.now_iso(),
+    }
+
+
+def fault_note(fault: EnvironmentFault) -> dict[str, Any]:
+    """Why the machine stopped under a task, shaped for `handoff.last_fault`.
+
+    An environment fault reaches no verdict: no status moves to `blocked` and no retry budget is
+    spent (this module's docstring). That is right, and it used to mean the reason existed only in
+    a terminal that has since closed. Carrying it separately from `failure_summary` keeps
+    *"nobody asked this code anything"* distinguishable from *"this code failed"*, which is the
+    distinction the whole fault type exists for.
+    """
+    return {
+        "kind": fault.fault.name,
+        "where": fault.where[:200],
+        "rc": max(-256, min(256, fault.rc)),
+        "output_tail": fault.output[-_HANDOFF_SUMMARY_MAX:],
+        "at": event_chain.now_iso(),
+    }
+
+
 # Single definitions live elsewhere; the old names stay importable from here.
 summarize_failure = common.summarize_failure
 _FAILURE_MAX_LINES = common._FAILURE_MAX_LINES
@@ -520,6 +663,9 @@ class Orchestrator:
         self.root = str(self.repo.root)
         self.store = store_mod.Store(self.repo)
         self.state = self.store.read_state()
+        # The frozen Expected Model. Read once: it cannot change during a run (gate ③ froze it,
+        # and `rein guard` denies a write while it is frozen), and every dossier needs it.
+        self._plan = self.store.read_plan()
         self.cycle_id = self.state.cycle_id if self.state else ""
         self.branch = config.branch
         # The git/worktree layer (build_git.py); the runner is late-bound through _run above.
@@ -548,13 +694,119 @@ class Orchestrator:
         # environment be re-discovered max_parallel times over.
         self._launch_retries_left = config.launch_retries
         self._launch_lock = threading.Lock()
+        # The reuse half of the evidence ledger: a content-addressed cache of facts already
+        # established, outside the working tree. Off in a dry run (nothing is established) and
+        # off when the operator says so. A miss only ever costs a re-run.
+        self.ledger = evidence.Ledger.for_repo(self.repo, enabled=not dry_run and evidence.cache_enabled_by_env())
+        # What each task's gate steps were established green against, keyed by task id. Written
+        # into `state.yaml` beside the `done` it justifies — this is the auditable half.
+        self._evidence: dict[str, dict[str, Any]] = {}
+        self._evidence_lock = threading.Lock()
+        # Diagnostics waiting for a status write to ride along with: what the last agent launch
+        # said, and the last fault that stopped one. Neither is a verdict, so neither gets a
+        # transaction (and an event) of its own.
+        self._pending_diagnostics: dict[str, dict[str, Any]] = {}
+        # Which gate steps went green during the attempt this thread is running. Thread-local
+        # because leaves run concurrently and each is establishing evidence about its own tree.
+        self._local = threading.local()
+        # What this run put in front of a model, by role. Measured, not estimated — see
+        # `spend_summary`.
+        self._spent: dict[str, dict[str, int]] = {}
+        self._spend_lock = threading.Lock()
+        # Tasks whose attempt ended before the quality gate, and the status that ending calls for.
+        # The caller reads this instead of assuming every unsuccessful attempt is `blocked`: an
+        # implementer that found the *design* wrong has said `needs-revision`, and overwriting
+        # that with `blocked` would file a defect in the plan as a defect in the code.
+        self._stops: dict[str, str] = {}
+
+    def _stop_verdict(self, task_id: str) -> tuple[str, bool]:
+        """(the status this task's failed attempt calls for, whether an escalation is still owed).
+
+        An attempt stopped by `_check_implementer_output` already said why, in the right words.
+        One that ran out of a gate step's retry budget has not, and the caller escalates for it.
+        """
+        recorded = self._stops.pop(task_id, "")
+        return (recorded, False) if recorded else ("blocked", True)
+
+    @property
+    def _current_step_evidence(self) -> list[dict[str, Any]]:
+        steps = getattr(self._local, "steps", None)
+        if steps is None:
+            steps = []
+            self._local.steps = steps
+        return steps
+
+    @property
+    def _current_acceptance(self) -> list[dict[str, Any]]:
+        established = getattr(self._local, "acceptance", None)
+        if established is None:
+            established = []
+            self._local.acceptance = established
+        return established
+
+    def _spend(self, role: str, prompt_bytes: int) -> None:
+        """Count one launch's input against the role that made it."""
+        with self._spend_lock:
+            spent = self._spent.setdefault(role, {"launches": 0, "prompt_bytes": 0})
+            spent["launches"] += 1
+            spent["prompt_bytes"] += prompt_bytes
+
+    def spend_summary(self) -> str:
+        """Where this run's input went, worst first. Empty when nothing was launched.
+
+        Bytes rather than tokens because bytes are what this process can know: a token count
+        belongs to a tokenizer nobody here owns, and reporting an estimate as a measurement is the
+        habit this whole codebase is built against. The ratio is stable enough that the *shape* —
+        which role, how many launches, how much each — is the actionable part either way.
+        """
+        with self._spend_lock:
+            rows = sorted(self._spent.items(), key=lambda item: -item[1]["prompt_bytes"])
+        if not rows:
+            return ""
+        total = sum(row["prompt_bytes"] for _, row in rows)
+        parts = [f"{role} {row['prompt_bytes'] / 1024:.0f}KiB/{row['launches']}" for role, row in rows]
+        return (
+            f"prompt input: {total / 1024:.0f}KiB over {sum(r['launches'] for _, r in rows)} launches — "
+            + ", ".join(parts)
+        )
+
+    def _note_diagnostic(self, task_id: str, patch: dict[str, Any]) -> None:
+        """Hold a diagnostic until the next status write for this task carries it into the store."""
+        if self.dry_run or not task_id:
+            return
+        with self._evidence_lock:
+            self._pending_diagnostics.setdefault(task_id, {}).update(patch)
+
+    def _take_diagnostics(self, task_id: str) -> dict[str, Any]:
+        with self._evidence_lock:
+            return self._pending_diagnostics.pop(task_id, {})
 
     def _set_status(self, task_id: str, status: str, *, commit: str = "") -> None:
         if self.dry_run:
             self._sim_status[task_id] = status
             print(f"    [dry-run] {task_id} → {status}")
             return
-        set_task_status(self.repo, task_id, status, commit=commit)
+        set_task_status(
+            self.repo,
+            task_id,
+            status,
+            commit=commit,
+            evidence=self._evidence.get(task_id, {}),
+            handoff=self._take_diagnostics(task_id),
+        )
+
+    def _task_status(self, task_id: str) -> str:
+        """This task's status as the *store* has it right now — not as this process last set it.
+
+        A leaf reports through the control plane, which writes the canonical `state.yaml`; the
+        orchestrator's own in-memory picture never sees that. Re-reading is how an implementer
+        saying "blocked" reaches the loop at all.
+        """
+        if self.dry_run:
+            return self._sim_status.get(task_id, "")
+        state = self.store.read_state()
+        entry = state.raw.get("tasks", {}).get(task_id) if state is not None else None
+        return str(entry.get("status", "")) if isinstance(entry, dict) else ""
 
     # -- launching an agent (the machine's side of the boundary) --
 
@@ -566,7 +818,17 @@ class Orchestrator:
             self._launch_retries_left -= 1
             return True
 
-    def _launch(self, argv: list[str], *, cwd: str, where: str, env: dict[str, str] | None = None) -> str:
+    def _launch(
+        self,
+        argv: list[str],
+        *,
+        cwd: str,
+        where: str,
+        env: dict[str, str] | None = None,
+        task_id: str = "",
+        role: str = "",
+        session: str = "",
+    ) -> str:
         """One agent-CLI launch, retried while it is the machine that keeps failing.
 
         Returns the launch's output. Raises :class:`faults.EnvironmentFault` — never `StopLoop`
@@ -576,15 +838,29 @@ class Orchestrator:
         Capacity exhaustion skips the retries: waiting seconds cannot fix a limit that lifts in
         hours, and sitting on the build lock until it does would make the run un-restartable from
         anywhere else. It exits to the caller immediately so a supervisor can do the waiting.
+
+        Whatever the launch said is noted against `task_id` on both paths. The output used to be
+        returned and then dropped on the floor by every caller, so an agent's own account of why
+        it stopped — the single most useful sentence in the whole run — survived nowhere.
         """
         attempt = 0
+        adapter = argv[0] if argv else ""
+        # What this run actually put in front of a model, measured rather than estimated: the loop
+        # composes every prompt itself, so it is the one thing here that can be counted exactly.
+        # `review_budget` at gate ④ is measured for the same reason — a limit nobody measures is a
+        # statement of intent, and this side of the run had no number at all.
+        self._spend(role or where, sum(len(part.encode("utf-8")) for part in argv))
         while True:
             rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
+            note = agent_launch_note(role=role or where, adapter=adapter, rc=rc, output=out, session=session)
             if rc == 0:
+                self._note_diagnostic(task_id, {"last_agent": note})
                 return out
             fault = faults.classify_launch(rc, out)
             if fault is faults.Fault.ENV_PERMANENT or faults.is_capacity(out) or not self._spend_launch_retry():
-                raise EnvironmentFault(fault, where=where, rc=rc, output=out)
+                raised = EnvironmentFault(fault, where=where, rc=rc, output=out)
+                self._note_diagnostic(task_id, {"last_agent": note, "last_fault": fault_note(raised)})
+                raise raised
             delay = _LAUNCH_BACKOFF_SEC[min(attempt, len(_LAUNCH_BACKOFF_SEC) - 1)]
             print(f"    [launch] {where}: the launch failed (rc={rc}) for a machine reason; retrying in {delay:g}s")
             time.sleep(delay)
@@ -643,29 +919,109 @@ class Orchestrator:
             graph = dag.Graph.from_tasks([replace(t, status=self._sim_status.get(t.id, t.status)) for t in graph.tasks])
         return graph
 
+    # -- the dossier: what the loop already knows, handed over instead of re-derived --
+
+    def _write_dossier(self, task: dag.Task, cwd: str, base: str, role: str) -> str:
+        """Assemble this task's dossier into `cwd` and return its repo-relative path ("" in a dry run).
+
+        Written before every launch rather than once per task: the diff moves between attempts,
+        and a dossier describing the tree as it was two retries ago is worse than none.
+        """
+        if self.dry_run:
+            return ""
+        changed, diff_cmd = self._review_scope(task, cwd, base)
+        document = dossier.build(
+            task,
+            plan=self._plan,
+            repo_path=self.repo.path,
+            changed=changed,
+            diff_cmd=diff_cmd,
+            base=base,
+            history=self._history_for(task),
+            handoff=self._handoff_for(task),
+            env={
+                "role": role,
+                "task_id": task.id,
+                "run_id": self.run_id,
+                "sandbox": self._profile_for_role(role),
+                "control_plane": self.control is not None,
+            },
+        )
+        dossier.write(cwd, document)
+        return f"{dossier.RELATIVE_PATH}/{task.id}.json"
+
+    def _profile_for_role(self, role: str) -> str:
+        """The executor profile's kind for `role` — what the agent is actually running inside.
+
+        Handed to the agent so it stops having to infer its own environment from the shape of its
+        prompt, and so a `codex` told it is already inside an OCI profile can stop trying to build
+        a second sandbox around itself.
+        """
+        key = {"implementer": "implementer", "code_reviewer": "reviewer"}.get(role, "quality_gate")
+        profile = self.config.raw.profile_for(key)
+        return profile.kind if profile is not None else "host"
+
+    def _history_for(self, task: dag.Task) -> list[dict[str, Any]]:
+        """One line per past attempt: which step went red and why, oldest first.
+
+        The handoff carried the *latest* failure only, so a task on its fourth attempt arrived
+        with no memory of the three before it and could — and did — re-try the same fix. The lines
+        come out of the audit chain, which already records every one of them.
+        """
+        if self.dry_run or not self.cycle_id:
+            return []
+        try:
+            events = self.store.read_events()
+        except Exception:  # noqa: BLE001 - a damaged chain is doctor's to report, not the loop's
+            return []
+        seen: list[dict[str, Any]] = []
+        for event in events:
+            if event.event != "task_failed" or task.id not in event.subject_ids:
+                continue
+            step = str(event.detail.get("step", "")) or str(event.detail.get("kind", ""))
+            if step:
+                seen.append({"attempt": len(seen) + 1, "step": step})
+        handoff = self._handoff_for(task)
+        if seen and handoff.get("failure_summary"):
+            seen[-1]["reason"] = str(handoff["failure_summary"])[-600:]
+        return seen[-dossier.MAX_HISTORY :]
+
     # -- implementer launch and quality gate --
 
-    def _implementer_prompt(self, task: dag.Task, failure_log: str) -> str:
+    def _implementer_prompt(self, task: dag.Task, failure_log: str, dossier_path: str = "") -> str:
         return build_prompts.implementer_prompt(
             task,
             failure_log,
             gate_cmds=self.config.gate_cmds,
             has_baseline=self.repo.path("docs/05-current-state.md").exists(),
             handoff=self._handoff_for(task),
+            dossier_path=dossier_path,
         )
 
     @property
-    def _resume_capable(self) -> bool:
-        """Retry-session continuity is claude-preset-gated — deliberately no adapter layer.
+    def _implementer_adapter(self) -> Adapter | None:
+        return adapter_for(self.config.adapter_argv)
 
-        Resume flags are per-CLI (codex is a different subcommand shape; gemini/custom are
-        unverifiable), so only the known `claude -p` contract gets them; every other CLI keeps
-        today's fresh launch per retry.
+    @property
+    def _resume_capable(self) -> bool:
+        """Whether a retry can continue the implementer's own session instead of starting cold.
+
+        Read off the adapter's capability record rather than an `== "claude"` test. The
+        consequence of a `False` here is the largest avoidable cost in a long build — every retry
+        re-reads the ticket, the design slice and the code from scratch — so it belongs somewhere
+        `doctor` can see it and say so, not in a branch inside the launcher.
         """
-        return bool(self.config.adapter_argv) and self.config.adapter_argv[0] == "claude"
+        adapter = self._implementer_adapter
+        return bool(adapter and adapter.resumable)
 
     def _invoke_implementer(
-        self, task: dag.Task, cwd: str, failure_log: str, session: str = "", resume: bool = False
+        self,
+        task: dag.Task,
+        cwd: str,
+        failure_log: str,
+        session: str = "",
+        resume: bool = False,
+        base: str = "",
     ) -> None:
         """One headless implementer launch; `session`/`resume` thread retry-session continuity.
 
@@ -679,12 +1035,22 @@ class Orchestrator:
         if self.dry_run:
             print(f"    [dry-run] launch implementer (cwd={cwd}) task={task.id}")
             return
-        prompt = self._implementer_prompt(task, failure_log)
+        prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, base, "implementer"))
         where = f"{task.id}: implementer"
+        adapter = self._implementer_adapter
         flags = list(write_flags(self.config.adapter_argv))
-        flags += (["--resume", session] if resume else ["--session-id", session]) if session else []
+        if session and adapter is not None:
+            flags += [*(adapter.resume_flags if resume else adapter.session_flags), session]
         try:
-            self._launch([*self.config.adapter_argv, *flags, prompt], cwd=cwd, where=where, env=self._leaf_env(task))
+            self._launch(
+                [*self.config.adapter_argv, *flags, prompt],
+                cwd=cwd,
+                where=where,
+                env=self._leaf_env(task),
+                task_id=task.id,
+                role="implementer",
+                session=session,
+            )
             return
         except EnvironmentFault as fault:
             if not resume or not fault.retryable or faults.is_capacity(fault.output):
@@ -697,15 +1063,23 @@ class Orchestrator:
             cwd=cwd,
             where=where,
             env=self._leaf_env(task),
+            task_id=task.id,
+            role="implementer",
         )
 
-    def _leaf_env(self, task: dag.Task) -> dict[str, str] | None:
-        """The environment an implementer runs with: the control socket and a scoped token.
+    def _leaf_env(self, task: dag.Task, role: str = "implementer") -> dict[str, str] | None:
+        """The environment an implementer runs with: the control socket, a scoped token, and who it is.
 
-        Scoped to this run and this task, granting only what a leaf legitimately needs
-        (declare a decision, record a knowledge gap, report status, append an event). It can
+        The token is scoped to this run and this task, granting only what a leaf legitimately
+        needs (declare a decision, record a knowledge gap, report status, append an event). It can
         never carry `gate.approve` or its siblings — `mint` refuses to sign those, and the
         server refuses to serve them even if a token somehow claimed them.
+
+        The `REIN_*` variables say what the agent *is*. Its role, its task, and the kind of
+        executor profile it is running inside were previously things it could only infer from the
+        shape of the prompt it was handed — which is guessing, and it guessed wrong in the one
+        case that mattered: a `codex` implementer already inside an OCI profile still tried to
+        build a second sandbox around itself.
 
         None when there is no control plane (a dry run), which means the leaf inherits this
         process's environment and its `rein decision add` will refuse rather than write
@@ -724,6 +1098,10 @@ class Orchestrator:
             **os.environ,
             control_plane.SOCKET_ENV: str(self.control.socket_path),
             control_plane.TOKEN_ENV: token,
+            "REIN_ROLE": role,
+            "REIN_TASK_ID": task.id,
+            "REIN_RUN_ID": self.run_id,
+            "REIN_SANDBOX": self._profile_for_role(role),
         }
 
     @property
@@ -731,21 +1109,32 @@ class Orchestrator:
         """The gate steps actually run. All of them: the DoD has no opt-out knob."""
         return self.config.steps
 
+    def _steps_at(self, stage: str) -> tuple[GateStep, ...]:
+        """The DoD steps belonging to one stage of the run.
+
+        `stage: both` is the default and what every step has always done. Naming `task` or
+        `integration` moves *when* a step runs, never whether: a whole suite re-established from
+        scratch on each attempt of each task, and again over the join, is the same confidence
+        bought several times. An operator decides that at gate ③; no task can.
+        """
+        return tuple(step for step in self._steps_effective if step.stage in {stage, "both"})
+
     def _steps_for(self, task: dag.Task, cwd: str = "", base: str = "") -> tuple[GateStep, ...]:
-        """The gate steps for one task: the shared DoD, minus any step whose `paths:` this
+        """The gate steps for one task: this stage's DoD, minus any step whose `paths:` this
         task's diff does not touch.
 
-        Still not a knob an implementer can turn: `paths:` is frozen at gate 3 in config.yaml
-        alongside every other DoD step, not read from the task or its ticket. A step naming no
-        `paths:` — every packaged step ships this way — runs for every task exactly as before.
-        The diff is computed fresh (`_review_scope`, the same source the review prompt's scope
-        uses) so an empty/unresolved diff (a fresh worktree, dry-run, no `cwd` given) runs every
-        step rather than guessing an empty scope means nothing to check.
+        Still not a knob an implementer can turn: `paths:` and `stage:` are frozen at gate 3 in
+        config.yaml alongside every other DoD step, not read from the task or its ticket. A step
+        naming no `paths:` — every packaged step ships this way — runs for every task exactly as
+        before. The diff is computed fresh (`_review_scope`, the same source the review prompt's
+        scope uses) so an empty/unresolved diff (a fresh worktree, dry-run, no `cwd` given) runs
+        every step rather than guessing an empty scope means nothing to check.
         """
+        steps = self._steps_at("task")
         if not cwd:
-            return self._steps_effective
+            return steps
         changed, _ = self._review_scope(task, cwd, base)
-        return tuple(step for step in self._steps_effective if step.matches_paths(changed))
+        return tuple(step for step in steps if step.matches_paths(changed))
 
     def _review_scope(self, task: dag.Task, cwd: str, base: str) -> tuple[list[str], str]:
         """The changed-path list + exact diff command that scope the review step's read.
@@ -758,35 +1147,115 @@ class Orchestrator:
         if self.dry_run:
             return [], ""
         if cwd != self.root:
-            return self.ws.branch_changed_paths(self.ws.branch_for(task.id)), f"git diff {self.branch}...HEAD"
+            paths = self.ws.branch_changed_paths(self.ws.branch_for(task.id), cwd=cwd)
+            return paths, f"git diff {self.branch}...HEAD"
         if base:
             return self.ws.changed_since(base), f"git diff {base[:12]}..HEAD"
         return [], ""
 
-    def _review_prompt(self, task: dag.Task, cwd: str, base: str) -> str:
+    def _review_prompt(
+        self, task: dag.Task, cwd: str, base: str, dossier_path: str = "", findings_path: str = ""
+    ) -> str:
         changed, diff_cmd = self._review_scope(task, cwd, base)
         return build_prompts.review_prompt(
-            task, gate_cmds=self.config.gate_cmds, changed_paths=changed, diff_cmd=diff_cmd
+            task,
+            gate_cmds=self.config.gate_cmds,
+            changed_paths=changed,
+            diff_cmd=diff_cmd,
+            dossier_path=dossier_path,
+            findings_path=findings_path,
         )
 
-    def _tree_state(self, cwd: str) -> tuple[str, str]:
-        return self.ws.tree_state(cwd)
+    def _fingerprint(self, cwd: str) -> str:
+        """The content digest of the tree at `cwd` ("" when it cannot be computed)."""
+        return "" if self.dry_run else self.ws.fingerprint(cwd)
 
     def _run_agent_step(self, step: GateStep, task: dag.Task, cwd: str, base: str) -> bool:
-        """Run the review+simplify agent step headless. Returns True if it changed the tree.
+        """Run the review agent step headless. Returns True if the tree ended up changing.
+
+        **The reviewer reports; it does not repair.** It used to be launched with write access and
+        told to apply its fixes, which put judging a change and editing it away in one pair of
+        hands — and moved the tree underneath the gate, so every already-passed step had to be
+        re-run behind it. Now it writes findings to a file, the implementer resolves the `must_fix`
+        ones within this step's own retry budget, and the reviewer looks again. The extra launch
+        is the price of the separation; what it buys back is a reviewer that no longer re-runs the
+        test suite the caller runs anyway, and a tree that only one participant moves.
 
         Launched with the adapter of the role the *step* declares — not the implementer's. Those
         were the same process until this was fixed, so a reviewer configured as a second opinion
         was the same model that had just written the code.
+
+        A reviewer whose findings cannot be read is not a reviewer that found nothing: an
+        unreadable answer stops the step rather than passing it.
         """
-        before = self._tree_state(cwd)
+        role = step.agent_role or "code_reviewer"
+        before = self._fingerprint(cwd)
+        rounds = max(0, step.retries)
+        for attempt in range(rounds + 1):
+            findings = self._collect_findings(step, task, cwd, base, role)
+            self._note_diagnostic(task.id, {"review": {"findings": list(findings)}})
+            outstanding = dossier.must_fix(findings)
+            if not outstanding:
+                if findings:
+                    print(f"    [review] {task.id}: {len(findings)} finding(s), none blocking")
+                break
+            if attempt == rounds:
+                # The budget is spent and the defects stand. Reporting the step as passed here is
+                # the one thing this must never do, so it raises rather than returns.
+                raise StopLoop(
+                    f"{task.id}: the reviewer's findings were not resolved within "
+                    f"{rounds} round(s):\n{dossier.render_findings(outstanding)}"
+                )
+            print(f"    [review] {task.id}: {len(outstanding)} must-fix finding(s) → back to the implementer")
+            self._invoke_review_fixer(task, cwd, base, dossier.render_findings(outstanding))
+        after = self._fingerprint(cwd)
+        # An unknown fingerprint on either side reads as "it changed": re-running the passed steps
+        # costs time, skipping them over an unread tree costs the verdict.
+        return not before or not after or after != before
+
+    def _collect_findings(self, step: GateStep, task: dag.Task, cwd: str, base: str, role: str) -> list[dict[str, Any]]:
+        """One reviewer launch, and its findings — read from the file, never from the chatter."""
+        dossier_path = self._write_dossier(task, cwd, base, role)
+        target = dossier.findings_path(cwd, task.id)
+        target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         argv = step.agent_argv or self.config.adapter_argv
+        prompt = self._review_prompt(task, cwd, base, dossier_path, f"{dossier.RELATIVE_PATH}/{target.name}")
+        # No write flags: the reviewer's `.rein/work/` file is the only thing it needs to produce,
+        # and everything else it might touch belongs to somebody else.
         self._launch(
-            [*argv, *write_flags(argv), self._review_prompt(task, cwd, base)],
+            [*argv, prompt],
             cwd=cwd,
             where=f"{task.id}: the '{step.name}' agent step",
+            env=self._leaf_env(task, role),
+            task_id=task.id,
+            role=role,
         )
-        return self._tree_state(cwd) != before
+        if not target.exists():
+            raise StopLoop(
+                f"{task.id}: the reviewer wrote no findings file ({dossier.RELATIVE_PATH}/{target.name}). "
+                "A review that produced nothing readable is not a review that found nothing."
+            )
+        try:
+            return dossier.parse_findings(target.read_text(encoding="utf-8"))
+        except (dossier.FindingsError, OSError) as exc:
+            raise StopLoop(f"{task.id}: the reviewer's findings could not be read — {exc}") from None
+
+    def _invoke_review_fixer(self, task: dag.Task, cwd: str, base: str, findings: str) -> None:
+        dossier_path = self._write_dossier(task, cwd, base, "implementer")
+        self._launch(
+            [
+                *self.config.adapter_argv,
+                *write_flags(self.config.adapter_argv),
+                build_prompts.review_fix_prompt(
+                    task, findings, gate_cmds=self.config.gate_cmds, dossier_path=dossier_path
+                ),
+            ],
+            cwd=cwd,
+            where=f"{task.id}: the review fixer",
+            env=self._leaf_env(task),
+            task_id=task.id,
+            role="implementer",
+        )
 
     def _run_cmd_step(self, step: GateStep, cwd: str) -> str:
         """Run one cmd step in its executor profile. "" on pass, a compact failure otherwise.
@@ -807,6 +1276,12 @@ class Orchestrator:
         sandboxed profile exists to prevent.
         """
         profile = self._profile_for(step)
+        tool = self._step_tool(step, profile)
+        subject = self._fingerprint(cwd)
+        if self.ledger.hit(evidence.KIND_GATE_STEP, subject, tool):
+            print(f"    [gate] {step.name}: already green on this tree — reusing")
+            self._note_evidence(step, profile, reused=True)
+            return ""
         spec = executors.ExecutionSpec(
             command=tuple(step.command),
             profile=profile,
@@ -820,11 +1295,37 @@ class Orchestrator:
         except executors.ExecutorError as exc:
             raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
         if result.exit_code == 0:
+            # Only a green is recorded. Caching a red would let one broken afternoon stand in for
+            # a verdict on code nobody re-ran, which is the direction that costs correctness
+            # rather than time.
+            self.ledger.record(evidence.KIND_GATE_STEP, subject, tool)
+            self._note_evidence(step, profile, reused=False)
             return ""
         fault = faults.classify_step(result.exit_code, result.output)
         if fault.is_environment:
             raise EnvironmentFault(fault, where=where, rc=result.exit_code, output=result.output)
         return summarize_failure(step.display, result.exit_code, result.output)
+
+    def _step_tool(self, step: GateStep, profile: models.ExecutorProfile) -> tuple[str, ...]:
+        """The tool identity a gate step's evidence is keyed on.
+
+        The step's name and argv, plus what it ran inside. "`make test` was green" is not a fact
+        about the code alone: a different image is a different claim, and a `host` profile is a
+        claim about a machine nothing pins at all — which is exactly why it is named here rather
+        than folded into a blank.
+        """
+        where = str(profile.raw.get("image", "")) if profile.is_sandboxed else f"host:{profile.name}"
+        return (step.name, *step.command, where)
+
+    def _note_evidence(self, step: GateStep, profile: models.ExecutorProfile, *, reused: bool) -> None:
+        """Remember that this step was green, for the `evidence` block the task's `done` carries."""
+        self._current_step_evidence.append(
+            {
+                "name": step.name,
+                "image": str(profile.raw.get("image", "")) if profile.is_sandboxed else f"host:{profile.name}",
+                "reused": reused,
+            }
+        )
 
     def _profile_for(self, step: GateStep) -> models.ExecutorProfile:
         """The profile a step runs in: its own, else `executors.quality_gate_profile`, else host.
@@ -897,7 +1398,209 @@ class Orchestrator:
             if failure:
                 return step.name, failure
             passed.append(step)
+        return self._run_acceptance(task, cwd)
+
+    def _run_acceptance(self, task: dag.Task, cwd: str) -> tuple[str | None, str]:
+        """Establish the task's own acceptance criteria, after the shared DoD has passed.
+
+        Last, and only after the DoD, because the two answer different questions and the order
+        matters when one of them fails: "the code is unsound" is a more useful first sentence than
+        "the code did not do what the ticket asked", and the second is usually a consequence of
+        the first.
+
+        A criterion that runs and fails returns through the same channel a gate step does, so it
+        inherits the send-back budget and the retry machinery whole — the implementer gets told
+        which criterion, and why, exactly as it would about a red `check`. Criteria the loop
+        cannot establish (`external`) are *not* failures and are not reported here; the caller
+        finds them on the evidence record and parks the task at `awaiting-evidence`.
+        """
+        for entry in task.acceptance:
+            evidence_spec = entry.get("evidence")
+            if not isinstance(evidence_spec, dict):
+                continue  # prose only, and honest about it: gate ④ is where a human reads it
+            kind = str(evidence_spec.get("kind", ""))
+            if kind not in models.MECHANIZED_EVIDENCE_KINDS:
+                continue
+            ac_id = str(entry.get("id", "?"))
+            failure = self._establish_acceptance(task, ac_id, kind, evidence_spec, cwd)
+            if failure:
+                statement = str(entry.get("statement", ""))
+                return f"acceptance:{ac_id}", f"{ac_id} ({statement}) is not satisfied.\n{failure}"
         return None, ""
+
+    def _establish_acceptance(self, task: dag.Task, ac_id: str, kind: str, spec: Mapping[str, Any], cwd: str) -> str:
+        """One criterion. "" when established, a compact failure otherwise."""
+        subject = self._fingerprint(cwd)
+        tool = (f"{task.id}:{ac_id}", kind, *(str(p) for p in spec.get("command", spec.get("paths", []))))
+        if self.ledger.hit(evidence.KIND_ACCEPTANCE, subject, tool):
+            self._note_acceptance(ac_id, kind, reused=True)
+            return ""
+        if kind == "artifact":
+            missing = [str(p) for p in spec.get("paths", []) if not (Path(cwd) / str(p)).exists()]
+            if missing:
+                return f"these artifacts do not exist: {', '.join(missing)}"
+        else:
+            step = GateStep(
+                name=f"acceptance:{ac_id}",
+                kind="command",
+                command=tuple(str(part) for part in spec.get("command", [])),
+                executor_profile=str(spec.get("executor_profile", "")),
+            )
+            # Through the same runner as a gate step, so a criterion runs in a sandbox for the
+            # same reason a test does — it is repository-derived code either way.
+            if failure := self._run_cmd_step(step, cwd):
+                return failure
+        self.ledger.record(evidence.KIND_ACCEPTANCE, subject, tool)
+        self._note_acceptance(ac_id, kind, reused=False)
+        return ""
+
+    def _note_acceptance(self, ac_id: str, kind: str, *, reused: bool) -> None:
+        self._current_acceptance.append({"id": ac_id, "kind": kind, "reused": reused})
+
+    def _completion_status(self, task: dag.Task) -> str:
+        """`done`, or `awaiting-evidence` when a criterion nobody here can establish is still open.
+
+        Asked **after the work has landed on the work branch**, not while it sat in a worktree,
+        and that placement is the whole design. An external criterion is something a person has
+        to go and look at — a staging deployment, a device, a screen — and none of that is
+        observable about code that only exists on an unmerged leaf branch. So the code merges
+        (it passed the entire DoD; nothing about it is in question) and only the *task* waits,
+        which is enough: gate ④ cannot open while a task is not done.
+
+        It also makes the fingerprints line up. The observation a human records is about the tree
+        they can actually see — the canonical checkout — and so is this check.
+        """
+        outstanding = self._unestablished_acceptance(task)
+        if not outstanding:
+            return "done"
+        self._escalate(
+            "awaiting_evidence",
+            f"{task.id}: passed the quality gate and landed, but {', '.join(outstanding)} needs evidence this "
+            f"loop cannot obtain. Observe it, then record it with "
+            f"`rein evidence record --task {task.id} --ac <id> --note …`.",
+            task=task.id,
+        )
+        return "awaiting-evidence"
+
+    def _unestablished_acceptance(self, task: dag.Task) -> list[str]:
+        """Criteria this loop cannot establish and nobody has recorded against the current tree.
+
+        `external` says so up front: a staging check, a device, a person. The loop does not fail
+        the task for it and does not quietly round it to `done` either — both would be a claim
+        nobody made. A human closes it with `rein evidence record`, and the record is bound to a
+        tree, so it cannot outlive the code it was about.
+        """
+        if self.dry_run:
+            return []
+        external = [
+            str(entry.get("id", "?"))
+            for entry in task.acceptance
+            if isinstance(entry.get("evidence"), dict) and str(entry["evidence"].get("kind", "")) == "external"
+        ]
+        if not external:
+            return []
+        tree = self._fingerprint(self.root)
+        recorded = {
+            str(item.get("id")) for item in self._recorded_acceptance(task.id) if str(item.get("tree", "")) == tree
+        }
+        return [ac_id for ac_id in external if ac_id not in recorded]
+
+    def _recorded_acceptance(self, task_id: str) -> list[Mapping[str, Any]]:
+        """External observations a human has recorded for this task, from the canonical store."""
+        state = self.store.read_state()
+        entry = state.raw.get("tasks", {}).get(task_id) if state is not None else None
+        recorded = entry.get("acceptance") if isinstance(entry, dict) else None
+        return [item for item in recorded if isinstance(item, dict)] if isinstance(recorded, list) else []
+
+    def _record_task_evidence(self, task: dag.Task, cwd: str, base: str) -> None:
+        """Remember what this task's pass was established on, for the `done` that follows.
+
+        Written into `state.yaml` beside the status, in the same transaction, so `done` carries
+        its own justification instead of being a word somebody's process exiting produced. Steps
+        are deduplicated by name keeping the last run of each: a step re-run after an agent step
+        moved the tree was established twice, and the second one is the one that holds.
+        """
+        if self.dry_run:
+            return
+        by_name: dict[str, dict[str, Any]] = {}
+        for entry in self._current_step_evidence:
+            by_name[str(entry["name"])] = entry
+        record: dict[str, Any] = {
+            "steps": list(by_name.values()),
+            "reported": self._read_report(task).get("outcome", "none"),
+        }
+        if self._current_acceptance:
+            record["acceptance"] = list(self._current_acceptance)
+        fingerprint = self._fingerprint(cwd)
+        if fingerprint:
+            record["tree"] = fingerprint
+        if base and _COMMIT_RE.match(base):
+            record["base"] = base
+        with self._evidence_lock:
+            self._evidence[task.id] = record
+
+    def _read_report(self, task: dag.Task) -> dict[str, Any]:
+        """What the implementer said about this attempt, through `rein report`. {} when it said nothing."""
+        if self.dry_run:
+            return {}
+        report = self._handoff_for(task).get("report")
+        return dict(report) if isinstance(report, dict) else {}
+
+    def _check_implementer_output(self, task: dag.Task, cwd: str, base: str) -> tuple[str, str]:
+        """What the implementer's attempt actually produced. ("", "") when it may go to the gate.
+
+        Returns `(kind, message)` for the three ways an attempt ends without the quality gate
+        having anything to say about it — the ones the loop used to run a full DoD over, and then
+        mark `done`:
+
+          `no_implementation`  the diff is empty. Nothing was built, so a green gate is a
+                               statement about the code that was already there. This is the case
+                               that let a sandbox refusing to let an agent write pass as success.
+          `agent_blocked`      the implementer said it could not do this. Asking a reviewer to
+                               review nothing, and a test suite to confirm it, is cost with no
+                               question attached.
+          `report_mismatch`    the implementer named paths it did not change. Its account of its
+                               own work is wrong, which is a finding whatever the tests say.
+
+        The empty-diff check needs a resolved scope to mean anything: an unresolved one (dry run,
+        a serial task with no base) is read as "not known", never as "nothing" — a fail-open the
+        gate itself already takes for its `paths:` filtering.
+        """
+        report = self._read_report(task)
+        outcome = str(report.get("outcome", ""))
+        if outcome in {"blocked", "needs-revision"}:
+            summary = str(report.get("summary", "")).strip() or "(no summary given)"
+            return f"agent_{outcome.replace('-', '_')}", f"{task.id}: the implementer reported {outcome} — {summary}"
+
+        changed, diff_cmd = self._review_scope(task, cwd, base)
+        if diff_cmd and not changed:
+            said = f" It reported: {report.get('summary', '')!r}." if report.get("summary") else ""
+            unheard = "" if report else " It never called `rein report`, so it said nothing about why."
+            return (
+                "no_implementation",
+                f"{task.id}: the implementer produced no change at all ({diff_cmd} is empty).{said}{unheard} "
+                "A quality gate green over an unchanged tree is a fact about the code that was already there.",
+            )
+
+        outside = dossier.scope_violations(task, changed)
+        if outside:
+            return (
+                "scope_violation",
+                f"{task.id}: changed {', '.join(outside)}, which its declared scope does not cover "
+                f"(include={list(task.scope_include)}, exclude={list(task.scope_exclude)}). "
+                "The plan says where this task's work belongs; landing it elsewhere is a scope change, "
+                "and a scope change to an approved plan is a human's decision.",
+            )
+
+        claimed = {str(p) for p in report.get("touched", []) if isinstance(p, str)}
+        untouched = sorted(claimed - set(changed)) if claimed and changed else []
+        if untouched:
+            return (
+                "report_mismatch",
+                f"{task.id}: the implementer reported changing {', '.join(untouched)}, "
+                "which the diff does not contain. Its account of its own work does not match what it did.",
+            )
+        return "", ""
 
     def _run_task_to_done(self, task: dag.Task, cwd: str, base: str = "") -> tuple[bool, str]:
         """Take one task to done via implementer implementation + the quality-gate pipeline.
@@ -905,6 +1608,11 @@ class Orchestrator:
         Each cmd step carries its own send-back budget (step.retries); a failure consumes only
         that step's budget. Returns (ok, log); ok=False means some step's budget ran out
         (the caller marks the task blocked).
+
+        **The gate is not the first question asked.** What the implementer produced is checked
+        first (`_check_implementer_output`), because a DoD that passes over an empty diff is not
+        evidence about this task, and because running a reviewer and a full test suite against an
+        attempt that already said "I am blocked" spends a model on a question nobody asked.
         """
         budgets = {s.name: s.retries for s in self._steps_for(task, cwd, base) if s.kind == "command"}
         # What an earlier, interrupted attempt left behind. Restoring the budgets is the load-
@@ -924,14 +1632,24 @@ class Orchestrator:
         session = str(uuid.uuid4()) if self._resume_capable and not self.dry_run else ""
         resume = False
         while True:
-            self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume)
+            self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume, base=base)
             if not self.dry_run:
                 changed, _ = self._review_scope(task, cwd, base)
                 violations = self._gate_violations(changed)
                 if violations:
                     raise GateViolationFault(violations)
+                kind, message = self._check_implementer_output(task, cwd, base)
+                if kind:
+                    # Not a gate failure, so it spends no step's budget: no step ever ran. The
+                    # attempt is over, and the reason — which the loop now actually holds — goes
+                    # to the human rather than being reconstructed from an unchanged tree.
+                    self._escalate(kind, message, task=task.id)
+                    self._stops[task.id] = "needs-revision" if kind == "agent_needs_revision" else "blocked"
+                    return False, message
+            self._local.steps, self._local.acceptance = [], []
             failed, failure_log = self._run_pipeline(task, cwd, base)
             if failed is None:
+                self._record_task_evidence(task, cwd, base)
                 return True, ""
             left = budgets.get(failed, 0)
             print(f"    quality gate fail at step '{failed}' (retries left: {left}): {task.id}")
@@ -968,6 +1686,7 @@ class Orchestrator:
             ],
             cwd=self.root,
             where=f"{ids}: the integration fixer",
+            role="implementer",
         )
 
     def _integration_gate(self, tasks: list[dag.Task]) -> tuple[bool, str]:
@@ -991,7 +1710,7 @@ class Orchestrator:
         budgets = {s.name: s.retries for s in self.config.steps if s.kind == "command"}
         while True:
             failed, failure_log = None, ""
-            for step in self._steps_effective:
+            for step in self._steps_at("integration"):
                 if step.kind != "command" or not step.command:
                     continue
                 failure = self._run_cmd_step(step, cwd=self.root)
@@ -1167,6 +1886,10 @@ class Orchestrator:
                 "fill `branch:` in state.md or check out the work branch first."
             )
             return common.EXIT_CANNOT_PROCEED
+        if problems := self._source_problems():
+            for problem in problems:
+                logger.error(problem)
+            return common.EXIT_CANNOT_PROCEED
         if self.dry_run:
             return self._run_loop()  # read-only: no lock either, and no contention to guard against
         try:
@@ -1175,7 +1898,16 @@ class Orchestrator:
             # outlives the orchestrator has nothing to talk to, which is the correct answer.
             with build_lock(self.repo), control_plane.serving(self.repo) as server:
                 self.control = server
-                return self._run_loop()
+                try:
+                    return self._run_loop()
+                finally:
+                    # In the `finally` because a run that stopped for capacity established real
+                    # facts before it stopped, and making the next attempt re-establish them is
+                    # exactly the waste the ledger exists to end.
+                    self.ledger.flush()
+                    for summary in (self.ledger.summary(), self.spend_summary()):
+                        if summary:
+                            print(f"[{summary}]")
         except store_mod.LockUnavailableError as exc:
             # Retry-later, not cannot-proceed: nothing here is broken, another run simply has the
             # repository. A supervisor restarting `rein build` races the previous process's
@@ -1183,10 +1915,77 @@ class Orchestrator:
             logger.error(f"another build run holds the lock: {exc}")
             return common.EXIT_RETRY_LATER
 
+    def _source_problems(self) -> list[str]:
+        """Why the prose this build would read is not the prose gate ③ approved.
+
+        Two distinct failures, and the second is the one that had no symptom at all:
+
+          **It moved.** A ticket edited after the freeze changes what gets built, and `plan.yaml`
+          being digest-frozen said nothing about it. Refusing here is the same posture `rein
+          guard` already takes towards a frozen document — the way forward is `rein revise --to
+          tasks` and a re-approval, not an edit nobody recorded.
+
+          **It is not committed.** A parallel leaf is cut from the work branch's tip
+          (`git worktree add <path> <branch>`), so it reads the *committed* text and nothing else.
+          An uncommitted ticket edit therefore reached no leaf, silently, and the run implemented
+          the old definition while the author was reading the new one on screen. Naming it costs a
+          commit; not naming it costs a task built to the wrong spec.
+
+        Empty when the plan was frozen before this release recorded sources, so an in-flight
+        repository upgrading mid-cycle is not stopped by a check it has no data for.
+        """
+        if self.state is None:
+            return []
+        pinned = self.state.frozen_sources
+        if not pinned:
+            return []
+        moved = [path for path, frozen in sorted(pinned.items()) if self._live_digest(path) != frozen]
+        if moved:
+            return [
+                f"{len(moved)} document(s) the build reads changed since gate 3 froze them: "
+                f"{', '.join(moved)}. Building now would implement text nobody approved — "
+                "roll back with `rein revise --to tasks`, re-approve, and run again."
+            ]
+        if self.dry_run:
+            return []
+        dirty = sorted(set(self.ws.dirty_paths(self.root)) & set(pinned))
+        if dirty:
+            return [
+                f"{len(dirty)} document(s) the build reads have uncommitted changes: {', '.join(dirty)}. "
+                f"Parallel worktrees are cut from `{self.branch}` and read only what is committed there, "
+                "so those edits would reach no task. Commit them first."
+            ]
+        return []
+
+    def _live_digest(self, path: str) -> str:
+        candidate = self.repo.path(path)
+        return digests.of_file(candidate) if candidate.is_file() else ""
+
+    def _promote_observed(self, graph: dag.Graph) -> bool:
+        """Finish any task whose outstanding observation a human has since recorded.
+
+        Without this the only way forward from `awaiting-evidence` would be `rein task reset`,
+        which sends the task back to the frontier and re-runs an implementer over code that is
+        already merged and already passed — paying a model to redo work whose only missing piece
+        was a person looking at a screen. Here it is a status flip: the DoD record is already in
+        `state.yaml`, and the observation names the tree it was made against, so all that is left
+        is to check the tree has not moved since.
+        """
+        promoted = False
+        for task in graph.tasks:
+            if task.status != "awaiting-evidence" or self._unestablished_acceptance(task):
+                continue
+            print(f"  [evidence] {task.id}: the outstanding observation has been recorded — finishing")
+            self._set_status(task.id, "done", commit=self._landed())
+            promoted = True
+        return promoted
+
     def _run_loop(self) -> int:
         self._recover_in_progress()
         while True:
             graph = self._load_graph()
+            if self._promote_observed(graph):
+                graph = self._load_graph()
             counts = graph.counts()
             unfinished = len(graph.tasks) - counts["done"]
             if unfinished == 0:
@@ -1246,13 +2045,15 @@ class Orchestrator:
                     code=1,
                 ) from exc
             if not ok:
-                self._set_status(task.id, "blocked")
-                self._escalate(
-                    "blocked",
-                    f"{task.id}: could not pass the quality gate within the limit; blocked.\n{log}",
-                    task=task.id,
-                )
-                raise StopLoop(f"{task.id} is blocked. Human intervention needed.", code=1)
+                status, owed = self._stop_verdict(task.id)
+                self._set_status(task.id, status)
+                if owed:
+                    self._escalate(
+                        "blocked",
+                        f"{task.id}: could not pass the quality gate within the limit; blocked.\n{log}",
+                        task=task.id,
+                    )
+                raise StopLoop(f"{task.id} is {status}. Human intervention needed.", code=1)
             # A serial task lands directly on the work branch (its own commits plus the finalize
             # below), where --no-verify and already-in-HEAD commits both escape the commit-stage
             # guard — so re-check everything the task changed before accepting it as done.
@@ -1274,7 +2075,7 @@ class Orchestrator:
                 # without its commit (one commit = one task is the record gate ④ reviews).
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
-            self._set_status(task.id, "done", commit=self._landed())
+            self._set_status(task.id, self._completion_status(task), commit=self._landed())
 
     def _consume_parallel(self, tasks: list[dag.Task]) -> None:
         """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
@@ -1320,12 +2121,14 @@ class Orchestrator:
                 blocked_any = True
                 continue
             if not ok:
-                self._set_status(task.id, "blocked")
-                self._escalate(
-                    "blocked",
-                    f"{task.id}: could not pass the quality gate within the limit; blocked.\n{log}",
-                    task=task.id,
-                )
+                status, owed = self._stop_verdict(task.id)
+                self._set_status(task.id, status)
+                if owed:
+                    self._escalate(
+                        "blocked",
+                        f"{task.id}: could not pass the quality gate within the limit; blocked.\n{log}",
+                        task=task.id,
+                    )
                 self._cleanup_worktree(task)  # the branch keeps the diff for inspection
                 blocked_any = True
                 continue
@@ -1353,11 +2156,12 @@ class Orchestrator:
                 self._set_status(task.id, "blocked")
                 self._cleanup_worktree(task)  # conflict: aborted merge, worktree no longer needed
                 blocked_any = True
-        # Integration gate: only a join of 2+ leaves creates a combined tree nobody has verified
-        # (a single-leaf join is byte-identical to that leaf's already-gated worktree state).
-        # Not a knob any more: each leaf was green only in isolation, so a batch that merged
-        # two or more of them has never been verified as one tree until now.
-        if len(merged) >= 2:
+        # Integration gate: a join of 2+ leaves creates a combined tree nobody has verified (a
+        # single-leaf join is byte-identical to that leaf's already-gated worktree state). Not a
+        # knob: each leaf was green only in isolation, so a batch that merged two or more of them
+        # has never been verified as one tree until now. A `stage: integration` step is the other
+        # reason to run it — those never ran per task, so even a single leaf has to face them.
+        if merged and (len(merged) >= 2 or self._steps_at("integration") != self._steps_at("task")):
             # An EnvironmentFault here propagates with the merged tasks still `in-progress`, and
             # that is the honest state: they merged, but nothing has verified the combined tree.
             # The next run resets them to `todo` and re-plays them, which re-runs the integration
@@ -1369,7 +2173,7 @@ class Orchestrator:
         ids = ",".join(t.id for t in merged)
         if ok:
             for task in merged:
-                self._set_status(task.id, "done", commit=landed.get(task.id, ""))
+                self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
         else:
             for task in merged:
                 self._set_status(task.id, "blocked")
@@ -1406,6 +2210,9 @@ class Orchestrator:
         """
         print("\n========== all tasks done ==========")
         print(dag.render(graph))
+        for measured in (self.ledger.summary(), self.spend_summary()):
+            if measured:
+                print(measured)
 
         print(
             "\nWhat this run established: every task's code passed the configured quality gate.\n"

@@ -31,7 +31,7 @@ import argparse
 import json
 import logging
 
-from rein import common, dag, event_chain, models
+from rein import approve, common, dag, event_chain, models
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -161,8 +161,9 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
         plan_block = raw.setdefault("plan", {})
         plan_block["status"] = "draft"
         # The frozen digests described a plan that is now editable again; leaving them would
-        # let a later check "verify" against a freeze that no longer holds.
-        for key in ("digest", "config_digest", "toolchain_digest", "frozen_at"):
+        # let a later check "verify" against a freeze that no longer holds. The key list comes
+        # from the module that writes them — two copies agreeing was something to remember.
+        for key in approve.FROZEN_PLAN_KEYS:
             plan_block.pop(key, None)
 
     if revision["invalidates_review"]:

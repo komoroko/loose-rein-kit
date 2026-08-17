@@ -120,12 +120,27 @@ def _kill_group(proc: Any, os_mod: Any, signal_mod: Any) -> None:
     proc.kill()
 
 
+#: What :func:`_cap` appends when it truncates. Named so a caller that needs the *whole* output
+#: (anything hashing it) can tell "this is the output" from "this is the start of the output".
+TRUNCATION_MARKER = f"… (output truncated at {MAX_OUTPUT_BYTES} bytes)"
+
+
 def _cap(text: str) -> str:
     encoded = text.encode("utf-8", errors="replace")
     if len(encoded) <= MAX_OUTPUT_BYTES:
         return text
     kept = encoded[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
-    return f"{kept}\n… (output truncated at {MAX_OUTPUT_BYTES} bytes)"
+    return f"{kept}\n{TRUNCATION_MARKER}"
+
+
+def was_truncated(output: str) -> bool:
+    """True when :func:`run` capped this output.
+
+    A capped stream is a prefix, not an answer. Hashing one would give two different trees the
+    same fingerprint as soon as they agreed for the first 4 MiB, so every caller that content-
+    addresses command output has to ask this first and fall back to "unknown".
+    """
+    return output.endswith(TRUNCATION_MARKER)
 
 
 # --- failure summarization (retry-friendly, token-lean) ---------------------

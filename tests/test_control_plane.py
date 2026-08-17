@@ -409,3 +409,67 @@ def test_the_cli_offers_no_verb_that_edits_or_removes_a_record() -> None:
     parser = control_plane._build_parser("rein decision", "decision.declare")
     action = next(a for a in parser._actions if a.dest == "action")
     assert action.choices == ["add"]
+
+
+# --- `rein report`: how an implementer ends its attempt --------------------------
+
+
+def test_report_records_the_outcome_and_the_agents_own_words(repo: repo_mod.Repo) -> None:
+    """The channel that did not exist. The loop had one bit — the process exited — to read."""
+    assert (
+        control_plane.report_main(
+            [
+                "--task",
+                "T-001",
+                "--outcome",
+                "implemented",
+                "--summary",
+                "wrote the handler",
+                "--touched",
+                "src/api/handler.py",
+                "--repo",
+                str(repo.root),
+            ]
+        )
+        == 0
+    )
+
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None
+    report = raw["tasks"]["T-001"]["handoff"]["report"]
+    assert report["outcome"] == "implemented"
+    assert report["summary"] == "wrote the handler"
+    assert report["touched"] == ["src/api/handler.py"]
+    # `implemented` claims nothing: it leaves the status where the loop put it and opens the gate.
+    assert raw["tasks"]["T-001"]["status"] == "in-progress"
+
+
+def test_report_can_only_narrow_what_happens_next(repo: repo_mod.Repo) -> None:
+    """An agent may park its own task. Nothing it can say finishes one."""
+    assert (
+        control_plane.report_main(
+            [
+                "--task",
+                "T-001",
+                "--outcome",
+                "blocked",
+                "--summary",
+                "bwrap: Permission denied",
+                "--repo",
+                str(repo.root),
+            ]
+        )
+        == 2
+    )
+
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None
+    assert raw["tasks"]["T-001"]["status"] == "blocked"
+    assert [e.event for e in store_mod.Store(repo).read_events()] == ["task_failed"]
+    assert "done" not in control_plane._OUTCOME_STATUS.values()
+
+
+def test_a_stop_without_a_reason_is_refused(repo: repo_mod.Repo) -> None:
+    """The verb exists to end unexplained stops, so it may not be used to make one."""
+    assert control_plane.report_main(["--task", "T-001", "--outcome", "blocked", "--repo", str(repo.root)]) == 1
+    assert store_mod.Store(repo).read_events() == []

@@ -66,12 +66,43 @@ PLAN_STATUS_VALUES = frozenset({"draft", "frozen", "invalidated"})
 # build_loop derives layers and the critical path from it.
 TASK_KIND_ORDER: tuple[str, ...] = ("foundation", "parallel", "integration")
 TASK_KIND_VALUES = frozenset(TASK_KIND_ORDER)
-TASK_STATUS_ORDER: tuple[str, ...] = ("todo", "in-progress", "blocked", "needs-revision", "done")
+# `awaiting-evidence` is the status that says the difference between "this failed" and "nobody
+# established this". A task whose acceptance criteria include evidence the loop cannot obtain —
+# a staging check, a device, a person — has not failed and is not done, and rounding it to either
+# is a lie in one direction or the other. It sits off the frontier until a human records the
+# observation with `rein evidence record`.
+TASK_STATUS_ORDER: tuple[str, ...] = (
+    "todo",
+    "in-progress",
+    "blocked",
+    "needs-revision",
+    "awaiting-evidence",
+    "done",
+)
 TASK_STATUS_VALUES = frozenset(TASK_STATUS_ORDER)
 # What became of an interrupted attempt's preserved work by the time the next one starts: still
 # waiting to be picked up, merged into the fresh worktree, or left on its branch because merging
 # it conflicted (see state.schema.json `handoff`).
 SALVAGE_STATE_VALUES = frozenset({"pending", "restored", "conflict"})
+
+# What an implementer says about its own attempt, through `rein report`. Deliberately *not* the
+# task-status vocabulary: a status is a verdict the loop reaches, this is a claim the agent makes,
+# and collapsing the two is how "the agent exited" came to mean "the task is done". `blocked` and
+# `needs-revision` do map onto statuses — an agent may always narrow what happens next — while
+# `implemented` earns nothing on its own and only ever opens the quality gate.
+AGENT_OUTCOME_ORDER: tuple[str, ...] = ("implemented", "blocked", "needs-revision")
+AGENT_OUTCOME_VALUES = frozenset(AGENT_OUTCOME_ORDER)
+#: The same vocabulary as recorded beside a *verdict*, where "nothing was claimed" is itself
+#: information: a task that reached done with `none` had an implementer that never reported.
+REPORTED_OUTCOME_VALUES = frozenset({*AGENT_OUTCOME_ORDER, "none"})
+
+# How a task's own acceptance criterion is established. `command` and `artifact` the loop can do
+# itself; `external` it deliberately cannot — a staging check, a device, a person — which is what
+# `awaiting-evidence` exists to say out loud instead of quietly rounding to `done`.
+ACCEPTANCE_EVIDENCE_KINDS: tuple[str, ...] = ("command", "artifact", "external")
+ACCEPTANCE_EVIDENCE_KIND_VALUES = frozenset(ACCEPTANCE_EVIDENCE_KINDS)
+#: The kinds this loop can establish on its own.
+MECHANIZED_EVIDENCE_KINDS = frozenset({"command", "artifact"})
 
 EXECUTOR_VALUES = frozenset({"oci", "host"})
 
@@ -79,6 +110,15 @@ EXECUTOR_VALUES = frozenset({"oci", "host"})
 MOUNT_MODE_VALUES = frozenset({"none", "read_only", "read_write"})
 HOME_MODE_VALUES = frozenset({"ephemeral", "host"})
 QUALITY_GATE_KIND_VALUES = frozenset({"command", "agent"})
+#: Where a DoD step runs. `both` is what every step has always done and stays the default; the
+#: other two exist so a fast focused suite can guard each task while the whole one runs over the
+#: join, rather than every task re-establishing the whole thing from scratch.
+GATE_STAGE_ORDER: tuple[str, ...] = ("task", "integration", "both")
+GATE_STAGE_VALUES = frozenset(GATE_STAGE_ORDER)
+#: What the per-task reviewer may say about a change. `must_fix` sends it back to the implementer
+#: within the review step's own budget; `consider` stops nothing and is carried to gate ④. Neither
+#: passes or fails a task on its own — the reviewer reports, and the loop decides what that costs.
+FINDING_SEVERITY_VALUES = frozenset({"must_fix", "consider"})
 AGENT_ROLE_VALUES = frozenset({"implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"})
 
 # --- review vocabulary (plan §6.7) --------------------------------------------
@@ -311,6 +351,9 @@ CENTRAL_ONLY_CAPABILITIES = frozenset(
 ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "claim": re.compile(r"^C-\d{3,}$"),
     "task": re.compile(r"^T-\d{3,}$"),
+    #: Scoped to its task, so a short number is enough — `A-1` of T-004 and `A-1` of T-005 are
+    #: different criteria, and nothing ever refers to one from outside its own task.
+    "acceptance": re.compile(r"^A-\d+$"),
     "statement": re.compile(r"^STMT-\d{3,}$"),
     "actual_statement": re.compile(r"^AST-\d{3,}$"),
     "challenge": re.compile(r"^CH-\d{3,}$"),
@@ -499,6 +542,19 @@ class Task(Element):
         scope = self.raw.get("scope")
         return _ids(scope, "exclude") if isinstance(scope, dict) else ()
 
+    @property
+    def acceptance(self) -> tuple[Mapping[str, Any], ...]:
+        """This task's own acceptance criteria, as the frozen plan states them.
+
+        Distinct from the shared DoD in two directions. The DoD is the same for every task and
+        says the code is *sound*; these say this task in particular did *what it was for*. And a
+        criterion here cannot loosen the gate — the DoD runs unchanged either way — because a
+        human froze this list at gate ③, which is exactly what stops it being a knob an
+        implementer turns down on itself.
+        """
+        value = self.raw.get("acceptance")
+        return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
+
 
 _PLAN_SECTIONS: Mapping[str, type[Element]] = {"claims": Claim, "tasks": Task}
 
@@ -664,6 +720,20 @@ class State:
         """
         plan = self.raw.get("plan")
         return _str(plan, "config_digest") if isinstance(plan, dict) else ""
+
+    @property
+    def frozen_sources(self) -> dict[str, str]:
+        """The prose the build reads, as it hashed when gate ③ froze it. Empty before the freeze.
+
+        `plan.yaml` is bound by a digest and always was; the task tickets and the design document
+        an implementer is actually sent to *read* were bound to nothing. This is what makes
+        "the ticket changed after it was approved" a fact something can check.
+        """
+        plan = self.raw.get("plan")
+        sources = plan.get("sources") if isinstance(plan, dict) else None
+        if not isinstance(sources, dict):
+            return {}
+        return {str(path): str(digest) for path, digest in sources.items() if isinstance(digest, str)}
 
     @property
     def change_requests(self) -> list[Mapping[str, Any]]:
@@ -920,6 +990,17 @@ class GateStep:
         into.
         """
         return _ids(self.raw, "paths")
+
+    @property
+    def stage(self) -> str:
+        """Where this step runs: `task`, `integration`, or `both` (the default).
+
+        Not a way to run less of the DoD — every step still runs — but a way to say *how often*.
+        A whole test suite re-established from scratch on every attempt of every task, and again
+        over the join, is the same confidence bought several times over.
+        """
+        value = _str(self.raw, "stage", "both")
+        return value if value in GATE_STAGE_VALUES else "both"
 
 
 @dataclass(frozen=True)
@@ -1195,8 +1276,34 @@ def cross_reference_errors(plan: Plan) -> list[str]:
         for path in (*task.scope_include, *task.scope_exclude):
             if not is_repo_path(path):
                 errors.append(f"tasks/{task.id}: scope path {path!r} is not a safe repo-relative path")
+        errors += _acceptance_errors(task)
 
     errors += _cycle_errors(plan)
+    return errors
+
+
+def _acceptance_errors(task: Task) -> list[str]:
+    """Shape checks the schema cannot make about one task's acceptance criteria.
+
+    Ids are unique *within the task* (they are scoped to it), and an evidence kind must carry
+    what that kind is made of — a `command` with no argv, or an `artifact` naming no path, is a
+    criterion that would report itself established by doing nothing at all.
+    """
+    errors: list[str] = []
+    seen: set[str] = set()
+    for entry in task.acceptance:
+        ac_id = _str(entry, "id")
+        if ac_id in seen:
+            errors.append(f"tasks/{task.id}: duplicate acceptance id {ac_id!r}")
+        seen.add(ac_id)
+        evidence = entry.get("evidence")
+        if not isinstance(evidence, dict):
+            continue
+        kind = _str(evidence, "kind")
+        if kind == "command" and not _ids(evidence, "command"):
+            errors.append(f"tasks/{task.id}/{ac_id}: evidence kind 'command' with no command to run")
+        if kind == "artifact" and not _ids(evidence, "paths"):
+            errors.append(f"tasks/{task.id}/{ac_id}: evidence kind 'artifact' with no paths to require")
     return errors
 
 

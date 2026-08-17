@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import build_loop, common, dag, executors, faults, models
+from rein import build_loop, common, dag, dossier, evidence, executors, faults, models
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -195,21 +195,27 @@ def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
     assert config.adapter_argv == build_loop.ADAPTERS["claude"]
 
 
-def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = build_repo(tmp_path)
-    repo = repo_mod.Repo(root)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo)
-    monkeypatch.setattr(orch, "_tree_state", lambda cwd: ("", ""))
+def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[str]]) -> object:
+    """A fake reviewer that writes the findings file the step now reads its verdict from."""
 
-    launched: list[list[str]] = []
-
-    def fake_run(cmd: list[str], **kwargs: object) -> tuple[int, str]:
+    def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
         launched.append(cmd)
+        target = dossier.findings_path(cwd or str(root), "T-001")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"findings": findings}), encoding="utf-8")
         return 0, ""
 
-    monkeypatch.setattr(build_loop, "_run", fake_run)
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    orch._run_agent_step(orch.config.steps[0], task, cwd=str(root), base="")
+    return fake_run
+
+
+def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = build_repo(tmp_path)
+    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+
+    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
     assert launched, "the agent step never launched anything"
     assert tuple(launched[0][:2]) == build_loop.ADAPTERS["codex"], (
@@ -217,22 +223,64 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
     )
 
 
-def test_the_codex_agent_step_is_launched_able_to_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`codex exec` runs in a read-only sandbox unless told otherwise. Without this the loop
-    starts, every task hands work to an agent that cannot save a file, and the diffs come back
-    empty with nothing saying why."""
+def test_the_reviewer_is_launched_without_write_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """It reports; it does not repair.
+
+    `codex exec` is read-only unless told otherwise, and the reviewer is the one launch that
+    should stay that way. Handing it `--sandbox workspace-write` let one participant both judge a
+    change and edit the judgement away — and moved the tree underneath the gate, so every
+    already-passed step had to be re-run behind it.
+    """
     root = build_repo(tmp_path)
     orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_tree_state", lambda cwd: ("", ""))
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
     launched: list[list[str]] = []
+    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
 
-    def fake_run(cmd: list[str], **kwargs: object) -> tuple[int, str]:
+    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
+
+    assert "--sandbox" not in launched[0], "the reviewer was launched able to change the code it is judging"
+
+
+def test_a_must_fix_finding_goes_to_the_implementer_and_the_reviewer_looks_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The round the separation buys: somebody other than the reviewer has to act on a finding."""
+    root = build_repo(tmp_path)
+    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    launched: list[list[str]] = []
+    rounds = iter([[{"severity": "must_fix", "statement": "the guard is gone", "anchor": "src/x.py:4"}], []])
+
+    def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
         launched.append(cmd)
+        if cmd[0] == "codex":  # the reviewer's adapter in this config
+            target = dossier.findings_path(cwd or str(root), "T-001")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps({"findings": next(rounds)}), encoding="utf-8")
         return 0, ""
 
     monkeypatch.setattr(build_loop, "_run", fake_run)
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
-    assert launched[0][:4] == ["codex", "exec", "--sandbox", "workspace-write"]
+
+    adapters = [cmd[0] for cmd in launched]
+    assert adapters == ["codex", "claude", "codex"], (
+        "expected review → implementer fix → review again, got " + " → ".join(adapters)
+    )
+    assert "the guard is gone" in launched[1][-1], "the fixer was not told what the reviewer found"
+
+
+def test_an_unreadable_review_is_not_a_review_that_found_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failure mode a silent pass would hide: a reviewer that said nothing readable."""
+    root = build_repo(tmp_path)
+    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, "I had a good look, honestly"))
+
+    with pytest.raises(common.StopLoop, match="wrote no findings file"):
+        orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
@@ -532,6 +580,63 @@ def test_a_command_step_passes_on_exit_zero(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(common, "run", fake_git())
     step = build_loop.GateStep(name="test", kind="command", command=("make", "test"))
     assert loop._run_cmd_step(step, cwd=str(tmp_path)) == ""
+
+
+def test_a_command_step_already_green_on_this_tree_is_not_run_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the ledger, at the one place every gate command goes through.
+
+    A retry that failed only in `check` re-ran `test` from the top, and the integration gate
+    re-ran a DoD a leaf had already verified on the identical tree. Both are the same command
+    against the same content in the same image — one fact, established once.
+    """
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
+    ran: list[tuple[str, ...]] = []
+
+    def counting(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
+        ran.append(tuple(cmd))
+        return 0, ""
+
+    monkeypatch.setattr(common, "run", counting)
+    step = build_loop.GateStep(name="test", kind="command", command=("make", "test"))
+
+    assert loop._run_cmd_step(step, cwd=str(tmp_path)) == ""
+    assert loop._run_cmd_step(step, cwd=str(tmp_path)) == ""
+    assert ran.count(("make", "test")) == 1
+
+
+def test_a_command_step_is_re_run_when_the_tree_moved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The subject is content. A tree that moved by a byte has never been checked."""
+    loop = orchestrator(tmp_path)
+    trees = iter(["sha256:" + "a" * 64, "sha256:" + "b" * 64])
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: next(trees))
+    ran: list[tuple[str, ...]] = []
+
+    def counting(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
+        ran.append(tuple(cmd))
+        return 0, ""
+
+    monkeypatch.setattr(common, "run", counting)
+    step = build_loop.GateStep(name="test", kind="command", command=("make", "test"))
+
+    loop._run_cmd_step(step, cwd=str(tmp_path))
+    loop._run_cmd_step(step, cwd=str(tmp_path))
+    assert ran.count(("make", "test")) == 2
+
+
+def test_a_red_command_step_is_never_cached(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only greens are recorded: a cached red would let one broken afternoon stand as a verdict."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "c" * 64)
+    monkeypatch.setattr(common, "run", fake_git({("make", "test"): (1, "tests/x.py::t FAILED")}))
+    step = build_loop.GateStep(name="test", kind="command", command=("make", "test"))
+
+    assert loop._run_cmd_step(step, cwd=str(tmp_path)) != ""
+    assert not loop.ledger.hit(
+        evidence.KIND_GATE_STEP, "sha256:" + "c" * 64, loop._step_tool(step, loop._profile_for(step))
+    )
 
 
 def test_a_command_step_summarizes_its_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1026,7 +1131,33 @@ def test_a_launch_the_machine_failed_leaves_the_task_where_it_found_it(
     assert raw is not None
     entry = raw["tasks"]["T-001"]
     assert entry["status"] == "todo"
-    assert "handoff" not in entry  # no retry budget was spent, so none was written down
+    handoff = entry.get("handoff", {})
+    # No retry budget was spent, so none was written down — the fields that *are* a verdict about
+    # this task stay absent.
+    assert "retries_left" not in handoff
+    assert "failed_step" not in handoff
+    assert "failure_summary" not in handoff
+
+
+def test_a_launch_the_machine_failed_still_says_why(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reason has to outlive the terminal, without becoming a verdict about the task.
+
+    "No verdict was reached" was being enforced by recording nothing at all, which is how an
+    implementer that stopped for a nameable reason reached the operator as a task that had simply
+    not moved. Diagnostics and verdicts are different things and now live in different keys.
+    """
+    loop = orchestrator(tmp_path, config=make_config(launch_retries=0))
+    monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT))
+
+    with pytest.raises(build_loop.EnvironmentFault):
+        loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
+
+    raw = store_mod.Store(loop.repo).read_raw("state")
+    assert raw is not None
+    handoff = raw["tasks"]["T-001"]["handoff"]
+    assert SESSION_LIMIT[1] in handoff["last_agent"]["output_tail"]
+    assert handoff["last_agent"]["role"] == "implementer"
+    assert SESSION_LIMIT[1] in handoff["last_fault"]["output_tail"]
 
 
 def test_a_launch_failure_writes_no_verdict_into_the_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1253,3 +1384,124 @@ def test_a_stale_session_still_falls_back_but_an_exhausted_one_does_not(
     with pytest.raises(build_loop.EnvironmentFault):
         loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="", session="s-2", resume=True)
     assert len([c for c in exhausted if c[0] == "claude"]) == 1
+
+
+# --- the adapter capability record ------------------------------------------------
+
+
+def test_every_adapter_declares_what_it_can_do() -> None:
+    """The table replaced two dicts and one `== "claude"` test, each load-bearing and invisible.
+
+    What the loop needs from an adapter is not "which one is it" but what it can do: change the
+    tree, continue a session, isolate itself. Asserting on the declarations is asserting on the
+    only thing any caller reads.
+    """
+    codex = build_loop.ADAPTER_TABLE["codex"]
+    assert codex.write_flags == ("--sandbox", "workspace-write")
+    assert codex.own_sandbox, "codex sandboxes itself — the fact the nested-sandbox check needs"
+    assert not codex.resumable, "codex resumes the *last* session, which parallel leaves cannot name"
+
+    claude = build_loop.ADAPTER_TABLE["claude"]
+    assert claude.resumable and not claude.own_sandbox and not claude.write_flags
+
+
+def test_the_argv_table_is_derived_from_the_capability_records() -> None:
+    """One definition per adapter. Two would drift, and the drift would be silent."""
+    assert build_loop.ADAPTERS == {name: a.argv for name, a in build_loop.ADAPTER_TABLE.items()}
+
+
+def test_a_resumable_implementer_stamps_then_resumes_its_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The flags come off the record, so adding an adapter is data rather than a new branch."""
+    loop = orchestrator(tmp_path)
+    launched: list[list[str]] = []
+
+    def capture(cmd: list[str], **kwargs: object) -> tuple[int, str]:
+        launched.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(build_loop, "_run", capture)
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+
+    loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="", session="S-1", resume=False)
+    loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="", session="S-1", resume=True)
+
+    assert "--session-id" in launched[0] and "--resume" not in launched[0]
+    assert "--resume" in launched[1] and "--session-id" not in launched[1]
+
+
+# --- where a DoD step runs (`stage:`) ------------------------------------------
+
+
+def _staged_config() -> build_loop.Config:
+    """A DoD split the way `stage:` exists for: a fast check per task, the whole suite over the join."""
+    return build_loop.Config.from_models(
+        models.Config(
+            make_config(
+                quality_gate=[
+                    {
+                        "name": "focused",
+                        "kind": "command",
+                        "command": ["a"],
+                        "executor_profile": "quality",
+                        "stage": "task",
+                    },
+                    {
+                        "name": "suite",
+                        "kind": "command",
+                        "command": ["b"],
+                        "executor_profile": "quality",
+                        "stage": "integration",
+                    },
+                    {"name": "check", "kind": "command", "command": ["c"], "executor_profile": "quality"},
+                ]
+            )
+        )
+    )
+
+
+def test_a_stage_moves_when_a_step_runs_not_whether(tmp_path: Path) -> None:
+    """Every configured step still runs. The question `stage:` answers is how often the same
+    confidence gets bought — a whole suite re-established on each attempt of each task, and again
+    over the join, is the same thing paid for several times."""
+    loop = build_loop.Orchestrator(_staged_config(), dry_run=True, repo=repo_mod.Repo(build_repo(tmp_path)))
+
+    assert [s.name for s in loop._steps_at("task")] == ["focused", "check"]
+    assert [s.name for s in loop._steps_at("integration")] == ["suite", "check"]
+    # Nothing is dropped: every step belongs to at least one stage.
+    assert {s.name for s in loop._steps_at("task")} | {s.name for s in loop._steps_at("integration")} == {
+        s.name for s in loop.config.steps
+    }
+
+
+def test_a_step_with_no_stage_runs_everywhere_as_it_always_did(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    assert loop._steps_at("task") == loop._steps_at("integration") == loop.config.steps
+
+
+# --- what this run put in front of a model -------------------------------------
+
+
+def test_the_run_measures_its_own_prompt_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop composes every prompt, so this is the one number it can know exactly.
+
+    Gate ④'s review budget is measured rather than declared for the same reason; the build side
+    of the run had no number at all, which is why "we are re-sending too much" could only ever be
+    an impression.
+    """
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, ""))
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+
+    loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="")
+    loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="")
+
+    summary = loop.spend_summary()
+    assert "2 launches" in summary
+    assert "implementer" in summary
+
+
+def test_a_run_that_launched_nothing_reports_nothing(tmp_path: Path) -> None:
+    """An empty measurement is not a measurement of zero — it is silence, and it prints as silence."""
+    assert orchestrator(tmp_path).spend_summary() == ""
