@@ -303,6 +303,31 @@ def test_an_unparseable_payload_allows_but_leaves_a_trace(
     assert "unparseable hook payload" in capsys.readouterr().err
 
 
+def test_asking_the_guard_for_help_answers_the_question(capsys: pytest.CaptureFixture[str]) -> None:
+    """It used to reach the stdin read, so `rein guard --help` reported an unparseable hook
+    payload and exited 0 — the guard's *allow* code — to a human who had asked it a question."""
+    assert gate_guard.main(["--help"]) == 0
+    out = capsys.readouterr()
+    assert "--check-diff" in out.out
+    assert "hook payload" not in out.err
+
+
+def test_an_argument_the_guard_cannot_read_denies_rather_than_reading_stdin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A guard handed arguments it does not understand is a misregistered hook.
+
+    stdin here carries a payload that would be *allowed* (no guarded path), so a rc of 2 can only
+    come from the argument check — the previous code fell through to it and passed.
+    """
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"tool_input": {"file_path": "README.md"}})))
+    assert gate_guard.main(["--check-diff", "--and-something-else"]) == 2
+    assert "usage: rein guard" in capsys.readouterr().err
+
+
 # --- commit-stage check -------------------------------------------------------
 
 

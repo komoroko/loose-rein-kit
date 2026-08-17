@@ -589,12 +589,32 @@ def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
     return patch_targets(command) if isinstance(command, str) else []
 
 
+#: The guard has exactly two invocations, and a human asking about them is a third thing entirely.
+USAGE = """usage: rein guard [--check-diff]
+
+  (no arguments)  PreToolUse hook mode: reads the host's JSON payload on stdin and answers
+                  whether the paths it is about to write may be written right now.
+  --check-diff    commit-stage mode: checks every path in the diff against HEAD. This is what
+                  .pre-commit-config.yaml registers, and what `make check` runs.
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     common.configure_logging()
     if argv is None:
         argv = sys.argv[1:]
-    if "--check-diff" in argv:
+    if argv == ["--check-diff"]:
         return check_diff()
+    if argv:
+        # Argument handling at all, which there was none of: anything that was not `--check-diff`
+        # fell through to the stdin read below, so `rein guard --help` answered a human's question
+        # with "unparseable hook payload — allowing without a gate check" and exited 0, the guard's
+        # *allow* code. Two invocations exist (above) and nothing else does; an unrecognized one is
+        # a misregistered hook, which denies rather than passes — a guard given arguments it cannot
+        # read does not know what it is being asked.
+        asked = argv[0] in ("-h", "--help")
+        print(USAGE, end="", file=sys.stdout if asked else sys.stderr)
+        return 0 if asked else 2
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
