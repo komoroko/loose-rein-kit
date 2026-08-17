@@ -364,6 +364,46 @@ def test_no_module_reads_a_field_the_payload_stopped_carrying() -> None:
             assert token not in text, f"{name} reads `{token}` — {why}"
 
 
+def test_the_page_does_not_tell_the_human_to_go_and_do_what_it_just_did() -> None:
+    """`/api/gate/approve` records the approval; the page must say so.
+
+    It did not. The endpoint began life as a readiness check, and `post()` in api.js kept the
+    message that belonged to that contract — so a human clicked Approve, the gate actually opened,
+    and the toast said "is ready — run the command shown to approve". The board refreshed to a ✓ in
+    the same breath, leaving the two halves of the page disagreeing about the one judgement in this
+    product that widens what happens next.
+
+    A refusal never reaches that branch: an unready gate and a moved repository are both 409s
+    carrying `error`. So `approval_id` in the body means it happened, and the only honest toast
+    names it.
+    """
+    api = (ui.ASSETS_DIR / "api.js").read_text(encoding="utf-8")
+    assert "run the command shown to approve" not in api
+    assert "approval_id" in api, "the toast has to read the field that proves the approval was recorded"
+    assert "(data.blockers" not in api, "a POST never carries blockers — an unready gate is a 409"
+
+
+def test_every_api_route_the_server_dispatches_is_reached_from_the_page() -> None:
+    """A route with no caller is dead weight; a caller with no route is a 404 the human meets.
+
+    Both directions, read out of the two sources rather than a hand-kept list: `do_GET`/`do_POST`
+    match `self.path` against literals, and the modules build their URLs from literals too.
+    """
+    source = Path(ui.__file__).read_text(encoding="utf-8")
+    routes = {
+        m.rstrip("?")
+        for m in re.findall(r'self\.path(?:\s*==\s*|\.startswith\()\s*"(/api/[^"]*)"', source)
+    }
+    assert routes, "no /api/ route literals found — this canary would pass on anything"
+    bundle = "".join(
+        p.read_text(encoding="utf-8") for p in sorted(ui.ASSETS_DIR.iterdir()) if p.suffix in (".js", ".html")
+    )
+    for route in sorted(routes):
+        assert route in bundle, f"{route} is dispatched by ui.py but nothing on the page calls it"
+    for called in sorted(set(re.findall(r'"(/api/[^"?]*)"', bundle))):
+        assert any(called.startswith(r) for r in routes), f"the page calls {called}, which ui.py does not dispatch"
+
+
 def test_assets_are_served_with_their_types_and_nothing_else(server: ui.DashboardServer) -> None:
     conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
     conn.request("GET", "/assets/app.css")

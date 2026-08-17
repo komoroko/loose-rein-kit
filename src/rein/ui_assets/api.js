@@ -56,14 +56,17 @@ export async function post(path, body) {
         data.exit_code === 0 ? "ok" : "err");
     } else {
       out.textContent = JSON.stringify(data, null, 2);
-      // /api/gate/approve deliberately opens nothing — it answers "is this gate ready, and what
-      // do you run to approve it". Announcing "approved" here said the browser had done the one
-      // thing it is not allowed to do, and said it just as loudly when `ok` was false.
-      const blocked = (data.blockers || []).length;
-      toast(data.gate
-        ? (blocked ? "gate " + data.gate + ": " + blocked + " blocker(s) — not ready"
-                   : "gate " + data.gate + " is ready — run the command shown to approve")
-        : "done", data.gate && blocked ? "err" : "ok");
+      // /api/gate/approve DOES open the gate: the write session a launch link minted is the
+      // capability handover, so reaching the handler means the approval was recorded and an
+      // `approval_id` came back. This branch used to say "is ready — run the command shown to
+      // approve", written when the endpoint only reported readiness. It kept saying it after the
+      // endpoint started recording, so the one judgement in this product that widens what happens
+      // next was announced to the human as not having happened. A refusal never arrives here —
+      // an unready gate is a 409 and a moved repository a 409, both carrying `error`, which the
+      // branch above owns.
+      toast(data.approval_id
+        ? "✓ gate " + data.gate + " approved (" + data.approval_id + ")"
+        : "done", "ok");
     }
     invalidate();  // the action just moved the SSOT — take the next payload whatever the ETag says
     document.dispatchEvent(new CustomEvent("rein:refresh"));
