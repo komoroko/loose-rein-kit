@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rein
-from rein import common, dag, dag_trace, digests, event_chain, executors, install, models, strict_yaml
+from rein import common, dag, dag_trace, digests, event_chain, executors, gate_guard, install, models, strict_yaml
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -743,6 +743,8 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
         findings.append(
             Finding("INFO", "hook", f"{' / '.join(missing)} sessions run without it — no hook host registered for them")
         )
+    if "claude" in surfaces:
+        findings += _check_claude_matcher(repo)
     if "codex" in surfaces:
         findings.append(
             Finding(
@@ -753,6 +755,43 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
             )
         )
     return findings
+
+
+def _check_claude_matcher(repo: repo_mod.Repo) -> list[Finding]:
+    """Every write-capable tool must be in a matcher whose hooks run the guard.
+
+    "Is the guard registered?" and "does the registration cover the tools that write?" are two
+    questions and only the first was asked. The matcher read `Write|Edit|MultiEdit` — `MultiEdit`
+    retired upstream, `NotebookEdit` never added — so a `.ipynb` under a guarded prefix passed the
+    edit-stage check untouched and only the commit-stage one ever looked at it. A hook that fires on
+    a subset of the writes is the failure mode this whole file exists to make visible.
+    """
+    try:
+        settings = json.loads(repo.path(SETTINGS_PATH).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []  # _reads_guard already established it parses far enough to mention the guard
+    covered: set[str] = set()
+    for group in settings.get("hooks", {}).get("PreToolUse", []) or []:
+        if not isinstance(group, dict) or not _mentions_guard(json.dumps(group.get("hooks", []))):
+            continue
+        matcher = group.get("matcher")
+        if not isinstance(matcher, str):
+            continue  # no matcher means "every tool" on hosts that ignore it — nothing to check
+        covered |= {tool.strip() for tool in matcher.split("|")}
+    uncovered = [tool for tool in gate_guard.CLAUDE_WRITE_TOOLS if tool not in covered]
+    if not uncovered:
+        return [
+            Finding("PASS", "hook", f"the matcher covers every write tool ({', '.join(gate_guard.CLAUDE_WRITE_TOOLS)})")
+        ]
+    return [
+        Finding(
+            "WARN",
+            "hook",
+            f"{SETTINGS_PATH}'s PreToolUse matcher does not name {', '.join(uncovered)}, so an edit made "
+            "with it never reaches the guard — the commit-stage check becomes the only layer. Add them to "
+            "the matcher (`rein install claude --force` restores the shipped one).",
+        )
+    ]
 
 
 #: The verbs whose pre-authorization breaks gate rule 2 outright: each one, run without a prompt,

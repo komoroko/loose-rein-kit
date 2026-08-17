@@ -471,8 +471,10 @@ def test_patch_targets_reads_the_apply_patch_grammar(patch: str, expected: list[
 @pytest.mark.parametrize(
     ("tool_input", "expected"),
     [
-        ({"file_path": "/repo/a.py"}, ["/repo/a.py"]),  # Claude Code
+        ({"file_path": "/repo/a.py"}, ["/repo/a.py"]),  # Claude Code, Write/Edit
         ({"filePath": "/repo/a.py"}, ["/repo/a.py"]),  # VS Code Copilot
+        ({"notebook_path": "/repo/a.ipynb"}, ["/repo/a.ipynb"]),  # Claude Code, NotebookEdit
+        ({"notebookPath": "/repo/a.ipynb"}, ["/repo/a.ipynb"]),
         ({"command": _patch("*** Update File: a.py\n@@\n+x\n")}, ["a.py"]),  # Codex
         ({"command": "git status"}, []),  # a terminal command carries nothing to guard
         ({}, []),
@@ -480,6 +482,30 @@ def test_patch_targets_reads_the_apply_patch_grammar(patch: str, expected: list[
 )
 def test_hook_paths_speaks_all_three_hosts(tool_input: dict[str, object], expected: list[str]) -> None:
     assert gate_guard.hook_paths(tool_input) == expected
+
+
+def test_a_notebook_edit_under_a_guarded_prefix_is_denied(tmp_path: Path) -> None:
+    """A notebook is source. `NotebookEdit` names its target `notebook_path` and nothing read that
+    key, so a `.ipynb` under a guarded prefix reached the guard with no path it could see — allowed
+    at edit stage, leaving the commit-stage check as the only layer that ever looked at it.
+
+    Driven through the hook protocol with *only* `notebook_path`, because that is the payload: a
+    test that also passed `file_path` would pass without the fix.
+    """
+    import io
+    import sys
+
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    payload = {"cwd": str(tmp_path), "tool_input": {"notebook_path": str(tmp_path / "src/train.ipynb")}}
+    stdin, stdout = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+    try:
+        assert gate_guard.main([]) == 0
+        raw = sys.stdout.getvalue().strip()
+    finally:
+        sys.stdin, sys.stdout = stdin, stdout
+    assert raw, "a NotebookEdit under src/ must produce a decision, not silence"
+    assert "gate 'tasks' is not approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_a_patch_touching_a_guarded_path_is_denied(tmp_path: Path) -> None:

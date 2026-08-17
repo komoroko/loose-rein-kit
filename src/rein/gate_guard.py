@@ -525,17 +525,34 @@ def patch_targets(command: str) -> list[str]:
     return out
 
 
+#: Every spelling a host uses for "the file this call is about to write". Several hosts, one
+#: question. Claude Code sends `file_path` for Write/Edit and `notebook_path` for NotebookEdit;
+#: VS Code Copilot camelCases both. A notebook is source like any other file — a `.ipynb` under a
+#: guarded prefix was reaching the guard with no path it could read, so the edit-stage check passed
+#: it and only the commit-stage one (extension-blind, walking `git status`) ever saw it.
+PATH_KEYS: tuple[str, ...] = ("file_path", "filePath", "notebook_path", "notebookPath")
+
+#: The Claude Code tools that write a file, and therefore all have to reach the guard. This tuple is
+#: the claim; `doctor.check_hook` holds the installed PreToolUse matcher against it, and `PATH_KEYS`
+#: is what makes the coverage real once a call actually arrives. A tool absent from both is a hole
+#: nothing reports: the matcher never fires and the commit-stage check becomes the only layer left.
+#:
+#: `MultiEdit` is retired upstream and stays. This is a foreign host's tool namespace, not a format
+#: of ours to keep tidy — a dead alternative in a regex costs nothing and keeps an older host covered.
+CLAUDE_WRITE_TOOLS: tuple[str, ...] = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
 def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
     """The paths this tool call is about to write, as the host named them.
 
-    Three hosts, three spellings, one question. Claude Code sends `file_path`, VS Code Copilot
-    camelCases it, and Codex's `apply_patch` sends **no path field at all** — the raw patch text
-    arrives as `command` and the paths live inside it (`pre_tool_use_payload` in openai/codex's
-    apply_patch handler). Reading only the path fields would make a hook registered with Codex
-    fire on every edit and allow every one of them, which is worse than having no hook: `doctor`
-    would report the guard as registered while it guarded nothing.
+    :data:`PATH_KEYS` covers the direct spellings. Codex's `apply_patch` sends **no path field at
+    all** — the raw patch text arrives as `command` and the paths live inside it
+    (`pre_tool_use_payload` in openai/codex's apply_patch handler). Reading only the path fields
+    would make a hook registered with Codex fire on every edit and allow every one of them, which
+    is worse than having no hook: `doctor` would report the guard as registered while it guarded
+    nothing.
     """
-    for key in ("file_path", "filePath"):
+    for key in PATH_KEYS:
         value = tool_input.get(key)
         if isinstance(value, str) and value:
             return [value]

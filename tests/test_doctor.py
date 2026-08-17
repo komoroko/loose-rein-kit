@@ -12,6 +12,7 @@ finds is a doctor whose findings nobody reads.
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -763,6 +764,50 @@ def test_the_codex_registration_does_not_claim_to_be_active(tmp_path: Path) -> N
     )
     findings = doctor.check_hook(repo_mod.Repo(tmp_path))
     assert _levels(findings, "only once the project is trusted") == ["INFO"]
+
+
+def test_a_matcher_that_misses_a_write_tool_is_reported(tmp_path: Path) -> None:
+    """"Is the guard registered?" and "does the registration cover the tools that write?" are two
+    questions, and only the first was ever asked. The shipped matcher read `Write|Edit|MultiEdit` —
+    `MultiEdit` retired upstream, `NotebookEdit` never added — so a `.ipynb` edit never reached the
+    guard and nothing said so."""
+    from rein import gate_guard
+
+    seed_repo(
+        tmp_path,
+        settings='{"hooks": {"PreToolUse": [{"matcher": "Write|Edit", '
+        '"hooks": [{"type": "command", "command": "rein guard"}]}]}}',
+    )
+    findings = doctor.check_hook(repo_mod.Repo(tmp_path))
+    assert _levels(findings, "does not name") == ["WARN"]
+    assert "NotebookEdit" in [f for f in findings if "does not name" in f.message][0].message
+
+    seed_repo(
+        tmp_path,
+        settings=json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "|".join(gate_guard.CLAUDE_WRITE_TOOLS),
+                            "hooks": [{"type": "command", "command": "rein guard"}],
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+    assert _levels(doctor.check_hook(repo_mod.Repo(tmp_path)), "covers every write tool") == ["PASS"]
+
+
+def test_the_shipped_matcher_covers_every_write_tool() -> None:
+    """The payload's settings.json is what `rein install claude` writes, so a hole there ships to
+    every product — checking only the repo's own copy would miss exactly that."""
+    from rein import gate_guard, install
+
+    groups = install._settings_template()["hooks"]["PreToolUse"]
+    covered = {tool for group in groups for tool in str(group.get("matcher", "")).split("|")}
+    assert covered >= set(gate_guard.CLAUDE_WRITE_TOOLS), f"missing: {set(gate_guard.CLAUDE_WRITE_TOOLS) - covered}"
 
 
 def test_a_host_with_no_codex_registration_gets_no_trust_note(tmp_path: Path) -> None:
