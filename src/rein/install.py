@@ -524,9 +524,7 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
 
     _print_plan(items)
     hashes = _apply_plan(repo, items, desired)
-    files = {
-        _materialized_key(rel): digest for rel, digest in _record_after(recorded, items, hashes).items()
-    }
+    files = {_materialized_key(rel): digest for rel, digest in _record_after(recorded, items, hashes).items()}
     data["prompts"] = {"version": rein.__version__, "files": files}
     # Stamp the running release into the lock. Without this the lock keeps claiming the version
     # that wrote the repo *before* the upgrade, so the startup skew warning fires forever and

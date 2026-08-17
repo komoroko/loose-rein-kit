@@ -767,7 +767,7 @@ def test_the_codex_registration_does_not_claim_to_be_active(tmp_path: Path) -> N
 
 
 def test_a_matcher_that_misses_a_write_tool_is_reported(tmp_path: Path) -> None:
-    """"Is the guard registered?" and "does the registration cover the tools that write?" are two
+    """ "Is the guard registered?" and "does the registration cover the tools that write?" are two
     questions, and only the first was ever asked. The shipped matcher read `Write|Edit|MultiEdit` —
     `MultiEdit` retired upstream, `NotebookEdit` never added — so a `.ipynb` edit never reached the
     guard and nothing said so."""

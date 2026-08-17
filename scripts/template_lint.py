@@ -644,8 +644,8 @@ DECLARED_BUT_UNREAD: dict[str, str] = {
     "observed_conditions": "agent-authored: the conditions an extracted statement holds under",
     "recommended_fix": "agent-authored: what the security reviewer suggests",
     "unknowns": "agent-authored: what the extractor could not determine",
-    "implementer_profile": "built at runtime by Config.profile_for as f\"{role}_profile\"",
-    "reviewer_profile": "built at runtime by Config.profile_for as f\"{role}_profile\"",
+    "implementer_profile": 'built at runtime by Config.profile_for as f"{role}_profile"',
+    "reviewer_profile": 'built at runtime by Config.profile_for as f"{role}_profile"',
 }
 
 
@@ -687,9 +687,7 @@ def check_declared_properties_are_read(root: Path) -> list[str]:
     A literal name search is coarse on purpose — it cannot tell a writer from a reader — but it
     catches the whole class, because a field nothing *mentions* is certainly one nothing writes.
     """
-    sources = "\n".join(
-        path.read_text(encoding="utf-8") for path in sorted((root / "src" / "rein").rglob("*.py"))
-    )
+    sources = "\n".join(path.read_text(encoding="utf-8") for path in sorted((root / "src" / "rein").rglob("*.py")))
     failures = []
     for name, where in sorted(_declared_properties(root).items()):
         if name in DECLARED_BUT_UNREAD or re.search(rf"\b{re.escape(name)}\b", sources):
@@ -700,8 +698,7 @@ def check_declared_properties_are_read(root: Path) -> list[str]:
         )
     stale = sorted(set(DECLARED_BUT_UNREAD) - set(_declared_properties(root)))
     failures += [
-        f"DECLARED_BUT_UNREAD names `{name}`, which no schema declares any more — drop the entry"
-        for name in stale
+        f"DECLARED_BUT_UNREAD names `{name}`, which no schema declares any more — drop the entry" for name in stale
     ]
     return failures
 

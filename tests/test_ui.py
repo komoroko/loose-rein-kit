@@ -390,10 +390,7 @@ def test_every_api_route_the_server_dispatches_is_reached_from_the_page() -> Non
     match `self.path` against literals, and the modules build their URLs from literals too.
     """
     source = Path(ui.__file__).read_text(encoding="utf-8")
-    routes = {
-        m.rstrip("?")
-        for m in re.findall(r'self\.path(?:\s*==\s*|\.startswith\()\s*"(/api/[^"]*)"', source)
-    }
+    routes = {m.rstrip("?") for m in re.findall(r'self\.path(?:\s*==\s*|\.startswith\()\s*"(/api/[^"]*)"', source)}
     assert routes, "no /api/ route literals found — this canary would pass on anything"
     bundle = "".join(
         p.read_text(encoding="utf-8") for p in sorted(ui.ASSETS_DIR.iterdir()) if p.suffix in (".js", ".html")
