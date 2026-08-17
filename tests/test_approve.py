@@ -480,9 +480,11 @@ def test_approving_gate_three_freezes_the_plan(tmp_path: Path) -> None:
 
 
 def test_the_freeze_keys_are_exactly_the_ones_a_roll_back_clears(tmp_path: Path) -> None:
-    # revise.apply pops these four. A key written at the freeze and not cleared on the roll back
-    # would survive an un-freeze and let a later check "verify" against a freeze that no longer
-    # holds — so the two sets are asserted equal rather than trusted to stay in step.
+    # revise.apply pops exactly this set — it imports the constant rather than repeating it, so
+    # the two can no longer drift by someone forgetting one. What is still worth asserting is the
+    # round trip: everything the freeze writes is gone again after the roll back, because a key
+    # that survived an un-freeze would let a later check "verify" against a freeze that no longer
+    # holds.
     from rein import revise
 
     repo = _tasks_gate_repo(tmp_path)
@@ -490,7 +492,7 @@ def test_the_freeze_keys_are_exactly_the_ones_a_roll_back_clears(tmp_path: Path)
     store = store_mod.Store(repo)
     state = store.read_state()
     assert state is not None
-    assert set(state.raw["plan"]) == {"status", *approve._FROZEN_PLAN_KEYS}
+    assert set(state.raw["plan"]) == {"status", *approve.FROZEN_PLAN_KEYS}
 
     revision = revise.plan_revision(repo, "tasks", [])
     assert revision["unfreezes_plan"] is True
@@ -511,7 +513,7 @@ def test_the_freeze_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
     assert approval_id in frozen.subject_ids
     # The digests the freeze covers travel in the event, so the chain says what was frozen and
     # not merely that something was.
-    assert set(frozen.detail) == set(approve._FROZEN_PLAN_KEYS)
+    assert set(frozen.detail) == set(approve.FROZEN_PLAN_KEYS)
 
 
 def test_a_plan_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path) -> None:
@@ -549,3 +551,50 @@ def test_the_other_gates_do_not_touch_the_plan_block(tmp_path: Path) -> None:
     approve.record_approval(repo, "requirements", approve.approval_subject(repo, "requirements"))
     state = store_mod.Store(repo).read_state()
     assert state is not None and state.plan_status == "draft"
+
+
+# --- the prose the build reads, pinned at the freeze ------------------------------
+
+
+def test_the_freeze_pins_the_documents_the_build_will_read(tmp_path: Path) -> None:
+    """`plan.yaml` was bound by a digest. The tickets an implementer is *sent to read* were not.
+
+    That asymmetry is the whole defect: a ticket edited after gate ③ changed what got built, and
+    nothing anywhere recorded that the thing built was not the thing approved.
+    """
+    repo = _tasks_gate_repo(tmp_path)
+    ticket = repo.path("docs/tasks/T-001.md")
+    ticket.parent.mkdir(parents=True, exist_ok=True)
+    ticket.write_text("# T-001\n\n## Acceptance criteria\n- [ ] it holds\n", encoding="utf-8")
+
+    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    assert state.frozen_sources["docs/tasks/T-001.md"].startswith("sha256:")
+
+
+def test_a_document_that_does_not_exist_is_simply_not_a_source(tmp_path: Path) -> None:
+    """A repository without a baseline has one fewer source, not a missing one."""
+    repo = _tasks_gate_repo(tmp_path)
+    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    assert "docs/05-current-state.md" not in state.frozen_sources
+
+
+def test_a_roll_back_releases_the_pinned_sources_too(tmp_path: Path) -> None:
+    """They describe a plan that is editable again — the same reason the digests go."""
+    from rein import revise
+
+    repo = _tasks_gate_repo(tmp_path)
+    repo.path("docs/tasks").mkdir(parents=True, exist_ok=True)
+    repo.path("docs/tasks/T-001.md").write_text("# T-001\n", encoding="utf-8")
+    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+
+    revise.apply(repo, revise.plan_revision(repo, "tasks", []), "the ticket was wrong")
+
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    assert state.frozen_sources == {}

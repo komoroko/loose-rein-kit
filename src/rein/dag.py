@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rein import common, models
 from rein import repo as repo_mod
@@ -51,6 +52,16 @@ class Task:
     claim_ids: tuple[str, ...] = ()
     domains: tuple[str, ...] = ()
     attempts: int = 0
+    #: The paths this task is allowed to change, as the frozen plan declares them. Empty means
+    #: unbounded — which is what an undeclared scope has always meant, and not "nothing". The
+    #: plan schema has carried these since it was written; carrying them through the graph is
+    #: what finally lets something *check* them, instead of asking an agent nicely in a prompt.
+    scope_include: tuple[str, ...] = ()
+    scope_exclude: tuple[str, ...] = ()
+    #: This task's own acceptance criteria as the frozen plan states them — what it was *for*,
+    #: as against the shared DoD's "is this code sound". Prose in a ticket nothing parsed, until
+    #: the plan grew a place to put them.
+    acceptance: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def is_done(self) -> bool:
@@ -58,8 +69,13 @@ class Task:
 
     @property
     def needs_human(self) -> bool:
-        """Blocked or awaiting a revision — the scheduler cannot move these on its own."""
-        return self.status in {"blocked", "needs-revision"}
+        """Statuses the scheduler cannot move on its own.
+
+        Three, for three different reasons: the code could not pass (`blocked`), the plan itself
+        is wrong (`needs-revision`), or the evidence this task needs is not something the loop can
+        obtain (`awaiting-evidence`). Re-running the build helps with none of them.
+        """
+        return self.status in {"blocked", "needs-revision", "awaiting-evidence"}
 
 
 @dataclass(frozen=True)
@@ -254,6 +270,9 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 claim_ids=t.claim_ids,
                 domains=t.domains,
                 attempts=attempts_map.get(t.id, 0),
+                scope_include=t.scope_include,
+                scope_exclude=t.scope_exclude,
+                acceptance=t.acceptance,
             )
             for t in plan.tasks
         ]

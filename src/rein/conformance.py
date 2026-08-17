@@ -45,12 +45,33 @@ def build_request(
     }
 
 
+#: What an extra behaviour can be (review.schema.json `machine.extra_behaviors[].category`).
+#: A category outside this list is refused rather than defaulted: there is no neutral value that
+#: would be honest, and inventing one would file behaviour nobody classified under a name nobody
+#: chose.
+EXTRA_CATEGORIES = frozenset(
+    {
+        "new_default",
+        "retry_timeout_fallback",
+        "external_side_effect",
+        "public_interface",
+        "persistence",
+        "exception_suppression",
+        "security_boundary",
+        "observability_reduction",
+        "dependency_change",
+        "concurrency",
+    }
+)
+
+
 @dataclass(frozen=True)
 class ComparatorResult:
-    """The validated per-claim comparison and the actual-coverage gaps the Comparator found."""
+    """The validated per-claim comparison, the actual-coverage gaps, and the extra behaviours."""
 
     claims: tuple[dict[str, Any], ...]
     actual_coverage_gaps: tuple[dict[str, Any], ...]
+    extra_behaviors: tuple[dict[str, Any], ...] = ()
 
 
 def run_comparator(
@@ -100,9 +121,23 @@ def run_comparator(
     gaps_raw = document.get("actual_coverage_gaps")
     gaps = [dict(g) for g in gaps_raw if isinstance(g, Mapping)] if isinstance(gaps_raw, list) else []
 
+    extras_raw = document.get("extra_behaviors")
+    extras: list[dict[str, Any]] = []
+    if isinstance(extras_raw, list):
+        for index, extra in enumerate(extras_raw):
+            if not isinstance(extra, Mapping):
+                problems.append(f"extra_behaviors[{index}] is not a mapping")
+                continue
+            problems += _validate_extra(extra, actual_ids=actual_ids)
+            extras.append(dict(extra))
+
     if problems:
         raise ComparatorError("conformance rejected:\n" + "\n".join(f"  - {p}" for p in problems))
-    return ComparatorResult(claims=tuple(claims), actual_coverage_gaps=tuple(gaps))
+    return ComparatorResult(
+        claims=tuple(claims),
+        actual_coverage_gaps=tuple(gaps),
+        extra_behaviors=tuple(extras),
+    )
 
 
 def actual_digest_of(request: Mapping[str, Any]) -> str:
@@ -134,6 +169,33 @@ def _validate_claim(
     # An AI cannot lower the change's risk below its effective floor.
     if claim.get("risk") is not None:
         problems += review_policy.reject_risk_downgrade(str(claim.get("risk")), effective_risk, subject=cid)
+    return problems
+
+
+def _validate_extra(extra: Mapping[str, Any], *, actual_ids: set[str]) -> list[str]:
+    """An extra behaviour is a statement about the Actual, so it must anchor in the Actual.
+
+    This is the one section the plan cannot check the Comparator against — by definition no claim
+    accounts for it, so `validate_citations` has nothing to resolve the entry to. The Actual is
+    what is left: an extra behaviour that names no Actual Statement is the Comparator describing
+    code nobody read, and it is refused for the same reason a fabricated claim citation is.
+
+    The change's risk floor is deliberately *not* applied here. A claim's risk restates the
+    change's, so `reject_risk_downgrade` belongs there; an extra behaviour's risk is a property of
+    that behaviour, and forcing every one of them up to a critical change's floor would report ten
+    critical findings where there is one.
+    """
+    problems: list[str] = []
+    eid = str(extra.get("id", "?"))
+    referenced = _string_list(extra.get("actual_statement_ids"))
+    if not referenced:
+        problems.append(f"{eid}: names no Actual Statement — an extra behaviour must cite the code it was read from")
+    for aid in referenced:
+        if aid not in actual_ids:
+            problems.append(f"{eid}: references Actual Statement {aid!r}, which the extractor never produced")
+    category = str(extra.get("category", ""))
+    if category not in EXTRA_CATEGORIES:
+        problems.append(f"{eid}: category {category!r} is not one this release classifies")
     return problems
 
 

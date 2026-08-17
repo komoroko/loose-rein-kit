@@ -10,6 +10,9 @@
     --prog-bg:#cfe4ff; --prog-bd:#2f7fd6; --prog-ink:#0a3358;
     --blk-bg:#ffdad3; --blk-bd:#d84a34; --blk-ink:#7a1c10;
     --rev-bg:#ffe6bf; --rev-bd:#b3760f; --rev-ink:#6c4906;
+    /* awaiting-evidence: not a failure and not a completion, so deliberately outside the
+       red/amber family — nothing here went wrong, something is simply not established yet. */
+    --wait-bg:#e4dcf7; --wait-bd:#7057c4; --wait-ink:#332364;
     --done-bg:#c9efd6; --done-bd:#1f9d69; --done-ink:#0a3d27;
     --shadow:0 1px 0 rgba(18,32,30,.04);
   }
@@ -23,6 +26,7 @@
     --prog-bg:#123353; --prog-bd:#3b82f6; --prog-ink:#bcd9ff;
     --blk-bg:#48170f; --blk-bd:#e0503a; --blk-ink:#ffb9ad;
     --rev-bg:#3f2c07; --rev-bd:#e7a53a; --rev-ink:#ffd894;
+    --wait-bg:#2b2350; --wait-bd:#9b85e8; --wait-ink:#ded3ff;
     /* done sits *above* the rest of the family in luminance, not below it: at #0d3324 it was
        darker than --todo-bg and barely separable from --panel, so a finished task read as an
        empty slot — the one status a glance at the board is most often looking for. */
@@ -36,6 +40,7 @@
     --prog-bg:#123353; --prog-bd:#3b82f6; --prog-ink:#bcd9ff;
     --blk-bg:#48170f; --blk-bd:#e0503a; --blk-ink:#ffb9ad;
     --rev-bg:#3f2c07; --rev-bd:#e7a53a; --rev-ink:#ffd894;
+    --wait-bg:#2b2350; --wait-bd:#9b85e8; --wait-ink:#ded3ff;
     --done-bg:#125437; --done-bd:#1f9d69; --done-ink:#a6f0c9; --shadow:0 1px 0 rgba(0,0,0,.5);
   }
   * { box-sizing:border-box; }
@@ -122,6 +127,7 @@
   .chip.in-progress { background:var(--prog-bg); border-color:var(--prog-bd); color:var(--prog-ink); }
   .chip.blocked { background:var(--blk-bg); border-color:var(--blk-bd); color:var(--blk-ink); }
   .chip.needs-revision { background:var(--rev-bg); border-color:var(--rev-bd); color:var(--rev-ink); }
+  .chip.awaiting-evidence { background:var(--wait-bg); border-color:var(--wait-bd); color:var(--wait-ink); }
   .chip.done { background:var(--done-bg); border-color:var(--done-bd); color:var(--done-ink); }
   .chip.critical { border-width:2px; font-weight:700; box-shadow:inset 0 0 0 1px var(--accent); }
   /* Queue severities (status_api.PENDING_SEVERITY_ORDER). `blocking` borrows the blocked palette
@@ -172,6 +178,7 @@
   svg.dag .nd.in-progress { fill:var(--prog-bg); stroke:var(--prog-bd); }
   svg.dag .nd.blocked { fill:var(--blk-bg); stroke:var(--blk-bd); }
   svg.dag .nd.needs-revision { fill:var(--rev-bg); stroke:var(--rev-bd); }
+  svg.dag .nd.awaiting-evidence { fill:var(--wait-bg); stroke:var(--wait-bd); }
   svg.dag .nd.done { fill:var(--done-bg); stroke:var(--done-bd); }
   /* Last, so it outranks the status strokes above: the critical path is a property of the graph,
      and losing it to whatever status a node happens to be in would make it unreadable. */
@@ -194,6 +201,7 @@
   .seg.in-progress { background:var(--prog-bd); border-color:var(--prog-bd); }
   .seg.blocked { background:var(--blk-bd); border-color:var(--blk-bd); }
   .seg.needs-revision { background:var(--rev-bd); border-color:var(--rev-bd); }
+  .seg.awaiting-evidence { background:var(--wait-bd); border-color:var(--wait-bd); }
   .seg.done { background:var(--done-bd); border-color:var(--done-bd); }
   @media (prefers-reduced-motion: no-preference) {
     .seg.in-progress { animation:segpulse 1.6s ease-in-out infinite; }

@@ -129,6 +129,7 @@ def make_task(
     claim_ids: list[str] | None = None,
     risk: str = "low",
     title: str = "",
+    acceptance: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     task: dict[str, Any] = {
         "id": task_id,
@@ -140,6 +141,8 @@ def make_task(
         task["blocked_by"] = blocked_by
     if claim_ids is not None:
         task["claim_ids"] = claim_ids
+    if acceptance is not None:
+        task["acceptance"] = acceptance
     return task
 
 

@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rein
-from rein import common, dag, dag_trace, event_chain, executors, install, models, strict_yaml
+from rein import common, dag, dag_trace, digests, event_chain, executors, install, models, strict_yaml
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -203,8 +203,49 @@ def check_integrations(repo: repo_mod.Repo, config: models.Config | None) -> lis
 _POST_FREEZE_GATES = ("tasks", "build", "release")
 
 
+def _source_drift(state: models.State, repo: repo_mod.Repo | None) -> list[Finding]:
+    """Has any prose the build reads moved since gate ③ froze it?
+
+    `plan.yaml` was always bound by a digest. The task tickets and the design document an
+    implementer is actually pointed at were bound to nothing, so an edit after the approval
+    changed what got built and left no trace that it had.
+    """
+    pinned = state.frozen_sources
+    if repo is None or not pinned:
+        return []
+    moved: list[str] = []
+    gone: list[str] = []
+    for path, frozen in sorted(pinned.items()):
+        candidate = repo.path(path)
+        if not candidate.is_file():
+            gone.append(path)
+        elif digests.of_file(candidate) != frozen:
+            moved.append(path)
+    findings: list[Finding] = []
+    if moved:
+        findings.append(
+            Finding(
+                "FAIL",
+                "gates",
+                f"{len(moved)} document(s) the build reads changed since gate 3 froze them "
+                f"({', '.join(moved[:5])}{'…' if len(moved) > 5 else ''}). The implementation would be "
+                "built from text nobody approved — roll back with `rein revise --to tasks` and re-approve.",
+            )
+        )
+    if gone:
+        findings.append(
+            Finding("FAIL", "gates", f"{len(gone)} document(s) frozen at gate 3 are missing: {', '.join(gone[:5])}")
+        )
+    if not moved and not gone:
+        findings.append(Finding("PASS", "gates", f"{len(pinned)} document(s) still match the digests gate 3 froze"))
+    return findings
+
+
 def check_freeze_drift(
-    state: models.State | None, plan: models.Plan | None, config: models.Config | None
+    state: models.State | None,
+    plan: models.Plan | None,
+    config: models.Config | None,
+    repo: repo_mod.Repo | None = None,
 ) -> list[Finding]:
     """Has anything the gate ③ freeze covers moved since? (read-only half of `rein guard` rule 2)
 
@@ -245,6 +286,8 @@ def check_freeze_drift(
             )
         else:
             findings.append(Finding("PASS", "gates", f"{label} still matches the digest gate 3 froze"))
+
+    findings += _source_drift(state, repo)
 
     for gate in _POST_FREEZE_GATES:
         if state.gate_status(gate) != "approved":
@@ -423,8 +466,19 @@ def check_sandbox(config: models.Config | None) -> list[Finding]:
     return findings
 
 
-def check_independence(config: models.Config | None) -> list[Finding]:
-    """The actual-extractor / comparator pair (plan §12.4)."""
+def check_independence(config: models.Config | None, plan: models.Plan | None = None) -> list[Finding]:
+    """The actual-extractor / comparator pair (plan §12.4).
+
+    Independence is *required* only for a critical review (`review_policy.independence_ok`), and
+    only between these two roles — never between the implementer and the code reviewer, which the
+    shipped config points at the same CLI. Reporting an unset pair as a FAIL regardless of what
+    the plan actually contains made the whole thing read as "two models are mandatory", on a
+    template whose plan has no claims in it at all.
+
+    So: sharing a group stays a FAIL — that is a configuration that cannot become independent by
+    the plan changing. Simply not having declared groups yet is a FAIL once a `critical` claim
+    exists to need them, and a WARN before that, naming what would make it bite.
+    """
     if config is None:
         return []
     from rein import agent_cli
@@ -437,7 +491,98 @@ def check_independence(config: models.Config | None) -> list[Finding]:
         left = config.independence_group("actual_extractor")
         right = config.independence_group("comparator")
         return [Finding("PASS", "review", f"independent groups: {left} vs {right}")]
+    undeclared = not all(config.independence_group(role) for role in agent_cli.INDEPENDENT_PAIR)
+    critical = plan is not None and any(models.risk_at_least(c.risk, "critical") for c in plan.claims)
+    if level == "FAIL" and undeclared and not critical:
+        return [
+            Finding(
+                "WARN",
+                "review",
+                f"{w} No claim in this plan is `critical` yet, so nothing needs it today — "
+                "declare the groups before one is, with `rein agent <cli> --role <role> --group <provider/model>`.",
+            )
+            for w in warnings
+        ]
     return [Finding(level, "review", w) for w in warnings]
+
+
+def running_containerized() -> bool:
+    """Whether this `rein` process is itself inside a container.
+
+    Two independent signals because neither is universal: Docker's marker file, and an init
+    cgroup path naming a container runtime. Both absent is read as "not containerized", which is
+    the right default — the check it feeds only ever *warns*.
+    """
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(marker in cgroup for marker in ("/docker/", "/podman/", "containerd", "kubepods"))
+
+
+def check_nested_sandbox(config: models.Config | None) -> list[Finding]:
+    """An adapter that brings its own sandbox, launched from inside one already.
+
+    `codex exec` establishes its own process isolation, and `rein build` passes it
+    `--sandbox workspace-write` so an implementer can write at all. Inside a container, that inner
+    sandbox needs kernel features the outer one has already dropped, so it fails at the moment the
+    agent tries to write a file — and the failure surfaces as a task that changed nothing, which
+    is a symptom pointing nowhere near its cause.
+
+    Only a WARN, and deliberately so: this is a real and supported way to run, it just needs the
+    adapter told not to sandbox itself. Naming the combination is the whole job — the fix belongs
+    to whoever chose the environment, not to a tool guessing which isolation to weaken.
+    """
+    if config is None or not running_containerized():
+        return []
+    from rein import agent_cli, build_loop
+
+    findings: list[Finding] = []
+    for name in sorted({config.adapter(role) or "claude" for role in agent_cli.ROLES}):
+        adapter = build_loop.ADAPTER_TABLE.get(name)
+        if adapter is not None and adapter.own_sandbox:
+            findings.append(
+                Finding(
+                    "WARN",
+                    "sandbox",
+                    f"`rein` is running inside a container and the {name!r} adapter establishes its own "
+                    "sandbox on top. The inner one needs kernel features the outer has dropped, so it fails "
+                    "where the agent writes — which reaches the run as a task that produced no change. "
+                    "Either run `rein` on the host and let the executor profiles do the isolating, or "
+                    "configure the adapter not to sandbox itself.",
+                )
+            )
+    return findings
+
+
+def check_retry_continuity(config: models.Config | None) -> list[Finding]:
+    """Whether the implementer's retries continue its session or start from cold.
+
+    Not a defect — it is what the CLI offers — but it is the largest avoidable cost in a long
+    build, and it was invisible: a `codex` implementer re-read its ticket, its design slice and
+    the surrounding code on every single retry, and nothing anywhere said so.
+    """
+    if config is None:
+        return []
+    from rein import build_loop
+
+    name = config.adapter("implementer") or "claude"
+    adapter = build_loop.ADAPTER_TABLE.get(name)
+    if adapter is None:
+        return []
+    if adapter.resumable:
+        return [Finding("PASS", "agents", f"{name}: a retry continues the implementer's own session")]
+    return [
+        Finding(
+            "INFO",
+            "agents",
+            f"{name}: every retry is a fresh launch — the implementer re-reads its ticket, its design "
+            "slice and the code each time. Expected for this CLI; it is what the per-task dossier "
+            "exists to keep cheap.",
+        )
+    ]
 
 
 def check_adapters(config: models.Config | None, state: models.State | None) -> list[Finding]:
@@ -902,14 +1047,16 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_integrations(repo, config)
     findings += check_runtime(repo)
     findings += check_sandbox(config)
-    findings += check_independence(config)
+    findings += check_nested_sandbox(config)
+    findings += check_independence(config, plan)
     findings += check_adapters(config, state)
+    findings += check_retry_continuity(config)
     findings += check_hook(repo)
     findings += check_preauthorization(repo)
     findings += check_ci(repo)
     findings += check_gate_chain(state)
     findings += check_receipts(state)
-    findings += check_freeze_drift(state, plan, config)
+    findings += check_freeze_drift(state, plan, config, repo)
     findings += check_plan(repo, plan, state)
     findings += check_chain(repo)
     findings += check_last_run(repo)

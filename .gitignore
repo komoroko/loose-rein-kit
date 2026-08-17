@@ -36,6 +36,9 @@ site/
 .worktrees/
 # generated PR body (rein pr-draft); regenerate rather than track
 .rein/pr-draft.md
+# per-task dossiers the loop writes for its agents; derived from the plan and the diff, rebuilt
+# for every launch, and deleted with the worktree they were written into
+.rein/work/
 
 # ---- environment variables / secrets ----
 .env

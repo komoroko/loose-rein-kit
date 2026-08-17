@@ -13,9 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from rein import common
+from rein import common, digests
 from rein import repo as repo_mod
 from rein.common import StopLoop
+
+#: Never part of what "the tree" means: orchestration state is not the product, and a fingerprint
+#: that moved whenever the loop wrote down a fact would invalidate the fact by recording it.
+_EXCLUDED = (".rein/",)
 
 
 class EventSink(Protocol):
@@ -84,11 +88,66 @@ class GitWorkspace:
         """The leaf worktree path under worktree_dir."""
         return str(self.repo.path(self.worktree_dir) / task_id)
 
-    def tree_state(self, cwd: str) -> tuple[str, str]:
-        """(HEAD hash, porcelain status) — the change-detection fingerprint."""
-        _, head = self._run(["git", "rev-parse", "HEAD"], cwd=cwd)
-        _, dirty = self._run(["git", "status", "--porcelain"], cwd=cwd)
-        return head.strip(), dirty.strip()
+    def fingerprint(self, cwd: str) -> str:
+        """A content digest of the working tree at `cwd`, or "" when it cannot be computed.
+
+        This is what "the same tree" means everywhere downstream: the change-detection probe
+        around an agent step, and the subject of every evidence-ledger fact. Both need *content*.
+        The predecessor hashed HEAD plus `git status --porcelain`, which is a list of names and
+        status codes — so a second edit to a file that was already modified left the fingerprint
+        byte-identical, and "did the agent change anything?" answered no while the tree had moved.
+
+        Three inputs, and each covers what the others cannot:
+
+          committed blobs           `git ls-tree -r -z HEAD`, hashed by path/mode/blob id. Not the
+                                    commit id: that moves when history does, so a salvage merge
+                                    changing not one byte would invalidate every fact established
+                                    about that content — and an observation a human recorded
+                                    against it would stop matching the code it was about.
+          `git diff HEAD --binary`  every tracked modification and deletion, content and all
+                                    (`--binary` so an image or a compiled fixture is not reduced
+                                    to "Binary files differ", which is a name again)
+          untracked blob ids        `git hash-object` over what `git ls-files -o` lists, since a
+                                    brand-new file appears in neither of the first two
+
+        **`.rein/` is excluded throughout**, for the same reason `finalize_commit` excludes it
+        from a task commit: orchestration state is not the product. Including it made the
+        fingerprint move every time anything recorded anything — so the very act of writing down
+        that a step had passed changed the tree that step had passed against.
+
+        Returns "" — never a partial digest — when any of that is unavailable or was truncated by
+        the output cap. Callers read "" as "unknown", which is a cache miss and a changed tree:
+        the direction that costs a re-run rather than a wrong verdict.
+        """
+        # `-z`, because `parse_ls_tree` requires it: the default format C-escapes a path holding
+        # a newline, and an escaped path is a different string from the one on disk. Fed the
+        # unseparated form it parsed the whole listing as one entry, whose name began `.rein/` —
+        # so the exclusion below dropped everything and every tree hashed identically. A
+        # fingerprint that is silently constant is worse than none, which is what the emptiness
+        # check underneath is for.
+        rc, listed = self._run(["git", "ls-tree", "-r", "-z", "HEAD"], cwd=cwd)
+        if rc != 0 or common.was_truncated(listed):
+            return ""
+        try:
+            entries = digests.parse_ls_tree(listed)
+        except digests.DigestError:
+            return ""
+        if listed.strip() and not entries:
+            return ""
+        committed = digests.tree_digest(digests.filter_tree(entries, exclude_prefixes=_EXCLUDED))
+        rc, diff = self._run(["git", "diff", "HEAD", "--binary", "--", ".", ":(exclude).rein"], cwd=cwd)
+        if rc != 0 or common.was_truncated(diff):
+            return ""
+        rc, listing = self._run(["git", "ls-files", "-o", "--exclude-standard", "--", ".", ":(exclude).rein"], cwd=cwd)
+        if rc != 0 or common.was_truncated(listing):
+            return ""
+        untracked = [name for name in listing.splitlines() if name.strip()]
+        blobs = ""
+        if untracked:
+            rc, blobs = self._run(["git", "hash-object", "--", *untracked], cwd=cwd)
+            if rc != 0 or common.was_truncated(blobs):
+                return ""
+        return digests.of_texts(["tree", committed, "diff", diff, "untracked", *untracked, "blobs", blobs])
 
     def head(self, cwd: str | None = None) -> str:
         """The current HEAD hash ("" when unavailable)."""
@@ -208,18 +267,32 @@ class GitWorkspace:
         self.git(["worktree", "remove", "--force", self.worktree_path(task_id)])
         return True
 
-    def branch_changed_paths(self, branch: str) -> list[str]:
-        """Paths a leaf branch changed since it forked off the work branch (merge-base diff)."""
-        rc, out = self._run(["git", "diff", "--name-only", f"{self.branch}...{branch}"], cwd=self.root)
-        return [p for p in out.splitlines() if p.strip()] if rc == 0 else []
+    def branch_changed_paths(self, branch: str, cwd: str = "") -> list[str]:
+        """Paths a leaf changed: committed since it forked off the work branch, plus its dirty tree.
 
-    def changed_since(self, base: str) -> list[str]:
-        """Paths a serial task changed on the work branch: commits since `base` plus the dirty tree."""
+        `cwd` is the leaf's worktree. Without it this answered on committed work alone, which is
+        the *branch*'s state rather than the attempt's: the implementer is told to commit, but the
+        loop's own `finalize_commit` exists precisely because it sometimes does not — so "the
+        implementer produced nothing" and "the implementer has not committed yet" were the same
+        answer. They are not the same thing, and one of them is a failure.
+        """
         paths: set[str] = set()
-        rc, out = self._run(["git", "diff", "--name-only", f"{base}..HEAD"], cwd=self.root)
+        rc, out = self._run(["git", "diff", "--name-only", f"{self.branch}...{branch}"], cwd=self.root)
         if rc == 0:
             paths.update(p for p in out.splitlines() if p.strip())
-        rc, out = self._run(["git", "status", "--porcelain", "-uall", "--", ".", ":(exclude).rein"], cwd=self.root)
+        if cwd:
+            paths.update(self.dirty_paths(cwd))
+        return sorted(paths)
+
+    def dirty_paths(self, cwd: str) -> list[str]:
+        """Uncommitted paths in `cwd` — modified, staged and untracked — excluding `.rein/`.
+
+        `.rein/` is excluded for the same reason `finalize_commit` excludes it: orchestration
+        state is not any task's work, and counting it would make every task look like it changed
+        something.
+        """
+        paths: set[str] = set()
+        rc, out = self._run(["git", "status", "--porcelain", "-uall", "--", ".", ":(exclude).rein"], cwd=cwd)
         if rc == 0:
             for line in out.splitlines():
                 if len(line) < 4:
@@ -228,6 +301,15 @@ class GitWorkspace:
                 if " -> " in path:
                     path = path.split(" -> ", 1)[1]
                 paths.add(path.strip('"'))
+        return sorted(paths)
+
+    def changed_since(self, base: str) -> list[str]:
+        """Paths a serial task changed on the work branch: commits since `base` plus the dirty tree."""
+        paths: set[str] = set()
+        rc, out = self._run(["git", "diff", "--name-only", f"{base}..HEAD"], cwd=self.root)
+        if rc == 0:
+            paths.update(p for p in out.splitlines() if p.strip())
+        paths.update(self.dirty_paths(self.root))
         return sorted(paths)
 
     def finalize_commit(self, cwd: str, message: str) -> bool:

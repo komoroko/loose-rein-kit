@@ -48,6 +48,7 @@ def implementer_prompt(
     gate_cmds: Sequence[str],
     has_baseline: bool,
     handoff: Mapping[str, object] | None = None,
+    dossier_path: str = "",
 ) -> str:
     # Point the implementer at the design section for this task's requirement rather than the whole
     # design doc: reading only the relevant slice keeps the subagent context lean and avoids
@@ -71,16 +72,31 @@ def implementer_prompt(
     task_test_ref = (
         f"This task is answerable for: {', '.join(task.claim_ids)} (see .rein/plan.yaml).\n" if task.claim_ids else ""
     )
+    # The dossier is everything the loop already worked out — the claims and what each one says,
+    # the declared scope, the classified diff, what earlier attempts tried. Reading it first is
+    # what stops the agent re-deriving all of that from the repository on every single launch.
+    dossier_ref = (
+        f"**Read {dossier_path} first.** It carries this task's claims and what each one asserts, its "
+        "acceptance criteria and how each one will be judged, the paths you are scoped to, what has "
+        "already changed (with lockfiles and generated files summarized rather than spelled out), and "
+        "what earlier attempts tried. It is assembled fresh for this launch — trust it over anything "
+        "you would go and re-derive.\n"
+        if dossier_path
+        else ""
+    )
     prompt = (
         f'You are the implementer subagent. Your only task is {task.id} "{task.title}".\n'
-        f"Read docs/tasks/{task.id}.md, {design_ref}, and the existing code, and implement "
+        f"{dossier_ref}"
+        f"Then read docs/tasks/{task.id}.md, {design_ref}, and the existing code, and implement "
         f"following the protocol in .rein/prompts/agents/implementer.md.{baseline_ref}\n"
         f"{task_test_ref}"
         f"Write automated tests and get {_gate_list(gate_cmds)} green.\n"
         "When done, commit your changes to this branch (excluding the orchestration state .rein/):\n"
         f"  git add -A -- . ':(exclude).rein' && git commit -m \"{task.id}: <summary>\"\n"
         "Do not reach outside scope (other tasks' territory). If you find a requirements/design defect, "
-        "do not fix it on your own — report it."
+        "do not fix it on your own — report it.\n"
+        "End with one `rein report --outcome implemented|blocked|needs-revision --summary … --touched …` "
+        "call: it is the only channel by which anything you say reaches the caller."
     )
     note = handoff_note(handoff or {})
     if note:
@@ -93,13 +109,31 @@ def implementer_prompt(
 
 
 def review_prompt(
-    task: dag.Task, *, gate_cmds: Sequence[str], changed_paths: Sequence[str] = (), diff_cmd: str = ""
+    task: dag.Task,
+    *,
+    gate_cmds: Sequence[str],
+    changed_paths: Sequence[str] = (),
+    diff_cmd: str = "",
+    dossier_path: str = "",
+    findings_path: str = "",
 ) -> str:
     # Scope the reviewer's read to the task's actual diff: it runs in a fresh context (independent
     # verification — deliberately not the implementer's session), and without this hint it must
-    # re-survey the tree cold to even find the changes it is reviewing.
+    # re-survey the tree cold to even find the changes it is reviewing. The dossier goes further:
+    # it already separates the source from the tests from the 800 lines of lockfile, and says what
+    # the task was supposed to establish, so the reviewer stops re-inferring both from a raw diff.
     cmds = ", ".join(f"`{c}`" for c in gate_cmds)
-    if changed_paths:
+    if dossier_path:
+        scope = (
+            f"**Read {dossier_path} first.** It carries the claims this task answers, its acceptance "
+            "criteria, its declared scope, and its changed paths already split into source, tests and "
+            "mechanical churn — review the source and tests, not the churn. Judge the change against "
+            f"the acceptance criteria, one at a time. The full diff is `{diff_cmd}`.\n"
+            if diff_cmd
+            else f"**Read {dossier_path} first.** It carries the claims this task answers, its acceptance "
+            "criteria, its declared scope, and its changed paths split by kind.\n"
+        )
+    elif changed_paths:
         listing = "\n".join(f"  {p}" for p in changed_paths)
         scope = (
             f"The task's changes are exactly these paths (diff: `{diff_cmd}`):\n{listing}\n"
@@ -113,11 +147,43 @@ def review_prompt(
         f'You are the reviewer for task {task.id} "{task.title}" (the quality gate\'s agent step).\n'
         f"{scope}"
         "Review this branch's changes for this task for correctness bugs (the /code-review discipline), "
-        "then simplify: reuse existing code, remove needless complexity, and strip what the ticket's "
+        "then for simplification: reuse existing code, needless complexity, and anything the ticket's "
         "acceptance criteria do not require — speculative generality, unused knobs/hooks (YAGNI; the "
-        "/simplify discipline). Apply the fixes directly.\n"
-        "Stay within this task's scope; if you find a requirements/design defect, report it instead of fixing it.\n"
-        f'If you change anything, commit with the "{task.id}: " prefix and keep {cmds} green.'
+        "/simplify discipline). Stay within this task's scope; a requirements/design defect is a finding "
+        "like any other, not something to work around.\n"
+        "\n"
+        "**You do not change the code, and you do not run anything.** You have no write access to it, "
+        f"and running {cmds} would only repeat what the caller runs itself and decides by. Judging a "
+        "change and then editing it away is one participant doing both halves of a review; the "
+        "implementer fixes what you find, and you get to look again.\n"
+        "\n"
+        f"Write your findings to `{findings_path}` and nothing else:\n"
+        '  {"findings": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}\n'
+        "`must_fix` is a defect the change cannot land with — a bug, a broken contract, a security "
+        "problem. `consider` is everything else worth saying; it stops nothing and is carried to the "
+        "human at gate ④. An empty list is a real answer, and the right one when the change is sound: "
+        "inventing a finding to look thorough costs an implementer round for nothing."
+    )
+
+
+def review_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str], dossier_path: str = "") -> str:
+    """Hand a reviewer's must-fix findings back to the implementer.
+
+    The reviewer used to apply its own fixes, which made the tree move underneath the gate and
+    forced every already-passed step to be re-run — and put judging and repairing in one pair of
+    hands. Separating them costs this one extra launch and buys a review whose findings somebody
+    else had to act on.
+    """
+    reference = f"Your dossier is {dossier_path}.\n" if dossier_path else ""
+    return (
+        f'You are the implementer for task {task.id} "{task.title}". An independent reviewer read your '
+        "change and found the following, and each one has to be resolved before the task can land:\n"
+        f"{findings}\n"
+        f"{reference}"
+        "Fix them with the minimal change — do not widen scope, and do not redo the task. If a finding "
+        "is wrong, say so in your `rein report --summary` rather than silently ignoring it: the reviewer "
+        f"looks again afterwards. Keep {_gate_list(gate_cmds)} green, and commit with the "
+        f'"{task.id}: " prefix.'
     )
 
 

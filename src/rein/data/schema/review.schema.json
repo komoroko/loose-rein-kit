@@ -790,6 +790,15 @@
                   "blocking": {
                     "type": "boolean"
                   },
+                  "first_seen": {
+                    "description": "The change this finding is a statement about. Without it a blocking finding was carried forward by id alone, so one taken against base A kept blocking a regeneration against base B — a different diff, sometimes no longer containing the code the finding named.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "trusted_base_sha": { "$ref": "#/$defs/commit" },
+                      "subject_head_sha": { "$ref": "#/$defs/commit" }
+                    }
+                  },
                   "recommended_fix": {
                     "$ref": "#/$defs/text"
                   }

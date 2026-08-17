@@ -251,11 +251,42 @@ FREEZING_GATE = "tasks"
 
 #: The keys `state.plan` carries once frozen — exactly the set `revise.apply` clears on a roll
 #: back. A key written here and not cleared there would survive an un-freeze and let a later
-#: check "verify" against a freeze that no longer holds.
-_FROZEN_PLAN_KEYS = ("digest", "config_digest", "toolchain_digest", "frozen_at")
+#: check "verify" against a freeze that no longer holds. `revise` imports this rather than
+#: repeating it: the two lists agreeing was, until now, a thing somebody had to remember.
+FROZEN_PLAN_KEYS = ("digest", "config_digest", "toolchain_digest", "sources", "frozen_at")
+
+#: Documents outside `plan.yaml` that the implementation phase reads, other than the task tickets
+#: (which come from the plan's own task ids). Present-only: a repository without a baseline
+#: document simply has one fewer source, not a missing one.
+_SOURCE_DOCS = ("docs/10-requirements.md", "docs/20-design.md", "docs/05-current-state.md")
 
 
-def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[str, str]:
+def implementation_sources(repo: repo_mod.Repo, plan: models.Plan) -> dict[str, str]:
+    """Every prose document the build will read, digested, keyed by repo-relative path.
+
+    The gap this closes: `plan.yaml` is frozen by digest, and the documents an implementer is
+    actually pointed at — its ticket, the design section covering its claims — were bound to
+    nothing at all. A ticket edited after gate ③ changed what got built, with no record anywhere
+    that the thing built was not the thing approved.
+
+    Digested over the file's bytes as they sit in the working tree, because that is what a human
+    reading the repository sees. Whether those bytes have also been *committed* is a separate
+    question, and a separate check: a parallel leaf is cut from the work branch's tip and can only
+    read what is committed there.
+    """
+    paths = [*_SOURCE_DOCS, *(f"docs/tasks/{task.id}.md" for task in plan.tasks)]
+    artifacts = plan.raw.get("cycle", {}).get("artifacts")
+    if isinstance(artifacts, dict):
+        paths += [str(ref.get("path", "")) for ref in artifacts.values() if isinstance(ref, dict)]
+    found: dict[str, str] = {}
+    for path in sorted(set(p for p in paths if p)):
+        candidate = repo.path(path)
+        if candidate.is_file():
+            found[path] = digests.of_file(candidate)
+    return found
+
+
+def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[str, object]:
     """`state.plan` as gate ③ freezes it, refusing if the documents moved since `subject`.
 
     Recomputed here rather than copied from `subject` because `subject` was assembled *before*
@@ -285,6 +316,7 @@ def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[
         "digest": plan.digest(),
         "config_digest": config.digest(),
         "toolchain_digest": config.toolchain_digest(),
+        "sources": implementation_sources(repo, plan),
         "frozen_at": event_chain.now_iso(),
     }
 
@@ -359,7 +391,7 @@ def record_approval(
                 cycle_id=state.cycle_id,
                 actor="local-confirmation",
                 subject_ids=[approval_id],
-                detail={key: raw["plan"][key] for key in _FROZEN_PLAN_KEYS},
+                detail={key: raw["plan"][key] for key in FROZEN_PLAN_KEYS},
             )
 
         tx.write("state", raw, expect_digest=seen)

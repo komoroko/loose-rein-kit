@@ -173,6 +173,14 @@
             "items": {
               "$ref": "#/$defs/pathGlob"
             }
+          },
+          "stage": {
+            "description": "Where in the run this step belongs. `task` runs it per task only; `integration` runs it only on the merged work branch; `both` (the default) does what every step has always done. This is what lets a fast focused suite guard each task while the whole suite runs once over the join — the same total confidence, an order of magnitude less of it re-established per attempt. Frozen at gate 3, so it is an operator's decision about the DoD's shape and never a task's opt-out: every step still runs, the question is only how often.",
+            "enum": [
+              "task",
+              "integration",
+              "both"
+            ]
           }
         },
         "allOf": [
