@@ -66,6 +66,39 @@ def test_every_schema_enum_has_a_models_constant(schema_name: str) -> None:
         )
 
 
+# Vocabularies that deliberately have no schema enum of their own, with the reason. The header of
+# models.py's vocabulary section says every one of these appears as an `enum` in a schema — an
+# unchecked claim until now, and two constants had already stopped being true when it was written.
+NON_DOCUMENT_VOCABULARIES: dict[str, str] = {
+    "AGENT_ROLE_VALUES": "config's `agents` constrains the roles as fixed properties + additionalProperties: false",
+    "CAPABILITY_VALUES": "a control-plane token's scope, never written into a document",
+    "CENTRAL_ONLY_CAPABILITIES": "the same token vocabulary, split by who may exercise it",
+    "MECHANIZED_EVIDENCE_KINDS": "a subset of ACCEPTANCE_EVIDENCE_KINDS (the two this loop can do itself)",
+    "REVIEW_STAGE_VALUES": "the review stages are derived per request, not stored — review_api enforces them",
+}
+
+
+def test_every_vocabulary_appears_as_a_schema_enum() -> None:
+    """The other direction, and the one that was missing.
+
+    `test_every_schema_enum_has_a_models_constant` catches a schema enum drifting away from the
+    code. Nothing caught a *constant* describing a document field the schema does not have, which is
+    how `HOME_MODE_VALUES` outlived the `home` property entirely and `SCENARIO_KIND_VALUES` was
+    declared for a shape no schema ever carried. Both read as vocabulary; neither constrained
+    anything.
+    """
+    schema_enums = {values for name in SCHEMA_NAMES for _, values in _enums(models.schema(name))}
+    for values, names in sorted(_python_vocabularies().items(), key=lambda kv: sorted(kv[1])):
+        for constant in names:
+            if constant in NON_DOCUMENT_VOCABULARIES:
+                continue
+            assert values in schema_enums, (
+                f"models.{constant} = {sorted(values)} matches no enum in any schema. Either the field "
+                "it describes is gone (delete the constant) or it never constrained one (record it in "
+                "NON_DOCUMENT_VOCABULARIES with the reason)."
+            )
+
+
 def test_gate_and_phase_ladders_agree() -> None:
     assert set(models.PHASE_AFTER_GATE) == set(models.GATE_ORDER)
     assert set(models.PHASE_AFTER_GATE.values()) <= set(models.PHASE_ORDER)

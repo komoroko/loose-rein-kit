@@ -625,6 +625,87 @@ def check_scaffold_config_parity(root: Path) -> list[str]:
     return failures
 
 
+#: Schema properties no Python is expected to name, and why. Two kinds only.
+#:
+#: **Agent-authored** — a reviewer writes the field and jsonschema is what checks it. No Python
+#: reads them because nothing downstream needs to: they are carried into the review document and
+#: read by the human. Legitimate, and the reason this canary needs a list at all.
+#:
+#: **Built at runtime** — the key is assembled rather than written out, so a literal search cannot
+#: see it. `Config.profile_for` does `f"{role}_profile"`.
+#:
+#: Anything else is the `machine.extra_behaviors` shape: declared in the schema, consumed by
+#: something, and written by nobody. Adding a name here is a claim that has to be true.
+DECLARED_BUT_UNREAD: dict[str, str] = {
+    "assessment_basis": "agent-authored: how the comparator reached its semantic judgement",
+    "assessor_digest": "agent-authored: which assessor produced it",
+    "code_anchor_digest": "agent-authored: the integrity axis's own binding",
+    "limitations": "agent-authored: what a statement does not cover",
+    "observed_conditions": "agent-authored: the conditions an extracted statement holds under",
+    "recommended_fix": "agent-authored: what the security reviewer suggests",
+    "unknowns": "agent-authored: what the extractor could not determine",
+    "implementer_profile": "built at runtime by Config.profile_for as f\"{role}_profile\"",
+    "reviewer_profile": "built at runtime by Config.profile_for as f\"{role}_profile\"",
+}
+
+
+def _declared_properties(root: Path) -> dict[str, str]:
+    """Every property name the shipped schemas declare → the first place it is declared."""
+    import json
+
+    found: dict[str, str] = {}
+
+    def walk(node: object, schema: str, path: str) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                for key, child in properties.items():
+                    found.setdefault(str(key), f"{schema}{path}/{key}")
+                    walk(child, schema, f"{path}/{key}")
+            for key, child in node.items():
+                if key != "properties":
+                    walk(child, schema, f"{path}/{key}")
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                walk(child, schema, f"{path}/{index}")
+
+    for path in sorted((root / "src" / "rein" / "data" / "schema").glob("*.schema.json")):
+        walk(json.loads(path.read_text(encoding="utf-8")), path.name, "")
+    return found
+
+
+def check_declared_properties_are_read(root: Path) -> list[str]:
+    """Every schema property is named by some Python, or listed above with a reason.
+
+    The defect this exists for has happened repeatedly and is always the same shape: a field
+    declared in the schema, consumed by decision cards or a budget or a summary, and **written by
+    nobody**. `machine.extra_behaviors` reported "extra behaviours: 0" from a list that could not
+    hold anything; `rename_semantics_analyzed` sat beside two flags the coverage status actually
+    reads; `human.session` described stage progress that is derived instead; `dispositions[].owner`
+    and `.due` were affordances `record_disposition` cannot produce.
+
+    A literal name search is coarse on purpose — it cannot tell a writer from a reader — but it
+    catches the whole class, because a field nothing *mentions* is certainly one nothing writes.
+    """
+    sources = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted((root / "src" / "rein").rglob("*.py"))
+    )
+    failures = []
+    for name, where in sorted(_declared_properties(root).items()):
+        if name in DECLARED_BUT_UNREAD or re.search(rf"\b{re.escape(name)}\b", sources):
+            continue
+        failures.append(
+            f"{where}: declared in the schema and named nowhere in src/rein/**.py. Wire it, delete it, "
+            f"or record it in DECLARED_BUT_UNREAD with the reason it needs no reader."
+        )
+    stale = sorted(set(DECLARED_BUT_UNREAD) - set(_declared_properties(root)))
+    failures += [
+        f"DECLARED_BUT_UNREAD names `{name}`, which no schema declares any more — drop the entry"
+        for name in stale
+    ]
+    return failures
+
+
 def check_ignored_payload(root: Path) -> list[str]:
     """No file this template ships is invisible to git.
 
@@ -742,6 +823,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         failures += check_tracked_artifacts(root, files[CONFIG_PATH])
         failures += check_ignored_payload(root)
+        failures += check_declared_properties_are_read(root)
         failures += check_oci_profile_mentions(root)
         failures += check_scaffold_config_parity(root)
         failures += check_readme_parity(files["README.md"], files["README.ja.md"])
