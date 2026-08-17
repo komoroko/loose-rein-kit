@@ -64,6 +64,24 @@ MACHINE_WRITTEN: tuple[str, ...] = (
     ".rein/rein.lock",
 )
 
+#: Where this guard is *registered*. Written by `rein install`, hashed in the lock, and — until now —
+#: guarded by nothing: not rule 1, not rule 2, and not `guard.paths`, which covers deliverable
+#: directories. So the one file an agent could edit to switch off edit-stage enforcement was the one
+#: file no rule mentioned. Denied outright rather than gated behind an approval, because there is no
+#: phase at which an agent rewriting the guard's own registration is the expected next step; a human
+#: changing it does so at their editor, where no PreToolUse hook applies.
+#:
+#: This closes the tool-write path only. A CLI that writes its own project config directly (Codex
+#: creating `.codex/config.toml` on trust) is not a tool call and no hook sees it — that is what the
+#: commit-stage check and `doctor.check_hook` are for.
+HOOK_REGISTRATION: tuple[str, ...] = (
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".codex/hooks.json",
+    ".codex/config.toml",
+    ".github/hooks/",
+)
+
 #: Pinned by the gate ③ receipt. Rule 2 — denied once `plan.status` is frozen.
 FROZEN_AFTER_GATE_THREE: tuple[str, ...] = (
     ".rein/plan.yaml",
@@ -199,6 +217,17 @@ def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = 
             " the audit events that explain the change. A hand edit produces a state change with no"
             " matching event, which `rein doctor` reports and no gate receipt will cover."
             " Use the command that owns this change instead."
+        )
+
+    # Rule 1, second half — the guard's own registration. Also never relaxed by template_mode: a
+    # template whose hook can be switched off is a template that ships with the switch.
+    if _matches(rel, HOOK_REGISTRATION):
+        return False, (
+            f"Blocked: {rel} is where this guard is registered with the host, so an edit to it can"
+            " switch off edit-stage enforcement — including this very check. `rein install` writes"
+            " it and the lock records its hash; there is no phase at which rewriting it is the"
+            " expected next step. If a human wants it changed, they change it at their own editor,"
+            " where no PreToolUse hook applies."
         )
 
     state = _read_state(repo)

@@ -70,6 +70,41 @@ def test_rule_one_holds_even_with_every_gate_approved(tmp_path: Path) -> None:
     assert not allowed
 
 
+@pytest.mark.parametrize(
+    "rel",
+    [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".codex/hooks.json",
+        ".codex/config.toml",
+        ".github/hooks/rein.json",
+    ],
+)
+def test_the_guards_own_registration_cannot_be_edited_by_an_agent(tmp_path: Path, rel: str) -> None:
+    """The one file an agent could edit to switch off edit-stage enforcement was the one file no
+    rule mentioned: not rule 1, not rule 2, and not `guard.paths`, which covers deliverable
+    directories. Every gate approved makes no difference — there is no phase at which rewriting the
+    guard's own registration is the expected next step."""
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "approved"), phase="done"))
+    allowed, reason = decide(tmp_path, rel)
+    assert not allowed
+    assert "switch off edit-stage enforcement" in reason
+
+
+def test_the_registration_rule_is_not_relaxed_by_template_mode(tmp_path: Path) -> None:
+    """A template whose hook can be switched off is a template that ships with the switch."""
+    seed_repo(tmp_path, config=make_config(template_mode=True))
+    assert not decide(tmp_path, ".claude/settings.json")[0]
+
+
+def test_the_registration_rule_does_not_block_committing_it(tmp_path: Path) -> None:
+    """`rein install` writes these files and they have to be committable, exactly as state.yaml is —
+    rule 1 forbids hand edits, not commits (`_rule_three` is the whole of the commit stage)."""
+    seed_repo(tmp_path)
+    allowed, _ = gate_guard.evaluate(str(tmp_path / ".claude/settings.json"), repo_mod.Repo(tmp_path), stage="commit")
+    assert allowed
+
+
 # --- rule 2: a frozen plan is frozen ------------------------------------------
 
 

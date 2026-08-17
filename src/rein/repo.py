@@ -28,6 +28,20 @@ from pathlib import Path
 
 _GIT_TIMEOUT_SEC = 10
 
+#: The SSOT directory as a POSIX prefix. Everything under it is orchestration state and never the
+#: product, so it is excluded from four answers that have to agree: what "the tree" is
+#: (`build_git.fingerprint`), what a task is credited with changing (`dirty_paths`), what its commit
+#: carries (`finalize_commit`, and the same pathspec in the implementer's own instructions), and
+#: what a review is bound to (`review.change_digest`). One constant, because two places able to
+#: answer differently is the whole defect — a fingerprint that moved whenever the loop wrote down a
+#: fact would invalidate the fact by recording it, and a review that wrote review.yaml would
+#: invalidate itself.
+SSOT_DIR = ".rein/"
+
+#: The same exclusion as a git pathspec, for the commands that take one. `.` is explicit because a
+#: pathspec containing only an exclusion matches nothing.
+SSOT_PATHSPEC: tuple[str, ...] = (".", f":(exclude){SSOT_DIR.rstrip('/')}")
+
 
 class RepoNotFoundError(RuntimeError):
     """No .rein/ directory was found — the command has no repository to operate on."""

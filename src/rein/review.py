@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 #: The SSOT artefacts are bound by their own digests, so the change under review is the tree with
 #: them excluded — otherwise a review that writes review.yaml would invalidate itself (plan §17.3).
-_CHANGE_EXCLUDE: tuple[str, ...] = (".rein/",)
+_CHANGE_EXCLUDE: tuple[str, ...] = (repo_mod.SSOT_DIR,)
 
 
 class ReviewError(Exception):
