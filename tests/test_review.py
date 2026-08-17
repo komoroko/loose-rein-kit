@@ -424,6 +424,28 @@ def test_a_comparison_failure_is_not_reported_as_a_failed_extraction(review_repo
     assert "actual_extraction_failed" not in kinds
 
 
+@pytest.mark.integration
+def test_a_review_that_could_not_read_its_own_inputs_is_recorded_too(review_repo: Path) -> None:
+    """The four SSOT reads sat outside the block that records a failure.
+
+    So the failure that needs no reviewer at all — plan.yaml not parsing — was the one kind still
+    leaving the log with nothing in it. state.yaml is read first so the event can name the cycle:
+    an event that cannot is refused, which would make recording the failure a chain defect.
+    """
+    repo = repo_mod.Repo(review_repo)
+    repo.plan.write_text("claims: [oh dear\n", encoding="utf-8")
+
+    with pytest.raises(Exception) as caught:
+        review.generate(repo, _fake_reviewer)
+    assert not isinstance(caught.value, review.ReviewError)  # the parse error itself, not a wrapped one
+
+    events, defects = event_chain.scan(repo.events)
+    assert not defects, defects
+    assert events[-1].event == "review_failed"
+    assert events[-1].detail.get("stage") == "inputs"
+    assert events[-1].cycle_id  # the log is queried per cycle; an event that names none is unfindable
+
+
 # --- what the reviewers are actually handed ------------------------------------
 
 _LOCKFILE_DIFF = """diff --git a/src/api.py b/src/api.py

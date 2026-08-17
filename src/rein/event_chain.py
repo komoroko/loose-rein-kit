@@ -228,13 +228,22 @@ def make(
     detail: dict[str, object] | None = None,
     tx_id: str = "",
 ) -> models.Event:
-    """An unchained event ready for :func:`link`. Unknown event names are refused here, not later.
+    """An unchained event ready for :func:`link`. A name or cycle the log cannot carry is refused
+    here, not later.
 
     Rejecting the vocabulary at construction is what keeps the log aggregatable: a typo would
-    otherwise create a kind no query knows to look for.
+    otherwise create a kind no query knows to look for. `cycle_id` is refused for the same reason
+    and was not — callers wrote `state.cycle_id if state else ""`, and an event with no cycle is
+    both unfindable by every per-cycle query and invalid against `event.schema.json`, so appending
+    one turned a failure that wanted recording into a defect in the chain a gate receipt pins.
     """
     if event not in models.EVENT_VALUES:
         raise ValueError(f"unknown event {event!r} — one of: {', '.join(models.EVENT_ORDER)}")
+    if not models.CYCLE_ID_RE.match(cycle_id):
+        raise ValueError(
+            f"event {event!r}: cycle_id {cycle_id!r} is not one the log can carry "
+            f"(must match {models.CYCLE_ID_RE.pattern}) — the caller has to establish the cycle first"
+        )
     return models.Event(
         seq=0,
         id=new_id(),

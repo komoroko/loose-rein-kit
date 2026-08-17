@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import cycle, models
+from rein import cycle, models, strict_yaml
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import chain, make_state, seed_repo
@@ -157,6 +157,30 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
+def test_the_reset_state_is_schema_valid_and_lands_with_its_event(tmp_path: Path) -> None:
+    """The reset used to call `atomic_write` on state.yaml directly, so the schema never saw the
+    document and the write was a separate step from the event recording it. Both go through one
+    transaction now; the structural half of this is
+    `test_store.test_only_the_store_writes_a_machine_written_document`."""
+    repo = finished_repo(tmp_path, git=True, events=chain("cycle_initialized"))
+    _git(tmp_path, "config", "user.email", "t@e.x")
+    _git(tmp_path, "config", "user.name", "T")
+    cycle.snapshot_scaffold(repo)
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "baseline")
+
+    assert cycle.main(["--name", "payment", "--repo", str(tmp_path)]) == 0
+
+    raw = strict_yaml.load_mapping(repo.state.read_text(encoding="utf-8"), what="state.yaml")
+    assert models.schema_errors(raw, "state") == []
+    events = store_mod.Store(repo).read_events()
+    assert [e.event for e in events] == ["cycle_initialized"]
+    assert events[0].cycle_id == "payment"
+    # No journal left behind: the write and its event committed as one unit.
+    assert not store_mod.Store(repo).journal.exists()
+
+
+@pytest.mark.integration
 def test_close_refuses_when_not_ready(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     seed_repo(tmp_path, state=make_state(gates={"release": "pending"}), docs=True, git=True)
     assert cycle.main(["--name", "payment", "--repo", str(tmp_path)]) == 1
@@ -171,6 +195,12 @@ def test_dry_run_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert store_mod.Store(repo).document_digest("state") == before
 
 
-def test_a_bad_slug_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ["Payment Refactor!", "-leading-dash", "яя", "①"])
+def test_a_bad_slug_is_refused(tmp_path: Path, name: str) -> None:
+    """The check was `slug.replace("-", "").isalnum()`, an approximation of the schema's pattern
+    that accepted a leading dash and every Unicode letter `str.isalnum` counts — so `--name -foo`
+    got as far as writing a cycle_id that state.yaml and the audit log both reject."""
     finished_repo(tmp_path)
-    assert cycle.main(["--name", "Payment Refactor!", "--repo", str(tmp_path)]) == 2
+    # `--name=<value>`: argparse would read a leading-dash value as another option and exit itself,
+    # which is the right answer but not the one under test here.
+    assert cycle.main([f"--name={name}", "--repo", str(tmp_path)]) == 2

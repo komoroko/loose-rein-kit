@@ -364,6 +364,14 @@ ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
 #: Repo-relative POSIX paths only: no absolute path, no `..`, no backslash, no leading slash.
 REPO_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$")
 
+#: The cycle id, which `state.yaml` and every event carry. One spelling of a rule that had four:
+#: the schema's pattern (checked against it by a test), `cycle.py`'s `--name` predicate, which
+#: accepted a leading dash and any Unicode letter the schema rejects, and two `if state else ""`
+#: fallbacks that put an empty one into the hash chain. Every event is queried by cycle, so an
+#: event that cannot name its own is unfindable — and fails the schema `event_chain.scan` and
+#: `rein doctor` validate the log against, which is how a recording failure became a chain defect.
+CYCLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
 
 def is_repo_path(value: object) -> bool:
     """True when `value` is a safe repo-relative POSIX path (no escape, no absolute form)."""

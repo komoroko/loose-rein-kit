@@ -47,6 +47,25 @@ def test_unknown_event_name_is_refused_at_construction(tmp_path: Path) -> None:
         event_chain.make("taks_completed", "demo")
 
 
+@pytest.mark.parametrize("cycle_id", ["", "-leading-dash", "яя", "Upper", "has_underscore"])
+def test_a_cycle_the_log_cannot_carry_is_refused_at_construction(cycle_id: str) -> None:
+    """The same reason the event name is refused here: the log is queried per cycle.
+
+    Callers wrote `state.cycle_id if state else ""` and `cycle-close` accepted `--name` values
+    `str.isalnum` allows, so appending one produced an event that no per-cycle query finds *and*
+    that `event.schema.json` rejects — turning a recorded failure into a defect in the chain a
+    gate receipt pins.
+    """
+    with pytest.raises(ValueError, match="cycle_id"):
+        event_chain.make("task_completed", cycle_id)
+
+
+def test_the_cycle_id_rule_is_the_schema_s(tmp_path: Path) -> None:
+    """One rule, two spellings, checked against each other — it previously had four."""
+    for name in ("event", "state"):
+        assert models.schema(name)["properties"]["cycle_id"]["pattern"] == models.CYCLE_ID_RE.pattern
+
+
 def test_deleted_record_is_detected(tmp_path: Path) -> None:
     path = tmp_path / "events.ndjson"
     _write(path)

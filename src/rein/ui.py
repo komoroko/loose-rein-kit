@@ -654,12 +654,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 human_review.assert_machine_current(review, expected)
                 new_human = apply(review, dict(review.human))
                 state = tx.store.read_state()
+                if state is None or not state.cycle_id:
+                    raise UiActionError(HTTPStatus.CONFLICT, "state.yaml names no cycle — run `rein doctor`")
                 tx.write(
                     "review",
                     {**review.raw, "human": new_human},
                     expect_digest=store_mod.read_digest(review),
                 )
-                tx.append(event, cycle_id=state.cycle_id if state else "", subject_ids=_review_subjects(body))
+                tx.append(event, cycle_id=state.cycle_id, subject_ids=_review_subjects(body))
             fresh = store.read_review()
             self._send_json(
                 HTTPStatus.OK,

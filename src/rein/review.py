@@ -331,24 +331,37 @@ def generate(
     not explain.
     """
     store = store_mod.Store(repo)
-    plan = store.read_plan()
-    config = store.read_config()
-    state = store.read_state()
-    # Captured before the pipeline runs, not inside the transaction: the whole point is to
-    # refuse if review.yaml moved while the (slow, LLM-driven) stages were running.
-    seen_review = store_mod.read_digest(store.read_review())
-
-    cycle = state.cycle_id if state else (plan.cycle_id if plan else "")
     # Which stage a failure landed in, for the event that records it. Tracked as the pipeline
     # advances rather than read off the exception: each stage raises its own well-worded error and
     # wrapping those would change what a human sees at the console to say where it happened.
-    stage = "coverage"
+    #
+    # It starts at `inputs`, not `coverage`, because reading the SSOT is a stage that fails: a
+    # plan.yaml that does not parse means gate ④ cannot be produced, and with these four reads
+    # outside the recording block that failure was the one kind still going unrecorded. `cycle` is
+    # read *from* those documents, so it is bound before them and stays "" when they are what broke.
+    stage = "inputs"
+    cycle = ""
 
     def entered(name: str) -> None:
         nonlocal stage
         stage = name
 
     try:
+        # state.yaml first, and its cycle taken immediately: it is the document that *names* the
+        # cycle, so reading it ahead of the ones that can fail is what lets their failure be
+        # recorded under the right cycle instead of nowhere.
+        state = store.read_state()
+        cycle = state.cycle_id if state else ""
+        plan = store.read_plan()
+        config = store.read_config()
+        # Captured before the pipeline runs, not inside the transaction: the whole point is to
+        # refuse if review.yaml moved while the (slow, LLM-driven) stages were running.
+        seen_review = store_mod.read_digest(store.read_review())
+
+        cycle = cycle or (plan.cycle_id if plan else "")
+        if not cycle:
+            raise ReviewError("no cycle to record this review under — .rein/state.yaml names none; run `rein doctor`")
+        entered("coverage")
         rc, head_out = repo._git_rc("rev-parse", "HEAD")
         if rc != 0:
             raise ReviewError("cannot resolve HEAD — is this a git repository with commits?")
@@ -489,6 +502,13 @@ def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: st
     is to re-raise the real failure; a store problem here would replace the error a human needs to
     read with one about bookkeeping, and the log being unwritable is what `rein doctor` is for.
     """
+    if not cycle:
+        # There is no cycle to file it under, and an event that cannot name one is refused by
+        # `event_chain.make`. Say where the account went instead of leaving the reader to notice
+        # the log is silent — this is reachable only in the `inputs` stage, where the cycle is read
+        # out of the very documents that failed.
+        logger.warning(f"the review failed at stage '{stage}' and no cycle is established to record it under: {reason}")
+        return
     try:
         with store.transaction() as tx:
             detail = {"stage": stage, "reason": reason[:1000]}
@@ -698,9 +718,11 @@ def complete(repo: repo_mod.Repo, *, actor: str = "") -> None:
     except ValueError as exc:
         raise ReviewError(str(exc)) from None
     state = store.read_state()
+    if state is None or not state.cycle_id:
+        raise ReviewError("cannot record the freeze — .rein/state.yaml names no cycle; run `rein doctor`")
     with store.transaction() as tx:
         tx.write("review", {**review.raw, "human": new_human}, expect_digest=seen)
-        tx.append("human_review_frozen", cycle_id=state.cycle_id if state else "", actor=actor)
+        tx.append("human_review_frozen", cycle_id=state.cycle_id, actor=actor)
 
 
 # -- CLI ----------------------------------------------------------------------
