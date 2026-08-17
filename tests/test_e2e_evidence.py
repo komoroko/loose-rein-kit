@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -413,7 +414,7 @@ def test_the_dossier_is_written_where_the_agent_is_told_to_read_it(
     repo: repo_mod.Repo, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The handover itself: the loop's own facts, on disk, before the agent starts guessing."""
-    found: list[dict[str, object]] = []
+    found: list[dict[str, Any]] = []
 
     def _run(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
         if cmd and cmd[0] == "claude":

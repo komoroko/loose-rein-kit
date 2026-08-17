@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -31,7 +32,7 @@ def git(root: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def build_repo(tmp_path: Path, acceptance: list[dict[str, object]]) -> repo_mod.Repo:
+def build_repo(tmp_path: Path, acceptance: list[dict[str, Any]]) -> repo_mod.Repo:
     root = tmp_path / "product"
     root.mkdir(parents=True)
     git(root, "init", "-q", "-b", "main")
@@ -49,7 +50,7 @@ def build_repo(tmp_path: Path, acceptance: list[dict[str, object]]) -> repo_mod.
     return repo_mod.Repo(root)
 
 
-def status_of(repo: repo_mod.Repo, task_id: str = "T-001") -> dict[str, object]:
+def status_of(repo: repo_mod.Repo, task_id: str = "T-001") -> dict[str, Any]:
     raw = store_mod.Store(repo).read_raw("state")
     assert raw is not None
     return dict(raw["tasks"].get(task_id, {}))

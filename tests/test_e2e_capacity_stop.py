@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -78,7 +79,7 @@ def implementer_writing(root: Path, *, stop_on: str = "") -> object:
     return _run
 
 
-def status_of(repo: repo_mod.Repo, task_id: str) -> dict[str, object]:
+def status_of(repo: repo_mod.Repo, task_id: str) -> dict[str, Any]:
     raw = store_mod.Store(repo).read_raw("state")
     assert raw is not None
     return dict(raw["tasks"].get(task_id, {}))
