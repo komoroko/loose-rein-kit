@@ -286,7 +286,9 @@ EVENT_ORDER: tuple[str, ...] = (
     "run_aborted",
     "decision_declared",
     "coverage_generated",
-    "actual_extraction_started",
+    # No `actual_extraction_started`: the vocabulary carried one and nothing ever emitted it. A
+    # closed vocabulary refuses unknown names precisely so the log stays aggregatable, which makes
+    # a name no code can produce a claim about the log that is not true.
     "actual_extraction_generated",
     "actual_extraction_failed",
     "comparison_generated",

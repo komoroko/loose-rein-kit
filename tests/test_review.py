@@ -15,7 +15,8 @@ from typing import Any
 
 import pytest
 
-from rein import diff_facts, models, review
+from rein import actual_extraction, conformance, diff_facts, event_chain, models, review
+from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import make_config, make_plan, make_state, seed_repo
@@ -370,6 +371,56 @@ def test_the_review_is_the_same_document_whatever_the_stages_race(review_repo: P
     for machine in (first, second):
         machine["binding"].pop("generated_at", None)
     assert first == second
+
+
+@pytest.mark.integration
+def test_a_review_that_could_not_be_produced_says_so_in_the_audit_log(review_repo: Path) -> None:
+    """`events.ATTENTION_EVENTS` counts `actual_extraction_failed` and `review_failed` as things
+    needing a human decision, and nothing anywhere emitted either — so every failure of gate ④'s
+    own machinery left the log reporting "needing a human decision: 0".
+
+    The extractor is the stage failed here because it is the one with an event of its own: its
+    failure means no Actual was read out of the code at all.
+    """
+
+    def refusing(request: Mapping[str, Any]) -> str:
+        if "expected_model" not in request and "signals" not in (request.get("deterministic_facts") or {}):
+            raise actual_extraction.ExtractionError("the extractor returned prose, not a statement list")
+        return _fake_reviewer(request)
+
+    repo = repo_mod.Repo(review_repo)
+    with pytest.raises(actual_extraction.ExtractionError):
+        review.generate(repo, refusing)
+
+    events, defects = event_chain.scan(repo.events)
+    assert not defects, defects  # the failure path must leave the chain intact, not merely present
+    kinds = [e.event for e in events]
+    assert kinds[-2:] == ["actual_extraction_failed", "review_failed"]
+    assert events[-1].detail.get("stage") == "actual_extraction"
+    assert "prose" in str(events[-1].detail.get("reason"))
+    assert {"actual_extraction_failed", "review_failed"} <= events_mod.ATTENTION_EVENTS
+    # Nothing was written: a review that failed must not leave a half-built machine half behind.
+    stored = store_mod.Store(repo).read_review()
+    assert stored is None or not stored.is_generated
+
+
+@pytest.mark.integration
+def test_a_comparison_failure_is_not_reported_as_a_failed_extraction(review_repo: Path) -> None:
+    """Two different facts. The extractor failing means there is no Actual; the comparator failing
+    means one exists and could not be held against the plan — and only the first has an event."""
+
+    def refusing(request: Mapping[str, Any]) -> str:
+        if "expected_model" in request:
+            raise conformance.ComparatorError("the comparator cited a statement that does not exist")
+        return _fake_reviewer(request)
+
+    repo = repo_mod.Repo(review_repo)
+    with pytest.raises(conformance.ComparatorError):
+        review.generate(repo, refusing)
+
+    kinds = [e.event for e in event_chain.scan(repo.events)[0]]
+    assert kinds[-1] == "review_failed"
+    assert "actual_extraction_failed" not in kinds
 
 
 # --- what the reviewers are actually handed ------------------------------------
