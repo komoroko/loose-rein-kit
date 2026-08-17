@@ -4,6 +4,215 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.1] - 2026-08-17
+
+Three reported defects, and what looking for more of the same kind turned up. The kind is one
+this changelog keeps describing: something written down and answered to by nobody — a caller left
+behind by a rename, a field the schema declares and no code writes, a constant placed to prevent
+a confusion nothing consults it about. Ten more of them were found by asking the question
+mechanically instead of by hand, and the canaries at the end are there so the next one is found
+by a test rather than by a person reading.
+
+**Breaking**: `review.yaml` documents from earlier releases no longer validate. Regenerate with
+`rein review generate`; there is no migration, deliberately. A `state.yaml` whose `cycle_id` does
+not match `^[a-z0-9][a-z0-9-]*$` is refused rather than carried — `cycle-close` could write one.
+
+### A step something outside killed was recorded as the code failing
+
+`_killed_externally` was written for a reported rc=143 in the field and consulted by nobody.
+`classify_step` treated everything except an unlaunchable command and a `network: none` resolver
+failure as `CONTENT`, so the OOM killer, a supervisor's SIGTERM and a closing terminal all charged
+the step's retry budget and went into an append-only chain as facts about the code. This is the
+same defect 0.2.3 fixed for DNS failures, left standing on the path that a session limit at 3am
+actually takes.
+
+Both spellings count, because both occur: `subprocess` reports a signal death as a negative rc, a
+shell and `docker run` report 128+N. Only SIGHUP/SIGKILL/SIGTERM — SIGINT stays out for the reason
+it always did, and a segfault's 139 is still a verdict. Our own timeout is untouched: `common.run`
+kills the process group with SIGKILL and returns `RC_TIMEOUT`, so "we stopped it for hanging" never
+reads as "something else stopped it". A container the kernel killed for exceeding `memory_mb`
+arrives as 137 too, and that is partly about the code — the direction that costs a re-run rather
+than a wrong verdict wins, and the console line names the limit instead of spending retries.
+
+### A gate ④ that could not be produced now records that it could not
+
+`events.ATTENTION_EVENTS` has always counted `actual_extraction_failed` and `review_failed` among
+the things needing a human decision. Nothing emitted either. `generate` appended its five events
+on the success path only, while a dozen `raise` sites — an unresolvable HEAD, a reviewer answering
+with prose, a blocking security finding, a review.yaml that moved — left the log with nothing at
+all, and `rein events` reported "needing a human decision: 0" for a review that had just failed.
+The log exists so that no state change goes unexplained; the review pipeline's own failure was the
+state change it could not explain.
+
+`actual_extraction_failed` fires only when the extractor is the stage that failed, because that is
+a different fact from a comparison failure: the extractor is the stage that reads the code *without*
+the plan, so its failure means there is no Actual at all. `Exception`, not `BaseException` — a
+Ctrl-C is a human deciding to stop, and filing that as a defect would put a decision in the log as
+a failure. `actual_extraction_started` is gone from the vocabulary: a closed vocabulary refuses
+unknown names so the log stays aggregatable, which makes a name no code can produce a claim about
+the log that is not true.
+
+### The dashboard said a gate it had just opened was still shut
+
+`/api/gate/approve` began as a readiness check and later started recording the approval. `post()`
+in api.js kept the message that belonged to the first contract: with no `blockers` in a POST body
+it read `blocked === 0` and toasted "gate X is ready — run the command shown to approve". So a
+human pressed Approve, the gate opened, the receipt recorded `ui-session` — and the page told them
+it had not happened and that they should go to a terminal, while the board refreshed to a ✓ in the
+same breath. Nobody was at risk of a double approval (`readiness` reports an approved gate as its
+own blocker); what was lost is the human's ability to believe the screen, about the one judgement
+here that widens what happens next.
+
+The approval path itself was correct throughout — the launch-link handover, the digest re-binding,
+the channel in the receipt. Only the sentence was wrong. It survived because the asset tests here
+were about payload field *names*, so two canaries now cover the other thing: api.js must not carry
+the retired phrasing, and every `/api/` route ui.py dispatches must be reached from the page (and
+the reverse), read out of both sources rather than a list someone keeps.
+
+### A NotebookEdit reached the guard with no path it could read
+
+The Claude matcher read `Write|Edit|MultiEdit`: `MultiEdit` retired upstream, `NotebookEdit` never
+added. And even matched it would have changed nothing, because `hook_paths` knew `file_path`,
+`filePath` and Codex's patch text but never `notebook_path`. A `.ipynb` under a guarded prefix
+passed the edit-stage check untouched, leaving the extension-blind commit-stage check as the only
+layer that ever looked at it — layered enforcement degraded to one layer, silently, on the host
+this template ships for. A notebook is source: it is code an agent wrote.
+
+`doctor` was asking one question where there are two. "Is the guard registered?" it answered;
+"does the registration cover the tools that write?" it never asked, so the hole was invisible to the
+command whose job is to find exactly this. `MultiEdit` stays in the matcher — a foreign host's tool
+namespace is not a format of ours to keep tidy, and a dead alternative in a regex costs nothing.
+
+### The guard's own registration was protected by nothing
+
+`.claude/settings.json` is where this guard is registered, and it was in neither rule 1
+(machine-written), nor rule 2 (frozen at gate ③), nor `guard.paths`, which covers deliverable
+directories. The one file an agent could edit to switch off edit-stage enforcement — including the
+check that would have stopped it — was the one file no rule mentioned. Denied outright rather than
+gated behind an approval: there is no phase at which rewriting it is the expected next step, and a
+human who wants it changed does so at their editor, where no PreToolUse hook applies. Not relaxed
+by `template_mode`, because a template whose hook can be switched off is a template that ships with
+the switch.
+
+### A file a release dropped no longer haunts the repository unseen
+
+`_plan` iterated the payload alone, so a file an earlier release shipped stayed on disk forever —
+and the lock rewrite that followed kept only keys still in the payload, so after one `sync` nothing
+knew the file had ever been installed and `uninstall`, which works from that record, could not
+retract it either. Removal is planned before the rewrite now. An unshipped file somebody edited is
+kept *and keeps its lock entry*, because that entry is the only thing left tying it to the tool that
+put it there.
+
+Two more around the same lock. `stale_integrations` says in its own docstring that sync *and*
+doctor surface the skew, and only sync ever called it — so a repository reading new prompts through
+wrappers an older rein wrote came back all PASS. And a lock entry naming a hash the payload no
+longer has went unnoticed; three were already stale on main, which is how this was found. That is
+not cosmetic: `_plan` reads the record to tell a pristine file from a locally modified one, so the
+next release to change one of those files would report a local modification that does not exist and
+decline to update it.
+
+### An unmeasured partition stopped passing a budget it was never held to
+
+`analyzed_bytes` was optional, read with a default of 0, and its own description said an absent
+value reads as "within budget". It is required now. Every other unknown here falls the other way —
+an unavailable fingerprint reads as *changed*, because the honest direction costs a re-run rather
+than a verdict — and a byte budget with no actual is the one place that inversion could hide.
+
+### What the schema declared and nobody wrote
+
+Four fields, removed rather than wired, because an affordance no requirement names is scope creep:
+`rename_semantics_analyzed`, sitting beside the two flags the coverage status really reads, so
+`_default_status` appeared to take a third measure it never took; `human.session`
+(`started_at`/`stage`/`completed_stages`), a stored-progress design replaced by deriving it and
+never removed; and `dispositions[].owner`/`due`, affordances `record_disposition` cannot produce.
+
+The code equivalents went with them: `HOME_MODE_VALUES` (no `home` property exists in any schema),
+`SCENARIO_KIND_ORDER`/`_VALUES`, `Orchestrator._task_status` — whose docstring claimed to be how an
+implementer's "blocked" reaches the loop, while the loop reads `_read_report` — `_branch_for`,
+`dag.KIND_ORDER`, `Repo.schema_dir` (it pointed at `.rein/schema/` while validation reads the
+packaged copy), `Config.project_name`, `Task.needs_human`, and `PERMANENT_DOCS`/`_permanent_docs`,
+a cold-maintainer documentation input with no consumer and no slot in any reviewer request.
+
+Two were better wired than deleted. `event_chain.verify_root` now backs the line in `approve` that
+spelled the same check out by hand, and `CONFIRMATION_CHANNEL_VALUES` now actually validates
+`confirmed_via`, which accepted any string and failed several layers out as a schema violation.
+
+### `.rein/` was spelled six times
+
+Four answers have to agree about what "the tree" excludes — the fingerprint, the paths a task is
+credited with changing, the commit it produces, and the change a review is bound to — and they were
+two module constants plus four inline `:(exclude).rein` pathspecs, plus a seventh copy inside the
+instruction the implementer types. All of them derive from `repo.SSOT_DIR` now. Nothing behaves
+differently; the point is that one of them drifting stops being possible, and the way that failure
+would have surfaced is a fact invalidated by having been recorded.
+
+### `cycle-close` reset the SSOT's own state.yaml outside the store
+
+Rule 1 of the gate guard denies an agent hand-editing `state.yaml`, `review.yaml`, or
+`events.ndjson`, on the grounds that those are written only inside a Central Store transaction. The
+reset that opens the next cycle wrote `state.yaml` with a bare `atomic_write` — so the claim the
+guard enforces against agents was false about rein's own code, in the one place it mattered most.
+Two things followed. The schema never saw the document: `--name ①` was accepted by a `--name` check
+that approximated the schema's pattern with `slug.replace("-", "").isalnum()`, and a cycle id
+`state.yaml` rejects reached disk and was reported back as an open cycle. And the reset landed
+separately from the `cycle_initialized` event, so a crash between them left a fresh cycle with
+nothing in the log to say one had been opened. Both go through one transaction now.
+
+The `--name` rule is the schema's, not an approximation of it — the old predicate accepted a leading
+dash and every Unicode letter `str.isalnum` counts. `models.CYCLE_ID_RE` is the one spelling, and a
+test holds it against the pattern in both `event.schema.json` and `state.schema.json`.
+
+### An event that could not name its cycle went into the chain anyway
+
+`event_chain.make` refuses an unknown event *name* — a typo would create a kind no query knows to
+look for — and said nothing about `cycle_id`, which is the field every per-cycle query reads. Three
+callers wrote `state.cycle_id if state else ""`. The log is validated against
+`event.schema.json`, where `cycle_id` is non-empty and patterned, so appending one of those turned
+the failure it was recording into a **defect in the chain a gate receipt pins**: `rein doctor` would
+report the audit log as damaged, and `cycle-close` would refuse to archive it. Refused at
+construction now, for the reason the event name already was, and each of the three callers says
+which document is missing instead of substituting a value the log cannot carry.
+
+`rein review generate`'s own four SSOT reads moved inside the block that records a failure — with
+`state.yaml` read first, so a `plan.yaml` that does not parse is recorded under the right cycle
+rather than under none. That was the last failure of gate ④'s machinery that left the log empty.
+
+### `rein --version` reported a broken install
+
+It answered `unknown verb '--version' — run 'rein --help' for the verb list` and exited 2. `help`
+has had three spellings from the start; `version` had one, and the invocation everyone reaches for
+first was the one that failed. `--version` and `-V` now answer as `version` does.
+
+`rein guard` parsed no arguments beyond `--check-diff`, so `rein guard --help` fell through to the
+hook's stdin read and answered a human's question with "unparseable hook payload — allowing without
+a gate check", exit 0 — the guard's *allow* code. It has exactly two invocations; `--help` prints
+them, and an argument it cannot read denies rather than passing, because a guard given arguments it
+does not understand does not know what it is being asked. No host registration passes any
+(`pass_filenames: false` in the pre-commit hook, none in the three PreToolUse registrations), so the
+fail-open on a malformed payload is now reachable only by a host that actually sends one.
+
+### Two canaries for the directions nothing was checking
+
+models.py's vocabulary header says every one of its constants appears as an `enum` in a schema, and
+the existing test checks only the converse — a schema enum drifting from the code. Nothing caught a
+constant describing a document field that does not exist, which is how two of them survived. And
+`template_lint` now requires every declared schema property to be named by some Python or listed
+with a reason, since that class has now bitten four times.
+
+A third holds the guard's rule 1 against rein's own code: no module but `store.py` may
+`atomic_write` one of the three machine-written documents. It is the invariant `cycle-close` broke,
+and the only form of the check that catches the shape rather than one instance of it — a reset with a
+*valid* cycle id produced a valid document either way, so the behavioural test did not discriminate.
+
+Every canary here was verified by reintroducing the defect it describes and watching it fail.
+
+### Not a defect: `_tree_state`
+
+Reported as calling a retired `GitWorkspace.tree_state`. Both were renamed together in 0.3.0
+(`fingerprint` / `_fingerprint`) and neither name survives anywhere in the tree. The report came
+from a 0.2.3 install standing in a 0.3.0 repository, which is the skew `lock.startup_warning`
+prints on every invocation.
+
 ## [0.3.0] - 2026-08-17
 
 `rein build` decided a task by asking one question — did the quality gate pass? — of a process it
