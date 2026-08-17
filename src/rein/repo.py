@@ -139,10 +139,6 @@ class Repo:
         return self.root / ".rein/prompts"
 
     @property
-    def schema_dir(self) -> Path:
-        return self.root / ".rein/schema"
-
-    @property
     def scaffold(self) -> Path:
         return self.root / ".rein/scaffold"
 

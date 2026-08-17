@@ -282,7 +282,10 @@ def read_version(root: Path) -> str:
     """The [project] version of a checkout's pyproject.toml ("" if there is none).
 
     pyproject is the single version source — the release workflow and scripts/template_lint.py
-    both read it and nothing else, so a second place to look could only ever disagree.
+    both read it and nothing else, so a second place to look could only ever disagree. The only
+    caller is that canary (`check_version_changelog`), which is why this reads a *path* rather than
+    answering from `rein.__version__`: it is asking what a checkout on disk says, not what the
+    running interpreter was installed as.
     """
     try:
         text = (root / "pyproject.toml").read_text(encoding="utf-8")

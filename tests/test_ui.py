@@ -765,6 +765,7 @@ def _generated_review_with_challenge() -> dict[str, object]:
                 {
                     "diff_digest": "sha256:" + "d" * 64,
                     "analyzed_files": 1,
+                    "analyzed_bytes": 1024,
                     "truncated": False,
                     "coverage_status": "sufficient",
                 }

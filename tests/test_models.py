@@ -366,6 +366,7 @@ machine:
   coverage:
     - diff_digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
       analyzed_files: 27
+      analyzed_bytes: 12345
       truncated: false
       coverage_status: sufficient
   actual_extraction:

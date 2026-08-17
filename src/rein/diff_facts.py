@@ -548,12 +548,18 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
 
 
 def _default_status(manifest: CoverageManifest, deleted_lines_present: bool) -> str:
-    """`sufficient` only when nothing bearing on the change went unread — risk-blind by design.
+    """`sufficient` only when none of the things below went unread — risk-blind by design.
 
     This records *what was read*, and nothing here weighs how much the unread part matters:
     any unsupported/binary/generated file, or an unevaluated dependency change, makes coverage
     `insufficient` on its own. `review_policy.coverage_gap_risk` is what prices that gap
     against the rest of the change, and `review_policy.coverage_blocks` decides the gate.
+
+    The list is exactly what the checks below name, and no more. The schema used to declare a
+    `rename_semantics_analyzed` alongside the dependency and binary flags, written by nobody and
+    read by nobody — a third measure this function appeared to take and did not. It is gone rather
+    than implemented: `DiffFile.renamed_from` already reaches the reviewer, so a move is
+    distinguishable from a rewrite by the participant that can actually judge it.
     """
     if manifest.unsupported_files or manifest.generated_files:
         return "insufficient"

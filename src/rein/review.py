@@ -215,28 +215,6 @@ def _relevant_code(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.Di
     return RelevantCode(files=provided, truncated=tuple(truncated), omitted=tuple(omitted))
 
 
-#: The permanent tier, as `gate-workflow.md` defines it: what a stranger arriving months later
-#: actually has. Deliberately not the plan, the review, or any log — the cold maintainer is a
-#: test of the documentation, and priming it with the reasoning defeats the test (§12.6).
-PERMANENT_DOCS: tuple[str, ...] = (
-    "AGENTS.md",
-    "CLAUDE.md",
-    "README.md",
-    "docs/00-product-brief.md",
-    "docs/05-current-state.md",
-)
-
-
-def _permanent_docs(repo: repo_mod.Repo, head: str) -> dict[str, str]:
-    """The permanent documentation at `head`, under the same per-file ceiling as the code."""
-    docs: dict[str, str] = {}
-    for path in PERMANENT_DOCS:
-        rc, text = repo._git_rc("show", f"{head}:{path}")
-        if rc == 0:
-            docs[path] = text[:RELEVANT_CODE_CHARS]
-    return docs
-
-
 # -- the expected model handed to the comparator ------------------------------
 
 

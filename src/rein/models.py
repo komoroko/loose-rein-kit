@@ -108,7 +108,6 @@ EXECUTOR_VALUES = frozenset({"oci", "host"})
 
 # Sandbox knobs (plan §10.2).
 MOUNT_MODE_VALUES = frozenset({"none", "read_only", "read_write"})
-HOME_MODE_VALUES = frozenset({"ephemeral", "host"})
 QUALITY_GATE_KIND_VALUES = frozenset({"command", "agent"})
 #: Where a DoD step runs. `both` is what every step has always done and stays the default; the
 #: other two exist so a fast focused suite can guard each task while the whole one runs over the
@@ -240,8 +239,6 @@ SECURITY_CATEGORY_VALUES = frozenset(
     }
 )
 
-SCENARIO_KIND_ORDER: tuple[str, ...] = ("happy_path", "failure_path", "rollback_path")
-SCENARIO_KIND_VALUES = frozenset(SCENARIO_KIND_ORDER)
 
 #: The gate-④ rail, in order. Three screens and a freeze, because the same finding used to
 #: appear on four of them — as a summary count, as a raw gap, as an Expected/Actual row, and
@@ -1037,11 +1034,6 @@ class Config:
         not a change of the environment the evidence was produced in.
         """
         return digests.of({"executors": self.raw.get("executors")})
-
-    @property
-    def project_name(self) -> str:
-        project = self.raw.get("project")
-        return _str(project, "name") if isinstance(project, dict) else ""
 
     @property
     def work_branch(self) -> str:

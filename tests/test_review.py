@@ -31,6 +31,7 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
     coverage = {
         "diff_digest": "sha256:" + "d" * 64,
         "analyzed_files": 2,
+        "analyzed_bytes": 1024,
         "truncated": False,
         "coverage_status": "sufficient",
     }

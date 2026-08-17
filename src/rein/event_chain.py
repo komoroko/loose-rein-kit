@@ -32,8 +32,13 @@ from pathlib import Path
 
 from rein import digests, models, strict_yaml
 
-#: The chain root of an empty log. A distinct constant rather than "" so that "no events yet"
-#: and "field absent" cannot be confused when a receipt binds a root.
+#: The chain root of an empty log — what `chain_root([])` returns, kept as a name so the tests that
+#: pin it do not carry a bare sha256 literal nobody can check by reading.
+#:
+#: It was introduced to keep "no events yet" distinguishable from "field absent" where a receipt
+#: binds a root, and no production code ever consulted it for that: `approve` compares roots through
+#: `digests.matches`, which an absent `attested_chain_root` fails on its own. The claim in the old
+#: comment was the remnant here, not the constant.
 EMPTY_CHAIN_ROOT = digests.of_texts([])
 
 

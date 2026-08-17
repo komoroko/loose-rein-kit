@@ -377,6 +377,7 @@
             "required": [
               "diff_digest",
               "analyzed_files",
+              "analyzed_bytes",
               "coverage_status",
               "truncated"
             ],
@@ -397,7 +398,7 @@
                 "minimum": 0
               },
               "analyzed_bytes": {
-                "description": "Size in bytes of the diff this entry covers. The `max_diff_bytes_per_partition` budget is denominated in bytes, so without a measured value that budget has no actual and can never be exceeded — which is what an unmeasured entry reads as. Absent on reviews generated before the measure; those read as 0, i.e. within budget.",
+                "description": "Size in bytes of the diff this entry covers. Required: the `max_diff_bytes_per_partition` budget is denominated in bytes, so an entry without a measured value gives that budget no actual and it can never be exceeded. It was optional, read with a default of 0, and documented as \"within budget\" — an unmeasured partition passing a size check it was never held to. A review generated before the measure is regenerated, not tolerated.",
                 "type": "integer",
                 "minimum": 0
               },
@@ -474,9 +475,6 @@
                 }
               },
               "deleted_lines_analyzed": {
-                "type": "boolean"
-              },
-              "rename_semantics_analyzed": {
                 "type": "boolean"
               },
               "dependency_semantics_analyzed": {
@@ -942,36 +940,6 @@
             }
           }
         },
-        "session": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "started_at": {
-              "type": "string",
-              "maxLength": 64
-            },
-            "stage": {
-              "enum": [
-                "scope",
-                "decision",
-                "diff",
-                "freeze"
-              ]
-            },
-            "completed_stages": {
-              "type": "array",
-              "maxItems": 16,
-              "items": {
-                "enum": [
-                  "scope",
-                  "decision",
-                  "diff",
-                  "freeze"
-                ]
-              }
-            }
-          }
-        },
         "expertise": {
           "description": "Self-declared, per domain. High/critical work by a `partial` or `unfamiliar` reviewer needs an expert, an experiment, or a smaller scope — a general reviewer's risk acceptance is not enough (plan 14.9).",
           "type": "array",
@@ -1116,14 +1084,6 @@
               "note": {
                 "type": "string",
                 "maxLength": 2000
-              },
-              "owner": {
-                "type": "string",
-                "maxLength": 200
-              },
-              "due": {
-                "type": "string",
-                "maxLength": 32
               },
               "detection": {
                 "type": "string",

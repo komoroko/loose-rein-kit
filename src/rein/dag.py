@@ -29,7 +29,6 @@ from rein import repo as repo_mod
 
 logger = logging.getLogger(__name__)
 
-KIND_ORDER = models.TASK_KIND_ORDER
 KIND_VALUES = models.TASK_KIND_VALUES
 STATUS_ORDER = models.TASK_STATUS_ORDER
 STATUS_VALUES = models.TASK_STATUS_VALUES
@@ -66,16 +65,6 @@ class Task:
     @property
     def is_done(self) -> bool:
         return self.status == "done"
-
-    @property
-    def needs_human(self) -> bool:
-        """Statuses the scheduler cannot move on its own.
-
-        Three, for three different reasons: the code could not pass (`blocked`), the plan itself
-        is wrong (`needs-revision`), or the evidence this task needs is not something the loop can
-        obtain (`awaiting-evidence`). Re-running the build helps with none of them.
-        """
-        return self.status in {"blocked", "needs-revision", "awaiting-evidence"}
 
 
 @dataclass(frozen=True)
