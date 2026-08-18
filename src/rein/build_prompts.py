@@ -11,10 +11,21 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from rein import dag
+from rein import repo as repo_mod
 
 
 def _gate_list(gate_cmds: Sequence[str]) -> str:
     return " and ".join(f"`{c}`" for c in gate_cmds) or "the quality-gate commands"
+
+
+def _pathspec() -> str:
+    """The commit pathspec, shell-quoted, from the one constant that defines it.
+
+    The implementer is told to run the same exclusion `finalize_commit` applies when the
+    implementer does not. Spelled out twice by hand, those two could drift — and the instruction
+    is the copy an agent actually types.
+    """
+    return " ".join(part if part == "." else f"'{part}'" for part in repo_mod.SSOT_PATHSPEC)
 
 
 def handoff_note(handoff: Mapping[str, object]) -> str:
@@ -92,7 +103,7 @@ def implementer_prompt(
         f"{task_test_ref}"
         f"Write automated tests and get {_gate_list(gate_cmds)} green.\n"
         "When done, commit your changes to this branch (excluding the orchestration state .rein/):\n"
-        f"  git add -A -- . ':(exclude).rein' && git commit -m \"{task.id}: <summary>\"\n"
+        f'  git add -A -- {_pathspec()} && git commit -m "{task.id}: <summary>"\n'
         "Do not reach outside scope (other tasks' territory). If you find a requirements/design defect, "
         "do not fix it on your own — report it.\n"
         "End with one `rein report --outcome implemented|blocked|needs-revision --summary … --touched …` "
@@ -195,7 +206,7 @@ def integration_fix_prompt(ids: str, failure_log: str, *, gate_cmds: Sequence[st
         "lint/format/type error, or the tasks' changes interfering) with the minimal change — do not "
         "widen scope or redo the tasks themselves.\n"
         "Commit your fix to this branch (excluding the orchestration state .rein/):\n"
-        f"  git add -A -- . ':(exclude).rein' && git commit -m \"{ids}: integration fix\"\n"
+        f'  git add -A -- {_pathspec()} && git commit -m "{ids}: integration fix"\n'
         f"Keep {_gate_list(gate_cmds)} green.\n\n"
         f"Resolve this integration failure:\n{failure_log}"
     )

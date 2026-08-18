@@ -12,6 +12,7 @@ finds is a doctor whose findings nobody reads.
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -129,18 +130,85 @@ def test_copied_surfaces_in_a_product_warn_that_upgrade_will_never_see_them(tmp_
     assert "rein install" in results[0].message
 
 
-def test_a_recorded_integration_passes(tmp_path: Path) -> None:
+def _materialized_lock(tmp_path: Path, files: dict[str, str]) -> None:
     from rein import lock as lock_mod
+
+    lock_path = tmp_path / ".rein" / "rein.lock"
+    data = lock_mod.read(lock_path) or {}
+    prompts = data.get("prompts")
+    data["prompts"] = {**(prompts if isinstance(prompts, dict) else {}), "files": files}
+    lock_mod.write(lock_path, data)
+
+
+def test_a_lock_hash_the_payload_no_longer_has_is_reported(tmp_path: Path) -> None:
+    """The record is what `_plan` reads to tell a pristine file from a locally modified one, so a
+    stale entry turns the *next* release's update of that file into a silent "locally modified —
+    kept". Three entries were already stale on main when this check was written, and nothing looked
+    at them: check_materialized only ever compared disk against the payload."""
+    from rein import install
+
+    seed_repo(tmp_path)
+    repo = repo_mod.Repo(tmp_path)
+    assert install.sync(repo) == 0  # the record only exists once something materialized the payload
+    recorded = {k.removeprefix(".rein/"): v for k, v in install.materialized_record(repo).items()}
+    assert recorded, "seed_repo is expected to leave a populated materialized record"
+    victim = "schema/event.schema.json"
+    _materialized_lock(tmp_path, {**recorded, victim: "sha256:" + "0" * 64})
+
+    results = doctor.check_materialized(repo)
+    stale = [f for f in results if "stale hash" in f.message]
+    assert [f.level for f in stale] == ["WARN"]
+    assert victim in stale[0].message and "rein sync" in stale[0].message
+    # The disk copy is untouched, so the long-standing disk-vs-payload question still answers PASS.
+    assert any(f.level == "PASS" and "match the packaged payload" in f.message for f in results)
+
+
+def test_a_materialized_file_no_release_ships_is_reported(tmp_path: Path) -> None:
+    from rein import install
+
+    seed_repo(tmp_path)
+    repo = repo_mod.Repo(tmp_path)
+    assert install.sync(repo) == 0  # the record only exists once something materialized the payload
+    recorded = {k.removeprefix(".rein/"): v for k, v in install.materialized_record(repo).items()}
+    _materialized_lock(tmp_path, {**recorded, "prompts/commands/retired.md": "sha256:" + "0" * 64})
+
+    orphans = [f for f in doctor.check_materialized(repo) if "no longer shipped" in f.message]
+    assert [f.level for f in orphans] == ["WARN"]
+    assert "prompts/commands/retired.md" in orphans[0].message
+
+
+def _record_integration(tmp_path: Path, version: str) -> None:
+    from rein import lock as lock_mod
+
+    lock_path = tmp_path / ".rein" / "rein.lock"
+    data = lock_mod.read(lock_path) or {}
+    data["integrations"] = {"claude": {"version": version, "files": {}}}
+    lock_mod.write(lock_path, data)
+
+
+def test_a_recorded_integration_passes(tmp_path: Path) -> None:
+    import rein
 
     seed_repo(tmp_path)
     _place_claude_surface(tmp_path)
-    lock_path = tmp_path / ".rein" / "rein.lock"
-    data = lock_mod.read(lock_path) or {}
-    data["integrations"] = {"claude": {"version": "0.1.2", "files": {}}}
-    lock_mod.write(lock_path, data)
+    _record_integration(tmp_path, rein.__version__)
     results = doctor.check_integrations(repo_mod.Repo(tmp_path), models.Config(make_config(template_mode=False)))
     assert [f.level for f in results] == ["PASS"]
     assert "recorded in the lock" in results[0].message
+
+
+def test_a_surface_an_older_release_wrote_is_not_reported_as_healthy(tmp_path: Path) -> None:
+    """`stale_integrations` says in its own docstring that sync *and* doctor surface this skew, and
+    only sync ever called it. `sync` refreshes the shared artifacts and never the per-agent
+    wrappers, so a repository could read new prompts through wrappers an older rein wrote and come
+    back all PASS."""
+    seed_repo(tmp_path)
+    _place_claude_surface(tmp_path)
+    _record_integration(tmp_path, "0.1.2")
+    results = doctor.check_integrations(repo_mod.Repo(tmp_path), models.Config(make_config(template_mode=False)))
+    assert [f.level for f in results] == ["WARN"]
+    assert "written by rein 0.1.2" in results[0].message
+    assert "rein install claude" in results[0].message
 
 
 # --- gate rule 2: nothing may pre-authorize a gate-opening verb ----------------
@@ -696,6 +764,50 @@ def test_the_codex_registration_does_not_claim_to_be_active(tmp_path: Path) -> N
     )
     findings = doctor.check_hook(repo_mod.Repo(tmp_path))
     assert _levels(findings, "only once the project is trusted") == ["INFO"]
+
+
+def test_a_matcher_that_misses_a_write_tool_is_reported(tmp_path: Path) -> None:
+    """ "Is the guard registered?" and "does the registration cover the tools that write?" are two
+    questions, and only the first was ever asked. The shipped matcher read `Write|Edit|MultiEdit` —
+    `MultiEdit` retired upstream, `NotebookEdit` never added — so a `.ipynb` edit never reached the
+    guard and nothing said so."""
+    from rein import gate_guard
+
+    seed_repo(
+        tmp_path,
+        settings='{"hooks": {"PreToolUse": [{"matcher": "Write|Edit", '
+        '"hooks": [{"type": "command", "command": "rein guard"}]}]}}',
+    )
+    findings = doctor.check_hook(repo_mod.Repo(tmp_path))
+    assert _levels(findings, "does not name") == ["WARN"]
+    assert "NotebookEdit" in [f for f in findings if "does not name" in f.message][0].message
+
+    seed_repo(
+        tmp_path,
+        settings=json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "|".join(gate_guard.CLAUDE_WRITE_TOOLS),
+                            "hooks": [{"type": "command", "command": "rein guard"}],
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+    assert _levels(doctor.check_hook(repo_mod.Repo(tmp_path)), "covers every write tool") == ["PASS"]
+
+
+def test_the_shipped_matcher_covers_every_write_tool() -> None:
+    """The payload's settings.json is what `rein install claude` writes, so a hole there ships to
+    every product — checking only the repo's own copy would miss exactly that."""
+    from rein import gate_guard, install
+
+    groups = install._settings_template()["hooks"]["PreToolUse"]
+    covered = {tool for group in groups for tool in str(group.get("matcher", "")).split("|")}
+    assert covered >= set(gate_guard.CLAUDE_WRITE_TOOLS), f"missing: {set(gate_guard.CLAUDE_WRITE_TOOLS) - covered}"
 
 
 def test_a_host_with_no_codex_registration_gets_no_trust_note(tmp_path: Path) -> None:

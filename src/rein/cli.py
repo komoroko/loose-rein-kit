@@ -183,7 +183,10 @@ def main(argv: list[str] | None = None) -> int:
     if repo_flag is not None:
         rest = [*rest, "--repo", repo_flag]
 
-    if verb == "version":
+    # Three spellings, like `help` above: `rein --version` is what everyone types first, and it
+    # answered `unknown verb '--version'` with exit 2 — a version check that fails is read as a
+    # broken install, which is the opposite of what it was asked.
+    if verb in ("version", "--version", "-V"):
         print(rein.__version__)
         return 0
 

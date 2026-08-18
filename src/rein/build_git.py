@@ -17,9 +17,8 @@ from rein import common, digests
 from rein import repo as repo_mod
 from rein.common import StopLoop
 
-#: Never part of what "the tree" means: orchestration state is not the product, and a fingerprint
-#: that moved whenever the loop wrote down a fact would invalidate the fact by recording it.
-_EXCLUDED = (".rein/",)
+#: Never part of what "the tree" means (see `repo.SSOT_DIR` for why it is one constant).
+_EXCLUDED: tuple[str, ...] = (repo_mod.SSOT_DIR,)
 
 
 class EventSink(Protocol):
@@ -135,10 +134,10 @@ class GitWorkspace:
         if listed.strip() and not entries:
             return ""
         committed = digests.tree_digest(digests.filter_tree(entries, exclude_prefixes=_EXCLUDED))
-        rc, diff = self._run(["git", "diff", "HEAD", "--binary", "--", ".", ":(exclude).rein"], cwd=cwd)
+        rc, diff = self._run(["git", "diff", "HEAD", "--binary", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
         if rc != 0 or common.was_truncated(diff):
             return ""
-        rc, listing = self._run(["git", "ls-files", "-o", "--exclude-standard", "--", ".", ":(exclude).rein"], cwd=cwd)
+        rc, listing = self._run(["git", "ls-files", "-o", "--exclude-standard", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
         if rc != 0 or common.was_truncated(listing):
             return ""
         untracked = [name for name in listing.splitlines() if name.strip()]
@@ -292,7 +291,7 @@ class GitWorkspace:
         something.
         """
         paths: set[str] = set()
-        rc, out = self._run(["git", "status", "--porcelain", "-uall", "--", ".", ":(exclude).rein"], cwd=cwd)
+        rc, out = self._run(["git", "status", "--porcelain", "-uall", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
         if rc == 0:
             for line in out.splitlines():
                 if len(line) < 4:
@@ -333,7 +332,7 @@ class GitWorkspace:
         """
         if self.dry_run:
             return True
-        pathspec = [".", ":(exclude).rein"]
+        pathspec = list(repo_mod.SSOT_PATHSPEC)
         rc, out = self._run(["git", "status", "--porcelain", "--", *pathspec], cwd=cwd)
         if rc == 0 and not out.strip():
             return True  # clean tree — nothing to preserve

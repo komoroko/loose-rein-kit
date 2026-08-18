@@ -108,6 +108,39 @@ def test_an_ordinary_content_failure_is_not_read_as_network() -> None:
     resolver's own unambiguous strings do, so a test asserting its own connection-handling logic
     is not misclassified."""
     assert faults.classify_step(1, "ConnectionError: could not connect (mocked)") is faults.Fault.CONTENT
+
+
+@pytest.mark.parametrize(
+    "rc, output",
+    [
+        (143, ""),  # a supervisor's SIGTERM, as a shell reports it
+        (-15, ""),  # the same kill, as subprocess reports it
+        (137, "Killed"),  # the OOM killer, as `docker run` reports it
+        (-9, ""),  # the same kill, direct
+        (129, ""),  # SIGHUP: the terminal closed
+        (-1, ""),
+    ],
+)
+def test_a_step_something_outside_killed_is_not_the_codes_fault(rc: int, output: str) -> None:
+    """A signal is not a verdict. The OOM killer, a supervisor's SIGTERM and a closing terminal
+    all used to charge the step's retry budget and be recorded as facts about the code, because
+    `_killed_externally` was written for exactly this and consulted by nobody."""
+    assert faults.classify_step(rc, output) is faults.Fault.ENV_TRANSIENT
+
+
+def test_our_own_timeout_is_still_the_codes_fault() -> None:
+    """`common.run` kills the process group with SIGKILL but returns RC_TIMEOUT, not 137 — so
+    "we stopped it for hanging" never reads as "something else stopped it"."""
+    assert faults.classify_step(common.RC_TIMEOUT, "timed out after 1800s (process group killed)") is (
+        faults.Fault.CONTENT
+    )
+
+
+def test_an_ordinary_nonzero_rc_near_the_signal_range_is_still_content() -> None:
+    """Only 128+{SIGHUP,SIGKILL,SIGTERM} count. An exit code that merely lives up there is a
+    verdict like any other — a rule that swallowed the whole range would hide real failures."""
+    for rc in (128, 130, 139, 141, 255):
+        assert faults.classify_step(rc, "2 failed, 40 passed") is faults.Fault.CONTENT
     assert not faults.is_network_unreachable("2 failed, 40 passed")
 
 
@@ -168,6 +201,18 @@ def test_the_summary_tells_the_reader_nothing_was_marked() -> None:
     assert "agent capacity" in summary
     assert "Nothing was marked" in summary
     assert "3:30am" in summary
+
+
+def test_a_killed_step_says_a_signal_ended_it_and_names_the_memory_limit() -> None:
+    """rc=137 with no other clue is most often the OOM killer, and "2 failed, 40 passed" is the
+    thing this summary must never imply. It also has to say what actually helps, because spending
+    the step's retries on a container that will be killed again teaches nothing."""
+    fault = faults.EnvironmentFault(faults.Fault.ENV_TRANSIENT, where="gate step 'test'", rc=137, output="Killed")
+    summary = fault.summary()
+    assert fault.retryable
+    assert "killed from outside (rc=137)" in summary
+    assert "memory_mb" in summary
+    assert "Nothing was marked" in summary
 
 
 def test_a_permanent_fault_does_not_invite_a_re_run() -> None:

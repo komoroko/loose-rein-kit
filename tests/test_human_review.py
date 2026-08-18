@@ -8,11 +8,13 @@ human-only update non-staling (E2E-09).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 
 from rein import human_review, models
+from tests._support import make_review
 
 
 def _review(*, machine: dict[str, Any] | None = None, human: dict[str, Any] | None = None) -> models.Review:
@@ -27,6 +29,7 @@ def _review(*, machine: dict[str, Any] | None = None, human: dict[str, Any] | No
             {
                 "diff_digest": "sha256:" + "d" * 64,
                 "analyzed_files": 1,
+                "analyzed_bytes": 1024,
                 "truncated": False,
                 "coverage_status": "sufficient",
             }
@@ -214,10 +217,16 @@ def test_the_budget_is_per_partition_so_the_measure_is_the_max_not_the_sum() -> 
     assert human_review.scope_split_required(review, dict(review.human)) == []
 
 
-def test_a_review_generated_before_the_measurement_keeps_its_verdict() -> None:
-    """A coverage entry with no `analyzed_bytes` reads as 0 — never as "we measured and it was big"."""
-    review = _review()
-    assert human_review.budget_actuals(review, dict(review.human))["max_diff_bytes_per_partition"] == 0
+def test_a_coverage_entry_that_measured_nothing_is_refused_rather_than_read_as_zero() -> None:
+    """`analyzed_bytes` was optional and defaulted to 0 here, documented as "within budget" — an
+    unmeasured partition passing a size check it was never held to. That is the one direction this
+    file must not round towards, so the schema requires it and a document without it does not parse.
+    A review written before the measure is regenerated, not tolerated."""
+    document = make_review(generated=True)
+    del document["machine"]["coverage"][0]["analyzed_bytes"]
+    with pytest.raises(models.DocumentError) as caught:
+        models.Review.parse(json.dumps(document))
+    assert "analyzed_bytes" in str(caught.value)
 
 
 def test_the_screen_uses_the_ceilings_the_review_was_generated_against() -> None:

@@ -323,7 +323,9 @@ def _coverage_totals(review: models.Review) -> dict[str, object]:
     for entry in review.coverage:
         files += int(entry.get("analyzed_files", 0) or 0)
         hunks += int(entry.get("analyzed_hunks", 0) or 0)
-        bytes_read = max(bytes_read, int(entry.get("analyzed_bytes", 0) or 0))
+        # No default: `analyzed_bytes` is required by the schema, and 0 for an unmeasured partition
+        # is what let a byte budget pass a partition it never measured (see _largest_partition_bytes).
+        bytes_read = max(bytes_read, int(entry["analyzed_bytes"]))
         partitioned = partitioned or bool(entry.get("partitioned"))
         if str(entry.get("coverage_status")) != "sufficient":
             status = "insufficient"

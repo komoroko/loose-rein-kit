@@ -149,15 +149,29 @@ def classify_step(rc: int, output: str) -> Fault:
     """Classify a failed quality-gate command step. CONTENT unless it could not be run at all.
 
     A timeout stays CONTENT on purpose: a test suite that hangs is a fact about the code, and
-    the retry budget the step already carries is the right place for it. A DNS/network-unreachable
-    failure is ENV_PERMANENT, not ENV_TRANSIENT: `network: none` is a fixed sandbox policy, so
-    the step fails the same way on every retry until the dependency is baked into the pinned
-    image — waiting does not help, unlike a launch's capacity limit.
+    the retry budget the step already carries is the right place for it. It never reaches the
+    signal check below either, because :func:`rein.common.run` returns its own
+    :data:`~rein.common.RC_TIMEOUT` rather than the rc of the group kill it performs — so
+    "we stopped it" and "something else stopped it" stay distinguishable.
+
+    A DNS/network-unreachable failure is ENV_PERMANENT, not ENV_TRANSIENT: `network: none` is a
+    fixed sandbox policy, so the step fails the same way on every retry until the dependency is
+    baked into the pinned image — waiting does not help, unlike a launch's capacity limit.
+
+    A step killed from outside is ENV_TRANSIENT, and this is the reading that was missing:
+    :func:`_killed_externally` existed for a reported rc=143 in the field and nothing consulted
+    it, so the OOM killer, a supervisor's SIGTERM and a closing terminal all charged the step's
+    retry budget and were recorded as facts about the code. A container the kernel killed for
+    exceeding `memory_mb` also arrives here as 137, and that *is* partly about the code — but
+    the honest direction is the one that costs a re-run rather than a wrong verdict, so it reads
+    as the machine's failure and the console line names the limit.
     """
     if rc == 0:
         raise ValueError("classify_step is for a failed step (rc != 0)")
     if _unlaunchable(rc, output) or is_network_unreachable(output):
         return Fault.ENV_PERMANENT
+    if _killed_externally(rc):
+        return Fault.ENV_TRANSIENT
     return Fault.CONTENT
 
 
@@ -204,12 +218,25 @@ class EnvironmentFault(Exception):
         """One console-ready paragraph: what failed, why, and what the reader should do."""
         reset = reset_hint(self.output)
         network = is_network_unreachable(self.output)
-        cause = "agent capacity" if is_capacity(self.output) else f"rc={self.rc}"
+        killed = _killed_externally(self.rc)
+        if is_capacity(self.output):
+            cause = "agent capacity"
+        elif killed:
+            cause = f"killed from outside (rc={self.rc})"
+        else:
+            cause = f"rc={self.rc}"
         if network:
             advice = (
                 "The sandbox runs with network: none, so this fails the same way on every "
                 "retry — bake the dependency into the pinned image (see the packaged "
                 "Containerfiles) rather than resolving it at test time."
+            )
+        elif killed:
+            advice = (
+                "Nothing here is about the code: a signal ended it. Nothing was marked, so "
+                "re-running `rein build` continues from the preserved work. If this repeats at "
+                "the same point, the OOM killer is the usual cause — raise the profile's "
+                "`memory_mb` in .rein/config.yaml rather than spending the step's retries on it."
             )
         elif self.retryable:
             advice = (

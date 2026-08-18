@@ -405,3 +405,30 @@ def test_reads_refuse_a_damaged_chain(repo: repo_mod.Repo) -> None:
     repo.events.write_text(repo.events.read_text(encoding="utf-8").replace("demo-cycle", "other-cycle"), "utf-8")
     with pytest.raises(event_chain.ChainError):
         st.read_events()
+
+
+def test_only_the_store_writes_a_machine_written_document() -> None:
+    """`gate_guard` rule 1 denies an *agent* hand-editing state.yaml / review.yaml / events.ndjson
+    because "written only inside a Central Store transaction" — this is the same claim held against
+    rein's own code, which is where it was actually broken.
+
+    `cycle-close` reset state.yaml with a bare `atomic_write`, so the reset skipped the schema
+    (`--name ①` reached disk) and landed separately from the event recording it. Only the store
+    writes those three, and only `tx.write` reaches them, which is what makes the schema check and
+    the journal unavoidable rather than customary.
+    """
+    import ast
+    import pathlib
+
+    machine_written = ("state", "review", "events")
+    offenders: list[str] = []
+    for path in sorted(pathlib.Path("src/rein").rglob("*.py")):
+        if path.name == "store.py":  # the one module whose job this is
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call) or "atomic_write" not in ast.unparse(node.func):
+                continue
+            target = ast.unparse(node.args[0]) if node.args else ""
+            if any(target.endswith(f".{name}") for name in machine_written):
+                offenders.append(f"{path}:{node.lineno} atomic_write({target})")
+    assert not offenders, "these write a machine-written document outside the store: " + "; ".join(offenders)

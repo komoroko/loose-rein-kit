@@ -64,6 +64,24 @@ MACHINE_WRITTEN: tuple[str, ...] = (
     ".rein/rein.lock",
 )
 
+#: Where this guard is *registered*. Written by `rein install`, hashed in the lock, and — until now —
+#: guarded by nothing: not rule 1, not rule 2, and not `guard.paths`, which covers deliverable
+#: directories. So the one file an agent could edit to switch off edit-stage enforcement was the one
+#: file no rule mentioned. Denied outright rather than gated behind an approval, because there is no
+#: phase at which an agent rewriting the guard's own registration is the expected next step; a human
+#: changing it does so at their editor, where no PreToolUse hook applies.
+#:
+#: This closes the tool-write path only. A CLI that writes its own project config directly (Codex
+#: creating `.codex/config.toml` on trust) is not a tool call and no hook sees it — that is what the
+#: commit-stage check and `doctor.check_hook` are for.
+HOOK_REGISTRATION: tuple[str, ...] = (
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".codex/hooks.json",
+    ".codex/config.toml",
+    ".github/hooks/",
+)
+
 #: Pinned by the gate ③ receipt. Rule 2 — denied once `plan.status` is frozen.
 FROZEN_AFTER_GATE_THREE: tuple[str, ...] = (
     ".rein/plan.yaml",
@@ -199,6 +217,17 @@ def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = 
             " the audit events that explain the change. A hand edit produces a state change with no"
             " matching event, which `rein doctor` reports and no gate receipt will cover."
             " Use the command that owns this change instead."
+        )
+
+    # Rule 1, second half — the guard's own registration. Also never relaxed by template_mode: a
+    # template whose hook can be switched off is a template that ships with the switch.
+    if _matches(rel, HOOK_REGISTRATION):
+        return False, (
+            f"Blocked: {rel} is where this guard is registered with the host, so an edit to it can"
+            " switch off edit-stage enforcement — including this very check. `rein install` writes"
+            " it and the lock records its hash; there is no phase at which rewriting it is the"
+            " expected next step. If a human wants it changed, they change it at their own editor,"
+            " where no PreToolUse hook applies."
         )
 
     state = _read_state(repo)
@@ -525,17 +554,34 @@ def patch_targets(command: str) -> list[str]:
     return out
 
 
+#: Every spelling a host uses for "the file this call is about to write". Several hosts, one
+#: question. Claude Code sends `file_path` for Write/Edit and `notebook_path` for NotebookEdit;
+#: VS Code Copilot camelCases both. A notebook is source like any other file — a `.ipynb` under a
+#: guarded prefix was reaching the guard with no path it could read, so the edit-stage check passed
+#: it and only the commit-stage one (extension-blind, walking `git status`) ever saw it.
+PATH_KEYS: tuple[str, ...] = ("file_path", "filePath", "notebook_path", "notebookPath")
+
+#: The Claude Code tools that write a file, and therefore all have to reach the guard. This tuple is
+#: the claim; `doctor.check_hook` holds the installed PreToolUse matcher against it, and `PATH_KEYS`
+#: is what makes the coverage real once a call actually arrives. A tool absent from both is a hole
+#: nothing reports: the matcher never fires and the commit-stage check becomes the only layer left.
+#:
+#: `MultiEdit` is retired upstream and stays. This is a foreign host's tool namespace, not a format
+#: of ours to keep tidy — a dead alternative in a regex costs nothing and keeps an older host covered.
+CLAUDE_WRITE_TOOLS: tuple[str, ...] = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
 def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
     """The paths this tool call is about to write, as the host named them.
 
-    Three hosts, three spellings, one question. Claude Code sends `file_path`, VS Code Copilot
-    camelCases it, and Codex's `apply_patch` sends **no path field at all** — the raw patch text
-    arrives as `command` and the paths live inside it (`pre_tool_use_payload` in openai/codex's
-    apply_patch handler). Reading only the path fields would make a hook registered with Codex
-    fire on every edit and allow every one of them, which is worse than having no hook: `doctor`
-    would report the guard as registered while it guarded nothing.
+    :data:`PATH_KEYS` covers the direct spellings. Codex's `apply_patch` sends **no path field at
+    all** — the raw patch text arrives as `command` and the paths live inside it
+    (`pre_tool_use_payload` in openai/codex's apply_patch handler). Reading only the path fields
+    would make a hook registered with Codex fire on every edit and allow every one of them, which
+    is worse than having no hook: `doctor` would report the guard as registered while it guarded
+    nothing.
     """
-    for key in ("file_path", "filePath"):
+    for key in PATH_KEYS:
         value = tool_input.get(key)
         if isinstance(value, str) and value:
             return [value]
@@ -543,12 +589,32 @@ def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
     return patch_targets(command) if isinstance(command, str) else []
 
 
+#: The guard has exactly two invocations, and a human asking about them is a third thing entirely.
+USAGE = """usage: rein guard [--check-diff]
+
+  (no arguments)  PreToolUse hook mode: reads the host's JSON payload on stdin and answers
+                  whether the paths it is about to write may be written right now.
+  --check-diff    commit-stage mode: checks every path in the diff against HEAD. This is what
+                  .pre-commit-config.yaml registers, and what `make check` runs.
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
     common.configure_logging()
     if argv is None:
         argv = sys.argv[1:]
-    if "--check-diff" in argv:
+    if argv == ["--check-diff"]:
         return check_diff()
+    if argv:
+        # Argument handling at all, which there was none of: anything that was not `--check-diff`
+        # fell through to the stdin read below, so `rein guard --help` answered a human's question
+        # with "unparseable hook payload — allowing without a gate check" and exited 0, the guard's
+        # *allow* code. Two invocations exist (above) and nothing else does; an unrecognized one is
+        # a misregistered hook, which denies rather than passes — a guard given arguments it cannot
+        # read does not know what it is being asked.
+        asked = argv[0] in ("-h", "--help")
+        print(USAGE, end="", file=sys.stdout if asked else sys.stderr)
+        return 0 if asked else 2
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):

@@ -35,6 +35,7 @@ def _machine(**kwargs: Any) -> dict[str, Any]:
         "diff_digest": "sha256:" + "d" * 64,
         "coverage_status": "sufficient",
         "analyzed_files": 1,
+        "analyzed_bytes": 1024,
         "analyzed_hunks": 1,
         "truncated": False,
     }

@@ -108,7 +108,6 @@ EXECUTOR_VALUES = frozenset({"oci", "host"})
 
 # Sandbox knobs (plan §10.2).
 MOUNT_MODE_VALUES = frozenset({"none", "read_only", "read_write"})
-HOME_MODE_VALUES = frozenset({"ephemeral", "host"})
 QUALITY_GATE_KIND_VALUES = frozenset({"command", "agent"})
 #: Where a DoD step runs. `both` is what every step has always done and stays the default; the
 #: other two exist so a fast focused suite can guard each task while the whole one runs over the
@@ -240,8 +239,6 @@ SECURITY_CATEGORY_VALUES = frozenset(
     }
 )
 
-SCENARIO_KIND_ORDER: tuple[str, ...] = ("happy_path", "failure_path", "rollback_path")
-SCENARIO_KIND_VALUES = frozenset(SCENARIO_KIND_ORDER)
 
 #: The gate-④ rail, in order. Three screens and a freeze, because the same finding used to
 #: appear on four of them — as a summary count, as a raw gap, as an Expected/Actual row, and
@@ -286,7 +283,9 @@ EVENT_ORDER: tuple[str, ...] = (
     "run_aborted",
     "decision_declared",
     "coverage_generated",
-    "actual_extraction_started",
+    # No `actual_extraction_started`: the vocabulary carried one and nothing ever emitted it. A
+    # closed vocabulary refuses unknown names precisely so the log stays aggregatable, which makes
+    # a name no code can produce a claim about the log that is not true.
     "actual_extraction_generated",
     "actual_extraction_failed",
     "comparison_generated",
@@ -364,6 +363,14 @@ ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
 
 #: Repo-relative POSIX paths only: no absolute path, no `..`, no backslash, no leading slash.
 REPO_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$")
+
+#: The cycle id, which `state.yaml` and every event carry. One spelling of a rule that had four:
+#: the schema's pattern (checked against it by a test), `cycle.py`'s `--name` predicate, which
+#: accepted a leading dash and any Unicode letter the schema rejects, and two `if state else ""`
+#: fallbacks that put an empty one into the hash chain. Every event is queried by cycle, so an
+#: event that cannot name its own is unfindable — and fails the schema `event_chain.scan` and
+#: `rein doctor` validate the log against, which is how a recording failure became a chain defect.
+CYCLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def is_repo_path(value: object) -> bool:
@@ -1035,11 +1042,6 @@ class Config:
         not a change of the environment the evidence was produced in.
         """
         return digests.of({"executors": self.raw.get("executors")})
-
-    @property
-    def project_name(self) -> str:
-        project = self.raw.get("project")
-        return _str(project, "name") if isinstance(project, dict) else ""
 
     @property
     def work_branch(self) -> str:

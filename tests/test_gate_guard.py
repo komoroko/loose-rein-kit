@@ -70,6 +70,41 @@ def test_rule_one_holds_even_with_every_gate_approved(tmp_path: Path) -> None:
     assert not allowed
 
 
+@pytest.mark.parametrize(
+    "rel",
+    [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".codex/hooks.json",
+        ".codex/config.toml",
+        ".github/hooks/rein.json",
+    ],
+)
+def test_the_guards_own_registration_cannot_be_edited_by_an_agent(tmp_path: Path, rel: str) -> None:
+    """The one file an agent could edit to switch off edit-stage enforcement was the one file no
+    rule mentioned: not rule 1, not rule 2, and not `guard.paths`, which covers deliverable
+    directories. Every gate approved makes no difference — there is no phase at which rewriting the
+    guard's own registration is the expected next step."""
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "approved"), phase="done"))
+    allowed, reason = decide(tmp_path, rel)
+    assert not allowed
+    assert "switch off edit-stage enforcement" in reason
+
+
+def test_the_registration_rule_is_not_relaxed_by_template_mode(tmp_path: Path) -> None:
+    """A template whose hook can be switched off is a template that ships with the switch."""
+    seed_repo(tmp_path, config=make_config(template_mode=True))
+    assert not decide(tmp_path, ".claude/settings.json")[0]
+
+
+def test_the_registration_rule_does_not_block_committing_it(tmp_path: Path) -> None:
+    """`rein install` writes these files and they have to be committable, exactly as state.yaml is —
+    rule 1 forbids hand edits, not commits (`_rule_three` is the whole of the commit stage)."""
+    seed_repo(tmp_path)
+    allowed, _ = gate_guard.evaluate(str(tmp_path / ".claude/settings.json"), repo_mod.Repo(tmp_path), stage="commit")
+    assert allowed
+
+
 # --- rule 2: a frozen plan is frozen ------------------------------------------
 
 
@@ -266,6 +301,31 @@ def test_an_unparseable_payload_allows_but_leaves_a_trace(
     monkeypatch.setattr(sys, "stdin", io.StringIO("{not json"))
     assert gate_guard.main([]) == 0
     assert "unparseable hook payload" in capsys.readouterr().err
+
+
+def test_asking_the_guard_for_help_answers_the_question(capsys: pytest.CaptureFixture[str]) -> None:
+    """It used to reach the stdin read, so `rein guard --help` reported an unparseable hook
+    payload and exited 0 — the guard's *allow* code — to a human who had asked it a question."""
+    assert gate_guard.main(["--help"]) == 0
+    out = capsys.readouterr()
+    assert "--check-diff" in out.out
+    assert "hook payload" not in out.err
+
+
+def test_an_argument_the_guard_cannot_read_denies_rather_than_reading_stdin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A guard handed arguments it does not understand is a misregistered hook.
+
+    stdin here carries a payload that would be *allowed* (no guarded path), so a rc of 2 can only
+    come from the argument check — the previous code fell through to it and passed.
+    """
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"tool_input": {"file_path": "README.md"}})))
+    assert gate_guard.main(["--check-diff", "--and-something-else"]) == 2
+    assert "usage: rein guard" in capsys.readouterr().err
 
 
 # --- commit-stage check -------------------------------------------------------
@@ -471,8 +531,10 @@ def test_patch_targets_reads_the_apply_patch_grammar(patch: str, expected: list[
 @pytest.mark.parametrize(
     ("tool_input", "expected"),
     [
-        ({"file_path": "/repo/a.py"}, ["/repo/a.py"]),  # Claude Code
+        ({"file_path": "/repo/a.py"}, ["/repo/a.py"]),  # Claude Code, Write/Edit
         ({"filePath": "/repo/a.py"}, ["/repo/a.py"]),  # VS Code Copilot
+        ({"notebook_path": "/repo/a.ipynb"}, ["/repo/a.ipynb"]),  # Claude Code, NotebookEdit
+        ({"notebookPath": "/repo/a.ipynb"}, ["/repo/a.ipynb"]),
         ({"command": _patch("*** Update File: a.py\n@@\n+x\n")}, ["a.py"]),  # Codex
         ({"command": "git status"}, []),  # a terminal command carries nothing to guard
         ({}, []),
@@ -480,6 +542,30 @@ def test_patch_targets_reads_the_apply_patch_grammar(patch: str, expected: list[
 )
 def test_hook_paths_speaks_all_three_hosts(tool_input: dict[str, object], expected: list[str]) -> None:
     assert gate_guard.hook_paths(tool_input) == expected
+
+
+def test_a_notebook_edit_under_a_guarded_prefix_is_denied(tmp_path: Path) -> None:
+    """A notebook is source. `NotebookEdit` names its target `notebook_path` and nothing read that
+    key, so a `.ipynb` under a guarded prefix reached the guard with no path it could see — allowed
+    at edit stage, leaving the commit-stage check as the only layer that ever looked at it.
+
+    Driven through the hook protocol with *only* `notebook_path`, because that is the payload: a
+    test that also passed `file_path` would pass without the fix.
+    """
+    import io
+    import sys
+
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    payload = {"cwd": str(tmp_path), "tool_input": {"notebook_path": str(tmp_path / "src/train.ipynb")}}
+    stdin, stdout = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+    try:
+        assert gate_guard.main([]) == 0
+        raw = sys.stdout.getvalue().strip()
+    finally:
+        sys.stdin, sys.stdout = stdin, stdout
+    assert raw, "a NotebookEdit under src/ must produce a decision, not silence"
+    assert "gate 'tasks' is not approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_a_patch_touching_a_guarded_path_is_denied(tmp_path: Path) -> None:

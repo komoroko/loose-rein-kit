@@ -31,7 +31,6 @@
         "run_aborted",
         "decision_declared",
         "coverage_generated",
-        "actual_extraction_started",
         "actual_extraction_generated",
         "actual_extraction_failed",
         "comparison_generated",

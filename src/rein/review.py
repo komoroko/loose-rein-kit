@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 #: The SSOT artefacts are bound by their own digests, so the change under review is the tree with
 #: them excluded — otherwise a review that writes review.yaml would invalidate itself (plan §17.3).
-_CHANGE_EXCLUDE: tuple[str, ...] = (".rein/",)
+_CHANGE_EXCLUDE: tuple[str, ...] = (repo_mod.SSOT_DIR,)
 
 
 class ReviewError(Exception):
@@ -215,28 +215,6 @@ def _relevant_code(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.Di
     return RelevantCode(files=provided, truncated=tuple(truncated), omitted=tuple(omitted))
 
 
-#: The permanent tier, as `gate-workflow.md` defines it: what a stranger arriving months later
-#: actually has. Deliberately not the plan, the review, or any log — the cold maintainer is a
-#: test of the documentation, and priming it with the reasoning defeats the test (§12.6).
-PERMANENT_DOCS: tuple[str, ...] = (
-    "AGENTS.md",
-    "CLAUDE.md",
-    "README.md",
-    "docs/00-product-brief.md",
-    "docs/05-current-state.md",
-)
-
-
-def _permanent_docs(repo: repo_mod.Repo, head: str) -> dict[str, str]:
-    """The permanent documentation at `head`, under the same per-file ceiling as the code."""
-    docs: dict[str, str] = {}
-    for path in PERMANENT_DOCS:
-        rc, text = repo._git_rc("show", f"{head}:{path}")
-        if rc == 0:
-            docs[path] = text[:RELEVANT_CODE_CHARS]
-    return docs
-
-
 # -- the expected model handed to the comparator ------------------------------
 
 
@@ -344,127 +322,201 @@ def generate(
     The deterministic piece (the coverage manifest) runs unconditionally; the reviewer stages are called and
     their *validated* outputs merged. The human half is reset to `not_started` — a fresh machine
     review is a fresh review, and no prior human answer speaks for it (plan §6.6).
+
+    **A failure records itself.** Every `raise` below used to leave the audit chain with nothing in
+    it: `events.ATTENTION_EVENTS` listed `review_failed` and `actual_extraction_failed` as things
+    needing a human decision and no code path anywhere emitted either, so a gate ④ that could not
+    be produced reported "needing a human decision: 0". The whole log exists so that no state
+    change goes unexplained, and the review pipeline's own failure was the state change it could
+    not explain.
     """
     store = store_mod.Store(repo)
-    plan = store.read_plan()
-    config = store.read_config()
-    state = store.read_state()
-    # Captured before the pipeline runs, not inside the transaction: the whole point is to
-    # refuse if review.yaml moved while the (slow, LLM-driven) stages were running.
-    seen_review = store_mod.read_digest(store.read_review())
+    # Which stage a failure landed in, for the event that records it. Tracked as the pipeline
+    # advances rather than read off the exception: each stage raises its own well-worded error and
+    # wrapping those would change what a human sees at the console to say where it happened.
+    #
+    # It starts at `inputs`, not `coverage`, because reading the SSOT is a stage that fails: a
+    # plan.yaml that does not parse means gate ④ cannot be produced, and with these four reads
+    # outside the recording block that failure was the one kind still going unrecorded. `cycle` is
+    # read *from* those documents, so it is bound before them and stays "" when they are what broke.
+    stage = "inputs"
+    cycle = ""
 
-    rc, head_out = repo._git_rc("rev-parse", "HEAD")
-    if rc != 0:
-        raise ReviewError("cannot resolve HEAD — is this a git repository with commits?")
-    head = head_out.strip()
-    trusted_base = _resolve_base(repo, plan, base)
-    change = change_digest(repo, head)
-    diff_text = _diff(repo, trusted_base, head)
+    def entered(name: str) -> None:
+        nonlocal stage
+        stage = name
 
-    # The manifest reads the *whole* diff, always: what it measures is how much of the change
-    # could be analysed, and folding a file before counting it would be measuring the fold.
-    facts = diff_facts.analyze(diff_text)
-    coverage = facts.coverage.to_manifest()
-    risk_floor = facts.risk_floor
-    effective = _effective_risk(facts, plan)
+    try:
+        # state.yaml first, and its cycle taken immediately: it is the document that *names* the
+        # cycle, so reading it ahead of the ones that can fail is what lets their failure be
+        # recorded under the right cycle instead of nowhere.
+        state = store.read_state()
+        cycle = state.cycle_id if state else ""
+        plan = store.read_plan()
+        config = store.read_config()
+        # Captured before the pipeline runs, not inside the transaction: the whole point is to
+        # refuse if review.yaml moved while the (slow, LLM-driven) stages were running.
+        seen_review = store_mod.read_digest(store.read_review())
 
-    # The reviewers read the folded one. `change_digest` above is over the committed tree, so
-    # neither this nor `relevant`'s omissions can move what the review is bound to.
-    reviewable, folded = fold_mechanical(diff_text, facts.files)
-    relevant = _relevant_code(repo, head, facts.files)
+        cycle = cycle or (plan.cycle_id if plan else "")
+        if not cycle:
+            raise ReviewError("no cycle to record this review under — .rein/state.yaml names none; run `rein doctor`")
+        entered("coverage")
+        rc, head_out = repo._git_rc("rev-parse", "HEAD")
+        if rc != 0:
+            raise ReviewError("cannot resolve HEAD — is this a git repository with commits?")
+        head = head_out.strip()
+        trusted_base = _resolve_base(repo, plan, base)
+        change = change_digest(repo, head)
+        diff_text = _diff(repo, trusted_base, head)
 
-    security_request = security_review.build_request(
-        diff_text=reviewable,
-        relevant_code=relevant.files,
-        deterministic_facts={
-            "signals": [h.signal for h in facts.signals],
-            "relevant_code": relevant.as_facts(),
-            "mechanical_bodies_withheld": folded,
-        },
-        trusted_base_sha=trusted_base,
-        subject_head_sha=head,
-    )
-    # What the last review found blocking *about this same base*. Read here rather than at the
-    # call below, because the call is about to move off this thread and the store is not something
-    # to touch from two.
-    prior_blocking = _prior_blocking_ids(store.read_review(), trusted_base)
+        # The manifest reads the *whole* diff, always: what it measures is how much of the change
+        # could be analysed, and folding a file before counting it would be measuring the fold.
+        facts = diff_facts.analyze(diff_text)
+        coverage = facts.coverage.to_manifest()
+        risk_floor = facts.risk_floor
+        effective = _effective_risk(facts, plan)
 
-    # The security review reads the diff and the relevant code; it consumes nothing the extractor
-    # or the comparator produce, so it does not have to wait behind them. Three LLM stages at up
-    # to 15 minutes each ran end to end for no reason but the order they were written in.
-    # Determinism is unaffected: the results are merged, and the events appended, in a fixed
-    # order below, and a failure in the extraction still surfaces ahead of one here.
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        security_future = pool.submit(
-            security_review.run_security_review,
-            security_request,
-            reviewer,
-            repo=repo,
-            commit=head,
-            # Without it the check below — a reviewer may not clear its own block by
-            # regenerating and omitting the finding — had nothing to compare against, so the
-            # protection its own docstring describes never once applied.
-            prior_blocking_ids=prior_blocking,
+        # The reviewers read the folded one. `change_digest` above is over the committed tree, so
+        # neither this nor `relevant`'s omissions can move what the review is bound to.
+        reviewable, folded = fold_mechanical(diff_text, facts.files)
+        relevant = _relevant_code(repo, head, facts.files)
+
+        security_request = security_review.build_request(
+            diff_text=reviewable,
+            relevant_code=relevant.files,
+            deterministic_facts={
+                "signals": [h.signal for h in facts.signals],
+                "relevant_code": relevant.as_facts(),
+                "mechanical_bodies_withheld": folded,
+            },
+            trusted_base_sha=trusted_base,
+            subject_head_sha=head,
         )
-        try:
-            extraction, comparison = _extract_and_compare(
-                repo,
+        # What the last review found blocking *about this same base*. Read here rather than at the
+        # call below, because the call is about to move off this thread and the store is not something
+        # to touch from two.
+        prior_blocking = _prior_blocking_ids(store.read_review(), trusted_base)
+
+        # The security review reads the diff and the relevant code; it consumes nothing the extractor
+        # or the comparator produce, so it does not have to wait behind them. Three LLM stages at up
+        # to 15 minutes each ran end to end for no reason but the order they were written in.
+        # Determinism is unaffected: the results are merged, and the events appended, in a fixed
+        # order below, and a failure in the extraction still surfaces ahead of one here.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            security_future = pool.submit(
+                security_review.run_security_review,
+                security_request,
                 reviewer,
-                plan=plan,
-                config=config,
-                head=head,
-                trusted_base=trusted_base,
-                diff_text=reviewable,
-                relevant=relevant,
-                coverage=coverage,
-                risk_floor=risk_floor,
-                effective=effective,
+                repo=repo,
+                commit=head,
+                # Without it the check below — a reviewer may not clear its own block by
+                # regenerating and omitting the finding — had nothing to compare against, so the
+                # protection its own docstring describes never once applied.
+                prior_blocking_ids=prior_blocking,
             )
-        except BaseException:
-            # The security stage's own failure is not the one to report: this one came first in
-            # the pipeline's order, and reporting whichever thread lost a race would make the
-            # error a reader sees depend on timing.
-            security_future.cancel()
-            raise
-        security = security_future.result()
+            try:
+                extraction, comparison = _extract_and_compare(
+                    repo,
+                    reviewer,
+                    plan=plan,
+                    config=config,
+                    head=head,
+                    trusted_base=trusted_base,
+                    diff_text=reviewable,
+                    relevant=relevant,
+                    coverage=coverage,
+                    risk_floor=risk_floor,
+                    effective=effective,
+                    on_stage=entered,
+                )
+            except BaseException:
+                # The security stage's own failure is not the one to report: this one came first in
+                # the pipeline's order, and reporting whichever thread lost a race would make the
+                # error a reader sees depend on timing.
+                security_future.cancel()
+                raise
+            entered("security_review")
+            security = security_future.result()
 
-    binding = {
-        "change_digest": change,
-        "plan_digest": plan.digest() if plan is not None else digests.of({}),
-        "config_digest": config.digest() if config is not None else digests.of({}),
-        "toolchain_digest": _toolchain_digest(config),
-        "coverage_digest": digests.of(coverage),
-        "actual_digest": extraction.actual_digest,
-        "trusted_base_sha": trusted_base,
-        "subject_head_sha": head,
-        "generated_at": event_chain.now_iso(),
-    }
-    gaps = _coverage_gaps(comparison.actual_coverage_gaps)
-    machine = assemble(
-        binding=binding,
-        coverage=coverage,
-        actual_statements=extraction.actual_statements,
-        claims=comparison.claims,
-        gaps=gaps,
-        extra_behaviors=_extra_behaviors(comparison.extra_behaviors, gaps=gaps),
-        security=security.to_section(),
-        effective_risk=effective,
-        plan=plan,
-        # A config may set only the budgets it wants to move, so the recorded snapshot is the
-        # defaults with the repository's overrides on top — the same merge human_review does.
-        budget_limits={**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})},
-    )
+        entered("assembly")
+        binding = {
+            "change_digest": change,
+            "plan_digest": plan.digest() if plan is not None else digests.of({}),
+            "config_digest": config.digest() if config is not None else digests.of({}),
+            "toolchain_digest": _toolchain_digest(config),
+            "coverage_digest": digests.of(coverage),
+            "actual_digest": extraction.actual_digest,
+            "trusted_base_sha": trusted_base,
+            "subject_head_sha": head,
+            "generated_at": event_chain.now_iso(),
+        }
+        gaps = _coverage_gaps(comparison.actual_coverage_gaps)
+        machine = assemble(
+            binding=binding,
+            coverage=coverage,
+            actual_statements=extraction.actual_statements,
+            claims=comparison.claims,
+            gaps=gaps,
+            extra_behaviors=_extra_behaviors(comparison.extra_behaviors, gaps=gaps),
+            security=security.to_section(),
+            effective_risk=effective,
+            plan=plan,
+            # A config may set only the budgets it wants to move, so the recorded snapshot is the
+            # defaults with the repository's overrides on top — the same merge human_review does.
+            budget_limits={**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})},
+        )
 
-    cycle = state.cycle_id if state else (plan.cycle_id if plan else "")
-    document = {"machine": machine, "human": {"status": "not_started"}}
-    with store.transaction() as tx:
-        tx.write("review", document, expect_digest=seen_review)
-        tx.append("coverage_generated", cycle_id=cycle, actor=actor)
-        tx.append("actual_extraction_generated", cycle_id=cycle, actor=actor)
-        tx.append("comparison_generated", cycle_id=cycle, actor=actor)
-        tx.append("security_review_generated", cycle_id=cycle, actor=actor)
-        tx.append("review_generated", cycle_id=cycle, actor=actor, detail={"change_digest": change})
+        entered("write")
+        document = {"machine": machine, "human": {"status": "not_started"}}
+        with store.transaction() as tx:
+            tx.write("review", document, expect_digest=seen_review)
+            tx.append("coverage_generated", cycle_id=cycle, actor=actor)
+            tx.append("actual_extraction_generated", cycle_id=cycle, actor=actor)
+            tx.append("comparison_generated", cycle_id=cycle, actor=actor)
+            tx.append("security_review_generated", cycle_id=cycle, actor=actor)
+            tx.append("review_generated", cycle_id=cycle, actor=actor, detail={"change_digest": change})
+    except Exception as exc:
+        # `Exception`, not `BaseException`: a Ctrl-C is a human deciding to stop, and filing that
+        # as a review failure would put a decision in the log as a defect. Same line the signal
+        # classifier draws (faults._EXTERNAL_SIGNALS leaves SIGINT out).
+        _record_failure(store, cycle, actor, stage=stage, reason=str(exc))
+        raise
     return machine
+
+
+#: Reviewer stages, by the name `generate` tracks them under. `actual_extraction` is the one with
+#: an event of its own: it is the stage that reads the code without the plan, so its failure means
+#: there is no Actual at all — a different fact from a comparison that had one and could not use it.
+_STAGE_EVENT: Mapping[str, str] = {"actual_extraction": "actual_extraction_failed"}
+
+
+def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: str, reason: str) -> None:
+    """Append the failure events for a review that could not be produced. Never raises.
+
+    Append-only: nothing was written, so there is no document to stage, and a transaction that
+    appends without writing is exactly what `store.Transaction` permits (the refusal runs the other
+    way — a write with no event).
+
+    Swallowing the store's own errors is deliberate. This runs inside an `except` block whose job
+    is to re-raise the real failure; a store problem here would replace the error a human needs to
+    read with one about bookkeeping, and the log being unwritable is what `rein doctor` is for.
+    """
+    if not cycle:
+        # There is no cycle to file it under, and an event that cannot name one is refused by
+        # `event_chain.make`. Say where the account went instead of leaving the reader to notice
+        # the log is silent — this is reachable only in the `inputs` stage, where the cycle is read
+        # out of the very documents that failed.
+        logger.warning(f"the review failed at stage '{stage}' and no cycle is established to record it under: {reason}")
+        return
+    try:
+        with store.transaction() as tx:
+            detail = {"stage": stage, "reason": reason[:1000]}
+            if stage in _STAGE_EVENT:
+                tx.append(_STAGE_EVENT[stage], cycle_id=cycle, actor=actor, detail=detail)
+            tx.append("review_failed", cycle_id=cycle, actor=actor, detail=detail)
+    except Exception as exc:  # the original failure must reach the reader, not this one
+        logger.warning(f"could not record the review failure in the audit log: {exc}")
 
 
 def _extract_and_compare(
@@ -480,13 +532,21 @@ def _extract_and_compare(
     coverage: Mapping[str, Any],
     risk_floor: str,
     effective: str,
+    on_stage: Callable[[str], None] = lambda _name: None,
 ) -> tuple[actual_extraction.ExtractionResult, conformance.ComparatorResult]:
     """The one genuinely sequential pair: the comparator reads what the extractor produced.
 
     Kept together so the concurrency in `generate` reads as "one chain plus one independent
     stage" rather than as three calls someone happened to interleave.
+
+    `on_stage` is called with each stage's name as it *begins*, so a caller can say which one
+    failed without this function having to know about the store or catch anything. It is the only
+    way to tell "the extractor failed" from "the comparator failed", and those are different
+    facts: one means nothing was read out of the code, the other means the reading exists and
+    could not be compared against the plan.
     """
     # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
+    on_stage("actual_extraction")
     extract_request = actual_extraction.build_request(
         trusted_base_sha=trusted_base,
         subject_head_sha=head,
@@ -503,6 +563,7 @@ def _extract_and_compare(
     )
 
     # Expected vs Actual — the Actual arrives read-only and digest-bound (§12.3).
+    on_stage("comparison")
     compare_request = conformance.build_request(
         expected_model=_expected_model(plan),
         actual_statements=extraction.actual_statements,
@@ -657,9 +718,11 @@ def complete(repo: repo_mod.Repo, *, actor: str = "") -> None:
     except ValueError as exc:
         raise ReviewError(str(exc)) from None
     state = store.read_state()
+    if state is None or not state.cycle_id:
+        raise ReviewError("cannot record the freeze — .rein/state.yaml names no cycle; run `rein doctor`")
     with store.transaction() as tx:
         tx.write("review", {**review.raw, "human": new_human}, expect_digest=seen)
-        tx.append("human_review_frozen", cycle_id=state.cycle_id if state else "", actor=actor)
+        tx.append("human_review_frozen", cycle_id=state.cycle_id, actor=actor)
 
 
 # -- CLI ----------------------------------------------------------------------

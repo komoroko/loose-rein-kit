@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import rein
 from rein import cli, init_cmd, registry, store, ui
 from tests._support import SANDBOXED_PROFILES, make_config
 
@@ -90,6 +91,17 @@ def test_version_short_circuits_the_lock_check(chdir_tmp: Path, capsys: pytest.C
     capsys.readouterr()
     assert cli.main(["status"]) == 1  # every other verb hard-stops on a newer lock format
     assert "is in format" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("spelling", ["version", "--version", "-V"])
+def test_the_conventional_version_spellings_all_answer(spelling: str, capsys: pytest.CaptureFixture[str]) -> None:
+    """`rein --version` used to answer `unknown verb '--version'` with exit 2.
+
+    `help` has had three spellings from the start and `version` had one, so the invocation
+    everybody reaches for first reported a broken install instead of a version.
+    """
+    assert cli.main([spelling]) == 0
+    assert capsys.readouterr().out.strip() == rein.__version__
 
 
 # --- start: wizard on a fresh copy, orientation afterwards -------------------------

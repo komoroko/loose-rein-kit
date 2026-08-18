@@ -795,19 +795,6 @@ class Orchestrator:
             handoff=self._take_diagnostics(task_id),
         )
 
-    def _task_status(self, task_id: str) -> str:
-        """This task's status as the *store* has it right now — not as this process last set it.
-
-        A leaf reports through the control plane, which writes the canonical `state.yaml`; the
-        orchestrator's own in-memory picture never sees that. Re-reading is how an implementer
-        saying "blocked" reaches the loop at all.
-        """
-        if self.dry_run:
-            return self._sim_status.get(task_id, "")
-        state = self.store.read_state()
-        entry = state.raw.get("tasks", {}).get(task_id) if state is not None else None
-        return str(entry.get("status", "")) if isinstance(entry, dict) else ""
-
     # -- launching an agent (the machine's side of the boundary) --
 
     def _spend_launch_retry(self) -> bool:
@@ -1733,9 +1720,6 @@ class Orchestrator:
 
     def _git(self, args: list[str], cwd: str | None = None) -> None:
         self.ws.git(args, cwd)
-
-    def _branch_for(self, task: dag.Task) -> str:
-        return self.ws.branch_for(task.id)
 
     def _worktree_path(self, task: dag.Task) -> str:
         return self.ws.worktree_path(task.id)

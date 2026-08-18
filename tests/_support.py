@@ -197,6 +197,9 @@ def make_review(
             {
                 "diff_digest": _digest("diff"),
                 "analyzed_files": 3,
+                # Required by the schema, so always emitted — the point of requiring it is that an
+                # unmeasured partition cannot pass a byte budget it was never held to.
+                "analyzed_bytes": analyzed_bytes,
                 "truncated": False,
                 "coverage_status": coverage_status,
             }
@@ -206,8 +209,6 @@ def make_review(
         "extra_behaviors": extra_behaviors or [],
         "security": {"findings": security_findings or []},
     }
-    if analyzed_bytes:
-        machine["coverage"][0]["analyzed_bytes"] = analyzed_bytes
     if unsupported_files:
         machine["coverage"][0]["unsupported_files"] = unsupported_files
     if review_budget:

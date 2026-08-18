@@ -51,10 +51,6 @@ CYCLE_DOCS: tuple[str, ...] = (
 CYCLE_STATE: tuple[str, ...] = ("plan.yaml", "state.yaml", "review.yaml", "events.ndjson")
 
 
-class CycleError(RuntimeError):
-    """The cycle cannot be closed."""
-
-
 def snapshot_scaffold(repo: repo_mod.Repo) -> bool:
     """Copy the pristine docs and SSOT documents aside, once. True if anything was taken.
 
@@ -196,8 +192,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     slug = args.name.strip().lower()
-    if not slug or not slug.replace("-", "").isalnum():
-        logger.error(f"--name {args.name!r} must be a lowercase slug (letters, digits, dashes)")
+    # The schema's rule, not an approximation of it: `replace("-", "").isalnum()` accepted a
+    # leading dash and every Unicode letter `str.isalnum` counts, so `--name -foo` and `--name яя`
+    # both got as far as writing a cycle_id that state.yaml and the audit log then reject.
+    if not models.CYCLE_ID_RE.match(slug):
+        logger.error(f"--name {args.name!r} must match {models.CYCLE_ID_RE.pattern} (lowercase, digits, dashes)")
         return 2
 
     today = date.today().isoformat()
@@ -233,9 +232,14 @@ def main(argv: list[str] | None = None) -> int:
     moved = _archive(repo, rows)
     restored = _restore(repo)
 
-    fresh = next_state(previous, slug)
-    store_mod.atomic_write(repo.state, store_mod.dump_yaml(fresh), mode=0o644)
+    # Through the Central Store, not `atomic_write`. state.yaml is the document `gate_guard` rule 1
+    # and AGENTS.md both describe as written only inside a transaction, and this — the reset that
+    # opens a cycle — was the one place writing it raw. Two things followed: the schema never saw
+    # the document, so a cycle id it rejects (`--name ①` was accepted upstream) reached disk; and
+    # the reset and the event recording it were two separate steps, so a crash between them left a
+    # fresh state.yaml with nothing in the log to say a cycle had been opened.
     with store.transaction() as tx:
+        tx.write("state", next_state(previous, slug))
         tx.append(
             "cycle_initialized",
             cycle_id=slug,

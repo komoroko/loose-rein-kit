@@ -147,6 +147,44 @@ def test_sync_prunes_a_lock_entry_whose_file_left_the_payload(repo: repo_mod.Rep
     assert "schema/retired.schema.json" not in refreshed["prompts"]["files"]
 
 
+def test_sync_deletes_a_materialized_file_the_payload_no_longer_ships(repo: repo_mod.Repo) -> None:
+    """`_plan` iterated the payload alone, so a file dropped by a release stayed on disk forever —
+    and the lock rewrite that followed dropped its entry, putting it beyond `uninstall`'s reach as
+    well. Nothing in the repository then knew it had ever been installed."""
+    assert install.sync(repo) == 0
+    retired = repo.path(".rein/prompts/commands/retired.md")
+    retired.write_text("what an earlier release shipped\n", encoding="utf-8")
+    data = lock_mod.read(repo.lock)
+    assert data is not None
+    data["prompts"]["files"]["prompts/commands/retired.md"] = lock_mod.norm_hash(retired.read_bytes())
+    lock_mod.write(repo.lock, data)
+
+    assert install.sync(repo) == 0
+    assert not retired.exists()
+    refreshed = lock_mod.read(repo.lock)
+    assert refreshed is not None
+    assert "prompts/commands/retired.md" not in refreshed["prompts"]["files"]
+
+
+def test_sync_keeps_an_unshipped_file_somebody_edited_and_keeps_its_record(repo: repo_mod.Repo) -> None:
+    """Deleting a local edit is not this command's call. Keeping the lock entry is the point: it is
+    the only thing left tying the file to the tool that put it there, so `uninstall` can still
+    retract it."""
+    assert install.sync(repo) == 0
+    retired = repo.path(".rein/prompts/commands/retired.md")
+    retired.write_text("what an earlier release shipped\n", encoding="utf-8")
+    data = lock_mod.read(repo.lock)
+    assert data is not None
+    data["prompts"]["files"]["prompts/commands/retired.md"] = "sha256:" + "0" * 64  # not what is on disk
+    lock_mod.write(repo.lock, data)
+
+    assert install.sync(repo) == 0
+    assert retired.exists()
+    refreshed = lock_mod.read(repo.lock)
+    assert refreshed is not None
+    assert refreshed["prompts"]["files"]["prompts/commands/retired.md"] == "sha256:" + "0" * 64
+
+
 def test_stale_integrations_compares_versions_canonically() -> None:
     data = {"integrations": {"claude": {"version": "0.1.0"}, "copilot": {"version": "0.1.1"}}}
     assert install.stale_integrations(data, "0.1.1") == {"claude": "0.1.0"}

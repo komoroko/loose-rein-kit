@@ -117,3 +117,29 @@ def test_a_fully_merged_branch_is_not_resurrected(
 
     ws.add_worktree("T-001")
     assert salvaged == []
+
+
+def test_the_ssot_exclusion_lives_in_exactly_one_place() -> None:
+    """Four answers have to agree about what "the tree" excludes: the fingerprint, the paths a task
+    is credited with, the commit it produces, and the change a review is bound to. They were four
+    separate spellings of `.rein/` — two module constants and four inline `:(exclude).rein`
+    pathspecs, plus the copy inside the implementer's own instructions — so any one of them could
+    drift and nothing would notice until a fact was invalidated by having been recorded.
+    """
+    import re
+
+    from rein import build_prompts, review
+
+    assert build_git._EXCLUDED == (repo_mod.SSOT_DIR,)
+    assert review._CHANGE_EXCLUDE == (repo_mod.SSOT_DIR,)
+    # The instruction an agent actually types renders the same pathspec the loop applies for it.
+    assert build_prompts._pathspec() == ". ':(exclude).rein'"
+    assert repo_mod.SSOT_PATHSPEC == (".", ":(exclude).rein")
+
+    literal = re.compile(r":\(exclude\)")
+    offenders = [
+        path.name
+        for path in sorted(Path(repo_mod.__file__).parent.rglob("*.py"))
+        if path.name != "repo.py" and literal.search(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == [], f"{offenders} spell the exclusion themselves instead of using repo.SSOT_PATHSPEC"

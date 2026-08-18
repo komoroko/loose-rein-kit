@@ -332,7 +332,16 @@ def record_approval(
     claim over a different channel. Both end here: a second way to reach an approved gate is the
     failure mode this module exists to prevent, so the receipt records *which* channel confirmed
     rather than flattening them into an unqualified "approved".
+
+    The channel is checked against the vocabulary here rather than only by the schema at write time.
+    `models.CONFIRMATION_CHANNELS` was declared, named in a comment, and never once consulted — so
+    the argument accepted any string and the refusal, when it came, read as a schema enum violation
+    several layers out instead of naming the one thing that was wrong.
     """
+    if confirmed_via not in models.CONFIRMATION_CHANNEL_VALUES:
+        raise ApprovalError(
+            f"unknown confirmation channel {confirmed_via!r} — one of {', '.join(models.CONFIRMATION_CHANNELS)}"
+        )
     store = store_mod.Store(repo)
     state = store.read_state()
     if state is None:
@@ -348,7 +357,10 @@ def record_approval(
         if defects:
             raise ApprovalError("refusing to record an approval against a damaged audit chain")
         root_before = event_chain.chain_root(events)
-        if not digests.matches(subject.get("attested_chain_root", ""), root_before):
+        # `verify_root` is the named form of exactly this check and was written for it, then never
+        # called from anywhere while this line spelled it out by hand. One of the two would have
+        # drifted eventually, and the one with a test is the one to keep.
+        if not event_chain.verify_root(events, str(subject.get("attested_chain_root", ""))):
             raise ApprovalError(
                 "the audit chain moved while the confirmation was on screen — events were appended, "
                 f"removed, or regenerated. Re-run `rein approve {gate}`."

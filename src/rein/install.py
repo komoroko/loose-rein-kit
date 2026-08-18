@@ -282,7 +282,10 @@ def read_version(root: Path) -> str:
     """The [project] version of a checkout's pyproject.toml ("" if there is none).
 
     pyproject is the single version source — the release workflow and scripts/template_lint.py
-    both read it and nothing else, so a second place to look could only ever disagree.
+    both read it and nothing else, so a second place to look could only ever disagree. The only
+    caller is that canary (`check_version_changelog`), which is why this reads a *path* rather than
+    answering from `rein.__version__`: it is asking what a checkout on disk says, not what the
+    running interpreter was installed as.
     """
     try:
         text = (root / "pyproject.toml").read_text(encoding="utf-8")
@@ -334,8 +337,24 @@ def _plan(repo: repo_mod.Repo, desired: dict[str, bytes], recorded: dict[str, st
     pristine (on-disk == lock record, or file absent) -> write; locally modified -> skip
     unless forced. A file already equal to the payload is "unchanged" (its hash is
     (re)recorded — crash-recovery convergence).
+
+    A destination the lock records and the payload no longer ships is **removed**. Iterating
+    `desired` alone left it on disk forever, and the lock rewrite that follows drops its entry
+    (`sync`/`install` keep only keys still in `desired`) — so after one upgrade nothing in the
+    repository knew the file had ever been installed, and `uninstall`, which works from the lock's
+    record, could not retract it either. Removal has to be planned here so it happens *before*
+    that rewrite; a release has only to drop a file for the alternative to strand it.
     """
     items: list[PlanItem] = []
+    for rel in sorted(set(recorded) - set(desired)):
+        try:
+            on_disk = lock_mod.norm_hash(repo.path(rel).read_bytes())
+        except OSError:
+            continue  # already gone: nothing to delete, and `_record_after` stops recording it
+        if on_disk == recorded[rel] or force:
+            items.append(PlanItem("remove", rel, "no longer shipped by this release"))
+        else:
+            items.append(PlanItem("leave-modified", rel, "no longer shipped, but locally modified — kept"))
     for rel in sorted(desired):
         new_hash = lock_mod.norm_hash(desired[rel])
         path = repo.path(rel)
@@ -366,20 +385,48 @@ def present_surfaces(repo: repo_mod.Repo, name: str) -> list[str]:
 
 
 def _apply_plan(repo: repo_mod.Repo, items: list[PlanItem], desired: dict[str, bytes]) -> dict[str, str]:
-    """Write the plan's install/update rows; return the lock hash per file (skips keep nothing new)."""
+    """Write the plan's install/update rows, delete its `remove` rows; return the lock hash per file."""
     hashes: dict[str, str] = {}
+    removed: list[str] = []
     for item in items:
+        if item.op == "remove":
+            repo.path(item.rel).unlink(missing_ok=True)
+            removed.append(item.rel)
+            continue
         if item.op in ("install", "update"):
             dest = repo.path(item.rel)
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(desired[item.rel])
         if item.op in ("install", "update", "unchanged"):
             hashes[item.rel] = lock_mod.norm_hash(desired[item.rel])
+    _prune_empty_dirs(repo, removed)
     return hashes
 
 
+def _record_after(recorded: dict[str, str], items: list[PlanItem], hashes: dict[str, str]) -> dict[str, str]:
+    """The lock's per-file record once a plan has run: every row the plan still owns, then the
+    fresh hashes on top.
+
+    A row survives unless the plan deleted it, so three cases separate cleanly. A file this
+    release no longer ships and that was pristine is gone from disk and from the record. One that
+    was *locally modified* stays in both — its record is the only thing left tying it to the tool
+    that installed it, so dropping it would put the file beyond `uninstall`'s reach as well as
+    `sync`'s, which is the hole this exists to close. And an entry whose file is already absent
+    yields no plan row at all, so it simply stops being recorded: there is nothing left to retract.
+
+    A `skip-modified` row keeps its old hash rather than taking the payload's — the file on disk is
+    still the one the record describes.
+    """
+    owned = {item.rel for item in items if item.op != "remove"}
+    out = {rel: digest for rel, digest in recorded.items() if rel in owned}
+    out.update(hashes)
+    return out
+
+
 def _print_plan(
-    items: list[PlanItem], *, verbose_ops: tuple[str, ...] = ("install", "update", "skip-modified")
+    items: list[PlanItem],
+    *,
+    verbose_ops: tuple[str, ...] = ("install", "update", "skip-modified", "remove", "leave-modified"),
 ) -> None:
     for item in items:
         if item.op in verbose_ops:
@@ -436,6 +483,22 @@ def _materialized_key(rel: str) -> str:
     return rel.removeprefix(".rein/")
 
 
+def materialized_record(repo: repo_mod.Repo) -> dict[str, str]:
+    """The lock's `prompts.files` map, keyed the way `_dest_map` keys it (repo-relative).
+
+    Public because `doctor` compares against it and the two must key it identically — the same
+    reason `present_surfaces` and `_dest_map` live here rather than being re-derived by each caller.
+    An unreadable lock reads as "records nothing", which is what `check_lock` reports on separately.
+    """
+    try:
+        data = lock_mod.read(repo.lock) or {}
+    except lock_mod.LockError:
+        return {}
+    prompts = data.get("prompts")
+    files = prompts.get("files") if isinstance(prompts, dict) else None
+    return {".rein/" + str(k): str(v) for k, v in (files or {}).items()}
+
+
 def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> int:
     """Materialize prompts/schema/rules from the package payload (see the module docstring)."""
     desired = _dest_map(MATERIALIZED)
@@ -461,8 +524,7 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
 
     _print_plan(items)
     hashes = _apply_plan(repo, items, desired)
-    files = {k: v for k, v in (recorded_raw or {}).items() if ".rein/" + k in desired}
-    files.update({_materialized_key(rel): digest for rel, digest in hashes.items()})
+    files = {_materialized_key(rel): digest for rel, digest in _record_after(recorded, items, hashes).items()}
     data["prompts"] = {"version": rein.__version__, "files": files}
     # Stamp the running release into the lock. Without this the lock keeps claiming the version
     # that wrote the repo *before* the upgrade, so the startup skew warning fires forever and
@@ -527,8 +589,7 @@ def install_integration(repo: repo_mod.Repo, name: str, *, force: bool = False, 
         print(f"[dry-run] install {name}: nothing written.")
         return 0
     hashes = _apply_plan(repo, items, desired)
-    files = {k: v for k, v in recorded.items() if k in desired}
-    files.update(hashes)
+    files = _record_after(recorded, items, hashes)
 
     record: dict[str, Any] = {
         "version": rein.__version__,

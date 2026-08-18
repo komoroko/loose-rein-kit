@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rein
-from rein import common, dag, dag_trace, digests, event_chain, executors, install, models, strict_yaml
+from rein import common, dag, dag_trace, digests, event_chain, executors, gate_guard, install, models, strict_yaml
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -111,30 +111,73 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
 
 
 def check_materialized(repo: repo_mod.Repo) -> list[Finding]:
-    """The materialized prompts/schema/oci/rules must equal the packaged payload.
+    """The materialized prompts/schema/oci/rules must equal the packaged payload, and so must the
+    lock's record of them.
 
     Reuses install's own destination map rather than re-deriving it, so "what sync writes" and
     "what doctor checks" cannot answer differently — a drift canary that drifts is worse than
     none at all.
+
+    Three separate questions, because they fail separately:
+
+      on disk vs payload    the one this check has always asked
+      recorded vs payload   a lock entry naming a hash the payload no longer has. Nothing looked,
+                            and it is not cosmetic: `_plan` reads that record to tell a pristine
+                            file from a locally modified one, so the *next* release to change such
+                            a file would classify it "locally modified — kept" and silently decline
+                            to update it. Three entries were already stale on main when this was
+                            written.
+      recorded but unshipped  a file this release no longer ships. `sync` now removes it; until it
+                            runs, saying so is the difference between a leftover and a mystery.
     """
     desired = install._dest_map(install.MATERIALIZED)
+    recorded = install.materialized_record(repo)
+    findings: list[Finding] = []
     drifted: list[str] = []
+    misrecorded: list[str] = []
     for rel, blob in sorted(desired.items()):
+        payload = lock_mod.norm_hash(blob)
         try:
-            if lock_mod.norm_hash(repo.path(rel).read_bytes()) != lock_mod.norm_hash(blob):
+            if lock_mod.norm_hash(repo.path(rel).read_bytes()) != payload:
                 drifted.append(rel)
         except OSError:
             drifted.append(f"{rel} (absent)")
+        if rel in recorded and recorded[rel] != payload:
+            misrecorded.append(rel)
     if drifted:
-        return [
+        findings.append(
             Finding(
                 "WARN",
                 "format",
                 f"{len(drifted)} materialized file(s) differ from the packaged payload "
                 f"(e.g. {drifted[0]}) — `rein sync --check` lists them all",
             )
-        ]
-    return [Finding("PASS", "format", f"{len(desired)} materialized file(s) match the packaged payload")]
+        )
+    else:
+        findings.append(Finding("PASS", "format", f"{len(desired)} materialized file(s) match the packaged payload"))
+    if misrecorded:
+        findings.append(
+            Finding(
+                "WARN",
+                "format",
+                f"{lock_mod.LOCK_NAME} records a stale hash for {len(misrecorded)} materialized file(s) "
+                f"(e.g. {misrecorded[0]}) — written by a release that changed them without re-running "
+                "`rein sync`. The record is what tells a pristine file from a locally modified one, so a "
+                "later release changing one of these would decline to update it. Run `rein sync`.",
+            )
+        )
+    orphans = sorted(set(recorded) - set(desired))
+    if orphans:
+        findings.append(
+            Finding(
+                "WARN",
+                "format",
+                f"{len(orphans)} materialized file(s) are recorded but no longer shipped by rein "
+                f"{rein.__version__} (e.g. {orphans[0]}) — `rein sync` removes them. Left in place they "
+                "reach every agent that reads .rein/ while belonging to no release.",
+            )
+        )
+    return findings
 
 
 def check_integrations(repo: repo_mod.Repo, config: models.Config | None) -> list[Finding]:
@@ -151,23 +194,39 @@ def check_integrations(repo: repo_mod.Repo, config: models.Config | None) -> lis
     absence is a choice rather than a defect.
     """
     try:
-        recorded = (lock_mod.read(repo.lock) or {}).get("integrations") or {}
+        data = lock_mod.read(repo.lock) or {}
     except lock_mod.LockError:
         return []  # check_lock already reported the unusable lock
+    recorded = data.get("integrations") or {}
+    # Which surfaces were written by a different release. `stale_integrations` was written for
+    # `sync` *and* this check — its own docstring says so — and only `sync` ever called it, so a
+    # repository reading new prompts through wrappers an older rein wrote came back all PASS.
+    stale = install.stale_integrations(data, rein.__version__)
     findings: list[Finding] = []
     unrecorded: list[str] = []
     for name in sorted(install.INTEGRATIONS):
         present = install.present_surfaces(repo, name)
         if not present:
             continue
-        if isinstance(recorded.get(name), dict):
+        if not isinstance(recorded.get(name), dict):
+            unrecorded.append(f"{name} ({len(present)} file(s))")
+        elif name in stale:
+            findings.append(
+                Finding(
+                    "WARN",
+                    "format",
+                    f"integration '{name}' surfaces were written by rein {stale[name] or '(unrecorded)'}, "
+                    f"not the {rein.__version__} that materialized .rein/ — `rein sync` refreshes only the "
+                    f"shared artifacts, so this repository reads new prompts through old wrappers. "
+                    f"Run `rein install {name}` (or `rein upgrade`).",
+                )
+            )
+        else:
             findings.append(
                 Finding(
                     "PASS", "format", f"integration '{name}' installed ({len(present)} file(s), recorded in the lock)"
                 )
             )
-        else:
-            unrecorded.append(f"{name} ({len(present)} file(s))")
     if not unrecorded:
         return findings
     if config is not None and config.template_mode:
@@ -684,6 +743,8 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
         findings.append(
             Finding("INFO", "hook", f"{' / '.join(missing)} sessions run without it — no hook host registered for them")
         )
+    if "claude" in surfaces:
+        findings += _check_claude_matcher(repo)
     if "codex" in surfaces:
         findings.append(
             Finding(
@@ -694,6 +755,43 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
             )
         )
     return findings
+
+
+def _check_claude_matcher(repo: repo_mod.Repo) -> list[Finding]:
+    """Every write-capable tool must be in a matcher whose hooks run the guard.
+
+    "Is the guard registered?" and "does the registration cover the tools that write?" are two
+    questions and only the first was asked. The matcher read `Write|Edit|MultiEdit` — `MultiEdit`
+    retired upstream, `NotebookEdit` never added — so a `.ipynb` under a guarded prefix passed the
+    edit-stage check untouched and only the commit-stage one ever looked at it. A hook that fires on
+    a subset of the writes is the failure mode this whole file exists to make visible.
+    """
+    try:
+        settings = json.loads(repo.path(SETTINGS_PATH).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []  # _reads_guard already established it parses far enough to mention the guard
+    covered: set[str] = set()
+    for group in settings.get("hooks", {}).get("PreToolUse", []) or []:
+        if not isinstance(group, dict) or not _mentions_guard(json.dumps(group.get("hooks", []))):
+            continue
+        matcher = group.get("matcher")
+        if not isinstance(matcher, str):
+            continue  # no matcher means "every tool" on hosts that ignore it — nothing to check
+        covered |= {tool.strip() for tool in matcher.split("|")}
+    uncovered = [tool for tool in gate_guard.CLAUDE_WRITE_TOOLS if tool not in covered]
+    if not uncovered:
+        return [
+            Finding("PASS", "hook", f"the matcher covers every write tool ({', '.join(gate_guard.CLAUDE_WRITE_TOOLS)})")
+        ]
+    return [
+        Finding(
+            "WARN",
+            "hook",
+            f"{SETTINGS_PATH}'s PreToolUse matcher does not name {', '.join(uncovered)}, so an edit made "
+            "with it never reaches the guard — the commit-stage check becomes the only layer. Add them to "
+            "the matcher (`rein install claude --force` restores the shipped one).",
+        )
+    ]
 
 
 #: The verbs whose pre-authorization breaks gate rule 2 outright: each one, run without a prompt,

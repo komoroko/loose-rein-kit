@@ -39,6 +39,7 @@ def _review(machine: dict[str, Any], human: dict[str, Any] | None = None) -> mod
             {
                 "diff_digest": "sha256:" + "d" * 64,
                 "analyzed_files": 1,
+                "analyzed_bytes": 1024,
                 "truncated": False,
                 "coverage_status": "sufficient",
             }

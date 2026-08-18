@@ -299,10 +299,14 @@ def _largest_partition_bytes(review: models.Review) -> int:
 
     The budget is per *partition*, not per change, so the measure is the max rather than the sum: a
     change split into readable pieces is within budget however many pieces there are, and one
-    unreadable piece is over it however small the rest were. A coverage entry carrying no
-    `analyzed_bytes` reads as 0, so a review written before the measure keeps the verdict it had.
+    unreadable piece is over it however small the rest were.
+
+    `analyzed_bytes` is required by the schema, so there is no absent case to default. It used to be
+    optional and read as 0 here — an unmeasured partition passing a size check it was never held to,
+    which is the one direction this file must never round towards. A review written before the
+    measure is regenerated rather than tolerated.
     """
-    return max((int(entry.get("analyzed_bytes", 0) or 0) for entry in review.coverage), default=0)
+    return max((int(entry["analyzed_bytes"]) for entry in review.coverage), default=0)
 
 
 def budget_actuals(review: models.Review, human: Mapping[str, Any]) -> dict[str, int]:

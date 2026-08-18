@@ -32,8 +32,13 @@ from pathlib import Path
 
 from rein import digests, models, strict_yaml
 
-#: The chain root of an empty log. A distinct constant rather than "" so that "no events yet"
-#: and "field absent" cannot be confused when a receipt binds a root.
+#: The chain root of an empty log — what `chain_root([])` returns, kept as a name so the tests that
+#: pin it do not carry a bare sha256 literal nobody can check by reading.
+#:
+#: It was introduced to keep "no events yet" distinguishable from "field absent" where a receipt
+#: binds a root, and no production code ever consulted it for that: `approve` compares roots through
+#: `digests.matches`, which an absent `attested_chain_root` fails on its own. The claim in the old
+#: comment was the remnant here, not the constant.
 EMPTY_CHAIN_ROOT = digests.of_texts([])
 
 
@@ -223,13 +228,22 @@ def make(
     detail: dict[str, object] | None = None,
     tx_id: str = "",
 ) -> models.Event:
-    """An unchained event ready for :func:`link`. Unknown event names are refused here, not later.
+    """An unchained event ready for :func:`link`. A name or cycle the log cannot carry is refused
+    here, not later.
 
     Rejecting the vocabulary at construction is what keeps the log aggregatable: a typo would
-    otherwise create a kind no query knows to look for.
+    otherwise create a kind no query knows to look for. `cycle_id` is refused for the same reason
+    and was not — callers wrote `state.cycle_id if state else ""`, and an event with no cycle is
+    both unfindable by every per-cycle query and invalid against `event.schema.json`, so appending
+    one turned a failure that wanted recording into a defect in the chain a gate receipt pins.
     """
     if event not in models.EVENT_VALUES:
         raise ValueError(f"unknown event {event!r} — one of: {', '.join(models.EVENT_ORDER)}")
+    if not models.CYCLE_ID_RE.match(cycle_id):
+        raise ValueError(
+            f"event {event!r}: cycle_id {cycle_id!r} is not one the log can carry "
+            f"(must match {models.CYCLE_ID_RE.pattern}) — the caller has to establish the cycle first"
+        )
     return models.Event(
         seq=0,
         id=new_id(),
