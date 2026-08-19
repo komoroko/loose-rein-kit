@@ -13,9 +13,12 @@ over something that will never run would be a worse failure than the one being p
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import Any
 
 from rein import models, preflight
+from tests import conftest
 
 _PINNED = {"kind": "oci", "image": "localhost/rein-python@sha256:" + "0" * 64, "network_profile": "none"}
 _HOST = {"kind": "host"}
@@ -141,3 +144,16 @@ def test_every_problem_renders_with_a_remedy() -> None:
     config = _config(impl=_HOST, rev=_HOST, quality=_PINNED)
     problems = preflight.check(config, [_step("test", executor_profile="quality")], {"implementer": []}, runtime=None)
     assert problems and all("→" in p.render() for p in problems)
+
+
+# --- the suite's own environment ------------------------------------------------
+
+
+def test_the_agent_cli_the_suite_preflights_is_the_stub_and_not_the_host_s() -> None:
+    """Every full-loop test passes this check, so on a machine with `claude` installed it would
+    pass for a reason that is not about the code — and refuse to start everywhere else. The stub
+    `conftest` puts on PATH is what production's `shutil.which` must find."""
+    for name in conftest.STUBBED_AGENT_CLIS:
+        found = shutil.which(name)
+        assert found is not None, f"{name} is not on the suite's PATH"
+        assert Path(found).parent.name.startswith("agent-cli"), f"{name} resolved to the host's {found}"
