@@ -244,17 +244,24 @@ SECURITY_CATEGORY_VALUES = frozenset(
 #: appear on four of them — as a summary count, as a raw gap, as an Expected/Actual row, and
 #: again as the card that actually asked for a decision. Only the last one wanted an answer.
 #:
-#: `scope` comes first and reveals no expected answer: it says which commits, which files, and
-#: which claims this review speaks for — and, more importantly, which it does not. A reviewer
-#: who does not know the boundary does not know what they approved.
-#: `decision` is the only screen that asks for anything; the evidence for each card lives
-#: inside the card, revealed after the reviewer records what they think (plan §21.2).
+#: `scope` comes first: it says which commits, which files, and which claims this review speaks
+#: for — and, more importantly, which it does not. A reviewer who does not know the boundary does
+#: not know what they approved.
+#: `orient` is what was actually built and under what conditions — the delivered tasks, the
+#: dependency movement, the sandbox and network boundary each gate step ran in, the interfaces the
+#: blind extractor read out, what the gate established and what it could not. All of it derived
+#: from the SSOT (`brief.py`), none of it asked for. It exists so the reviewer stops reconstructing
+#: the change from a diff before every card.
+#: `decision` is the only screen that asks for anything, and each card carries its own evidence.
 #: `diff` is the change itself, for a reviewer who wants to read it rather than be told about it.
-REVIEW_STAGE_ORDER: tuple[str, ...] = ("scope", "decision", "diff", "freeze")
+REVIEW_STAGE_ORDER: tuple[str, ...] = ("scope", "orient", "decision", "diff", "freeze")
 REVIEW_STAGE_VALUES = frozenset(REVIEW_STAGE_ORDER)
 
 RUN_STATUS_VALUES = frozenset({"idle", "running", "waiting_for_review", "blocked", "complete"})
-REVIEW_STATUS_VALUES = frozenset({"none", "generating", "awaiting_human", "human_in_progress", "frozen", "stale"})
+# There is deliberately no `state.review` status beside these. `review.yaml` carries the machine
+# half's `status` and the human half's `status`, digested separately, and a second copy in
+# `state.yaml` could only ever disagree with them: it was written in two places (a new cycle, a
+# roll back), read in none, and its six values named states nothing could produce.
 
 BUDGET_NAMES: tuple[str, ...] = (
     "max_critical_decisions",
@@ -281,6 +288,17 @@ EVENT_ORDER: tuple[str, ...] = (
     # The run stopped because the machine failed, not because any task did. Deliberately outside
     # `events.ATTENTION_EVENTS`: it asks nobody to judge the work, it asks for a re-run.
     "run_aborted",
+    # What one build run put in front of a model, and how much of it was a cold re-read. Emitted
+    # once per run because a run is the unit that ends: a per-launch event would swamp the chain,
+    # and a counter living only in the process would vanish with the `EXIT_RETRY_LATER` that a
+    # long build is nearly certain to hit. Also outside `ATTENTION_EVENTS` — it asks for no
+    # judgement, it makes one possible.
+    "run_measured",
+    # A pinned sandbox image was rebuilt and re-pinned. Outside `ATTENTION_EVENTS`: it asks for no
+    # judgement now — it is what makes gate ④'s "the evidence was produced in an environment the
+    # gate ③ approval never saw" answerable then. Before this, `rein oci build --write-config`
+    # rewrote config.yaml with `path.write_text` and the audit chain never heard about it.
+    "environment_repinned",
     "decision_declared",
     "coverage_generated",
     # No `actual_extraction_started`: the vocabulary carried one and nothing ever emitted it. A
@@ -292,9 +310,7 @@ EVENT_ORDER: tuple[str, ...] = (
     "security_review_generated",
     "review_generated",
     "review_failed",
-    "challenge_answered",
     "decision_recorded",
-    "counterfactual_answered",
     "expertise_declared",
     "expert_requested",
     "disposition_recorded",
@@ -355,7 +371,6 @@ ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "acceptance": re.compile(r"^A-\d+$"),
     "statement": re.compile(r"^STMT-\d{3,}$"),
     "actual_statement": re.compile(r"^AST-\d{3,}$"),
-    "challenge": re.compile(r"^CH-\d{3,}$"),
     "decision_card": re.compile(r"^DC-\d{3,}$"),
     "finding": re.compile(r"^SEC-\d{3,}$"),
     "extra_behavior": re.compile(r"^EXTRA-\d{3,}$"),
@@ -722,11 +737,22 @@ class State:
     def plan_config_digest(self) -> str:
         """What `config.yaml` hashed to when gate ③ froze it. "" before the freeze.
 
-        The pair of :attr:`plan_digest`: gate ③ freezes config.yaml too, because it pins the
-        sandbox and the quality gate a review's evidence is produced in.
+        The pair of :attr:`plan_digest`, and specifically :meth:`Config.frozen_digest` — the
+        sandbox *decisions* and the quality gate, image pins excluded.
         """
         plan = self.raw.get("plan")
         return _str(plan, "config_digest") if isinstance(plan, dict) else ""
+
+    @property
+    def plan_environment_digest(self) -> str:
+        """The sandbox picture gate ③ saw, pins included. "" before the freeze or on an old freeze.
+
+        Recorded rather than enforced: a rebuilt image is the same sandbox and is allowed to move
+        underneath the freeze. Comparing it is how "the evidence was produced somewhere else than
+        the approval saw" becomes a sentence a human reads, rather than a fact nothing states.
+        """
+        plan = self.raw.get("plan")
+        return _str(plan, "environment_digest") if isinstance(plan, dict) else ""
 
     @property
     def frozen_sources(self) -> dict[str, str]:
@@ -756,11 +782,6 @@ class State:
     @property
     def execution(self) -> Mapping[str, Any]:
         value = self.raw.get("execution")
-        return value if isinstance(value, dict) else {}
-
-    @property
-    def review(self) -> Mapping[str, Any]:
-        value = self.raw.get("review")
         return value if isinstance(value, dict) else {}
 
     @property
@@ -798,7 +819,7 @@ class Review:
     """``review.yaml`` — the machine review and the human review, digested separately (plan §6.6).
 
     The split is the point: regenerating the machine review resets the human section, while a
-    human answering a challenge must *not* make the machine review stale (plan §17.5).
+    human recording a decision must *not* make the machine review stale (plan §17.5).
     """
 
     raw: Mapping[str, Any]
@@ -985,7 +1006,15 @@ class GateStep:
 
     @property
     def required(self) -> bool:
-        return self.raw.get("required") is not False
+        """Must this step have something to run? Explicit opt-in, absent reads as False.
+
+        It used to read as True unless the key said `false`, which contradicted both its own
+        documentation ("an empty command is normally a silent skip — fine for a library") and the
+        packaged config's comment on `smoke` ("…then set `required: true`"). That went unnoticed
+        while nothing read the flag; now that `rein.preflight` refuses a run over it, a default of
+        True would refuse every repository whose config simply never mentioned it.
+        """
+        return bool(self.raw.get("required"))
 
     @property
     def paths(self) -> tuple[str, ...]:
@@ -1010,9 +1039,27 @@ class GateStep:
         return value if value in GATE_STAGE_VALUES else "both"
 
 
+#: The per-profile key that names a *build* of the sandbox rather than a decision about it. The
+#: only thing `rein oci build --write-config` rewrites when a dependency changes, and the only
+#: thing gate ③'s freeze lets move underneath it.
+PIN_KEY = "image"
+
+
+def _without_image_pins(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """`raw` with every `executor_profiles.<name>.image` removed (a copy; the input is untouched)."""
+    profiles = raw.get("executor_profiles")
+    if not isinstance(profiles, dict):
+        return dict(raw)
+    stripped = {
+        name: ({k: v for k, v in body.items() if k != PIN_KEY} if isinstance(body, dict) else body)
+        for name, body in profiles.items()
+    }
+    return {**raw, "executor_profiles": stripped}
+
+
 @dataclass(frozen=True)
 class Config:
-    """``config.yaml`` — execution knobs, frozen wholesale at gate ③.
+    """``config.yaml`` — execution knobs, frozen at gate ③ apart from the image pins.
 
     Read by the guard hook, the build loop, the executors, and doctor. Note what it cannot
     answer: *who* may approve anything. There is no knob for that here — a gate opens only by a
@@ -1030,18 +1077,43 @@ class Config:
             raise DocumentError(what, errors)
         return cls(document)
 
-    def digest(self) -> str:
-        return digests.of(self.raw, drop=digests.VOLATILE_TIMESTAMP_KEYS)
+    def frozen_digest(self) -> str:
+        """The part of config.yaml gate ③'s approval covers: everything but the image pins.
 
-    def toolchain_digest(self) -> str:
-        """Which sandbox each role runs in, as one digest.
+        The pin is deliberately outside. A task that legitimately adds a dependency makes the
+        pinned image wrong — the closure it needs is not baked in, and a `network: none` sandbox
+        fails the same way on every retry — so the image has to be rebuilt *during* the cycle. With
+        the whole file frozen, that one digest string cost a `rein revise --to tasks`: the plan
+        un-froze, every gate below reset in a chain, and the human re-approved a plan nothing had
+        changed. The environment moved; the decision did not.
 
-        Bound into the gate ③ freeze and into every machine review, so that changing the sandbox
-        a step ran in moves the digest and an approval taken against the old one stops applying.
-        Narrower than :meth:`digest` on purpose: a comment or a budget moving in config.yaml is
-        not a change of the environment the evidence was produced in.
+        What stays inside is everything that is a decision: which profile each role runs under,
+        `kind`, `network_profile`, `mount_repo`, the limits, the quality gate, the budgets, the
+        guard. Flipping a profile from `oci` to `host`, or opening its network, still breaks the
+        freeze and still needs a human — those widen what may happen, and only the pin narrows to
+        "same sandbox, rebuilt".
+
+        The pin is not thereby unbound: :meth:`environment_digest` covers it, gate ③ records that
+        digest beside this one, and `rein doctor` and the gate ④ brief report when it has moved.
         """
-        return digests.of({"executors": self.raw.get("executors")})
+        return digests.of(_without_image_pins(self.raw), drop=digests.VOLATILE_TIMESTAMP_KEYS)
+
+    def environment_digest(self) -> str:
+        """The sandbox picture as one digest: role→profile, and every profile body including its pin.
+
+        This is what :meth:`frozen_digest` leaves out, plus what it keeps of the sandbox — so a
+        reader comparing two of these is asking "was the evidence produced in the same environment",
+        which is a different question from "is this the approved plan".
+
+        Its predecessor hashed `{"executors": ...}` alone — the role→profile *name* map — while
+        claiming in its own docstring to move when the sandbox a step ran in changed. It did not:
+        `executor_profiles` is where `kind`, `image` and `network_profile` live, and repointing a
+        profile at a different image left this digest identical. Nothing compared it either, so the
+        claim was never contradicted by anything.
+        """
+        return digests.of(
+            {"executors": self.raw.get("executors"), "executor_profiles": self.raw.get("executor_profiles")}
+        )
 
     @property
     def work_branch(self) -> str:

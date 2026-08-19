@@ -33,6 +33,7 @@ from typing import Any
 
 from rein import (
     actual_extraction,
+    brief,
     common,
     conformance,
     decision_cards,
@@ -240,6 +241,8 @@ def assemble(
     effective_risk: str = "",
     plan: models.Plan | None = None,
     budget_limits: Mapping[str, int] | None = None,
+    brief_sections: Mapping[str, Any] | None = None,
+    residual_findings: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Compose a schema-valid `machine` half from the validated pieces (plan §6.6).
 
@@ -252,6 +255,11 @@ def assemble(
     decisions a human is answerable for must not be authored by the thing under review, and it must
     not be able to omit a finding. `plan` supplies each claim's frozen risk, domains and owed
     evidence; without it the cards still appear, at their default risk and with no domain routing.
+
+    `brief_sections` and `residual_findings` arrive already derived (`brief.derive`,
+    `brief.residual_findings`) rather than being built here, because they read config.yaml and
+    state.yaml — documents this function deliberately never takes, so that assembling a machine
+    half stays a pure shaping step a test can drive without a repository on disk.
     """
     verdicts = [str(c.get("verdict", "unknown")) for c in claims]
     summary = {
@@ -273,6 +281,10 @@ def assemble(
     }
     if effective_risk:
         machine["effective_risk"] = effective_risk
+    if brief_sections:
+        machine["brief"] = dict(brief_sections)
+    if residual_findings:
+        machine["residual_findings"] = [dict(f) for f in residual_findings]
     if gaps:
         machine["gaps"] = [dict(g) for g in gaps]
     if extra_behaviors:
@@ -316,12 +328,21 @@ def generate(
     executor: Any = None,
     base: str | None = None,
     actor: str = "",
+    force: bool = False,
 ) -> dict[str, Any]:
     """Run the whole pipeline and write `review.yaml`'s machine half; return the assembled machine.
 
     The deterministic piece (the coverage manifest) runs unconditionally; the reviewer stages are called and
     their *validated* outputs merged. The human half is reset to `not_started` — a fresh machine
     review is a fresh review, and no prior human answer speaks for it (plan §6.6).
+
+    **A subject that has not moved is not re-read.** Everything the pipeline is a function of is a
+    digest computed before a model is called: the committed tree, the frozen plan, the config the
+    approval covers, the sandbox, the coverage manifest. When all of them match the review already
+    on disk, three reviewer stages would be paid for to produce a reading of the same bytes — and,
+    worse, the human half would be reset, discarding answers about a change nothing had touched.
+    A field run recorded `review_generated` fifteen times in one cycle for exactly this. `force`
+    is the way to say "read it again anyway", which is a deliberate act with a visible cost.
 
     **A failure records itself.** Every `raise` below used to leave the audit chain with nothing in
     it: `events.ATTENTION_EVENTS` listed `review_failed` and `actual_extraction_failed` as things
@@ -376,6 +397,25 @@ def generate(
         coverage = facts.coverage.to_manifest()
         risk_floor = facts.risk_floor
         effective = _effective_risk(facts, plan)
+
+        subject = {
+            "change_digest": change,
+            "plan_digest": plan.digest() if plan is not None else digests.of({}),
+            "config_digest": config.frozen_digest() if config is not None else digests.of({}),
+            "environment_digest": _environment_digest(config),
+            "coverage_digest": digests.of(coverage),
+            "tasks_digest": _tasks_digest(state),
+            "trusted_base_sha": trusted_base,
+            "subject_head_sha": head,
+        }
+        existing = store.read_review()
+        if not force and _same_subject(existing, subject):
+            assert existing is not None  # _same_subject is False for None
+            print(
+                "review: the subject has not moved since the last generation — reusing it "
+                "(nothing was re-read; `rein review generate --force` to run the pipeline anyway)"
+            )
+            return dict(existing.machine)
 
         # The reviewers read the folded one. `change_digest` above is over the committed tree, so
         # neither this nor `relevant`'s omissions can move what the review is bound to.
@@ -440,17 +480,7 @@ def generate(
             security = security_future.result()
 
         entered("assembly")
-        binding = {
-            "change_digest": change,
-            "plan_digest": plan.digest() if plan is not None else digests.of({}),
-            "config_digest": config.digest() if config is not None else digests.of({}),
-            "toolchain_digest": _toolchain_digest(config),
-            "coverage_digest": digests.of(coverage),
-            "actual_digest": extraction.actual_digest,
-            "trusted_base_sha": trusted_base,
-            "subject_head_sha": head,
-            "generated_at": event_chain.now_iso(),
-        }
+        binding = {**subject, "actual_digest": extraction.actual_digest, "generated_at": event_chain.now_iso()}
         gaps = _coverage_gaps(comparison.actual_coverage_gaps)
         machine = assemble(
             binding=binding,
@@ -462,6 +492,17 @@ def generate(
             security=security.to_section(),
             effective_risk=effective,
             plan=plan,
+            # The orientation stage, derived here rather than inside `assemble` because it reads
+            # config.yaml and state.yaml — documents `assemble` deliberately never takes, so that
+            # composing a machine half stays testable without a repository.
+            brief_sections=brief.derive(
+                plan=plan,
+                state=state,
+                config=config,
+                actual_statements=extraction.actual_statements,
+                changed_paths=[f.path for f in facts.files],
+            ),
+            residual_findings=brief.residual_findings(state),
             # A config may set only the budgets it wants to move, so the recorded snapshot is the
             # defaults with the repository's overrides on top — the same merge human_review does.
             budget_limits={**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})},
@@ -643,14 +684,51 @@ def _independence(config: models.Config | None) -> dict[str, Any]:
     return {role: {"group": config.independence_group(role)} for role in ("actual_extractor", "comparator")}
 
 
-def _toolchain_digest(config: models.Config | None) -> str:
-    """What the review was produced in: the executor profiles that ran its steps.
+def _tasks_digest(state: models.State | None) -> str:
+    """The task facts the orientation is derived from, as one digest.
 
-    Delegates to :meth:`models.Config.toolchain_digest`, which the gate ③ freeze binds too — two
+    `change_digest` covers the committed tree *minus* `.rein/`, which is right for a review of the
+    code and wrong as the whole reuse key: the orientation brief and the residual findings are
+    derived from `state.yaml`, and a task promoted from `awaiting-evidence` to `done` after a human
+    recorded what they saw moves none of the other digests. Reusing across that served a brief the
+    repository had since contradicted, at the gate where the whole point is that it has not.
+
+    Only `tasks`, because that is what `brief.derive` and `brief.residual_findings` read. The gate
+    lines and the freeze record move for reasons that say nothing about this document.
+    """
+    tasks = state.raw.get("tasks") if state is not None else None
+    return digests.of(tasks if isinstance(tasks, dict) else {}, drop=digests.VOLATILE_TIMESTAMP_KEYS)
+
+
+def _same_subject(existing: models.Review | None, subject: Mapping[str, str]) -> bool:
+    """Would regenerating produce a review of exactly what the one on disk already reviewed?
+
+    Every key compared is deterministic and computed before any model runs, so this is an identity
+    check rather than a guess: the committed tree under review, the Expected Model, the config the
+    approval covers, the sandbox, and the manifest of what could be read. An LLM stage is not a
+    function of anything else, which is why nothing else needs to be in here.
+
+    A malformed or ungenerated review is not reusable, and neither is one whose binding is missing
+    any of these — "it did not say" must never read as "it agreed".
+    """
+    if existing is None or not existing.is_generated:
+        return False
+    binding = existing.binding
+    return all(binding.get(key) == value for key, value in subject.items())
+
+
+def _environment_digest(config: models.Config | None) -> str:
+    """What the review was produced in: the executor profiles that ran its steps, pins included.
+
+    Delegates to :meth:`models.Config.environment_digest`, which the gate ③ freeze binds too — two
     copies of "which sandbox was this" would eventually disagree, and then a freeze and a review
     would be talking about different environments while reporting the same digest name.
+
+    This is the digest that is *allowed* to move within a cycle (a dependency was added, the image
+    was rebuilt). Which is exactly why it is recorded here: gate ④ shows the human that the
+    environment its evidence was produced in is not the one gate ③ saw.
     """
-    return config.toolchain_digest() if config is not None else digests.of({"executors": None})
+    return config.environment_digest() if config is not None else digests.of({"executors": None})
 
 
 def _coverage_gaps(gaps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -779,7 +857,12 @@ def _staged_reviewer(repo: repo_mod.Repo) -> review_policy.Reviewer:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rein review", description="the grounded machine review (gate ④)")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("generate", help="run the review pipeline and write review.yaml")
+    gen = sub.add_parser("generate", help="run the review pipeline and write review.yaml")
+    gen.add_argument(
+        "--force",
+        action="store_true",
+        help="re-run the pipeline even when the subject has not moved (discards the human answers)",
+    )
     sub.add_parser("complete", help="freeze the human review (all blockers must be clear)")
     sub.add_parser("show", help="print the current review.yaml")
     args = parser.parse_args(argv)
@@ -793,7 +876,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "generate":
-            generate(repo, _staged_reviewer(repo))
+            generate(repo, _staged_reviewer(repo), force=args.force)
             print("review.yaml generated — review it in `rein ui`, then `rein review complete`")
             return 0
         if args.cmd == "complete":

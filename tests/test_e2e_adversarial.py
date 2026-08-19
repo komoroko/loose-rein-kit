@@ -33,7 +33,7 @@ def _review(machine: dict[str, Any], human: dict[str, Any] | None = None) -> mod
         "binding": {
             "change_digest": "sha256:" + "a" * 64,
             "plan_digest": "sha256:" + "b" * 64,
-            "toolchain_digest": "sha256:" + "c" * 64,
+            "environment_digest": "sha256:" + "c" * 64,
         },
         "coverage": [
             {
@@ -83,7 +83,7 @@ _HIGH_CARD = {
     "kind": "claim",
     "question": "C-001 is 'diverged'. What happens to it?",
     "options": [{"id": "A", "statement_id": "STMT-001"}, {"id": "B", "statement_id": "STMT-002"}],
-    "evidence": {"expected": {"statement": "x"}, "expected_choice": "B"},
+    "evidence": {"expected": {"statement": "x"}},
 }
 
 
@@ -98,20 +98,22 @@ def test_e2e_08_stale_machine_digest_is_refused() -> None:
 def test_e2e_09_human_answer_does_not_stale_the_machine() -> None:
     review = _review({"decision_cards": [_HIGH_CARD]})
     before = review.machine_digest()
-    human = human_review.record_challenge_answer(review, dict(review.human), "DC-001", "B", confidence="low")
+    human = human_review.record_decision(review, dict(review.human), "DC-001", "B", confidence="low")
     after = models.Review({"machine": dict(review.machine), "human": human})
     assert after.machine_digest() == before and after.human_digest() != review.human_digest()
 
 
-# E2E-19: a high-risk card withholds its evidence until the reviewer records their own read.
-def test_e2e_19_priming_defense() -> None:
+# E2E-19 (priming defense) is the *extractor's* property and is pinned in test_reviewers.py: the
+# blind reader of the code never receives the plan. It once had a second half here — a high-risk
+# card withholding its evidence from the human until they had guessed — which defended against
+# nothing a model could be primed by and put a quiz in front of the decision. What replaces it is
+# the opposite guarantee: the card arrives with its evidence, and the answer is still required.
+def test_a_high_risk_card_arrives_with_its_evidence_and_still_demands_an_answer() -> None:
     review = _review({"decision_cards": [_HIGH_CARD]})
-    asked = human_review.next_challenge(review, dict(review.human))
-    assert asked is not None and "evidence" not in asked
-    assert human_review.reveal_for(review, "DC-001") == _HIGH_CARD["evidence"]
-
-    answered = human_review.record_challenge_answer(review, dict(review.human), "DC-001", "B", confidence="high")
-    assert human_review.next_challenge(review, answered) is None
+    assert human_review.unanswered_decisions(review, dict(review.human)) == ["DC-001"]
+    assert _HIGH_CARD["evidence"]  # carried on the card the API serves, never stripped from it
+    answered = human_review.record_decision(review, dict(review.human), "DC-001", "B", confidence="high")
+    assert human_review.unanswered_decisions(review, answered) == []
 
 
 # E2E-23: the strict loader refuses duplicate keys, merge keys, aliases, and deep nesting.

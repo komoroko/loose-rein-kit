@@ -23,3 +23,9 @@ Claude Code also carries the **mechanism layer** of the gates: the PreToolUse ho
 The implementation phase is `rein build` (headless, via the adapters `rein agent <role> <cli>`
 sets) — one command whose completion is the signal, so never schedule wake-ups to poll it;
 retry-after-capacity is a shell loop on its exit code (build.md).
+
+**Bash caps how long one command may run and a real build outlasts that cap.** Start it detached
+with its output in a file (`nohup rein build --supervise > .rein/build.log 2>&1 &`), end the turn,
+and read `rein resume` / the log when you come back — **never re-run `rein build` to check on it**:
+the build lock makes the second run exit `3`, which is indistinguishable from a capacity stop
+(build.md, "When the run outlasts your host's command timeout").

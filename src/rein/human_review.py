@@ -1,24 +1,30 @@
-"""The human review as a decision procedure, not a screen: sequence, challenge, expertise, budget.
+"""The human review as a decision procedure, not a screen: decision, expertise, budget.
 
 review_api.py serves the pane and ui.py serves the bytes; this module owns the *rules* that make a
 human a decision-maker rather than the ratifier of a tidy explanation (plan §14). Everything here is
 pure over ``review.yaml`` — a machine half the generator produced and a human half the reviewer is
 building — so each rule is a fixed fact a test can pin without a browser:
 
-- **Sequence** (§14.1, §21.2). A high/critical Decision Card withholds its evidence until the
-  reviewer has recorded what they think should happen. Seeing the answer before you have thought
-  about the case yourself is exactly the priming the order exists to prevent, so the withholding
-  is mechanical, not advisory.
-- **Challenge** (§14.2, §14.3). A mismatch does not close on one acknowledgement: it opens a
-  counterfactual the reviewer must resolve with a corrected mental model. The score is never
-  evidence of anyone's correctness — the point is cognitive forcing.
+- **Decision** (§14.1). Every finding the review could not settle becomes a Decision Card, and a
+  high/critical card with no recorded answer blocks the freeze. That is the one thing gate ④ asks
+  a human *for*: a judgement, on the record, with the reviewer's own confidence beside it.
 - **Expertise** (§14.9, E2E-05). High/critical work in a domain the reviewer declared `partial` or
   `unfamiliar` cannot be closed by a general reviewer's risk acceptance; it needs an expert, an
   experiment, a scope reduction, a safe-default revision, or the behaviour removed.
 - **Budget** (§14.10, E2E-30). Past a budget the answer is to *split the scope*, never to lengthen
   the screen — so exceeding one blocks completion with `scope_split_required` instead of scrolling.
 
-The two halves are digested separately (models.Review). A human answering a challenge must not make
+**What this module no longer does is ask the reviewer a question it already knows the answer to.**
+A high/critical card used to withhold its evidence until the reviewer had recorded an unprimed
+guess, and a guess that missed opened a counterfactual to close. The intent was cognitive forcing;
+the effect was a comprehension quiz standing between a human and the decision they were actually
+there to make. The forcing function that survives is the one that costs nothing to answer honestly
+and cannot be cleared by rote: an unanswered high/critical card blocks the gate, and every answer
+carries a confidence nothing defaults. What replaced the withholding is the opposite move — the
+`orient` stage (`brief.py`) hands over everything the loop already knows about the change *before*
+the first card, so the reviewer spends their attention deciding rather than reconstructing.
+
+The two halves are digested separately (models.Review). A human recording a judgement must not make
 the machine review stale (E2E-09); a machine review regenerated under a reviewer's feet must refuse
 that reviewer's next write (`assert_machine_current` → 409, E2E-08). The ``apply_*`` functions return
 a new human mapping for store.Transaction to persist — this module never touches the disk itself.
@@ -29,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from rein import models
+from rein import models, review_policy
 
 # The standard review budget (plan §14.10). A machine review may carry its own measured
 # `review_budget`, but these are the limits the loop enforces when the config does not override
@@ -50,11 +56,6 @@ REMEDIATING_ACTIONS = frozenset(
 #: Where a domain counts as high-stakes: a decision card at this risk or above pulls its
 #: `requires_domains` into the set that needs an expertise declaration.
 _EXPERT_RISK_FLOOR = "high"
-
-#: Challenge-first is scoped by risk, not applied to everything (see :func:`challenges`). A
-#: low-risk change asks nothing; a high-risk one asks at most `MAX_CHALLENGES`, hardest first.
-CHALLENGE_RISK_FLOOR = "high"
-MAX_CHALLENGES = 3
 
 
 class StaleReview(Exception):
@@ -85,100 +86,7 @@ def _human_list(human: Mapping[str, Any], key: str) -> tuple[Mapping[str, Any], 
     return tuple(v for v in value if isinstance(v, Mapping)) if isinstance(value, list) else ()
 
 
-def challenges(review: models.Review) -> tuple[Mapping[str, Any], ...]:
-    """The cards a reviewer must take a position on **before** seeing the evidence.
-
-    A challenge is not a separate artefact any more, and no reviewer stage produces one: it is a
-    high/critical Decision Card asked in two beats. The reviewer records what they think should
-    happen, and only then does the card open its `evidence` — the Expected the plan states, the
-    Actual the blind extractor read, and the gap or finding that raised it. Deriving the challenge
-    from the card rather than asking a model for one is what makes this reachable at all; the
-    generator-produced version was specified in three documents and written by nothing, so the
-    forcing function it describes never once fired.
-
-    Challenge-first is a cognitive-forcing function, and a forcing function applied to everything
-    stops forcing anything: a reviewer asked the same number of questions about a typo fix as about
-    a change to an authorisation boundary learns to clear the list. So the two-beat set is the high
-    and critical cards only, capped — a low-risk change legitimately has none, and
-    `challenges_complete` is then true from the start rather than after a ritual.
-
-    Scoping in code rather than in a prompt is deliberate. A generator asked for "at most three,
-    high risk only" that produced eight low-risk ones would silently reinstate the formality the
-    cap exists to prevent, and the reviewer would have no way to tell.
-    """
-    cards = [c for c in _machine_list(review, "decision_cards") if models.risk_at_least(_risk(c), CHALLENGE_RISK_FLOOR)]
-    cards.sort(key=lambda c: (-models.RISK_ORDER.index(_risk(c)), str(c.get("id", ""))))
-    return tuple(cards[:MAX_CHALLENGES])
-
-
-def _reveal(challenge: Mapping[str, Any]) -> Mapping[str, Any]:
-    """A card's evidence — withheld until the reviewer has recorded their own read of it."""
-    reveal = challenge.get("evidence")
-    return reveal if isinstance(reveal, Mapping) else {}
-
-
-# -- challenge sequence (plan §14.2, §14.3) -----------------------------------
-
-
-def answered_challenge_ids(human: Mapping[str, Any]) -> frozenset[str]:
-    return frozenset(str(a.get("challenge_id")) for a in _human_list(human, "challenge_answers"))
-
-
-def unanswered_challenges(review: models.Review, human: Mapping[str, Any]) -> list[str]:
-    """Challenge ids the reviewer has not yet answered, in document order."""
-    answered = answered_challenge_ids(human)
-    return [str(c.get("id")) for c in challenges(review) if str(c.get("id")) not in answered]
-
-
-def next_challenge(review: models.Review, human: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    """The next card awaiting a first read, **with its evidence stripped**.
-
-    The evidence is not a secret — `review show` prints the whole document — but the API must not
-    hand it back on the same screen that asks the question, or the forcing function is defeated for
-    anyone using the UI rather than reading the YAML (plan §14.2).
-    """
-    answered = answered_challenge_ids(human)
-    for challenge in challenges(review):
-        if str(challenge.get("id")) not in answered:
-            return {k: v for k, v in challenge.items() if k != "evidence"}
-    return None
-
-
-def reveal_for(review: models.Review, challenge_id: str) -> Mapping[str, Any] | None:
-    """The reveal for an *answered* challenge; None if the challenge is unknown or unanswered."""
-    for challenge in challenges(review):
-        if str(challenge.get("id")) == challenge_id:
-            return _reveal(challenge)
-    return None
-
-
-def mismatched_challenges(review: models.Review, human: Mapping[str, Any]) -> list[str]:
-    """Answered challenges whose choice differs from the revealed expected choice."""
-    expected = {str(c.get("id")): str(_reveal(c).get("expected_choice", "")) for c in challenges(review)}
-    out = []
-    for answer in _human_list(human, "challenge_answers"):
-        cid = str(answer.get("challenge_id"))
-        if cid in expected and expected[cid] and str(answer.get("choice")) != expected[cid]:
-            out.append(cid)
-    return out
-
-
-def open_counterfactuals(review: models.Review, human: Mapping[str, Any]) -> list[str]:
-    """Mismatched challenges the reviewer has not yet closed with a corrected model (plan §14.3)."""
-    resolved = {
-        str(cf.get("challenge_id"))
-        for cf in _human_list(human, "counterfactual_answers")
-        if str(cf.get("corrected_model", "")).strip()
-    }
-    return [cid for cid in mismatched_challenges(review, human) if cid not in resolved]
-
-
-def challenges_complete(review: models.Review, human: Mapping[str, Any]) -> bool:
-    """Every high/critical card read once unprimed, and every mismatch closed."""
-    return not unanswered_challenges(review, human) and not open_counterfactuals(review, human)
-
-
-# -- sequence enforcement (plan §14.1, §21.2) ---------------------------------
+# -- stage progress (plan §14.1, §21.2) ---------------------------------------
 
 
 def stage_settled(review: models.Review, human: Mapping[str, Any], stage: str) -> bool | None:
@@ -187,13 +95,15 @@ def stage_settled(review: models.Review, human: Mapping[str, Any], stage: str) -
     A tick on a review screen has to mean something the repository can show afterwards — ticking a
     deliverable the moment it is *selected* records nothing except that a mouse moved.
 
-    So completion is derived from the artefacts a stage actually produces: an answered challenge set,
-    an answered decision set, a frozen review. The reading stages produce nothing, and None says so
-    rather than claiming either that they were done or that they were skipped — "we did not measure"
-    has to be a state you can name (plan §2.4).
+    So completion is derived from the artefacts a stage actually produces: an answered decision set,
+    a frozen review. The reading stages — `scope`, `orient`, `diff` — produce nothing, and None says
+    so rather than claiming either that they were done or that they were skipped: "we did not
+    measure" has to be a state you can name (plan §2.4). `orient` in particular must stay None. It
+    is the stage that exists to *lower* what the reviewer has to reconstruct, and stamping a tick on
+    it the moment it is opened would be the "a mouse moved" claim in its purest form.
     """
     if stage == "decision":
-        return challenges_complete(review, human) and not unanswered_decisions(review, human)
+        return not unanswered_decisions(review, human)
     if stage == "freeze":
         return str(human.get("status", "not_started")) == "frozen"
     return None
@@ -264,10 +174,17 @@ def expertise_gaps(review: models.Review, human: Mapping[str, Any]) -> list[dict
 
 
 def _critical_claim_ids(review: models.Review) -> set[str]:
+    """The claims every critical Decision Card is about.
+
+    Every card, not a capped subset. This used to walk the challenge set — the three hardest cards
+    the challenge-first screen asked about — so a review with five critical cards measured its own
+    `max_critical_decisions` budget against three of them. A budget computed over part of its
+    subject is not a budget.
+    """
     ids: set[str] = set()
-    for challenge in challenges(review):
-        if _risk(challenge) == "critical":
-            claim_ids = challenge.get("claim_ids")
+    for card in _machine_list(review, "decision_cards"):
+        if _risk(card) == "critical":
+            claim_ids = card.get("claim_ids")
             if isinstance(claim_ids, list):
                 ids.update(str(c) for c in claim_ids)
     return ids
@@ -382,19 +299,21 @@ def completion_blockers(
     human = human if human is not None else dict(review.human)
     blockers: list[str] = []
 
-    if not review.coverage_sufficient:
-        blockers.append("coverage is insufficient — extra-behaviour counts are undeterminable, not zero")
+    # Priced by risk, through the module that owns the gate-④ decision — `approve.readiness` reads
+    # the same function, so the freeze and the gate can no longer disagree about the same manifest.
+    #
+    # This used to block unconditionally, which reinstated exactly the dead end
+    # `review_policy.coverage_gap_risk` exists to have broken: a single unreadable file makes the
+    # manifest `insufficient` regardless of what was in it, and with the freeze refusing on that
+    # alone, a low-risk cycle containing one binary asset had no way through gate ④ at all — scope
+    # split included, since splitting never removes the file. What was left of the honesty property
+    # is untouched: the manifest still says `insufficient`, the reviewer still reads it, and
+    # extra-behaviour counts are still withheld rather than rendered as zero.
+    blockers += review_policy.coverage_blocks(review, review.effective_risk)
 
-    unanswered = unanswered_challenges(review, human)
-    if unanswered:
-        blockers.append(f"unanswered challenges: {', '.join(unanswered)}")
-    open_cf = open_counterfactuals(review, human)
-    if open_cf:
-        blockers.append(f"unresolved challenge mismatches (need a corrected model): {', '.join(open_cf)}")
-
-    # The substantive judgement. Without it the challenge — a comprehension check — would be the
-    # only mandatory answer, so a review could be frozen having answered a quiz about the change
-    # while deciding nothing about it.
+    # The substantive judgement, and the only answer this review demands. It is what keeps a freeze
+    # from being reachable by reading: every finding the machine could not settle is a card, and a
+    # high/critical one cannot lapse into silence.
     undecided = unanswered_decisions(review, human)
     if undecided:
         blockers.append(f"unanswered high/critical decision cards: {', '.join(undecided)}")
@@ -442,7 +361,7 @@ def assert_machine_current(review: models.Review, expected_machine_digest: str) 
     screen loading and the write landing, the answers describe an artefact that is gone; merging
     them would attribute the reviewer's judgement to a review they never saw (plan §17.5, E2E-08).
     A pure machine-digest comparison is also why a human-only update never trips this on itself
-    (E2E-09): answering a challenge changes `human`, never `machine`.
+    (E2E-09): recording a decision changes `human`, never `machine`.
 
     An absent digest is refused rather than waved through: a caller that names no machine review
     has not established that it saw *this* one, and treating "no claim" as "the right claim" is
@@ -467,47 +386,9 @@ def assert_machine_current(review: models.Review, expected_machine_digest: str) 
 def _human_base(human: Mapping[str, Any]) -> dict[str, Any]:
     """A mutable copy of the human half with its list fields materialised."""
     out: dict[str, Any] = dict(human)
-    for key in (
-        "expertise",
-        "challenge_answers",
-        "counterfactual_answers",
-        "decisions",
-        "dispositions",
-        "requested_experts",
-    ):
+    for key in ("expertise", "decisions", "dispositions", "requested_experts"):
         value = out.get(key)
         out[key] = list(value) if isinstance(value, list) else []
-    return out
-
-
-def record_challenge_answer(
-    review: models.Review,
-    human: Mapping[str, Any],
-    challenge_id: str,
-    choice: str,
-    *,
-    confidence: str,
-    rationale: str = "",
-) -> dict[str, Any]:
-    """Add a challenge answer. `answered_before_reveal` is stamped true because the API only ever
-    reaches this before the reveal is served (plan §14.2); the schema pins it to that constant."""
-    if challenge_id not in {str(c.get("id")) for c in challenges(review)}:
-        raise ValueError(f"unknown challenge {challenge_id!r}")
-    if challenge_id in answered_challenge_ids(human):
-        raise ValueError(f"challenge {challenge_id!r} is already answered")
-    if confidence not in models.CONFIDENCE_VALUES:
-        raise ValueError(f"confidence must be one of {', '.join(sorted(models.CONFIDENCE_VALUES))}")
-    out = _human_base(human)
-    answer: dict[str, Any] = {
-        "challenge_id": challenge_id,
-        "choice": choice,
-        "confidence": confidence,
-        "answered_before_reveal": True,
-    }
-    if rationale.strip():
-        answer["rationale"] = rationale
-    out["challenge_answers"].append(answer)
-    out["status"] = "in_progress"
     return out
 
 
@@ -520,12 +401,12 @@ def record_decision(
     confidence: str,
     reason: str = "",
 ) -> dict[str, Any]:
-    """Answer one Decision Card — the judgement gate ④ actually asks the human for.
+    """Answer one Decision Card — the judgement gate ④ asks the human for.
 
-    Re-answering is allowed and replaces the previous answer, unlike a challenge: a challenge
-    records what the reviewer thought *before* seeing the reveal, so a second attempt would falsify
-    it, whereas a decision is a conclusion the reviewer is entitled to change while the review is
-    still open. Both are refused once the review is frozen, by the caller's transaction.
+    Re-answering is allowed and replaces the previous answer: a decision is a conclusion the
+    reviewer is entitled to change while the review is still open, and forcing a first answer to
+    stand would push a reviewer to withhold one until they felt certain. It is refused once the
+    review is frozen, by the caller's transaction.
     """
     card = next((c for c in _machine_list(review, "decision_cards") if str(c.get("id")) == card_id), None)
     if card is None:
@@ -562,21 +443,6 @@ def unanswered_decisions(review: models.Review, human: Mapping[str, Any], *, flo
         for c in _machine_list(review, "decision_cards")
         if models.risk_at_least(_risk(c), floor) and str(c.get("id")) not in answered
     ]
-
-
-def record_counterfactual(
-    human: Mapping[str, Any], challenge_id: str, corrected_model: str, *, answer: str = ""
-) -> dict[str, Any]:
-    """Close a mismatch with the reviewer's corrected mental model (plan §14.3)."""
-    if not corrected_model.strip():
-        raise ValueError("a counterfactual needs a non-empty corrected_model")
-    out = _human_base(human)
-    entry: dict[str, Any] = {"challenge_id": challenge_id, "corrected_model": corrected_model}
-    if answer.strip():
-        entry["answer"] = answer
-    out["counterfactual_answers"].append(entry)
-    out["status"] = "in_progress"
-    return out
 
 
 def record_expertise(human: Mapping[str, Any], domain: str, level: str) -> dict[str, Any]:

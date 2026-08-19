@@ -83,7 +83,6 @@ def make_state(
         "gates": gate_block,
         "plan": {"status": plan_status, "digest": _digest("plan")},
         "execution": {"status": "idle"},
-        "review": {"status": "none"},
         "tasks": {tid: {"status": status} for tid, status in (tasks or {}).items()},
     }
     return document
@@ -191,7 +190,7 @@ def make_review(
         "binding": {
             "change_digest": _digest("change"),
             "plan_digest": _digest("plan"),
-            "toolchain_digest": _digest("toolchain"),
+            "environment_digest": _digest("toolchain"),
         },
         "coverage": [
             {

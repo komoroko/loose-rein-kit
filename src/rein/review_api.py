@@ -26,7 +26,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from rein import event_chain, human_review, mdlite, models, strict_yaml
+from rein import event_chain, human_review, mdlite, models, status_api, strict_yaml
 from rein import events as events_mod
 
 _MAX_DELIVERABLE = 300_000  # bytes of one deliverable the pane will render
@@ -277,18 +277,20 @@ def collect_review(root: str | Path, gate: str) -> dict[str, object]:
         result["review_meta"] = _review_meta(root, head_value if isinstance(head_value, str) else None)
     if gate == "release":
         events, _ = event_chain.scan(root / ".rein" / "events.ndjson")
-        result["open_escalations"] = sum(1 for e in events if e.event in events_mod.ATTENTION_EVENTS)
+        result["open_escalations"] = len(events_mod.open_attention(events, status_api.task_status_of(root)))
     return result
 
 
-# -- gate ④ Challenge-first session (plan §14.1, §21.1, §21.2) --
+# -- gate ④ human review session (plan §14.1, §21.1, §21.2) --
 
-# The deliverable review above answers "what do I read"; the Challenge-first session answers the
-# harder question gate ④ asks — "did *you* think about this before you saw the answer". The sequence
-# is mechanical: `stage_data` refuses a priming stage (expected/actual, scenarios, the decision card)
-# until the unprimed challenge is complete, so a reviewer using the UI cannot skip to the reveal. The
-# rules live in human_review; this layer only shapes them into JSON. Every payload is machine-review
-# content plus the reviewer's own progress — never raw agent HTML (the client renders via textContent).
+# The deliverable review above answers "what do I read"; this session answers the harder question
+# gate ④ asks — "what do *you* decide". The stages run scope (what this approval covers) → orient
+# (what was actually built, and under which conditions) → decision (the answers) → diff → freeze.
+# The two reading stages before the questions are the load-bearing part: a reviewer who has to
+# reconstruct the change from a diff before every card spends their attention on reconstruction.
+# The rules live in human_review and the orient content in brief; this layer only shapes them into
+# JSON. Every payload is machine-review content plus the reviewer's own progress — never raw agent
+# HTML (the client renders via textContent).
 
 
 def _load_review(root: Path) -> models.Review | None:
@@ -354,8 +356,7 @@ def scope_block(root: Path, review: models.Review) -> dict[str, object]:
 
     Everything here is derived from what the machine review already recorded: the binding says which
     two commits bound the change, the coverage manifest says how much of it could be read, and the
-    budget says whether that is a reviewable amount in one sitting. None of it is an expected answer,
-    so it can be shown ahead of the unprimed challenge without priming anything.
+    budget says whether that is a reviewable amount in one sitting.
 
     The reason it is a stage rather than a footnote: an approval covers a boundary, and a reviewer
     who does not know the boundary cannot know what they approved. Gate ④ binds a human's judgement to
@@ -388,20 +389,20 @@ def scope_block(root: Path, review: models.Review) -> dict[str, object]:
             "security_findings": len(review.security_findings),
             "statements": len(machine.get("statements", []) or []),
         },
-        # How much of a judgement this session will actually ask for. Challenges are risk-scoped and
-        # capped, so "12 challenges exist" is not what a reviewer is about to be asked.
-        "challenges_asked": len(human_review.challenges(review)),
+        # How much of a judgement this session will actually ask for. Only high/critical cards
+        # block the freeze, so the card total is not what a reviewer is about to be answerable for.
+        "decisions_required": len(human_review.unanswered_decisions(review, review.human)),
         "budget": human_review.budget_report(review, review.human),
         "scope_split_required": human_review.scope_split_required(review, review.human),
     }
 
 
 def review_session(root: str | Path) -> dict[str, object]:
-    """The whole state of the human review: stage progress, the challenge front, and every blocker.
+    """The whole state of the human review: stage progress, what is still unanswered, every blocker.
 
-    This is the one call the review pane polls: it carries the next unprimed card (reveal
-    stripped), the expertise and budget verdicts, and the machine digest a subsequent write must
-    echo back (a stale one is refused — plan §17.5).
+    This is the one call the review pane polls: it carries the outstanding decisions, the expertise
+    and budget verdicts, and the machine digest a subsequent write must echo back (a stale one is
+    refused — plan §17.5).
     """
     root = Path(root)
     review = _load_review(root)
@@ -422,10 +423,7 @@ def review_session(root: str | Path) -> dict[str, object]:
         "human_status": review.human_status,
         "machine_digest": review.machine_digest(),
         "scope": scope_block(root, review),
-        "next_challenge": human_review.next_challenge(review, human),
-        "unanswered_challenges": human_review.unanswered_challenges(review, human),
         "unanswered_decisions": human_review.unanswered_decisions(review, human),
-        "open_counterfactuals": human_review.open_counterfactuals(review, human),
         "expertise_gaps": human_review.expertise_gaps(review, human),
         "budget": human_review.budget_report(review, human),
         "scope_split_required": human_review.scope_split_required(review, human),
@@ -436,11 +434,13 @@ def review_session(root: str | Path) -> dict[str, object]:
 
 
 def stage_data(root: str | Path, stage: str) -> dict[str, object]:
-    """The content of one review stage — or a `locked` refusal when a priming stage is reached early.
+    """The content of one review stage.
 
-    Raises ReviewError for an unknown stage (the HTTP layer's 404); a locked stage is a normal 200
-    with `locked: true`, because "you must answer the challenge first" is information the pane shows,
-    not an error (plan §21.2).
+    Raises ReviewError for an unknown stage (the HTTP layer's 404). No stage withholds anything any
+    more: a card's evidence used to be stripped until the reviewer had recorded an unprimed guess
+    about it, which made the screen a quiz standing in front of the decision. What lowers the cost
+    of deciding is the opposite — `scope` and `orient` hand over the boundary and the change before
+    the first card is asked.
     """
     if stage not in models.REVIEW_STAGE_VALUES:
         raise ReviewError(f"unknown review stage '{stage}' (one of {', '.join(models.REVIEW_STAGE_ORDER)})")
@@ -453,28 +453,27 @@ def stage_data(root: str | Path, stage: str) -> dict[str, object]:
     payload: dict[str, object] = {"stage": stage, "generated": True}
     if stage == "scope":
         payload["scope"] = scope_block(root, review)
+    elif stage == "orient":
+        # What was built, and under what conditions — derived at generation time and carried in the
+        # machine half (brief.derive). Served as it was recorded: this layer must not recompute it,
+        # or the reviewer would be reading a brief about a different tree than the one the rest of
+        # the review is bound to.
+        payload["brief"] = machine.get("brief", {})
+        payload["residual_findings"] = list(machine.get("residual_findings", []) or [])
+        # The claim comparison belongs here rather than on the decision screen: only the claims the
+        # comparator could *not* settle become cards, so a reviewer who saw cards alone would never
+        # see what the review did establish. It asks for nothing, which is why it can sit in a
+        # reading stage — and the three axes stay separate lanes, because integrity is a fact,
+        # semantic support is somebody's judgement, and conformance is an observation.
+        payload["claims"] = list(review.claim_results)
+        payload["actual_extraction"] = list(machine.get("actual_extraction", []) or [])
     elif stage == "decision":
-        # The one screen that asks for anything. The cards, the sentences their options mean, the
-        # security findings (cards too — severity-ordered alongside the rest), the gaps and extra
-        # behaviours that raised them, and what this reviewer has already answered: a decision
-        # screen that could not show its own previous answer would ask for it twice.
-        #
-        # `next_challenge` is the unprimed half: a high/critical card withholds its evidence until
-        # the reviewer records what they think should happen (human_review.challenges). The same
-        # withholding applies here — a card listed in full on this screen while `next_challenge`
-        # showed it stripped would hand back with one hand what the other just withheld.
-        pending_ids = {
-            str(c.get("id"))
-            for c in human_review.challenges(review)
-            if str(c.get("id")) not in human_review.answered_challenge_ids(human)
-        }
-        cards = []
-        for card in machine.get("decision_cards", []) or []:
-            card = dict(card)
-            if str(card.get("id")) in pending_ids:
-                card.pop("evidence", None)
-            cards.append(card)
-        payload["decision_cards"] = cards
+        # The one screen that asks for anything. The cards *with* their evidence, the sentences
+        # their options mean, the security findings (cards too — severity-ordered alongside the
+        # rest), the gaps and extra behaviours that raised them, and what this reviewer has already
+        # answered: a decision screen that could not show its own previous answer would ask for it
+        # twice.
+        payload["decision_cards"] = [dict(c) for c in machine.get("decision_cards", []) or []]
         payload["statements"] = list(machine.get("statements", []) or [])
         payload["gaps"] = list(machine.get("gaps", []) or [])
         payload["extra_behaviors"] = list(review.extra_behaviors)
@@ -482,22 +481,9 @@ def stage_data(root: str | Path, stage: str) -> dict[str, object]:
         payload["summary"] = machine.get("summary", {})
         payload["decisions"] = [d for d in human.get("decisions", []) or [] if isinstance(d, dict)]
         payload["unanswered"] = human_review.unanswered_decisions(review, human)
-        payload["next_challenge"] = human_review.next_challenge(review, human)
-        payload["unanswered_challenges"] = human_review.unanswered_challenges(review, human)
     elif stage == "diff":
         payload["diff"] = _diff_block(root)
     elif stage == "freeze":
         payload["can_freeze"] = human_review.can_freeze(review, human)
         payload["completion_blockers"] = human_review.completion_blockers(review, human)
     return payload
-
-
-def challenge_reveal(root: str | Path, challenge_id: str) -> dict[str, object]:
-    """The reveal for an answered challenge — served only after the answer is recorded (plan §14.2)."""
-    root = Path(root)
-    review = _load_review(root)
-    if review is None or not review.is_generated:
-        return _not_generated()
-    if challenge_id not in human_review.answered_challenge_ids(review.human):
-        return {"challenge_id": challenge_id, "answered": False, "reveal": None}
-    return {"challenge_id": challenge_id, "answered": True, "reveal": human_review.reveal_for(review, challenge_id)}

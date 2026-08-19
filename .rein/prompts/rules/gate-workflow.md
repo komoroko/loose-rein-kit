@@ -30,38 +30,63 @@ outcome-independent work** (scaffolding, dev-env/CI setup, read-only investigati
 the boundary. It is throwaway-by-default, recorded in the phase deliverable's "speculative work
 log" (per-phase specifics: each procedure file's "While waiting for approval" section).
 
-## The gate ④ human review (Challenge-first)
+## The gate ④ human review
 
 Gate ④ does not review a document, it reviews a **generated grounded review**, and what it asks the
 human for is a **judgement**, not a reading. `rein review generate` writes the machine half;
-the human half is worked through in `rein ui` — a rail of **scope → decision → diff → freeze** —
-and frozen with `rein review complete`. Freezing is a precondition of `rein approve build` —
-it is **not** the approval.
+the human half is worked through in `rein ui` — a rail of
+**scope → orient → decision → diff → freeze** — and frozen with `rein review complete`. Freezing is
+a precondition of `rein approve build` — it is **not** the approval.
 
-Order matters and is enforced in code, not by instruction:
+The first two stages ask for nothing. That is the design: **a reviewer who has to reconstruct the
+change before every card spends their attention on reconstruction.**
 
-- **The scope is stated before the first question.** The opening stage says which commits this
-  review is bound to, how much of the change could be read, what could **not** be (the coverage
-  gap, by path and reason), and whether it fits one session's budget. It reveals no expected
-  answer, so it precedes anything that would prime a judgement. An approval covers a boundary;
-  a reviewer who does not know the boundary does not know what they approved.
+- **The scope is stated before anything else.** Which commits this review is bound to, how much of
+  the change could be read, what could **not** be (the coverage gap, by path and reason), and
+  whether it fits one session's budget. An approval covers a boundary; a reviewer who does not know
+  the boundary does not know what they approved.
+- **The orient stage says what was built, and under what conditions.** The delivered tasks and the
+  claims they answer; which dependency manifests, generated files and migrations moved; **which
+  sandbox, image and network posture each quality-gate step ran under**; what the blind extractor
+  read out about the interfaces, persistence, security boundaries and dependencies; what the gate
+  established and for how many tasks; whether anything ever *launched* the deliverable; the
+  Expected/Actual comparison on its three axes; and what is still open — tasks awaiting evidence,
+  open change requests, and the per-task review findings marked `consider` that stopped nothing and
+  would otherwise have died with the session that produced them. Every line is **derived from the
+  SSOT**, not written by anything: ids, paths, commands, image references, and reviewer prose
+  reached by statement id so its epistemic status stays attached.
+- **If the sandbox moved since gate ③, orient says so.** Gate ③ freezes `config.yaml` without its
+  image pins, so a task that legitimately adds a dependency can have its sandbox rebuilt without
+  re-approving a plan nothing changed. That permission is paid for here: the approver is told,
+  rather than left to find out, that the evidence they are signing over was produced in an
+  environment the gate ③ approval never saw. It blocks nothing — `kind`, `network_profile` and
+  `mount_repo` are still frozen, so a sandbox that *opened* never reaches this gate at all.
 - **Decision Cards are the one screen that asks for anything.** Every finding the review could
   not settle — an unaligned claim, a gap, ungrounded extra behaviour, a security finding —
-  becomes a card, derived from the findings rather than authored by a reviewer. **Unanswered
-  high/critical cards block the freeze.** Every answer carries the human's own **confidence**;
-  nothing defaults it.
-- **Challenge-first, without a separate stage for it.** A high/critical card withholds its
-  evidence (the Expected the plan states, the Actual a reviewer that never saw the plan read out
-  of the code) until the reviewer records what they think should happen — capped at three cards,
-  hardest first. A low-risk change asks none. A mismatch does not close on an acknowledgement: it
-  opens a **counterfactual** the reviewer closes by writing what they now believe. Nobody scores
-  it — the point is that the approver thought about the case themselves.
+  becomes a card, derived from the findings rather than authored by a reviewer, and **each card
+  carries its own evidence**. **Unanswered high/critical cards block the freeze.** Every answer
+  carries the human's own **confidence**; nothing defaults it.
 - **No card offers accepting the risk.** The dispositions are revise / experiment / expert /
   reduce scope / dispute-with-a-reason. That absence is the policy.
-- **A tick means a recorded judgement**, never that a screen was visited.
+- **A tick means a recorded judgement**, never that a screen was visited. The reading stages
+  record nothing and say so, rather than claiming either that they were done or skipped.
+- **Coverage is priced by risk, not by presence.** An `insufficient` manifest is a statement about
+  reading, not about danger. At high/critical it blocks — "extra behaviour: undeterminable" cannot
+  be waved through as zero — and below that it is recorded, shown, and does not shut the gate. Both
+  the freeze and `rein approve build` read the same rule, because two rules over one manifest is
+  how a low-risk cycle carrying a single unreadable font file ends up with no way through gate ④,
+  scope split included: splitting never removes the file.
 - **A blown review budget splits the scope**; it never lengthens the screen. The budgets are
   measured, not declarative — including the diff size — so a change too large for one sitting
   blocks the freeze until the scope is reduced or the limit is raised as a recorded decision.
+
+**What is deliberately gone.** A high/critical card used to withhold its evidence until the
+reviewer had recorded an unprimed guess, and a guess that missed opened a counterfactual to close.
+The intent was cognitive forcing; the effect was a comprehension quiz standing between a human and
+the decision they were there to make — and it defended against nothing, since the priming that
+matters is the *extractor's*, and that is enforced separately and still is. The forcing function
+that remains is the one nobody can clear by rote: a high/critical card cannot lapse into silence,
+and the answer carries a confidence the tool will not invent.
 
 ## Context budget (context hygiene)
 

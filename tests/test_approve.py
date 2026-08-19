@@ -473,9 +473,9 @@ def test_approving_gate_three_freezes_the_plan(tmp_path: Path) -> None:
     assert state is not None
     assert state.plan_status == "frozen"
     assert state.plan_digest == plan.digest()
-    assert state.plan_config_digest == config.digest()
+    assert state.plan_config_digest == config.frozen_digest()
     frozen = state.raw["plan"]
-    assert frozen["toolchain_digest"] == config.toolchain_digest()
+    assert frozen["environment_digest"] == config.environment_digest()
     assert frozen["frozen_at"]
 
 

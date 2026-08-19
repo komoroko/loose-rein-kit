@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+from collections.abc import Iterable
 from typing import Any
 
 # --- diagnostics logging ------------------------------------------------------
@@ -211,6 +212,44 @@ def summarize_failure(cmd: str, rc: int, output: str) -> str:
 # answers rather than the three internal causes:
 
 #: Every task is done. Nothing to re-run.
+# --- repo-relative path patterns ----------------------------------------------
+
+
+def path_covered(path: str, pattern: str) -> bool:
+    """Does `pattern` cover the repo-relative `path`?
+
+    One rule, shared by `guard.paths` in config.yaml and by a task's `scope` in plan.yaml: a
+    pattern covers the path it names and everything beneath it, and **a trailing slash changes
+    nothing**.
+
+    It used to be load-bearing. `src/rein/` covered the subtree; `src/rein` named an exact *file*,
+    which no changed-path list ever contains, so every file under a directory someone wrote
+    without the slash came back as a scope violation. A convention a human has to remember, whose
+    failure mode is silent and total, is not a convention worth keeping.
+
+    The prefix match is anchored at a separator, so `src/app` never covers `src/app.py` — the
+    reason the exact/prefix distinction existed at all is preserved without the spelling.
+    """
+    prefix = pattern.rstrip("/")
+    if not prefix:
+        return False
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def longest_cover(path: str, patterns: Iterable[str]) -> str | None:
+    """The most specific pattern covering `path` ("" is never one), or None.
+
+    Longest wins, so the answer does not depend on the caller's iteration order — and an exact
+    match wins over any prefix automatically, because a prefix that covers a path can only be
+    shorter than it.
+    """
+    best: str | None = None
+    for pattern in patterns:
+        if path_covered(path, pattern) and (best is None or len(pattern.rstrip("/")) > len(best.rstrip("/"))):
+            best = pattern
+    return best
+
+
 EXIT_DONE = 0
 #: A task could not pass the quality gate, or the frontier is empty with work left. The verdict
 #: is real and a human has to act on it — re-running changes nothing.

@@ -315,13 +315,22 @@ def test_an_approved_gate_missing_a_bound_digest_fails() -> None:
 # been edited, and for a long time nothing anywhere said so.
 
 
+def _repinned(profiles: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    """The same profiles with every image pinned to a different digest — a rebuild, nothing else."""
+    return {
+        name: {**body, "image": str(body["image"]).replace("0" * 64, "1" * 64)} if "image" in body else body
+        for name, body in profiles.items()
+    }
+
+
 def _frozen(plan_doc: dict[str, object], config_doc: dict[str, object], **overrides: object) -> models.State:
     """A state whose freeze record matches the two documents beside it."""
     raw = make_state(plan_status="frozen")
     raw["plan"] = {
         "status": "frozen",
         "digest": models.Plan(plan_doc).digest(),
-        "config_digest": models.Config(config_doc).digest(),
+        "config_digest": models.Config(config_doc).frozen_digest(),
+        "environment_digest": models.Config(config_doc).environment_digest(),
         **overrides,
     }
     for gate in ("requirements", "design", "tasks"):
@@ -334,7 +343,30 @@ def _frozen(plan_doc: dict[str, object], config_doc: dict[str, object], **overri
 def test_a_matching_freeze_passes() -> None:
     plan_doc, config_doc = make_plan(), make_config()
     results = doctor.check_freeze_drift(_frozen(plan_doc, config_doc), models.Plan(plan_doc), models.Config(config_doc))
-    assert [f.level for f in results] == ["PASS", "PASS"]
+    assert [f.level for f in results] == ["PASS", "PASS", "PASS"]
+
+
+def test_a_rebuilt_image_is_reported_and_never_failed() -> None:
+    """The pin is deliberately outside `frozen_digest`, so a rebuilt sandbox image no longer costs
+    a rollback of a plan nothing changed. What it must not do is pass in silence: gate ④ approves
+    over evidence produced here, and the freeze recorded a different environment."""
+    plan_doc, config_doc = make_plan(), make_config(profiles=SANDBOXED_PROFILES)
+    repinned = make_config(profiles=_repinned(SANDBOXED_PROFILES))
+    results = doctor.check_freeze_drift(_frozen(plan_doc, config_doc), models.Plan(plan_doc), models.Config(repinned))
+    assert [f.level for f in results] == ["PASS", "PASS", "INFO"]
+    assert "the sandbox has changed" in results[-1].message
+    assert not [f for f in results if f.level == "FAIL"]
+
+
+def test_opening_a_sandbox_still_breaks_the_freeze() -> None:
+    """Only the pin moved out. `kind`, `network_profile` and `mount_repo` are decisions, and a
+    decision that widens what may happen still needs the human who approved the narrower one."""
+    plan_doc, config_doc = make_plan(), make_config(profiles=SANDBOXED_PROFILES)
+    opened = {name: {**body, "kind": "host"} for name, body in SANDBOXED_PROFILES.items()}
+    results = doctor.check_freeze_drift(
+        _frozen(plan_doc, config_doc), models.Plan(plan_doc), models.Config(make_config(profiles=opened))
+    )
+    assert [f.level for f in results if f.level == "FAIL"]
 
 
 def test_a_config_edited_after_the_freeze_is_a_fail() -> None:

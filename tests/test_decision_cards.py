@@ -29,7 +29,7 @@ def _machine(**kwargs: Any) -> dict[str, Any]:
     binding = {
         "change_digest": "sha256:" + "a" * 64,
         "plan_digest": "sha256:" + "b" * 64,
-        "toolchain_digest": "sha256:" + "c" * 64,
+        "environment_digest": "sha256:" + "c" * 64,
     }
     coverage = {
         "diff_digest": "sha256:" + "d" * 64,
@@ -190,7 +190,7 @@ def test_recording_a_decision_requires_a_real_card_option_and_confidence() -> No
 
 
 def test_a_decision_may_be_changed_while_the_review_is_open() -> None:
-    """Unlike a challenge, which records what the reviewer thought before the reveal."""
+    """A conclusion the reviewer may revise; forcing the first answer to stand would suppress it."""
     machine = _machine(claims=[_claim("C-001", "diverged")])
     rev = _review(machine)
     human = human_review.record_decision(rev, {}, "DC-001", "A", confidence="low", reason="first pass")
@@ -216,13 +216,14 @@ def test_low_risk_cards_do_not_block(caplog: pytest.LogCaptureFixture) -> None:
     assert human_review.unanswered_decisions(_review(machine), {}) == []
 
 
-# --- challenge risk-scoping (derived from the same Decision Cards, not a separate section) ---
+# --- risk scoping of what actually blocks ------------------------------------
 #
-# A challenge is not a generated artefact any more: it is a high/critical Decision Card asked in
-# two beats, so risk-scoping is exercised directly through the claims/gaps that produce cards.
+# Only high and critical cards hold the freeze shut. The scoping is exercised through the claims
+# and gaps that produce the cards, because that is where a card's risk comes from — a card cannot
+# be more or less blocking than the finding it restates.
 
 
-def test_only_high_and_critical_cards_are_asked_as_challenges() -> None:
+def test_only_high_and_critical_cards_block() -> None:
     machine = _machine(
         claims=[_claim("C-001", "aligned")],
         gaps=[
@@ -231,11 +232,10 @@ def test_only_high_and_critical_cards_are_asked_as_challenges() -> None:
             {"id": "GAP-003", "kind": "evidence_gap", "statement_id": "STMT-003", "risk": "medium"},
         ],
     )
-    ids = [c["id"] for c in human_review.challenges(_review(machine))]
-    assert ids == ["DC-002"]  # only the critical gap's card
+    assert human_review.unanswered_decisions(_review(machine), {}) == ["DC-002"]
 
 
-def test_a_low_risk_review_is_challenge_complete_from_the_start() -> None:
+def test_a_low_risk_review_demands_no_answer() -> None:
     machine = _machine(
         claims=[_claim("C-001", "aligned")],
         gaps=[
@@ -244,11 +244,17 @@ def test_a_low_risk_review_is_challenge_complete_from_the_start() -> None:
         ],
     )
     rev = _review(machine)
-    assert human_review.challenges(rev) == ()
-    assert human_review.challenges_complete(rev, {}) is True
+    assert human_review.unanswered_decisions(rev, {}) == []
+    assert human_review.completion_blockers(rev, {}) == []
 
 
-def test_the_challenge_set_is_capped_hardest_first() -> None:
+def test_every_blocking_card_is_named_not_a_capped_sample() -> None:
+    """The blocker list is exhaustive: a reviewer must not clear three and discover a fourth.
+
+    This is what the removed challenge cap used to hide. `_critical_claim_ids` walked that capped
+    set too, so a review with more critical cards than the cap measured its own budget against a
+    sample of itself.
+    """
     machine = _machine(
         claims=[_claim("C-001", "aligned")],
         gaps=[
@@ -259,7 +265,6 @@ def test_the_challenge_set_is_capped_hardest_first() -> None:
             {"id": "GAP-009", "kind": "evidence_gap", "statement_id": "STMT-009", "risk": "critical"},
         ],
     )
-    asked = [c["id"] for c in human_review.challenges(_review(machine))]
-    assert len(asked) == human_review.MAX_CHALLENGES
-    critical_card = next(c["id"] for c in machine["decision_cards"] if c["risk"] == "critical")
-    assert asked[0] == critical_card  # critical outranks the high ones regardless of id order
+    blocking = [c["id"] for c in machine["decision_cards"] if c["risk"] in ("high", "critical")]
+    assert human_review.unanswered_decisions(_review(machine), {}) == blocking
+    assert len(blocking) == 6

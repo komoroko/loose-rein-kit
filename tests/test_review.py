@@ -26,7 +26,7 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
     binding = {
         "change_digest": "sha256:" + "a" * 64,
         "plan_digest": "sha256:" + "b" * 64,
-        "toolchain_digest": "sha256:" + "c" * 64,
+        "environment_digest": "sha256:" + "c" * 64,
     }
     coverage = {
         "diff_digest": "sha256:" + "d" * 64,
@@ -107,6 +107,34 @@ def test_generate_writes_a_schema_valid_review_and_resets_human(review_repo: Pat
     assert stored is not None and stored.is_generated
     assert stored.human_status == "not_started"  # a fresh machine review is a fresh review
     assert stored.machine.get("binding", {}).get("subject_head_sha")
+
+
+@pytest.mark.integration
+def test_the_orientation_brief_is_derived_into_the_machine_half(review_repo: Path) -> None:
+    """The brief is built inside `generate`, not when the pane asks for it.
+
+    Recomputing it on read would show a brief about the working tree beside claims bound to
+    `subject_head_sha` — two descriptions of different trees on one screen. Building it here also
+    means it is schema-checked by the same write every other section goes through.
+    """
+    import yaml
+
+    state_path = review_repo / ".rein" / "state.yaml"
+    document = yaml.safe_load(state_path.read_text(encoding="utf-8"))
+    document["tasks"] = {"T-001": {"status": "done", "evidence": {"steps": [{"name": "test"}]}}}
+    state_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "task done")
+
+    machine = review.generate(repo_mod.Repo(review_repo), _fake_reviewer)
+    brief_section = machine["brief"]
+    assert [row["task_id"] for row in brief_section["delivered"]] == ["T-001"]
+    assert {row["step"] for row in brief_section["verification"]} == {"test", "check"}
+    # `make_config`'s default profiles are host ones, so the boundary reports what that really is.
+    assert {row["network"] for row in brief_section["execution_boundary"]} == {"unconfined"}
+    # It survived the schema-validated write, not only the in-memory assembly.
+    stored = store_mod.Store(repo_mod.Repo(review_repo)).read_review()
+    assert stored is not None and stored.machine["brief"] == brief_section
 
 
 @pytest.mark.integration
@@ -368,10 +396,109 @@ def test_the_review_is_the_same_document_whatever_the_stages_race(review_repo: P
     order are fixed, so two generations of the same HEAD assemble identically."""
     repo = repo_mod.Repo(review_repo)
     first = review.generate(repo, _fake_reviewer)
-    second = review.generate(repo, _fake_reviewer)
+    second = review.generate(repo, _fake_reviewer, force=True)
     for machine in (first, second):
         machine["binding"].pop("generated_at", None)
     assert first == second
+
+
+# --- a subject that has not moved is not re-read -------------------------------
+#
+# A field run recorded `review_generated` fifteen times in one cycle. Three reviewer stages were
+# paid for each time to read the same bytes, and each one reset the human half — so the answers
+# recorded against a change nothing had touched were discarded too.
+
+
+def test_regenerating_an_unmoved_subject_calls_no_reviewer(review_repo: Path) -> None:
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
+    assert calls == []
+
+
+def test_regenerating_an_unmoved_subject_appends_no_event(review_repo: Path) -> None:
+    """A log that records commands run rather than changes made is a log nobody can aggregate."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    before = [e.event for e in store_mod.Store(repo).read_events()]
+    review.generate(repo, _fake_reviewer)
+    assert [e.event for e in store_mod.Store(repo).read_events()] == before
+
+
+def test_regenerating_an_unmoved_subject_keeps_the_human_answers(review_repo: Path) -> None:
+    """The expensive half of the waste: a reviewer part-way through gate ④ who ran the command
+    again lost everything they had recorded, about a change that had not moved."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    store = store_mod.Store(repo)
+    existing = store.read_review()
+    assert existing is not None
+    with store.transaction() as tx:
+        tx.write("review", {**existing.raw, "human": {"status": "in_progress"}})
+        tx.append("decision_recorded", cycle_id="demo-cycle")
+
+    review.generate(repo, _fake_reviewer)
+    after = store.read_review()
+    assert after is not None and after.human_status == "in_progress"
+
+
+def test_force_re_reads_and_resets_the_human_half(review_repo: Path) -> None:
+    """The escape hatch says "read it again anyway", and pays the full price of saying so."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    store = store_mod.Store(repo)
+    existing = store.read_review()
+    assert existing is not None
+    with store.transaction() as tx:
+        tx.write("review", {**existing.raw, "human": {"status": "in_progress"}})
+        tx.append("decision_recorded", cycle_id="demo-cycle")
+
+    review.generate(repo, _fake_reviewer, force=True)
+    after = store.read_review()
+    assert after is not None and after.human_status == "not_started"
+    assert [e.event for e in store.read_events()].count("review_generated") == 2
+
+
+def test_a_task_promoted_after_the_review_is_re_read(review_repo: Path) -> None:
+    """`change_digest` covers the committed tree minus `.rein/`, so a task moving from
+    `awaiting-evidence` to `done` — after a human recorded what they saw — moves none of the code
+    digests. The orientation brief is derived from exactly that, and reusing across it served a
+    document the repository had since contradicted, at the gate whose whole point is that it has not."""
+    import yaml
+
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    assert "delivered" not in store_mod.Store(repo).read_review().machine["brief"]  # type: ignore[union-attr]
+
+    path = review_repo / ".rein" / "state.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["tasks"] = {"T-001": {"status": "done", "evidence": {"steps": [{"name": "test"}]}}}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    review.generate(repo, _fake_reviewer)
+    after = store_mod.Store(repo).read_review()
+    assert after is not None
+    assert [row["task_id"] for row in after.machine["brief"]["delivered"]] == ["T-001"]
+
+
+def test_a_moved_head_is_re_read(review_repo: Path) -> None:
+    """The identity check is over the committed tree, so a commit is what makes it a new subject."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    later = review_repo / "src" / "later.py"
+    later.parent.mkdir(parents=True, exist_ok=True)
+    later.write_text("VALUE = 2\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "another change")
+
+    review.generate(repo, _fake_reviewer)
+    assert [e.event for e in store_mod.Store(repo).read_events()].count("review_generated") == 2
 
 
 @pytest.mark.integration

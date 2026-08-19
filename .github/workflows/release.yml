@@ -2,15 +2,15 @@ name: release
 
 # Cut a GitHub Release from the current pyproject version. Human-initiated: someone runs this
 # from the Actions tab (workflow_dispatch) once the release-prep commit has merged to main. That
-# commit carries three things, and the job below refuses to release without them:
+# commit carries three things, all three checked before the tag exists:
 #
 #   1. the `version` bump in pyproject.toml (the single version source)
 #   2. the matching `## [x.y.z]` section in CHANGELOG.md (and its src/rein/data/ copy)
 #   3. `rein sync` run in this repo, so .rein/rein.lock records the version being
 #      released — this repo dogfoods its own harness, and the lock is the installed instance's
-#      record of which rein wrote its artifacts. Nothing else re-runs sync, so without this
-#      step the lock keeps naming an older release and every CLI invocation here warns about the
-#      skew (lock.startup_warning runs on all of them).
+#      record of which rein wrote its artifacts. Enforced by `scripts/template_lint.py`
+#      (check_rein_lock_version) on every pull request, not here: a version canary that only
+#      fires on the day of the release is one that found the drift a week too late.
 #
 # The job derives the tag `v<version>` from pyproject (the single version source),
 # creates it, and publishes a notes-only Release whose body is the matching CHANGELOG section
@@ -49,23 +49,6 @@ jobs:
             echo "tag $TAG already exists — bump the version in pyproject.toml before releasing" >&2
             exit 1
           fi
-
-      - name: Guard against a stale rein.lock
-        run: |
-          # This repo is itself an installed Loose Rein instance, so its lock names the tool version
-          # that wrote .rein/. Only `rein sync` refreshes it, and a release bump does not
-          # run it — catch the omission here rather than shipping a release whose own dogfooded
-          # repo claims an older version. Reads the top-level `tool_version:` key (not `prompts:`'s
-          # nested `version:` key, which tracks the prompt-doc format separately).
-          recorded="$(awk '
-            /^tool_version:/ {gsub(/['"'"'" ]/, "", $2); print $2; exit}
-          ' .rein/rein.lock)"
-          if [ "$recorded" != "$VERSION" ]; then
-            echo "rein.lock records '${recorded:-(unset)}' but this release is $VERSION." >&2
-            echo "Run \`rein sync\` in the release-prep commit and merge it before releasing." >&2
-            exit 1
-          fi
-          echo "rein.lock is in step with $VERSION"
 
       - name: Extract release notes from CHANGELOG
         run: |

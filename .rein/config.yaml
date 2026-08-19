@@ -139,8 +139,9 @@ guard:
   # product deliverables). `rein init` writes false for products — that is when the
   # editor-hook guard goes live.
   template_mode: true
-  # A path ending in "/" guards that prefix; any other path guards that exact file. Exact
-  # wins over prefixes, longest prefix wins. tests/ is deliberately NOT guarded: preparing
+  # Each path guards the file it names and everything beneath it; the trailing "/" is optional
+  # punctuation. The prefix is anchored at a separator, so `src` guards src/a.py and never
+  # srcfile.py, and the most specific entry wins. tests/ is deliberately NOT guarded: preparing
   # fixtures while a gate is pending is sanctioned speculative work.
   paths:
     - { path: docs/20-design.md, requires_gate: requirements }

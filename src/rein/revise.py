@@ -16,8 +16,10 @@ A roll back has three consequences beyond the gate lines themselves:
   bytes nobody will read again. The receipts are cleared with the gate — but the
   `gate_approved` events stay in the chain, because an audit record you can erase is not one.
 
-  **The review goes stale.** Any machine or human review below the target is invalidated,
-  because it reviewed an implementation of a plan that no longer stands.
+  **The human review goes stale.** Its answers — and the freeze `approve.readiness` re-checks —
+  were recorded about an implementation of a plan that no longer stands, so they return to
+  `not_started`. The machine half is left alone: it is a reading of the code, regenerating it is a
+  deliberate act, and clearing it here would destroy the thing those answers were answers *to*.
 
 `--impacted` marks the named tasks **and their transitive dependents** `needs-revision`.
 Missing an impacted task is the dangerous direction, so the whole closure is marked
@@ -122,7 +124,10 @@ def render(revision: dict[str, object]) -> str:
     if revision["unfreezes_plan"]:
         lines.append("- plan.status: frozen → draft (plan.yaml and config.yaml become editable)")
     if revision["invalidates_review"]:
-        lines.append("- the machine and human review are invalidated (they reviewed a plan that no longer stands)")
+        lines.append(
+            "- the human review returns to not_started (its answers were about an implementation of a "
+            "plan that no longer stands); the machine review is left as it is — regenerate it deliberately"
+        )
     marked = revision["marked_tasks"]
     assert isinstance(marked, list)
     if marked:
@@ -166,9 +171,6 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
         for key in approve.FROZEN_PLAN_KEYS:
             plan_block.pop(key, None)
 
-    if revision["invalidates_review"]:
-        raw["review"] = {"status": "stale"}
-
     marked = revision["marked_tasks"]
     assert isinstance(marked, list)
     if marked:
@@ -179,8 +181,24 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
                 {**entry, "status": "needs-revision"} if isinstance(entry, dict) else {"status": "needs-revision"}
             )
 
+    # "The review goes stale" — the module docstring has said so since it was written, and what it
+    # did was set a `state.review.status` nothing read. The human half of `review.yaml` is where
+    # that sentence has to land: it holds answers recorded against an implementation of a plan that
+    # no longer stands, and the freeze it may already carry is a precondition `approve.readiness`
+    # re-checks. The machine half stays as it is — regenerating is a separate act, and clearing it
+    # here would destroy the reading the human answers were about.
+    review = store.read_review()
+    seen_review = store_mod.read_digest(review)
+    stale_review = (
+        {**review.raw, "human": {"status": "not_started"}}
+        if revision["invalidates_review"] and review is not None and review.human_status != "not_started"
+        else None
+    )
+
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=seen)
+        if stale_review is not None:
+            tx.write("review", stale_review, expect_digest=seen_review)
         tx.append(
             "gate_revised",
             cycle_id=state.cycle_id,

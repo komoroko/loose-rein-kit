@@ -30,4 +30,8 @@ Symmetric with the human opening a gate, **rewinding approval is also the human'
 ## Principles
 - **Rewinding approval is the human's privilege.** `/revise` is run only under the human's explicit judgment.
 - **Do not discard and rebuild tasks.** Reconcile existing tasks against the revised upstream, and pick up the impact exhaustively with deterministic computation (`--impacted`).
-- The truth is `.rein/state.yaml` (gates, task status), `.rein/plan.yaml` (the tasks), and `.rein/events.ndjson` (the roll-back log). `/revise` also invalidates the receipts and the review built on the reset gates.
+- The truth is `.rein/state.yaml` (gates, task status), `.rein/plan.yaml` (the tasks), and `.rein/events.ndjson` (the roll-back log). `/revise` also clears the receipts of the reset gates and returns the **human** half of
+  `review.yaml` to `not_started` — its answers, and the freeze `rein approve build` re-checks, were
+  recorded about an implementation of a plan that no longer stands. The machine half is left as it
+  is: it is a reading of the code rather than of the plan, regenerating it costs three reviewer
+  launches, and clearing it here would destroy the thing those answers were answers *to*.

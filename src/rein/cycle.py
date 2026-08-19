@@ -172,7 +172,6 @@ def next_state(previous: models.State, slug: str) -> dict[str, object]:
         "gates": {gate: {"status": "pending", "receipt": None} for gate in models.GATE_ORDER},
         "plan": {"status": "draft"},
         "execution": {"status": "idle"},
-        "review": {"status": "none"},
         "tasks": {},
     }
 

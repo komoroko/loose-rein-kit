@@ -228,9 +228,8 @@ class TestBuildGateDiff:
 class TestScopeStage:
     """The scope stage says what this review speaks for — and what it does not.
 
-    It comes before the unprimed challenge and is deliberately not a priming stage: a commit range,
-    a file count and a coverage gap reveal no expected answer, and withholding them would ask a
-    reviewer to answer the first question without knowing what their approval will cover.
+    It comes first because an approval covers a boundary: a reviewer who does not know the commit
+    range, how much of it could be read, and what could not be, does not know what they approved.
     """
 
     def _generated(self, root: Path, *, extra_coverage: str = "", head: str = "e" * 40) -> None:
@@ -243,7 +242,7 @@ class TestScopeStage:
             "  binding:\n"
             "    change_digest: sha256:" + "a" * 64 + "\n"
             "    plan_digest: sha256:" + "b" * 64 + "\n"
-            "    toolchain_digest: sha256:" + "c" * 64 + "\n"
+            "    environment_digest: sha256:" + "c" * 64 + "\n"
             "    trusted_base_sha: " + "f" * 40 + "\n"
             "    subject_head_sha: " + head + "\n"
             "  coverage:\n"
@@ -255,7 +254,7 @@ class TestScopeStage:
             "      coverage_status: sufficient\n" + extra_coverage + "human:\n  status: not_started\n",
         )
 
-    def test_the_scope_stage_comes_first_and_reveals_no_expected_answer(self, make_repo: MakeRepo) -> None:
+    def test_the_scope_stage_comes_first(self, make_repo: MakeRepo) -> None:
         from rein import models
 
         assert models.REVIEW_STAGE_ORDER[0] == "scope"
@@ -278,7 +277,7 @@ class TestScopeStage:
         assert scope["effective_risk"] == "high"
         coverage = scope["coverage"]
         assert coverage["analyzed_files"] == 11 and coverage["analyzed_bytes"] == 421888
-        assert scope["challenges_asked"] == 0  # no challenges recorded, so none will be asked
+        assert scope["decisions_required"] == 0  # no cards recorded, so nothing is outstanding
         names = {row["name"] for row in scope["budget"]}
         assert "max_diff_bytes_per_partition" in names
 

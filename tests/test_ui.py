@@ -740,15 +740,15 @@ def test_get_review_unknown_gate_is_404(server: ui.DashboardServer, path: str) -
     assert _request(server, "GET", path)[0] == 404
 
 
-# --- Challenge-first human review (plan §21.1, §21.2) ---------------------------
+# --- the gate ④ human review (plan §21.1, §21.2) --------------------------------
 
 
-def _generated_review_with_challenge() -> dict[str, object]:
+def _generated_review_with_card() -> dict[str, object]:
     """A minimal generated machine review carrying one high-risk Decision Card (DC-001).
 
-    Being high-risk, it doubles as the unprimed challenge (expected choice 'B') — a challenge is
-    not a separate machine section any more, it is a high/critical card asked in two beats
-    (human_review.challenges): the reviewer answers before `evidence` is served back.
+    Being high-risk it blocks the freeze until answered (human_review.unanswered_decisions), and its
+    `evidence` is served with it from the first request — the withholding that used to gate it on an
+    unprimed guess is gone.
     """
     return {
         "machine": {
@@ -756,7 +756,7 @@ def _generated_review_with_challenge() -> dict[str, object]:
             "binding": {
                 "change_digest": "sha256:" + "a" * 64,
                 "plan_digest": "sha256:" + "b" * 64,
-                "toolchain_digest": "sha256:" + "c" * 64,
+                "environment_digest": "sha256:" + "c" * 64,
             },
             "coverage": [
                 {
@@ -769,7 +769,18 @@ def _generated_review_with_challenge() -> dict[str, object]:
             ],
             "actual_extraction": [],
             "claims": [],
-            # A high-risk card, so it blocks the freeze until answered (human_review.unanswered_decisions).
+            "brief": {
+                "delivered": [{"task_id": "T-001", "title": "the retry path", "status": "done"}],
+                "execution_boundary": [{"step": "test", "profile": "quality", "sandbox": "oci", "network": "none"}],
+            },
+            "residual_findings": [
+                {
+                    "task_id": "T-001",
+                    "severity": "consider",
+                    "statement": "the retry key could be threaded through instead of rebuilt",
+                    "observed_commit": "1" * 40,
+                }
+            ],
             "statements": [
                 {"id": "STMT-001", "text": "Return it to the implementer.", "epistemic_status": "machine_inferred"},
                 {"id": "STMT-002", "text": "Change the expectation instead.", "epistemic_status": "machine_inferred"},
@@ -780,11 +791,7 @@ def _generated_review_with_challenge() -> dict[str, object]:
                     "question": "C-001 diverged. What happens to it?",
                     "risk": "high",
                     "options": [{"id": "A", "statement_id": "STMT-001"}, {"id": "B", "statement_id": "STMT-002"}],
-                    "evidence": {
-                        "expected_choice": "B",
-                        "expected": {"statement": "a lost response never double-commits"},
-                        "counterfactual": "trace the retry key",
-                    },
+                    "evidence": {"expected": {"statement": "a lost response never double-commits"}},
                 }
             ],
         },
@@ -800,7 +807,7 @@ def review_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
         root,
         state=make_state(project="rv", gates=dict.fromkeys(models.GATE_ORDER, "pending"), phase="build"),
         config=make_config(profiles=SANDBOXED_PROFILES),
-        review=_generated_review_with_challenge(),
+        review=_generated_review_with_card(),
     )
     srv = ui.DashboardServer(("127.0.0.1", 0), root=root, read_only=False)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -811,13 +818,16 @@ def review_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
         srv.server_close()
 
 
-def test_session_carries_the_next_challenge_without_its_reveal(review_server: ui.DashboardServer) -> None:
+def _digest(server: ui.DashboardServer) -> str:
+    return str(json.loads(_request(server, "GET", "/api/review/session")[1])["machine_digest"])
+
+
+def test_the_session_names_what_is_still_owed(review_server: ui.DashboardServer) -> None:
     status, data = _request(review_server, "GET", "/api/review/session")
     assert status == 200
     session = json.loads(data)
     assert session["generated"] is True
-    assert session["next_challenge"]["id"] == "DC-001"
-    assert "reveal" not in session["next_challenge"]  # the expected choice must not leak with the question
+    assert session["unanswered_decisions"] == ["DC-001"]
     assert session["machine_digest"].startswith("sha256:")
 
 
@@ -827,32 +837,47 @@ def _card(stage_payload: dict[str, Any], card_id: str) -> dict[str, Any]:
     return next(c for c in cards if c["id"] == card_id)
 
 
-def test_the_decision_stage_withholds_evidence_until_the_card_is_answered(review_server: ui.DashboardServer) -> None:
-    before = json.loads(_request(review_server, "GET", "/api/review/stage/decision")[1])
-    assert "evidence" not in _card(before, "DC-001")
+def test_the_decision_stage_serves_a_card_with_its_evidence(review_server: ui.DashboardServer) -> None:
+    """The evidence used to be stripped until the reviewer had guessed at the card first.
 
-    digest = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
-    body = {"challenge_id": "DC-001", "choice": "B", "confidence": "high", "machine_digest": digest}
-    status, data = write(review_server, "/api/review/challenge", body)
-    assert status == 200 and json.loads(data)["ok"] is True
+    That withheld the material for the judgement on the one screen that asks for it. Pinning the
+    opposite is what stops the sequence being reintroduced.
+    """
+    stage = json.loads(_request(review_server, "GET", "/api/review/stage/decision")[1])
+    evidence = _card(stage, "DC-001")["evidence"]
+    assert evidence["expected"]["statement"] == "a lost response never double-commits"
 
-    after = json.loads(_request(review_server, "GET", "/api/review/stage/decision")[1])
-    assert _card(after, "DC-001")["evidence"]["expected_choice"] == "B"
+
+def test_the_orient_stage_carries_the_brief_and_the_unresolved_findings(
+    review_server: ui.DashboardServer,
+) -> None:
+    """The stage that exists so the decision stage can ask for less.
+
+    The residual findings are the ones the per-task reviewer marked `consider`: they stop nothing,
+    they were written to the task handoff, and until this stage existed nothing ever read them back.
+    """
+    stage = json.loads(_request(review_server, "GET", "/api/review/stage/orient")[1])
+    assert stage["brief"]["delivered"][0]["task_id"] == "T-001"
+    assert stage["brief"]["execution_boundary"][0]["network"] == "none"
+    finding = stage["residual_findings"][0]
+    assert finding["task_id"] == "T-001" and finding["severity"] == "consider"
+    # The finding is stamped with the tree it was observed against, not the reviewed HEAD.
+    assert finding["observed_commit"] == "1" * 40
 
 
 def test_a_human_answer_leaves_the_machine_digest_unchanged(review_server: ui.DashboardServer) -> None:
-    # E2E-09: answering a challenge moves the human half, never the machine half.
-    before = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
-    body = {"challenge_id": "DC-001", "choice": "B", "confidence": "low", "machine_digest": before}
-    data = json.loads(write(review_server, "/api/review/challenge", body)[1])
+    # E2E-09: recording a decision moves the human half, never the machine half.
+    before = _digest(review_server)
+    body: dict[str, object] = {"card_id": "DC-001", "choice": "B", "confidence": "low", "machine_digest": before}
+    data = json.loads(write(review_server, "/api/review/decision", body)[1])
     assert data["machine_digest"] == before
 
 
 def test_a_stale_machine_digest_is_refused_with_409(review_server: ui.DashboardServer) -> None:
     # E2E-08: an answer written against a machine review that has since changed is a conflict.
     stale = "sha256:" + "0" * 64
-    body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "confidence": "low", "machine_digest": stale}
-    status, _ = write(review_server, "/api/review/challenge", body)
+    body: dict[str, object] = {"card_id": "DC-001", "choice": "B", "confidence": "low", "machine_digest": stale}
+    status, _ = write(review_server, "/api/review/decision", body)
     assert status == 409
 
 
@@ -860,42 +885,19 @@ def test_an_answer_naming_no_machine_review_is_refused(review_server: ui.Dashboa
     """The guard used to be opt-in from the client: `assert_machine_current` short-circuited on
     an empty string, so simply omitting the field merged the answer into whatever machine review
     happened to be on disk — the E2E-08 failure, reachable by leaving a field out."""
-    body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "confidence": "low"}
-    status, data = write(review_server, "/api/review/challenge", body)
+    body: dict[str, object] = {"card_id": "DC-001", "choice": "B", "confidence": "low"}
+    status, data = write(review_server, "/api/review/decision", body)
     assert status == 400 and b"machine_digest is required" in data
-
-
-def test_an_answer_without_a_confidence_is_refused(review_server: ui.DashboardServer) -> None:
-    """The pane hardcoded "medium" and the server defaulted to "low", so the recorded number was
-    whichever fabrication won. How sure the reviewer was is theirs to state or not state at all."""
-    digest = json.loads(_request(review_server, "GET", "/api/review/session")[1])["machine_digest"]
-    body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "machine_digest": digest}
-    status, data = write(review_server, "/api/review/challenge", body)
-    assert status == 400 and b"confidence is required" in data
-
-
-def _answer_challenge(server: ui.DashboardServer) -> str:
-    """Clear the unprimed challenge (the card's own unprimed read), returning the machine digest."""
-    digest = str(json.loads(_request(server, "GET", "/api/review/session")[1])["machine_digest"])
-    body: dict[str, object] = {
-        "challenge_id": "DC-001",
-        "choice": "B",  # the expected choice, so no counterfactual opens
-        "confidence": "medium",
-        "machine_digest": digest,
-    }
-    assert write(server, "/api/review/challenge", body)[0] == 200
-    return digest
 
 
 def test_a_decision_card_can_be_answered_from_the_pane(review_server: ui.DashboardServer) -> None:
     """The judgement gate ④ asks for had a schema slot, an id validator and no endpoint at all."""
-    digest = _answer_challenge(review_server)
     body: dict[str, object] = {
         "card_id": "DC-001",
         "choice": "A",
         "confidence": "high",
         "reason": "the retry key is not threaded through",
-        "machine_digest": digest,
+        "machine_digest": _digest(review_server),
     }
     status, data = write(review_server, "/api/review/decision", body)
     assert status == 200, data
@@ -907,7 +909,6 @@ def test_a_decision_card_can_be_answered_from_the_pane(review_server: ui.Dashboa
 
 
 def test_an_unanswered_high_risk_card_blocks_the_freeze(review_server: ui.DashboardServer) -> None:
-    _answer_challenge(review_server)
     session = json.loads(_request(review_server, "GET", "/api/review/session")[1])
     assert session["unanswered_decisions"] == ["DC-001"]
     assert any("decision cards" in b for b in session["completion_blockers"])
@@ -915,10 +916,23 @@ def test_an_unanswered_high_risk_card_blocks_the_freeze(review_server: ui.Dashbo
 
 
 def test_a_decision_without_a_confidence_is_refused(review_server: ui.DashboardServer) -> None:
-    digest = _answer_challenge(review_server)
-    body: dict[str, object] = {"card_id": "DC-001", "choice": "A", "machine_digest": digest}
+    """The pane hardcoded "medium" and the server defaulted to "low", so the recorded number was
+    whichever fabrication won. How sure the reviewer was is theirs to state or not state at all."""
+    body: dict[str, object] = {"card_id": "DC-001", "choice": "A", "machine_digest": _digest(review_server)}
     status, data = write(review_server, "/api/review/decision", body)
     assert status == 400 and b"confidence is required" in data
+
+
+def test_the_challenge_endpoints_are_gone(review_server: ui.DashboardServer) -> None:
+    """A removed screen must not leave a live write behind it.
+
+    An endpoint nothing renders is still an endpoint: left in place it would keep accepting answers
+    to a question the pane no longer asks, and move `human_digest` for a judgement nobody made.
+    """
+    assert _request(review_server, "GET", "/api/review/challenge/DC-001/reveal")[0] == 404
+    for action in ("challenge", "counterfactual"):
+        body: dict[str, object] = {"challenge_id": "DC-001", "choice": "B", "machine_digest": _digest(review_server)}
+        assert write(review_server, f"/api/review/{action}", body)[0] == 404
 
 
 def test_a_stage_tick_means_a_recorded_judgement_not_a_visit(review_server: ui.DashboardServer) -> None:
@@ -926,13 +940,15 @@ def test_a_stage_tick_means_a_recorded_judgement_not_a_visit(review_server: ui.D
     this payload is entitled to make about a stage the reviewer merely scrolled past."""
     session = json.loads(_request(review_server, "GET", "/api/review/session")[1])
     settled = {s["name"]: s["settled"] for s in session["stages"]}
-    assert settled["decision"] is False  # DC-001 is neither read nor decided yet
+    assert settled["decision"] is False  # DC-001 is not decided yet
     assert settled["freeze"] is False  # not frozen
-    assert settled["scope"] is None and settled["diff"] is None  # reading stages record nothing
+    # The reading stages record nothing — including orient, which exists to lower what the reviewer
+    # has to reconstruct, so ticking it on open would be the "a mouse moved" claim exactly.
+    assert settled["scope"] is None and settled["orient"] is None and settled["diff"] is None
 
 
 def test_review_post_without_token_is_403(review_server: ui.DashboardServer) -> None:
-    status, _ = _request(review_server, "POST", "/api/review/challenge", {"challenge_id": "DC-001", "choice": "B"})
+    status, _ = _request(review_server, "POST", "/api/review/decision", {"card_id": "DC-001", "choice": "B"})
     assert status == 403
 
 

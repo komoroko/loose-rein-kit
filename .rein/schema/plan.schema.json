@@ -92,6 +92,7 @@
         "domains": { "$ref": "#/$defs/domains" },
         "risk": { "$ref": "#/$defs/risk" },
         "scope": {
+          "description": "Where this task's work belongs. Each entry covers the path it names and everything beneath it; a trailing '/' is optional punctuation and changes nothing, and the prefix is anchored at a separator (`src/app` covers `src/app/x.py`, never `src/app.py`). An empty `include` is unbounded, not forbidden. Checked against the real diff by the build loop.",
           "type": "object",
           "additionalProperties": false,
           "properties": {

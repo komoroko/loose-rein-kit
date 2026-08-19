@@ -220,7 +220,13 @@ def approval_subject(repo: repo_mod.Repo, gate: str) -> dict[str, str]:
     if plan is not None:
         subject["plan_digest"] = plan.digest()
     if config is not None:
-        subject["config_digest"] = config.digest()
+        subject["config_digest"] = config.frozen_digest()
+        # Recorded, never compared against the freeze. The pin is allowed to move within a cycle
+        # (a task adds a dependency, the image is rebuilt), so what a receipt can honestly say is
+        # *which* environment the approval was taken over — which is what makes a later "the
+        # evidence was produced somewhere else" answerable at all. The schema declared this slot
+        # and nothing ever filled it.
+        subject["environment_digest"] = config.environment_digest()
     if review is not None and review.is_generated:
         subject["machine_digest"] = review.machine_digest()
         subject["human_digest"] = review.human_digest()
@@ -238,6 +244,7 @@ def approval_subject(repo: repo_mod.Repo, gate: str) -> dict[str, str]:
 _RECEIPT_DIGESTS = (
     "plan_digest",
     "config_digest",
+    "environment_digest",
     "machine_digest",
     "human_digest",
     "artifact_digest",
@@ -253,7 +260,7 @@ FREEZING_GATE = "tasks"
 #: back. A key written here and not cleared there would survive an un-freeze and let a later
 #: check "verify" against a freeze that no longer holds. `revise` imports this rather than
 #: repeating it: the two lists agreeing was, until now, a thing somebody had to remember.
-FROZEN_PLAN_KEYS = ("digest", "config_digest", "toolchain_digest", "sources", "frozen_at")
+FROZEN_PLAN_KEYS = ("digest", "config_digest", "environment_digest", "sources", "frozen_at")
 
 #: Documents outside `plan.yaml` that the implementation phase reads, other than the task tickets
 #: (which come from the plan's own task ids). Present-only: a repository without a baseline
@@ -304,7 +311,7 @@ def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[
 
     for name, current, presented in (
         ("plan.yaml", plan.digest(), subject.get("plan_digest", "")),
-        ("config.yaml", config.digest(), subject.get("config_digest", "")),
+        ("config.yaml", config.frozen_digest(), subject.get("config_digest", "")),
     ):
         if presented and not digests.matches(presented, current):
             raise ApprovalError(
@@ -314,8 +321,8 @@ def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[
     return {
         "status": "frozen",
         "digest": plan.digest(),
-        "config_digest": config.digest(),
-        "toolchain_digest": config.toolchain_digest(),
+        "config_digest": config.frozen_digest(),
+        "environment_digest": config.environment_digest(),
         "sources": implementation_sources(repo, plan),
         "frozen_at": event_chain.now_iso(),
     }

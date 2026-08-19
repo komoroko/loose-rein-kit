@@ -38,5 +38,5 @@ tasks: []
 #    claim_ids: [C-001]
 #    domains: [<domain>]
 #    risk: high
-#    scope:
-#      include: [src/]
+#    scope:                           # where this task's work belongs; the loop checks the diff
+#      include: [src/]                #   against it. Covers everything beneath; the "/" is optional.

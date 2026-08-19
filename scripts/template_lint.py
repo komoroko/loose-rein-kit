@@ -88,6 +88,12 @@ _DESCRIPTION_RE = re.compile(r"^description\s*[:=]\s*(.+?)\s*$", re.MULTILINE)
 _TOML_ESCAPE_RE = re.compile(r"\\(.)")
 # uv.lock's entry for this project itself — `[[package]]` / name / version, in that order.
 _LOCK_PROJECT_RE = re.compile(r'^name = "loose-rein-kit"\nversion = "([^"]+)"', re.MULTILINE)
+
+#: `.rein/rein.lock`'s two version stamps: the release that wrote the repo, and the one that wrote
+#: the materialized prompts. Read as text — the lock is machine-written YAML and this canary must
+#: keep working on a lock that no longer parses as anything else.
+_REIN_LOCK_TOOL_RE = re.compile(r"^tool_version:\s*['\"]?([^'\"\s]+)", re.MULTILINE)
+_REIN_LOCK_PROMPTS_RE = re.compile(r"^prompts:\n(?:[ \t]+.*\n)*?[ \t]+version:\s*['\"]?([^'\"\s]+)", re.MULTILINE)
 # Claude-only mechanism names must never leak into the agent-neutral files — they belong in
 # the capability mappings alone. A leak means a neutral body regressed to one agent's dialect.
 _CLAUDE_ONLY_TERMS = ("AskUserQuestion", "PushNotification", "ExitPlanMode")
@@ -772,6 +778,33 @@ def check_version_lock(version: str, lock_text: str) -> list[str]:
     return []
 
 
+def check_rein_lock_version(version: str, lock_text: str) -> list[str]:
+    """`.rein/rein.lock` records the release that wrote this repository's materialized artifacts.
+
+    The fourth identity file, and the one with no natural symptom. `rein sync` stamps
+    `tool_version` and `prompts.version` only as a side effect of *writing* something, so a release
+    that changes no payload byte leaves both at the previous version and `sync --check` — which
+    compares content, not versions — passes. That is exactly what happened at 0.3.1: the shipped
+    template claimed 0.3.0 while the CLI was 0.3.1, and the only thing that noticed was a shell
+    snippet in the release workflow, on the day of the release.
+
+    Here instead, so it fails on the pull request that bumps the version rather than at the tag.
+    """
+    if not version:
+        return []  # check_version_changelog already reports the missing version
+    failures = []
+    for key, pattern in (("tool_version", _REIN_LOCK_TOOL_RE), ("prompts.version", _REIN_LOCK_PROMPTS_RE)):
+        m = pattern.search(lock_text)
+        if not m:
+            failures.append(f".rein/rein.lock has no `{key}` — run `rein sync`")
+        elif m.group(1) != version:
+            failures.append(
+                f"pyproject.toml says version {version} but .rein/rein.lock's {key} says "
+                f"{m.group(1)} — run `rein sync` and commit the lock"
+            )
+    return failures
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -829,6 +862,7 @@ def main(argv: list[str] | None = None) -> int:
         lock = root / "uv.lock"
         if lock.is_file():  # a product repository has no uv.lock of its own to keep in step
             failures += check_version_lock(version, lock.read_text(encoding="utf-8"))
+        failures += check_rein_lock_version(version, (root / ".rein" / "rein.lock").read_text(encoding="utf-8"))
     except OSError as exc:
         logger.error(f"template-lint failed: {exc}")
         return 1
