@@ -85,9 +85,11 @@
           "$ref": "#/$defs/digest"
         },
         "config_digest": {
+          "description": "config.yaml as gate 3 froze it, image pins excluded (`models.Config.frozen_digest`). The pin sits outside because a task that legitimately adds a dependency makes the pinned image wrong, and rebuilding it used to cost a full rollback and re-approval of a plan nothing had changed. Everything that is a decision — kind, network_profile, mount_repo, the quality gate, the budgets, the guard — is still in here.",
           "$ref": "#/$defs/digest"
         },
-        "toolchain_digest": {
+        "environment_digest": {
+          "description": "The sandbox picture the freeze saw: role to profile, and every profile body including its image pin (`models.Config.environment_digest`). Recorded, not enforced — this one is allowed to move within a cycle, and `rein doctor` and the gate 4 brief report when it has.",
           "$ref": "#/$defs/digest"
         },
         "sources": {
@@ -130,42 +132,6 @@
         },
         "subject_head_sha": {
           "$ref": "#/$defs/commit"
-        }
-      }
-    },
-    "review": {
-      "description": "Digests of the current review. `human_digest` is null until the human section is frozen; a mismatch between any of these and a recomputed value makes the review stale (plan 17.5).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "status": {
-          "enum": [
-            "none",
-            "generating",
-            "awaiting_human",
-            "human_in_progress",
-            "frozen",
-            "stale"
-          ]
-        },
-        "change_digest": {
-          "$ref": "#/$defs/nullableDigest"
-        },
-        "actual_digest": {
-          "$ref": "#/$defs/nullableDigest"
-        },
-        "machine_digest": {
-          "$ref": "#/$defs/nullableDigest"
-        },
-        "human_digest": {
-          "$ref": "#/$defs/nullableDigest"
-        },
-        "coverage_digest": {
-          "$ref": "#/$defs/nullableDigest"
-        },
-        "generated_at": {
-          "type": "string",
-          "maxLength": 64
         }
       }
     },
@@ -332,6 +298,11 @@
               },
               "failure_summary": {
                 "description": "The tail of that step's output, as the next implementer is told it.",
+                "type": "string",
+                "maxLength": 4000
+              },
+              "futile": {
+                "description": "Why the loop stopped rather than spending another send-back: the step was already red on the work branch before this task ran, or it failed identically over a tree the implementer did not move. Recorded because \"the budget ran out\" and \"the budget was abandoned as pointless\" are different things to whoever reads this, and only the second names something to go and repair.",
                 "type": "string",
                 "maxLength": 4000
               },
@@ -667,7 +638,7 @@
         "human_digest": {
           "$ref": "#/$defs/digest"
         },
-        "toolchain_digest": {
+        "environment_digest": {
           "$ref": "#/$defs/digest"
         },
         "validation_digest": {

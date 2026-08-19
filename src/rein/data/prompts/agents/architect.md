@@ -33,6 +33,8 @@ human to decide — the same way as any other technical choice above. Skip this 
 
 ## Output
 A design draft following the `docs/20-design.md` scaffold, ADR drafts, and the technical-choice points for the human to decide (options + trade-offs).
+
+For **every** requirement, also state **what the approach requires of a person** — a setting somebody supplies, a schema somebody migrates, a dependency somebody provides, a signal somebody watches — and **whether it can be undone**. Say "nothing" where a requirement genuinely asks nothing of anybody; leaving it blank is different, and it means nobody decided. These two lines are what `/tasks` freezes as each task's `operator_surface`, and what gate ④ holds the built code against.
 The design is finalized by the human at gate ②. Do not implement (write code).
 
 Write the deliverable in the user's language (the project's primary language).

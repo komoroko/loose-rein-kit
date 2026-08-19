@@ -83,7 +83,6 @@ def make_state(
         "gates": gate_block,
         "plan": {"status": plan_status, "digest": _digest("plan")},
         "execution": {"status": "idle"},
-        "review": {"status": "none"},
         "tasks": {tid: {"status": status} for tid, status in (tasks or {}).items()},
     }
     return document
@@ -130,6 +129,7 @@ def make_task(
     risk: str = "low",
     title: str = "",
     acceptance: list[dict[str, Any]] | None = None,
+    operator_surface: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     task: dict[str, Any] = {
         "id": task_id,
@@ -143,6 +143,8 @@ def make_task(
         task["claim_ids"] = claim_ids
     if acceptance is not None:
         task["acceptance"] = acceptance
+    if operator_surface is not None:
+        task["operator_surface"] = operator_surface
     return task
 
 
@@ -178,6 +180,7 @@ def make_review(
     review_budget: list[dict[str, Any]] | None = None,
     base_sha: str = "",
     head_sha: str = "",
+    brief: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A review document. `generated=False` is the honest empty state, not an empty result.
 
@@ -191,7 +194,7 @@ def make_review(
         "binding": {
             "change_digest": _digest("change"),
             "plan_digest": _digest("plan"),
-            "toolchain_digest": _digest("toolchain"),
+            "environment_digest": _digest("toolchain"),
         },
         "coverage": [
             {
@@ -221,6 +224,8 @@ def make_review(
         machine["effective_risk"] = effective_risk
     if gaps:
         machine["gaps"] = gaps
+    if brief:
+        machine["brief"] = brief
     return {"machine": machine, "human": {"status": human_status}}
 
 

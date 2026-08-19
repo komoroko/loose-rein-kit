@@ -38,3 +38,14 @@
 ## Consequences / results
 <!-- The constraints or assumptions this decision imposes downstream -->
 -
+
+### What this requires of a person
+<!-- Required for any decision that changes something somebody has to operate: the setting they
+     must supply, the procedure they must run, the signal they must watch. This is what gate ③
+     freezes as `operator_surface` and gate ④ holds the built code against. -->
+-
+
+### Reversibility
+<!-- Can this be undone, and how? A fact about the decision, not an opinion about it — and the one
+     the person approving at gate ④ is actually handed. If it cannot be undone, say that. -->
+-

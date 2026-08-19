@@ -209,8 +209,19 @@ rein oci build --profile python                 # or just print the sha256: dige
 `python`, which is what its `containerfile:` key says. Without `--write-config`, `oci build` only
 prints the digest and the config key to paste it under. With it, the command rewrites just the
 `kind`, `image` and `network_profile` lines of the profiles it built — every comment in
-`config.yaml` survives, and it refuses to write a file that no longer parses. Pin before gate ③:
-the config freezes there and the guard refuses it afterwards.
+`config.yaml` survives, and it refuses to write a file that no longer parses.
+
+**Re-pinning after gate ③ is allowed, and only re-pinning.** Gate ③ freezes `config.yaml` with the
+image pins taken out, because a task that legitimately adds a dependency makes the pinned image
+wrong — the closure it needs is not baked in, and a `network: none` sandbox fails the same way on
+every retry. Rebuilding that image used to cost a `rein revise --to tasks`: the plan un-froze,
+every gate below reset in a chain, and a human re-approved a plan nothing had changed. Now
+`rein oci build --write-config` rewrites the pin, records an `environment_repinned` event, and
+leaves the gates alone. Everything else in the file is still frozen — `kind`, `network_profile`,
+`mount_repo`, the quality gate, the budgets, the guard — so opening a sandbox still needs the human
+who approved the narrower one. What the permission is paid for with is visibility: `rein doctor`
+reports that the sandbox has moved, and gate ④'s orientation shows the approver that the evidence
+they are signing over was produced in an environment gate ③ never saw.
 
 None of the three packaged Containerfiles fit every stack a repository might mix in — a task can
 touch a toolchain none of them were built for. A profile can instead set `dockerfile:` — a
@@ -353,11 +364,16 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
    - `rein ui` — the dashboard: an Overview board carrying that queue; a **Review tab** where
      the gate under decision is read and approved in one pane — it opens on the **scope** (the
      commit range, how much was read, what could *not* be, and whether the change fits one review
-     session), then the **Decision Cards**: every unsettled claim, gap, ungrounded extra
-     behaviour, and security finding, one card each. A high/critical card withholds its evidence
-     until you record what you think should happen — Challenge-first, without a separate
-     screen for it — then reveals the Expected the plan states against the Actual a reviewer that
-     never saw the plan read out of the code; a Tasks tab (DAG, layer progress); an Activity tab
+     session), then **orient**: what this cycle delivered, which dependencies and migrations moved,
+     which sandbox and network posture each quality-gate step ran under, **what the change now
+     requires of a person** — the operator-facing behaviour read out of the code, sorted by whether
+     any task declared it at gate ③, with what nobody declared first and the file *as it ends up*
+     one click away — what the gate established, what is still open (including what the implementer
+     said about each task that did not land), and the Expected/Actual comparison — all derived from
+     the SSOT, none of it asked of you. Only then the **Decision
+     Cards**: every unsettled claim, gap, ungrounded extra behaviour, and security finding, one
+     card each, with its evidence attached. Unanswered high/critical cards block the freeze;
+     a Tasks tab (DAG, layer progress); an Activity tab
      (live event feed, operations). The page can notify you when a gate or escalation starts
      waiting (opt-in bell; the tab title/favicon always show it). Actions stay a fixed whitelist —
      reads, fixed diagnostics (doctor, tests), and decision recording (approve / resolve / revise /

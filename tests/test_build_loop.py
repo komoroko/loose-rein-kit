@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import build_loop, common, dag, dossier, evidence, executors, faults, models
+from rein import build_loop, common, dag, digests, dossier, evidence, executors, faults, models
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -424,6 +424,39 @@ def test_starting_a_task_counts_an_attempt(tmp_path: Path) -> None:
     build_loop.set_task_status(repo, "T-001", "in-progress")
     raw = store_mod.Store(repo).read_raw("state")
     assert raw is not None and raw["tasks"]["T-001"]["attempts"] == 2
+
+
+def test_a_block_records_which_step_went_red_and_what_was_left(tmp_path: Path) -> None:
+    """The terminal `task_failed` used to carry a prose note and nothing a reader could sort or
+    count by — the step name and the budget lived only on the per-attempt records, and a task that
+    blocked on its first round produced no per-attempt record at all. Nothing new is discovered
+    here: the facts are in the handoff written by this same transaction."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.record_attempt_failure(
+        repo, "T-001", failed_step="test", failure_summary="2 failed", retries_left={"test": 0, "check": 2}
+    )
+    build_loop.set_task_status(repo, "T-001", "blocked", note="out of retries")
+
+    failures = [e for e in store_mod.Store(repo).read_events() if e.event == "task_failed"]
+    assert failures[-1].detail["step"] == "test"
+    assert failures[-1].detail["retries_left"] == 0
+    assert failures[-1].detail["note"] == "out of retries"
+
+
+def test_a_block_with_nothing_recorded_says_nothing_it_does_not_know(tmp_path: Path) -> None:
+    """No handoff, no step — an event that invented one would be worse than one that is silent."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.set_task_status(repo, "T-001", "blocked", note="the implementer reported blocked")
+    failed = [e for e in store_mod.Store(repo).read_events() if e.event == "task_failed"][-1]
+    assert "step" not in failed.detail and "retries_left" not in failed.detail
+
+
+def test_a_completion_carries_no_failure_detail(tmp_path: Path) -> None:
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.record_attempt_failure(repo, "T-001", failed_step="test", failure_summary="x", retries_left={"test": 1})
+    build_loop.set_task_status(repo, "T-001", "done", commit="a" * 40)
+    done = [e for e in store_mod.Store(repo).read_events() if e.event == "task_completed"][-1]
+    assert "step" not in done.detail
 
 
 def test_an_off_vocabulary_status_is_refused(tmp_path: Path) -> None:
@@ -1505,3 +1538,190 @@ def test_the_run_measures_its_own_prompt_input(tmp_path: Path, monkeypatch: pyte
 def test_a_run_that_launched_nothing_reports_nothing(tmp_path: Path) -> None:
     """An empty measurement is not a measurement of zero — it is silence, and it prints as silence."""
     assert orchestrator(tmp_path).spend_summary() == ""
+
+
+# --- the run's own input budget (measured, not estimated) ----------------------
+#
+# "Every launch's input is measured and reported at the end of the run — a budget nobody counts is
+# a statement of intent." The counter used to see only the argv this process composes, which is the
+# small half: what a launch is *told to read* is the dossier plus the ticket, the design slice and
+# the baseline, and that is where a build's input goes. It also lived in the process, so the
+# `EXIT_RETRY_LATER` a long build is nearly certain to hit took the number with it.
+
+
+def test_a_launch_counts_what_it_was_told_to_read_not_only_what_was_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    (tmp_path / "docs" / "tasks").mkdir(parents=True, exist_ok=True)
+    ticket = tmp_path / "docs" / "tasks" / "T-001.md"
+    ticket.write_text("x" * 4096, encoding="utf-8")
+
+    loop._write_dossier(task, str(tmp_path), base="", role="implementer")
+    handed = loop.spend_totals()["implementer"]["handed_bytes"]
+    # The dossier itself plus the ticket it names — the ticket alone is already larger than any
+    # prompt this loop composes, which is the asymmetry the second counter exists to show.
+    assert handed > ticket.stat().st_size
+
+
+def test_a_resumed_launch_is_not_counted_as_a_cold_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold launch re-reads its ticket, design slice and code from scratch. Whether that is the
+    largest avoidable cost in a long build is a claim the run can now answer about itself."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
+    loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer", resumed=True)
+    row = loop.spend_totals()["implementer"]
+    assert row["launches"] == 2 and row["cold_launches"] == 1
+
+
+def test_the_summary_reports_both_numbers_and_the_cold_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
+    loop._spend_handover("implementer", 200_000)
+    summary = loop.spend_summary()
+    assert "sent" in summary and "handed to read" in summary and "1 cold" in summary
+
+
+def test_a_run_that_launched_nothing_records_no_measurement(tmp_path: Path) -> None:
+    """A run that took the lock and found no frontier did not measure zero — it measured nothing,
+    and an event saying "0 bytes" would be a different claim."""
+    loop = orchestrator(tmp_path)
+    loop._record_spend()
+    assert [e for e in loop.store.read_events() if e.event == "run_measured"] == []
+
+
+def test_the_measurement_lands_in_the_audit_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """In the chain rather than in state.yaml: the chain never rotates, so summing `run_measured`
+    over a cycle is the cycle's total while each run stays separately readable."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
+    loop._spend_handover("code_reviewer", 1024)
+    loop._record_spend()
+
+    measured = [e for e in loop.store.read_events() if e.event == "run_measured"]
+    assert len(measured) == 1
+    detail = measured[0].detail
+    assert detail["launches"] == 1 and detail["cold_launches"] == 1
+    assert detail["handed_bytes"] == 1024 and detail["prompt_bytes"] > 0
+    assert set(detail["by_role"]) == {"implementer", "code_reviewer"}
+
+
+# --- what is not worth another round ------------------------------------------
+#
+# Two observations, neither of which parses the failure's text. `faults` refuses to interpret
+# build-tool output on principle, so the reported cases — a lockfile mismatch, a missing browser
+# binary, an absent CDK context — are caught by the shape of the retry instead: the step was
+# already red before the task ran, or nothing moved between two identical failures.
+
+
+def _task() -> dag.Task:
+    return dag.Task(id="T-001", title="demo", kind="foundation", status="in-progress")
+
+
+def test_a_step_already_red_on_the_work_branch_is_not_sent_back(tmp_path: Path) -> None:
+    """The reported run: task after task spent its whole send-back budget on a `check` a dependency
+    drift had broken weeks earlier, and the chain recorded each as a verdict about that task's code."""
+    loop = orchestrator(tmp_path)
+    loop._baseline_red["check"] = "ruff: 3 pre-existing errors"
+    reason = loop._futile(_task(), "check", "ruff: 3 pre-existing errors", "sha256:" + "a" * 64, ("", "", ""))
+    assert "already red" in reason and "ruff: 3 pre-existing errors" in reason
+
+
+def test_a_step_red_only_now_is_still_worth_a_round(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    loop._baseline_red["check"] = "pre-existing"
+    assert loop._futile(_task(), "test", "1 failed", "sha256:" + "a" * 64, ("", "", "")) == ""
+
+
+def test_an_identical_failure_over_an_unmoved_tree_is_not_retried(tmp_path: Path) -> None:
+    """The implementer ran and changed nothing, so the next round has the same inputs."""
+    loop = orchestrator(tmp_path)
+    tree = "sha256:" + "a" * 64
+    log = "error: the lockfile is out of date"
+    seen = ("test", digests.of_bytes(log.encode("utf-8")), tree)
+    assert "unchanged tree" in loop._futile(_task(), "test", log, tree, seen)
+
+
+def test_a_moved_tree_earns_another_round(tmp_path: Path) -> None:
+    """Even on an identical failure: the implementer changed something, so the inputs are not the
+    same and the retry is not provably pointless."""
+    loop = orchestrator(tmp_path)
+    log = "error: the lockfile is out of date"
+    seen = ("test", digests.of_bytes(log.encode("utf-8")), "sha256:" + "a" * 64)
+    assert loop._futile(_task(), "test", log, "sha256:" + "b" * 64, seen) == ""
+
+
+def test_a_different_failure_over_an_unmoved_tree_earns_another_round(tmp_path: Path) -> None:
+    """A flaky suite failing differently each time is not the case this catches."""
+    loop = orchestrator(tmp_path)
+    tree = "sha256:" + "a" * 64
+    seen = ("test", digests.of_bytes(b"first failure"), tree)
+    assert loop._futile(_task(), "test", "a different failure", tree, seen) == ""
+
+
+def test_an_unknown_fingerprint_never_matches(tmp_path: Path) -> None:
+    """Fail open towards retrying: spending a retry is recoverable, refusing one on a tree nothing
+    could read is not."""
+    loop = orchestrator(tmp_path)
+    log = "the same failure"
+    seen = ("test", digests.of_bytes(log.encode("utf-8")), "")
+    assert loop._futile(_task(), "test", log, "", seen) == ""
+
+
+def test_the_futile_reason_reaches_the_audit_chain(tmp_path: Path) -> None:
+    """ "the budget ran out" and "the budget was abandoned as pointless" are different things, and
+    only the second names something to go and repair."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    build_loop.record_attempt_failure(
+        repo,
+        "T-001",
+        failed_step="check",
+        failure_summary="ruff: 3 errors",
+        retries_left={"check": 0},
+        futile="T-001: 'check' was already red on work before this task ran",
+    )
+    failed = [e for e in store_mod.Store(repo).read_events() if e.event == "task_failed"][-1]
+    assert "already red" in failed.detail["futile"]
+
+
+def test_a_baseline_is_not_established_in_a_dry_run(tmp_path: Path) -> None:
+    """A dry run enters no sandbox and runs no command — its job is to print the control flow."""
+    root = build_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=True, repo=repo)
+    loop._establish_baseline()
+    assert loop._baseline_red == {}
+
+
+def test_the_baseline_is_taken_once_per_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One batch per layer, and the tree under it moves as tasks land — re-running the whole DoD at
+    the root before each batch would buy a number nothing reads."""
+    loop = orchestrator(tmp_path)
+    ran: list[str] = []
+
+    def record(step: build_loop.GateStep, cwd: str) -> str:
+        ran.append(step.name)
+        return ""
+
+    monkeypatch.setattr(loop, "_run_cmd_step", record)
+    loop._establish_baseline()
+    loop._establish_baseline()
+    assert ran == ["test", "check"]
+
+
+def test_a_baseline_that_cannot_run_marks_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No container runtime, no pinned image — the machine failed, so nothing was learned about any
+    step. The batch about to start hits the same fault and aborts the run without marking a task."""
+    loop = orchestrator(tmp_path)
+
+    def unrunnable(step: build_loop.GateStep, cwd: str) -> str:
+        raise faults.EnvironmentFault(faults.Fault.ENV_PERMANENT, where="test", rc=127, output="could not run make")
+
+    monkeypatch.setattr(loop, "_run_cmd_step", unrunnable)
+    loop._establish_baseline()
+    assert loop._baseline_red == {}

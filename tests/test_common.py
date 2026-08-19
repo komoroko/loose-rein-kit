@@ -181,3 +181,37 @@ def test_common_stays_stdlib_only_at_import_time() -> None:
     head = source.split("# --- diagnostics logging", 1)[0]
     assert "import yaml" not in head
     assert "from rein" not in head
+
+
+# --- repo-relative path patterns ----------------------------------------------
+#
+# One rule shared by `guard.paths` and a task's `scope`. The trailing slash used to decide between
+# "prefix" and "exact file", which meant a directory written without it matched nothing at all.
+
+
+def test_a_pattern_covers_its_own_path() -> None:
+    assert common.path_covered("src/a.py", "src/a.py")
+
+
+def test_the_trailing_slash_changes_nothing() -> None:
+    assert common.path_covered("src/rein/brief.py", "src/rein/") is True
+    assert common.path_covered("src/rein/brief.py", "src/rein") is True
+
+
+def test_the_prefix_is_anchored_at_a_separator() -> None:
+    """`src/app` must not swallow `src/app.py` — the reason the exact case existed."""
+    assert common.path_covered("src/app.py", "src/app") is False
+    assert common.path_covered("src/app/main.py", "src/app") is True
+
+
+def test_an_empty_pattern_covers_nothing() -> None:
+    """ "" and "/" would otherwise cover the whole repository by accident."""
+    assert common.path_covered("src/a.py", "") is False
+    assert common.path_covered("src/a.py", "/") is False
+
+
+def test_the_most_specific_pattern_wins_regardless_of_order() -> None:
+    patterns = ["docs/", "docs/tasks/", "docs/tasks/T-001.md"]
+    assert common.longest_cover("docs/tasks/T-001.md", patterns) == "docs/tasks/T-001.md"
+    assert common.longest_cover("docs/tasks/T-002.md", reversed(patterns)) == "docs/tasks/"
+    assert common.longest_cover("src/a.py", patterns) is None

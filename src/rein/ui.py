@@ -281,7 +281,7 @@ def _tail(text: str) -> str:
 
 def _review_subjects(body: dict[str, object]) -> list[str]:
     """The id a human-review write is about, for the audit event's subject_ids (best-effort)."""
-    for key in ("challenge_id", "subject_id", "card_id", "domain"):
+    for key in ("subject_id", "card_id", "domain"):
         value = body.get(key)
         if isinstance(value, str) and value:
             return [value]
@@ -460,7 +460,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         limit = max(1, min(limit, 200))
         root = self.server.active_root()
         events = _load_events_cached(root / ".rein" / "events.ndjson")
-        open_ids = {e.id for e in events if e.event in events_mod.ATTENTION_EVENTS}
+        open_ids = {e.id for e in events_mod.open_attention(events, status_api.task_status_of(root))}
         self._send_json(
             HTTPStatus.OK,
             {
@@ -486,9 +486,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
 
     def _send_review_get(self, suffix: str) -> None:
-        """Route a /api/review/ GET: the Challenge-first session, one stage, a reveal, or a gate.
+        """Route a /api/review/ GET: the gate ④ session, one of its stages, or a gate's deliverables.
 
-        The Challenge-first paths are matched first and by exact shape; anything else is handed to
+        The session paths are matched first and by exact shape; anything else is handed to
         review_api as a gate *name*, so a traversal-shaped suffix is just an unknown gate (404). The
         broad `except` keeps a damaged SSOT from 500-ing the pane, the same posture as /api/status.
         """
@@ -500,9 +500,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if suffix.startswith("stage/"):
                 self._send_json(HTTPStatus.OK, review_api.stage_data(root, suffix[len("stage/") :]))
                 return
-            if suffix.startswith("challenge/") and suffix.endswith("/reveal"):
-                cid = suffix[len("challenge/") : -len("/reveal")]
-                self._send_json(HTTPStatus.OK, review_api.challenge_reveal(root, cid))
+            if suffix.startswith("as-built/"):
+                wanted = urllib.parse.unquote(suffix[len("as-built/") :])
+                self._send_json(HTTPStatus.OK, review_api.as_built(root, wanted))
                 return
             self._send_json(HTTPStatus.OK, review_api.collect_review(root, suffix))
         except review_api.ReviewError as exc:
@@ -606,18 +606,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
         self._send_json(HTTPStatus.OK, {"ok": True, "id": request_id})
 
-    # -- Challenge-first human-review writes (plan §21.1) --
+    # -- human-review writes (plan §21.1) --
     #
     # Every write is one Store transaction that refuses a stale machine digest (409) and records an
-    # audit event beside the change — a human answering a challenge cannot make the machine review
+    # audit event beside the change — a human recording a judgement cannot make the machine review
     # stale (E2E-09), and a machine review regenerated under the reviewer's feet refuses their next
     # write (E2E-08). The machine half is copied through byte-for-byte, so only `human` moves.
 
     def _review_post(self, action: str, body: dict[str, object]) -> None:
         handlers = {
-            "challenge": self._review_challenge,
             "decision": self._review_decision,
-            "counterfactual": self._review_counterfactual,
             "expertise": self._review_expertise,
             "disposition": self._review_disposition,
             "expert": self._review_expert,
@@ -676,21 +674,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (store_mod.StoreError, models.DocumentError, ValueError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
 
-    def _review_challenge(self, body: dict[str, object]) -> None:
-        # No default for `confidence`: how sure the reviewer was is theirs to state, and a server
-        # that guesses it is writing a human judgement nobody made.
-        cid, choice = str(body.get("challenge_id") or ""), str(body.get("choice") or "")
-        confidence, rationale = str(body.get("confidence") or ""), str(body.get("rationale") or "")
-        if not confidence:
-            raise UiActionError(HTTPStatus.BAD_REQUEST, "confidence is required (low, medium or high)")
-        self._review_mutate(
-            body,
-            "challenge_answered",
-            lambda review, human: human_review.record_challenge_answer(
-                review, human, cid, choice, confidence=confidence, rationale=rationale
-            ),
-        )
-
     def _review_decision(self, body: dict[str, object]) -> None:
         # Confidence is required, not defaulted. A default would be this server inventing a human
         # judgement — the same overclaim `epistemic_status` exists to prevent, one layer up.
@@ -704,15 +687,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             lambda review, human: human_review.record_decision(
                 review, human, cid, choice, confidence=confidence, reason=reason
             ),
-        )
-
-    def _review_counterfactual(self, body: dict[str, object]) -> None:
-        cid, model = str(body.get("challenge_id") or ""), str(body.get("corrected_model") or "")
-        answer = str(body.get("answer") or "")
-        self._review_mutate(
-            body,
-            "counterfactual_answered",
-            lambda _review, human: human_review.record_counterfactual(human, cid, model, answer=answer),
         )
 
     def _review_expertise(self, body: dict[str, object]) -> None:

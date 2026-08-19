@@ -91,8 +91,8 @@ FROZEN_AFTER_GATE_THREE: tuple[str, ...] = (
     ".rein/oci/",
 )
 
-#: Rule 3's built-in defaults, used when config carries no `guard.paths`. A key ending in "/"
-#: guards the prefix; any other key guards that exact file.
+#: Rule 3's built-in defaults, used when config carries no `guard.paths`. A key guards the path it
+#: names and everything beneath it; the trailing slash is punctuation, not meaning.
 DEFAULT_GUARD_PATHS: dict[str, str] = {
     "docs/20-design.md": "requirements",
     "docs/decisions/": "requirements",
@@ -128,13 +128,8 @@ def _repo_or_cwd(start: Path | None = None) -> repo_mod.Repo:
 
 
 def _matches(rel: str, patterns: tuple[str, ...]) -> str | None:
-    """The pattern in `patterns` that covers `rel`, or None."""
-    for pattern in patterns:
-        if pattern.endswith("/") and rel.startswith(pattern):
-            return pattern
-        if rel == pattern:
-            return pattern
-    return None
+    """The pattern in `patterns` that covers `rel`, or None (:func:`rein.common.path_covered`)."""
+    return common.longest_cover(rel, patterns)
 
 
 def _config(repo: repo_mod.Repo) -> models.Config | None:
@@ -158,8 +153,9 @@ def guard_paths(config: models.Config | None) -> dict[str, str]:
 def required_gate(file_path: str, rules: dict[str, str] | None = None, repo: repo_mod.Repo | None = None) -> str | None:
     """The gate this edit requires under rule 3. None when the path is not guarded.
 
-    An exact entry wins over prefix entries; among matching prefixes the longest wins, so the
-    decision does not depend on the config's key order.
+    The most specific entry wins, so the decision does not depend on the config's key order. An
+    exact entry still beats every prefix — a prefix that covers a path can only be shorter than it
+    — which is why that case no longer needs a branch of its own.
     """
     repo = repo or _repo_or_cwd()
     rel = repo.rel(file_path)
@@ -167,14 +163,8 @@ def required_gate(file_path: str, rules: dict[str, str] | None = None, repo: rep
         return None
     if rules is None:
         rules = guard_paths(_config(repo))
-    exact = rules.get(rel)
-    if exact is not None:
-        return exact
-    best: tuple[int, str] | None = None
-    for key, gate in rules.items():
-        if key.endswith("/") and rel.startswith(key) and (best is None or len(key) > best[0]):
-            best = (len(key), gate)
-    return best[1] if best else None
+    key = common.longest_cover(rel, rules)
+    return rules[key] if key is not None else None
 
 
 def _read_state(repo: repo_mod.Repo) -> models.State | None:
@@ -282,8 +272,14 @@ def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:
     made, reverted, and re-applied leaves no trace in a path list but moves the digest.
 
     Both artifacts are checked. Gate ③ freezes `config.yaml` for the same reason it freezes
-    `plan.yaml` — it pins the sandbox and the quality gate the evidence will be produced in — so
+    `plan.yaml` — it fixes the sandbox and the quality gate the evidence will be produced in — so
     covering only the plan left half the freeze resting on the path rule alone.
+
+    config.yaml is compared by :meth:`models.Config.frozen_digest`, which excludes the image pins:
+    rebuilding a pinned image mid-cycle is a rebuild of the *same* sandbox, and making that cost a
+    rollback meant a task that legitimately added a dependency could not land at all. Everything
+    else in the file — `kind`, `network_profile`, `mount_repo`, the quality gate, the budgets —
+    still fails here the moment it moves.
     """
     from rein import store as store_mod
 
@@ -295,21 +291,29 @@ def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:
     if state is None or state.plan_status != "frozen":
         return []
 
+    def plan_now() -> str | None:
+        document = store.read_plan()
+        return document.digest() if document is not None else None
+
+    def config_now() -> str | None:
+        document = store.read_config()
+        return document.frozen_digest() if document is not None else None
+
     failures: list[str] = []
-    for label, recorded, read in (
-        ("plan.yaml", state.plan_digest, store.read_plan),
-        ("config.yaml", state.plan_config_digest, store.read_config),
+    for label, recorded, live in (
+        ("plan.yaml", state.plan_digest, plan_now),
+        ("config.yaml", state.plan_config_digest, config_now),
     ):
         if not recorded:
             continue  # frozen before this digest was recorded: nothing to compare against
         try:
-            document = read()
+            current = live()
         except (models.DocumentError, strict_yaml.StrictParseError) as exc:
             failures.append(f"{label} is frozen but no longer valid: {exc}")
             continue
-        if document is None:
+        if current is None:
             failures.append(f"{label} is frozen in state.yaml but the file is gone")
-        elif document.digest() != recorded:
+        elif current != recorded:
             failures.append(
                 f"{label} has changed since gate 3 froze it (its digest no longer matches the receipt). "
                 "Roll back with `rein revise --to tasks` instead of editing a frozen artifact."

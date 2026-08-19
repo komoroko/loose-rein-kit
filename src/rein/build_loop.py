@@ -76,6 +76,7 @@ from rein import (
     faults,
     gate_guard,
     models,
+    preflight,
     strict_yaml,
 )
 from rein import repo as repo_mod
@@ -393,6 +394,29 @@ def set_task_status(
     )
 
 
+def _failure_detail(handoff: object) -> dict[str, Any]:
+    """The why-it-stopped fields of a handoff, shaped for an event detail. {} when it says nothing.
+
+    `failure_summary` is deliberately not among them: it is a multi-kilobyte gate log, and an audit
+    record is an index into the evidence rather than a copy of it. Each field is read at its own
+    type — a `retries_left` that is not a mapping of counts says nothing about the budget, and
+    putting whatever it holds on the event would put junk in an append-only log.
+    """
+    if not isinstance(handoff, Mapping):
+        return {}
+    detail: dict[str, Any] = {}
+    step = handoff.get("failed_step")
+    if isinstance(step, str) and step:
+        detail["step"] = step
+    budgets = handoff.get("retries_left")
+    if isinstance(step, str) and isinstance(budgets, Mapping) and isinstance(budgets.get(step), int):
+        detail["retries_left"] = budgets[step]
+    futile = handoff.get("futile")
+    if isinstance(futile, str) and futile:
+        detail["futile"] = futile
+    return detail
+
+
 def _set_task_status_once(
     repo: repo_mod.Repo,
     task_id: str,
@@ -443,9 +467,17 @@ def _set_task_status_once(
     event = {"done": "task_completed", "in-progress": "task_started", "blocked": "task_failed"}.get(
         status, "decision_declared"
     )
-    detail = {"status": status, "note": note}
+    detail: dict[str, Any] = {"status": status, "note": note}
     if landed:
         detail["commit"] = landed
+    if status == "blocked":
+        # What actually went red, on the event that says the task stopped. The gate-step failures
+        # carried `step` and `retries_left` on their own `task_failed` records and this one — the
+        # terminal one, the only `task_failed` a task that blocked on its first round produces at
+        # all — carried a prose note and nothing a reader could sort or count by. The facts are
+        # already in the handoff being written in this same transaction, so nothing new is
+        # discovered here; it is simply written down where the chain can see it.
+        detail.update(_failure_detail(merged.get("handoff")))
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=seen)
         tx.append(event, cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
@@ -510,15 +542,30 @@ def _update_task_handoff_once(
 
 
 def record_attempt_failure(
-    repo: repo_mod.Repo, task_id: str, *, failed_step: str, failure_summary: str, retries_left: dict[str, int]
+    repo: repo_mod.Repo,
+    task_id: str,
+    *,
+    failed_step: str,
+    failure_summary: str,
+    retries_left: dict[str, int],
+    futile: str = "",
 ) -> None:
-    """Record a gate-step failure as both the audit event and the next attempt's inheritance."""
-    patch = {
+    """Record a gate-step failure as both the audit event and the next attempt's inheritance.
+
+    `futile` is the loop's reason for not spending another round (`Orchestrator._futile`) — carried
+    because "the budget ran out" and "the budget was abandoned as pointless" are different things
+    for whoever reads this afterwards, and the second one names something to go and repair.
+    """
+    patch: dict[str, Any] = {
         "failed_step": failed_step[:_HANDOFF_STEP_MAX],
         "failure_summary": failure_summary[-_HANDOFF_SUMMARY_MAX:],
         "retries_left": {name[:_HANDOFF_STEP_MAX]: max(0, min(100, n)) for name, n in retries_left.items()},
     }
-    detail = {"step": failed_step, "retries_left": retries_left.get(failed_step, 0)}
+    if futile:
+        patch["futile"] = futile[:_HANDOFF_SUMMARY_MAX]
+    detail: dict[str, Any] = {"step": failed_step, "retries_left": retries_left.get(failed_step, 0)}
+    if futile:
+        detail["futile"] = futile
     update_task_handoff(repo, task_id, patch, event="task_failed", detail=detail)
 
 
@@ -718,6 +765,10 @@ class Orchestrator:
         # implementer that found the *design* wrong has said `needs-revision`, and overwriting
         # that with `blocked` would file a defect in the plan as a defect in the code.
         self._stops: dict[str, str] = {}
+        # DoD steps already red on the work branch before any task ran, and what they said. A task
+        # that fails one of these is not sent back to an implementer: `_establish_baseline`.
+        self._baseline_red: dict[str, str] = {}
+        self._baseline_taken = False
 
     def _stop_verdict(self, task_id: str) -> tuple[str, bool]:
         """(the status this task's failed attempt calls for, whether an escalation is still owed).
@@ -744,12 +795,44 @@ class Orchestrator:
             self._local.acceptance = established
         return established
 
-    def _spend(self, role: str, prompt_bytes: int) -> None:
-        """Count one launch's input against the role that made it."""
+    def _row_for(self, role: str) -> dict[str, int]:
+        return self._spent.setdefault(role, {"launches": 0, "prompt_bytes": 0, "handed_bytes": 0, "cold_launches": 0})
+
+    def _spend(self, role: str, prompt_bytes: int, *, resumed: bool = False) -> None:
+        """Count one launch's input against the role that made it.
+
+        `resumed` distinguishes a launch that continues the agent's own session from one that
+        starts cold. A cold launch re-reads its ticket, its design slice and the code it is working
+        on from scratch — the `Adapter` docstring has called that the largest avoidable cost in a
+        long build since the capability record was written, and until this counter existed the
+        claim was not something the run could confirm or refute about itself.
+        """
         with self._spend_lock:
-            spent = self._spent.setdefault(role, {"launches": 0, "prompt_bytes": 0})
+            spent = self._row_for(role)
             spent["launches"] += 1
             spent["prompt_bytes"] += prompt_bytes
+            if not resumed:
+                spent["cold_launches"] += 1
+
+    def _spend_handover(self, role: str, handed_bytes: int) -> None:
+        """Count what a launch was *told to read*, as opposed to what was sent in its argv.
+
+        These are different measurements and only the first one was ever taken. The prompt this
+        process composes is a few kilobytes; the dossier plus the ticket, design slice and baseline
+        it names are the actual reading list, and they are where a build's input budget goes. A
+        measurement that cannot see the larger of the two numbers cannot answer whether handing the
+        same documents to every launch is worth caching — which is the question it exists for.
+
+        It is still not a token count and still not the whole truth: what an agent then chooses to
+        open on its own is outside this process entirely. Naming the boundary is the point.
+        """
+        with self._spend_lock:
+            self._row_for(role)["handed_bytes"] += handed_bytes
+
+    def spend_totals(self) -> dict[str, dict[str, int]]:
+        """This run's measurement, by role. A copy — the caller must not hold the lock's data."""
+        with self._spend_lock:
+            return {role: dict(row) for role, row in self._spent.items()}
 
     def spend_summary(self) -> str:
         """Where this run's input went, worst first. Empty when nothing was launched.
@@ -760,14 +843,20 @@ class Orchestrator:
         which role, how many launches, how much each — is the actionable part either way.
         """
         with self._spend_lock:
-            rows = sorted(self._spent.items(), key=lambda item: -item[1]["prompt_bytes"])
+            rows = sorted(self._spent.items(), key=lambda item: -(item[1]["prompt_bytes"] + item[1]["handed_bytes"]))
         if not rows:
             return ""
-        total = sum(row["prompt_bytes"] for _, row in rows)
-        parts = [f"{role} {row['prompt_bytes'] / 1024:.0f}KiB/{row['launches']}" for role, row in rows]
+        sent = sum(row["prompt_bytes"] for _, row in rows)
+        handed = sum(row["handed_bytes"] for _, row in rows)
+        launches = sum(row["launches"] for _, row in rows)
+        cold = sum(row["cold_launches"] for _, row in rows)
+        parts = [
+            f"{role} {(row['prompt_bytes'] + row['handed_bytes']) / 1024:.0f}KiB/{row['launches']}"
+            for role, row in rows
+        ]
         return (
-            f"prompt input: {total / 1024:.0f}KiB over {sum(r['launches'] for _, r in rows)} launches — "
-            + ", ".join(parts)
+            f"input: {sent / 1024:.0f}KiB sent + {handed / 1024:.0f}KiB handed to read over "
+            f"{launches} launches ({cold} cold) — " + ", ".join(parts)
         )
 
     def _note_diagnostic(self, task_id: str, patch: dict[str, Any]) -> None:
@@ -815,6 +904,7 @@ class Orchestrator:
         task_id: str = "",
         role: str = "",
         session: str = "",
+        resumed: bool = False,
     ) -> str:
         """One agent-CLI launch, retried while it is the machine that keeps failing.
 
@@ -836,7 +926,7 @@ class Orchestrator:
         # composes every prompt itself, so it is the one thing here that can be counted exactly.
         # `review_budget` at gate ④ is measured for the same reason — a limit nobody measures is a
         # statement of intent, and this side of the run had no number at all.
-        self._spend(role or where, sum(len(part.encode("utf-8")) for part in argv))
+        self._spend(role or where, sum(len(part.encode("utf-8")) for part in argv), resumed=resumed)
         while True:
             rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
             note = agent_launch_note(role=role or where, adapter=adapter, rc=rc, output=out, session=session)
@@ -934,7 +1024,8 @@ class Orchestrator:
                 "control_plane": self.control is not None,
             },
         )
-        dossier.write(cwd, document)
+        written = dossier.write(cwd, document)
+        self._spend_handover(role, dossier.handover_bytes(document, written, self.repo.path))
         return f"{dossier.RELATIVE_PATH}/{task.id}.json"
 
     def _profile_for_role(self, role: str) -> str:
@@ -1037,6 +1128,7 @@ class Orchestrator:
                 task_id=task.id,
                 role="implementer",
                 session=session,
+                resumed=resume,
             )
             return
         except EnvironmentFault as fault:
@@ -1589,6 +1681,42 @@ class Orchestrator:
             )
         return "", ""
 
+    def _futile(self, task: dag.Task, failed: str, failure_log: str, tree: str, seen: tuple[str, str, str]) -> str:
+        """Why spending another round on this failure would buy the same answer. "" = worth retrying.
+
+        Two readings, and neither parses the failure's text. `faults` refuses to interpret build-tool
+        output on principle — detecting "the lockfile is out of sync" or "the browser is not
+        installed" would mean carrying a pattern for every tool anyone runs — so what is read here
+        is the *observation* instead, which is tool-agnostic and exact:
+
+          **It was already red.** The step failed on the work branch before any task ran
+          (`_establish_baseline`). Sending an implementer back to fix a break it did not cause, in
+          a scope that does not contain it, is three launches spent on a question nobody asked.
+
+          **Nothing moved.** The same step failed with byte-identical output over a tree with the
+          same fingerprint. The implementer ran and changed nothing; the next round has the same
+          inputs and will reach the same place. This is what actually catches the reported cases —
+          a lockfile mismatch, a missing browser binary, an absent CDK context — without knowing
+          anything about any of them.
+
+        An unknown fingerprint ("" — a dry run, a git layer that could not answer) never matches:
+        fail open towards retrying, because spending a retry is recoverable and refusing one on an
+        unread tree is not.
+        """
+        if failed in self._baseline_red:
+            return (
+                f"{task.id}: '{failed}' was already red on {self.branch} before this task ran, so a "
+                f"send-back would ask the implementer to fix a break outside its scope.\n"
+                f"What the baseline said:\n{self._baseline_red[failed]}"
+            )
+        digest = digests.of_bytes(failure_log.encode("utf-8"))
+        if tree and seen == (failed, digest, tree):
+            return (
+                f"{task.id}: '{failed}' failed identically over an unchanged tree — the implementer "
+                "ran and moved nothing, so another round has the same inputs and reaches the same place."
+            )
+        return ""
+
     def _run_task_to_done(self, task: dag.Task, cwd: str, base: str = "") -> tuple[bool, str]:
         """Take one task to done via implementer implementation + the quality-gate pipeline.
 
@@ -1618,6 +1746,9 @@ class Orchestrator:
         # the compact failure summary alone. The review agent step is never resumed (independence).
         session = str(uuid.uuid4()) if self._resume_capable and not self.dry_run else ""
         resume = False
+        # (step, failure digest, tree fingerprint) of the previous round — what `_futile` compares
+        # this round against. "" for the fingerprint means "unknown", which never matches.
+        seen: tuple[str, str, str] = ("", "", "")
         while True:
             self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume, base=base)
             if not self.dry_run:
@@ -1634,12 +1765,18 @@ class Orchestrator:
                     self._stops[task.id] = "needs-revision" if kind == "agent_needs_revision" else "blocked"
                     return False, message
             self._local.steps, self._local.acceptance = [], []
+            after_implementer = self._fingerprint(cwd)
             failed, failure_log = self._run_pipeline(task, cwd, base)
             if failed is None:
                 self._record_task_evidence(task, cwd, base)
                 return True, ""
-            left = budgets.get(failed, 0)
-            print(f"    quality gate fail at step '{failed}' (retries left: {left}): {task.id}")
+            futile = self._futile(task, failed, failure_log, after_implementer, seen)
+            seen = (failed, digests.of_bytes(failure_log.encode("utf-8")), after_implementer)
+            left = 0 if futile else budgets.get(failed, 0)
+            if futile:
+                print(f"    quality gate fail at step '{failed}', not retried — {futile}")
+            else:
+                print(f"    quality gate fail at step '{failed}' (retries left: {left}): {task.id}")
             budgets[failed] = max(0, left - 1)
             if not self.dry_run:  # unreachable in dry-run today (the dry pipeline always passes); keep read-only anyway
                 # The event and the next attempt's inheritance are the same fact, so they are the
@@ -1651,6 +1788,7 @@ class Orchestrator:
                     failed_step=failed,
                     failure_summary=failure_log,
                     retries_left=budgets,
+                    futile=futile,
                 )
             if left <= 0:
                 return False, failure_log
@@ -1706,11 +1844,20 @@ class Orchestrator:
                     break
             if failed is None:
                 return True, ""
-            left = budgets.get(failed, 0)
-            print(f"    integration gate fail at step '{failed}' (retries left: {left}): {ids}")
-            self._event(
-                "task_failed", [t.id for t in tasks], {"step": failed, "stage": "integration", "retries_left": left}
-            )
+            # Same rule as a task's send-back: a step that was already red before any of this
+            # batch ran is not something a fixer launch can be spent on. Without this the join
+            # paid the whole integration budget on the break the per-task loop had just refused
+            # to pay it on, one level up.
+            futile = self._baseline_red.get(failed, "")
+            left = 0 if futile else budgets.get(failed, 0)
+            if futile:
+                print(f"    integration gate fail at step '{failed}', not retried — already red on {self.branch}")
+            else:
+                print(f"    integration gate fail at step '{failed}' (retries left: {left}): {ids}")
+            detail: dict[str, Any] = {"step": failed, "stage": "integration", "retries_left": left}
+            if futile:
+                detail["futile"] = futile
+            self._event("task_failed", [t.id for t in tasks], detail)
             if left <= 0:
                 return False, failure_log
             budgets[failed] = left - 1
@@ -1874,6 +2021,13 @@ class Orchestrator:
             for problem in problems:
                 logger.error(problem)
             return common.EXIT_CANNOT_PROCEED
+        if not self.dry_run and (blockers := self._preflight()):
+            logger.error(
+                "refusing to start: this run cannot finish in this environment, and every reason "
+                "below was knowable before an implementer was launched.\n"
+                + "\n".join(f"  - {b.render()}" for b in blockers)
+            )
+            return common.EXIT_CANNOT_PROCEED
         if self.dry_run:
             return self._run_loop()  # read-only: no lock either, and no contention to guard against
         try:
@@ -1889,6 +2043,7 @@ class Orchestrator:
                     # facts before it stopped, and making the next attempt re-establish them is
                     # exactly the waste the ledger exists to end.
                     self.ledger.flush()
+                    self._record_spend()
                     for summary in (self.ledger.summary(), self.spend_summary()):
                         if summary:
                             print(f"[{summary}]")
@@ -1898,6 +2053,57 @@ class Orchestrator:
             # shutdown often enough that reading this as fatal would stop the loop for good.
             logger.error(f"another build run holds the lock: {exc}")
             return common.EXIT_RETRY_LATER
+
+    def _preflight(self) -> list[preflight.Problem]:
+        """Why this run cannot finish, found before the first launch (`rein.preflight`).
+
+        Every launch this run makes goes through one of the role adapters below, and every gate
+        step through one of the profiles; those are what get checked, and nothing else. Skipped in
+        a dry run, which launches nothing and enters no sandbox — its job is to print the control
+        flow, and refusing to do that because an image is unbuilt would withhold the one answer a
+        dry run exists to give.
+        """
+        roles = {"implementer": self.config.adapter_argv}
+        for step in self.config.steps:
+            if step.kind == "agent" and step.agent_argv:
+                roles[step.agent_role or "code_reviewer"] = step.agent_argv
+        return preflight.check(
+            self.config.raw, self.config.raw.quality_gate, roles, runtime=executors.container_runtime()
+        )
+
+    def _record_spend(self) -> None:
+        """Append this run's measurement to the audit chain. Never raises.
+
+        In the chain rather than in `state.yaml` for two reasons. A run ends in one of four ways
+        and `EXIT_RETRY_LATER` — capacity exhausted mid-build — is the likely one on a long build;
+        an in-process counter dies with it, and a `state.yaml` field would only hold the last run's
+        figure. The chain never rotates, so summing `run_measured` over a cycle is the cycle's
+        total, and each run stays separately readable.
+
+        It records nothing when nothing launched: a run that took the lock and found no frontier
+        did not measure zero, it measured nothing, and an event saying "0 bytes" would be a
+        different claim.
+
+        A failure to append is swallowed. This is the last thing a run does and it is a
+        measurement — losing the number is a worse outcome than the run reporting it, but stopping
+        a finished build over a bookkeeping write would be worse than both.
+        """
+        totals = self.spend_totals()
+        if not totals or not self.cycle_id:
+            return
+        detail = {
+            "run_id": self.run_id,
+            "launches": sum(row["launches"] for row in totals.values()),
+            "cold_launches": sum(row["cold_launches"] for row in totals.values()),
+            "prompt_bytes": sum(row["prompt_bytes"] for row in totals.values()),
+            "handed_bytes": sum(row["handed_bytes"] for row in totals.values()),
+            "by_role": totals,
+        }
+        try:
+            with self.store.transaction() as tx:
+                tx.append("run_measured", cycle_id=self.cycle_id, detail=detail)
+        except Exception as exc:  # noqa: BLE001 - a lost measurement must not fail a finished run
+            logger.debug(f"could not record the run measurement ({exc})")
 
     def _source_problems(self) -> list[str]:
         """Why the prose this build would read is not the prose gate ③ approved.
@@ -1964,6 +2170,49 @@ class Orchestrator:
             promoted = True
         return promoted
 
+    def _establish_baseline(self) -> None:
+        """Which DoD steps are already red on the tree no task has touched yet.
+
+        The reported case: a run's tasks stopped, one after another, on a `check` that a
+        dependency drift had broken weeks earlier. Each one spent its whole send-back budget —
+        three implementer launches — on a failure it had not caused and could not have fixed
+        within its own scope, and the audit chain recorded three `task_failed` verdicts about the
+        code each of them wrote.
+
+        The loop could not tell those apart from a real regression because it had never asked the
+        one question that separates them: *was this step red before the task touched anything?*
+        Asked once here, against the work branch's tip, and answered by the same runner and the
+        same evidence ledger the gate itself uses — so on an unmoved tree it is a cache hit and
+        costs nothing.
+
+        Taken once, and only when a batch is actually about to run: a `rein build` that finds every
+        task done goes straight to gate ④, and paying a full gate run there answers nothing.
+
+        Recording, not refusing. A cycle whose first task is "fix the failing tests" is a
+        legitimate thing to start, and the implementer runs *before* the gate: if it fixed the
+        step, the step goes green and none of this applies. What changes is only what happens when
+        it is still red — `_run_task_to_done` stops rather than buying the same failure three more
+        times.
+        """
+        if self.dry_run or self._baseline_taken:
+            return
+        self._baseline_taken = True
+        steps = [s for s in self._steps_at("task") if s.kind == "command" and s.command]
+        for step in steps:
+            try:
+                failure = self._run_cmd_step(step, self.root)
+            except EnvironmentFault:
+                # Not a fact about the code either way, and the run is about to hit it again for
+                # real. Leave it to the batch, which knows how to abort without marking anything.
+                return
+            if failure:
+                self._baseline_red[step.name] = failure
+        if self._baseline_red:
+            print(
+                f"    [baseline] already red on the work branch before any task ran: "
+                f"{', '.join(sorted(self._baseline_red))}"
+            )
+
     def _run_loop(self) -> int:
         self._recover_in_progress()
         while True:
@@ -1986,6 +2235,10 @@ class Orchestrator:
                 return common.EXIT_HUMAN_NEEDED
 
             mode, tasks = batch
+            # Here rather than at the top of the run: a `rein build` that finds every task done goes
+            # straight to gate ④, and a full gate run at the root to answer a question no task is
+            # going to ask is exactly the waste this exists to end.
+            self._establish_baseline()
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
             try:
                 if mode == "serial" or not self.config.worktree_enabled:
@@ -2204,7 +2457,8 @@ class Orchestrator:
             "\nNext:\n"
             "  1. rein review generate   — coverage manifest, blind actual extraction,\n"
             "                                   conformance comparison, security and maintainability review\n"
-            "  2. rein ui                — answer the unprimed challenges, then read the comparison\n"
+            "  2. rein ui                — read the scope and the orient brief, then answer the\n"
+            "                                   Decision Cards and freeze the review\n"
             "  3. rein approve build     — readiness check, then your confirmation at the terminal\n"
             "\nThis loop cannot open gate 4, and neither can anything but a human: a gate opens only on\n"
             "the gate name typed at an interactive terminal, recorded by `rein approve` itself."

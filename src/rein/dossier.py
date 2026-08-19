@@ -36,7 +36,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from rein import dag, diff_facts, digests, models
+from rein import common, dag, diff_facts, digests, models
 
 #: Where a leaf finds its dossier, relative to its own working directory.
 RELATIVE_PATH = ".rein/work"
@@ -97,8 +97,10 @@ def scope_violations(task: dag.Task, changed: Sequence[str]) -> list[str]:
     prompt, checked by nobody. A task with no declared scope is unbounded, which is what an empty
     `include` has always meant; it is not read as "nothing is allowed".
 
-    A prefix ending in `/` covers everything under it; anything else must match exactly. The same
-    rule `guard.paths` uses, so an operator learns it once.
+    A pattern covers the path it names and everything beneath it, trailing slash or not
+    (:func:`rein.common.path_covered`). The same rule `guard.paths` uses, so an operator learns it
+    once — and the same rule whichever way they spell a directory, which is what it did not use
+    to be.
     """
     include, exclude = task.scope_include, task.scope_exclude
     if not include and not exclude:
@@ -109,7 +111,7 @@ def scope_violations(task: dag.Task, changed: Sequence[str]) -> list[str]:
 
 
 def _matches_any(path: str, patterns: Sequence[str]) -> bool:
-    return any(path.startswith(p) if p.endswith("/") else path == p for p in patterns)
+    return any(common.path_covered(path, p) for p in patterns)
 
 
 def build(
@@ -170,6 +172,31 @@ def write(cwd: str, document: Mapping[str, Any]) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return target
+
+
+def handover_bytes(document: Mapping[str, Any], written: Path, repo_path: Any) -> int:
+    """How much this launch was told to read: the dossier itself plus the documents it names.
+
+    Distinct from the prompt bytes the loop sends, and much larger. The prompt is a few kilobytes
+    of instruction; the reading list is this file plus the ticket, the design slice and the
+    baseline — which is where a build's input actually goes, and the number that decides whether
+    handing the same documents to every launch is worth caching.
+
+    It is a ceiling on the reading list, not a measurement of what was read: an agent may skim the
+    design document or open half the repository beside it, and neither is visible from this side of
+    the process boundary. A source that has since disappeared contributes nothing rather than
+    raising — a measurement is not a thing to fail a build on.
+    """
+    total = written.stat().st_size if written.is_file() else 0
+    sources = document.get("sources")
+    for entry in (sources if isinstance(sources, Mapping) else {}).values():
+        rel = entry.get("path") if isinstance(entry, Mapping) else None
+        if not isinstance(rel, str):
+            continue
+        candidate = repo_path(rel)
+        if candidate.is_file():
+            total += candidate.stat().st_size
+    return total
 
 
 #: What a reviewer may say about a change (`models.FINDING_SEVERITY_VALUES`).

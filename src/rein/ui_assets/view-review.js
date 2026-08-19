@@ -20,6 +20,7 @@ let review = null;     // last /api/review payload for `current`
 let session = null;    // last /api/review/session payload (gate ④'s human-review state)
 let stage = null;      // selected review stage (gate ④ only)
 let stageData = null;  // last /api/review/stage/<stage> payload
+let asBuilt = null;    // last /api/review/as-built/<path> payload, shown under the orient section
 let selected = null;   // selected deliverable id (non-build gates)
 let tabVisible = false;
 let fetchSeq = 0;          // newest request wins; older responses are dropped on arrival
@@ -94,11 +95,12 @@ function stages() { return ((session || {}).stages) || []; }
 function stageAllowed(name) { return stages().some(s => s.name === name); }
 
 // Where to land the reviewer: the first stage still carrying an unrecorded judgement, else the
-// first unlocked one. Never a locked stage — the server would only answer with a refusal.
+// first one. No stage is withheld any more — the whole review is readable from the moment it is
+// generated, and what the reviewer owes is a decision, not a sequence.
 function firstUnsettledStage() {
   const list = stages();
-  const unsettled = list.find(s => !s.locked && s.settled === false);
-  return (unsettled || list.find(s => !s.locked) || list[0] || {}).name || null;
+  const unsettled = list.find(s => s.settled === false);
+  return (unsettled || list[0] || {}).name || null;
 }
 
 // --- writes -------------------------------------------------------------------
@@ -132,24 +134,11 @@ function field(scope, name) {
   return el && el.type !== "radio" ? el.value : "";
 }
 
-function answerChallenge(id) {
-  const choice = field(id, "choice"), confidence = field(id, "confidence");
-  if (!choice) { toast("pick an answer first", "err"); return; }
-  if (!confidence) { toast("say how sure you are", "err"); return; }
-  postReview("challenge", { challenge_id: id, choice, confidence, rationale: field(id, "rationale") });
-}
-
 function answerDecision(id) {
   const choice = field(id, "choice"), confidence = field(id, "confidence");
   if (!choice) { toast("pick an option first", "err"); return; }
   if (!confidence) { toast("say how sure you are", "err"); return; }
   postReview("decision", { card_id: id, choice, confidence, reason: field(id, "reason") });
-}
-
-function answerCounterfactual(id) {
-  const corrected = field(id, "corrected");
-  if (!corrected.trim()) { toast("a corrected model is what closes a mismatch", "err"); return; }
-  postReview("counterfactual", { challenge_id: id, corrected_model: corrected, answer: field(id, "answer") });
 }
 
 function declareExpertise(domain) {
@@ -185,7 +174,7 @@ function selectGate(name) {
 
 async function selectStage(name) {
   if (name === stage) return;
-  stage = name; stageData = null;
+  stage = name; stageData = null; asBuilt = null;
   paint();
   const seq = fetchSeq;
   await fetchStage(seq);
@@ -277,64 +266,55 @@ function emptyNote(text) { return '<div class="empty">' + esc(text) + "</div>"; 
 
 // --- gate ④ stages ------------------------------------------------------------
 
-function challengeStage(d) {
-  const ch = d.challenge;
-  if (!ch) {
-    const open = (session.open_counterfactuals || []);
-    if (!open.length) return '<div class="okline">✓ every scoped challenge is answered.</div>';
-    return open.map(id =>
-      '<div class="card" data-scope="' + esc(id) + '"><div class="subhead">MISMATCH ' + esc(id) + "</div>" +
-      "<p>Your answer differed from what the evidence shows. One acknowledgement does not close that — " +
-      "write what you now believe happens, in your own words.</p>" +
-      '<label class="fld">corrected model<textarea data-field="corrected" rows="3"></textarea></label>' +
-      textField("answer", "anything else worth recording", "optional") +
-      '<div class="gatebar">' + submitBtn("cf", id, "Record the corrected model") + "</div></div>").join("");
-  }
-  const choices = (ch.choices || []).map(c =>
-    '<label class="opt"><input type="radio" name="ch-' + esc(ch.id) + '" data-field="choice" value="' +
-    esc(c.id) + '"> <b>' + esc(c.id) + ".</b> " + esc(c.text) + "</label>").join("");
-  return '<div class="card" data-scope="' + esc(ch.id) + '">' +
-    '<div class="subhead">CHALLENGE ' + esc(ch.id) + " " + riskBadge(ch.risk) + "</div>" +
-    "<p>" + esc(ch.scenario) + "</p>" +
-    '<p class="empty">Answer before you see Expected/Actual. This is a forcing function, not a quiz — ' +
-    "nobody scores it, and it is asked only for the high-risk parts of this change.</p>" +
-    '<div class="opts">' + choices + "</div>" +
-    confidencePicker() +
-    textField("rationale", "why (optional, but it is what you will re-read later)", "") +
-    '<div class="gatebar">' + submitBtn("ch", ch.id, "Answer") + "</div>" +
-    '<div class="empty">' + (d.remaining || []).length + " scoped challenge(s) remaining</div></div>";
-}
-
 function decisionStage(d) {
   const cards = d.decision_cards || [];
-  if (!cards.length) return '<div class="okline">✓ nothing in this review needs a decision.</div>';
   const text = {};
   (d.statements || []).forEach(s => { text[s.id] = s; });
   const answered = {};
   (d.decisions || []).forEach(a => { answered[a.card_id] = a; });
-  return cards.map(card => {
-    const prior = answered[card.id];
-    const opts = (card.options || []).map(o => {
-      const st = text[o.statement_id] || {};
-      return '<label class="opt"><input type="radio" name="dc-' + esc(card.id) + '" data-field="choice" value="' +
-        esc(o.id) + '"' + (prior && prior.choice === o.id ? " checked" : "") + "> <b>" + esc(o.id) + ".</b> " +
-        esc(st.text || o.statement_id) + "</label>";
-    }).join("");
-    const domains = (card.requires_domains || []).length
-      ? '<div class="warn">needs familiarity with: ' + esc(card.requires_domains.join(", ")) + "</div>" : "";
-    const priorLine = prior
-      ? '<div class="okline">recorded: ' + esc(prior.choice) + " (confidence " + esc(prior.confidence) + ")" +
-        (prior.reason ? " — " + esc(prior.reason) : "") + "</div>"
-      : "";
-    return '<div class="card" data-scope="' + esc(card.id) + '">' +
-      '<div class="subhead">DECISION ' + esc(card.id) + " " + riskBadge(card.risk) + "</div>" +
-      "<p>" + esc(card.question) + "</p>" + domains + priorLine +
-      '<div class="opts">' + opts + "</div>" +
-      confidencePicker() +
-      textField("reason", "why", "") +
-      '<div class="gatebar">' + submitBtn("dc", card.id, prior ? "Change the decision" : "Record the decision") +
-      "</div></div>";
+  const cardsHtml = cards.length
+    ? cards.map(card => {
+      const prior = answered[card.id];
+      const opts = (card.options || []).map(o => {
+        const st = text[o.statement_id] || {};
+        return '<label class="opt"><input type="radio" name="dc-' + esc(card.id) + '" data-field="choice" value="' +
+          esc(o.id) + '"' + (prior && prior.choice === o.id ? " checked" : "") + "> <b>" + esc(o.id) + ".</b> " +
+          esc(st.text || o.statement_id) + "</label>";
+      }).join("");
+      const domains = (card.requires_domains || []).length
+        ? '<div class="warn">needs familiarity with: ' + esc(card.requires_domains.join(", ")) + "</div>" : "";
+      const priorLine = prior
+        ? '<div class="okline">recorded: ' + esc(prior.choice) + " (confidence " + esc(prior.confidence) + ")" +
+          (prior.reason ? " — " + esc(prior.reason) : "") + "</div>"
+        : "";
+      return '<div class="card" data-scope="' + esc(card.id) + '">' +
+        '<div class="subhead">DECISION ' + esc(card.id) + " " + riskBadge(card.risk) + "</div>" +
+        "<p>" + esc(card.question) + "</p>" + domains + priorLine +
+        evidenceHtml(card.evidence) +
+        '<div class="opts">' + opts + "</div>" +
+        confidencePicker() +
+        textField("reason", "why", "") +
+        '<div class="gatebar">' + submitBtn("dc", card.id, prior ? "Change the decision" : "Record the decision") +
+        "</div></div>";
+      }).join("")
+    : '<div class="okline">✓ nothing in this review needs a decision.</div>';
+  return cardsHtml + riskBriefStage(d) + securityStage(d);
+}
+
+// A card's evidence — the Expected the plan states and the Actual a reviewer that never saw the
+// plan read. Shown with the card, always. It used to be stripped until the reviewer had recorded an
+// unprimed guess about the card, which meant the one screen asking for a judgement withheld the
+// material for making it.
+function evidenceHtml(evidence) {
+  if (!evidence || typeof evidence !== "object") return "";
+  const rows = Object.keys(evidence).map(k => {
+    const v = evidence[k];
+    const text = typeof v === "string" ? v : JSON.stringify(v);
+    return "<tr><td>" + esc(k.replace(/_/g, " ")) + "</td><td>" + esc(text) + "</td></tr>";
   }).join("");
+  if (!rows) return "";
+  return '<div class="subhead" style="margin-top:.5rem">EVIDENCE</div><div class="scroll"><table>' +
+    rows + "</table></div>";
 }
 
 // The three axes, side by side and never merged. models.py: there is no single `verified` field,
@@ -376,10 +356,15 @@ function expectedActualStage(d) {
 const DISPOSITIONS = ["revise_implementation", "revise_design", "revise_requirement",
   "run_experiment", "request_expert", "reduce_scope", "dispute_finding"];
 
+// The findings the cards were derived from, shown under them. A gap's disposition form lives here
+// and nowhere else — recording what happens to a gap is a judgement the schema, the API and the
+// blocker list all expect, and until this section was reachable the pane offered no way to make it.
+// Returns "" when there is nothing: this is a sub-section now, not a stage, and an "all clear" line
+// under a stack of open decisions would be reassuring about the wrong thing.
 function riskBriefStage(d) {
   const gaps = d.gaps || [], extras = d.extra_behaviors || [];
-  let html = "";
-  if (!gaps.length && !extras.length) html += '<div class="okline">✓ no open gaps or ungrounded behaviour.</div>';
+  if (!gaps.length && !extras.length && !(d.statements || []).length) return "";
+  let html = '<div class="subhead" style="margin-top:.8rem">WHAT RAISED THESE</div>';
   gaps.forEach(g => {
     html += '<div class="card" data-scope="disp:' + esc(g.id) + '">' +
       '<div class="subhead">' + esc(g.id) + " " + esc(g.kind || "") + " " + riskBadge(g.risk) +
@@ -403,27 +388,14 @@ function riskBriefStage(d) {
 }
 
 function securityStage(d) {
-  const findings = d.findings || [];
-  if (!findings.length) return '<div class="okline">✓ the security review reported no findings.</div>';
-  return findings.map(f =>
+  const findings = d.security_findings || [];
+  if (!findings.length) return "";
+  return '<div class="subhead" style="margin-top:.8rem">SECURITY REVIEW</div>' + findings.map(f =>
     '<div class="card"><div class="subhead">' + esc(f.id) + " " + esc(f.category || "") + " " +
     riskBadge(f.severity) + (f.blocking === true ? ' <span class="conf low">blocking</span>' : "") + "</div>" +
     "<p>" + esc(f.attack_scenario || "") + "</p>" +
     (f.recommended_fix ? '<div class="empty">suggested fix: ' + esc(f.recommended_fix) + "</div>" : "") +
     "</div>").join("");
-}
-
-function overviewStage(d) {
-  const s = d.summary || {};
-  const rows = Object.keys(s).map(k =>
-    "<tr><td>" + esc(k.replace(/_/g, " ")) + '</td><td class="mono">' + esc(s[k]) + "</td></tr>").join("");
-  const budget = (session.budget || []).map(b =>
-    "<tr><td>" + esc(b.name.replace(/_/g, " ")) + '</td><td class="mono">' + esc(b.actual) + " / " + esc(b.limit) +
-    "</td><td>" + (b.exceeded ? '<span class="conf low">over</span>' : "ok") + "</td></tr>").join("");
-  return '<div class="scroll"><table>' + rows + "</table></div>" +
-    '<div class="subhead" style="margin-top:.8rem">REVIEW BUDGET</div>' +
-    '<div class="scroll"><table>' + budget + "</table></div>" +
-    '<div class="empty">A blown budget splits the scope; it never lengthens this screen.</div>';
 }
 
 function expertiseBlock() {
@@ -460,18 +432,213 @@ function freezeStage(d) {
   return html;
 }
 
-function genericStage(d, key, label) {
-  const rows = d[key] || [];
-  if (!rows.length) return emptyNote("nothing recorded for " + label + ".");
-  return '<pre class="patch">' + esc(JSON.stringify(rows, null, 2)) + "</pre>";
+// --- orient: what was built, and under what conditions -------------------------
+//
+// The stage that asks for nothing and exists so the decision stage can ask for less. Everything
+// here was derived at generation time (brief.derive) and stored in the machine half, so it
+// describes the same commit range as the claims beside it. Nothing on this screen is a sentence
+// the tool wrote: ids, paths, commands and image references, plus reviewer prose reached by id.
+
+function briefTable(rows) {
+  return '<div class="scroll"><table>' + rows.join("") + "</table></div>";
+}
+
+function pathsCell(paths) {
+  return (paths || []).map(esc).join("<br>") || "—";
+}
+
+// The one part of the orientation that can change an approval, so it is the one part ordered by
+// decision value: what nobody declared, then what was declared and never read out, then a count of
+// the ones that went as foreseen. A table of expected rows is where the first two go to hide.
+function asBuiltPanel() {
+  if (!asBuilt || stage !== "orient") return "";
+  return '<div class="subhead" style="margin-top:.8rem">AS BUILT \u2014 ' + esc(asBuilt.path) +
+    ' <span class="mono">@' + esc((asBuilt.commit || "").slice(0, 12)) + "</span></div>" +
+    "<pre class=\"scroll\">" + esc(asBuilt.content || "") + "</pre>" +
+    '<div class="empty">The file as it ends up at the commit this review is bound to \u2014 not the ' +
+    "diff, and not your working tree.</div>";
+}
+
+function requirementsOnPeople(section) {
+  if (!section) return "";
+  let html = '<div class="subhead" style="margin-top:.8rem">WHAT THIS CHANGE NOW REQUIRES OF A PERSON</div>';
+
+  const undeclared = section.undeclared || [];
+  if (undeclared.length) {
+    html += briefTable([("<tr><th>nobody declared this</th><th>read out of the code</th><th>where</th></tr>")].concat(
+      undeclared.map(u =>
+        "<tr><td>" + esc(u.category.replace(/_/g, " ")) + " " + confBadge(u.confidence) +
+        '</td><td>' + esc(u.statement) + '</td><td class="mono">' + pathsCell(u.paths) + "</td></tr>"))) +
+      '<div class="warn">No task declared these at gate \u2462, so nobody decided they would be ' +
+      "somebody's job. That is what this row is: not a defect, a decision that has not been made.</div>";
+  }
+
+  const unobserved = section.unobserved || [];
+  if (unobserved.length) {
+    html += '<div class="subhead" style="margin-top:.6rem">DECLARED, NOTHING READ OUT</div>' +
+      briefTable(unobserved.map(u => surfaceRow(u)));
+  }
+
+  const declared = section.as_declared;
+  if (declared) {
+    html += '<div class="subhead" style="margin-top:.6rem">AS DECLARED</div>' +
+      briefTable(["<tr><td>foreseen at gate \u2462 and present</td><td>" + esc(declared.count) + "</td></tr>"]);
+    if ((declared.entries || []).length) {
+      html += "<details><summary>show them</summary>" +
+        briefTable(declared.entries.map(u => surfaceRow(u))) + "</details>";
+    }
+  }
+  return html;
+}
+
+// One declared surface. `as_built` is a link rather than a body: what a person operates is the file
+// as it ends up, which no diff shows — and holding it in the review would make the document a copy
+// of the repository.
+function surfaceRow(u) {
+  const built = (u.as_built || []).map(a =>
+    '<button data-act="asbuilt" data-id="' + esc(a.path) + '">' + esc(a.path) + "</button>").join(" ");
+  return '<tr><td class="mono">' + esc(u.task_id) + "</td><td>" + esc(u.kind.replace(/_/g, " ")) +
+    "</td><td>" + esc(u.name) + "</td><td>" + esc(u.adr || "\u2014") + "</td><td>" +
+    (built || pathsCell(u.paths)) + "</td></tr>";
+}
+
+function confBadge(level) {
+  return level ? '<span class="conf ' + esc(level) + '">' + esc(level) + "</span>" : "";
+}
+
+// The as-built body, fetched from the commit the review is bound to. The server refuses any path
+// the stored brief did not publish, so this cannot become a way to read the repository.
+async function showAsBuilt(path) {
+  try {
+    const res = await fetch("/api/review/as-built/" + encodeURIComponent(path));
+    const payload = await res.json();
+    if (payload.error) { toast(payload.error, "err"); return; }
+    if (payload.too_large) {
+      toast(path + " is " + payload.bytes + " bytes, over the " + payload.limit +
+        " this pane shows — read it at " + payload.commit.slice(0, 12) + " instead", "err");
+      return;
+    }
+    asBuilt = payload;
+    paint();
+  } catch (e) { toast("request failed: " + e, "err"); }
+}
+
+function orientStage(d) {
+  const b = d.brief || {};
+  let html = "";
+
+  if (b.delivered) {
+    html += '<div class="subhead">DELIVERED</div>' + briefTable(b.delivered.map(t =>
+      "<tr><td class=\"mono\">" + esc(t.task_id) + "</td><td>" + esc(t.title || "") + "</td><td>" +
+      esc(t.kind || "") + " " + riskBadge(t.risk) + "</td><td>" + esc(t.status) + "</td><td class=\"mono\">" +
+      esc((t.claim_ids || []).join(" ")) + "</td></tr>"));
+  }
+
+  if (b.execution_boundary) {
+    html += '<div class="subhead" style="margin-top:.8rem">WHERE THE QUALITY GATE RAN</div>' +
+      briefTable([("<tr><th>step</th><th>sandbox</th><th>image</th><th>network</th><th>command</th></tr>")].concat(
+        b.execution_boundary.map(s =>
+          "<tr><td>" + esc(s.step) + "</td><td>" + esc(s.sandbox || "—") + '</td><td class="mono">' +
+          esc(s.image || "—") + "</td><td>" +
+          (s.network === "unconfined" ? '<span class="conf low">unconfined</span>' : esc(s.network || "—")) +
+          '</td><td class="mono">' + esc((s.command || []).join(" ") || s.agent_role || "—") +
+          "</td></tr>"))) +
+      '<div class="empty">`none` is what the executor enforced, not what the config asked for: a ' +
+      "sandboxed step is refused at run time unless its network profile is none. A host step has no " +
+      "boundary to report, which is what unconfined says.</div>";
+  }
+
+  if (b.environment_drift) {
+    html += '<div class="subhead" style="margin-top:.8rem">THE SANDBOX MOVED SINCE GATE \u2462</div>' +
+      briefTable([
+        '<tr><td>approved at gate \u2462</td><td class="mono">' + esc(b.environment_drift.approved_at_gate_three) + "</td></tr>",
+        '<tr><td>evidence produced in</td><td class="mono">' + esc(b.environment_drift.evidence_produced_in) + "</td></tr>",
+      ]) +
+      '<div class="empty">Allowed, and not a blocker: gate \u2462 freezes config.yaml without its ' +
+      "image pins, so a task that adds a dependency can have its sandbox rebuilt without re-approving " +
+      "a plan nothing changed. You are approving over evidence produced in the later one.</div>";
+  }
+
+  if (b.stack || b.data) {
+    const rows = [];
+    const s = b.stack || {}, dt = b.data || {};
+    if (s.dependency_files) rows.push("<tr><td>dependency manifests</td><td>" + pathsCell(s.dependency_files) + "</td></tr>");
+    if (s.generated_files) rows.push("<tr><td>generated files</td><td>" + pathsCell(s.generated_files) + "</td></tr>");
+    if (dt.migrations) rows.push("<tr><td>migrations</td><td>" + pathsCell(dt.migrations) + "</td></tr>");
+    html += '<div class="subhead" style="margin-top:.8rem">WHAT MOVED UNDERNEATH THE CODE</div>' + briefTable(rows);
+  }
+
+  html += requirementsOnPeople(b.requirements_on_people);
+
+  if (b.verification || b.operations) {
+    const v = b.verification || {}, nothing = v.established_for_nothing || [];
+    const rows = [
+      "<tr><td>steps in the quality gate</td><td>" + esc(v.steps == null ? "—" : v.steps) + "</td></tr>",
+    ];
+    if (nothing.length) {
+      rows.push('<tr><td>established for no task</td><td class="mono">' + esc(nothing.join(" ")) + "</td></tr>");
+    }
+    html += '<div class="subhead" style="margin-top:.8rem">WHAT THE GATE ESTABLISHED</div>' + briefTable(rows);
+    if (nothing.length) {
+      html += '<div class="warn">Those steps ran for nothing: every task\'s diff missed their paths, or ' +
+        "the run never got that far.</div>";
+    }
+    const ops = b.operations || {};
+    if (!(ops.command || []).length) {
+      html += '<div class="warn">The smoke step has no command: nothing in this run ever started the ' +
+        "deliverable. Tests can be green while packaging, the entry point or dependency resolution is " +
+        "broken.</div>";
+    }
+  }
+
+  const r = b.residuals || {};
+  const residualRows = [];
+  ["awaiting_evidence", "blocked", "unstarted"].forEach(k => {
+    if (r[k]) residualRows.push("<tr><td>" + esc(k.replace(/_/g, " ")) + '</td><td class="mono">' +
+      esc(r[k].join(" ")) + "</td></tr>");
+  });
+  if (r.open_change_requests) residualRows.push('<tr><td>open change requests</td><td class="mono">' +
+    esc(r.open_change_requests.join(" ")) + "</td></tr>");
+  if (residualRows.length) {
+    html += '<div class="subhead" style="margin-top:.8rem">STILL OPEN</div>' + briefTable(residualRows);
+  }
+
+  if ((r.accounts || []).length) {
+    html += '<div class="subhead" style="margin-top:.8rem">WHAT THE IMPLEMENTER SAID ABOUT THEM</div>' +
+      briefTable(r.accounts.map(a =>
+        '<tr><td class="mono">' + esc(a.task_id) + "</td><td>" + esc(a.outcome || "") + "</td><td>" +
+        esc(a.summary) + "</td></tr>")) +
+      '<div class="empty">A claim by the agent that did the work, not a finding: nothing independent ' +
+      "checked it. It is here because these tasks are the ones you are being asked to approve around.</div>";
+  }
+
+  const findings = d.residual_findings || [];
+  if (findings.length) {
+    html += '<div class="subhead" style="margin-top:.8rem">UNRESOLVED REVIEW FINDINGS</div>' +
+      findings.map(f =>
+        '<div class="card"><div class="subhead">' + esc(f.task_id) + " " + riskBadge(
+          f.severity === "must_fix" ? "high" : "low") + "</div>" +
+        "<p>" + esc(f.statement) + "</p>" +
+        '<div class="empty">' + esc(f.anchor || "no anchor") + " · observed against " +
+        esc((f.observed_commit || "an unrecorded commit").slice(0, 9)) + ", not the reviewed HEAD</div></div>").join("") +
+      '<div class="empty">These were written by each task\'s own reviewer against that task\'s tree at ' +
+      "that moment. The merged tree may have moved since — that is why the commit is printed beside " +
+      "each one rather than presented as an observation about this review.</div>";
+  }
+
+  // Always last and always present: the claims the comparator settled have no card, so a reviewer
+  // reading cards alone would see only what the review could not conclude. `expectedActualStage`
+  // says so itself when there are none, which is why there is no fallback around this.
+  return html + asBuiltPanel() +
+    '<div class="subhead" style="margin-top:.8rem">EXPECTED vs ACTUAL</div>' + expectedActualStage(d);
 }
 
 // --- scope: what this review speaks for, and what it does not ------------------
 //
-// The first stage, and the only one that asks for nothing. An approval covers a boundary, so the
-// boundary is stated before the first question rather than being reconstructible from review.yaml
-// afterwards. Nothing here is an expected answer, which is why it can precede the Decision Cards'
-// withheld evidence (decisionStage below) without priming a judgement.
+// The first stage. An approval covers a boundary, so the boundary is stated before anything else
+// rather than being reconstructible from review.yaml afterwards. It is deliberately the numbers
+// only — what was actually built is the orient stage's job, and reading them in that order is what
+// stops a reviewer weighing "11 files" without knowing which eleven.
 
 function kv(label, value, cls) {
   return '<div class="axis' + (cls ? " " + cls : "") + '"><div class="axlabel">' + esc(label) +
@@ -496,7 +663,8 @@ function scopeStage(d) {
       bytesText(cov.analyzed_bytes)) +
     kv("claims", c.claims + " · gaps " + c.gaps + " · scenarios " + c.scenarios +
       " · decision cards " + c.decision_cards + " · security " + c.security_findings) +
-    kv("you will be asked", s.challenges_asked + " challenge(s), " + c.decision_cards + " decision card(s)") +
+    kv("you will be asked", c.decision_cards + " decision card(s), " + s.decisions_required +
+      " of them blocking") +
     "</div>";
   // Staleness is only assertable when both ends are known. "Generated against — but HEAD is now —"
   // is the shape of a check that did not run being printed as a check that failed.
@@ -557,16 +725,12 @@ function stageBody() {
     return '<div class="warn">No machine review has been generated. Gate ④ approves a grounded review, ' +
       "not a green test run — run <code>rein review generate</code> first.</div>";
   }
-  if (d.locked) {
-    return '<div class="warn">' + esc(d.reason || "locked") + "</div>" +
-      '<div class="empty">Seeing the answer before you have thought about the scenario is the priming ' +
-      "this order exists to prevent.</div>";
-  }
-  // Real stage names come from the server (models.REVIEW_STAGE_ORDER: scope, decision, diff,
-  // freeze) — these case labels must match those verbatim, or a stage silently falls through to
-  // the default "nothing to show" and its form becomes unreachable from the dashboard.
+  // Real stage names come from the server (models.REVIEW_STAGE_ORDER: scope, orient, decision,
+  // diff, freeze) — these case labels must match those verbatim, or a stage silently falls through
+  // to the default "nothing to show" and its form becomes unreachable from the dashboard.
   switch (d.stage) {
     case "scope": return scopeStage(d);
+    case "orient": return orientStage(d);
     case "decision": return decisionStage(d);
     case "diff": return diffHtml((d.diff || {}), review.review_meta);
     case "freeze": return freezeStage(d);
@@ -578,8 +742,8 @@ function stageBody() {
 // the stage records nothing, so no claim is made about it either way.
 function stageListHtml() {
   return '<div class="subhead">REVIEW STAGES</div>' + stages().map(s => {
-    const mark = s.locked ? "🔒" : (s.settled === true ? "✓" : (s.settled === false ? "◆" : "·"));
-    return '<div class="rv-item' + (s.name === stage ? " active" : "") + (s.locked ? " missing" : "") +
+    const mark = s.settled === true ? "✓" : (s.settled === false ? "◆" : "·");
+    return '<div class="rv-item' + (s.name === stage ? " active" : "") +
       '" data-stage="' + esc(s.name) + '"><span class="rv-read">' + mark + "</span>" +
       esc(s.name.replace(/_/g, " ")) + "</div>";
   }).join("") +
@@ -753,15 +917,14 @@ document.addEventListener("rein:refresh", () => { if (tabVisible) fetchReview();
 // read back with getAttribute — no server-supplied string ever becomes code on the page that holds
 // the approval token.
 const ACTIONS = {
-  ch: answerChallenge,
   dc: answerDecision,
-  cf: answerCounterfactual,
   disp: recordDisposition,
   exp: declareExpertise,
   expert: requestExpert,
   freeze: freezeReview,
   approve: approveCurrent,
   changes: requestChanges,
+  asbuilt: showAsBuilt,
 };
 
 document.addEventListener("click", e => {

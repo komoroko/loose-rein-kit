@@ -125,9 +125,10 @@ def _subjects(
                     f"satisfy what the plan says it must. What happens to it?"
                 ),
                 "options": ("revise_implementation", "revise_design", "run_experiment", "request_expert", "dispute"),
-                # Withheld until the reviewer records their own read (human_review.challenges).
-                # Expected is what the plan says; Actual is what a reviewer that never saw the plan
-                # read out of the code. Their disagreement is the whole signal.
+                # Served with the card. Expected is what the plan says; Actual is what a reviewer
+                # that never saw the plan read out of the code. Their disagreement is the whole
+                # signal, so putting it anywhere but beside the question makes the question harder
+                # to answer without making anyone think harder.
                 "evidence": {
                     "expected": claim.get("expected"),
                     "actual_statement_ids": list(claim.get("actual_statement_ids", ()) or ()),

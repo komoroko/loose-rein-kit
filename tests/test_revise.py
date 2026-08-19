@@ -116,14 +116,47 @@ def test_receipts_are_cleared_but_the_audit_chain_is_untouched(tmp_path: Path) -
     assert len(after) == len(before) + 1
 
 
-def test_the_review_is_invalidated(tmp_path: Path) -> None:
+def test_the_human_review_returns_to_not_started(tmp_path: Path) -> None:
+    """ "The review goes stale" is what the module has said since it was written, and what it did
+    was set a `state.review.status` nothing read — a second copy of a state `review.yaml` already
+    holds, able only to disagree with it. The freeze is a precondition `approve.readiness`
+    re-checks, so this is where the sentence has to land."""
     repo = repo_at(
         tmp_path,
         state=make_state(gates=ALL_APPROVED, phase="done"),
         review=make_review(generated=True, human_status="frozen"),
     )
     revise.apply(repo, revise.plan_revision(repo, "build", []), "reason")
-    assert state_of(repo).review.get("status") == "stale"
+    review = store_mod.Store(repo).read_review()
+    assert review is not None and review.human_status == "not_started"
+
+
+def test_the_machine_review_is_left_alone(tmp_path: Path) -> None:
+    """It is a reading of the code, not of the plan. Clearing it here would destroy the thing the
+    human answers were answers *to*, and regenerating is a deliberate act with its own cost."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=ALL_APPROVED, phase="done"),
+        review=make_review(generated=True, human_status="frozen"),
+    )
+    before = store_mod.Store(repo).read_review()
+    assert before is not None
+    machine_before = before.machine_digest()
+    revise.apply(repo, revise.plan_revision(repo, "build", []), "reason")
+    after = store_mod.Store(repo).read_review()
+    assert after is not None and after.machine_digest() == machine_before
+
+
+def test_a_roll_back_with_no_gate_to_reset_leaves_the_review_alone(tmp_path: Path) -> None:
+    """Nothing was withdrawn, so nothing the human recorded was about a plan that fell away."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(phase="build"),  # nothing approved from `build` onward
+        review=make_review(generated=True, human_status="frozen"),
+    )
+    revise.apply(repo, revise.plan_revision(repo, "build", []), "reason")
+    review = store_mod.Store(repo).read_review()
+    assert review is not None and review.human_status == "frozen"
 
 
 # --- impact analysis ----------------------------------------------------------

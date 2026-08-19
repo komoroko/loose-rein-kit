@@ -35,7 +35,12 @@ Each `cmd` step is gate-decided by exit code; a fail goes back to the implemente
 step's own `retries` budget** (over the budget → `blocked`) — but **only a failure the code
 earned counts**: an agent that never launched (capacity exhausted, the CLI not on PATH, a
 supervisor's signal) or a step that could not be run at all (no container runtime, no pinned
-image) produced no verdict, so it spends no budget, marks no task, and stops the run instead
+image) produced no verdict, so it spends no budget, marks no task, and stops the run instead.
+A send-back that *cannot help* is not spent either: a step already red at the baseline, or one
+that failed **identically over a tree the implementer did not move**, stops the task at once with
+`futile:` on its record — read from the observation, never from the failure's text, since the loop
+parses no build-tool output. That is what ends the pattern where a lockfile mismatch, a missing
+browser binary or an absent CDK context burned a whole budget three launches at a time
 → **gate-check every path the task changed** (merge-stage gate guard — a pending-gate path escalates as `gate_violation` and
 blocks the task instead of landing) → merge into work sequentially in **ascending-id order** →
 **when a batch merged 2+ leaves, re-run the cmd steps once on the merged work branch** — the
@@ -75,6 +80,22 @@ parallel leaf is cut from the work branch's tip and reads only what is committed
 uncommitted ticket edit reached no task at all while its author watched the new version on
 screen. Commit it, or roll back with `rein revise --to tasks` if the approval no longer covers it.
 
+It also refuses **before the first agent launch** on anything about the machine that this run
+cannot finish without: no container runtime while a step needs an OCI sandbox, a pinned image
+nobody built here, an agent CLI that is not on PATH, a `quality_gate` step marked `required:` with
+no `command:` to run. Every one of those was already knowable from `config.yaml` and the machine,
+and used to be discovered a lock, a worktree, a dossier and a model launch later — phrased as a
+task's failure. Each is reported with the command that repairs it, and all of them at once.
+
+Then it establishes a **baseline**: the DoD's command steps, run once against the work branch as
+it stands, before any task has touched it. A step already red there is not a fact about any task,
+so a task that fails it is not sent back to an implementer — it stops after one round with
+`futile:` on its `task_failed` record, naming what the baseline said. This is what stops a
+pre-existing `check` failure from spending three send-backs per task on a break outside every
+task's scope. It costs one gate run, cached by content in the evidence ledger, and it does not
+refuse: a cycle whose first task is "fix the failing tests" runs its implementer *before* the
+gate, so the step goes green and none of it applies.
+
 **`rein build` is one command, not an iteration** — it runs the whole algorithm to completion
 and its exit is the signal. Never schedule wake-ups to poll a run in progress; wait for the
 command. The exit code says what to do next, and is meant for an unattended supervisor as much
@@ -109,6 +130,36 @@ done
 A run stopped that way leaves each unfinished task `todo` with its worktree in place; the next
 run finalizes and salvages that work onto the leaf's branch and the implementer **continues**
 rather than restarting. `rein resume` and `rein doctor` both say so when you come back.
+
+### When the run outlasts your host's command timeout
+
+Every agent host caps how long one tool call may run, and a real build outlasts that cap. **"Never
+poll" is not the same as "never wait", and the gap between them is where the cost goes**: an agent
+whose command was cut off starts checking on the run, and each check is a launch, a context, and a
+share of the session limit spent on learning that the build is still building.
+
+So run it detached, with its output in a file, and **look once**:
+
+```sh
+nohup rein build --supervise > .rein/build.log 2>&1 &   # returns immediately; the run owns the lock
+```
+
+Then **end your turn** and let the human bring you back, or wait on the process if your host can
+wait at all. When you do come back, read the run's own record — never re-invoke the build to find
+out how it is going:
+
+- `rein resume` — what changed since you last looked, and what is waiting on a human
+- `rein status` / `rein ui` — the board
+- `tail -n 40 .rein/build.log` — the run's console output
+
+**Do not re-run `rein build` to check on it.** A second run cannot start while the first holds the
+build lock: it exits `3`, which is indistinguishable from a capacity stop, and a supervisor reading
+that will sleep on a build that is running perfectly well. Re-run it only after the first has
+exited, and only for the exit code it actually returned.
+
+**Set no wake-up timer under a minute, and prefer none at all.** A build's unit of progress is a
+task, which is minutes at the fastest; a check every few seconds measures nothing that has changed
+and costs a context each time.
 
 The non-deterministic parts are each task's implementation code content and the `review` agent
 step's fixes. Both are absorbed deterministically: after an agent step changes code, the
@@ -158,7 +209,10 @@ is the point; never fold them into the implementer's session.
    the pipeline events.
    Findings sit on three separate axes (integrity / semantic support / conformance); there is no
    single `verified`, and "extra behaviours: 0" appears only with the Coverage Manifest that
-   earned it. **Triage it**: a blocking security finding, a diverged high/critical claim, an ungrounded
+   earned it. The orient stage also states **what this change now requires of a person** — the
+   operator-facing readings sorted by whether a task's `operator_surface` foresaw them, the ones
+   nobody declared first — and, for each task that did not land, **what its implementer said about
+   it**, which is a claim rather than a finding. **Triage it**: a blocking security finding, a diverged high/critical claim, an ungrounded
    high/critical extra behaviour, or an insufficient Coverage Manifest blocks the gate — return
    those to the implementer to fix (a fix moves HEAD, so re-generate; a later commit leaves the
    review stale) and record judgment calls as escalation events for the human. Do not present
@@ -173,10 +227,13 @@ is the point; never fold them into the implementer's session.
    commit range it is bound to, how large the change is, what the review could **not** read, and
    whether it fits the review budget. A reader who does not know the boundary cannot weigh what
    follows. Then the completed tasks, key additions/changes, test results, **the grounded-review
-   results — the three axes, coverage, and the Challenge-first human review** — and unresolved
-   items. The human review is completed in `rein ui` — the stage
-   rail walks the reviewer from the unprimed challenge through the Decision Cards to the freeze
-   button (`.rein/prompts/rules/gate-workflow.md` "The gate ④ human review") — and frozen
+   results — the three axes and coverage** — and unresolved items. **Do not re-narrate the orient
+   stage in chat**: what was delivered, what moved underneath it, which sandbox and network posture
+   each gate step ran under, what the gate established, and what is still open are all derived into
+   the review itself and read there. Say where it is, not what it says. The human review is
+   completed in `rein ui` — the stage rail walks the reviewer from the scope through the orient
+   brief and the Decision Cards to the freeze button
+   (`.rein/prompts/rules/gate-workflow.md` "The gate ④ human review") — and frozen
    there or with `rein review complete` before the gate can be requested. Unanswered
    high/critical Decision Cards block the freeze; say so rather than presenting the gate.
    - **Smoke-step check**: if the deliverable is runnable (CLI, server, …) and

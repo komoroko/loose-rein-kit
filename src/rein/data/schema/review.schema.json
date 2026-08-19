@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/komoroko/loose-rein-kit/schema/review.schema.json",
   "title": "Loose Rein review.yaml (rein-grounded-v1)",
-  "description": "Two independently-digested halves. Regenerating `machine` resets `human`; a human answering a challenge must NOT make `machine` stale (plan 17.5). Every human-facing sentence is a statement with an epistemic status and evidence links — there is no free-form prose field anywhere in this document, because a sentence without a status is exactly what an AI fills in when it has no source (plan 6.8).",
+  "description": "Two independently-digested halves. Regenerating `machine` resets `human`; a human recording a judgement must NOT make `machine` stale (plan 17.5). Every human-facing sentence is a statement with an epistemic status and evidence links — there is no free-form prose field anywhere in this document, because a sentence without a status is exactly what an AI fills in when it has no source (plan 6.8).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -69,6 +69,20 @@
       "type": "string",
       "pattern": "^AST-[0-9]{3,}$"
     },
+    "taskId": {
+      "type": "string",
+      "pattern": "^T-[0-9]{3,}$"
+    },
+    "taskIdList": {
+      "type": "array",
+      "maxItems": 200,
+      "items": { "$ref": "#/$defs/taskId" }
+    },
+    "pathList": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/$defs/repoPath" }
+    },
     "decisionCardId": {
       "type": "string",
       "pattern": "^DC-[0-9]{3,}$"
@@ -106,6 +120,44 @@
         }
       }
     },
+    "declaredSurface": {
+      "description": "One `operator_surface` entry from the frozen plan, restated with the task that declared it and with the as-built identity of the paths it names.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "kind",
+        "name",
+        "paths"
+      ],
+      "properties": {
+        "task_id": { "$ref": "#/$defs/taskId" },
+        "kind": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 200 },
+        "paths": { "$ref": "#/$defs/pathList" },
+        "adr": { "type": "string", "maxLength": 64 },
+        "statement_ids": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/actualStatementId" } },
+        "as_built": {
+          "description": "The file as it ends up, named rather than copied: the blob at `binding.subject_head_sha` and its size. A diff shows the change; this is what somebody has to operate. The body is fetched from that commit on demand, so review.yaml never becomes a second copy of the repository.",
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "blob",
+              "bytes"
+            ],
+            "properties": {
+              "path": { "$ref": "#/$defs/repoPath" },
+              "blob": { "type": "string", "maxLength": 64 },
+              "bytes": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
     "machine": {
       "type": "object",
       "additionalProperties": false,
@@ -140,7 +192,7 @@
                 "required": [
                   "change_digest",
                   "plan_digest",
-                  "toolchain_digest"
+                  "environment_digest"
                 ]
               }
             }
@@ -172,10 +224,14 @@
             "config_digest": {
               "$ref": "#/$defs/digest"
             },
-            "toolchain_digest": {
+            "environment_digest": {
               "$ref": "#/$defs/digest"
             },
             "coverage_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "tasks_digest": {
+              "description": "The `state.yaml` task facts the orientation brief and the residual findings were derived from. Separate from `change_digest`, which covers the committed tree minus .rein/: a task promoted from `awaiting-evidence` to `done` after a human recorded what they saw moves no other digest here, and regenerating across that used to reuse a brief the repository had since contradicted.",
               "$ref": "#/$defs/digest"
             },
             "actual_digest": {
@@ -858,9 +914,216 @@
                 }
               },
               "evidence": {
-                "description": "What the card is about — the Expected the plan states, the Actual a reviewer that never saw the plan read, and the gap or finding that raised it. The API withholds it until the reviewer has recorded their own read of a high/critical card (human_review.challenges).",
+                "description": "What the card is about — the Expected the plan states, the Actual a reviewer that never saw the plan read, and the gap or finding that raised it. Served with the card, always: it used to be withheld until the reviewer had recorded an unprimed guess, which put a comprehension quiz in front of the decision the gate was actually asking for.",
                 "type": "object"
               }
+            }
+          }
+        },
+        "brief": {
+          "description": "The gate-4 orientation: what this cycle delivered and under what conditions, derived from the SSOT by `brief.derive` and bound to `binding.subject_head_sha` like everything else here. It authors no sentence of its own — ids, paths, commands and image references only — and where it carries a sentence somebody else wrote, the confidence and the code anchor travel with it, because that was always the rule rather than the indirection through an id. An absent section reports nothing rather than reporting an empty finding.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "delivered": {
+              "description": "Tasks whose work is in the reviewed tree, in the order the frozen plan lists them.",
+              "type": "array",
+              "maxItems": 200,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "task_id",
+                  "status"
+                ],
+                "properties": {
+                  "task_id": { "$ref": "#/$defs/taskId" },
+                  "title": { "type": "string", "maxLength": 200 },
+                  "kind": { "enum": ["foundation", "parallel", "integration"] },
+                  "risk": { "$ref": "#/$defs/risk" },
+                  "status": { "type": "string", "maxLength": 32 },
+                  "claim_ids": { "type": "array", "maxItems": 64, "items": { "type": "string", "maxLength": 64 } },
+                  "commit": { "$ref": "#/$defs/commit" }
+                }
+              }
+            },
+            "stack": {
+              "description": "Which dependency manifests and generated files moved. Their bodies are mechanical churn nobody reads; that they changed is the fact.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "dependency_files": { "$ref": "#/$defs/pathList" },
+                "generated_files": { "$ref": "#/$defs/pathList" }
+              }
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "migrations": { "$ref": "#/$defs/pathList" }
+              }
+            },
+            "execution_boundary": {
+              "description": "Where each DoD step ran. `network` is what the executor enforced, not what the config hoped for: an `oci` profile is refused at run time unless its network profile is `none`, and a `host` profile has no boundary to report — which is what `unconfined` says.",
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "step"
+                ],
+                "properties": {
+                  "step": { "type": "string", "maxLength": 64 },
+                  "kind": { "type": "string", "maxLength": 32 },
+                  "command": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 512 } },
+                  "agent_role": { "type": "string", "maxLength": 64 },
+                  "profile": { "type": "string", "maxLength": 64 },
+                  "sandbox": { "type": "string", "maxLength": 32 },
+                  "image": { "type": "string", "maxLength": 200 },
+                  "network": { "type": "string", "maxLength": 32 }
+                }
+              }
+            },
+            "environment_drift": {
+              "description": "Present only when the sandbox the evidence was produced in is not the one gate 3 approved. Gate 3 freezes config.yaml without its image pins, so rebuilding a pinned image mid-cycle — which a task that legitimately adds a dependency forces — costs no rollback. This is what that permission is paid for with: the approver signing at gate 4 is told, rather than left to find out.",
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "approved_at_gate_three",
+                "evidence_produced_in"
+              ],
+              "properties": {
+                "approved_at_gate_three": { "$ref": "#/$defs/digest" },
+                "evidence_produced_in": { "$ref": "#/$defs/digest" }
+              }
+            },
+            "requirements_on_people": {
+              "description": "What this change now requires of a person, sorted by whether anyone foresaw it. The operator-facing readings a blind extractor took out of the code are matched against the `operator_surface` entries a human froze at gate 3 — by category equality and path coverage, never by comparing one piece of prose to another. Ordered by decision value: what nobody declared, then what was declared and never read out, then a count of the foreseen ones.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "undeclared": {
+                  "description": "An operator-facing behaviour the code was read to have that no task declared. Nobody decided this would be somebody's job. Carried with its confidence and its anchor paths, because a reviewer's sentence separated from those is not evidence of anything.",
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "category",
+                      "statement_id",
+                      "statement",
+                      "confidence"
+                    ],
+                    "properties": {
+                      "category": { "type": "string", "maxLength": 64 },
+                      "statement_id": { "$ref": "#/$defs/actualStatementId" },
+                      "statement": { "$ref": "#/$defs/text" },
+                      "confidence": { "enum": ["low", "medium", "high"] },
+                      "paths": { "$ref": "#/$defs/pathList" }
+                    }
+                  }
+                },
+                "unobserved": {
+                  "description": "A declaration nothing was read out about: either it was not built or it could not be read, and telling those apart is the reviewer's job — which is why this says only that the reading is absent.",
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": { "$ref": "#/$defs/declaredSurface" }
+                },
+                "as_declared": {
+                  "description": "Foreseen and present. A count, because a table of expected rows is where the two lists above go to hide; the entries travel with it for a reader who asks.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "count"
+                  ],
+                  "properties": {
+                    "count": { "type": "integer", "minimum": 0 },
+                    "entries": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": { "$ref": "#/$defs/declaredSurface" }
+                    }
+                  }
+                }
+              }
+            },
+            "operations": {
+              "description": "The launch check. An empty `command` means the DoD never started the deliverable — a green suite over a package that cannot boot is what this exists to make visible.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "command": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 512 } },
+                "required": { "type": "boolean" }
+              }
+            },
+            "verification": {
+              "description": "How many DoD steps the gate ran, and which of them were established for no landed task at all. A step configured but established for nothing means every task's diff missed its `paths:`, or the run never got that far; the rest say the gate did what everyone already assumed, so they are a number rather than rows.",
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "steps"
+              ],
+              "properties": {
+                "steps": { "type": "integer", "minimum": 0 },
+                "established_for_nothing": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": { "type": "string", "maxLength": 64 }
+                }
+              }
+            },
+            "residuals": {
+              "description": "What is still open at the moment the gate is asked for.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "awaiting_evidence": { "$ref": "#/$defs/taskIdList" },
+                "blocked": { "$ref": "#/$defs/taskIdList" },
+                "unstarted": { "$ref": "#/$defs/taskIdList" },
+                "open_change_requests": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 64 } },
+                "accounts": {
+                  "description": "What the last implementer said, in its own words, about a task that did NOT land — the account `rein report` has always written and nobody approving a gate has ever read. A claim, not a finding: the loop checks `touched` against the real diff separately, and this is the sentence beside that, not a verdict. Only unfinished tasks: for work that landed, the implementer's own explanation is the one input the blind extractor is forbidden to see, and putting it in front of the approver would move that priming onto the person the arrangement exists to protect.",
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "task_id",
+                      "summary"
+                    ],
+                    "properties": {
+                      "task_id": { "$ref": "#/$defs/taskId" },
+                      "outcome": { "type": "string", "maxLength": 32 },
+                      "summary": { "type": "string", "maxLength": 4000 }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "residual_findings": {
+          "description": "Per-task review findings that were never resolved — the `consider` ones stop nothing by design and would otherwise die with the session that produced them. Each carries the commit and tree fingerprint it was observed against, which is NOT `subject_head_sha`: a reviewer looked at one task's worktree at one moment, and presenting that as an observation about the merged tree would be the overclaim this document exists to prevent.",
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "task_id",
+              "severity",
+              "statement"
+            ],
+            "properties": {
+              "task_id": { "$ref": "#/$defs/taskId" },
+              "severity": { "enum": ["must_fix", "consider"] },
+              "statement": { "type": "string", "maxLength": 2000 },
+              "anchor": { "type": "string", "maxLength": 512 },
+              "observed_commit": { "$ref": "#/$defs/commit" },
+              "observed_tree": { "$ref": "#/$defs/digest" }
             }
           }
         },
@@ -961,69 +1224,6 @@
                   "partial",
                   "unfamiliar"
                 ]
-              }
-            }
-          }
-        },
-        "challenge_answers": {
-          "type": "array",
-          "maxItems": 64,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "challenge_id",
-              "choice",
-              "confidence",
-              "answered_before_reveal"
-            ],
-            "properties": {
-              "challenge_id": {
-                "$ref": "#/$defs/challengeId"
-              },
-              "choice": {
-                "type": "string",
-                "maxLength": 8,
-                "pattern": "^[A-Z]$"
-              },
-              "rationale": {
-                "type": "string",
-                "maxLength": 2000
-              },
-              "confidence": {
-                "enum": [
-                  "low",
-                  "medium",
-                  "high"
-                ]
-              },
-              "answered_before_reveal": {
-                "const": true
-              }
-            }
-          }
-        },
-        "counterfactual_answers": {
-          "description": "Required after a mismatch. One acknowledgement does not close a mismatch (plan 14.3).",
-          "type": "array",
-          "maxItems": 64,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "challenge_id",
-              "corrected_model"
-            ],
-            "properties": {
-              "challenge_id": {
-                "$ref": "#/$defs/challengeId"
-              },
-              "answer": {
-                "type": "string",
-                "maxLength": 2000
-              },
-              "corrected_model": {
-                "$ref": "#/$defs/text"
               }
             }
           }
@@ -1130,10 +1330,6 @@
           ]
         }
       }
-    },
-    "challengeId": {
-      "description": "A card asked in two beats: the reviewer's unprimed read is recorded against the same id the decision is (human_review.challenges).",
-      "$ref": "#/$defs/decisionCardId"
     }
   }
 }

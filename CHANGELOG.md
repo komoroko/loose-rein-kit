@@ -4,6 +4,325 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.2] - 2026-08-19
+
+Two rounds of reported defects, and one thing the lifecycle never had a word for. The first round:
+gate ④ asked a human to pass a quiz and then to decide, and gave them nothing to decide *with*. The
+second, from running the loop on real work: the machine kept charging tasks for its own failures — a
+freeze that a rebuilt image broke, retries against a break no task caused, a review pipeline re-read
+for nothing, a queue that only grew. The shape recurs: something the code could distinguish and did
+not, so a cost landed on whoever was nearest. The third strand is the same shape one step earlier —
+no task could state what its change would require of a *person*, so gate ④ had nothing to compare
+the operator-facing readings against, and finding out cost whoever ended up operating the result.
+
+**Breaking**, all of it requiring a re-approval or a regeneration rather than a migration:
+
+- `review.yaml` from earlier releases does not validate — `human` no longer accepts
+  `challenge_answers` or `counterfactual_answers`, `binding.toolchain_digest` is now
+  `environment_digest`, and `machine` carries three new sections. Regenerate with `rein review
+  generate`.
+- `state.yaml` carrying a `review:` block does not validate — delete it. `state.plan.toolchain_digest`
+  is now `environment_digest`; re-approve gate ③.
+- The `challenge_answered` and `counterfactual_answered` event types are gone from the vocabulary
+  and `environment_repinned` is new; a log containing the first two will not validate.
+
+### Gate 4 says what the change now requires of a person
+
+The orientation stage had a table headed "what the blind extractor read", and it was a list of
+statement ids. The text of a reading appeared on screen only where a claim happened to cite it, so
+a sentence about a schema no claim covered — exactly the sentence somebody about to operate the
+thing needs — was reachable nowhere. Meanwhile nothing in the template had a word for a setting
+somebody has to supply, a migration somebody has to run, or a signal somebody has to watch: not the
+requirements, not the design, not the plan, not the test plan.
+
+That is a missing **Expected** side, not a missing screen. A task in `plan.yaml` now declares its
+`operator_surface` — `{kind, name, paths, adr}` — frozen at gate ③ with everything else, and gate ④
+sorts the extractor's operator-facing readings by whether one of those declarations foresaw them:
+**what nobody declared first**, then what was declared and never read out, then a **count** of the
+ones that went as foreseen. Expected rows are a number, because a table of them is where the first
+two go to hide. The `kind` vocabulary is a subset of the extractor's own statement categories rather
+than a new one, so the two sides compare without a translation table that could be wrong; matching
+is category equality plus path coverage, and stops there, because declaring a human's prose and a
+model's prose "the same surface" because they read alike is the overclaim the brief exists to avoid.
+
+### The file as it ends up, not the diff that changed it
+
+A diff shows what moved; what somebody operates is the result. Each declared surface now offers an
+**as-built** view — the file at the commit the review is bound to, fetched on demand from
+`/api/review/as-built/<path>` rather than copied into `review.yaml`, which would make the document a
+second copy of the repository. The route serves only paths the stored brief published; an ordinary
+committed source file is refused, because what this may read has to come from the review rather than
+from the request.
+
+### The implementer's own account of a task that did not land
+
+`rein report --summary`'s help says "a human reads this". None ever did: `handoff.report` was read
+by the loop, to phrase a failure, and by the next attempt's dossier. It now reaches gate ④ for the
+tasks that did **not** land — the ones the approver is being asked to sign around, which is when the
+reason matters — labelled as the claim it is. For work that landed it stays where it was: an
+implementer's explanation of its own code is the one input the blind extractor may not see, and
+handing it to the approver instead would move that priming onto the person the whole arrangement
+exists to protect.
+
+### Fewer things to read at every gate
+
+- The **self-assessment is three items**, not five. *Anticipated risks and trade-offs* is gone: gates
+  ①–③ already put the deliverable through an independent adversarial round, and the same question
+  answered a second time by its author is the self-consistent explanation this system declines to
+  treat as evidence. The *context-bloat signal* is gone too — hygiene addressed to the agent, and
+  the pre-compact check already carries it.
+- **Gate ③ presents two graph artefacts, not three.** `rein dag --mermaid` drew the same graph
+  `--render` already states; a second rendering of one fact is a second thing to read rather than a
+  second thing to know. The flag stays, and `/status` is where the whole picture is drawn.
+- **The quality-gate summary names only the exceptions.** It listed every DoD step and how many
+  tasks established it; its own docstring said the row worth reading is the step established for
+  nothing. Now that is what it prints, beside a count of the rest.
+
+### Where the trade-off stays
+
+An ADR that changes something somebody has to operate must now record **what it requires of a
+person** and **whether it can be undone**. Reversibility is a fact about the decision, and it is what
+the gate ④ approver is actually handed; the pros and cons stay with the options, at gate ②, where
+the choice is. Nothing restates them after the fact — a decision already made does not get
+re-litigated in front of the person approving the evidence for it.
+
+### Challenge-first is removed
+
+A high/critical Decision Card withheld its evidence — the Expected the plan states, the Actual a
+reviewer that never saw the plan read — until the reviewer had recorded an unprimed guess, and a
+guess that missed opened a counterfactual to close before the review could freeze. The intent was
+cognitive forcing. The effect was a comprehension quiz standing between a human and the decision
+they were there to make, on the one screen that asks for anything.
+
+It also defended against nothing. The priming that matters at gate ④ is the *extractor's* — a
+model shown the Expected reports the Expected — and that is enforced separately, in
+`actual_extraction.FORBIDDEN_KEYS`, and still is. Withholding evidence from the *human* protects a
+different party from a different thing.
+
+What remains is the forcing function nobody can clear by rote: an unanswered high/critical card
+blocks the freeze, and every answer carries a confidence the tool will not invent. Gone with it:
+`human_review.challenges` and the eight functions around it, `/api/review/challenge` and
+`/api/review/counterfactual`, the reveal endpoint, and the pane's `challengeStage` — which was
+already unreachable, having no `case` in the stage switch.
+
+One defect fell out of the removal. `_critical_claim_ids` walked the *challenge* set — the three
+hardest cards, capped — so a review with five critical cards measured its own
+`max_critical_decisions` budget against three of them.
+
+### The orient stage: what was built, and under what conditions
+
+`rein ui`'s gate ④ rail is now **scope → orient → decision → diff → freeze**. The new stage asks
+for nothing and exists so the decision stage can ask for less: the delivered tasks and the claims
+they answer, which dependency manifests and migrations moved, **which sandbox, image and network
+posture each quality-gate step ran under**, what the blind extractor read out about interfaces,
+persistence, security boundaries and dependencies, what the gate established and for how many
+tasks, whether anything ever *launched* the deliverable, the Expected/Actual comparison on its
+three axes, and what is still open.
+
+Every line is derived from the SSOT by the new `brief.py` — ids, paths, commands, image
+references, and reviewer prose reached by statement id so its epistemic status stays attached. It
+authors no sentence, which is the schema's rule and not a preference. It is built inside
+`review.generate` and stored in the machine half, so it describes the same commit range as the
+claims beside it; recomputing it on read would put a brief about the working tree next to a review
+about `subject_head_sha`. A section with nothing to report is absent rather than empty — "no
+migrations changed" must not read the same as "migrations were not looked at".
+
+The `network` line is worth naming separately. It is not a config value echoed back: `OciExecutor`
+refuses any profile whose `network_profile` is not `none`, so what the brief prints is what the
+runtime enforced — and a `host` profile is printed as `unconfined`, because "none" about it would
+be a claim nothing ever made.
+
+### `consider` findings reach gate ④, which they were documented to do
+
+The per-task reviewer's `must_fix` findings are resolved inside the build loop or the task blocks.
+Its `consider` findings stop nothing by design and were written to `state.yaml`'s task handoff,
+where nothing read them. `build.md`, the reviewer's own prompt, and the state schema all said they
+would reach a human at gate ④; no code did it. They now arrive as `machine.residual_findings`,
+shown on the orient stage.
+
+Each carries the commit and tree fingerprint it was **observed against**, which is not
+`subject_head_sha`: a reviewer looked at one task's worktree at one moment, and presenting that as
+an observation about the merged tree would be the overclaim the rest of the document is built to
+prevent. A `must_fix` finding on a task that blocked is carried at its own severity — downgrading
+it would hide why the task never landed.
+
+### The decision stage renders its whole payload
+
+`stage_data("decision")` had served the gaps, the ungrounded extra behaviours and the security
+findings since the stage existed, and the pane rendered the cards alone. The disposition form —
+the only way to record what happens to a gap, which `completion_blockers` and the review budget
+both expect — lived in a function nothing called, while the POST route accepting it stayed open.
+
+Deleted outright, being neither reachable nor wanted: `overviewStage` (its counts and its budget
+table are both on the scope stage) and `genericStage` (a JSON dump of an arbitrary payload key).
+
+### The run's input budget is measured, and survives the run
+
+"Every launch's input is measured and reported at the end of the run — a budget nobody counts is a
+statement of intent." The counter saw only the argv this process composes, which is the small half.
+What a launch is *told to read* — the dossier plus the ticket, the design slice and the baseline it
+names — is where a build's input goes, and it was not measured at all.
+
+Both numbers are now counted, alongside how many launches started **cold** rather than resuming the
+agent's own session. That last one makes an existing claim falsifiable: the `Adapter` docstring has
+called a non-resumable CLI "the single largest avoidable cost in a long build" since the capability
+record was written, and nothing in a run could confirm or refute it.
+
+The totals are appended to the audit chain as `run_measured` at the end of each run. Not
+`state.yaml`: a long build's likely ending is `EXIT_RETRY_LATER`, which took the in-process counter
+with it, and a state field would hold only the last run's figure. The chain never rotates, so
+summing over a cycle is the cycle's total while each run stays separately readable. A run that
+launched nothing records nothing — it did not measure zero.
+
+No caching or prompt-trimming follows from this yet, deliberately. Optimising an input budget
+before it could be measured is how a symptom gets treated.
+
+### Waiting for a build without polling it
+
+"`rein build` is one command, not an iteration — never schedule wake-ups to poll a run in progress"
+has been in `build.md` since 0.2.2, and nothing anywhere said how to *wait*. Every agent host caps
+how long one tool call may run and a real build outlasts that cap, so an agent whose command was
+cut off starts checking on the run — each check a launch, a context, and a share of the session
+limit spent learning that the build is still building.
+
+`build.md` now carries the recipe (detached with its output in a file, end the turn, read `rein
+resume` and the log when you come back), and all three capability mappings carry the host-specific
+note. Including the one that matters most: **do not re-run `rein build` to check on it** — the
+build lock makes the second run exit `3`, which is indistinguishable from a capacity stop, so a
+supervisor reading that will sleep on a build that is running perfectly well.
+
+### The environment pin left the plan freeze
+
+Gate ③ froze `config.yaml` whole. A task that legitimately adds a dependency makes the pinned
+sandbox image wrong — the closure it needs is not baked in, and a `network: none` sandbox fails
+identically on every retry — so rebuilding it mid-cycle cost a `rein revise --to tasks`: the plan
+un-froze, every gate below reset in a chain, and a human re-approved a plan nothing had changed.
+
+The freeze is now `Config.frozen_digest()`, which is `config.yaml` with each
+`executor_profiles.<name>.image` removed. Everything that is a *decision* stays inside: `kind`,
+`network_profile`, `mount_repo`, the limits, the quality gate, the budgets, the guard. Only the
+pin — the one thing `rein oci build --write-config` rewrites — is allowed to move underneath it, so
+a sandbox that *opens* still breaks the freeze and still needs the human who approved the narrower
+one.
+
+Making that trade honest meant fixing the digest that was supposed to carry the other half.
+`toolchain_digest` hashed `{"executors": …}` — the role→profile *name* map — while its own
+docstring claimed to move when the sandbox a step ran in changed. `executor_profiles` is where
+`kind`, `image` and `network_profile` live, so repointing a profile at a different image left it
+identical, and nothing anywhere compared it, so the claim was never contradicted. It is now
+`Config.environment_digest()`, it covers the profile bodies, and three things read it: gate ③
+records it in the freeze and in every receipt, `rein doctor` reports when it has moved (INFO, not
+FAIL — this movement is allowed), and gate ④'s orientation shows the approver that the evidence
+they are signing over was produced in an environment gate ③ never saw. `rein oci build
+--write-config` appends an `environment_repinned` event rather than rewriting `config.yaml` outside
+the audit chain.
+
+**Breaking**: `state.plan.toolchain_digest` and `review.yaml`'s `binding.toolchain_digest` are both
+renamed `environment_digest`. Re-approve gate ③ and regenerate the review.
+
+### Refusing before the first launch, and not paying for retries that cannot help
+
+Three failure shapes, one root: the loop discovered after spending models what it could have known
+before spending any.
+
+**Preflight** (`rein.preflight`). No container runtime while a step needs an OCI sandbox, a pinned
+image nobody built here, an agent CLI not on PATH, a `quality_gate` step marked `required:` with no
+`command:` — all now refuse the run with exit `2` and the command that repairs each, before the
+lock, the worktree, the dossier and the launch. `required` in particular has been in the schema and
+in `GateStep`'s docstring — "makes the loop refuse to start, before any implementer has been paid
+for" — read by nothing at all.
+
+**Baseline.** The DoD's command steps run once against the work branch before any task touches it.
+A step already red there is not a fact about any task, so a task failing it stops after one round
+instead of spending three implementer launches on a break outside its own scope. It does not
+refuse: a cycle whose first task is "fix the failing tests" runs its implementer *before* the gate.
+
+**Futile retries.** A step that fails identically over a tree the implementer did not move gets no
+second round. This is read from the observation — same step, same failure digest, same tree
+fingerprint — never from the failure's text: `faults` refuses to interpret build-tool output on
+principle, and adding a pattern for lockfile mismatches would be the first of an endless list. It
+catches the reported cases (a stale lockfile, a missing browser binary, an absent CDK context)
+without knowing anything about any of them.
+
+Both stops record `futile:` on the task's handoff and its `task_failed` event, because "the budget
+ran out" and "the budget was abandoned as pointless" mean different things to whoever reads it —
+only the second names something to go and repair.
+
+### One review status, and no re-reading a subject that has not moved
+
+`state.yaml` carried a `review` block with six status values. Nothing read it: not the property on
+`State`, not the enum in `models`, not one line anywhere. It was written in exactly two places — a
+new cycle and a roll back — and could only ever disagree with `review.yaml`, which holds the real
+machine and human statuses, digested separately. It is deleted, schema included.
+
+The roll back's half of it is now real. "The review goes stale" is what `revise`'s docstring has
+always said, and what it did was set that unread field; it now returns the **human** half of
+`review.yaml` to `not_started` in the same transaction. The machine half is left alone: it is a
+reading of the code rather than of the plan, and clearing it would destroy the thing those answers
+were answers *to*.
+
+`rein review generate` no longer re-runs the pipeline when nothing it reads has moved. Everything
+the review is a function of is a digest computed before a model is called — the committed tree, the
+frozen plan, the config the approval covers, the sandbox, the coverage manifest — and when all of
+them match the review on disk, three reviewer stages would be paid for to read the same bytes *and*
+the human half would be reset, discarding answers about a change nothing had touched. A field run
+recorded `review_generated` fifteen times in one cycle. `--force` says "read it again anyway".
+
+**Breaking**: a `state.yaml` carrying a `review:` block no longer validates. Delete the block.
+
+### One unreadable file no longer shuts gate ④
+
+`human_review.completion_blockers` blocked the freeze on any `insufficient` coverage manifest,
+while `review_policy.coverage_blocks` — which `rein approve build` reads — blocks only at
+high/critical. Two rules over one manifest, and the stricter one reinstated exactly the dead end
+`coverage_gap_risk`'s docstring records having broken: a single binary asset makes the manifest
+insufficient regardless of what was in it, so a low-risk cycle containing one had no way through
+gate ④ at all, scope split included, since splitting never removes the file. The freeze now reads
+the same risk-priced rule as the gate. Nothing about the honesty property changes — the manifest
+still says `insufficient`, and extra-behaviour counts are still withheld rather than rendered zero.
+
+### A directory in `scope` no longer had to be spelled with a slash
+
+`scope: {include: [src/rein]}` matched an exact *file* named `src/rein`, which no changed-path list
+contains, so every file under the directory came back as a scope violation and the task blocked for
+reaching into territory that was its own. `src/rein/` worked. The same rule ran in `guard.paths`.
+
+The trailing slash is now punctuation: a pattern covers the path it names and everything beneath
+it, anchored at a separator, so `src/app` covers `src/app/main.py` and never `src/app.py` — which
+is the entire reason the exact case existed. One helper (`common.path_covered`), three call sites,
+and the rule written down in both schemas, where it had never appeared.
+
+### Resolved events leave the queue
+
+`plan_invalidated`, `review_failed` and `actual_extraction_failed` had no retirement condition at
+all, so `rein status` carried "waiting for you" rows for a rollback re-approved weeks earlier and
+for a generation that failed once and succeeded on the retry. A queue that only grows is one people
+stop reading, and the rows it buries are the ones that mattered.
+
+Each is now closed by the event that *undoes what it reported* — `plan_frozen` for the first,
+`review_generated` for the other two — ordered by the chain's own `seq`, never by a clock.
+`events.ndjson` is untouched: this narrows what a view calls pending, exactly as every other row of
+the queue is derived rather than stored, and there is still no way to close a record by hand. The
+whole policy moved into `events.py` beside `ATTENTION_EVENTS`, so the dashboard feed, the release
+gate's counter and `rein status` stop each having their own idea of what is open.
+
+### `task_failed` says what failed
+
+The terminal `task_failed` — the only one a task that blocks on its first round produces — carried
+a status and a prose note. Which step went red, and how much budget was left, lived on the
+per-attempt records only. Both now travel on the event, lifted from the handoff written in the same
+transaction, so nothing new is discovered and the chain becomes something a reader can sort by.
+
+### The rein.lock version canary runs on every pull request
+
+`.rein/rein.lock` records the release that wrote this repository's materialized artifacts, and
+`rein sync` stamps it only as a side effect of writing something — so a release changing no payload
+byte left it at the previous version while `sync --check`, which compares content, passed. That is
+what happened at 0.3.1: the shipped template claimed 0.3.0. The only thing that noticed was a shell
+snippet in the release workflow, on the day of the release. It is now `template_lint`'s
+`check_rein_lock_version`, beside the CHANGELOG and `uv.lock` canaries, and the workflow step is
+gone.
+
 ## [0.3.1] - 2026-08-17
 
 Three reported defects, and what looking for more of the same kind turned up. The kind is one

@@ -72,11 +72,27 @@ def test_an_exclusion_wins_over_an_inclusion() -> None:
     assert dossier.scope_violations(scoped, ["src/api/x.py", "src/vendor/lib.py"]) == ["src/vendor/lib.py"]
 
 
-def test_a_prefix_needs_its_slash() -> None:
-    """The same rule `guard.paths` uses, so an operator learns it once."""
+def test_a_prefix_matches_only_at_a_separator() -> None:
+    """The reason the exact/prefix distinction existed: a scope naming a file must not swallow the
+    files whose names merely start with it."""
     scoped = task(scope_include=("src/api/handler.py",))
     assert dossier.scope_violations(scoped, ["src/api/handler.py"]) == []
     assert dossier.scope_violations(scoped, ["src/api/handler.py.bak"]) == ["src/api/handler.py.bak"]
+
+
+def test_a_directory_covers_its_tree_whether_or_not_it_was_spelled_with_a_slash() -> None:
+    """The trailing slash used to be load-bearing and silent: `src/api` matched an exact *file* by
+    that name, which no changed-path list contains, so every file under the directory came back as
+    a scope violation and the task blocked for reaching into territory that was its own."""
+    changed = ["src/api/handler.py", "src/apiary/bee.py"]
+    with_slash = dossier.scope_violations(task(scope_include=("src/api/",)), changed)
+    without = dossier.scope_violations(task(scope_include=("src/api",)), changed)
+    assert with_slash == without == ["src/apiary/bee.py"]
+
+
+def test_an_exclude_needs_no_slash_either() -> None:
+    scoped = task(scope_include=("src/",), scope_exclude=("src/vendor",))
+    assert dossier.scope_violations(scoped, ["src/api/x.py", "src/vendor/lib.py"]) == ["src/vendor/lib.py"]
 
 
 def test_the_plan_carries_scope_all_the_way_into_the_graph() -> None:

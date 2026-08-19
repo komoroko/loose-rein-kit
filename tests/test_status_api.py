@@ -363,9 +363,8 @@ def test_a_batch_task_failed_stays_until_every_named_task_is_done(tmp_path: Path
     assert [item for item in queue if item["kind"] == "escalation"]
 
 
-def test_plan_invalidated_is_never_auto_suppressed(tmp_path: Path) -> None:
-    """No task subject to check against — this stays a human's call regardless of task status,
-    same as before this change (`plan_invalidated`'s conventional subject is `-`, not a task)."""
+def test_plan_invalidated_stands_until_the_plan_is_frozen_again(tmp_path: Path) -> None:
+    """A task finishing says nothing about it — the plan is not a task."""
     seed_repo(
         tmp_path,
         events=_chain_with_subjects(("plan_invalidated", ())),
@@ -377,11 +376,24 @@ def test_plan_invalidated_is_never_auto_suppressed(tmp_path: Path) -> None:
     assert [item for item in queue if item["kind"] == "escalation"]
 
 
-def test_task_outcome_resolved_is_scoped_to_task_failed_and_knowledge_gap() -> None:
-    from rein import event_chain
+def test_a_re_freeze_retires_the_plan_invalidated_it_answered(tmp_path: Path) -> None:
+    """The roll back happened, the human re-approved gate ③, and the queue said "waiting for you"
+    about it for the rest of the cycle. `plan_frozen` is the event that undoes exactly the state
+    `plan_invalidated` reported, so it is what closes the row — nothing is erased from the log."""
+    seed_repo(
+        tmp_path,
+        events=_chain_with_subjects(("plan_invalidated", ()), ("plan_frozen", ("APPROVAL-1",))),
+        state=make_state(tasks={"T-001": "done"}),
+    )
+    status = status_api.collect_status(repo_mod.Repo(tmp_path))
+    queue = status["pending"]
+    assert isinstance(queue, list)
+    assert not [item for item in queue if item["kind"] == "escalation"]
 
-    review_failed = event_chain.make("review_failed", "demo-cycle", subject_ids=("T-001",))
-    assert not status_api._task_outcome_resolved(review_failed, {"T-001": "done"})
+
+def test_task_status_of_answers_empty_for_an_unreadable_repository(tmp_path: Path) -> None:
+    """The safe direction: no statuses retires nothing, rather than a crash or a cleared queue."""
+    assert status_api.task_status_of(tmp_path) == {}
 
 
 # --- the pending queue --------------------------------------------------------

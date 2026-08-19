@@ -228,9 +228,8 @@ class TestBuildGateDiff:
 class TestScopeStage:
     """The scope stage says what this review speaks for — and what it does not.
 
-    It comes before the unprimed challenge and is deliberately not a priming stage: a commit range,
-    a file count and a coverage gap reveal no expected answer, and withholding them would ask a
-    reviewer to answer the first question without knowing what their approval will cover.
+    It comes first because an approval covers a boundary: a reviewer who does not know the commit
+    range, how much of it could be read, and what could not be, does not know what they approved.
     """
 
     def _generated(self, root: Path, *, extra_coverage: str = "", head: str = "e" * 40) -> None:
@@ -243,7 +242,7 @@ class TestScopeStage:
             "  binding:\n"
             "    change_digest: sha256:" + "a" * 64 + "\n"
             "    plan_digest: sha256:" + "b" * 64 + "\n"
-            "    toolchain_digest: sha256:" + "c" * 64 + "\n"
+            "    environment_digest: sha256:" + "c" * 64 + "\n"
             "    trusted_base_sha: " + "f" * 40 + "\n"
             "    subject_head_sha: " + head + "\n"
             "  coverage:\n"
@@ -255,7 +254,7 @@ class TestScopeStage:
             "      coverage_status: sufficient\n" + extra_coverage + "human:\n  status: not_started\n",
         )
 
-    def test_the_scope_stage_comes_first_and_reveals_no_expected_answer(self, make_repo: MakeRepo) -> None:
+    def test_the_scope_stage_comes_first(self, make_repo: MakeRepo) -> None:
         from rein import models
 
         assert models.REVIEW_STAGE_ORDER[0] == "scope"
@@ -278,7 +277,7 @@ class TestScopeStage:
         assert scope["effective_risk"] == "high"
         coverage = scope["coverage"]
         assert coverage["analyzed_files"] == 11 and coverage["analyzed_bytes"] == 421888
-        assert scope["challenges_asked"] == 0  # no challenges recorded, so none will be asked
+        assert scope["decisions_required"] == 0  # no cards recorded, so nothing is outstanding
         names = {row["name"] for row in scope["budget"]}
         assert "max_diff_bytes_per_partition" in names
 
@@ -314,3 +313,87 @@ class TestScopeStage:
         root = make_repo()
         _write(root, ".rein/review.yaml", "machine:\n  status: not_generated\nhuman:\n  status: not_started\n")
         assert review_api.stage_data(root, "scope")["generated"] is False
+
+
+class TestAsBuilt:
+    """The as-built view: one declared surface as it *ends up*, read at the reviewed commit.
+
+    Two properties, and the second is the security one. It must read the reviewed commit rather
+    than the working tree, or gate ④ shows a file from a tree its findings are not about. And it
+    must serve only what the stored brief published — the route reads blobs out of the repository,
+    so what it may read has to come from the review, never from the request.
+    """
+
+    def _seed(self, root: Path, *, declared_path: str = "db/schema.sql") -> str:
+        _git(root, "init", "-q", "-b", "main")
+        _write(root, "db/schema.sql", "create table users (id int);\n")
+        _write(root, "secrets.env", "TOKEN=hunter2\n")
+        _git(root, "add", ".")
+        _git(root, "commit", "-qm", "schema")
+        head = _git(root, "rev-parse", "HEAD")
+        _write(
+            root,
+            ".rein/review.yaml",
+            "machine:\n"
+            "  status: generated\n"
+            "  binding:\n"
+            "    change_digest: sha256:" + "a" * 64 + "\n"
+            "    plan_digest: sha256:" + "b" * 64 + "\n"
+            "    subject_head_sha: " + head + "\n"
+            "  brief:\n"
+            "    requirements_on_people:\n"
+            "      unobserved:\n"
+            "        - task_id: T-001\n"
+            "          kind: persistence\n"
+            "          name: users\n"
+            "          paths: [db/]\n"
+            "          as_built:\n"
+            "            - path: " + declared_path + "\n"
+            "              blob: " + "c" * 40 + "\n"
+            "              bytes: 29\n"
+            "human:\n  status: not_started\n",
+        )
+        return head
+
+    def test_a_declared_surface_is_served_as_it_ends_up(self, make_repo: MakeRepo) -> None:
+        root = make_repo()
+        head = self._seed(root)
+        payload = review_api.as_built(root, "db/schema.sql")
+        assert payload["content"] == "create table users (id int);\n"
+        assert payload["commit"] == head
+
+    def test_it_reads_the_reviewed_commit_and_not_the_working_tree(self, make_repo: MakeRepo) -> None:
+        """A file that moved after the review is a file the findings beside it are not about."""
+        root = make_repo()
+        self._seed(root)
+        _write(root, "db/schema.sql", "drop table users;\n")
+        assert review_api.as_built(root, "db/schema.sql")["content"] == "create table users (id int);\n"
+
+    def test_a_path_the_review_never_published_is_refused(self, make_repo: MakeRepo) -> None:
+        """Committed, readable, and none of this route's business."""
+        root = make_repo()
+        self._seed(root)
+        with pytest.raises(review_api.ReviewError, match="not an as-built path"):
+            review_api.as_built(root, "secrets.env")
+
+    def test_a_traversal_is_just_another_undeclared_path(self, make_repo: MakeRepo) -> None:
+        root = make_repo()
+        self._seed(root)
+        with pytest.raises(review_api.ReviewError, match="not an as-built path"):
+            review_api.as_built(root, "../../etc/passwd")
+
+    def test_an_ungenerated_review_publishes_nothing_to_read(self, make_repo: MakeRepo) -> None:
+        root = make_repo()
+        _write(root, ".rein/review.yaml", "machine:\n  status: not_generated\nhuman:\n  status: not_started\n")
+        with pytest.raises(review_api.ReviewError, match="nothing bound to a commit"):
+            review_api.as_built(root, "db/schema.sql")
+
+    def test_a_file_too_large_to_show_says_so_rather_than_arriving_truncated(
+        self, make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A silently cut schema is a schema somebody reads as complete."""
+        root = make_repo()
+        self._seed(root)
+        monkeypatch.setattr(review_api, "AS_BUILT_MAX_BYTES", 1)
+        payload = review_api.as_built(root, "db/schema.sql")
+        assert payload["too_large"] is True and payload["limit"] == 1 and "content" not in payload

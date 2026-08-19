@@ -217,11 +217,13 @@ def main(argv: list[str] | None = None) -> int:
         # Parse before writing: a config this command corrupted would be a worse outcome than one
         # the human had to edit by hand, and `rein guard` rule 2 refuses it after gate 3 anyway.
         try:
-            models.Config.parse(text)
+            before = models.Config.parse(path.read_text(encoding="utf-8")).environment_digest()
+            after = models.Config.parse(text).environment_digest()
         except models.DocumentError as exc:
             logger.error(f"refusing to write a config.yaml that no longer parses: {exc}")
             return 1
         path.write_text(text, encoding="utf-8")
+        _record_repin(repo, pins, before=before, after=after)
         print(f"\npinned {', '.join(sorted(pins))} in .rein/config.yaml (kind: oci)")
         # Verify here rather than telling the human to run it. A pin that does not resolve is the
         # failure this command is most likely to leave behind, and "run `rein oci verify` next"
@@ -230,6 +232,39 @@ def main(argv: list[str] | None = None) -> int:
         return _verify(args.repo)
 
     return _verify(args.repo)
+
+
+def _record_repin(repo: repo_mod.Repo, pins: dict[str, str], *, before: str, after: str) -> None:
+    """Put the re-pin in the audit chain. Prints and continues if it cannot.
+
+    Gate ③ deliberately does not freeze the image pin — rebuilding it because a task added a
+    dependency is a rebuild of the *same* sandbox, and making that cost a rollback is what stopped
+    such a task landing at all. What the pin being unfrozen must not mean is that it moves in
+    silence: gate ④ reads the environment digest beside the evidence it produced, and this event is
+    where the change acquires a time, a reason and a place in the chain.
+
+    Not fatal. The images are built and config.yaml is already written; refusing to record that
+    would leave the repository in the state the event describes, minus the event.
+    """
+    from rein import event_chain
+    from rein import store as store_mod
+
+    if before == after:
+        return  # the same images, re-pinned: nothing about the environment moved
+    try:
+        store = store_mod.Store(repo)
+        state = store.read_state()
+        if state is None or not state.cycle_id:
+            return  # no cycle to record it under — `rein init` has not run
+        with store.transaction() as tx:
+            tx.append(
+                "environment_repinned",
+                cycle_id=state.cycle_id,
+                subject_ids=sorted(pins),
+                detail={"profiles": {name: pins[name] for name in sorted(pins)}, "before": before, "after": after},
+            )
+    except (store_mod.StoreError, models.DocumentError, OSError, event_chain.ChainError) as exc:
+        logger.error(f"the images are pinned, but the re-pin could not be recorded in the audit chain: {exc}")
 
 
 def _verify(repo_arg: str | None) -> int:

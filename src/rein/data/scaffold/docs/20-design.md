@@ -18,15 +18,25 @@
 
 ## Implementation approach per requirement
 
+> The last two lines of each section are what `/tasks` turns into that task's `operator_surface` in
+> `.rein/plan.yaml`, and what gate ④ holds the built code against. Writing "nothing" is a real
+> answer; leaving them blank means gate ④ meets whatever the code turned out to require with no
+> record that anybody decided it.
+
 ### R-1 → design
 - **Required features/modules**:
 - **Implementation method**:
 - **Existing assets to reuse**:
 - **Corresponding technical choice**: ADR-
+- **What this requires of a person**: <a setting somebody supplies, a schema somebody migrates, a
+  dependency somebody provides, a signal somebody watches — or "nothing", said explicitly>
+- **Reversibility**: <can it be undone, and how — or why it cannot>
 
 ### R-2 → design
 - **Required features/modules**:
 - **Implementation method**:
+- **What this requires of a person**:
+- **Reversibility**:
 
 <!-- Continue per requirement -->
 
@@ -70,5 +80,6 @@
 - **Assumptions made**: <assumptions taken as given about requirements, existing assets, technical choices>
 - **Confidence**: per area high / medium / low (e.g. architecture=high / technical choices=medium / non-functional=low). **Attach a reason for low spots.**
 - **Open questions / points for the human to decide**:
-- **Anticipated risks / trade-offs**:
-- **Context-bloat signal** (when relevant): <if the design has grown, link detail out to an ADR instead of inlining; propose compressing resolved log rows>
+<!-- Three items and no more. Risks belong to the adversarial-review round above, which asks a
+     reviewer that did not write this; the same question answered again by the author is not a
+     second opinion. Context hygiene is the pre-compact check's job, not the gate's. -->

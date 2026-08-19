@@ -300,6 +300,31 @@ def _source_drift(state: models.State, repo: repo_mod.Repo | None) -> list[Findi
     return findings
 
 
+def _environment_drift(state: models.State, config: models.Config | None) -> Finding:
+    """Has the sandbox the evidence is produced in moved since gate ③ saw it?
+
+    Never a FAIL, and that is the whole point of it existing. An image rebuilt because a task added
+    a dependency is a legitimate mid-cycle change — `frozen_digest` deliberately does not cover the
+    pin, so nothing blocks. What must not happen is that it goes *unsaid*: an approval taken at
+    gate ④ over evidence produced in an environment the gate ③ approval never saw is a fact its
+    reader is entitled to. So it is reported here, and again in the gate ④ brief.
+    """
+    recorded = state.plan_environment_digest
+    if not recorded:
+        return Finding("INFO", "gates", "the freeze records no environment digest — nothing to compare the sandbox to")
+    if config is None:
+        return Finding("WARN", "gates", "config.yaml cannot be read, so the sandbox cannot be compared to the freeze")
+    live = config.environment_digest()
+    if live == recorded:
+        return Finding("PASS", "gates", "the sandbox is the one gate 3 saw")
+    return Finding(
+        "INFO",
+        "gates",
+        f"the sandbox has changed since gate 3 saw it ({recorded[:19]}… → {live[:19]}…) — allowed "
+        "(a rebuilt image is the same sandbox), and gate 4 shows it beside the evidence it produced",
+    )
+
+
 def check_freeze_drift(
     state: models.State | None,
     plan: models.Plan | None,
@@ -326,7 +351,7 @@ def check_freeze_drift(
     frozen = {"plan_digest": state.plan_digest, "config_digest": state.plan_config_digest}
     for key, label, live in (
         ("plan_digest", "plan.yaml", plan.digest() if plan is not None else ""),
-        ("config_digest", "config.yaml", config.digest() if config is not None else ""),
+        ("config_digest", "config.yaml", config.frozen_digest() if config is not None else ""),
     ):
         recorded = frozen[key]
         if not recorded:
@@ -346,6 +371,7 @@ def check_freeze_drift(
         else:
             findings.append(Finding("PASS", "gates", f"{label} still matches the digest gate 3 froze"))
 
+    findings.append(_environment_drift(state, config))
     findings += _source_drift(state, repo)
 
     for gate in _POST_FREEZE_GATES:

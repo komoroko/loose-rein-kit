@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from rein import digests, models, strict_yaml
+from tests._support import make_plan, make_task
 
 SCHEMA_NAMES = ("plan", "state", "review", "event", "config")
 
@@ -127,11 +128,11 @@ def test_risk_acceptance_is_not_a_disposition() -> None:
     assert not any("accept" in action for action in models.DISPOSITION_VALUES)
 
 
-def test_the_gate_four_rail_ends_on_a_freeze_not_a_reveal() -> None:
-    """Twelve stages used to show the same finding four times over; the surviving rail is
-    scope (no expected answer revealed) -> decision (the one screen that asks for anything) ->
-    diff -> freeze."""
-    assert models.REVIEW_STAGE_ORDER == ("scope", "decision", "diff", "freeze")
+def test_the_gate_four_rail_reads_before_it_asks() -> None:
+    """Twelve stages used to show the same finding four times over. The surviving rail is two
+    reading stages — scope (what this approval covers) then orient (what was built, and under what
+    conditions) — before decision, the one screen that asks for anything, then diff and freeze."""
+    assert models.REVIEW_STAGE_ORDER == ("scope", "orient", "decision", "diff", "freeze")
 
 
 @pytest.mark.parametrize("name", ["plan", "state", "review", "config"])
@@ -395,7 +396,7 @@ machine:
   binding:
     change_digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
     plan_digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
-    toolchain_digest: sha256:8888888888888888888888888888888888888888888888888888888888888888
+    environment_digest: sha256:8888888888888888888888888888888888888888888888888888888888888888
   coverage:
     - diff_digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
       analyzed_files: 27
@@ -458,14 +459,75 @@ def test_truncated_coverage_is_rejected_outright() -> None:
         models.Review.parse(REVIEW.replace("truncated: false", "truncated: true"))
 
 
-def test_answering_a_challenge_after_the_reveal_is_rejected() -> None:
+def test_the_human_half_no_longer_accepts_a_challenge_answer() -> None:
+    """The unprimed-guess record is gone from the schema, not merely unused by the code.
+
+    Leaving the field accepted would let a stale UI keep writing answers to a question nothing
+    asks, and `human_digest` would move for a judgement nobody made.
+    """
     bad = REVIEW.replace(
         "human:\n  status: not_started",
         "human:\n  status: in_progress\n  challenge_answers:\n"
-        "    - {challenge_id: DC-001, choice: B, confidence: low, answered_before_reveal: false}",
+        "    - {challenge_id: DC-001, choice: B, confidence: low, answered_before_reveal: true}",
     )
-    with pytest.raises(models.DocumentError, match="answered_before_reveal"):
+    with pytest.raises(models.DocumentError, match="challenge_answers"):
         models.Review.parse(bad)
+
+
+# --- config: the two digests ----------------------------------------------------
+#
+# Gate ③ freezes a config.yaml with its image pins taken out, and records the whole sandbox
+# picture beside it. The split is what lets a task that legitimately adds a dependency have its
+# sandbox rebuilt without re-approving a plan nothing changed — and the second digest is what stops
+# that permission from being a hole nobody can see through.
+
+
+def _config(**profiles: dict[str, Any]) -> models.Config:
+    return models.Config(
+        {
+            "project": {"name": "demo", "work_branch": "work"},
+            "executors": {"implementer_profile": "impl", "reviewer_profile": "rev"},
+            "executor_profiles": profiles,
+        }
+    )
+
+
+_PINNED = {"kind": "oci", "image": "localhost/rein-python@sha256:" + "0" * 64, "network_profile": "none"}
+
+
+def test_a_rebuilt_image_does_not_move_the_frozen_digest() -> None:
+    """The whole point: `rein oci build --write-config` after a dependency lands rewrites exactly
+    this one string, and it used to cost `rein revise --to tasks` — the plan un-froze and every
+    gate below reset in a chain, for a decision nobody had changed."""
+    before = _config(impl=_PINNED, rev=_PINNED)
+    after = _config(impl={**_PINNED, "image": "localhost/rein-python@sha256:" + "1" * 64}, rev=_PINNED)
+    assert before.frozen_digest() == after.frozen_digest()
+    assert before.environment_digest() != after.environment_digest()
+
+
+def test_opening_a_sandbox_moves_the_frozen_digest() -> None:
+    """Only the pin moved out. `kind` and `network_profile` widen what may happen, and widening is
+    the judgement a human made at gate ③."""
+    pinned = _config(impl=_PINNED, rev=_PINNED)
+    for change in ({"kind": "host"}, {"network_profile": "egress"}, {"mount_repo": "read_write"}):
+        opened = _config(impl={**_PINNED, **change}, rev=_PINNED)
+        assert pinned.frozen_digest() != opened.frozen_digest(), change
+
+
+def test_the_environment_digest_covers_the_profile_bodies_not_only_their_names() -> None:
+    """Its predecessor hashed `{"executors": ...}` — the role→profile *name* map — while claiming to
+    move when the sandbox a step ran in changed. Repointing a profile at a different image, or
+    flipping it to `host`, left it identical, and nothing ever compared it, so the claim was never
+    contradicted."""
+    pinned = _config(impl=_PINNED, rev=_PINNED)
+    on_the_host = _config(impl={"kind": "host"}, rev=_PINNED)
+    assert pinned.environment_digest() != on_the_host.environment_digest()
+
+
+def test_a_config_with_no_profiles_still_digests() -> None:
+    bare = models.Config({"project": {"name": "demo"}})
+    assert digests.is_digest(bare.frozen_digest())
+    assert digests.is_digest(bare.environment_digest())
 
 
 # --- event ---------------------------------------------------------------------
@@ -500,3 +562,48 @@ def test_event_round_trips_through_a_mapping() -> None:
         detail={"attempts": 2},
     )
     assert models.Event.from_mapping(event.to_mapping()) == event
+
+
+# --- what a task declares it will require of a person ---------------------------
+
+
+def test_a_task_reads_back_the_operator_surface_the_plan_froze() -> None:
+    """The Expected side of gate ④'s "what does this now require of somebody" comparison."""
+    plan = models.Plan(
+        make_plan(
+            tasks=[
+                make_task(
+                    "T-001",
+                    operator_surface=[
+                        {"kind": "persistence", "name": "users.email_verified", "paths": ["db/schema.sql"]}
+                    ],
+                )
+            ]
+        )
+    )
+    surface = plan.task("T-001").operator_surface  # type: ignore[union-attr]
+    assert [entry["kind"] for entry in surface] == ["persistence"]
+
+
+def test_a_task_that_declares_nothing_reads_back_an_empty_declaration() -> None:
+    """Declaring nothing is allowed; it means every operator-facing reading arrives undeclared."""
+    plan = models.Plan(make_plan(tasks=[make_task("T-001")]))
+    assert plan.task("T-001").operator_surface == ()  # type: ignore[union-attr]
+
+
+def test_the_declared_kinds_are_a_subset_of_the_actual_statement_categories() -> None:
+    """Two vocabularies over one comparison would need a mapping table that can be wrong."""
+    import json
+
+    from rein import data as data_mod
+
+    schema = json.loads(data_mod.read_text("schema/review.schema.json"))
+    categories = set(
+        schema["$defs"]["machine"]["properties"]["actual_extraction"]["items"]["properties"]["category"]["enum"]
+    )
+    assert models.OPERATOR_SURFACE_KIND_VALUES <= categories
+
+
+def test_a_declared_kind_outside_the_enum_is_refused_by_the_schema() -> None:
+    plan = make_plan(tasks=[make_task("T-001", operator_surface=[{"kind": "vibes", "name": "x", "paths": ["src/"]}])])
+    assert any("vibes" in error or "kind" in error for error in models.schema_errors(plan, "plan"))

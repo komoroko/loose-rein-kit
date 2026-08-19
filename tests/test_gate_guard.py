@@ -366,7 +366,7 @@ def test_check_diff_catches_a_config_edited_after_the_freeze(tmp_path: Path) -> 
     config, state = documents.read_config(), documents.read_state()
     assert config is not None and state is not None
     raw = json.loads(json.dumps(state.raw))
-    raw["plan"]["config_digest"] = config.digest()
+    raw["plan"]["config_digest"] = config.frozen_digest()
     (tmp_path / ".rein" / "state.yaml").write_bytes(store.dump_yaml(raw))
     assert gate_guard.check_diff(repo) == 0
 

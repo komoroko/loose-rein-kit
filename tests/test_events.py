@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import event_chain, events
+from rein import event_chain, events, models
 from tests._support import chain, seed_repo
 
 
@@ -122,3 +122,55 @@ def test_attention_events_are_a_subset_of_the_vocabulary() -> None:
     from rein import models
 
     assert events.ATTENTION_EVENTS < models.EVENT_VALUES
+
+
+# --- what is still open -------------------------------------------------------
+#
+# The retirement rules, at the level they are decided. Two kinds, and the difference matters: a
+# task's own later success retires a verdict about that task, while a later event in the chain
+# retires a report the chain itself has since undone. Neither touches events.ndjson.
+
+
+def _chain(*specs: tuple[str, tuple[str, ...]]) -> list[models.Event]:
+    built: list[models.Event] = []
+    previous: models.Event | None = None
+    for name, subjects in specs:
+        linked = event_chain.link(previous, event_chain.make(name, "demo-cycle", subject_ids=subjects))
+        built.append(linked)
+        previous = linked
+    return built
+
+
+def test_a_later_review_generated_retires_the_failure_that_preceded_it() -> None:
+    """A pipeline that failed once and succeeded on the retry left a permanent "waiting for you"
+    row, because these two had no retirement condition at all."""
+    chain = _chain(("review_failed", ()), ("actual_extraction_failed", ()), ("review_generated", ()))
+    assert events.open_attention(chain) == []
+
+
+def test_a_failure_after_the_last_success_still_stands() -> None:
+    """Order is the chain's, not the clock's: only a *later* answer closes anything."""
+    chain = _chain(("review_generated", ()), ("review_failed", ()))
+    assert [e.event for e in events.open_attention(chain)] == ["review_failed"]
+
+
+def test_an_event_does_not_supersede_itself() -> None:
+    chain = _chain(("plan_invalidated", ()))
+    assert [e.event for e in events.open_attention(chain)] == ["plan_invalidated"]
+
+
+def test_a_task_failed_is_retired_by_that_task_reaching_done() -> None:
+    chain = _chain(("task_failed", ("T-001",)))
+    assert events.open_attention(chain, {"T-001": "done"}) == []
+    assert [e.event for e in events.open_attention(chain, {"T-001": "blocked"})] == ["task_failed"]
+
+
+def test_a_batch_failure_stands_until_every_task_it_named_is_done() -> None:
+    chain = _chain(("task_failed", ("T-001", "T-002")))
+    assert [e.event for e in events.open_attention(chain, {"T-001": "done"})] == ["task_failed"]
+
+
+def test_a_review_failure_is_not_retired_by_a_task_it_happened_to_name() -> None:
+    """`review_failed` is not a verdict about a task, so a task status is not authoritative over it."""
+    chain = _chain(("review_failed", ("T-001",)))
+    assert [e.event for e in events.open_attention(chain, {"T-001": "done"})] == ["review_failed"]

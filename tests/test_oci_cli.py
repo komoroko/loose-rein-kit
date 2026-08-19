@@ -210,3 +210,50 @@ def test_build_refuses_up_front_when_no_container_runtime_exists(
     )
     assert oci_cli.main(["build", "--all", "--write-config", "--repo", str(tmp_path)]) == 1
     assert "install docker or podman first" in caplog.text
+
+
+# --- the re-pin reaches the audit chain ---------------------------------------
+#
+# Gate ③ deliberately leaves the image pin outside its freeze, so a rebuilt sandbox costs no
+# rollback. What that permission is paid for with is visibility: the change has to acquire a time
+# and a place in the chain, and gate ④ reads it beside the evidence it produced. Before this,
+# `--write-config` rewrote config.yaml with `path.write_text` and the log never heard about it.
+
+
+def _pinned(name: str, digest_char: str) -> dict[str, object]:
+    return {"kind": "oci", "image": f"localhost/rein-{name}@sha256:" + digest_char * 64, "network_profile": "none"}
+
+
+def test_a_rebuilt_pin_is_recorded_in_the_chain(tmp_path: Path) -> None:
+    from rein import repo as repo_mod
+    from rein import store as store_mod
+
+    root = _repo_with({"quality": _pinned("python", "0")}, tmp_path)
+    repo = repo_mod.Repo(root)
+    path = repo.path(".rein/config.yaml")
+    new_image = "localhost/rein-python@sha256:" + "1" * 64
+    text, missing = oci_cli.pin_profiles(path.read_text(encoding="utf-8"), {"quality": new_image})
+    assert not missing
+    before = models.Config.parse(path.read_text(encoding="utf-8")).environment_digest()
+    path.write_text(text, encoding="utf-8")
+    after = models.Config.parse(text).environment_digest()
+
+    oci_cli._record_repin(repo, {"quality": new_image}, before=before, after=after)
+
+    recorded = [e for e in store_mod.Store(repo).read_events() if e.event == "environment_repinned"]
+    assert len(recorded) == 1
+    assert recorded[0].subject_ids == ("quality",)
+    assert recorded[0].detail["profiles"] == {"quality": new_image}
+    assert recorded[0].detail["before"] == before and recorded[0].detail["after"] == after
+
+
+def test_re_pinning_the_same_images_records_nothing(tmp_path: Path) -> None:
+    """An event per invocation would make the chain a record of commands run, not of changes made."""
+    from rein import repo as repo_mod
+    from rein import store as store_mod
+
+    root = _repo_with({"quality": _pinned("python", "0")}, tmp_path)
+    repo = repo_mod.Repo(root)
+    digest = models.Config.parse(repo.path(".rein/config.yaml").read_text(encoding="utf-8")).environment_digest()
+    oci_cli._record_repin(repo, {"quality": "x"}, before=digest, after=digest)
+    assert not [e for e in store_mod.Store(repo).read_events() if e.event == "environment_repinned"]
