@@ -110,6 +110,68 @@ def test_generate_writes_a_schema_valid_review_and_resets_human(review_repo: Pat
 
 
 @pytest.mark.integration
+def test_what_the_change_requires_of_a_person_survives_the_schema_validated_write(review_repo: Path) -> None:
+    """The section is assembled from a plan declaration and a blind reading, and it has to be a shape
+    the review schema accepts — a section that only ever exists in memory proves nothing about the
+    document a reviewer opens.
+    """
+    import json
+
+    import yaml
+
+    (review_repo / "db").mkdir()
+    (review_repo / "db" / "schema.sql").write_text("create table users (id int);\n", encoding="utf-8")
+    plan_path = review_repo / ".rein" / "plan.yaml"
+    plan = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
+    plan["tasks"][0]["operator_surface"] = [
+        {"kind": "persistence", "name": "users", "paths": ["db/schema.sql"], "adr": "ADR-001"}
+    ]
+    plan_path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "declare a surface")
+
+    blob = _git(review_repo, "rev-parse", "HEAD:db/schema.sql").strip()
+
+    def reviewer(request: Mapping[str, Any]) -> str:
+        if "expected_model" in request:
+            return json.dumps({"claims": [], "actual_digest": request["actual_digest"]})
+        facts = request.get("deterministic_facts", {})
+        if isinstance(facts, dict) and "signals" in facts:
+            return json.dumps({"findings": []})
+        return json.dumps(
+            {
+                "actual_statements": [
+                    {
+                        "id": "AST-001",
+                        "statement": "the users table has one integer column",
+                        "category": "persistence",
+                        "confidence": "high",
+                        "code_anchors": [
+                            {
+                                "path": "db/schema.sql",
+                                "blob": "git-blob:" + blob,
+                                "start_line": 1,
+                                "end_line": 1,
+                            }
+                        ],
+                    }
+                ],
+                "coverage": {},
+            }
+        )
+
+    review.generate(repo_mod.Repo(review_repo), reviewer)
+    stored = store_mod.Store(repo_mod.Repo(review_repo)).read_review()
+    assert stored is not None
+    section = stored.machine["brief"]["requirements_on_people"]
+    # Declared and read out: a count, not a row — and the as-built view names the blob it can serve.
+    assert section["as_declared"]["count"] == 1
+    entry = section["as_declared"]["entries"][0]
+    assert entry["adr"] == "ADR-001" and entry["statement_ids"] == ["AST-001"]
+    assert [built["path"] for built in entry["as_built"]] == ["db/schema.sql"]
+
+
+@pytest.mark.integration
 def test_the_orientation_brief_is_derived_into_the_machine_half(review_repo: Path) -> None:
     """The brief is built inside `generate`, not when the pane asks for it.
 
@@ -129,7 +191,9 @@ def test_the_orientation_brief_is_derived_into_the_machine_half(review_repo: Pat
     machine = review.generate(repo_mod.Repo(review_repo), _fake_reviewer)
     brief_section = machine["brief"]
     assert [row["task_id"] for row in brief_section["delivered"]] == ["T-001"]
-    assert {row["step"] for row in brief_section["verification"]} == {"test", "check"}
+    assert brief_section["verification"]["steps"] == 2
+    # `check` was established for no task, so it is named; `test` was, so it is only counted.
+    assert brief_section["verification"]["established_for_nothing"] == ["check"]
     # `make_config`'s default profiles are host ones, so the boundary reports what that really is.
     assert {row["network"] for row in brief_section["execution_boundary"]} == {"unconfined"}
     # It survived the schema-validated write, not only the in-memory assembly.

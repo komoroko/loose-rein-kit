@@ -27,6 +27,17 @@
 - **A-1**: <one thing, stated so that it could be false>
 - **A-2**:
 
+## What this requires of a person
+> Copied from the design's "What this requires of a person / Reversibility" lines. **The
+> machine-readable copy lives in `.rein/plan.yaml` under this task's `operator_surface:`**, and that
+> is the one gate ④ reads. Each entry names a `kind` (`persistence` / `public_interface` /
+> `dependency` / `default_value` / `observability` / `security_boundary` — the same words the blind
+> extractor uses), what a person deals with, where it can be read at the end, and the ADR that
+> decided it. Nothing to declare is a fine answer; what the code turns out to require still reaches
+> gate ④, just as something nobody foresaw.
+
+- **<kind>**: <what a person deals with> — read at `<path>` (ADR-NNN)
+
 ## Automated-test approach (the basis for the green decision)
 > The shared DoD (`quality_gate` in `.rein/config.yaml`) is what decides green, for every task
 > alike — this section says what *these* tests should cover, not which command runs them.
@@ -40,5 +51,5 @@
 ## Self-assessment (assumptions, confidence)
 > Material for making low-confidence tasks explicit to the human at gate ③.
 - **Confidence**: high / medium / low
-- **Assumptions made / risks**: <uncertain points, external dependencies, the risk of misreading due to coarse granularity, etc.>
+- **Assumptions made**: <uncertain points, external dependencies, the risk of misreading due to coarse granularity, etc.>
 - **Open questions** (decisions to surface at gate ③):

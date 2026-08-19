@@ -120,6 +120,44 @@
         }
       }
     },
+    "declaredSurface": {
+      "description": "One `operator_surface` entry from the frozen plan, restated with the task that declared it and with the as-built identity of the paths it names.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "kind",
+        "name",
+        "paths"
+      ],
+      "properties": {
+        "task_id": { "$ref": "#/$defs/taskId" },
+        "kind": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 200 },
+        "paths": { "$ref": "#/$defs/pathList" },
+        "adr": { "type": "string", "maxLength": 64 },
+        "statement_ids": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/actualStatementId" } },
+        "as_built": {
+          "description": "The file as it ends up, named rather than copied: the blob at `binding.subject_head_sha` and its size. A diff shows the change; this is what somebody has to operate. The body is fetched from that commit on demand, so review.yaml never becomes a second copy of the repository.",
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "blob",
+              "bytes"
+            ],
+            "properties": {
+              "path": { "$ref": "#/$defs/repoPath" },
+              "blob": { "type": "string", "maxLength": 64 },
+              "bytes": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
     "machine": {
       "type": "object",
       "additionalProperties": false,
@@ -883,7 +921,7 @@
           }
         },
         "brief": {
-          "description": "The gate-4 orientation: what this cycle delivered and under what conditions, derived from the SSOT by `brief.derive` and bound to `binding.subject_head_sha` like everything else here. It authors no sentence of its own — ids, paths, commands and image references only — and points at reviewer prose by statement id so the epistemic status stays attached to it. An absent section reports nothing rather than reporting an empty finding.",
+          "description": "The gate-4 orientation: what this cycle delivered and under what conditions, derived from the SSOT by `brief.derive` and bound to `binding.subject_head_sha` like everything else here. It authors no sentence of its own — ids, paths, commands and image references only — and where it carries a sentence somebody else wrote, the confidence and the code anchor travel with it, because that was always the rule rather than the indirection through an id. An absent section reports nothing rather than reporting an empty finding.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -960,20 +998,54 @@
                 "evidence_produced_in": { "$ref": "#/$defs/digest" }
               }
             },
-            "behaviour": {
-              "description": "What the blind extractor read out, grouped by the categories an orientation is about. By statement id — the text, its confidence and its code anchors stay in `actual_extraction`, where a copy could not strip them.",
-              "type": "array",
-              "maxItems": 16,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "category"
-                ],
-                "properties": {
-                  "category": { "type": "string", "maxLength": 64 },
-                  "statement_ids": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/actualStatementId" } },
-                  "paths": { "$ref": "#/$defs/pathList" }
+            "requirements_on_people": {
+              "description": "What this change now requires of a person, sorted by whether anyone foresaw it. The operator-facing readings a blind extractor took out of the code are matched against the `operator_surface` entries a human froze at gate 3 — by category equality and path coverage, never by comparing one piece of prose to another. Ordered by decision value: what nobody declared, then what was declared and never read out, then a count of the foreseen ones.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "undeclared": {
+                  "description": "An operator-facing behaviour the code was read to have that no task declared. Nobody decided this would be somebody's job. Carried with its confidence and its anchor paths, because a reviewer's sentence separated from those is not evidence of anything.",
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "category",
+                      "statement_id",
+                      "statement",
+                      "confidence"
+                    ],
+                    "properties": {
+                      "category": { "type": "string", "maxLength": 64 },
+                      "statement_id": { "$ref": "#/$defs/actualStatementId" },
+                      "statement": { "$ref": "#/$defs/text" },
+                      "confidence": { "enum": ["low", "medium", "high"] },
+                      "paths": { "$ref": "#/$defs/pathList" }
+                    }
+                  }
+                },
+                "unobserved": {
+                  "description": "A declaration nothing was read out about: either it was not built or it could not be read, and telling those apart is the reviewer's job — which is why this says only that the reading is absent.",
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": { "$ref": "#/$defs/declaredSurface" }
+                },
+                "as_declared": {
+                  "description": "Foreseen and present. A count, because a table of expected rows is where the two lists above go to hide; the entries travel with it for a reader who asks.",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "count"
+                  ],
+                  "properties": {
+                    "count": { "type": "integer", "minimum": 0 },
+                    "entries": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": { "$ref": "#/$defs/declaredSurface" }
+                    }
+                  }
                 }
               }
             },
@@ -987,19 +1059,18 @@
               }
             },
             "verification": {
-              "description": "Each DoD step and how many landed tasks recorded it established against their own tree. A configured step established for nothing is the row worth reading.",
-              "type": "array",
-              "maxItems": 32,
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "step",
-                  "established_for"
-                ],
-                "properties": {
-                  "step": { "type": "string", "maxLength": 64 },
-                  "established_for": { "type": "integer", "minimum": 0 }
+              "description": "How many DoD steps the gate ran, and which of them were established for no landed task at all. A step configured but established for nothing means every task's diff missed its `paths:`, or the run never got that far; the rest say the gate did what everyone already assumed, so they are a number rather than rows.",
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "steps"
+              ],
+              "properties": {
+                "steps": { "type": "integer", "minimum": 0 },
+                "established_for_nothing": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": { "type": "string", "maxLength": 64 }
                 }
               }
             },
@@ -1011,7 +1082,25 @@
                 "awaiting_evidence": { "$ref": "#/$defs/taskIdList" },
                 "blocked": { "$ref": "#/$defs/taskIdList" },
                 "unstarted": { "$ref": "#/$defs/taskIdList" },
-                "open_change_requests": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 64 } }
+                "open_change_requests": { "type": "array", "maxItems": 200, "items": { "type": "string", "maxLength": 64 } },
+                "accounts": {
+                  "description": "What the last implementer said, in its own words, about a task that did NOT land — the account `rein report` has always written and nobody approving a gate has ever read. A claim, not a finding: the loop checks `touched` against the real diff separately, and this is the sentence beside that, not a verdict. Only unfinished tasks: for work that landed, the implementer's own explanation is the one input the blind extractor is forbidden to see, and putting it in front of the approver would move that priming onto the person the arrangement exists to protect.",
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "task_id",
+                      "summary"
+                    ],
+                    "properties": {
+                      "task_id": { "$ref": "#/$defs/taskId" },
+                      "outcome": { "type": "string", "maxLength": 32 },
+                      "summary": { "type": "string", "maxLength": 4000 }
+                    }
+                  }
+                }
               }
             }
           }

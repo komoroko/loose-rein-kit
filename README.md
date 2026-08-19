@@ -365,9 +365,12 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
      the gate under decision is read and approved in one pane — it opens on the **scope** (the
      commit range, how much was read, what could *not* be, and whether the change fits one review
      session), then **orient**: what this cycle delivered, which dependencies and migrations moved,
-     which sandbox and network posture each quality-gate step ran under, what the blind extractor
-     read out of the code, what the gate established, what is still open, and the Expected/Actual
-     comparison — all derived from the SSOT, none of it asked of you. Only then the **Decision
+     which sandbox and network posture each quality-gate step ran under, **what the change now
+     requires of a person** — the operator-facing behaviour read out of the code, sorted by whether
+     any task declared it at gate ③, with what nobody declared first and the file *as it ends up*
+     one click away — what the gate established, what is still open (including what the implementer
+     said about each task that did not land), and the Expected/Actual comparison — all derived from
+     the SSOT, none of it asked of you. Only then the **Decision
      Cards**: every unsettled claim, gap, ungrounded extra behaviour, and security finding, one
      card each, with its evidence attached. Unanswered high/critical cards block the freeze;
      a Tasks tab (DAG, layer progress); an Activity tab

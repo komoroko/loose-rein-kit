@@ -184,6 +184,32 @@ class RelevantCode:
         }
 
 
+def _blob_facts(repo: repo_mod.Repo, head: str) -> brief.BlobFacts:
+    """How the brief names a declared path *as it ends up*: its blob at `head`, and its size.
+
+    Bound to the reviewed commit rather than the working tree, for the same reason
+    `_relevant_code` is: the review is of what was committed, and showing an approver a file that
+    has moved since would put a different tree beside the findings about this one.
+
+    Identity and size only. The body is fetched from the same commit when a reader asks, so
+    review.yaml never becomes a second copy of the repository.
+    """
+
+    def read(path: str) -> dict[str, Any] | None:
+        if not models.is_repo_path(path):
+            return None
+        rc, blob = repo._git_rc("rev-parse", f"{head}:{path}")
+        blob = blob.strip()
+        if rc != 0 or not blob:
+            return None
+        rc, size = repo._git_rc("cat-file", "-s", blob)
+        if rc != 0 or not size.strip().isdigit():
+            return None
+        return {"blob": blob, "bytes": int(size.strip())}
+
+    return read
+
+
 def _relevant_code(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffFile]) -> RelevantCode:
     """The head-side content of each changed file, under the ceilings above.
 
@@ -501,6 +527,7 @@ def generate(
                 config=config,
                 actual_statements=extraction.actual_statements,
                 changed_paths=[f.path for f in facts.files],
+                blob_facts=_blob_facts(repo, head),
             ),
             residual_findings=brief.residual_findings(state),
             # A config may set only the budgets it wants to move, so the recorded snapshot is the

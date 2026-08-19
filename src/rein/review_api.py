@@ -433,6 +433,75 @@ def review_session(root: str | Path) -> dict[str, object]:
     }
 
 
+#: Ceiling on an as-built body served to the pane. Past it the response says the file is too large
+#: and gives its size — a silently truncated schema is a schema somebody would read as complete.
+AS_BUILT_MAX_BYTES = 256 * 1024
+
+
+def _declared_as_built(review: models.Review) -> set[str]:
+    """Every path the stored brief named as an as-built view of a declared surface.
+
+    This is the whole access rule. The route reads a blob out of the repository at a commit, so
+    what it may read must come from the review itself rather than from the request: a path the
+    frozen plan declared, that `brief.derive` then resolved against the reviewed tree. Anything
+    else — including a perfectly ordinary source file — is not part of what this gate published.
+    """
+    brief = review.machine.get("brief")
+    section = brief.get("requirements_on_people") if isinstance(brief, dict) else None
+    if not isinstance(section, dict):
+        return set()
+    entries = list(section.get("unobserved") or [])
+    declared = section.get("as_declared")
+    if isinstance(declared, dict):
+        entries += list(declared.get("entries") or [])
+    paths = set()
+    for entry in entries:
+        for built in (entry.get("as_built") or []) if isinstance(entry, dict) else []:
+            if isinstance(built, dict) and built.get("path"):
+                paths.add(str(built["path"]))
+    return paths
+
+
+def as_built(root: str | Path, path: str) -> dict[str, object]:
+    """One declared surface as it *ends up*, read at the commit the review is bound to.
+
+    A diff shows what changed; this shows what somebody now has to operate — the schema after the
+    migration, the settings module after the key was added. It is a fetch rather than a section of
+    the brief because a body belongs in review.yaml even less than a diff does: the document would
+    grow a copy of the repository, and the copy would be the thing that goes stale.
+
+    Read at `binding.subject_head_sha`, never from the working tree. The rest of gate ④ describes
+    one commit, and a file from a different one shown beside it is the mistake `stage_data` refuses
+    to make when it declines to recompute the brief.
+    """
+    root = Path(root)
+    review = _load_review(root)
+    if review is None or not review.is_generated:
+        raise ReviewError("no machine review has been generated — there is nothing bound to a commit to read")
+    if path not in _declared_as_built(review):
+        raise ReviewError(f"{path!r} is not an as-built path of any surface this review declared")
+    binding = review.machine.get("binding")
+    head = str(binding.get("subject_head_sha", "")) if isinstance(binding, dict) else ""
+    if not head:
+        raise ReviewError("the review records no subject head to read the file at")
+
+    rc, blob = _git(root, "rev-parse", f"{head}:{path}")
+    blob = blob.strip()
+    if rc != 0 or not blob:
+        raise ReviewError(f"{path} does not exist at {head[:12]}")
+    rc, size = _git(root, "cat-file", "-s", blob)
+    if rc != 0 or not size.strip().isdigit():
+        # Refuse rather than read: an unmeasured blob is one the ceiling below never applied to.
+        raise ReviewError(f"{path}@{head[:12]}: its size could not be measured, so it is not served")
+    measured = int(size.strip())
+    if measured > AS_BUILT_MAX_BYTES:
+        return {"path": path, "commit": head, "bytes": measured, "too_large": True, "limit": AS_BUILT_MAX_BYTES}
+    rc, content = _git(root, "show", f"{head}:{path}")
+    if rc != 0:
+        raise ReviewError(f"{path}@{head[:12]} could not be read")
+    return {"path": path, "commit": head, "bytes": measured, "content": content}
+
+
 def stage_data(root: str | Path, stage: str) -> dict[str, object]:
     """The content of one review stage.
 

@@ -73,5 +73,3 @@ dedicated design section or task is fine (the trace only WARNs) — but every NF
 - **Assumptions made**: <assumptions taken as given without confirming; points where, if wrong, the requirements break>
 - **Confidence**: high / medium / low (may be split per requirement/area; **attach a reason for low spots**)
 - **Open questions / points for the human to decide**:
-- **Anticipated risks / trade-offs**:
-- **Context-bloat signal** (when relevant): <if this document or its logs have grown enough to risk Context Rot, propose trimming — push detail out to a linked file, compress resolved log rows>

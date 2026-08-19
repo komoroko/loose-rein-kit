@@ -209,7 +209,10 @@ is the point; never fold them into the implementer's session.
    the pipeline events.
    Findings sit on three separate axes (integrity / semantic support / conformance); there is no
    single `verified`, and "extra behaviours: 0" appears only with the Coverage Manifest that
-   earned it. **Triage it**: a blocking security finding, a diverged high/critical claim, an ungrounded
+   earned it. The orient stage also states **what this change now requires of a person** — the
+   operator-facing readings sorted by whether a task's `operator_surface` foresaw them, the ones
+   nobody declared first — and, for each task that did not land, **what its implementer said about
+   it**, which is a claim rather than a finding. **Triage it**: a blocking security finding, a diverged high/critical claim, an ungrounded
    high/critical extra behaviour, or an insufficient Coverage Manifest blocks the gate — return
    those to the implementer to fix (a fix moves HEAD, so re-generate; a later commit leaves the
    review stale) and record judgment calls as escalation events for the human. Do not present

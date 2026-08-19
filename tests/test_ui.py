@@ -228,6 +228,19 @@ def test_shipped_assets_match_the_allowlist_exactly() -> None:
     assert on_disk == set(ui._ASSET_TYPES) | {"index.html"}
 
 
+def test_the_as_built_route_reaches_review_api_rather_than_the_gate_list(server: ui.DashboardServer) -> None:
+    """Wiring, and the reason the wiring matters.
+
+    `/api/review/<anything>` is otherwise read as a *gate name*, so without the prefix match an
+    as-built request would come back as a 200-shaped "unknown gate" and the pane would render an
+    empty document instead of saying it could not read the file. The refusal is the point: this
+    route reads blobs out of the repository, and it may only read what the stored brief published.
+    """
+    status, data = _request(server, "GET", "/api/review/as-built/db%2Fschema.sql")
+    assert status == 404
+    assert b"nothing bound to a commit" in data
+
+
 # --- the payload contract between the modules and the server --------------------
 #
 # The drift this catches actually happened: `_tasks_block` renamed its task list to `rows` and

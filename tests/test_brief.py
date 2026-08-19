@@ -140,7 +140,7 @@ def test_a_section_with_nothing_to_report_is_absent_not_empty() -> None:
     assert "data" not in sections and "stack" not in sections
 
 
-# --- behaviour ----------------------------------------------------------------
+# --- what this change requires of a person ------------------------------------
 
 
 def _statement(sid: str, category: str, path: str) -> dict[str, Any]:
@@ -153,37 +153,106 @@ def _statement(sid: str, category: str, path: str) -> dict[str, Any]:
     }
 
 
-def test_behaviour_points_by_id_and_never_copies_the_prose() -> None:
-    """The text carries a confidence and code anchors in `actual_extraction`; a copy here would be
-    the same sentence with its epistemic status left behind."""
-    statements = [
-        _statement("AST-001", "public_interface", "src/app/api.py"),
-        _statement("AST-002", "control_flow", "src/app/api.py"),
-        _statement("AST-003", "security_boundary", "src/app/auth.py"),
-    ]
-    rows = brief.derive(plan=None, state=None, config=None, actual_statements=statements)["behaviour"]
-    by_category = {row["category"]: row for row in rows}
-    assert set(by_category) == {"public_interface", "security_boundary"}  # control_flow is the comparison's job
-    assert by_category["public_interface"]["statement_ids"] == ["AST-001"]
-    assert by_category["public_interface"]["paths"] == ["src/app/api.py"]
-    assert not any("statement" in row for row in rows)
+def _surface(kind: str, name: str, paths: list[str], adr: str | None = None) -> dict[str, Any]:
+    entry: dict[str, Any] = {"kind": kind, "name": name, "paths": paths}
+    if adr:
+        entry["adr"] = adr
+    return entry
 
 
-def test_a_statement_with_no_id_is_dropped_rather_than_pointed_at_by_an_empty_string() -> None:
-    """The section is a set of pointers into `actual_extraction`; one the reader cannot follow says
-    something was read out while giving no way to see what."""
-    statements = [
-        {"category": "public_interface", "code_anchors": [{"path": "src/a.py"}]},  # no id
-        _statement("AST-002", "public_interface", "src/b.py"),
+def test_a_reading_no_task_declared_is_the_first_thing_the_section_says() -> None:
+    """Nobody decided this would be somebody's job, and the approver is signing over it anyway."""
+    statements = [_statement("AST-001", "persistence", "db/schema/users.sql")]
+    section = brief.derive(plan=None, state=None, config=None, actual_statements=statements)["requirements_on_people"]
+    assert [row["statement_id"] for row in section["undeclared"]] == ["AST-001"]
+    # With its status attached: a sentence separated from its confidence and its anchor is not
+    # evidence of anything, which is the whole reason this may carry the text at all.
+    assert section["undeclared"][0]["statement"] == "the handler retries on 503"
+    assert section["undeclared"][0]["confidence"] == "high"
+    assert section["undeclared"][0]["paths"] == ["db/schema/users.sql"]
+
+
+def test_a_declared_surface_the_extractor_confirms_becomes_a_count_not_a_row() -> None:
+    plan = _plan(tasks=[make_task("T-001", operator_surface=[_surface("persistence", "users", ["db/schema"])])])
+    statements = [_statement("AST-001", "persistence", "db/schema/users.sql")]
+    section = brief.derive(plan=plan, state=None, config=None, actual_statements=statements)["requirements_on_people"]
+    assert "undeclared" not in section
+    assert section["as_declared"]["count"] == 1
+    assert section["as_declared"]["entries"][0]["statement_ids"] == ["AST-001"]
+
+
+def test_the_category_has_to_match_as_well_as_the_path() -> None:
+    """A declaration about the schema does not foresee a public interface that lives in the same file."""
+    plan = _plan(tasks=[make_task("T-001", operator_surface=[_surface("persistence", "users", ["db/schema"])])])
+    statements = [_statement("AST-001", "public_interface", "db/schema/users.sql")]
+    section = brief.derive(plan=plan, state=None, config=None, actual_statements=statements)["requirements_on_people"]
+    assert [row["statement_id"] for row in section["undeclared"]] == ["AST-001"]
+    assert [row["name"] for row in section["unobserved"]] == ["users"]
+
+
+def test_a_declaration_nothing_was_read_out_about_is_reported_as_unobserved() -> None:
+    """Not built, or not readable — this says only that the reading is absent."""
+    plan = _plan(
+        tasks=[make_task("T-001", operator_surface=[_surface("dependency", "redis", ["deploy/"], adr="ADR-004")])]
+    )
+    section = brief.derive(plan=plan, state=None, config=None)["requirements_on_people"]
+    assert section["unobserved"] == [
+        {"task_id": "T-001", "kind": "dependency", "name": "redis", "paths": ["deploy/"], "adr": "ADR-004"}
     ]
-    rows = brief.derive(plan=None, state=None, config=None, actual_statements=statements)["behaviour"]
-    assert rows[0]["statement_ids"] == ["AST-002"]
+    assert "as_declared" not in section
+
+
+def test_the_trailing_slash_in_a_declared_path_changes_nothing() -> None:
+    """The same rule as a task's `scope`, through the same helper — not a second spelling."""
+    statements = [_statement("AST-001", "persistence", "db/schema/users.sql")]
+    matched = []
+    for pattern in ("db/schema", "db/schema/"):
+        plan = _plan(tasks=[make_task("T-001", operator_surface=[_surface("persistence", "users", [pattern])])])
+        section = brief.derive(plan=plan, state=None, config=None, actual_statements=statements)[
+            "requirements_on_people"
+        ]
+        matched.append(section.get("as_declared", {}).get("count"))
+    assert matched == [1, 1]
+
+
+def test_an_internal_category_is_not_something_anybody_operates() -> None:
+    """`control_flow` and `state_propagation` describe the inside of the code; nobody runs them."""
+    statements = [_statement("AST-001", "control_flow", "src/app/api.py")]
+    sections = brief.derive(plan=None, state=None, config=None, actual_statements=statements)
+    assert "requirements_on_people" not in sections
+
+
+def test_a_statement_with_no_id_is_dropped_rather_than_reported_without_a_way_to_reach_it() -> None:
+    statements = [
+        {"category": "persistence", "code_anchors": [{"path": "db/a.sql"}]},  # no id
+        _statement("AST-002", "persistence", "db/b.sql"),
+    ]
+    section = brief.derive(plan=None, state=None, config=None, actual_statements=statements)["requirements_on_people"]
+    assert [row["statement_id"] for row in section["undeclared"]] == ["AST-002"]
+
+
+def test_the_as_built_view_names_the_blob_rather_than_copying_the_file() -> None:
+    """review.yaml is not a second copy of the repository; the body is fetched on demand."""
+    plan = _plan(tasks=[make_task("T-001", operator_surface=[_surface("persistence", "users", ["db/users.sql"])])])
+    section = brief.derive(
+        plan=plan,
+        state=None,
+        config=None,
+        blob_facts=lambda path: {"blob": "a" * 40, "bytes": 120} if path == "db/users.sql" else None,
+    )["requirements_on_people"]
+    assert section["unobserved"][0]["as_built"] == [{"path": "db/users.sql", "blob": "a" * 40, "bytes": 120}]
+
+
+def test_a_declared_path_that_does_not_exist_at_the_reviewed_commit_is_simply_absent() -> None:
+    plan = _plan(tasks=[make_task("T-001", operator_surface=[_surface("persistence", "users", ["db/users.sql"])])])
+    section = brief.derive(plan=plan, state=None, config=None, blob_facts=lambda path: None)["requirements_on_people"]
+    assert "as_built" not in section["unobserved"][0]
 
 
 # --- verification and operations -----------------------------------------------
 
 
-def test_verification_counts_the_tasks_a_step_was_established_for() -> None:
+def test_verification_reports_a_step_established_for_nothing_and_counts_the_rest() -> None:
     plan = _plan(tasks=[make_task("T-001"), make_task("T-002")])
     state = models.State(
         {
@@ -194,14 +263,16 @@ def test_verification_counts_the_tasks_a_step_was_established_for() -> None:
             },
         }
     )
-    rows = brief.derive(plan=plan, state=state, config=_config())["verification"]
-    assert {row["step"]: row["established_for"] for row in rows} == {"test": 2, "check": 1}
+    section = brief.derive(plan=plan, state=state, config=_config())["verification"]
+    # The steps that ran for something say what everyone already assumed, so they are a number, and
+    # with no exception left there is no list at all.
+    assert section == {"steps": len(_config().quality_gate)}
 
 
-def test_a_configured_step_established_for_nothing_still_appears() -> None:
+def test_every_step_established_for_nothing_leaves_only_the_exceptions() -> None:
     """The interesting row: every task's diff missed its `paths:`, or the run never got that far."""
-    rows = brief.derive(plan=None, state=None, config=_config())["verification"]
-    assert {row["established_for"] for row in rows} == {0}
+    section = brief.derive(plan=None, state=None, config=_config())["verification"]
+    assert section["established_for_nothing"] == [step.name for step in _config().quality_gate]
 
 
 def test_operations_reports_the_smoke_command_and_whether_it_is_required() -> None:
@@ -211,6 +282,42 @@ def test_operations_reports_the_smoke_command_and_whether_it_is_required() -> No
     ]
     sections = brief.derive(plan=None, state=None, config=_config(quality_gate=gate))
     assert sections["operations"] == {"command": [], "required": False}
+
+
+# --- the account of a task that did not land -----------------------------------
+
+
+def _with_report(status: str, outcome: str, summary: str) -> models.State:
+    return models.State(
+        {
+            **make_state(),
+            "tasks": {"T-001": {"status": status, "handoff": {"report": {"outcome": outcome, "summary": summary}}}},
+        }
+    )
+
+
+def test_an_unfinished_task_carries_what_the_implementer_said_about_it() -> None:
+    """`rein report` has always written this and nobody approving a gate has ever read it — and the
+    task it is about is one the approver is being asked to sign around."""
+    residuals = brief.derive(
+        plan=None, state=_with_report("blocked", "blocked", "the API key is not in the image"), config=None
+    )["residuals"]
+    assert residuals["accounts"] == [
+        {"task_id": "T-001", "outcome": "blocked", "summary": "the API key is not in the image"}
+    ]
+
+
+def test_a_task_that_landed_does_not_hand_the_approver_the_implementer_explanation() -> None:
+    """It is the one input the blind extractor may not see; showing it at the moment of decision
+    moves that priming onto the person the arrangement exists to protect."""
+    sections = brief.derive(plan=None, state=_with_report("done", "implemented", "wrote the adapter"), config=None)
+    # Nothing is open, so there is no residual section at all — and no account inside one.
+    assert "residuals" not in sections
+
+
+def test_an_unfinished_task_that_reported_nothing_produces_no_row() -> None:
+    state = models.State({**make_state(), "tasks": {"T-001": {"status": "blocked"}}})
+    assert "accounts" not in brief.derive(plan=None, state=state, config=None)["residuals"]
 
 
 # --- residual findings ---------------------------------------------------------
@@ -265,3 +372,18 @@ def test_a_finding_with_no_statement_is_dropped() -> None:
 def test_no_state_yields_no_findings_rather_than_an_error() -> None:
     assert brief.residual_findings(None) == []
     assert brief.derive(plan=None, state=None, config=None) == {}
+
+
+def test_a_reading_two_tasks_both_declared_is_credited_to_both() -> None:
+    """Crediting only the first would report the second as "nothing was read out about this" while
+    the reading sits in the very same list."""
+    plan = _plan(
+        tasks=[
+            make_task("T-001", operator_surface=[_surface("persistence", "users", ["db/"])]),
+            make_task("T-002", operator_surface=[_surface("persistence", "schema", ["db/schema"])]),
+        ]
+    )
+    statements = [_statement("AST-001", "persistence", "db/schema/users.sql")]
+    section = brief.derive(plan=plan, state=None, config=None, actual_statements=statements)["requirements_on_people"]
+    assert "unobserved" not in section
+    assert section["as_declared"]["count"] == 2

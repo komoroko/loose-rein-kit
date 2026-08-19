@@ -105,6 +105,47 @@
           "type": "array",
           "maxItems": 32,
           "items": { "$ref": "#/$defs/acceptance" }
+        },
+        "operator_surface": {
+          "description": "What this task will require of a person: a setting somebody has to supply, a schema somebody has to migrate, a dependency somebody has to provide, a signal somebody has to watch. Frozen at gate 3 with the rest of the task, which is what turns it into an Expected side — at gate 4 the blind extractor's readings are sorted by whether one of these foresaw them, and the readings nothing foresaw are what the approver is shown first. Declaring nothing is allowed; it means every operator-facing reading in that area arrives at gate 4 as undeclared.",
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/operatorSurface" }
+        }
+      }
+    },
+    "operatorSurface": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "paths"],
+      "properties": {
+        "kind": {
+          "description": "A subset of the Actual Statement categories in review.schema.json, not a vocabulary of its own: the declaration is compared against what a blind extractor read out of the code, and two vocabularies over one comparison would need a mapping table that can be wrong. These are the categories describing a surface somebody outside the code can see.",
+          "enum": [
+            "persistence",
+            "public_interface",
+            "dependency",
+            "default_value",
+            "observability",
+            "security_boundary"
+          ]
+        },
+        "name": {
+          "description": "What a person deals with, in their words — a settings key, a table and column, a queue, an endpoint. Never matched against anything: prose compared to prose is the overclaim the gate 4 brief exists to avoid, so `paths` is what carries the comparison.",
+          "$ref": "#/$defs/label"
+        },
+        "paths": {
+          "description": "Where this surface can be read at the reviewed commit — the migration, the schema file, the settings module. Covered the same way `scope` is (the path it names and everything beneath it, trailing slash optional), and this is what an extracted statement's code anchor is matched against. It is also what gate 4 offers as the as-built view: the file as it ends up, which a diff never shows.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/repoPath" }
+        },
+        "adr": {
+          "description": "The decision record that settled what this requires of a person and whether it can be undone. Shown beside the declaration at gate 4 so the trade-off a human approved at gate 2 is reachable from what was built — the review never restates it, because a restatement is a sentence nobody observed.",
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^ADR-[0-9]+$"
         }
       }
     },

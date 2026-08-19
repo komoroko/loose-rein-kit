@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from rein import digests, models, strict_yaml
+from tests._support import make_plan, make_task
 
 SCHEMA_NAMES = ("plan", "state", "review", "event", "config")
 
@@ -561,3 +562,48 @@ def test_event_round_trips_through_a_mapping() -> None:
         detail={"attempts": 2},
     )
     assert models.Event.from_mapping(event.to_mapping()) == event
+
+
+# --- what a task declares it will require of a person ---------------------------
+
+
+def test_a_task_reads_back_the_operator_surface_the_plan_froze() -> None:
+    """The Expected side of gate ④'s "what does this now require of somebody" comparison."""
+    plan = models.Plan(
+        make_plan(
+            tasks=[
+                make_task(
+                    "T-001",
+                    operator_surface=[
+                        {"kind": "persistence", "name": "users.email_verified", "paths": ["db/schema.sql"]}
+                    ],
+                )
+            ]
+        )
+    )
+    surface = plan.task("T-001").operator_surface  # type: ignore[union-attr]
+    assert [entry["kind"] for entry in surface] == ["persistence"]
+
+
+def test_a_task_that_declares_nothing_reads_back_an_empty_declaration() -> None:
+    """Declaring nothing is allowed; it means every operator-facing reading arrives undeclared."""
+    plan = models.Plan(make_plan(tasks=[make_task("T-001")]))
+    assert plan.task("T-001").operator_surface == ()  # type: ignore[union-attr]
+
+
+def test_the_declared_kinds_are_a_subset_of_the_actual_statement_categories() -> None:
+    """Two vocabularies over one comparison would need a mapping table that can be wrong."""
+    import json
+
+    from rein import data as data_mod
+
+    schema = json.loads(data_mod.read_text("schema/review.schema.json"))
+    categories = set(
+        schema["$defs"]["machine"]["properties"]["actual_extraction"]["items"]["properties"]["category"]["enum"]
+    )
+    assert models.OPERATOR_SURFACE_KIND_VALUES <= categories
+
+
+def test_a_declared_kind_outside_the_enum_is_refused_by_the_schema() -> None:
+    plan = make_plan(tasks=[make_task("T-001", operator_surface=[{"kind": "vibes", "name": "x", "paths": ["src/"]}])])
+    assert any("vibes" in error or "kind" in error for error in models.schema_errors(plan, "plan"))

@@ -20,6 +20,7 @@ let review = null;     // last /api/review payload for `current`
 let session = null;    // last /api/review/session payload (gate ④'s human-review state)
 let stage = null;      // selected review stage (gate ④ only)
 let stageData = null;  // last /api/review/stage/<stage> payload
+let asBuilt = null;    // last /api/review/as-built/<path> payload, shown under the orient section
 let selected = null;   // selected deliverable id (non-build gates)
 let tabVisible = false;
 let fetchSeq = 0;          // newest request wins; older responses are dropped on arrival
@@ -173,7 +174,7 @@ function selectGate(name) {
 
 async function selectStage(name) {
   if (name === stage) return;
-  stage = name; stageData = null;
+  stage = name; stageData = null; asBuilt = null;
   paint();
   const seq = fetchSeq;
   await fetchStage(seq);
@@ -446,6 +447,82 @@ function pathsCell(paths) {
   return (paths || []).map(esc).join("<br>") || "—";
 }
 
+// The one part of the orientation that can change an approval, so it is the one part ordered by
+// decision value: what nobody declared, then what was declared and never read out, then a count of
+// the ones that went as foreseen. A table of expected rows is where the first two go to hide.
+function asBuiltPanel() {
+  if (!asBuilt || stage !== "orient") return "";
+  return '<div class="subhead" style="margin-top:.8rem">AS BUILT \u2014 ' + esc(asBuilt.path) +
+    ' <span class="mono">@' + esc((asBuilt.commit || "").slice(0, 12)) + "</span></div>" +
+    "<pre class=\"scroll\">" + esc(asBuilt.content || "") + "</pre>" +
+    '<div class="empty">The file as it ends up at the commit this review is bound to \u2014 not the ' +
+    "diff, and not your working tree.</div>";
+}
+
+function requirementsOnPeople(section) {
+  if (!section) return "";
+  let html = '<div class="subhead" style="margin-top:.8rem">WHAT THIS CHANGE NOW REQUIRES OF A PERSON</div>';
+
+  const undeclared = section.undeclared || [];
+  if (undeclared.length) {
+    html += briefTable([("<tr><th>nobody declared this</th><th>read out of the code</th><th>where</th></tr>")].concat(
+      undeclared.map(u =>
+        "<tr><td>" + esc(u.category.replace(/_/g, " ")) + " " + confBadge(u.confidence) +
+        '</td><td>' + esc(u.statement) + '</td><td class="mono">' + pathsCell(u.paths) + "</td></tr>"))) +
+      '<div class="warn">No task declared these at gate \u2462, so nobody decided they would be ' +
+      "somebody's job. That is what this row is: not a defect, a decision that has not been made.</div>";
+  }
+
+  const unobserved = section.unobserved || [];
+  if (unobserved.length) {
+    html += '<div class="subhead" style="margin-top:.6rem">DECLARED, NOTHING READ OUT</div>' +
+      briefTable(unobserved.map(u => surfaceRow(u)));
+  }
+
+  const declared = section.as_declared;
+  if (declared) {
+    html += '<div class="subhead" style="margin-top:.6rem">AS DECLARED</div>' +
+      briefTable(["<tr><td>foreseen at gate \u2462 and present</td><td>" + esc(declared.count) + "</td></tr>"]);
+    if ((declared.entries || []).length) {
+      html += "<details><summary>show them</summary>" +
+        briefTable(declared.entries.map(u => surfaceRow(u))) + "</details>";
+    }
+  }
+  return html;
+}
+
+// One declared surface. `as_built` is a link rather than a body: what a person operates is the file
+// as it ends up, which no diff shows — and holding it in the review would make the document a copy
+// of the repository.
+function surfaceRow(u) {
+  const built = (u.as_built || []).map(a =>
+    '<button data-act="asbuilt" data-id="' + esc(a.path) + '">' + esc(a.path) + "</button>").join(" ");
+  return '<tr><td class="mono">' + esc(u.task_id) + "</td><td>" + esc(u.kind.replace(/_/g, " ")) +
+    "</td><td>" + esc(u.name) + "</td><td>" + esc(u.adr || "\u2014") + "</td><td>" +
+    (built || pathsCell(u.paths)) + "</td></tr>";
+}
+
+function confBadge(level) {
+  return level ? '<span class="conf ' + esc(level) + '">' + esc(level) + "</span>" : "";
+}
+
+// The as-built body, fetched from the commit the review is bound to. The server refuses any path
+// the stored brief did not publish, so this cannot become a way to read the repository.
+async function showAsBuilt(path) {
+  try {
+    const res = await fetch("/api/review/as-built/" + encodeURIComponent(path));
+    const payload = await res.json();
+    if (payload.error) { toast(payload.error, "err"); return; }
+    if (payload.too_large) {
+      toast(path + " is " + payload.bytes + " bytes, over the " + payload.limit +
+        " this pane shows — read it at " + payload.commit.slice(0, 12) + " instead", "err");
+      return;
+    }
+    asBuilt = payload;
+    paint();
+  } catch (e) { toast("request failed: " + e, "err"); }
+}
+
 function orientStage(d) {
   const b = d.brief || {};
   let html = "";
@@ -491,17 +568,21 @@ function orientStage(d) {
     html += '<div class="subhead" style="margin-top:.8rem">WHAT MOVED UNDERNEATH THE CODE</div>' + briefTable(rows);
   }
 
-  if (b.behaviour) {
-    html += '<div class="subhead" style="margin-top:.8rem">WHAT THE BLIND EXTRACTOR READ</div>' +
-      briefTable(b.behaviour.map(x =>
-        "<tr><td>" + esc(x.category.replace(/_/g, " ")) + '</td><td class="mono">' +
-        esc((x.statement_ids || []).join(" ")) + "</td><td>" + pathsCell(x.paths) + "</td></tr>"));
-  }
+  html += requirementsOnPeople(b.requirements_on_people);
 
   if (b.verification || b.operations) {
-    const rows = (b.verification || []).map(v =>
-      "<tr><td>" + esc(v.step) + "</td><td>" + esc(v.established_for) + " task(s)</td></tr>");
+    const v = b.verification || {}, nothing = v.established_for_nothing || [];
+    const rows = [
+      "<tr><td>steps in the quality gate</td><td>" + esc(v.steps == null ? "—" : v.steps) + "</td></tr>",
+    ];
+    if (nothing.length) {
+      rows.push('<tr><td>established for no task</td><td class="mono">' + esc(nothing.join(" ")) + "</td></tr>");
+    }
     html += '<div class="subhead" style="margin-top:.8rem">WHAT THE GATE ESTABLISHED</div>' + briefTable(rows);
+    if (nothing.length) {
+      html += '<div class="warn">Those steps ran for nothing: every task\'s diff missed their paths, or ' +
+        "the run never got that far.</div>";
+    }
     const ops = b.operations || {};
     if (!(ops.command || []).length) {
       html += '<div class="warn">The smoke step has no command: nothing in this run ever started the ' +
@@ -522,6 +603,15 @@ function orientStage(d) {
     html += '<div class="subhead" style="margin-top:.8rem">STILL OPEN</div>' + briefTable(residualRows);
   }
 
+  if ((r.accounts || []).length) {
+    html += '<div class="subhead" style="margin-top:.8rem">WHAT THE IMPLEMENTER SAID ABOUT THEM</div>' +
+      briefTable(r.accounts.map(a =>
+        '<tr><td class="mono">' + esc(a.task_id) + "</td><td>" + esc(a.outcome || "") + "</td><td>" +
+        esc(a.summary) + "</td></tr>")) +
+      '<div class="empty">A claim by the agent that did the work, not a finding: nothing independent ' +
+      "checked it. It is here because these tasks are the ones you are being asked to approve around.</div>";
+  }
+
   const findings = d.residual_findings || [];
   if (findings.length) {
     html += '<div class="subhead" style="margin-top:.8rem">UNRESOLVED REVIEW FINDINGS</div>' +
@@ -539,7 +629,8 @@ function orientStage(d) {
   // Always last and always present: the claims the comparator settled have no card, so a reviewer
   // reading cards alone would see only what the review could not conclude. `expectedActualStage`
   // says so itself when there are none, which is why there is no fallback around this.
-  return html + '<div class="subhead" style="margin-top:.8rem">EXPECTED vs ACTUAL</div>' + expectedActualStage(d);
+  return html + asBuiltPanel() +
+    '<div class="subhead" style="margin-top:.8rem">EXPECTED vs ACTUAL</div>' + expectedActualStage(d);
 }
 
 // --- scope: what this review speaks for, and what it does not ------------------
@@ -833,6 +924,7 @@ const ACTIONS = {
   freeze: freezeReview,
   approve: approveCurrent,
   changes: requestChanges,
+  asbuilt: showAsBuilt,
 };
 
 document.addEventListener("click", e => {

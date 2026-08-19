@@ -313,3 +313,87 @@ class TestScopeStage:
         root = make_repo()
         _write(root, ".rein/review.yaml", "machine:\n  status: not_generated\nhuman:\n  status: not_started\n")
         assert review_api.stage_data(root, "scope")["generated"] is False
+
+
+class TestAsBuilt:
+    """The as-built view: one declared surface as it *ends up*, read at the reviewed commit.
+
+    Two properties, and the second is the security one. It must read the reviewed commit rather
+    than the working tree, or gate ④ shows a file from a tree its findings are not about. And it
+    must serve only what the stored brief published — the route reads blobs out of the repository,
+    so what it may read has to come from the review, never from the request.
+    """
+
+    def _seed(self, root: Path, *, declared_path: str = "db/schema.sql") -> str:
+        _git(root, "init", "-q", "-b", "main")
+        _write(root, "db/schema.sql", "create table users (id int);\n")
+        _write(root, "secrets.env", "TOKEN=hunter2\n")
+        _git(root, "add", ".")
+        _git(root, "commit", "-qm", "schema")
+        head = _git(root, "rev-parse", "HEAD")
+        _write(
+            root,
+            ".rein/review.yaml",
+            "machine:\n"
+            "  status: generated\n"
+            "  binding:\n"
+            "    change_digest: sha256:" + "a" * 64 + "\n"
+            "    plan_digest: sha256:" + "b" * 64 + "\n"
+            "    subject_head_sha: " + head + "\n"
+            "  brief:\n"
+            "    requirements_on_people:\n"
+            "      unobserved:\n"
+            "        - task_id: T-001\n"
+            "          kind: persistence\n"
+            "          name: users\n"
+            "          paths: [db/]\n"
+            "          as_built:\n"
+            "            - path: " + declared_path + "\n"
+            "              blob: " + "c" * 40 + "\n"
+            "              bytes: 29\n"
+            "human:\n  status: not_started\n",
+        )
+        return head
+
+    def test_a_declared_surface_is_served_as_it_ends_up(self, make_repo: MakeRepo) -> None:
+        root = make_repo()
+        head = self._seed(root)
+        payload = review_api.as_built(root, "db/schema.sql")
+        assert payload["content"] == "create table users (id int);\n"
+        assert payload["commit"] == head
+
+    def test_it_reads_the_reviewed_commit_and_not_the_working_tree(self, make_repo: MakeRepo) -> None:
+        """A file that moved after the review is a file the findings beside it are not about."""
+        root = make_repo()
+        self._seed(root)
+        _write(root, "db/schema.sql", "drop table users;\n")
+        assert review_api.as_built(root, "db/schema.sql")["content"] == "create table users (id int);\n"
+
+    def test_a_path_the_review_never_published_is_refused(self, make_repo: MakeRepo) -> None:
+        """Committed, readable, and none of this route's business."""
+        root = make_repo()
+        self._seed(root)
+        with pytest.raises(review_api.ReviewError, match="not an as-built path"):
+            review_api.as_built(root, "secrets.env")
+
+    def test_a_traversal_is_just_another_undeclared_path(self, make_repo: MakeRepo) -> None:
+        root = make_repo()
+        self._seed(root)
+        with pytest.raises(review_api.ReviewError, match="not an as-built path"):
+            review_api.as_built(root, "../../etc/passwd")
+
+    def test_an_ungenerated_review_publishes_nothing_to_read(self, make_repo: MakeRepo) -> None:
+        root = make_repo()
+        _write(root, ".rein/review.yaml", "machine:\n  status: not_generated\nhuman:\n  status: not_started\n")
+        with pytest.raises(review_api.ReviewError, match="nothing bound to a commit"):
+            review_api.as_built(root, "db/schema.sql")
+
+    def test_a_file_too_large_to_show_says_so_rather_than_arriving_truncated(
+        self, make_repo: MakeRepo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A silently cut schema is a schema somebody reads as complete."""
+        root = make_repo()
+        self._seed(root)
+        monkeypatch.setattr(review_api, "AS_BUILT_MAX_BYTES", 1)
+        payload = review_api.as_built(root, "db/schema.sql")
+        assert payload["too_large"] is True and payload["limit"] == 1 and "content" not in payload

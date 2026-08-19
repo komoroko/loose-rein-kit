@@ -7,13 +7,19 @@ is running; the core's gate rules apply at all times regardless.
 ## Gate self-assessment (required at every gate)
 
 At every gate (①–⑤), present a **self-assessment block** alongside the deliverable — surfacing
-the system's own uncertainty is what lightens the human's review: **assumptions made**;
-**confidence** (high / medium / low by area, always with a reason for low spots); **open
-questions / points for the human to decide** (most important); **anticipated risks and
-trade-offs**; and, when relevant, a **context-bloat signal** (propose trimming an outgrowing
-deliverable or log). Do not pretend to high confidence to let the human skip verification.
-For requirements/design/task tickets, put it in the deliverable itself (each scaffold's
-"Self-assessment" section), not just spoken.
+the system's own uncertainty is what lightens the human's review. **Three items, and no more**:
+**assumptions made**; **confidence** (high / medium / low by area, always with a reason for low
+spots); **open questions / points for the human to decide** (most important). Do not pretend to
+high confidence to let the human skip verification. For requirements/design/task tickets, put it in
+the deliverable itself (each scaffold's "Self-assessment" section), not just spoken.
+
+**What this block deliberately does not carry.** A list of *anticipated risks and trade-offs* — the
+independent `adversarial-reviewer` round below asks that question of somebody who did not write the
+deliverable, and the same question answered a second time by its author is the self-consistent
+explanation this whole arrangement declines to treat as evidence. And a *context-bloat signal* —
+that is hygiene addressed to the agent, not a decision for the human, and the pre-compact check
+under "Context budget" is where it already lives. Every item a gate presents costs the reader
+attention that the items carrying a decision then have to compete with.
 
 Self-assessment alone is not independent verification: gates ①–③ additionally require one
 **adversarial-review round** by the `adversarial-reviewer` role — procedure and recording:
@@ -47,14 +53,26 @@ change before every card spends their attention on reconstruction.**
   the boundary does not know what they approved.
 - **The orient stage says what was built, and under what conditions.** The delivered tasks and the
   claims they answer; which dependency manifests, generated files and migrations moved; **which
-  sandbox, image and network posture each quality-gate step ran under**; what the blind extractor
-  read out about the interfaces, persistence, security boundaries and dependencies; what the gate
-  established and for how many tasks; whether anything ever *launched* the deliverable; the
+  sandbox, image and network posture each quality-gate step ran under**; how many quality-gate steps
+  ran and which ran for nothing; whether anything ever *launched* the deliverable; the
   Expected/Actual comparison on its three axes; and what is still open — tasks awaiting evidence,
-  open change requests, and the per-task review findings marked `consider` that stopped nothing and
-  would otherwise have died with the session that produced them. Every line is **derived from the
-  SSOT**, not written by anything: ids, paths, commands, image references, and reviewer prose
-  reached by statement id so its epistemic status stays attached.
+  open change requests, the per-task review findings marked `consider` that stopped nothing, and
+  what the implementer said about each task that did **not** land. Every line is **derived from the
+  SSOT**, not written by anything, and where it carries a sentence somebody else wrote, the
+  confidence and the code anchor travel with it.
+- **Orient's one substantive section is what the change now requires of a person.** A setting
+  somebody has to supply, a schema somebody has to migrate, a dependency somebody has to provide, a
+  signal somebody has to watch. Gate ③ freezes each task's `operator_surface`, and this section
+  sorts the blind extractor's operator-facing readings by whether one of those declarations foresaw
+  them: **what nobody declared comes first** — nobody decided that would be somebody's job — then
+  what was declared and never read out, then a **count** of the ones that went as foreseen. Expected
+  rows are a number, because a table of them is where the first two go to hide. A declared surface
+  also offers its **as-built** view: the file as it *ends up* at the reviewed commit, which a diff
+  never shows, fetched on demand rather than copied into the review.
+- **What the gate does not do here is re-open the choice.** The trade-off was decided at gate ②,
+  by a human, and it is recorded in the ADR the declaration names. Restating it after the fact would
+  put a sentence nobody observed in front of the person deciding, and re-litigate a decision that is
+  already made.
 - **If the sandbox moved since gate ③, orient says so.** Gate ③ freezes `config.yaml` without its
   image pins, so a task that legitimately adds a dependency can have its sandbox rebuilt without
   re-approving a plan nothing changed. That permission is paid for here: the approver is told,

@@ -6,11 +6,14 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.3.2] - 2026-08-19
 
-Two rounds of reported defects. The first: gate ④ asked a human to pass a quiz and then to decide,
-and gave them nothing to decide *with*. The second, from running the loop on real work: the machine
-kept charging tasks for its own failures — a freeze that a rebuilt image broke, retries against a
-break no task caused, a review pipeline re-read for nothing, a queue that only grew. The shape
-recurs: something the code could distinguish and did not, so a cost landed on whoever was nearest.
+Two rounds of reported defects, and one thing the lifecycle never had a word for. The first round:
+gate ④ asked a human to pass a quiz and then to decide, and gave them nothing to decide *with*. The
+second, from running the loop on real work: the machine kept charging tasks for its own failures — a
+freeze that a rebuilt image broke, retries against a break no task caused, a review pipeline re-read
+for nothing, a queue that only grew. The shape recurs: something the code could distinguish and did
+not, so a cost landed on whoever was nearest. The third strand is the same shape one step earlier —
+no task could state what its change would require of a *person*, so gate ④ had nothing to compare
+the operator-facing readings against, and finding out cost whoever ended up operating the result.
 
 **Breaking**, all of it requiring a re-approval or a regeneration rather than a migration:
 
@@ -22,6 +25,66 @@ recurs: something the code could distinguish and did not, so a cost landed on wh
   is now `environment_digest`; re-approve gate ③.
 - The `challenge_answered` and `counterfactual_answered` event types are gone from the vocabulary
   and `environment_repinned` is new; a log containing the first two will not validate.
+
+### Gate 4 says what the change now requires of a person
+
+The orientation stage had a table headed "what the blind extractor read", and it was a list of
+statement ids. The text of a reading appeared on screen only where a claim happened to cite it, so
+a sentence about a schema no claim covered — exactly the sentence somebody about to operate the
+thing needs — was reachable nowhere. Meanwhile nothing in the template had a word for a setting
+somebody has to supply, a migration somebody has to run, or a signal somebody has to watch: not the
+requirements, not the design, not the plan, not the test plan.
+
+That is a missing **Expected** side, not a missing screen. A task in `plan.yaml` now declares its
+`operator_surface` — `{kind, name, paths, adr}` — frozen at gate ③ with everything else, and gate ④
+sorts the extractor's operator-facing readings by whether one of those declarations foresaw them:
+**what nobody declared first**, then what was declared and never read out, then a **count** of the
+ones that went as foreseen. Expected rows are a number, because a table of them is where the first
+two go to hide. The `kind` vocabulary is a subset of the extractor's own statement categories rather
+than a new one, so the two sides compare without a translation table that could be wrong; matching
+is category equality plus path coverage, and stops there, because declaring a human's prose and a
+model's prose "the same surface" because they read alike is the overclaim the brief exists to avoid.
+
+### The file as it ends up, not the diff that changed it
+
+A diff shows what moved; what somebody operates is the result. Each declared surface now offers an
+**as-built** view — the file at the commit the review is bound to, fetched on demand from
+`/api/review/as-built/<path>` rather than copied into `review.yaml`, which would make the document a
+second copy of the repository. The route serves only paths the stored brief published; an ordinary
+committed source file is refused, because what this may read has to come from the review rather than
+from the request.
+
+### The implementer's own account of a task that did not land
+
+`rein report --summary`'s help says "a human reads this". None ever did: `handoff.report` was read
+by the loop, to phrase a failure, and by the next attempt's dossier. It now reaches gate ④ for the
+tasks that did **not** land — the ones the approver is being asked to sign around, which is when the
+reason matters — labelled as the claim it is. For work that landed it stays where it was: an
+implementer's explanation of its own code is the one input the blind extractor may not see, and
+handing it to the approver instead would move that priming onto the person the whole arrangement
+exists to protect.
+
+### Fewer things to read at every gate
+
+- The **self-assessment is three items**, not five. *Anticipated risks and trade-offs* is gone: gates
+  ①–③ already put the deliverable through an independent adversarial round, and the same question
+  answered a second time by its author is the self-consistent explanation this system declines to
+  treat as evidence. The *context-bloat signal* is gone too — hygiene addressed to the agent, and
+  the pre-compact check already carries it.
+- **Gate ③ presents two graph artefacts, not three.** `rein dag --mermaid` drew the same graph
+  `--render` already states; a second rendering of one fact is a second thing to read rather than a
+  second thing to know. The flag stays, and `/status` is where the whole picture is drawn.
+- **The quality-gate summary names only the exceptions.** It listed every DoD step and how many
+  tasks established it; its own docstring said the row worth reading is the step established for
+  nothing. Now that is what it prints, beside a count of the rest.
+
+### Where the trade-off stays
+
+An ADR that changes something somebody has to operate must now record **what it requires of a
+person** and **whether it can be undone**. Reversibility is a fact about the decision, and it is what
+the gate ④ approver is actually handed; the pros and cons stay with the options, at gate ②, where
+the choice is. Nothing restates them after the fact — a decision already made does not get
+re-litigated in front of the person approving the evidence for it.
 
 ### Challenge-first is removed
 

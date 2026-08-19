@@ -129,6 +129,7 @@ def make_task(
     risk: str = "low",
     title: str = "",
     acceptance: list[dict[str, Any]] | None = None,
+    operator_surface: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     task: dict[str, Any] = {
         "id": task_id,
@@ -142,6 +143,8 @@ def make_task(
         task["claim_ids"] = claim_ids
     if acceptance is not None:
         task["acceptance"] = acceptance
+    if operator_surface is not None:
+        task["operator_surface"] = operator_surface
     return task
 
 
@@ -177,6 +180,7 @@ def make_review(
     review_budget: list[dict[str, Any]] | None = None,
     base_sha: str = "",
     head_sha: str = "",
+    brief: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A review document. `generated=False` is the honest empty state, not an empty result.
 
@@ -220,6 +224,8 @@ def make_review(
         machine["effective_risk"] = effective_risk
     if gaps:
         machine["gaps"] = gaps
+    if brief:
+        machine["brief"] = brief
     return {"machine": machine, "human": {"status": human_status}}
 
 

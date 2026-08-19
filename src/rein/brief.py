@@ -9,11 +9,14 @@ from a diff, once per card. That reconstruction is the cost this module removes.
 
 **Derived, never authored.** Like `decision_cards`, every value here is a restatement of something
 the SSOT already records: a task id and its frozen title, a path, a command, an image reference, a
-statement *id*. Nothing here is a sentence this file composed. That is deliberate and it is the
+statement id. Nothing here is a sentence this file composed. That is deliberate and it is the
 schema's rule, not a preference — review.yaml has no free-form prose field, because a sentence with
-no epistemic status is exactly what a model fills in when it has no source. Where the brief points
-at something a reviewer wrote (`behaviour`), it points by **id** into `actual_extraction`, which
-carries the status and the code anchors; it does not copy the text out and strip them.
+no epistemic status is exactly what a model fills in when it has no source. Where the brief carries
+something a reviewer wrote, it carries the **confidence and the code anchor with it**: the rule was
+never "no text", it was "no text without its status", and an id the reader had to go and resolve
+somewhere else was how that rule got implemented back when there was nowhere to show the status.
+An implementer's own account (`residuals.accounts`) travels the same way — labelled as the claim it
+is, never as a finding.
 
 **Bound to the reviewed tree, not recomputed on read.** `derive` runs inside `review.generate` and
 its result is stored in the machine half, so the brief a reviewer reads describes the same commit
@@ -27,10 +30,16 @@ copy of a number is a second thing that can disagree with the first.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from rein import diff_facts, models
+from rein import common, diff_facts, models
+
+#: How the brief reaches the reviewed tree: given a repo-relative path, the identity and size of
+#: its blob at `binding.subject_head_sha`, or None when that commit has no such file. Injected
+#: rather than imported so this module stays pure — `derive` takes already-read SSOT, and a
+#: function that goes and reads git would make every test of it need a repository.
+BlobFacts = Callable[[str], dict[str, Any] | None]
 
 #: Cap on any path list in the brief. Past this a section is saying "a lot changed here", which is
 #: a fact the count carries better than the two-hundredth filename does.
@@ -40,11 +49,9 @@ MAX_PATHS = 100
 #: this has a scope problem no screen fixes.
 MAX_TASKS = 200
 
-#: The statement categories a reviewer is being oriented about, in the order they are shown. Not
-#: every category the extractor may emit — `control_flow` and `default_value` are the substance of
-#: the comparison itself, and repeating them here would turn an orientation into a second review.
-#: These four are the ones that answer "what does this change expose, store, protect, and depend on".
-BEHAVIOUR_CATEGORIES: tuple[str, ...] = ("public_interface", "persistence", "security_boundary", "dependency")
+#: Cap on the as-built file list carried for one declaration. A declaration naming more places than
+#: this is not describing one surface.
+MAX_AS_BUILT = 8
 
 #: Task statuses that mean the work landed. `awaiting-evidence` landed too — its code merged and
 #: passed everything; only the task is parked — so it belongs in `delivered` *and* in `residuals`.
@@ -150,43 +157,131 @@ def _environment_drift(state: models.State | None, config: models.Config | None)
     return {"approved_at_gate_three": frozen, "evidence_produced_in": live}
 
 
-def _behaviour(actual_statements: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """What the blind extractor read out, grouped by the categories an orientation is about.
+def _declarations(plan: models.Plan | None) -> list[dict[str, Any]]:
+    """Every `operator_surface` entry in the frozen plan, tagged with the task that declared it."""
+    if plan is None:
+        return []
+    rows = []
+    for task in plan.tasks:
+        for entry in task.operator_surface:
+            kind = str(entry.get("kind", ""))
+            paths = [str(p) for p in entry.get("paths", ()) if isinstance(p, str)]
+            if kind not in models.OPERATOR_SURFACE_KIND_VALUES or not paths:
+                continue
+            row: dict[str, Any] = {"task_id": task.id, "kind": kind, "name": str(entry.get("name", "")), "paths": paths}
+            if entry.get("adr"):
+                row["adr"] = str(entry["adr"])
+            rows.append(row)
+    return rows
 
-    By id and by anchor path, never by copying the statement text. The text lives in
-    `actual_extraction` with its confidence and its code anchors attached; a copy here would be the
-    same sentence with its epistemic status left behind, which is the one thing this document does
-    not allow.
+
+def _anchor_paths(statement: Mapping[str, Any]) -> list[str]:
+    anchors = statement.get("code_anchors")
+    if not isinstance(anchors, list):
+        return []
+    return [str(a["path"]) for a in anchors if isinstance(a, Mapping) and a.get("path")]
+
+
+def _requirements_on_people(
+    plan: models.Plan | None,
+    actual_statements: Sequence[Mapping[str, Any]],
+    blob_facts: BlobFacts | None,
+) -> dict[str, Any]:
+    """What this change now requires of a person, sorted by whether anyone foresaw it.
+
+    This is the one part of the orientation that can change an approval, so it is the one part
+    ordered by decision value rather than by category:
+
+    - **`undeclared` first.** An operator-facing behaviour the code was read to have, that no task
+      declared at gate ③. Nobody decided this would be someone's job; the approver is being asked
+      to sign over it anyway. Carried with its confidence and its anchor, because a sentence
+      without those is not evidence of anything.
+    - **`unobserved`.** A declaration nothing was read out about. Either it was not built or it
+      could not be read, and the two are the reviewer's to tell apart — which is why this says
+      only that the reading is absent.
+    - **`as_declared` as a count.** Foreseen and present is the boring case, and a table of boring
+      rows is where the two above go to hide. The entries travel with it for a reader who asks.
+
+    Matching is **category equality plus path coverage** (`common.path_covered`, the same rule as a
+    task's `scope`) and stops there. A declaration's `name` is prose a human wrote and a statement
+    is prose a model wrote; declaring them "the same surface" because they read alike is exactly
+    the overclaim the rest of this module refuses to make.
     """
-    grouped: dict[str, dict[str, Any]] = {}
+    declarations = _declarations(plan)
+    matched: dict[int, list[str]] = {i: [] for i in range(len(declarations))}
+    undeclared: list[dict[str, Any]] = []
+
     for statement in actual_statements:
         category = str(statement.get("category", ""))
         statement_id = str(statement.get("id", ""))
-        # No id, no row. This section is a set of pointers into `actual_extraction`, and an entry
-        # the reader cannot follow is worse than an absent one: it says something was read out
-        # while giving no way to see what.
-        if category not in BEHAVIOUR_CATEGORIES or not statement_id:
+        if category not in models.OPERATOR_SURFACE_KIND_VALUES or not statement_id:
             continue
-        bucket = grouped.setdefault(category, {"category": category, "statement_ids": [], "paths": set()})
-        bucket["statement_ids"].append(statement_id)
-        anchors = statement.get("code_anchors")
-        if isinstance(anchors, list):
-            for anchor in anchors:
-                if isinstance(anchor, Mapping) and anchor.get("path"):
-                    bucket["paths"].add(str(anchor["path"]))
-    rows = []
-    for category in BEHAVIOUR_CATEGORIES:
-        found = grouped.get(category)
-        if found is None:
+        paths = _anchor_paths(statement)
+        # Every declaration it lands in, not the first: two tasks may declare the same area, and
+        # crediting only one of them would report the other as "nothing was read out about this"
+        # while the reading sits in the same list.
+        hits = [
+            index
+            for index, declaration in enumerate(declarations)
+            if declaration["kind"] == category
+            and any(common.path_covered(path, pattern) for path in paths for pattern in declaration["paths"])
+        ]
+        if hits:
+            for index in hits:
+                matched[index].append(statement_id)
             continue
-        rows.append(
-            {
-                "category": category,
-                "statement_ids": found["statement_ids"][:MAX_PATHS],
-                "paths": sorted(found["paths"])[:MAX_PATHS],
-            }
-        )
-    return rows
+        row: dict[str, Any] = {
+            "category": category,
+            "statement_id": statement_id,
+            "statement": str(statement.get("statement", "")),
+            "confidence": str(statement.get("confidence", "low")),
+        }
+        if paths:
+            row["paths"] = sorted(set(paths))[:MAX_PATHS]
+        undeclared.append(row)
+
+    unobserved: list[dict[str, Any]] = []
+    as_declared: list[dict[str, Any]] = []
+    for index, declaration in enumerate(declarations):
+        row = dict(declaration)
+        built = _as_built(declaration["paths"], blob_facts)
+        if built:
+            row["as_built"] = built
+        if matched[index]:
+            row["statement_ids"] = matched[index][:MAX_PATHS]
+            as_declared.append(row)
+        else:
+            unobserved.append(row)
+
+    section: dict[str, Any] = {}
+    if undeclared:
+        section["undeclared"] = undeclared[:MAX_PATHS]
+    if unobserved:
+        section["unobserved"] = unobserved[:MAX_PATHS]
+    if as_declared:
+        section["as_declared"] = {"count": len(as_declared), "entries": as_declared[:MAX_PATHS]}
+    return section
+
+
+def _as_built(paths: Sequence[str], blob_facts: BlobFacts | None) -> list[dict[str, Any]]:
+    """How to reach each declared path *as it ends up*, at the commit the review is bound to.
+
+    The identity of the blob and its size, never its body: review.yaml is not a second copy of the
+    repository, and a document that grew a schema file every cycle would stop being readable for
+    the same reason the diff already is not. The pane fetches the body from that commit when a
+    reader asks for it.
+
+    A path with no blob is simply absent — a declaration may name a file the change deleted, or one
+    that was never created, and both are things `unobserved` is already saying more directly.
+    """
+    if blob_facts is None:
+        return []
+    out = []
+    for path in sorted(set(paths))[:MAX_AS_BUILT]:
+        facts = blob_facts(path)
+        if facts is not None:
+            out.append({"path": path, **facts})
+    return out
 
 
 def _operations(config: models.Config | None) -> dict[str, Any]:
@@ -205,15 +300,17 @@ def _operations(config: models.Config | None) -> dict[str, Any]:
     return {}
 
 
-def _verification(config: models.Config | None, state: models.State | None) -> list[dict[str, Any]]:
-    """Each DoD step, and how many landed tasks recorded it established against their own tree.
+def _verification(config: models.Config | None, state: models.State | None) -> dict[str, Any]:
+    """How many DoD steps ran for something, and which ones ran for nothing.
 
     A step configured but established for no task is the interesting row: it means every task's
-    diff missed the step's `paths:`, or the run never got that far. Counting recorded evidence
-    rather than reading the config alone is what makes the difference visible.
+    diff missed the step's `paths:`, or the run never got that far. The other rows say "the gate
+    did its job", which is what everybody assumed before opening the screen — so they are a number,
+    and only the exceptions are lines. Counting recorded evidence rather than reading the config
+    alone is what makes the difference visible at all.
     """
     if config is None:
-        return []
+        return {}
     established: dict[str, int] = {}
     tasks = state.raw.get("tasks") if state is not None else None
     for entry in (tasks if isinstance(tasks, dict) else {}).values():
@@ -224,7 +321,11 @@ def _verification(config: models.Config | None, state: models.State | None) -> l
         for step in steps if isinstance(steps, list) else []:
             if isinstance(step, Mapping) and step.get("name"):
                 established[str(step["name"])] = established.get(str(step["name"]), 0) + 1
-    return [{"step": step.name, "established_for": established.get(step.name, 0)} for step in config.quality_gate]
+    section: dict[str, Any] = {"steps": len(config.quality_gate)}
+    unestablished = [step.name for step in config.quality_gate if not established.get(step.name)]
+    if unestablished:
+        section["established_for_nothing"] = unestablished[:MAX_PATHS]
+    return section
 
 
 def _residuals(state: models.State | None) -> dict[str, Any]:
@@ -244,7 +345,47 @@ def _residuals(state: models.State | None) -> dict[str, Any]:
     open_requests = [str(cr.get("id", "")) for cr in state.change_requests_for("build", "open")]
     if open_requests:
         residual["open_change_requests"] = open_requests[:MAX_TASKS]
+    accounts = _accounts(tasks)
+    if accounts:
+        residual["accounts"] = accounts
     return residual
+
+
+def _accounts(tasks: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """What the last implementer said about each task that did **not** land.
+
+    `handoff.report` was written by every attempt and read by two things: the loop, to phrase a
+    failure, and the next attempt's dossier. Nobody approving the gate ever saw it — and the task
+    it is about is one the approver is being asked to sign *around*, which is precisely when the
+    reason matters.
+
+    Only unfinished tasks. For work that landed, the implementer's own account of it is the one
+    input the blind extractor is forbidden to see (`actual_extraction.FORBIDDEN_KEYS`), and putting
+    it in front of the human at the moment of decision would move that priming from the extractor
+    to the person whose judgement the whole arrangement exists to protect.
+
+    A claim, not a finding. The loop already checks `touched` against the real diff and treats a
+    disagreement as a finding; this is the sentence beside it, and it is labelled as such.
+    """
+    out: list[dict[str, Any]] = []
+    for task_id, entry in sorted(tasks.items()):
+        if not isinstance(entry, dict) or str(entry.get("status", "")) in _LANDED:
+            continue
+        handoff = entry.get("handoff")
+        report = handoff.get("report") if isinstance(handoff, dict) else None
+        if not isinstance(report, Mapping):
+            continue
+        summary = str(report.get("summary", "")).strip()
+        if not summary:
+            continue
+        out.append(
+            {
+                "task_id": task_id,
+                "outcome": str(report.get("outcome", "")),
+                "summary": summary,
+            }
+        )
+    return out[:MAX_TASKS]
 
 
 def derive(
@@ -254,6 +395,7 @@ def derive(
     config: models.Config | None,
     actual_statements: Sequence[Mapping[str, Any]] = (),
     changed_paths: Sequence[str] = (),
+    blob_facts: BlobFacts | None = None,
 ) -> dict[str, Any]:
     """Assemble the orientation brief. Pure: every argument is already-read SSOT.
 
@@ -288,9 +430,9 @@ def derive(
     if drift:
         sections["environment_drift"] = drift
 
-    behaviour = _behaviour(actual_statements)
-    if behaviour:
-        sections["behaviour"] = behaviour
+    requirements = _requirements_on_people(plan, actual_statements, blob_facts)
+    if requirements:
+        sections["requirements_on_people"] = requirements
 
     operations = _operations(config)
     if operations:

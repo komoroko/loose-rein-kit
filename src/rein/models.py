@@ -257,6 +257,22 @@ SECURITY_CATEGORY_VALUES = frozenset(
 REVIEW_STAGE_ORDER: tuple[str, ...] = ("scope", "orient", "decision", "diff", "freeze")
 REVIEW_STAGE_VALUES = frozenset(REVIEW_STAGE_ORDER)
 
+#: What a task may declare it will require of a person, in `plan.yaml`'s `operator_surface`.
+#: Deliberately a *subset of the Actual Statement categories* (`review.schema.json`) rather than a
+#: vocabulary of its own: the declaration is compared against what a blind extractor read out of
+#: the code, and two vocabularies over one comparison would need a mapping table that could be
+#: wrong. These six are the categories that describe a surface somebody outside the code can see —
+#: `control_flow` and `state_propagation` are internal, and nobody operates them.
+OPERATOR_SURFACE_KINDS: tuple[str, ...] = (
+    "persistence",
+    "public_interface",
+    "dependency",
+    "default_value",
+    "observability",
+    "security_boundary",
+)
+OPERATOR_SURFACE_KIND_VALUES = frozenset(OPERATOR_SURFACE_KINDS)
+
 RUN_STATUS_VALUES = frozenset({"idle", "running", "waiting_for_review", "blocked", "complete"})
 # There is deliberately no `state.review` status beside these. `review.yaml` carries the machine
 # half's `status` and the human half's `status`, digested separately, and a second copy in
@@ -575,6 +591,22 @@ class Task(Element):
         implementer turns down on itself.
         """
         value = self.raw.get("acceptance")
+        return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
+
+    @property
+    def operator_surface(self) -> tuple[Mapping[str, Any], ...]:
+        """What this task declares it will require of a person, as the frozen plan states it.
+
+        A config key somebody has to set, a schema somebody has to migrate, a dependency somebody
+        has to provide, a signal somebody has to watch. Frozen at gate ③ with the rest of the task,
+        which is what makes it an *Expected* side: at gate ④ the blind extractor's readings are
+        sorted by whether one of these declarations foresaw them, and the ones nothing foresaw are
+        the rows an approver has to look at.
+
+        Declaring nothing is allowed and costs nothing to write; it just means every operator-facing
+        reading in that area arrives at gate ④ as undeclared.
+        """
+        value = self.raw.get("operator_surface")
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
 

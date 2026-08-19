@@ -500,6 +500,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if suffix.startswith("stage/"):
                 self._send_json(HTTPStatus.OK, review_api.stage_data(root, suffix[len("stage/") :]))
                 return
+            if suffix.startswith("as-built/"):
+                wanted = urllib.parse.unquote(suffix[len("as-built/") :])
+                self._send_json(HTTPStatus.OK, review_api.as_built(root, wanted))
+                return
             self._send_json(HTTPStatus.OK, review_api.collect_review(root, suffix))
         except review_api.ReviewError as exc:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
