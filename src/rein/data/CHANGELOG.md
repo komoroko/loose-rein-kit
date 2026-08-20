@@ -4,6 +4,14 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.3] - 2026-08-20
+
+Docs only: `README.md`/`README.ja.md` cut to overview / setup / usage / caveats, dropping
+narrative justification that duplicated `.rein/config.yaml`'s own comments and
+`.rein/prompts/rules/gate-workflow.md`, and fixing the install command's stale pinned tag
+(`@v0.1.0`). The "How it works" diagram is now left-to-right with the `/revise` rollback edges
+routed through a single hub node so they no longer cross the main flow.
+
 ## [0.3.2] - 2026-08-19
 
 Two rounds of reported defects, and one thing the lifecycle never had a word for. The first round:
