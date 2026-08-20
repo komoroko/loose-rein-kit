@@ -16,7 +16,7 @@ agent that reads `AGENTS.md` (rules + procedures; gates by convention). See "Age
 ## How it works
 
 ```mermaid
-flowchart TD
+flowchart LR
     brief["brief<br/>(human writes the vision)"]:::human
     req["/req<br/>requirements"]:::agent
     g1{"① freeze requirements"}:::gate
@@ -31,7 +31,7 @@ flowchart TD
     done["done"]:::human
 
     subgraph TASKS["task set (dependency graph DAG)"]
-        direction TD
+        direction TB
         T1["foundation T-001"]:::task
         T2["leaf T-002"]:::task
         T3["leaf T-003"]:::task
@@ -48,18 +48,21 @@ flowchart TD
     brief --> req --> g1 --> design --> g2 --> tasks
     tasks -->|generates| T1
     TI --> g3
-    g3 -->|"parallel consumption (max 3)"| build
+    g3 -->|"parallel (max 3)"| build
     build --> g4 --> verify --> g5 --> done
 
-    req -. roll back /revise .- build
-    design -. roll back /revise .- build
-    design -. roll back /revise .- verify
+    RV(("/revise")):::revise
+    g1 -.- RV
+    g2 -.- RV
+    RV -.- g4
+    RV -.- g5
 
     classDef agent fill:#cfe8ff,stroke:#3b82f6,color:#06325e;
     classDef gate fill:#ffe9c7,stroke:#f59e0b,color:#7a4a00;
     classDef human fill:#d7f5dd,stroke:#22a04b,color:#0b3d1d;
     classDef task fill:#eeeeff,stroke:#8888aa,color:#222255;
-    linkStyle 18,19,20 stroke:#ee5544,color:#ee5544,stroke-width:1.5px;
+    classDef revise fill:#fff5f5,stroke:#ee5544,color:#ee5544;
+    linkStyle 18,19,20,21 stroke:#ee5544,color:#ee5544,stroke-width:1.5px;
 ```
 
 - 🟦 phases the agent runs
@@ -67,7 +70,7 @@ flowchart TD
 - 🟩 points of human involvement
 - 🟪 tasks — a DAG: foundation → parallel leaves → integration
 
-The flow moves top to bottom and **cannot advance while the prerequisite gate is unapproved**;
+The flow moves left to right and **cannot advance while the prerequisite gate is unapproved**;
 `/build` consumes the task set in parallel (max 3). Red dotted lines = roll back upstream via
 `/revise` (resets the gates from the target onward to `pending` in a chain) — also at the
 human's discretion.
@@ -103,14 +106,11 @@ always adds the repo you launched it from. For a single command, `rein --repo <p
 
 ## Design principles
 
-Loose Rein is itself a multi-agent orchestration, built on three axes:
-
-- **Architecture** — the simplest structure that works: `rein build` is a **deterministic DAG**
-  scheduler; each phase is delegated to a dedicated role agent to separate concerns.
-- **Context** — kept minimal: SSOT files hold the truth, role agents read only what they need,
-  failures are **summarized not dumped**, deliverable logs are compressed at each checkpoint
-  (the `events.ndjson` audit chain never rotates — a record that can disappear is not evidence),
-  and memory is tiered (session / cycle / permanent). See "Context budget" in `.rein/prompts/rules/gate-workflow.md`.
+- **Architecture** — `rein build` is a deterministic DAG scheduler; each phase runs as a
+  dedicated role agent.
+- **Context** — SSOT files hold the truth; role agents read only what they need; the
+  `events.ndjson` audit log never rotates. Detail: "Context budget" in
+  `.rein/prompts/rules/gate-workflow.md`.
 - **Tools** — minimal scoped role-agent grants; the quality gate has a retry cap.
 
 ## Setup
@@ -127,7 +127,8 @@ Prerequisites — a POSIX environment, plus a container runtime (docker/podman) 
 Install the CLI so its hooks resolve on PATH:
 
 ```bash
-uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@v0.1.0'   # provides `rein`
+uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # provides `rein`
+# replace vX.Y.Z with the latest release tag: https://github.com/komoroko/loose-rein-kit/releases
 ```
 
 The implementation phase (`rein build`) additionally needs a **headless agent CLI** — `claude -p`
@@ -184,69 +185,17 @@ Keeping the materialized files current:
 
 ### The sandbox images
 
-Repository code and tests are meant to run in a sealed OCI sandbox rather than on the
-host, where a test file an agent wrote would run with your credentials. The Containerfiles ship
-with the tool and are materialized under `.rein/oci/`, so the environment a review ran in is
-auditable from the repository rather than only from inside the wheel that built it:
+`rein doctor` fails until repository code and tests run in a sandbox rather than on the host, so
+a test file an agent wrote never runs with your credentials. Before your first `/build`:
 
 ```bash
-rein oci build --all --write-config # build all three and pin them into config.yaml
-rein oci verify                     # every profile's pinned digest is present locally
+rein oci build --all --write-config # build and pin the three packaged images (needs docker/podman)
+rein oci verify                     # confirm the pins are present
 ```
 
-That is the whole setup, and it is what `rein init`, `rein next`, `rein doctor` and the dashboard
-all point you at — the wizard offers to run it for you. It needs docker or podman on PATH, builds
-each image, pins the digests, flips the profiles to `kind: oci`, and verifies the pins resolve. To
-do it one image at a time, or to pin by hand:
-
-```bash
-rein oci list                                   # the packaged Containerfiles
-rein oci build --profile python --write-config  # builds it, pins it
-rein oci build --profile python                 # or just print the sha256: digest to paste
-```
-
-`--profile` names a **Containerfile, not an executor profile**: the `quality` profile builds from
-`python`, which is what its `containerfile:` key says. Without `--write-config`, `oci build` only
-prints the digest and the config key to paste it under. With it, the command rewrites just the
-`kind`, `image` and `network_profile` lines of the profiles it built — every comment in
-`config.yaml` survives, and it refuses to write a file that no longer parses.
-
-**Re-pinning after gate ③ is allowed, and only re-pinning.** Gate ③ freezes `config.yaml` with the
-image pins taken out, because a task that legitimately adds a dependency makes the pinned image
-wrong — the closure it needs is not baked in, and a `network: none` sandbox fails the same way on
-every retry. Rebuilding that image used to cost a `rein revise --to tasks`: the plan un-froze,
-every gate below reset in a chain, and a human re-approved a plan nothing had changed. Now
-`rein oci build --write-config` rewrites the pin, records an `environment_repinned` event, and
-leaves the gates alone. Everything else in the file is still frozen — `kind`, `network_profile`,
-`mount_repo`, the quality gate, the budgets, the guard — so opening a sandbox still needs the human
-who approved the narrower one. What the permission is paid for with is visibility: `rein doctor`
-reports that the sandbox has moved, and gate ④'s orientation shows the approver that the evidence
-they are signing over was produced in an environment gate ③ never saw.
-
-None of the three packaged Containerfiles fit every stack a repository might mix in — a task can
-touch a toolchain none of them were built for. A profile can instead set `dockerfile:` — a
-repo-relative path (e.g. `.rein/oci/custom/Containerfile`), already frozen alongside the rest of
-`config.yaml` once gate ③ freezes it — and `rein oci build --profile <that profile's name>`
-builds from it exactly as it would a packaged one. `containerfile:` and `dockerfile:` are
-mutually exclusive on one profile.
-
-The Containerfiles pin their base image **by digest**, not by the `python:3.13-slim-bookworm` tag,
-and pin `uv` the same way. Two builds a month apart used to produce different images, which made
-the digest you pinned a record of what happened to be current rather than something reproducible.
-A stale tool is the sharper version of the same problem: an old `uv` does not fail on a
-`pyproject.toml` it cannot fully parse, it warns and silently drops the whole `[tool.uv]` table —
-a sandbox-only divergence from your host, buried in a build log. The apt packages still resolve
-against the live Debian archive, so a rebuild much later can still shift; what the pins guarantee
-is that the interpreter, the resolver and the base filesystem cannot move under an approved review.
-
-**A digest binds which image ran; it does not make that image able to run your step.** The
-packaged ones carry python, uv and pytest, run as uid 1000 with a read-only root, and get
-`--network none`. This repository is the worked example of the gap: its quality gate calls `make
-test` and `make check`, the `python` image has no `make`, and `uv run --frozen` under
-`--network none` cannot reach a dependency closure — so pinning here would turn a passing gate
-into a failing one. Profiles therefore ship as `kind: host`, `doctor` reports that as a `FAIL`,
-and clearing it means writing a Containerfile carrying your own DoD's toolchain and dependency
-closure. That is a repository's decision, not a default anyone can ship.
+`rein init`, `rein next`, and the dashboard all prompt for this at the right time; the wizard can
+run it for you. Detail (custom Containerfiles, re-pinning, runtime flags): the `SANDBOXES`
+comment block in `.rein/config.yaml`.
 
 ## Repository settings you have to make yourself
 
@@ -256,7 +205,7 @@ judge it would not be a boundary. Set them once, on the hosting side:
 
 | Setting | Why |
 |---|---|
-| Protect `main`: no direct pushes, PR required | Every gate boundary the harness enforces is on a work branch. A direct push walks around all of them. |
+| Protect `main`: no direct pushes, PR required | Every gate boundary the harness enforces is on a work branch. A direct push bypasses all of them. |
 | Required checks: `tests` and `base-side policy check` | `policy-check` is the one check a pull request cannot fake — it reads the head tree from the trusted base side. Required, or it is advisory. |
 | Dismiss stale approvals on new commits | An approval is of a diff, not of a branch name. |
 | No self-approval on a PR that changes `.rein/` or `.github/workflows/` | Those are the boundary itself. |
@@ -321,15 +270,11 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
 
    Or in `rein ui`, from the same pane that just showed you the deliverable — no extra step.
 
-   **What that establishes.** Not that a human approved — nothing in a repository can show that.
-   The receipt records that *a* confirmation happened and over which channel, never *which* human;
-   there is no identity-bound mode. What does hold is narrower and load-bearing: **an approval
-   cannot happen by accident, by default, or by a configuration someone pre-authorized.** Three
-   things carry it — the interactive TTY `rein approve` insists on (a piped stdin, a CI job, or an
-   agent's captured subprocess all fail it), the dashboard's **single-use launch link**, printed to
-   the terminal `rein ui` runs in and readable by nothing that can merely fetch the page, and
-   `rein doctor`'s check that no settings file pre-authorizes a gate-opening verb. There is no
-   `--force`, and editing a gate line by hand is denied by the guard.
+   **An approval cannot happen by accident, by default, or via a pre-authorized config**:
+   `rein approve` requires an interactive TTY (a piped stdin, CI job, or agent subprocess all
+   fail it), the dashboard uses a single-use launch link printed only to the terminal `rein ui`
+   runs in, and `rein doctor` checks that no settings file pre-authorizes a gate-opening verb.
+   There is no `--force`, and hand-editing a gate line is denied by the guard.
 
 4. **Ask for changes** instead, when the deliverable is not right. This is a first-class answer,
    not a dead end — say no at the prompt, or use the dashboard's *Request changes*:
@@ -339,21 +284,15 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
                                  --reason "the acceptance criterion is unmeasurable"
    ```
 
-   An open request **holds the gate shut** and lives in `state.yaml`, so it survives the session
-   that raised it rather than evaporating with a chat message. The `--target` anchor is the point:
-   the agent reads the slice it names and fixes that, instead of re-running the phase over the
-   whole document. It answers with `rein changes address <id> --note <what changed>`, which
-   unblocks the gate and puts the note on your approval screen — approving is what closes it.
-   Raising one needs no authority of any kind, which is why the dashboard offers it freely: it can
-   only ever *narrow* what happens next.
+   An open request **holds the gate shut** and lives in `state.yaml`, so it survives past the
+   session that raised it. The `--target` anchor makes the agent fix that slice, not re-run the
+   whole phase. It answers with `rein changes address <id> --note <what changed>`, which unblocks
+   the gate and shows the note on your approval screen.
 
 5. **Roll back** on an upstream defect *after* a gate was approved: `/revise <phase>` resets gates
-   from the target onward and marks task impact (`rein revise --impacted T-00x` sets seeds and
-   their transitive dependents to `needs-revision`). There is no automatic, config-driven
-   invalidation — only `--impacted`'s named seeds and their dependents ever move. Pick seeds
-   narrowly: naming an early foundation task pulls in everything that (transitively) depends on
-   it, which for most DAGs is most of the plan — that is the closure doing its job, not a bug, but
-   it means the seed choice is the actual scoping decision to get right.
+   from the target onward. `rein revise --impacted T-00x` marks the named seed tasks and their
+   transitive dependents `needs-revision` — nothing moves automatically. Naming an early
+   foundation task pulls in everything downstream of it, so pick seeds narrowly.
 6. **Check progress** anytime:
    - `rein next` — just the next recommended command (`--json` for integrations)
    - `rein status` — leads with **Waiting on you**: everything standing between the repo and
@@ -361,35 +300,20 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
      rows are the same list `rein approve <gate> --check` refuses on, so the board can never
      say "nothing needs attention" about a gate that will not open.
    - `/status` — the same board in chat, plus the task DAG
-   - `rein ui` — the dashboard: an Overview board carrying that queue; a **Review tab** where
-     the gate under decision is read and approved in one pane — it opens on the **scope** (the
-     commit range, how much was read, what could *not* be, and whether the change fits one review
-     session), then **orient**: what this cycle delivered, which dependencies and migrations moved,
-     which sandbox and network posture each quality-gate step ran under, **what the change now
-     requires of a person** — the operator-facing behaviour read out of the code, sorted by whether
-     any task declared it at gate ③, with what nobody declared first and the file *as it ends up*
-     one click away — what the gate established, what is still open (including what the implementer
-     said about each task that did not land), and the Expected/Actual comparison — all derived from
-     the SSOT, none of it asked of you. Only then the **Decision
-     Cards**: every unsettled claim, gap, ungrounded extra behaviour, and security finding, one
-     card each, with its evidence attached. Unanswered high/critical cards block the freeze;
-     a Tasks tab (DAG, layer progress); an Activity tab
-     (live event feed, operations). The page can notify you when a gate or escalation starts
-     waiting (opt-in bell; the tab title/favicon always show it). Actions stay a fixed whitelist —
-     reads, fixed diagnostics (doctor, tests), and decision recording (approve / resolve / revise /
-     cycle-close); phase execution and push/PR/merge are deliberately absent.
+   - `rein ui` — the dashboard: an Overview board with that queue; a **Review tab** for reading
+     and approving the gate under decision in one pane (scope → what changed and how it was
+     reviewed → what the change now requires of a person → Decision Cards for every unsettled
+     claim, gap, or finding, each with its evidence, blocking the freeze until answered); a Tasks
+     tab (DAG, layer progress); an Activity tab (live event feed). Optional bell notifies on a
+     waiting gate/escalation. Actions are a fixed whitelist — reads, diagnostics, and decision
+     recording (approve / resolve / revise / cycle-close); phase execution and push/PR/merge are
+     not available here.
    - `rein dag --mermaid` — render the task dependency diagram
 7. **Ship as a PR**: `rein pr-draft` assembles the PR body from the SSOT into
    `.rein/pr-draft.md` (read-only); creating/pushing the PR stays yours.
 8. **Close the cycle** after gate ⑤: `rein cycle-close --name <slug>` archives to
    `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human
    operation, like opening a gate.
-
-> **No stalling during approval waits**: a notification fires on reaching a gate, and while
-> waiting the agent pulls forward only **outcome-independent** work (environment setup,
-> investigation, test-harness setup) — throwaway-by-default and recorded as speculative-work
-> events. It does nothing that pre-empts the approval outcome, so the gate's strictness
-> is preserved.
 
 ### Running the implementation phase autonomously
 
@@ -403,62 +327,24 @@ decisions reach the audit chain only through the control plane the orchestrator 
 
 The rules:
 
-- A task is done only after **passing the quality-gate pipeline** — `quality_gate` in
-  `config.yaml` is the **single DoD definition** (default: `test` → `check` → a
-  `/code-review`+`/simplify` review step → a real-launch smoke test for runnable deliverables).
-  Each step has its own retry budget; exhausting it → `blocked`. Set the smoke step
-  `required: true` once the deliverable is runnable, so a forgotten launch check refuses to build.
-  A step can name `paths:` (glob patterns) to run only for a task whose diff touches them — a
-  repo that mixes several independently-testable stacks is not forced to pay every stack's cost
-  on every task. This is a config decision frozen at gate ③, not
-  a knob a task's own ticket can turn: a step naming no `paths:` still runs for every task, and
-  an unresolved diff (a fresh worktree, before anything has changed yet) never reads as "nothing
-  applies" — it runs the full DoD.
-- **Parallel leaves run isolated** via `git worktree` (up to 3, `max_parallel`), merged into the
-  work branch in ascending-id order. After a batch merges ≥2 leaves, the cmd steps re-run on the
-  merged branch (integration gate). Every path a task changed is re-checked against the gate
-  rules right after its implementer runs — not only at merge, so a worktree that never gets that
-  far still cannot carry an undetected gate violation — and again before any merge; a violation
-  escalates (`gate_violation`) and blocks instead of landing.
-- An unsolvable task → `blocked`; an upstream defect → `needs-revision`, escalated, loop stops.
-  The orchestrator **never touches `gates.build`** (only the human opens a gate).
-- **A machine's failure is never recorded as a task's verdict.** An agent that never launched
-  (capacity exhausted, the CLI not on PATH, a supervisor's signal) or a step that could not be
-  run at all (no container runtime, no pinned image) produced no judgement about the code, so it
-  spends no retry budget, marks no task, and stops the run. Leaves that did pass still merge.
+- A task is done only once it passes `quality_gate` in `config.yaml` — the **single DoD
+  definition** (default: `test` → `check` → a `/code-review`+`/simplify` review step → a
+  real-launch smoke test for runnable deliverables; set the smoke step `required: true` once the
+  deliverable is runnable). Each step has its own retry budget; exhausting it → `blocked`. A step
+  can scope itself to `paths:` (glob patterns) so a repo mixing several stacks doesn't pay every
+  stack's cost on every task — frozen at gate ③, not a per-task knob.
+- **Parallel leaves run isolated** via `git worktree` (up to `max_parallel`) and merge in
+  ascending task-id order; an unsolvable task → `blocked`, an upstream defect →
+  `needs-revision` and the loop stops. Only a human opens `gates.build` — the orchestrator never
+  touches it.
 
-#### Exit codes, and running it unattended
+### Running unattended
 
-`rein build` is one command, not an iteration: its exit is the signal, so nothing should poll a
-run in progress. The code says what to do next.
-
-| code | meaning | what to do |
-|---|---|---|
-| `0` | every task is done | go to gate ④ |
-| `1` | a task could not pass the gate, or the frontier is empty with work left | a human reads the escalation |
-| `2` | it refused to start, or the machine failed in a way waiting cannot fix | repair what it names |
-| `3` | the machine failed in a way time fixes — capacity exhausted, a signal, another run holding the lock. **Nothing was marked, no budget spent** | re-run later; it continues |
-
-An agent **session or usage limit is a normal event** on a run of any length, not an incident.
-The loop exits `3` at once rather than sleeping on it — a limit that lifts in hours has no
-business holding the build lock and a set of worktrees — so the waiting belongs to whatever
-re-runs the command. `rein build --supervise` carries exactly this recipe in-process (same
-semantics, only `3` is retried, each attempt a fresh run against the current `state.yaml`):
-
-```sh
-rein build --supervise   # [--supervise-interval-sec N], default 900
-
-# equivalent, if something outside `rein` should own the interval/backoff instead:
-while :; do
-  rein build && break
-  rc=$?; [ "$rc" -eq 3 ] || exit "$rc"   # anything else needs a human
-  sleep 900
-done
-```
-
-Each unfinished task is left `todo` with its worktree in place; the next run finalizes and
-salvages that work onto the leaf's branch, so the implementer **continues rather than
-restarts**. `rein resume` and `rein doctor` both report the stop when you come back.
+`rein build`'s exit code is the signal: `0` done (go to gate ④); `1`/`2` need a human (an
+escalation to read, or something to repair); `3` is transient — capacity, a signal, another run
+holding the lock — and safe to retry, with nothing marked and no budget spent. `rein build
+--supervise` retries `3` automatically (`--supervise-interval-sec`, default 900). See
+"Troubleshooting" for what each stop looks like and how to resume.
 
 > **DoD commands are the project's own**: `quality_gate` names them once (the shipped
 > defaults `make test` / `make check` are placeholders — `rein init` fills detected commands
@@ -512,11 +398,11 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
   restarts.
 - **Edit denied by the gate guard** — you're editing a next-phase deliverable while its gate is
   `pending`; that's the mechanism working. Get the gate approved, or roll back with `/revise`.
-  There is no emergency hatch: a bypass key like `gates.enforce_hook` is refused outright, and
-  CI's base-side `policy-check` fails a pull request that tries to bring one in.
+  There is no bypass: a key like `gates.enforce_hook` is refused outright, and CI's base-side
+  `policy-check` fails a pull request that tries to add one.
 - **"template placeholders"** — run `rein start` (or `rein init --name <product>`) first.
-- **`rein: command not found` in a hook** — install the CLI on PATH (`uv tool install
-  git+<the rein repo>`); `rein doctor` FAILs when the hook binary is unresolvable.
+- **`rein: command not found` in a hook** — install the CLI on PATH (see "Setup"); `rein doctor`
+  FAILs when the hook binary is unresolvable.
 - **`/req` (or other phase commands) don't show up in your agent** — the agent surface is
   opt-in and not run automatically by `rein start`/`init`: run `rein install
   claude` (writes `.claude/commands/` + merges `.claude/settings.json`) or `rein install
@@ -563,18 +449,13 @@ column in `AGENTS.md`'s capability vocabulary table.
 
 - Agent surfaces are opt-in — `rein install claude|copilot|codex` writes them, and they invoke
   the installed `rein` CLI (so `uv tool install` is a prerequisite of the hooks).
-- The Codex surfaces are **unverified against a live Codex**: the hook payload shape and the skill
-  and subagent discovery paths were established from openai/codex's source and its published
-  documentation, not observed in a running session (the same footing `docs/10-requirements.md`
-  puts the codex / gemini adapters on). Codex also reads project-scoped config **only once the
-  project is trusted**; until then only the commit-stage check applies.
+- The Codex surfaces are **unverified against a live Codex**: the hook payload shape and the
+  skill/subagent discovery paths come from openai/codex's source and docs, not an observed
+  session. Codex also reads project-scoped config **only once the project is trusted**; until
+  then only the commit-stage check applies.
 - On every host, writes made **through the shell** (`sed -i`, a heredoc patch) miss the edit-time
   hook's matcher. The commit-stage `rein guard --check-diff` is what catches those.
-- Agent hooks in VS Code Copilot are a **preview** feature (re-verified 2026-07 against VS Code
-  v1.110: still preview; the events and file format this repo uses are current) — if off, the
-  gates still hold by convention.
+- Agent hooks in VS Code Copilot are a **preview** feature — if off, the gates still hold by
+  convention.
 - Parallel leaf tasks degrade to serial where delegation isn't available. `rein doctor`
   reports which hook hosts are registered.
-- For maintainers: VS Code tool identifiers are not versioned by the template — if one is renamed
-  upstream, fix the Copilot mapping's tool table and `.github/agents/*.agent.md` only (the shared
-  role bodies never name tools).
