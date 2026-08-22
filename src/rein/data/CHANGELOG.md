@@ -6,11 +6,14 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.3.4] - 2026-08-22
 
-Two defects from a field run, and both are the same sentence twice: the machine asked a question it
-had already answered, and somebody paid for the asking.
+Four defects from a field run. Two are the same sentence twice — the machine asked a question it had
+already answered, and somebody paid for the asking. The other two are the mirror image: a question
+that needed a human never got asked, and nothing noticed.
 
 `state.yaml`'s `handoff` gains an optional `escalation` — no migration, but a state.yaml written by
-this release does not validate against an older `rein`.
+this release does not validate against an older `rein`. **`rein approve requirements` and
+`rein approve design` now refuse while an unresolved `[NEEDS CLARIFICATION]` marker stands in the
+document they approve**, which is a gate that used to open and no longer does.
 
 ### Gate ④ read the orchestrator's own bookkeeping as if it were code
 
@@ -51,6 +54,50 @@ makes — and an unknown fingerprint never matches, so the failure is towards sp
 `rein task reset <T-NNN> --fresh` discards the record, which is how somebody who repaired something
 *outside* the tree says so; `rein task reset` now says as much on the way past, because a reset that
 produces no launch otherwise looks like a defect.
+
+### The check three documents promised, and nobody had written
+
+The rules module told every reader that `rein approve` machine-checks unresolved
+`[NEEDS CLARIFICATION]` markers. It never did — the word appears nowhere in the source — so a
+marker left standing opened the gate anyway, and the question it named was answered by whatever
+default the draft had already been written against. The document asserting the check was the reason
+nobody looked for it.
+
+It exists now, on the deliverable each gate already digests, with the lines named. HTML comments are
+dropped first: the scaffold explains the convention *using* the marker, and a check that cannot tell
+guidance from an open question is one nobody can leave switched on.
+
+The asking around it changed with it. `/req` used to rank the open points and batch **the top ones**
+into a single call — a cap on how much gets confirmed, dressed as a cap on how much one round can
+carry. **There is no cap now**: the ordering decides what is asked first, never what goes unasked,
+and the rounds continue while anything remains that the agent would otherwise close with its own
+default. A marker ends answered and recorded under `## Clarifications`, or demoted to
+`## Open questions` with its assumption spelled out — and demoting is the human's call, not the
+agent's. `/design` gains the same vocabulary, which it never had: the architect now marks what it
+would have settled silently, and gate ② checks for it the same way.
+
+### A ticket that promises a test, and a scope that forbids writing it
+
+A task ticket must state an automated-test approach; the task's `scope` says where its work may
+land. Nothing compared them, so a scope could freeze at gate ③ covering only the implementation
+file — and the mismatch surfaced at `/build`, as a `scope_violation`, after an implementer had
+already written the test (#17).
+
+The ticket now names the file its test goes in, and that path — with any ADR the design says the
+task records its decision in — has to be inside the frozen scope. The gate ③ adversarial round gets
+it as a lens, which is where a comparison no validator can make belongs: the reported case never
+named the test file at all, so a checker reading the ticket would have had nothing to compare. And
+the implementer, which is the first party to *know*, is now told to stop **before** doing the work
+and report `needs-revision` naming the path, rather than doing it and tripping the merge check.
+
+### Waiting for a build is not polling it
+
+`build.md` had always allowed waiting on the run "if your host can wait at all", but every host
+mapping said the same thing regardless: detach it, end the turn, let a human bring you back. Claude
+Code can be re-entered when a background command exits — waiting, with no timer and no check — and
+the mapping never used it. `background-wait` is now a capability in the vocabulary, mapped where it
+exists and degrading to the detach recipe where it does not. Detaching stays the right answer for
+one case, now stated: a run that has to outlive the session.
 
 ## [0.3.3] - 2026-08-20
 
