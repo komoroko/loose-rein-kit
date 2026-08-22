@@ -22,7 +22,12 @@ re-derives them → **read what the attempt produced before asking the gate anyt
 diff is `no_implementation`, a change outside the plan's declared `scope` is `scope_violation`,
 and an implementer that ended `rein report --outcome blocked` / `needs-revision` parks the task —
 in all three cases without spending a reviewer or a test suite on a question nobody asked, and
-`--touched` naming paths the diff does not contain is itself a finding → then run the quality-gate
+`--touched` naming paths the diff does not contain is itself a finding. Each of those verdicts is
+recorded with the **fingerprint of the tree it was reached over**, so a later `rein build` re-raises
+it with `futile:` instead of paying for a launch that reaches it again — which is what a task whose
+work already landed some other way used to cost, once per invocation, with no upper bound
+(`rein task reset <T-NNN> --fresh` is how a human says they repaired something outside the tree)
+→ then run the quality-gate
 pipeline `quality_gate` in `.rein/config.yaml` — the single definition of the DoD
 (default: `test` → `check` → `review` → `smoke`). A task has no `test` command of its own: the
 DoD is shared and runs in a sealed sandbox, never a command the implementer chose for itself.
@@ -206,7 +211,10 @@ is the point; never fold them into the implementer's session.
    generate` (bound to the current HEAD). It runs a deterministic Coverage Manifest, a **blind**
    actual-behaviour extraction (never given the plan), the Expected/Actual comparison, and the
    structured security and maintainability review — writing `.rein/review.yaml` and recording
-   the pipeline events.
+   the pipeline events. What it reads is the **product**: `.rein/` is no more in the diff than it
+   is in the digest the review binds itself to, and the diff is measured against
+   `review_policy.budgets.max_diff_bytes_per_partition` *before* a model is launched — over it the
+   answer is to split the scope (`/revise`), never to grow the request.
    Findings sit on three separate axes (integrity / semantic support / conformance); there is no
    single `verified`, and "extra behaviours: 0" appears only with the Coverage Manifest that
    earned it. The orient stage also states **what this change now requires of a person** — the

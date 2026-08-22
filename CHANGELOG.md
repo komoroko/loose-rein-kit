@@ -4,6 +4,54 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.4] - 2026-08-22
+
+Two defects from a field run, and both are the same sentence twice: the machine asked a question it
+had already answered, and somebody paid for the asking.
+
+`state.yaml`'s `handoff` gains an optional `escalation` — no migration, but a state.yaml written by
+this release does not validate against an older `rein`.
+
+### Gate ④ read the orchestrator's own bookkeeping as if it were code
+
+`rein review generate` failed three times over with `the actual_extractor adapter exited 1`. The
+adapter had said why — *"Prompt is too long · the request is ~1,061,094 tokens (limit 1,000,000)"* —
+and the pipeline threw that sentence away and reported the exit code, so the reason was reachable
+only by wrapping the CLI in a logging shim. Behind it: 27% of that cycle's diff was `.rein/` —
+schema payloads, the frozen plan, task state, the hash-chained log — handed to the blind extractor
+as reviewable source, and enough of it to push a legitimate change past the model's hard ceiling.
+
+`.rein/` was already outside everything else that answers "what is the change under review": the
+digest the review binds itself to, the tree fingerprint, every task commit. Only the diff put it
+back in, and it is now excluded through that same one constant. This is deliberately not the fold a
+lockfile gets — a folded file is still *in* the change, and the Coverage Manifest goes on reporting
+its body unread. `.rein/` is not in the change, so counting it would invent a coverage gap out of
+something no reviewer was ever meant to open, and at high risk that gap blocks the gate with an
+instruction — "split the unreadable part out of this scope" — nobody can carry out on the SSOT.
+
+Two things follow it. An adapter that fails now reports **what it said**, not merely that it
+stopped. And `review_policy.budgets.max_diff_bytes_per_partition` — the one byte-denominated
+budget, measurable until now only at the freeze, off the very manifest a change too big to review
+prevents — is checked **before a model is launched**. It is the same wall either way: a diff over
+that limit cannot be frozen once generated. What changes is that the refusal costs nothing and
+arrives carrying the budget's own name and its own instruction.
+
+### A verdict reached over a tree nobody moved, bought once per invocation
+
+0.3.2 stopped a DoD step being retried when it failed identically over a tree the implementer did
+not move. The other way an attempt ends — no change at all, a report naming paths the diff does not
+contain, an implementer that said it was blocked — had no such protection. A task whose work had
+already landed through a salvage merge was handed a fresh implementer once per `rein build`, three
+times, each one correctly reporting there was nothing left to do.
+
+That verdict is now recorded with the fingerprint of the tree it was reached over, and a later run
+re-raises it marked `futile:` instead of paying for a launch that reaches it again. What is read is
+the observation, never the report's text — the same tool-agnostic reading the step-level check
+makes — and an unknown fingerprint never matches, so the failure is towards spending the launch.
+`rein task reset <T-NNN> --fresh` discards the record, which is how somebody who repaired something
+*outside* the tree says so; `rein task reset` now says as much on the way past, because a reset that
+produces no launch otherwise looks like a defect.
+
 ## [0.3.3] - 2026-08-20
 
 Docs only: `README.md`/`README.ja.md` cut to overview / setup / usage / caveats, dropping
