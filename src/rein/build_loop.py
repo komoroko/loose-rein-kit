@@ -411,6 +411,9 @@ def _failure_detail(handoff: object) -> dict[str, Any]:
     budgets = handoff.get("retries_left")
     if isinstance(step, str) and isinstance(budgets, Mapping) and isinstance(budgets.get(step), int):
         detail["retries_left"] = budgets[step]
+    escalation = handoff.get("escalation")
+    if isinstance(escalation, Mapping) and isinstance(escalation.get("kind"), str) and escalation["kind"]:
+        detail["escalation"] = escalation["kind"]
     futile = handoff.get("futile")
     if isinstance(futile, str) and futile:
         detail["futile"] = futile
@@ -567,6 +570,40 @@ def record_attempt_failure(
     if futile:
         detail["futile"] = futile
     update_task_handoff(repo, task_id, patch, event="task_failed", detail=detail)
+
+
+def record_escalation(
+    repo: repo_mod.Repo,
+    task_id: str,
+    *,
+    kind: str,
+    message: str,
+    tree: str,
+    futile: str = "",
+) -> None:
+    """Record an attempt that ended *before* the quality gate — the event and the inheritance, together.
+
+    `record_attempt_failure`'s sibling for the other way a task stops. A gate step that failed
+    leaves its step name and its budget; an attempt `_check_implementer_output` stopped leaves the
+    verdict it reached and the fingerprint of the tree it reached it over — which is what the next
+    `rein build` needs to know that it is about to buy the same answer twice.
+
+    One transaction, so the `knowledge_gap` a human reads and the record the next attempt inherits
+    cannot exist apart; and one event, not two — this replaces `Orchestrator._escalate` on this
+    path rather than joining it.
+    """
+    escalation: dict[str, Any] = {
+        "kind": kind[:_HANDOFF_STEP_MAX],
+        "message": message[-_HANDOFF_SUMMARY_MAX:],
+    }
+    if tree:
+        escalation["tree"] = tree
+    patch: dict[str, Any] = {"escalation": escalation}
+    detail: dict[str, Any] = {"kind": kind, "message": message}
+    if futile:
+        patch["futile"] = futile[:_HANDOFF_SUMMARY_MAX]
+        detail["futile"] = futile
+    update_task_handoff(repo, task_id, patch, event="knowledge_gap", detail=detail)
 
 
 def record_salvage(repo: repo_mod.Repo, task_id: str, *, branch: str, salvage_state: str) -> None:
@@ -1717,6 +1754,45 @@ class Orchestrator:
             )
         return ""
 
+    def _stop_before_the_gate(self, task: dag.Task, kind: str, message: str, *, tree: str, futile: str = "") -> None:
+        """Record an attempt that ended before the quality gate, and the status that ending calls for.
+
+        `_escalate`'s counterpart for this one path, and it replaces it rather than joining it: the
+        `knowledge_gap` a human reads and the record the next attempt inherits are one write, so a
+        terminal killed between them cannot leave an escalation in the chain with nothing saying
+        what the next run already knows.
+        """
+        logger.warning(f"[escalation] {message}")
+        if not self.dry_run and self.cycle_id:
+            record_escalation(self.repo, task.id, kind=kind, message=message, tree=tree, futile=futile)
+        self._stops[task.id] = "needs-revision" if kind == "agent_needs_revision" else "blocked"
+
+    def _already_answered(self, task: dag.Task, cwd: str) -> tuple[str, str, str] | None:
+        """`(kind, message, tree)` this task already reached over exactly this tree. None = ask again.
+
+        `_futile`'s reading — *nothing moved* — applied to the other way an attempt ends. A gate
+        step can fail twice inside one run, so that comparison lives in a local; an attempt
+        `_check_implementer_output` stopped returns immediately, so the second asking is always a
+        *later `rein build`*, and the only thing that survives one is the handoff.
+
+        What it catches is a task whose work already landed some other way — a salvage merge, a
+        hand-applied fix — where every launch reports, correctly, that there is nothing to do. A
+        field run paid for three of them on one task. Nothing here parses that report: the reading
+        is the fingerprint, the same tool-agnostic observation `_futile` makes.
+
+        An unknown fingerprint ("") never matches, the same fail-open: spending a launch is
+        recoverable, refusing one over an unread tree is not.
+        """
+        if self.dry_run:
+            return None
+        recorded = self._handoff_for(task).get("escalation")
+        if not isinstance(recorded, Mapping):
+            return None
+        kind, tree = str(recorded.get("kind", "")), str(recorded.get("tree", ""))
+        if not kind or not tree or tree != self._fingerprint(cwd):
+            return None
+        return kind, str(recorded.get("message", "")), tree
+
     def _run_task_to_done(self, task: dag.Task, cwd: str, base: str = "") -> tuple[bool, str]:
         """Take one task to done via implementer implementation + the quality-gate pipeline.
 
@@ -1749,6 +1825,18 @@ class Orchestrator:
         # (step, failure digest, tree fingerprint) of the previous round — what `_futile` compares
         # this round against. "" for the fingerprint means "unknown", which never matches.
         seen: tuple[str, str, str] = ("", "", "")
+        answered = self._already_answered(task, cwd)
+        if answered is not None:
+            kind, prior, tree = answered
+            futile = (
+                f"{task.id}: not re-launched — the last attempt reached '{kind}' over a tree with this "
+                "exact fingerprint, so a fresh implementer has the same inputs and reaches the same "
+                f"verdict. If something outside the tree was repaired, `rein task reset {task.id} "
+                "--fresh --reason ...` discards this record and buys the launch."
+            )
+            message = f"{prior}\n{futile}" if prior else futile
+            self._stop_before_the_gate(task, kind, message, tree=tree, futile=futile)
+            return False, message
         while True:
             self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume, base=base)
             if not self.dry_run:
@@ -1760,9 +1848,10 @@ class Orchestrator:
                 if kind:
                     # Not a gate failure, so it spends no step's budget: no step ever ran. The
                     # attempt is over, and the reason — which the loop now actually holds — goes
-                    # to the human rather than being reconstructed from an unchanged tree.
-                    self._escalate(kind, message, task=task.id)
-                    self._stops[task.id] = "needs-revision" if kind == "agent_needs_revision" else "blocked"
+                    # to the human rather than being reconstructed from an unchanged tree. The
+                    # tree goes with it, so the next `rein build` can tell "try again" from
+                    # "ask the same question a second time".
+                    self._stop_before_the_gate(task, kind, message, tree=self._fingerprint(cwd))
                     return False, message
             self._local.steps, self._local.acceptance = [], []
             after_implementer = self._fingerprint(cwd)

@@ -152,9 +152,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.fresh:
         print("  handoff discarded — the next attempt starts with the configured retry budgets")
     elif result.handoff:
+        step = result.handoff.get("failed_step")
         left = result.handoff.get("retries_left")
-        step = result.handoff.get("failed_step", "?")
-        print(f"  handoff kept — last failed step: {step}, retries left: {left or 'n/a'}")
+        print(f"  handoff kept — last failed step: {step or 'n/a'}, retries left: {left or 'n/a'}")
+        escalation = result.handoff.get("escalation")
+        if isinstance(escalation, dict) and escalation.get("tree"):
+            # Without this line, a reset that produces no implementer launch looks like a bug.
+            print(
+                f"  the last attempt ended '{escalation.get('kind', '?')}' before the quality gate, over "
+                "the tree as it stands: the next `rein build` re-raises that verdict rather than paying "
+                "for a launch that reaches it again. `--fresh` is how you say you repaired something "
+                "outside the tree."
+            )
     print("  the escalation stays in the log; it is concluded by a disposition in the review, not by this.")
     return 0
 
