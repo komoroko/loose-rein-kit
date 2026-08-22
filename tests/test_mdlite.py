@@ -67,6 +67,15 @@ class TestRenderDialect:
         assert "guidance" not in html
         assert "before" in html and "after" in html
 
+    def test_stripping_comments_keeps_the_line_numbering(self) -> None:
+        """`approve.py` reports the line an unresolved marker sits on, so a multi-line comment has
+        to leave its lines behind rather than collapsing the ones after it upwards."""
+        stripped = mdlite.strip_comments("one\n<!-- two\nthree -->\nfour\n")
+        assert stripped.splitlines() == ["one", "", "", "four"]
+
+    def test_stripping_comments_leaves_everything_else(self) -> None:
+        assert mdlite.strip_comments("keep <!-- drop --> this") == "keep  this"
+
     def test_relative_and_anchor_links_allowed(self) -> None:
         html = mdlite.render("[adr](decisions/ADR-001.md) and [top](#summary)")
         assert '<a href="decisions/ADR-001.md"' in html

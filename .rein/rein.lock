@@ -2,36 +2,36 @@
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
 format: rein-grounded-v1
-tool_version: 0.3.3
+tool_version: 0.3.4
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.3.3
+  version: 0.3.4
   files:
-    AGENTS.rein.md: sha256:fa1fd1e132d06c5daec9a5545028777be21a23e817c299777b83b79636bfc039
+    AGENTS.rein.md: sha256:9c559355130144ccd27e5f829a12bc30b78be41ca9398a54b37eb5eee6e4d96f
     oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
     oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
     oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
     prompts/agents/adversarial-reviewer.md: sha256:8b0e688e806832019a24128f00098757090826ff3147dc533b3ce2eea4fdebe3
-    prompts/agents/architect.md: sha256:72323f94761fd59b9bc804a2825654f366002e083efad9bb228fa8b8a04ed87a
-    prompts/agents/implementer.md: sha256:b2c36b7ead5d1e81054dfb71dda3cb571154b74a97d7452dce2233689cba8e35
+    prompts/agents/architect.md: sha256:01f47a9e7b0342ca76fae5a3aa4539b9fd82bca60e7435458e8cf34a66a17d12
+    prompts/agents/implementer.md: sha256:93bc38fe32fba10f398d96575ee1a90596689a1aff5791ff7ffcf6ac5539aedd
     prompts/agents/requirements-analyst.md: sha256:f856541626e80f3439a3681c70a9ab09f557b0e3dc5c4ddd229f214b5f8efab3
-    prompts/commands/build.md: sha256:8b7638316d927334277c542f33f8876a125e82966f592de38c83241fdb6de0b3
-    prompts/commands/design.md: sha256:a962f1b5233b1bbd7b58104c34ac05cd709155aa70b8b041bb323630e6046598
+    prompts/commands/build.md: sha256:ddad6a2a3b2935c59f9e7b856c47510b9ac20b401ca3f1c307802bfad90e57c4
+    prompts/commands/design.md: sha256:3990596267138462fb9864c3718f0b767171235287c71712add6cc38b9e1c470
     prompts/commands/onboard.md: sha256:47fd4093b4eda0b469312622f19b0152d2bde1374670976966fd7aa22495ce23
-    prompts/commands/req.md: sha256:f2af1509ee5896c8ba4d50706fbd3edd087c24b67df8e5c54cbd5ef8635de7bf
+    prompts/commands/req.md: sha256:49f472fa26f5c91161a8edcd93eedf6f1e1fe95825a7e5e0b00be3e1eb54295b
     prompts/commands/revise.md: sha256:5ae3017afa8961f2a5f2ceb08771de4bf45cf0ef48a1b13b9b95e372ab025125
     prompts/commands/status.md: sha256:8766d7b065516ed45adc793ac3d226d71987a8a86a4cc7abd9f5efccfdc63186
-    prompts/commands/tasks.md: sha256:7049d8e8f60b8f07046d91c14e72cffcceeebf98d1696decea560a496bf93757
-    prompts/commands/verify.md: sha256:122388545f7ddf80654d03069efe178b3750b0b61ddb6d20e0fbce042f2124f0
-    prompts/rules/gate-workflow.md: sha256:76488b3e5729c1730c374b89f66234f7df850fc8c3b48d5963502e2b1d3523e2
+    prompts/commands/tasks.md: sha256:ef26fa578b566ffc00d40f5cdebeccc394cd2144a357052cdf3561d16b2e9c8e
+    prompts/commands/verify.md: sha256:2c6d2a9ab1ec8696c6f7e211ef6eab0234b95908cfbdb62e83f2565f9c814024
+    prompts/rules/gate-workflow.md: sha256:1ed5fa25ab442ebcf53eb06e7317d06051dcdca68f385767bf58b518506a3d9b
     schema/config.schema.json: sha256:5e68c20a3e68045030de6675d3f5eec08f0d9f3620a1707ca11d82c118957810
     schema/event.schema.json: sha256:42f054f7f19d371daf3fedc4dad1342406d8d227bd1ecbc2bec3a27783271bc7
     schema/plan.schema.json: sha256:d757ab47606c25899a5755fbd954b36019fa7f47622397e681d7f0e92bba153d
     schema/review.schema.json: sha256:eb029956857af9a86529530ad30915035c7d6fb04f410e70a91003fd735c19b4
-    schema/state.schema.json: sha256:10c5d8267bad73fa31dcaf39bae7fafc2c81b347bd02c14ea18d48421fa174ec
+    schema/state.schema.json: sha256:7886f698b8593727831a860f1f3b523101725d745a5d79142fa4ff8c079871ea
 integrations:
   claude:
-    version: 0.3.3
+    version: 0.3.4
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:d420f000ac6892cba6f1d753f5a3894018c0e334ad1df77cf2b0904b237ad430
@@ -51,7 +51,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.3.3
+    version: 0.3.4
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:fe72706426bcbb74f939842df53b792ca5c1bba52d3bf1909cb74b0e0ed0f09c
@@ -67,9 +67,9 @@ integrations:
       .codex/agents/implementer.toml: sha256:1c93b60464227ec637eed7290f3bb6d2a6f8c5d39bb904f131557a2ebf780b6b
       .codex/agents/requirements-analyst.toml: sha256:9249d1d6d8632d2fec155ec3577b802e723ea3b2235c8ae87389d08cde865038
       .codex/hooks.json: sha256:e78f4e7bf63b3c5fca54b9c341ac9898f2ba18497bc158bd3ea7aaea8f663c40
-      .codex/rein.md: sha256:fd37f437a90851cf3356679f16cf1ba625e4dad0d8611f1fc4d2117ac8b22e97
+      .codex/rein.md: sha256:4e1af8e8639166daf0ba8d477c488c88f26c3bee646f16d30bc57c7ed8e3bfb0
   copilot:
-    version: 0.3.3
+    version: 0.3.4
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:6a9126f67cd68da0494217e0b47a2c2344031ec0573e04d45d70feb250c7c68d
@@ -77,7 +77,7 @@ integrations:
       .github/agents/implementer.agent.md: sha256:b1953ab17a6c7ef6b671c8fa148746ca3864ab40499503eba21ec1f8b3e05921
       .github/agents/requirements-analyst.agent.md: sha256:b73ca2bbc692eabb91767be46efcdb5bead1cb876d6602f90fb58d2980faeed5
       .github/hooks/rein.json: sha256:2eacdbf36f1c05dfcf5266383b57dbf46f31306cfb5d93d93bc6926b0b3f7949
-      .github/instructions/rein.instructions.md: sha256:eba73e61121375fc726380e879ba3261947c0088e0f7813686fb219012927331
+      .github/instructions/rein.instructions.md: sha256:edf155f912b95a34c1a4846faf660b7055c13bec8f578b9de5d0501415532c0a
       .github/prompts/build.prompt.md: sha256:11e784509cfc9694d9256f3299e36663452a4b89aab03377027b0f04d14636e5
       .github/prompts/design.prompt.md: sha256:0e899f78a22a8671e7e5bb991727d461418887fbb24b4cfecfdd8ff667b65544
       .github/prompts/onboard.prompt.md: sha256:6c590a600ebd0e5b4a17121e5b4eef4931a3d110ad88abffdcc4bb0b0594be6e
@@ -88,6 +88,6 @@ integrations:
       .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-08-21'
+updated_at: '2026-08-23'
 rein:
   version: 0.1.0

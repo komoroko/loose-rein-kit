@@ -60,8 +60,8 @@ flowchart LR
     classDef agent fill:#cfe8ff,stroke:#3b82f6,color:#06325e;
     classDef gate fill:#ffe9c7,stroke:#f59e0b,color:#7a4a00;
     classDef human fill:#d7f5dd,stroke:#22a04b,color:#0b3d1d;
-    classDef task fill:#eeeeff,stroke:#8888aa,color:#222255;
-    classDef revise fill:#fff5f5,stroke:#ee5544,color:#ee5544;
+    classDef task fill:#e6e0f8,stroke:#7c6bbd,color:#2e2160;
+    classDef revise fill:#ffe0dc,stroke:#ee5544,color:#8a2b1e;
     linkStyle 18,19,20,21 stroke:#ee5544,color:#ee5544,stroke-width:1.5px;
 ```
 
@@ -69,11 +69,11 @@ flowchart LR
 - 🟧 gates ①–⑤ — **only the human** opens them
 - 🟩 points of human involvement
 - 🟪 tasks — a DAG: foundation → parallel leaves → integration
+- 🟥 `/revise` — rolling back upstream (the red dotted lines)
 
 The flow moves left to right and **cannot advance while the prerequisite gate is unapproved**;
-`/build` consumes the task set in parallel (max 3). Red dotted lines = roll back upstream via
-`/revise` (resets the gates from the target onward to `pending` in a chain) — also at the
-human's discretion.
+`/build` consumes the task set in parallel (max 3). `/revise` resets the gates from the target
+onward to `pending` in a chain — also at the human's discretion.
 
 ## Where to start
 

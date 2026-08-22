@@ -106,6 +106,42 @@ def test_the_cli_reports_what_it_did(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert "concluded by a disposition in the review" in out  # the escalation is not closed by this
 
 
+def test_a_reset_that_will_not_launch_anything_says_so(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Without this line, a reset that produces no implementer launch looks like a bug.
+
+    The handoff is kept by default, and a kept `escalation` is what makes the next `rein build`
+    re-raise the verdict instead of paying for a launch that reaches it again. The human who just
+    typed a reason for trying again is exactly the person who has to be told that, and told which
+    flag means "I repaired something outside the tree".
+    """
+    repo = repo_with_a_blocked_task(tmp_path)
+    build_loop.record_escalation(
+        repo,
+        "T-001",
+        kind="no_implementation",
+        message="T-001: the implementer produced no change at all",
+        tree="sha256:" + "a" * 64,
+    )
+    assert task_cmd.main(["reset", "T-001", "--reason", "it should have work to do", "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "ended 'no_implementation' before the quality gate" in out
+    assert "--fresh" in out
+
+
+def test_a_fresh_reset_promises_nothing_about_a_record_it_discarded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = repo_with_a_blocked_task(tmp_path)
+    build_loop.record_escalation(
+        repo, "T-001", kind="no_implementation", message="nothing to do", tree="sha256:" + "a" * 64
+    )
+    args = ["reset", "T-001", "--reason", "installed the tool", "--fresh", "--repo", str(tmp_path)]
+    assert task_cmd.main(args) == 0
+    out = capsys.readouterr().out
+    assert "handoff discarded" in out
+    assert "no_implementation" not in out
+
+
 def test_the_verb_is_reachable_from_the_dispatcher() -> None:
     from rein import cli
 

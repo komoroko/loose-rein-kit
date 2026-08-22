@@ -14,8 +14,7 @@
 
 ## Acceptance criteria
 > **The machine-readable copy lives in `.rein/plan.yaml` under this task's `acceptance:`, and that
-> is the one the loop reads.** A checkbox here is prose: nothing parses it, so "the acceptance
-> criteria are met" was only ever an assertion by whoever wrote the code. Write each criterion
+> is the one the loop reads.** A checkbox here is prose: nothing parses it. Write each criterion
 > here for a human, and give it an `id` matching the plan entry so the two can be read together.
 >
 > In the plan, each criterion says how it is judged: `command` (an argv the loop runs in a
@@ -42,6 +41,10 @@
 > The shared DoD (`quality_gate` in `.rein/config.yaml`) is what decides green, for every task
 > alike — this section says what *these* tests should cover, not which command runs them.
 - **Test kind**: unit / integration
+- **Test file(s)**: <the path the test goes in>
+<!-- This path, and any docs/decisions/ADR-*.md the design says this task records its decision in,
+     must be inside this task's `scope.include` in .rein/plan.yaml. A ticket that promises a test a
+     frozen scope forbids writing surfaces at /build as a scope_violation, after the work is done. -->
 - **Test target / cases**:
   -
 

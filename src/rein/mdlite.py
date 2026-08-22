@@ -37,6 +37,17 @@ _BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 _PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
 
 
+def strip_comments(text: str) -> str:
+    """`text` with every HTML comment removed and its line structure intact.
+
+    A comment collapses to the newlines it spanned rather than to nothing, so a caller that
+    reports *positions* — `approve.py` naming the line an unresolved marker sits on — keeps line
+    numbers that match the file on disk. The renderer cannot tell the difference: what stands
+    where a comment did is blank either way.
+    """
+    return _COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+
+
 def _strip_nul(text: str) -> str:
     """Drop NUL, the one character the stash placeholders are built from.
 
@@ -150,7 +161,7 @@ def _list(lines: list[str], start: int, out: list[str]) -> int:
 
 def render(text: str) -> str:
     """The whole document as HTML built only from this module's own tags (see the module docstring)."""
-    lines = _COMMENT_RE.sub("", _strip_nul(text)).splitlines()
+    lines = strip_comments(_strip_nul(text)).splitlines()
     out: list[str] = []
     paragraph: list[str] = []
     i = 0

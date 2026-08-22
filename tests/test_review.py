@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from rein import actual_extraction, conformance, diff_facts, event_chain, models, review
+from rein import actual_extraction, common, conformance, diff_facts, event_chain, models, review, review_policy
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -367,6 +367,140 @@ def test_change_digest_excludes_the_rein_dir(review_repo: Path) -> None:
     _git(review_repo, "commit", "-qm", "real change")
     moved = review.change_digest(repo, _git(review_repo, "rev-parse", "HEAD"))
     assert moved != before
+
+
+# -- what the reviewers are handed is the product ------------------------------
+
+
+def _budget_repo(root: Path, ceiling: int) -> Path:
+    config = make_config()
+    config["review_policy"] = {"budgets": {"max_diff_bytes_per_partition": ceiling}}
+    seed_repo(root, state=make_state(project="rv", phase="build"), plan=make_plan(), config=config)
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "seed")
+    return root
+
+
+@pytest.mark.integration
+def test_the_ssot_is_not_in_the_diff_the_reviewers_read(review_repo: Path) -> None:
+    """The review's subject and the reviewers' diff have to be answers about one thing.
+
+    `change_digest` has always left `.rein/` out — as do the tree fingerprint and every task commit
+    — while `_diff` handed the whole of it over as if a schema payload and an event log were code
+    somebody wrote. A field report measured that at 27% of a normal cycle's diff, and it pushed the
+    blind extractor's request past the model's hard context ceiling: a gate ④ that could not be
+    produced at all.
+    """
+    seed = _git(review_repo, "rev-parse", "HEAD")
+    (review_repo / "src.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+    (review_repo / ".rein" / "scratch.txt").write_text("SSOT-CHURN\n" * 200, encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "code beside bookkeeping")
+
+    seen: list[Mapping[str, Any]] = []
+    review.generate(repo_mod.Repo(review_repo), _capturing_reviewer(seen), base=seed)
+
+    diffs = [str(request["diff"]) for request in seen if "diff" in request]
+    assert diffs, "no stage was handed a diff at all"
+    assert all("SSOT-CHURN" not in diff for diff in diffs), "the SSOT reached a reviewer"
+    assert any("return 42" in diff for diff in diffs), "the code under review did not"
+
+
+@pytest.mark.integration
+def test_the_coverage_manifest_measures_the_product_not_the_bookkeeping(review_repo: Path) -> None:
+    """Withheld is not the same as out of scope.
+
+    A lockfile is *in* the change with its body folded, and the manifest goes on reporting it
+    unread. `.rein/` is not in the change, so counting it here would be a coverage gap invented out
+    of something no reviewer was ever meant to read — and `analyzed_bytes` is the actual the one
+    byte-denominated budget is measured against, which would then be measuring the orchestrator.
+    """
+    base = _git(review_repo, "rev-parse", "HEAD")
+    (review_repo / "src.py").write_text("def answer():\n    return 42\n", encoding="utf-8")
+    (review_repo / ".rein" / "scratch.txt").write_text("SSOT-CHURN\n" * 200, encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "code beside bookkeeping")
+
+    machine = review.generate(repo_mod.Repo(review_repo), _fake_reviewer, base=base)
+
+    head = _git(review_repo, "rev-parse", "HEAD")
+    product = _git(review_repo, "diff", f"{base}..{head}", "--", ".", ":(exclude).rein")
+    # `_git` strips, and the diff the manifest measured did not; compare on the payload instead.
+    assert machine["coverage"][0]["analyzed_bytes"] == len((product + "\n").encode("utf-8"))
+    assert not [entry for entry in machine["coverage"][0].get("generated_files", []) if ".rein" in entry["path"]]
+
+
+@pytest.mark.integration
+def test_a_diff_over_the_budget_is_refused_before_a_model_is_launched(tmp_path: Path) -> None:
+    """`max_diff_bytes_per_partition` was reachable only after the pipeline it makes impossible.
+
+    The budget is measured at the freeze, off the finished manifest. So a change too big for the
+    reviewer stages to run against never reached the sentence that says what to do about it: three
+    launches were paid for, and what came back said "the adapter exited 1". It is the same wall
+    either way — a diff over this limit cannot be frozen once generated — so refusing here removes
+    the cost, not the option.
+    """
+    root = _budget_repo(tmp_path, 4096)
+    seed = _git(root, "rev-parse", "HEAD")
+    (root / "big.py").write_text("x = 1\n" * 4000, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "a change nobody can hold at once")
+
+    seen: list[Mapping[str, Any]] = []
+    repo = repo_mod.Repo(root)
+    with pytest.raises(review.ReviewError) as excinfo:
+        review.generate(repo, _capturing_reviewer(seen), base=seed)
+
+    assert seen == [], "a reviewer was launched for a review that could never be frozen"
+    assert "max_diff_bytes_per_partition" in str(excinfo.value)
+    assert "/revise" in str(excinfo.value) and "review_policy.budgets" in str(excinfo.value)
+    events, defects = event_chain.scan(repo.events)
+    assert not defects, defects
+    assert events[-1].event == "review_failed"
+    assert events[-1].detail.get("stage") == "coverage"
+
+
+@pytest.mark.integration
+def test_a_diff_within_the_budget_still_generates(tmp_path: Path) -> None:
+    """The refusal is a ceiling, not a new precondition: under it, nothing changed."""
+    root = _budget_repo(tmp_path, 4096)
+    seed = _git(root, "rev-parse", "HEAD")
+    (root / "small.py").write_text("x = 1\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "a change one person can hold")
+
+    machine = review.generate(repo_mod.Repo(root), _fake_reviewer, base=seed)
+    assert machine["status"] == "generated"
+
+
+def test_a_failed_adapter_reports_what_it_said(review_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reason was in hand and thrown away.
+
+    `common.run` merges stderr into its output, so "Prompt is too long · the request is ~1,061,094
+    tokens (limit 1,000,000)" was already there when the error was raised as `exited 1`. A field
+    report of three identical failures was diagnosable only by wrapping the CLI in a logging shim.
+    """
+    said = "Prompt is too long · the request is ~1,061,094 tokens (limit 1,000,000)"
+    monkeypatch.setattr(common, "run", lambda *a, **k: (1, said))
+    call = review._adapter_reviewer(repo_mod.Repo(review_repo), "actual_extractor")
+
+    with pytest.raises(review_policy.ReviewPolicyError) as excinfo:
+        call({"diff": "diff --git a/x b/x\n"})
+    assert "actual_extractor adapter exited 1" in str(excinfo.value)
+    assert "Prompt is too long" in str(excinfo.value)
+
+
+def test_an_adapter_that_said_nothing_is_reported_as_saying_nothing(
+    review_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A silent failure must not read as a truncated one — the two call for different next moves."""
+    monkeypatch.setattr(common, "run", lambda *a, **k: (127, "   \n"))
+    call = review._adapter_reviewer(repo_mod.Repo(review_repo), "comparator")
+
+    with pytest.raises(review_policy.ReviewPolicyError) as excinfo:
+        call({"expected_model": {}})
+    assert "exited 127 and said nothing" in str(excinfo.value)
 
 
 # -- what the pipeline had been handing its own stages -------------------------

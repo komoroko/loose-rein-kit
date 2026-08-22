@@ -4,6 +4,110 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.4] - 2026-08-22
+
+Four defects from a field run. Two are the same sentence twice — the machine asked a question it had
+already answered, and somebody paid for the asking. The other two are the mirror image: a question
+that needed a human never got asked, and nothing noticed. Then a pass over the always-loaded prose
+itself, which had been paying for sentences that told an agent nothing to do.
+
+`state.yaml`'s `handoff` gains an optional `escalation` — no migration, but a state.yaml written by
+this release does not validate against an older `rein`. **`rein approve requirements` and
+`rein approve design` now refuse while an unresolved `[NEEDS CLARIFICATION]` marker stands in the
+document they approve**, which is a gate that used to open and no longer does.
+
+### Gate ④ read the orchestrator's own bookkeeping as if it were code
+
+`rein review generate` failed three times over with `the actual_extractor adapter exited 1`. The
+adapter had said why — *"Prompt is too long · the request is ~1,061,094 tokens (limit 1,000,000)"* —
+and the pipeline threw that sentence away and reported the exit code, so the reason was reachable
+only by wrapping the CLI in a logging shim. Behind it: 27% of that cycle's diff was `.rein/` —
+schema payloads, the frozen plan, task state, the hash-chained log — handed to the blind extractor
+as reviewable source, and enough of it to push a legitimate change past the model's hard ceiling.
+
+`.rein/` was already outside everything else that answers "what is the change under review": the
+digest the review binds itself to, the tree fingerprint, every task commit. Only the diff put it
+back in, and it is now excluded through that same one constant. This is deliberately not the fold a
+lockfile gets — a folded file is still *in* the change, and the Coverage Manifest goes on reporting
+its body unread. `.rein/` is not in the change, so counting it would invent a coverage gap out of
+something no reviewer was ever meant to open, and at high risk that gap blocks the gate with an
+instruction — "split the unreadable part out of this scope" — nobody can carry out on the SSOT.
+
+Two things follow it. An adapter that fails now reports **what it said**, not merely that it
+stopped. And `review_policy.budgets.max_diff_bytes_per_partition` — the one byte-denominated
+budget, measurable until now only at the freeze, off the very manifest a change too big to review
+prevents — is checked **before a model is launched**. It is the same wall either way: a diff over
+that limit cannot be frozen once generated. What changes is that the refusal costs nothing and
+arrives carrying the budget's own name and its own instruction.
+
+### A verdict reached over a tree nobody moved, bought once per invocation
+
+0.3.2 stopped a DoD step being retried when it failed identically over a tree the implementer did
+not move. The other way an attempt ends — no change at all, a report naming paths the diff does not
+contain, an implementer that said it was blocked — had no such protection. A task whose work had
+already landed through a salvage merge was handed a fresh implementer once per `rein build`, three
+times, each one correctly reporting there was nothing left to do.
+
+That verdict is now recorded with the fingerprint of the tree it was reached over, and a later run
+re-raises it marked `futile:` instead of paying for a launch that reaches it again. What is read is
+the observation, never the report's text — the same tool-agnostic reading the step-level check
+makes — and an unknown fingerprint never matches, so the failure is towards spending the launch.
+`rein task reset <T-NNN> --fresh` discards the record, which is how somebody who repaired something
+*outside* the tree says so; `rein task reset` now says as much on the way past, because a reset that
+produces no launch otherwise looks like a defect.
+
+### The check three documents promised, and nobody had written
+
+The rules module told every reader that `rein approve` machine-checks unresolved
+`[NEEDS CLARIFICATION]` markers. It never did — the word appears nowhere in the source — so a
+marker left standing opened the gate anyway, and the question it named was answered by whatever
+default the draft had already been written against. The document asserting the check was the reason
+nobody looked for it.
+
+It exists now, on the deliverable each gate already digests, with the lines named. HTML comments are
+dropped first: the scaffold explains the convention *using* the marker, and a check that cannot tell
+guidance from an open question is one nobody can leave switched on.
+
+The asking around it changed with it. `/req` used to rank the open points and batch **the top ones**
+into a single call — a cap on how much gets confirmed, dressed as a cap on how much one round can
+carry. **There is no cap now**: the ordering decides what is asked first, never what goes unasked,
+and the rounds continue while anything remains that the agent would otherwise close with its own
+default. A marker ends answered and recorded under `## Clarifications`, or demoted to
+`## Open questions` with its assumption spelled out — and demoting is the human's call, not the
+agent's. `/design` gains the same vocabulary, which it never had: the architect now marks what it
+would have settled silently, and gate ② checks for it the same way.
+
+### A ticket that promises a test, and a scope that forbids writing it
+
+A task ticket must state an automated-test approach; the task's `scope` says where its work may
+land. Nothing compared them, so a scope could freeze at gate ③ covering only the implementation
+file — and the mismatch surfaced at `/build`, as a `scope_violation`, after an implementer had
+already written the test (#17).
+
+The ticket now names the file its test goes in, and that path — with any ADR the design says the
+task records its decision in — has to be inside the frozen scope. The gate ③ adversarial round gets
+it as a lens, which is where a comparison no validator can make belongs: the reported case never
+named the test file at all, so a checker reading the ticket would have had nothing to compare. And
+the implementer, which is the first party to *know*, is now told to stop **before** doing the work
+and report `needs-revision` naming the path, rather than doing it and tripping the merge check.
+
+### Waiting for a build is not polling it
+
+`build.md` had always allowed waiting on the run "if your host can wait at all", but every host
+mapping said the same thing regardless: detach it, end the turn, let a human bring you back. Claude
+Code can be re-entered when a background command exits — waiting, with no timer and no check — and
+the mapping never used it. `background-wait` is now a capability in the vocabulary, mapped where it
+exists and degrading to the detach recipe where it does not. Detaching stays the right answer for
+one case, now stated: a run that has to outlive the session.
+
+### The always-loaded files pay rent
+
+Every rule an agent reads costs the same context the deliverables need, so the prose that teaches no
+action was cut: design rationale addressed to a reader rather than an actor, archaeology of
+mechanisms that are already gone, and the paragraphs each phase procedure repeated from `AGENTS.md`,
+which is loaded anyway. No rule was dropped — where a sentence was the only home of one, it stayed.
+`AGENTS.md` −12%, `gate-workflow.md` (read by every phase) −19%, the phase procedures −4 to −12%.
+
 ## [0.3.3] - 2026-08-20
 
 Docs only: `README.md`/`README.ja.md` cut to overview / setup / usage / caveats, dropping

@@ -27,10 +27,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from collections.abc import Mapping
 
-from rein import change_request, common, dag, dag_trace, digests, event_chain, models, review_policy
+from rein import change_request, common, dag, dag_trace, digests, event_chain, mdlite, models, review_policy
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -41,6 +42,10 @@ GATE_ARTIFACT: dict[str, str] = {
     "requirements": "docs/10-requirements.md",
     "design": "docs/20-design.md",
 }
+
+
+#: The marker a phase agent leaves at the exact spot it would otherwise have guessed.
+_CLARIFICATION_RE = re.compile(r"\[NEEDS CLARIFICATION\b")
 
 
 class ApprovalError(RuntimeError):
@@ -148,6 +153,41 @@ def _change_request_blockers(state: models.State, gate: str) -> list[str]:
     ]
 
 
+def _clarification_blockers(repo: repo_mod.Repo, gate: str) -> list[str]:
+    """Unresolved `[NEEDS CLARIFICATION]` markers in the document this gate approves.
+
+    Three documents told the reader this check existed; nothing ran it, so a marker left standing
+    opened the gate anyway and the question it named was answered by whatever default the draft
+    had already been written against.
+
+    HTML comments are dropped first: the scaffold explains the marker convention *using* the
+    marker, and a check that cannot tell guidance from an open question is one nobody can leave
+    switched on.
+    """
+    artifact = GATE_ARTIFACT.get(gate)
+    if not artifact:
+        return []
+    path = repo.path(artifact)
+    if not path.exists():
+        # Absence is a different failure, and not this function's to report: `_plan_blockers`
+        # already refuses a gate with nothing behind it.
+        return []
+    try:
+        body = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"cannot read {artifact}: {exc}"]
+    lines = [
+        str(n) for n, line in enumerate(mdlite.strip_comments(body).splitlines(), 1) if _CLARIFICATION_RE.search(line)
+    ]
+    if not lines:
+        return []
+    return [
+        f"{artifact} still carries {len(lines)} unresolved `[NEEDS CLARIFICATION]` marker(s) "
+        f"(line {', '.join(lines)}) — ask the human and record the answer under `## Clarifications`, "
+        "or demote it to `## Open questions` with the assumption you wrote the text under."
+    ]
+
+
 def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool = True) -> list[str]:
     """Every mechanical reason `gate` cannot be approved. Empty means a request may be issued.
 
@@ -182,6 +222,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
         )
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
     blockers += _change_request_blockers(state, gate)
+    blockers += _clarification_blockers(repo, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
     blockers += _review_blockers(review, gate, _head_sha(repo))

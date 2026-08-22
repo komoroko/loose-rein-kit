@@ -11,7 +11,10 @@
 
 Each item expresses "what the user can do". Priority: Must / Should / Could.
 Write acceptance criteria as **measurable, technology-agnostic** checks (a number, a state, an observable behaviour — not "fast" or "easy").
-While drafting, mark anything undecided inline as `[NEEDS CLARIFICATION: <what>]` — resolve every marker (or demote it to Open questions) before gate ①.
+<!-- While drafting, mark anything undecided inline as a `[NEEDS CLARIFICATION: <what>]` marker at the
+     exact spot it affects, instead of picking a plausible default. There is no cap on how many:
+     every marker is asked of the human or demoted to Open questions with its assumption written
+     out, and `rein approve requirements` refuses while any is left standing in the prose. -->
 
 ### R-1: <title>
 - **Overview**:
@@ -73,3 +76,6 @@ dedicated design section or task is fine (the trace only WARNs) — but every NF
 - **Assumptions made**: <assumptions taken as given without confirming; points where, if wrong, the requirements break>
 - **Confidence**: high / medium / low (may be split per requirement/area; **attach a reason for low spots**)
 - **Open questions / points for the human to decide**:
+<!-- Three *kinds* of item and no more — assumptions, confidence, open questions. That is a limit on
+     what this block is about, never on how many open questions it lists: every point the human has to
+     decide belongs here, however many there are. -->

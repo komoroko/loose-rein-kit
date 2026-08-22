@@ -1689,6 +1689,127 @@ def test_the_futile_reason_reaches_the_audit_chain(tmp_path: Path) -> None:
     assert "already red" in failed.detail["futile"]
 
 
+# --- the same question, asked twice over the same tree ------------------------
+#
+# `_futile` covers a gate step that failed identically over an unmoved tree. An attempt
+# `_check_implementer_output` stopped returns before any step runs, so its repeat is always a later
+# `rein build` — and the only thing that survives one is the handoff.
+
+
+def _escalated(loop: build_loop.Orchestrator, tree: str, kind: str = "no_implementation") -> None:
+    build_loop.record_escalation(
+        loop.repo,
+        "T-001",
+        kind=kind,
+        message="T-001: the implementer produced no change at all (git diff is empty).",
+        tree=tree,
+    )
+
+
+def test_a_verdict_already_reached_over_this_tree_is_not_bought_a_second_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported run: a task whose work had already landed via a salvage merge was handed a
+    fresh implementer once per `rein build`, three times, each one correctly reporting that there
+    was nothing to do."""
+    loop = orchestrator(tmp_path)
+    tree = "sha256:" + "a" * 64
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: tree)
+    _escalated(loop, tree)
+    launched: list[object] = []
+    monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: launched.append(a))
+
+    ok, message = loop._run_task_to_done(_task(), str(tmp_path))
+
+    assert launched == [], "the launch this whole record exists to avoid was spent anyway"
+    assert ok is False
+    assert "not re-launched" in message
+    assert "the implementer produced no change at all" in message, "the original verdict must survive"
+    assert loop._stops["T-001"] == "blocked"
+
+
+def test_the_repeat_is_marked_futile_where_a_step_failure_would_be(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "Determined once and re-raised" and "determined again" must not read the same in the log."""
+    loop = orchestrator(tmp_path)
+    tree = "sha256:" + "a" * 64
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: tree)
+    _escalated(loop, tree)
+    monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: None)
+
+    loop._run_task_to_done(_task(), str(tmp_path))
+
+    build_loop.set_task_status(loop.repo, "T-001", "blocked", note="stopped")
+    failed = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "task_failed"][-1]
+    assert "not re-launched" in failed.detail["futile"]
+    assert failed.detail["escalation"] == "no_implementation"
+
+
+def test_an_implementer_that_said_needs_revision_parks_the_task_there_on_the_repeat_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An implementer that found the *design* wrong said so; re-raising it as `blocked` would file
+    a defect in the plan as a defect in the code."""
+    loop = orchestrator(tmp_path)
+    tree = "sha256:" + "a" * 64
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: tree)
+    _escalated(loop, tree, kind="agent_needs_revision")
+    monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: None)
+
+    loop._run_task_to_done(_task(), str(tmp_path))
+    assert loop._stops["T-001"] == "needs-revision"
+
+
+def test_a_moved_tree_earns_the_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Something changed since that verdict — another task merged, a human edited — so the question
+    is not the one that was answered."""
+    loop = orchestrator(tmp_path)
+    _escalated(loop, "sha256:" + "a" * 64)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "b" * 64)
+    assert loop._already_answered(_task(), str(tmp_path)) is None
+
+
+def test_an_unread_tree_earns_the_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same fail-open `_futile` takes: spending a launch is recoverable, refusing one over a
+    tree nothing could read is not."""
+    loop = orchestrator(tmp_path)
+    _escalated(loop, "sha256:" + "a" * 64)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "")
+    assert loop._already_answered(_task(), str(tmp_path)) is None
+
+
+def test_a_task_that_never_escalated_earns_the_launch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
+    assert loop._already_answered(_task(), str(tmp_path)) is None
+
+
+def test_recording_an_escalation_appends_exactly_one_event(tmp_path: Path) -> None:
+    """The handoff and the `knowledge_gap` are one write: a terminal killed between them would
+    otherwise leave an escalation in the chain with nothing saying what the next run already knows.
+    And one event, not two — this replaces `_escalate` on this path rather than joining it."""
+    repo = repo_mod.Repo(build_repo(tmp_path))
+    before = len(store_mod.Store(repo).read_events())
+    build_loop.record_escalation(
+        repo,
+        "T-001",
+        kind="report_mismatch",
+        message="T-001: named paths the diff does not contain",
+        tree="sha256:" + "c" * 64,
+    )
+    events = store_mod.Store(repo).read_events()
+    assert len(events) == before + 1
+    assert events[-1].event == "knowledge_gap"
+    assert events[-1].detail["kind"] == "report_mismatch"
+    handoff = build_loop.read_task_handoff(store_mod.Store(repo).read_state(), "T-001")
+    assert handoff["escalation"] == {
+        "kind": "report_mismatch",
+        "message": "T-001: named paths the diff does not contain",
+        "tree": "sha256:" + "c" * 64,
+    }
+
+
 def test_a_baseline_is_not_established_in_a_dry_run(tmp_path: Path) -> None:
     """A dry run enters no sandbox and runs no command — its job is to print the control flow."""
     root = build_repo(tmp_path)

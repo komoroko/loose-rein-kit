@@ -306,6 +306,24 @@
                 "type": "string",
                 "maxLength": 4000
               },
+              "escalation": {
+                "description": "The verdict the last attempt reached before the quality gate was asked anything, and the tree it reached it over. An implementer that produced no change, named paths it did not change, or reported itself blocked answered a question; asking the same question again over the same tree buys the same answer at the price of a whole launch, which a field run paid three times for one task whose work had already landed. Written here because the comparison is across `rein build` invocations and this is the only thing that survives one. `rein task reset --fresh` discards it, which is how somebody who repaired something outside the tree says so.",
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "maxLength": 64
+                  },
+                  "message": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "tree": {
+                    "$ref": "#/$defs/digest"
+                  }
+                }
+              },
               "retries_left": {
                 "description": "Remaining send-back budget per step name. Absent means the step's configured budget is untouched; restoring it is what stops a crash loop from getting infinite retries.",
                 "type": "object",
