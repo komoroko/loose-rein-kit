@@ -42,6 +42,10 @@
 > The shared DoD (`quality_gate` in `.rein/config.yaml`) is what decides green, for every task
 > alike — this section says what *these* tests should cover, not which command runs them.
 - **Test kind**: unit / integration
+- **Test file(s)**: <the path the test goes in>
+<!-- This path, and any docs/decisions/ADR-*.md the design says this task records its decision in,
+     must be inside this task's `scope.include` in .rein/plan.yaml. A ticket that promises a test a
+     frozen scope forbids writing surfaces at /build as a scope_violation, after the work is done. -->
 - **Test target / cases**:
   -
 
