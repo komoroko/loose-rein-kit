@@ -72,7 +72,24 @@ def change_digest(repo: repo_mod.Repo, commit: str) -> str:
 
 
 def _diff(repo: repo_mod.Repo, base: str, head: str) -> str:
-    rc, out = repo._git_rc("diff", f"{base}..{head}")
+    """The change under review, which is the *product* — `.rein/` is not part of it.
+
+    The same exclusion `change_digest` above takes, through the same constant, because the two
+    have to be answers about one subject. They were not: the digest a review binds itself to left
+    the SSOT out, and the diff every reviewer read put it back in — schema payloads, the frozen
+    plan, task state, the event log, all of it handed over as if it were code somebody wrote. A
+    field report measured it at 27% of a normal cycle's diff, and the extractor's request went past
+    the model's hard context ceiling on the strength of it, which is a gate ④ that cannot be
+    produced at all.
+
+    Not a fold, which is what a lockfile gets: a folded file is still *in* the change and the
+    Coverage Manifest goes on reporting its body as unread. `.rein/` is not in the change, so
+    reporting it unread would be a coverage gap invented out of something nobody was ever meant
+    to review — and `_default_status` turns any generated file into `insufficient`, which at
+    high risk is a gate ④ block whose instruction ("split the unreadable part out of this scope")
+    cannot be carried out on the orchestration state itself.
+    """
+    rc, out = repo._git_rc("diff", f"{base}..{head}", "--", *repo_mod.SSOT_PATHSPEC)
     if rc != 0:
         raise ReviewError(f"cannot diff {base}..{head}: {out.strip()}")
     return out
@@ -347,6 +364,33 @@ def assemble(
 # -- generation ---------------------------------------------------------------
 
 
+def _refuse_over_budget(diff_bytes: int, limits: Mapping[str, int]) -> None:
+    """Refuse a review whose diff is already past the one byte-denominated budget.
+
+    `max_diff_bytes_per_partition` was measurable only *after* the pipeline ran: `human_review`
+    reads it off the finished coverage manifest, at the freeze. So a change big enough that the
+    three reviewer stages cannot be run against it at all never reached the budget's own
+    instruction — the operator paid three model launches to be told "the adapter exited 1", and
+    the sentence that would have said what to do about it lived behind the failure.
+
+    It is the same wall either way. A diff over this limit cannot be frozen once generated, so
+    nothing is refused here that would have been allowed later; what changes is that it is refused
+    before the launches rather than after them, and with the budget's own name on it. Measured
+    over the whole diff, exactly as `_largest_partition_bytes` measures it, so passing here and
+    blowing it at the freeze is not a thing that can happen.
+    """
+    ceiling = limits["max_diff_bytes_per_partition"]
+    if diff_bytes <= ceiling:
+        return
+    raise ReviewError(
+        "review budget exceeded before the pipeline ran — split the scope, do not grow the "
+        f"screen: max_diff_bytes_per_partition is {ceiling} and this change's diff is "
+        f"{diff_bytes} bytes. Reduce what this cycle claims through `/revise` and review the "
+        "remainder in its own gate ④ round, or raise the limit in `review_policy.budgets` as a "
+        "deliberate, recorded decision about how much one person can hold at once."
+    )
+
+
 def generate(
     repo: repo_mod.Repo,
     reviewer: review_policy.Reviewer,
@@ -443,6 +487,12 @@ def generate(
             )
             return dict(existing.machine)
 
+        # A config may set only the budgets it wants to move, so the effective ceilings are the
+        # defaults with the repository's overrides on top — the same merge `human_review` does at
+        # the freeze, and the snapshot recorded on the assembled review below.
+        limits = {**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})}
+        _refuse_over_budget(facts.coverage.analyzed_bytes, limits)
+
         # The reviewers read the folded one. `change_digest` above is over the committed tree, so
         # neither this nor `relevant`'s omissions can move what the review is bound to.
         reviewable, folded = fold_mechanical(diff_text, facts.files)
@@ -530,9 +580,7 @@ def generate(
                 blob_facts=_blob_facts(repo, head),
             ),
             residual_findings=brief.residual_findings(state),
-            # A config may set only the budgets it wants to move, so the recorded snapshot is the
-            # defaults with the repository's overrides on top — the same merge human_review does.
-            budget_limits={**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})},
+            budget_limits=limits,
         )
 
         entered("write")
@@ -833,6 +881,11 @@ def complete(repo: repo_mod.Repo, *, actor: str = "") -> None:
 # -- CLI ----------------------------------------------------------------------
 
 
+#: How much of a failed adapter's output travels with the error. Its closing words are where a
+#: CLI says what stopped it, and an error message is read on a terminal, not scrolled.
+_ADAPTER_OUTPUT_TAIL = 1000
+
+
 def _adapter_reviewer(repo: repo_mod.Repo, role: str = "code_reviewer") -> review_policy.Reviewer:
     """A production reviewer that hands the request as JSON to the adapter configured for `role`.
 
@@ -856,7 +909,14 @@ def _adapter_reviewer(repo: repo_mod.Repo, role: str = "code_reviewer") -> revie
     def call(request: Mapping[str, Any]) -> str:
         rc, out = common.run(list(argv), timeout=900, input_text=json.dumps(request, ensure_ascii=False))
         if rc != 0:
-            raise review_policy.ReviewPolicyError(f"the {role} adapter exited {rc}")
+            # What the adapter said, not merely that it stopped. `common.run` merges stderr into
+            # `out`, so the reason was in hand and thrown away: a field report of three identical
+            # `exited 1` failures was diagnosable only by wrapping the CLI in a logging shim, and
+            # the message behind them — "Prompt is too long" — named its own cause exactly.
+            said = out.strip()[-_ADAPTER_OUTPUT_TAIL:]
+            raise review_policy.ReviewPolicyError(
+                f"the {role} adapter exited {rc}" + (f", saying:\n{said}" if said else " and said nothing")
+            )
         return out
 
     return call
