@@ -3,6 +3,11 @@
 > `/design` generates this, starting from `docs/10-requirements.md` (approved).
 > Important technical choices are **decided by the human via a `structured-question`** and recorded in `docs/decisions/ADR-*.md`.
 > Finalized once a human approves at **gate ②**.
+<!-- While designing, mark anything undecided inline as a `[NEEDS CLARIFICATION: <what>]` marker at the
+     exact spot it affects (the design section, or the option list it belongs to), instead of settling
+     on a plausible default. There is no cap on how many: every marker is decided by the human — as a
+     technical choice recorded in an ADR — or demoted to Open questions with its assumption written
+     out, and `rein approve design` refuses while any is left standing in the prose. -->
 
 ## Architecture overview
 <!-- Overall structure. Component diagram or data flow in prose / a simple diagram -->
@@ -80,6 +85,8 @@
 - **Assumptions made**: <assumptions taken as given about requirements, existing assets, technical choices>
 - **Confidence**: per area high / medium / low (e.g. architecture=high / technical choices=medium / non-functional=low). **Attach a reason for low spots.**
 - **Open questions / points for the human to decide**:
-<!-- Three items and no more. Risks belong to the adversarial-review round above, which asks a
-     reviewer that did not write this; the same question answered again by the author is not a
-     second opinion. Context hygiene is the pre-compact check's job, not the gate's. -->
+<!-- Three *kinds* of item and no more — assumptions, confidence, open questions. That is a limit on
+     what this block is about, never on how many open questions it lists: every point the human has to
+     decide belongs here, however many there are. Risks belong to the adversarial-review round above,
+     which asks a reviewer that did not write this; the same question answered again by the author is
+     not a second opinion. Context hygiene is the pre-compact check's job, not the gate's. -->

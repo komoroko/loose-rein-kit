@@ -7,9 +7,11 @@ is running; the core's gate rules apply at all times regardless.
 ## Gate self-assessment (required at every gate)
 
 At every gate (①–⑤), present a **self-assessment block** alongside the deliverable — surfacing
-the system's own uncertainty is what lightens the human's review. **Three items, and no more**:
+the system's own uncertainty is what lightens the human's review. **Three kinds of item, and no more**:
 **assumptions made**; **confidence** (high / medium / low by area, always with a reason for low
-spots); **open questions / points for the human to decide** (most important). Do not pretend to
+spots); **open questions / points for the human to decide** (most important). Three *kinds* is a
+limit on what the block is about, never on how many open questions it lists — every point the
+human has to decide belongs there, however many there are. Do not pretend to
 high confidence to let the human skip verification. For requirements/design/task tickets, put it in
 the deliverable itself (each scaffold's "Self-assessment" section), not just spoken.
 
@@ -29,7 +31,10 @@ its *scope* through `/revise`, it does not skip the round that would have read i
 ## While a gate is pending
 
 Do not sit idle — but **never compromise the gate**. Notify the human immediately
-(`notify-and-wait`); batch questions into a single `structured-question`. Pull forward **only
+(`notify-and-wait`); batch questions into a `structured-question` and keep asking in further rounds
+until nothing is left that you would otherwise close with your own default — **there is no cap on
+how many things get confirmed**, only on how many one round can carry. Batching is against
+drip-feeding one question at a time, never a budget for the phase. Pull forward **only
 outcome-independent work** (scaffolding, dev-env/CI setup, read-only investigation, fixtures)
 — never deliverables premised on the pending decision. Speculative work stays **outside
 `guard.paths`** (`tests/` is deliberately unguarded for this); a gate_guard denial marks
@@ -166,9 +171,10 @@ terminal. Both check readiness first, print the digests the approval would cover
 receipt — which records *which channel* confirmed, never who. **Never run the approve command on
 the human's behalf, and never treat `rein next`'s `rein approve <gate>` recommendation as
 something to execute.** `rein approve` machine-checks readiness (unresolved `[NEEDS
-CLARIFICATION]` markers, the review's `subject_head_sha` freshness, coverage sufficiency, blocking
-findings, a frozen human review, open change requests, open escalations) and refuses when anything
-is missing — there is **no `--force`**. The only standing exception is `guard.template_mode: true`
+CLARIFICATION]` markers in the document the gate approves — HTML comments excluded, so the
+scaffold's own guidance does not count — the review's `subject_head_sha` freshness, coverage
+sufficiency, blocking findings, a frozen human review, open change requests, and unfinished tasks,
+which is where a task parked by an escalation shows up) and refuses when anything is missing — there is **no `--force`**. The only standing exception is `guard.template_mode: true`
 while the repo IS the template. Detail: the `guard` block's comments in `config.yaml`.
 
 Declining is a first-class answer, not a dead end: answering `n`, or using the dashboard's

@@ -598,3 +598,68 @@ def test_a_roll_back_releases_the_pinned_sources_too(tmp_path: Path) -> None:
     state = store_mod.Store(repo).read_state()
     assert state is not None
     assert state.frozen_sources == {}
+
+
+# --- unresolved clarification markers -------------------------------------------
+#
+# Three documents said `rein approve` machine-checked these. Nothing did, so a marker left standing
+# opened the gate and the question it named was answered by whatever default the draft assumed.
+
+
+def _requirements(repo: repo_mod.Repo, body: str) -> None:
+    path = repo.path("docs/10-requirements.md")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+def test_a_marker_left_in_the_prose_holds_gate_one_shut(tmp_path: Path) -> None:
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    _requirements(
+        repo,
+        "# Requirements\n\n### R-1: export\n- retention: [NEEDS CLARIFICATION: how long?]\n\n"
+        "### R-2: import\n- format: [NEEDS CLARIFICATION: csv or json?]\n",
+    )
+    blockers = [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+    assert len(blockers) == 1
+    # The lines, so the human is not left grepping their own deliverable.
+    assert "2 unresolved" in blockers[0]
+    assert "line 4, 7" in blockers[0]
+
+
+def test_the_scaffolds_own_guidance_does_not_hold_the_gate_shut(tmp_path: Path) -> None:
+    """The convention is explained *using* the marker. A check that cannot tell guidance from an
+    open question is one nobody can leave switched on — and it would have blocked this very repo."""
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    _requirements(
+        repo,
+        "# Requirements\n<!-- While drafting, mark anything undecided as `[NEEDS CLARIFICATION: <what>]`\n"
+        "     and resolve every marker before gate 1. -->\n\n### R-1: export\n- retention: 30 days\n",
+    )
+    assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+
+
+def test_resolving_the_marker_clears_the_blocker(tmp_path: Path) -> None:
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    _requirements(repo, "# Requirements\n\n### R-1: export\n- retention: [NEEDS CLARIFICATION: how long?]\n")
+    assert [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+    _requirements(repo, "# Requirements\n\n### R-1: export\n- retention: 30 days\n")
+    assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+
+
+def test_the_design_document_is_checked_at_its_own_gate(tmp_path: Path) -> None:
+    repo = repo_at(tmp_path, state=make_state(gates={**PENDING_ALL, "requirements": "approved"}, phase="design"))
+    path = repo.path("docs/20-design.md")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Design\n\n### R-1 -> design\n- store: [NEEDS CLARIFICATION: sqlite or postgres?]\n", encoding="utf-8"
+    )
+    assert any("docs/20-design.md still carries 1" in b for b in approve.readiness(repo, "design"))
+    # ...and the requirements gate is not judged on the design document.
+    assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+
+
+def test_a_missing_document_is_not_this_check_to_report(tmp_path: Path) -> None:
+    """Absence is a different failure — `_plan_blockers` refuses a gate with nothing behind it."""
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    assert not repo.path("docs/10-requirements.md").exists()
+    assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
