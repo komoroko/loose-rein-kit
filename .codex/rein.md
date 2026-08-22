@@ -28,12 +28,11 @@ Notes:
 - **The implementation phase is `rein build`, and needs a headless agent CLI** (installed and
   authenticated) — the orchestrator launches the CLI named by `agents.implementer.adapter`
   (`claude` by default; `codex` / `gemini` also work). It is one command whose completion is the
-  signal, never polled; retry-after-capacity is a shell loop on its exit code.
+  signal, never polled.
 - **Codex's `exec` caps how long one command may run**, and a real build outlasts that cap. With no
   `background-wait`, take its degradation: start the run detached with its output in a file
   (`nohup rein build --supervise > .rein/build.log 2>&1 &`), end the turn, and read `rein resume` /
-  the log when you come back — **never re-run `rein build` to check on it**: the build lock makes
-  the second run exit `3`, which is indistinguishable from a capacity stop (build.md, "When the run
+  the log when you come back — **never re-run `rein build` to check on it** (build.md, "When the run
   outlasts your host's command timeout").
 - The security review before gate ④ / at `/verify`: perform a security-focused review pass; it is
   recorded in `review.yaml`'s `machine.security` by `rein review generate`, bound to the

@@ -14,8 +14,7 @@
 
 ## Acceptance criteria
 > **The machine-readable copy lives in `.rein/plan.yaml` under this task's `acceptance:`, and that
-> is the one the loop reads.** A checkbox here is prose: nothing parses it, so "the acceptance
-> criteria are met" was only ever an assertion by whoever wrote the code. Write each criterion
+> is the one the loop reads.** A checkbox here is prose: nothing parses it. Write each criterion
 > here for a human, and give it an `id` matching the plan entry so the two can be read together.
 >
 > In the plan, each criterion says how it is judged: `command` (an argv the loop runs in a

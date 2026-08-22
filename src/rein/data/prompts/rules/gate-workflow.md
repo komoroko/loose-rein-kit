@@ -15,13 +15,11 @@ human has to decide belongs there, however many there are. Do not pretend to
 high confidence to let the human skip verification. For requirements/design/task tickets, put it in
 the deliverable itself (each scaffold's "Self-assessment" section), not just spoken.
 
-**What this block deliberately does not carry.** A list of *anticipated risks and trade-offs* — the
-independent `adversarial-reviewer` round below asks that question of somebody who did not write the
-deliverable, and the same question answered a second time by its author is the self-consistent
-explanation this whole arrangement declines to treat as evidence. And a *context-bloat signal* —
-that is hygiene addressed to the agent, not a decision for the human, and the pre-compact check
-under "Context budget" is where it already lives. Every item a gate presents costs the reader
-attention that the items carrying a decision then have to compete with.
+**What this block deliberately does not carry.** *Anticipated risks and trade-offs* — the
+`adversarial-reviewer` round below asks that of somebody who did not write the deliverable, and the
+author's second answer to it is the self-consistent explanation this arrangement declines to treat
+as evidence. And a *context-bloat signal* — hygiene addressed to the agent, not a decision for the
+human; it lives in the pre-compact check under "Context budget".
 
 Self-assessment alone is not independent verification: gates ①–③ additionally require one
 **adversarial-review round** by the `adversarial-reviewer` role — procedure and recording:
@@ -49,67 +47,42 @@ the human half is worked through in `rein ui` — a rail of
 **scope → orient → decision → diff → freeze** — and frozen with `rein review complete`. Freezing is
 a precondition of `rein approve build` — it is **not** the approval.
 
-The first two stages ask for nothing. That is the design: **a reviewer who has to reconstruct the
-change before every card spends their attention on reconstruction.**
+The first two stages ask for nothing: a reviewer who has to reconstruct the change before every
+card spends their attention on reconstruction.
 
-- **The scope is stated before anything else.** Which commits this review is bound to, how much of
+- **The scope is stated before anything else** — which commits the review is bound to, how much of
   the change could be read, what could **not** be (the coverage gap, by path and reason), and
-  whether it fits one session's budget. An approval covers a boundary; a reviewer who does not know
-  the boundary does not know what they approved.
-- **The orient stage says what was built, and under what conditions.** The delivered tasks and the
+  whether it fits one session's budget. An approval covers a boundary.
+- **The orient stage says what was built, and under what conditions** — the delivered tasks and the
   claims they answer; which dependency manifests, generated files and migrations moved; **which
-  sandbox, image and network posture each quality-gate step ran under**; how many quality-gate steps
-  ran and which ran for nothing; whether anything ever *launched* the deliverable; the
-  Expected/Actual comparison on its three axes; and what is still open — tasks awaiting evidence,
-  open change requests, the per-task review findings marked `consider` that stopped nothing, and
-  what the implementer said about each task that did **not** land. Every line is **derived from the
-  SSOT**, not written by anything, and where it carries a sentence somebody else wrote, the
-  confidence and the code anchor travel with it.
-- **Orient's one substantive section is what the change now requires of a person.** A setting
-  somebody has to supply, a schema somebody has to migrate, a dependency somebody has to provide, a
-  signal somebody has to watch. Gate ③ freezes each task's `operator_surface`, and this section
-  sorts the blind extractor's operator-facing readings by whether one of those declarations foresaw
-  them: **what nobody declared comes first** — nobody decided that would be somebody's job — then
-  what was declared and never read out, then a **count** of the ones that went as foreseen. Expected
-  rows are a number, because a table of them is where the first two go to hide. A declared surface
-  also offers its **as-built** view: the file as it *ends up* at the reviewed commit, which a diff
-  never shows, fetched on demand rather than copied into the review.
-- **What the gate does not do here is re-open the choice.** The trade-off was decided at gate ②,
-  by a human, and it is recorded in the ADR the declaration names. Restating it after the fact would
-  put a sentence nobody observed in front of the person deciding, and re-litigate a decision that is
-  already made.
-- **If the sandbox moved since gate ③, orient says so.** Gate ③ freezes `config.yaml` without its
-  image pins, so a task that legitimately adds a dependency can have its sandbox rebuilt without
-  re-approving a plan nothing changed. That permission is paid for here: the approver is told,
-  rather than left to find out, that the evidence they are signing over was produced in an
-  environment the gate ③ approval never saw. It blocks nothing — `kind`, `network_profile` and
-  `mount_repo` are still frozen, so a sandbox that *opened* never reaches this gate at all.
+  sandbox, image and network posture each quality-gate step ran under**; whether anything ever
+  *launched* the deliverable; the Expected/Actual comparison on its three axes; and what is still
+  open, including what the implementer said about each task that did **not** land. Every line is
+  **derived from the SSOT**, and where it carries a sentence somebody else wrote, the confidence and
+  the code anchor travel with it. If the sandbox moved since gate ③ it says so: that blocks nothing
+  (`kind`, `network_profile` and `mount_repo` are frozen), but the approver is told the evidence was
+  produced in an environment the gate ③ approval never saw.
+- **Orient's one substantive section is what the change now requires of a person** — a setting to
+  supply, a schema to migrate, a dependency to provide, a signal to watch. It sorts the blind
+  extractor's operator-facing readings against each task's frozen `operator_surface`: **what nobody
+  declared comes first**, then what was declared and never read out, then a **count** of the ones
+  that went as foreseen. It does not re-open the choice — that was decided at gate ② and is recorded
+  in the ADR the declaration names.
 - **Decision Cards are the one screen that asks for anything.** Every finding the review could
   not settle — an unaligned claim, a gap, ungrounded extra behaviour, a security finding —
   becomes a card, derived from the findings rather than authored by a reviewer, and **each card
   carries its own evidence**. **Unanswered high/critical cards block the freeze.** Every answer
-  carries the human's own **confidence**; nothing defaults it.
-- **No card offers accepting the risk.** The dispositions are revise / experiment / expert /
-  reduce scope / dispute-with-a-reason. That absence is the policy.
-- **A tick means a recorded judgement**, never that a screen was visited. The reading stages
-  record nothing and say so, rather than claiming either that they were done or skipped.
-- **Coverage is priced by risk, not by presence.** An `insufficient` manifest is a statement about
-  reading, not about danger. At high/critical it blocks — "extra behaviour: undeterminable" cannot
-  be waved through as zero — and below that it is recorded, shown, and does not shut the gate. Both
-  the freeze and `rein approve build` read the same rule, because two rules over one manifest is
-  how a low-risk cycle carrying a single unreadable font file ends up with no way through gate ④,
-  scope split included: splitting never removes the file.
+  carries the human's own **confidence**; nothing defaults it. The dispositions are revise /
+  experiment / expert / reduce scope / dispute-with-a-reason — **no card offers accepting the
+  risk**, and that absence is the policy.
+- **A tick means a recorded judgement**, never that a screen was visited.
+- **Coverage is priced by risk, not by presence.** An `insufficient` manifest blocks at
+  high/critical — "extra behaviour: undeterminable" cannot be waved through as zero — and below
+  that is recorded, shown, and does not shut the gate. The freeze and `rein approve build` read the
+  same rule.
 - **A blown review budget splits the scope**; it never lengthens the screen. The budgets are
   measured, not declarative — including the diff size — so a change too large for one sitting
   blocks the freeze until the scope is reduced or the limit is raised as a recorded decision.
-
-**What is deliberately gone.** A high/critical card used to withhold its evidence until the
-reviewer had recorded an unprimed guess, and a guess that missed opened a counterfactual to close.
-The intent was cognitive forcing; the effect was a comprehension quiz standing between a human and
-the decision they were there to make — and it defended against nothing, since the priming that
-matters is the *extractor's*, and that is enforced separately and still is. The forcing function
-that remains is the one nobody can clear by rote: a high/critical card cannot lapse into silence,
-and the answer carries a confidence the tool will not invent.
 
 ## Context budget (context hygiene)
 
@@ -128,10 +101,9 @@ Rules: **keep deliverables lean; push detail out to linked files** (e.g. an `ADR
 deliverable log rows, keep the decision, drop the transcript. **`events.ndjson` is the exception:
 it never rotates.** A record that can disappear is not evidence, so the audit chain only grows —
 budget for that when deciding what deserves an event. **Failures are summarized, not dumped.**
-**Prefer fetch-on-demand over holding everything** — read the slice you need. **A `docs/notes/` memo is a record, not a permanent tier: once its lesson is
-promoted (into `AGENTS.md`, an `ADR-*.md`, or the code) the note has served its purpose and is
-deleted** — a note that never promotes-then-exits is how records accumulate (a copy that lands
-in a product is deletable there; it is outside `upgrade`/`uninstall`).
+**Prefer fetch-on-demand over holding everything** — read the slice you need. **A `docs/notes/`
+memo is a record, not a permanent tier: once its lesson is promoted (into `AGENTS.md`, an
+`ADR-*.md`, or the code) the note has served its purpose and is deleted.**
 
 **Compact the session at clean checkpoints, not mid-flight.** `session-compaction` is
 human-run; the agent suggests it — only at a phase or build-layer boundary, and only when the
@@ -163,14 +135,10 @@ The installed `rein guard` denies in code at three checkpoints — **edit-time**
 hook on deliverable writes), **commit-stage** (`rein guard --check-diff` in pre-commit /
 the quality gate), and **merge-stage** (`rein build` re-checks every path a task changed
 before it lands; violations escalate as `gate_violation`). Guarded paths: `guard.paths`.
-A `state.yaml` gate flip to `approved` written by hand is denied. The only write path is
-`approve.record_approval`, reached by a human confirming in one of **two** places: `rein approve
-<gate>` at a terminal (`[y/N]`, default no), or the dashboard's approval footer, whose write
-session exists only because someone opened the single-use launch link `rein ui` printed to its own
-terminal. Both check readiness first, print the digests the approval would cover, and write the
-receipt — which records *which channel* confirmed, never who. **Never run the approve command on
-the human's behalf, and never treat `rein next`'s `rein approve <gate>` recommendation as
-something to execute.** `rein approve` machine-checks readiness (unresolved `[NEEDS
+A `state.yaml` gate flip to `approved` written by hand is denied: the only write path is
+`approve.record_approval`, reached by a human confirming at their own terminal or in the dashboard
+(AGENTS.md "Gate rules" 2). Both check readiness first, print the digests the approval would cover,
+and write the receipt. `rein approve` machine-checks readiness (unresolved `[NEEDS
 CLARIFICATION]` markers in the document the gate approves — HTML comments excluded, so the
 scaffold's own guidance does not count — the review's `subject_head_sha` freshness, coverage
 sufficiency, blocking findings, a frozen human review, open change requests, and unfinished tasks,

@@ -64,15 +64,13 @@ Four documents, distinct roles — do not conflate them:
   `pending`|`approved` — **the only write path to `approved` is a human approval `rein`
   recorded**, and the receipt binds the digests that approval covered. Gate ③ also pins the
   **prose the build reads** (`plan.sources`: the task tickets and the design/requirements
-  documents); a task's `evidence` records the tree its `done` was decided on.
+  documents); a task's `evidence` records the tree its `done` was decided on. The receipt
+  records which channel confirmed, never which human.
 - **`.rein/review.yaml`** — the **machine review** and the **human review**, digested
   *separately*. Regenerating the machine review resets the human review; a human answer never
   makes the machine review stale.
 - **`.rein/events.ndjson`** — the hash-chained audit log. Every state change records why;
   a deleted, reordered, or re-hashed line breaks the chain a gate receipt pins.
-
-An approval records that a human confirmed at a terminal, never *which* human — there is no
-identity-bound mode, so authority never depends on anything outside the repository.
 
 ## Gate rules (strict)
 
@@ -84,19 +82,6 @@ identity-bound mode, so authority never depends on anything outside the reposito
    no), or the dashboard's approval footer. **Never edit a gate line yourself, never run
    `rein approve` for them, and never pre-authorize it.** When `rein next` recommends
    `rein approve <gate>` — it does, once a gate is ready — that is a line to *show*, not to run.
-
-   **What this establishes.** Not that a human approved — nothing in the repository can show that,
-   and the receipt records only that *a* confirmation happened and over which channel. What holds
-   is narrower: **an approval cannot happen by accident, by default, or by a configuration someone
-   pre-authorized.** Three mechanisms carry it — the TTY requirement (a piped stdin, a CI job, an
-   agent's captured subprocess all fail it), the dashboard's single-use launch link, printed to the
-   terminal `rein ui` runs in and readable by nothing else, and `rein doctor`'s check that no
-   settings file pre-authorizes a gate-opening verb. A local process with a real pty defeats all
-   three, as it always could.
-
-   What is left is **direction**: a surface may record judgements that only ever *narrow* what
-   happens next — a change request, a review answer, a disposition — while the one judgement that
-   *widens* it needs the capability handover above.
 3. **Do not silently fix problems in requirements/design.** Set the task `needs-revision`,
    record a `knowledge-gap`/escalation event, and raise it to the human.
 
@@ -123,14 +108,11 @@ task's territory blocks the task rather than landing.
 **The loop derives; agents do not re-derive.** Each launch is handed a **dossier**
 (`.rein/work/T-NNN.json`) with the claims the task answers and what each asserts, its acceptance
 criteria, its scope, the changed paths split into source / tests / mechanical churn, and what
-earlier attempts tried. The one deliberate exception is gate ④'s blind extractor, which is
-*supposed* to read the code without ever seeing the plan. Mechanical churn — lockfiles, generated
-files — reaches no reviewer as a body, only as the fact that it changed; the Coverage Manifest
-goes on reporting it unanalysed, so nothing is claimed that was not read.
+earlier attempts tried. The one deliberate exception is gate ④'s blind extractor: never give it
+the plan.
 
 **Whoever judges does not repair.** The per-task reviewer is launched read-only and writes
-findings; the implementer resolves them and the reviewer looks again. Every launch's input is
-measured and reported at the end of the run — a budget nobody counts is a statement of intent.
+findings; the implementer resolves them and the reviewer looks again.
 
 ## Principles
 
@@ -147,23 +129,21 @@ measured and reported at the end of the run — a budget nobody counts is a stat
   status** — a delegated agent's textual "green" is never evidence. Repo code and tests run in
   the **OCI sandbox**, never on the host.
 - **`done` means the evidence was there, not that the agent stopped.** A task closes only when
-  the DoD went green **against the tree the task actually produced** — a content fingerprint, not
-  a moment — and `state.yaml` records that fingerprint beside the status. An attempt that changed
-  nothing does not reach the gate at all: a green over an unchanged tree is a fact about code
-  that was already there. An implementer ends with **`rein report --outcome
-  implemented|blocked|needs-revision`**, the only channel its account of the work travels on;
-  `blocked` and `needs-revision` park the task **before** a reviewer or a test suite is spent on
-  it, and no outcome it can report finishes anything. What it says is a claim (`--touched` is
-  checked against the real diff), never a verdict.
+  the DoD went green **against the tree the task actually produced** — a content fingerprint
+  `state.yaml` records beside the status. An attempt that changed nothing does not reach the gate
+  at all: a green over an unchanged tree is a fact about code that was already there. An
+  implementer ends with **`rein report --outcome implemented|blocked|needs-revision`**, the only
+  channel its account of the work travels on; `blocked` and `needs-revision` park the task
+  **before** a reviewer or a test suite is spent on it, and no outcome it can report finishes
+  anything. What it says is a claim (`--touched` is checked against the real diff), never a verdict.
 - **A task's own bar is `acceptance` in the plan, and the DoD still runs.** The DoD asks whether
   the code is *sound*; a task's acceptance criteria ask whether it did what it was *for* — both,
-  never one instead of the other, and neither chosen by the implementer (a human freezes the list
-  at gate ③). Each criterion says how it is judged: `command`, `artifact`, `external`, or nothing
-  at all, which is honest for a judgement call and leaves it to gate ④. **`external` is evidence
-  this loop cannot obtain** — a staging check, a device, a person — so the work merges and the
-  task waits at **`awaiting-evidence`**: not failed, not done, off the frontier until somebody
-  records what they saw with `rein evidence record`. That record binds the tree it was made
-  against, so changing the code retires it.
+  and neither chosen by the implementer (a human freezes the list at gate ③). Each criterion says
+  how it is judged: `command`, `artifact`, `external`, or nothing at all, which is honest for a
+  judgement call and leaves it to gate ④. **`external` is evidence this loop cannot obtain** — a
+  staging check, a device, a person — so the work merges and the task waits at
+  **`awaiting-evidence`** until somebody records what they saw with `rein evidence record`. That
+  record binds the tree it was made against, so changing the code retires it.
 - **Small and sure.** One commit, one concern; approval before destructive/outward-facing ops.
 - **Context isolation and hygiene.** Delegate phase work to role agents; keep deliverables and
   logs lean (tiers, GC, compaction: the rules module).

@@ -86,7 +86,5 @@
 - **Confidence**: per area high / medium / low (e.g. architecture=high / technical choices=medium / non-functional=low). **Attach a reason for low spots.**
 - **Open questions / points for the human to decide**:
 <!-- Three *kinds* of item and no more — assumptions, confidence, open questions. That is a limit on
-     what this block is about, never on how many open questions it lists: every point the human has to
-     decide belongs here, however many there are. Risks belong to the adversarial-review round above,
-     which asks a reviewer that did not write this; the same question answered again by the author is
-     not a second opinion. Context hygiene is the pre-compact check's job, not the gate's. -->
+     what this block is about, never on how many open questions it lists. Risks belong to the
+     adversarial-review round above, which asks a reviewer that did not write this. -->

@@ -22,15 +22,11 @@ Claude Code also carries the **mechanism layer** of the gates: the PreToolUse ho
 `.claude/settings.json` runs `rein guard` on every Write/Edit (AGENTS.md "Gate rules").
 
 The implementation phase is `rein build` (headless, via the adapters `rein agent <role> <cli>`
-sets) — one command whose completion is the signal, so never schedule wake-ups to poll it;
-retry-after-capacity is a shell loop on its exit code (build.md).
+sets) — one command whose completion is the signal, so never schedule wake-ups to poll it.
 
-**Bash caps how long one foreground command may run and a real build outlasts that cap**, so use
-`background-wait`: `rein build --supervise` with `run_in_background: true`, then get on with
-something else. The run's exit re-invokes you — that is waiting, not polling, and it costs no
-launch. **Detach instead (`nohup rein build --supervise > .rein/build.log 2>&1 &`, then end the
-turn) when the run has to outlive this session**: a host-managed background task belongs to the
-host, an orphaned process does not. Either way, when you come back read `rein resume` / the log,
-and **never re-run `rein build` to check on it** — the build lock makes the second run exit `3`,
-which is indistinguishable from a capacity stop (build.md, "When the run outlasts your host's
-command timeout").
+**Bash caps how long one foreground command may run and a real build outlasts that cap**: run
+`rein build --supervise` with `run_in_background: true` and get on with something else — its exit
+re-invokes you, which is waiting, not polling. **Detach instead (`nohup rein build --supervise >
+.rein/build.log 2>&1 &`, then end the turn) when the run has to outlive this session.** Either way,
+come back through `rein resume` / the log and **never re-run `rein build` to check on it**
+(build.md, "When the run outlasts your host's command timeout").

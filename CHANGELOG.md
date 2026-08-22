@@ -8,7 +8,8 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 Four defects from a field run. Two are the same sentence twice — the machine asked a question it had
 already answered, and somebody paid for the asking. The other two are the mirror image: a question
-that needed a human never got asked, and nothing noticed.
+that needed a human never got asked, and nothing noticed. Then a pass over the always-loaded prose
+itself, which had been paying for sentences that told an agent nothing to do.
 
 `state.yaml`'s `handoff` gains an optional `escalation` — no migration, but a state.yaml written by
 this release does not validate against an older `rein`. **`rein approve requirements` and
@@ -98,6 +99,14 @@ Code can be re-entered when a background command exits — waiting, with no time
 the mapping never used it. `background-wait` is now a capability in the vocabulary, mapped where it
 exists and degrading to the detach recipe where it does not. Detaching stays the right answer for
 one case, now stated: a run that has to outlive the session.
+
+### The always-loaded files pay rent
+
+Every rule an agent reads costs the same context the deliverables need, so the prose that teaches no
+action was cut: design rationale addressed to a reader rather than an actor, archaeology of
+mechanisms that are already gone, and the paragraphs each phase procedure repeated from `AGENTS.md`,
+which is loaded anyway. No rule was dropped — where a sentence was the only home of one, it stayed.
+`AGENTS.md` −12%, `gate-workflow.md` (read by every phase) −19%, the phase procedures −4 to −12%.
 
 ## [0.3.3] - 2026-08-20
 
