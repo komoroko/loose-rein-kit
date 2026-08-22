@@ -15,8 +15,8 @@ realizes the vocabulary below; with none, use the degradation column.
 
 ## Capability vocabulary (portable verbs)
 
-Rules and procedures name human-interaction points with these neutral capabilities, never an
-agent-specific tool.
+Rules and procedures name the points where they need something of the host — a human interaction,
+or a way of running something — with these neutral capabilities, never an agent-specific tool.
 
 | Capability | Meaning | Lacking it |
 |---|---|---|
@@ -27,6 +27,7 @@ agent-specific tool.
 | `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
 | `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |
 | `command-preauthorization` | pre-authorize known-safe commands | approve each interactively |
+| `background-wait` | start a long command detached and be re-entered when it exits — waiting, not polling | detach with the output in a file, end the turn, read the log when a human brings you back |
 
 ## Language
 

@@ -110,8 +110,9 @@ def claude_import_block() -> str:
         "`approval-presentation` → plan mode + ExitPlanMode; `session-compaction` → /compact\n"
         "(human-run); `role-delegation` → the subagents in .claude/agents/;\n"
         "`command-preauthorization` → permissions.allow in\n"
-        ".claude/settings.json. The implementation phase is `rein build` — one command whose\n"
-        "completion is the signal, so never poll it. The operating rules are imported from:\n"
+        ".claude/settings.json; `background-wait` → Bash with run_in_background (the run's exit\n"
+        "re-invokes you). The implementation phase is `rein build` — one command whose completion\n"
+        "is the signal, so wait for it and never poll it. The operating rules are imported from:\n"
         f"@{REIN_RULES_PATH}\n"
     )
 

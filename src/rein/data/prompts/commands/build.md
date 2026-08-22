@@ -143,15 +143,19 @@ poll" is not the same as "never wait", and the gap between them is where the cos
 whose command was cut off starts checking on the run, and each check is a launch, a context, and a
 share of the session limit spent on learning that the build is still building.
 
-So run it detached, with its output in a file, and **look once**:
+**If you have `background-wait`, use it**: start `rein build --supervise` through it and get on
+with something else. The run's exit brings you back on its own, which is waiting — no timer, no
+check, no launch spent.
+
+**Detach instead when the run has to outlive this session**, because a host-managed background task
+belongs to the host and an orphaned process does not:
 
 ```sh
 nohup rein build --supervise > .rein/build.log 2>&1 &   # returns immediately; the run owns the lock
 ```
 
-Then **end your turn** and let the human bring you back, or wait on the process if your host can
-wait at all. When you do come back, read the run's own record — never re-invoke the build to find
-out how it is going:
+Then **end your turn** and let the human bring you back. Either way, when you come back read the
+run's own record — never re-invoke the build to find out how it is going:
 
 - `rein resume` — what changed since you last looked, and what is waiting on a human
 - `rein status` / `rein ui` — the board
