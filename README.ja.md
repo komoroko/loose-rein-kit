@@ -135,9 +135,14 @@ rein oci build --all --write-config # 3つの同梱イメージをビルドし�
 rein oci verify                     # pin が揃っているか確認する
 ```
 
-`rein init` とウィザードは適切なタイミングでこれを促し、その場で実行することもできる。独自
-Containerfile・再 pin・実行時フラグの詳細は、`.rein/config.yaml` の
-`SANDBOXES` コメントブロックに記載してある。
+`rein init` とウィザードは適切なタイミングでこれを促し、その場で実行することもできる。
+
+同梱イメージに入っているのは python・uv・pytest だけで、ネットワークも無い。同梱の既定ゲートを
+動かすには足りるが、それ以上は動かない。**リンタ・型検査・依存関係の解決を要するゲートには専用の
+イメージが要る**。Containerfile を書き(`.rein/oci/<name>/Containerfile` に置けば同梱分と並ぶ)、
+プロファイルの `containerfile:` を `dockerfile:` に置き換えて指し、
+`rein oci build --profile <そのプロファイル名> --write-config` でビルドと pin を行う。再 pin・
+実行時フラグ・記述例の詳細は、`.rein/config.yaml` の `SANDBOXES` コメントブロックに記載してある。
 
 ## 使い方
 

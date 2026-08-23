@@ -51,8 +51,28 @@ executors:
 #
 # Pinning is not the whole job: the image has to be able to RUN the step you point at it. The
 # packaged images carry python, uv and pytest and run with `--network none`, so a quality-gate
-# step that invokes `make`, or that resolves dependencies at run time, needs its own
-# Containerfile before its profile can leave `kind: host`.
+# step that invokes `make`, that lints or type-checks, or that resolves dependencies at run time,
+# needs its own Containerfile before its profile can leave `kind: host`.
+#
+# Writing one is two lines of config and a file. Put the Containerfile anywhere in the repository
+# — `.rein/oci/<name>/Containerfile` keeps it beside the packaged ones — install what your gate
+# actually runs, and point the profile at it with `dockerfile:` INSTEAD of `containerfile:`
+# (they are mutually exclusive; the pinned `image` digest stays the binding fact either way):
+#
+#     # .rein/oci/quality/Containerfile
+#     FROM docker.io/library/python:3.13-slim-bookworm@sha256:<pin a digest, never a tag>
+#     RUN pip install --no-cache-dir "pytest==9.0.3" "ruff==0.15.16" "mypy==2.1.0"
+#     USER 1000:1000
+#     WORKDIR /work
+#
+#     # …and in the profile below, replacing its `containerfile:` (the two are exclusive):
+#     quality:
+#       dockerfile: .rein/oci/quality/Containerfile
+#
+# `rein oci build --profile <that profile name> --write-config` then builds YOUR file and pins the
+# digest — once a profile sets `dockerfile:`, `--profile` resolves to it instead of to a packaged
+# Containerfile. Everything the gate needs has to be IN the image: the runner gives it no network,
+# so a step that installs at run time fails there however well it works on your machine.
 # ---------------------------------------------------------------------------
 executor_profiles:
   quality:

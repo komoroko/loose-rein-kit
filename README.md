@@ -135,8 +135,14 @@ rein oci build --all --write-config # build and pin the three packaged images (n
 rein oci verify                     # confirm the pins are present
 ```
 
-`rein init` and the wizard prompt for this at the right time and can run it for you. Detail
-(custom Containerfiles, re-pinning, runtime flags): the `SANDBOXES` comment block in
+`rein init` and the wizard prompt for this at the right time and can run it for you.
+
+The packaged images carry python, uv and pytest and run with no network — enough for the shipped
+default gate and nothing more. **A gate that needs a linter, a type checker, or a dependency
+closure needs its own image**: write a Containerfile (`.rein/oci/<name>/Containerfile` keeps it
+beside the packaged ones), point the profile at it with `dockerfile:` instead of `containerfile:`,
+and `rein oci build --profile <that profile> --write-config` builds and pins it. Detail
+(re-pinning, runtime flags, a worked example): the `SANDBOXES` comment block in
 `.rein/config.yaml`.
 
 ## Daily use
