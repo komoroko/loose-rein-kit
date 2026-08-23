@@ -97,16 +97,26 @@ agents:
 
 # The single definition of the DoD. `command` is an argv array — no shell, so a pipe or a
 # redirect has to live in a script a reviewer can read.
+#
+# The two defaults below are what the PACKAGED `python` image can actually run: it carries python,
+# uv and pytest, nothing else, and the runner gives it no network. They used to be `make test` and
+# `make check`, which was a default that could not work anywhere — `rein init` writes no makefile,
+# and the image has no `make` either, so following doctor's advice to sandbox the profiles pinned
+# the DoD to an image that could not execute it.
+#
+# They are a floor, not a quality bar. `compileall` catches a syntax error and nothing else; the
+# moment you want a linter, a type checker, or a dependency closure, point the profile at your own
+# image with `dockerfile:` (see `executor_profiles` above) and put the real commands here.
 quality_gate:
   - name: test
     kind: command
-    command: [make, test]
+    command: [python, -m, pytest, -q, tests/]
     executor_profile: quality
     retries: 2
     required: true
   - name: check
     kind: command
-    command: [make, check]
+    command: [python, -m, compileall, -q, .]
     executor_profile: quality
     retries: 2
     required: true

@@ -351,9 +351,11 @@ holding the lock — and safe to retry, with nothing marked and no budget spent.
 --supervise` retries `3` automatically (`--supervise-interval-sec`, default 900). See
 "Troubleshooting" for what each stop looks like and how to resume.
 
-> **DoD commands are the project's own**: `quality_gate` names them once (the shipped
-> defaults `make test` / `make check` are placeholders — `rein init` fills detected commands
-> in a brownfield repo; substitute yours otherwise).
+> **DoD commands are the project's own**: `quality_gate` names them once. The shipped defaults
+> (`python -m pytest`, `python -m compileall`) are the floor the packaged `python` sandbox image
+> can actually run — it carries python, uv and pytest and has no network. `rein init` fills
+> detected commands in a brownfield repo; otherwise substitute yours, and point the profile at
+> your own image with `dockerfile:` when they need more than that.
 
 ## Security review
 

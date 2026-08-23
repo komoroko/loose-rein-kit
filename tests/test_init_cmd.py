@@ -380,3 +380,23 @@ def test_an_already_sandboxed_repo_is_not_asked_again(tmp_path: Path, monkeypatc
     seed_repo(tmp_path, config=make_config(profiles=SANDBOXED_PROFILES))
     monkeypatch.setattr("rein.executors.container_runtime", lambda: "docker")
     assert "already sandboxed" in init_cmd.sandbox_step(tmp_path, offer=True, ask=lambda _q: "y")
+
+
+def test_the_step_command_substitution_is_anchored_on_the_step_name() -> None:
+    """It used to match the literal `command: [make, test]`.
+
+    The day that default changed, the substitution would have silently done nothing and every
+    brownfield repo would have been initialized with a DoD that ignored its own detected commands.
+    """
+    from rein import data as data_mod
+
+    out = init_cmd.brownfield_config(data_mod.read_text("scaffold/rein/config.yaml"), "cargo test", "cargo clippy")
+
+    assert 'command: ["cargo", "test"]' in out
+    assert 'command: ["cargo", "clippy"]' in out
+    assert "compileall" not in out.split("- name: check")[1].split("- name: review")[0]
+
+
+def test_a_scaffold_whose_shape_moved_fails_instead_of_doing_nothing() -> None:
+    with pytest.raises(ValueError, match="no quality-gate step named"):
+        init_cmd.brownfield_config("quality_gate: []\n", "npm test", "npm run lint")

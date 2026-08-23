@@ -13,7 +13,7 @@ prompts:
     oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
     prompts/agents/adversarial-reviewer.md: sha256:8b0e688e806832019a24128f00098757090826ff3147dc533b3ce2eea4fdebe3
     prompts/agents/architect.md: sha256:01f47a9e7b0342ca76fae5a3aa4539b9fd82bca60e7435458e8cf34a66a17d12
-    prompts/agents/implementer.md: sha256:93bc38fe32fba10f398d96575ee1a90596689a1aff5791ff7ffcf6ac5539aedd
+    prompts/agents/implementer.md: sha256:6798571c003d677a6987ddfbbe427357cf97ef49a922a675984e37525473b9e7
     prompts/agents/requirements-analyst.md: sha256:f856541626e80f3439a3681c70a9ab09f557b0e3dc5c4ddd229f214b5f8efab3
     prompts/commands/build.md: sha256:5571ca682eb78b6250183054012d8ca78a1509b408d0591953c99a8918626305
     prompts/commands/design.md: sha256:3990596267138462fb9864c3718f0b767171235287c71712add6cc38b9e1c470
