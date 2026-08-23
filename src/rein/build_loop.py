@@ -371,7 +371,7 @@ def set_task_status(
 ) -> None:
     """Write one task's status and the event that explains it, in one transaction.
 
-    `commit` is the work-branch commit that landed the task — recorded as `completed_commit` and
+    `commit` is the commit that landed the task — recorded as `completed_commit` and
     carried in the same event, so "which commit closed T-NNN" is answerable from either the SSOT
     or the log without a second event to count twice.
 
@@ -2078,18 +2078,83 @@ class Orchestrator:
     def _cleanup_worktree(self, task: dag.Task) -> None:
         self.ws.cleanup_worktree(task.id)
 
-    def merge_leaf(self, task: dag.Task, branch: str) -> bool:
-        return self.ws.merge_leaf(task.id, branch)
+    def _load_landing(self) -> None:
+        """Which tasks already have an open pull request, and on which branch their work belongs.
 
-    def _landed(self) -> str:
-        """The work-branch commit the caller just created, as `completed_commit`.
-
-        Read at the moment the task's commit becomes HEAD — right after the serial finalize, or
-        right after that one leaf's merge — never once at the end of a batch. A batch's leaves
-        merge one after another, so a hash read after all of them names the last merge for every
-        member of the batch, and an integration gate that commits a fix moves it further still.
+        Read from the audit log, not configured: `pr-stack` records every pull request it opens,
+        and that record is what says a task's next commit belongs on a slice branch rather than on
+        the work branch. A slice already *ready* is excluded — past gate ④ a change is a human's
+        call, not something a re-run lands on quietly. Empty when no stack has been published,
+        which is every first build, and why nothing about that path changes.
         """
-        return "" if self.dry_run else self.ws.head()
+        from rein import pr_stack
+
+        events, _ = event_chain.scan(self.repo.events)
+        self.ws.landing = {r.task_id: r.branch for r in pr_stack.ledger(events) if r.task_id and not r.ready}
+
+    def merge_leaf(self, task: dag.Task, branch: str) -> bool:
+        """Merge one leaf into its target branch, classifying a conflict rather than only failing on it.
+
+        A conflict used to abort and block the task, full stop. It still ends that way when the two
+        sides genuinely disagree — but "genuinely" is now established rather than assumed: the
+        collision goes through `conflict`, which resolves the mechanical kind and escalates the
+        rest with the reason recorded. An implementer that reports nothing at all lands on
+        `semantic`, which is the same blocked task as before, now with a `knowledge_gap` beside it.
+        """
+        cwd = self.ws.merge_cwd(task.id)
+        if self.dry_run or not cwd:
+            with self._merge_checkout(task) as scratch:
+                return self._merge_into(task, branch, scratch)
+        return self._merge_into(task, branch, cwd)
+
+    @contextlib.contextmanager
+    def _merge_checkout(self, task: dag.Task) -> Iterator[str]:
+        """A checkout holding this task's target branch, made only when no worktree already has it."""
+        if self.dry_run:
+            yield self.root
+            return
+        with build_git.scratch_worktree(
+            self.repo, self.config.worktree_dir, "_merge", self.ws.target_branch(task.id), _late_run
+        ) as path:
+            yield path
+
+    def _merge_into(self, task: dag.Task, branch: str, cwd: str) -> bool:
+        if self.dry_run:
+            return self.ws.merge_leaf(task.id, branch, cwd)
+        if self.ws.merge_leaf(task.id, branch, cwd):
+            return True
+        resolution = conflict.merge_with_resolution(
+            self._plan or models.Plan({}),
+            cwd=cwd,
+            source_ref=branch,
+            ours_task=self._landing_owner(task.id),
+            theirs_task=task.id,
+            implement=self.resolve_conflict,
+            quality_gate=self.task_gate,
+            run=_late_run,
+        )
+        if resolution.merged:
+            print(f"    [merge] {task.id}: conflict resolved ({resolution.kind})")
+            self.ws.git(["worktree", "remove", "--force", self.ws.worktree_path(task.id)])
+            return True
+        conflict.escalate(self.repo, resolution)
+        self._escalate("merge_conflict", f"{task.id}: {resolution.escalation}", task=task.id)
+        return False
+
+    def _landing_owner(self, task_id: str) -> str:
+        """The task whose branch this one lands on — itself when a pull request already holds it."""
+        return task_id if self.ws.landing.get(task_id) else ""
+
+    def _landed(self, task_id: str) -> str:
+        """The commit the caller just created on this task's target branch, as `completed_commit`.
+
+        Read at the moment the task's commit becomes that branch's tip — right after the serial
+        finalize, or right after that one leaf's merge — never once at the end of a batch. A
+        batch's leaves merge one after another, so a hash read after all of them names the last
+        merge for every member of the batch, and an integration gate that commits a fix moves it
+        further still.
+        """
+        return "" if self.dry_run else self.ws.landed(task_id)
 
     # -- main loop --
 
@@ -2169,6 +2234,7 @@ class Orchestrator:
                 + "\n".join(f"  - {b.render()}" for b in blockers)
             )
             return common.EXIT_CANNOT_PROCEED
+        self._load_landing()
         if self.dry_run:
             return self._run_loop()  # read-only: no lock either, and no contention to guard against
         try:
@@ -2307,7 +2373,7 @@ class Orchestrator:
             if task.status != "awaiting-evidence" or self._unestablished_acceptance(task):
                 continue
             print(f"  [evidence] {task.id}: the outstanding observation has been recorded — finishing")
-            self._set_status(task.id, "done", commit=self._landed())
+            self._set_status(task.id, "done", commit=self._landed(task.id))
             promoted = True
         return promoted
 
@@ -2453,7 +2519,7 @@ class Orchestrator:
                 # without its commit (one commit = one task is the record gate ④ reviews).
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
-            self._set_status(task.id, self._completion_status(task), commit=self._landed())
+            self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
 
     def _consume_parallel(self, tasks: list[dag.Task]) -> None:
         """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
@@ -2529,7 +2595,7 @@ class Orchestrator:
                     continue
             if self.merge_leaf(task, branches[task.id]):
                 merged.append(task)  # done is decided after the integration gate below
-                landed[task.id] = self._landed()  # this leaf's merge commit, before the next one
+                landed[task.id] = self._landed(task.id)  # this leaf's merge commit, before the next one
             else:
                 self._set_status(task.id, "blocked")
                 self._cleanup_worktree(task)  # conflict: aborted merge, worktree no longer needed
@@ -2539,6 +2605,18 @@ class Orchestrator:
         # knob: each leaf was green only in isolation, so a batch that merged two or more of them
         # has never been verified as one tree until now. A `stage: integration` step is the other
         # reason to run it — those never ran per task, so even a single leaf has to face them.
+        #
+        # Only the leaves that landed on the *work branch* are in that join. A task whose pull
+        # request is open landed on its own slice branch, so the combined tree does not exist here
+        # yet — `rein pr-stack --restack` is what brings them together, and it runs this same gate
+        # once it has. Gating on a tree that is not the one under test would be the worse error.
+        elsewhere = [t for t in merged if self.ws.landing.get(t.id)]
+        if elsewhere:
+            print(
+                f"    [merge] {', '.join(t.id for t in elsewhere)} landed on their pull-request branches; "
+                "`rein pr-stack --restack` joins them into the work branch"
+            )
+        merged = [t for t in merged if not self.ws.landing.get(t.id)]
         if merged and (len(merged) >= 2 or self._steps_at("integration") != self._steps_at("task")):
             # An EnvironmentFault here propagates with the merged tasks still `in-progress`, and
             # that is the honest state: they merged, but nothing has verified the combined tree.

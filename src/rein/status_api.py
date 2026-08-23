@@ -284,7 +284,13 @@ def _handoffs(state: models.State | None) -> dict[str, dict[str, str]]:
 
 
 def completed_commits(state: models.State | None) -> dict[str, str]:
-    """Per done task, the work-branch commit that landed it — what makes the board's "done" reviewable."""
+    """Per done task, the commit that landed it — what makes the board's "done" reviewable.
+
+    Normally on the work branch. A task whose pull request is already open lands on that slice's
+    branch instead (`build_git.GitWorkspace.target_branch`), and `pr-stack --restack` brings it
+    into the work branch afterwards — so this is "where the task landed", not "where on the work
+    branch".
+    """
     tasks = state.raw.get("tasks") if state else None
     if not isinstance(tasks, dict):
         return {}

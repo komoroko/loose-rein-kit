@@ -2,8 +2,8 @@
 
 One cycle has always shipped as one pull request. A cycle that touched eight tasks then arrives
 as one diff, and the reviewer who has to read it is handed the whole of it at once. Everything
-needed to cut it apart was already recorded: `build_loop` writes the work-branch commit that
-landed each task into `state.yaml` as `completed_commit`, and the plan holds the DAG that says
+needed to cut it apart was already recorded: `build_loop` writes the commit that landed each task
+into `state.yaml` as `completed_commit`, and the plan holds the DAG that says
 what each task was for. This module turns those two into an ordered list of **slices** — one per
 task — each of which becomes a pull request based on the one below it.
 
@@ -33,7 +33,7 @@ import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from rein import common, conflict, dag, event_chain, models, pr_draft, status_api
+from rein import build_git, common, conflict, dag, event_chain, models, pr_draft, status_api
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -740,22 +740,6 @@ class Propagation:
         return not self.stopped_at
 
 
-def _worktree(repo: repo_mod.Repo, config: models.Config, branch: str) -> str:
-    """A throwaway worktree with `branch` checked out. Removed by :func:`_drop_worktree`."""
-    path = repo.path(config.worktree_dir) / RESTACK_WORKTREE
-    _git_write(repo, "worktree", "remove", "--force", str(path))
-    _git_write(repo, "worktree", "prune")
-    rc, out = _git_write(repo, "worktree", "add", "--force", str(path), branch)
-    if rc != 0:
-        raise StackError(f"could not create the restack worktree at {path}: {out}")
-    return str(path)
-
-
-def _drop_worktree(repo: repo_mod.Repo, path: str) -> None:
-    _git_write(repo, "worktree", "remove", "--force", path)
-    _git_write(repo, "worktree", "prune")
-
-
 def restack(
     repo: repo_mod.Repo,
     docs: Documents,
@@ -783,8 +767,11 @@ def restack(
         return Propagation()
     merged: list[str] = []
     resolved: list[str] = []
-    path = _worktree(repo, docs.config, chain[0])
     try:
+        scratch = build_git.scratch_worktree(repo, docs.config.worktree_dir, RESTACK_WORKTREE, chain[0], run)
+    except common.StopLoop as exc:
+        raise StackError(str(exc)) from None
+    with scratch as path:
         for position in range(1, len(chain)):
             source, target = chain[position - 1], chain[position]
             cwd = _checkout_for(repo, target, path, run)
@@ -805,8 +792,6 @@ def restack(
             if resolution.kind != "noop":
                 merged.append(target)
                 print(f"  {source} → {target}: {resolution.kind}")
-    finally:
-        _drop_worktree(repo, path)
     return Propagation(tuple(merged), tuple(resolved))
 
 
@@ -817,28 +802,13 @@ def _checkout_for(repo: repo_mod.Repo, branch: str, worktree: str, run: Callable
     checked out in the canonical checkout — so merging into it happens there, which is also where
     the build loop merges every leaf.
     """
-    for root in _worktree_heads(repo, run):
-        if root[1] == branch:
-            return root[0]
+    for path, checked_out in build_git.worktree_heads(repo, run):
+        if checked_out == branch:
+            return path
     rc, out = run(["git", "switch", branch], cwd=worktree)
     if rc != 0:
         raise StackError(f"could not check out {branch} in the restack worktree: {out}")
     return worktree
-
-
-def _worktree_heads(repo: repo_mod.Repo, run: Callable[..., tuple[int, str]]) -> list[tuple[str, str]]:
-    """`(path, branch)` for every worktree that has a branch checked out."""
-    rc, out = run(["git", "worktree", "list", "--porcelain"], cwd=str(repo.root))
-    if rc != 0:
-        return []
-    found: list[tuple[str, str]] = []
-    path = ""
-    for line in out.splitlines():
-        if line.startswith("worktree "):
-            path = line[len("worktree ") :].strip()
-        elif line.startswith("branch ") and path:
-            found.append((path, line[len("branch refs/heads/") :].strip()))
-    return found
 
 
 def _task_of(slices: Sequence[Slice], branch: str) -> str:

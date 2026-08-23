@@ -9,6 +9,8 @@ doctor/pr_draft already rely on (see build_loop's `_late_run`).
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -39,6 +41,46 @@ class Runner(Protocol):
     def __call__(self, cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]: ...
 
 
+def worktree_heads(repo: repo_mod.Repo, run: Runner) -> list[tuple[str, str]]:
+    """`(path, branch)` for every worktree of `repo` that has a branch checked out.
+
+    git refuses one branch in two worktrees, so anything that wants to merge into a branch has to
+    ask first whether some worktree already holds it — and merge there if one does.
+    """
+    rc, out = run(["git", "worktree", "list", "--porcelain"], cwd=str(repo.root))
+    if rc != 0:
+        return []
+    found: list[tuple[str, str]] = []
+    path = ""
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree ") :].strip()
+        elif line.startswith("branch ") and path:
+            found.append((path, line[len("branch refs/heads/") :].strip()))
+    return found
+
+
+@contextmanager
+def scratch_worktree(repo: repo_mod.Repo, worktree_dir: str, name: str, branch: str, run: Runner) -> Iterator[str]:
+    """A throwaway worktree with `branch` checked out, removed on the way out.
+
+    For merging into a branch nothing else has checked out. A leftover from a killed run is
+    cleared first — it holds no work of its own, so removing it cannot lose anything, which is
+    exactly what is *not* true of the leaf worktrees above.
+    """
+    path = str(repo.path(worktree_dir) / name)
+    run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
+    run(["git", "worktree", "prune"], cwd=str(repo.root))
+    rc, out = run(["git", "worktree", "add", "--force", path, branch], cwd=str(repo.root))
+    if rc != 0:
+        raise StopLoop(f"could not create the scratch worktree at {path}: {out}")
+    try:
+        yield path
+    finally:
+        run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
+        run(["git", "worktree", "prune"], cwd=str(repo.root))
+
+
 class GitWorkspace:
     """Every git call of one build run, anchored to the repo root and the work branch."""
 
@@ -53,6 +95,7 @@ class GitWorkspace:
         run: Runner,
         on_event: EventSink | None = None,
         on_salvage: SalvageSink | None = None,
+        landing: Mapping[str, str] | None = None,
     ) -> None:
         self.repo = repo
         self.root = str(repo.root)
@@ -68,6 +111,11 @@ class GitWorkspace:
         # Where preserved work is reported so the *next* attempt can find it. Injected for the
         # same reason as on_event: this runs inside a worktree that is about to be replaced.
         self.on_salvage: SalvageSink = on_salvage or (lambda task_id, branch, state: None)
+        # Where a re-run task's work lands, when it is not the work branch. A task whose pull
+        # request is already open has to have its fix land *on that pull request* — appending it
+        # to the work branch instead would put the fix for slice 2 in a slice nobody has reviewed.
+        # Empty for a first build, which is why nothing about that path changes.
+        self.landing: dict[str, str] = dict(landing or {})
 
     def git(self, args: list[str], cwd: str | None = None) -> None:
         """Run one git command; StopLoop on failure; prints and no-ops under dry-run."""
@@ -82,6 +130,33 @@ class GitWorkspace:
     def branch_for(self, task_id: str) -> str:
         """The leaf branch name per branch_pattern."""
         return self.branch_pattern.format(branch=self.branch, task_id=task_id)
+
+    def target_branch(self, task_id: str) -> str:
+        """Where this task's work is based on and merged back into. The work branch by default.
+
+        A task with an open pull request lands on *that* branch instead: the fix for a review
+        finding belongs to the slice that introduced the code, and `pr-stack --restack` carries it
+        upward afterwards. With no stack the map is empty and every task lands on the work branch,
+        which is every existing run.
+        """
+        return self.landing.get(task_id) or self.branch
+
+    def merge_cwd(self, task_id: str) -> str:
+        """The checkout to merge this task's leaf into — whichever worktree holds its target branch.
+
+        "" when nothing has it checked out and the caller has to make a scratch worktree
+        (:func:`scratch_worktree`); git refuses the same branch in two worktrees at once.
+        """
+        target = self.target_branch(task_id)
+        for path, branch in worktree_heads(self.repo, self._run):
+            if branch == target:
+                return path
+        return ""
+
+    def landed(self, task_id: str) -> str:
+        """The commit this task's target branch now points at — what `completed_commit` records."""
+        _, out = self._run(["git", "rev-parse", self.target_branch(task_id)], cwd=self.root)
+        return out.strip()
 
     def worktree_path(self, task_id: str) -> str:
         """The leaf worktree path under worktree_dir."""
@@ -159,15 +234,16 @@ class GitWorkspace:
         To avoid .git index.lock contention, worktree creation must be called **serially on the main thread**.
 
         `restore_from` is an earlier attempt's salvage branch. The new branch still starts from the
-        work branch — branching from the salvage point instead would silently drop whatever the
-        work branch gained in the meantime — and the preserved work is merged in on top. That is
+        task's target branch (:meth:`target_branch`, the work branch unless a pull request already
+        holds this task) — branching from the salvage point instead would silently drop whatever
+        that branch gained in the meantime — and the preserved work is merged in on top. That is
         the difference between "the interrupted run's work was kept" and "the next run continues
         it": preservation alone left every restarted task re-implemented from zero.
         """
         branch = self.branch_for(task_id)
         path = self.worktree_path(task_id)
         salvaged = "" if self.dry_run else self._salvage_leftovers(task_id, branch, path)
-        self.git(["worktree", "add", "-b", branch, path, self.branch])
+        self.git(["worktree", "add", "-b", branch, path, self.target_branch(task_id)])
         self._restore_salvaged(task_id, path, salvaged or restore_from)
         return branch
 
@@ -217,7 +293,8 @@ class GitWorkspace:
             raise StopLoop(f"{task_id}: could not preserve the leftover worktree {path}; kept for manual recovery")
         self._run(["git", "worktree", "remove", "--force", path], cwd=self.root)
         if self._run(["git", "rev-parse", "--verify", "--quiet", branch], cwd=self.root)[0] == 0:
-            rc, out = self._run(["git", "rev-list", "-n", "1", branch, "--not", self.branch], cwd=self.root)
+            target = self.target_branch(task_id)
+            rc, out = self._run(["git", "rev-list", "-n", "1", branch, "--not", target], cwd=self.root)
             if rc != 0 or out.strip():  # unmerged commits — or unable to prove there are none
                 salvage = self._salvage_name(branch)
                 self.git(["branch", "-m", branch, salvage])
@@ -249,24 +326,30 @@ class GitWorkspace:
         self._run(["git", "worktree", "remove", "--force", self.worktree_path(task_id)], cwd=self.root)
         self._run(["git", "worktree", "prune"], cwd=self.root)
 
-    def merge_leaf(self, task_id: str, branch: str) -> bool:
-        """Merge a leaf branch into work and remove the worktree. On a conflict, abort and return False."""
+    def merge_leaf(self, task_id: str, branch: str, cwd: str = "") -> bool:
+        """Merge a leaf branch into its target and remove the worktree. On a conflict, abort and return False.
+
+        `cwd` is the checkout holding the target branch; the repository root by default, which is
+        where the work branch lives. A task landing on a slice branch is merged wherever that
+        branch is checked out (:meth:`merge_cwd`, or a scratch worktree the caller made).
+        """
+        target = self.target_branch(task_id)
         if self.dry_run:
-            print(f"    [dry-run] git merge --no-ff {branch} → {self.branch}, remove worktree")
+            print(f"    [dry-run] git merge --no-ff {branch} → {target}, remove worktree")
             return True
-        rc, out = self._run(["git", "merge", "--no-ff", "--no-edit", branch], cwd=self.root)
+        rc, out = self._run(["git", "merge", "--no-ff", "--no-edit", branch], cwd=cwd or self.root)
         if rc != 0:
-            self._run(["git", "merge", "--abort"], cwd=self.root)
+            self._run(["git", "merge", "--abort"], cwd=cwd or self.root)
             self.on_event(
                 "task_failed",
                 task_id,
-                {"kind": "merge_conflict", "detail": f"conflict merging into work: {out[-500:]}"},
+                {"kind": "merge_conflict", "detail": f"conflict merging into {target}: {out[-500:]}"},
             )
             return False
         self.git(["worktree", "remove", "--force", self.worktree_path(task_id)])
         return True
 
-    def branch_changed_paths(self, branch: str, cwd: str = "") -> list[str]:
+    def branch_changed_paths(self, branch: str, cwd: str = "", task_id: str = "") -> list[str]:
         """Paths a leaf changed: committed since it forked off the work branch, plus its dirty tree.
 
         `cwd` is the leaf's worktree. Without it this answered on committed work alone, which is
@@ -276,7 +359,8 @@ class GitWorkspace:
         answer. They are not the same thing, and one of them is a failure.
         """
         paths: set[str] = set()
-        rc, out = self._run(["git", "diff", "--name-only", f"{self.branch}...{branch}"], cwd=self.root)
+        base = self.target_branch(task_id) if task_id else self.branch
+        rc, out = self._run(["git", "diff", "--name-only", f"{base}...{branch}"], cwd=self.root)
         if rc == 0:
             paths.update(p for p in out.splitlines() if p.strip())
         if cwd:
