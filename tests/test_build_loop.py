@@ -382,7 +382,7 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop, "_integration_gate", lambda merged: (True, ""))
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: next(heads))
@@ -1350,7 +1350,7 @@ def test_a_stopped_leaf_keeps_its_worktree_while_its_batchmates_still_merge(
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
     monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
     monkeypatch.setattr(loop, "_cleanup_worktree", lambda task: cleaned.append(task.id))
 
     def record_merge(task: dag.Task, branch: str) -> bool:
@@ -1945,7 +1945,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: "a" * 40)
 
@@ -1958,3 +1958,41 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     loop._consume_parallel(tasks)
 
     assert gated == [["T-001", "T-003"]]
+
+
+def test_a_leaf_is_diffed_against_its_target_branch_not_the_work_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The base and the branch used to be separate arguments and the base was always the work branch.
+
+    A leaf landing on a slice branch was then diffed against a branch it never forked from, so its
+    changed-path set carried every commit the slices below had added — and `_gate_violations`
+    judged paths the task had not touched.
+    """
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-002": "build/x-pr-c1-02-T-002"}
+    calls: list[list[str]] = []
+
+    def record(cmd: list[str], cwd: str | None = None, **_: object) -> tuple[int, str]:
+        calls.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(loop.ws, "_run", record)
+
+    loop._branch_changed_paths("T-002")
+    loop._branch_changed_paths("T-001")
+
+    ranges = [cmd[-1] for cmd in calls if cmd[:3] == ["git", "diff", "--name-only"]]
+    assert ranges[0].startswith("build/x-pr-c1-02-T-002...")
+    assert ranges[1].startswith(f"{loop.branch}...")
+
+
+def test_the_review_step_is_told_the_scope_it_actually_has(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-002": "build/x-pr-c1-02-T-002"}
+    monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
+    task = dag.Task(id="T-002", title="leaf", kind="parallel")
+
+    _, command = loop._review_scope(task, cwd=str(tmp_path / "leaf"), base="")
+
+    assert command == "git diff build/x-pr-c1-02-T-002...HEAD"

@@ -206,14 +206,14 @@ def test_commits_outside_any_task_become_a_tail_slice(cycle: Callable[..., dict[
     slices = derive(bundle)
 
     tail = slices[-1]
-    assert tail.is_tail and tail.task_id == ""
+    assert tail.task_id == "" and tail.label == "tail"
     assert tail.head_sha == deliverable
     assert tail.branch == f"{WORK_BRANCH}-pr-{DEMO_CYCLE}-04-tail"
     assert tail.base_ref == slices[-2].branch
 
 
 def test_no_tail_slice_when_the_last_task_is_the_tip(cycle: Callable[..., dict[str, Any]]) -> None:
-    assert all(not s.is_tail for s in derive(cycle()))
+    assert all(s.task_id for s in derive(cycle()))
 
 
 def test_a_cycle_with_nothing_landed_derives_no_slices(tmp_path: Path) -> None:
@@ -681,7 +681,7 @@ def test_materialize_is_free_to_re_run(cycle: Callable[..., dict[str, Any]]) -> 
 
     again = pr_stack.materialize(bundle["repo"], slices)
 
-    assert again.touched == ()
+    assert again.created == () and again.advanced == ()
     assert again.unchanged == tuple(s.branch for s in slices)
 
 
@@ -1362,3 +1362,37 @@ def test_a_second_cycle_does_not_reuse_the_first_cycle_s_branch_names(
     second = derive(bundle)
 
     assert not published & {s.branch for s in second}, "cycle 2 reused a branch cycle 1 published"
+
+
+def test_a_slice_whose_commits_cannot_be_listed_fails_rather_than_reporting_none(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body that claims a slice carries nothing, because git could not be asked, is a lie."""
+    bundle = cycle()
+    docs = documents(bundle)
+    slices = pr_stack.derive(bundle["repo"], docs, base="main")
+    # The slice's base is gone: `git log base..head` now exits non-zero.
+    broken = [replace(s, base_sha="0" * 40) for s in slices]
+
+    with pytest.raises(pr_stack.StackError, match="claim it carries none"):
+        pr_stack.write_bodies(bundle["repo"], docs, broken, base="main")
+
+
+def test_two_tasks_recording_the_same_landing_commit_are_refused(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    """Keyed by commit, the second task silently replaced the first and left the stack entirely."""
+    bundle = cycle()
+    repo = bundle["repo"]
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    document = dict(state.raw)
+    shared = bundle["landed"]["T-001"]
+    document["tasks"] = {
+        **document["tasks"],
+        "T-002": {"status": "done", "completed_commit": shared},
+    }
+    repo.state.write_bytes(store_mod.dump_yaml(document))
+
+    with pytest.raises(pr_stack.StackError, match="One commit cannot be two pull requests"):
+        derive(bundle)

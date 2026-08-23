@@ -72,7 +72,6 @@ class Resolution:
     """What became of one merge. `kind` is the classification; nothing else stands in for it."""
 
     kind: str
-    commit: str = ""
     conflict: Conflict | None = None
     #: What a human is told, when a human has to be told. Empty for the merged kinds.
     escalation: str = ""
@@ -124,11 +123,6 @@ def _conflicted_paths(cwd: str, run: Runner) -> tuple[str, ...]:
 def _has_staged_changes(cwd: str, run: Runner) -> bool:
     rc, _ = run(["git", "diff", "--cached", "--quiet"], cwd=cwd)
     return rc != 0
-
-
-def _head(cwd: str, run: Runner) -> str:
-    rc, out = run(["git", "rev-parse", "HEAD"], cwd=cwd)
-    return out.strip() if rc == 0 else ""
 
 
 def resolution_message(conflict: Conflict) -> str:
@@ -247,7 +241,7 @@ def _commit(cwd: str, run: Runner, message: str, *, kind: str, conflict: Conflic
             escalation=f"the merge resolved but would not commit: {out}",
             log=out,
         )
-    return Resolution(kind=kind, commit=_head(cwd, run), conflict=conflict)
+    return Resolution(kind=kind, conflict=conflict)
 
 
 # --- escalation ---------------------------------------------------------------
@@ -286,6 +280,10 @@ def escalate(repo: repo_mod.Repo, resolution: Resolution, *, category: str = "me
                 "risk": "high",
                 "anchor": ",".join(resolution.conflict.paths[:8]),
                 "classification": resolution.kind,
+                # The quality gate said *why* it refused the resolution, and that sentence used to
+                # be computed and thrown away — the same loss 0.3.4 closed for a failing adapter.
+                # It is the first thing the human reading this gap will want.
+                "gate_output": resolution.log[-1000:],
             },
         )
     return marked

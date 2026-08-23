@@ -53,7 +53,6 @@ LEDGER_READY = "ready"
 #: branches `build_git` creates (`<work_branch>-T-NNN`), which outlive a blocked or salvaged task.
 #: The naming itself lives in `models` — `policy_check` has to recognise one of these as a base it
 #: must not trust, and it does not import this module.
-TAIL_SUFFIX = models.STACK_TAIL_SUFFIX
 
 
 class StackError(RuntimeError):
@@ -84,13 +83,9 @@ class Slice:
     opened_at: str = ""
 
     @property
-    def is_tail(self) -> bool:
-        return not self.task_id
-
-    @property
     def label(self) -> str:
         """How this slice is named to a human: its task id, or `tail`."""
-        return self.task_id or TAIL_SUFFIX
+        return self.task_id or models.STACK_TAIL_SUFFIX
 
 
 @dataclass(frozen=True)
@@ -178,7 +173,10 @@ def _commits_between(repo: repo_mod.Repo, base: str, head: str) -> tuple[str, ..
     """
     rc, out = repo._git_rc("rev-list", "--reverse", f"{base}..{head}")
     if rc != 0:
-        return ()
+        raise StackError(
+            f"cannot list {base[:12]}..{head[:12]} — a slice that reports no commits because git could "
+            "not be asked is a pull-request body that lies about what it carries"
+        )
     return tuple(line.strip() for line in out.splitlines() if line.strip())
 
 
@@ -316,7 +314,22 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
     graph = dag.join(plan, state)
     commit_of = status_api.completed_commits(state)
     done = {t.id for t in graph.tasks if t.is_done}
-    landed_commits = {commit_of[t]: t for t in sorted(done) if commit_of.get(t)}
+    landed_commits: dict[str, str] = {}
+    for landed_task in sorted(done):
+        commit = commit_of.get(landed_task)
+        if not commit:
+            continue
+        if commit in landed_commits:
+            # Keyed by commit, a second task with the same one silently replaced the first and that
+            # task simply left the stack — no slice, no pull request, no complaint. There is also no
+            # honest way to give two tasks that landed in one commit two pull requests, so this
+            # refuses rather than picks.
+            raise StackError(
+                f"{landed_commits[commit]} and {landed_task} both record {commit[:12]} as the commit that "
+                "landed them. One commit cannot be two pull requests — `rein task reset` one of them and "
+                "re-run the build, or repair the state that recorded it."
+            )
+        landed_commits[commit] = landed_task
 
     records = ledger(events)
     slices: list[Slice] = []
@@ -370,13 +383,11 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
 
     index = (records[-1].index if records else 0) + 1
     segment: list[str] = []
-    fresh_order: list[str] = []
     for commit in chain:
         segment.append(commit)
         task_id = landed_commits.get(commit)
         if task_id is None:
             continue
-        fresh_order.append(task_id)
         task = plan.task(task_id)
         slices.append(
             Slice(
@@ -535,10 +546,6 @@ class Materialized:
     advanced: tuple[str, ...] = ()
     unchanged: tuple[str, ...] = ()
 
-    @property
-    def touched(self) -> tuple[str, ...]:
-        return self.created + self.advanced
-
 
 def materialize(repo: repo_mod.Repo, slices: Sequence[Slice], *, dry_run: bool = False) -> Materialized:
     """Point each slice's branch at the commit the slice ends on. Creates no commits.
@@ -591,7 +598,7 @@ def _subjects(repo: repo_mod.Repo, slice_: Slice) -> list[str]:
     """`<short sha> <subject>` for each commit the slice carries, oldest first."""
     rc, out = repo._git_rc("log", "--reverse", "--format=%h %s", f"{slice_.base_sha}..{slice_.head_sha}")
     if rc != 0:
-        return []
+        raise StackError(f"cannot read {slice_.branch}'s commits — the body would claim it carries none")
     return [line.rstrip() for line in out.splitlines() if line.strip()]
 
 
@@ -963,7 +970,7 @@ def _confirm_ready(docs: Documents, slices: Sequence[Slice], records: Sequence[L
         print(f"  {key.ljust(20)}  {receipt.get(key, '(not recorded)')}")
     print(f"\n{len(records)} draft pull request(s) would become ready for review:")
     for record_ in records:
-        print(f"  {record_.index:02d} {record_.task_id or TAIL_SUFFIX}: {record_.url or record_.branch}")
+        print(f"  {record_.index:02d} {record_.task_id or models.STACK_TAIL_SUFFIX}: {record_.url or record_.branch}")
     print("\nEach body is rewritten first, so it states what the review found rather than that it is still pending.")
     if not common.ask_yes_no(f"Lift {len(records)} pull request(s) out of draft?"):
         raise PublishError("nothing was lifted; the pull requests are still drafts.")

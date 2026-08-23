@@ -275,7 +275,11 @@ def workflows_missing_stack_inputs(repo: repo_mod.Repo) -> list[str]:
             continue
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError) as exc:
+            # Not knowing whether CI can judge a stack is not the same as knowing it can. This
+            # answer gates a publish, so an unreadable workflow has to block it — and "unreadable"
+            # includes bytes that are not UTF-8, which is not an OSError and used to crash here.
+            missing.append(f".github/workflows/{path.name} cannot be read ({exc}) — its policy job is unknown")
             continue
         if _POLICY_INVOCATION not in text:
             continue

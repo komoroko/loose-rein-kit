@@ -1265,8 +1265,8 @@ class Orchestrator:
         if self.dry_run:
             return [], ""
         if cwd != self.root:
-            paths = self.ws.branch_changed_paths(self.ws.branch_for(task.id), cwd=cwd)
-            return paths, f"git diff {self.branch}...HEAD"
+            paths = self.ws.branch_changed_paths(task.id, cwd=cwd)
+            return paths, f"git diff {self.ws.target_branch(task.id)}...HEAD"
         if base:
             return self.ws.changed_since(base), f"git diff {base[:12]}..HEAD"
         return [], ""
@@ -2049,8 +2049,8 @@ class Orchestrator:
         verdicts = ((p, gate_guard.evaluate(str(self.repo.path(p)), self.repo)) for p in paths)
         return [(p, reason) for p, (ok, reason) in verdicts if not ok]
 
-    def _branch_changed_paths(self, branch: str) -> list[str]:
-        return self.ws.branch_changed_paths(branch)
+    def _branch_changed_paths(self, task_id: str) -> list[str]:
+        return self.ws.branch_changed_paths(task_id)
 
     def _changed_since(self, base: str) -> list[str]:
         return self.ws.changed_since(base)
@@ -2587,7 +2587,7 @@ class Orchestrator:
             # bypassed hook can carry a gate violation; merging would bury it in the work branch's
             # HEAD where --check-diff never looks again. Check the branch's full diff first.
             if not self.dry_run:
-                violations = self._gate_violations(self._branch_changed_paths(branches[task.id]))
+                violations = self._gate_violations(self._branch_changed_paths(task.id))
                 if violations:
                     self._block_for_gate_violation(task.id, f"leaf branch {branches[task.id]}", violations)
                     self._cleanup_worktree(task)  # not merged; the branch keeps the diff for review

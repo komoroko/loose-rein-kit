@@ -349,8 +349,14 @@ class GitWorkspace:
         self.git(["worktree", "remove", "--force", self.worktree_path(task_id)])
         return True
 
-    def branch_changed_paths(self, branch: str, cwd: str = "", task_id: str = "") -> list[str]:
-        """Paths a leaf changed: committed since it forked off the work branch, plus its dirty tree.
+    def branch_changed_paths(self, task_id: str, cwd: str = "") -> list[str]:
+        """Paths a leaf changed: committed since it forked off **its target branch**, plus its dirty tree.
+
+        Takes the task rather than the branch, and derives both ends from it. The two used to be
+        separate arguments, and the base was always the work branch — so a leaf landing on a slice
+        branch was diffed against a branch it did not fork from, and the result carried every
+        commit the slices below it had added. The gate-violation check then judged paths the task
+        never touched, and the review step was told a scope that was not its own.
 
         `cwd` is the leaf's worktree. Without it this answered on committed work alone, which is
         the *branch*'s state rather than the attempt's: the implementer is told to commit, but the
@@ -359,8 +365,8 @@ class GitWorkspace:
         answer. They are not the same thing, and one of them is a failure.
         """
         paths: set[str] = set()
-        base = self.target_branch(task_id) if task_id else self.branch
-        rc, out = self._run(["git", "diff", "--name-only", f"{base}...{branch}"], cwd=self.root)
+        branch = self.branch_for(task_id)
+        rc, out = self._run(["git", "diff", "--name-only", f"{self.target_branch(task_id)}...{branch}"], cwd=self.root)
         if rc == 0:
             paths.update(p for p in out.splitlines() if p.strip())
         if cwd:

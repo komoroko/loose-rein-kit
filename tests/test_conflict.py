@@ -148,7 +148,6 @@ def test_a_clean_merge_commits_without_asking_anyone(colliding: Callable[..., di
     result = merge(bundle, implement=_never, gate=_never_gate)
 
     assert result.kind == "clean"
-    assert result.commit
     assert result.merged
 
 
@@ -206,7 +205,6 @@ def test_a_resolution_the_gate_accepts_is_mechanical(colliding: Callable[..., di
     result = merge(bundle, implement=resolves('VERBS = {\n    "a": "a",\n    "b": "b",\n}\n'), gate=green)
 
     assert result.kind == "mechanical"
-    assert result.commit
     assert 'VERBS = {\n    "a": "a",\n    "b": "b",\n}\n' == (Path(bundle["root"]) / bundle["path"]).read_text()
 
 
@@ -358,3 +356,15 @@ def test_escalate_never_touches_a_gate(colliding: Callable[..., dict[str, Any]])
     assert after is not None
     assert {g: after.gate_status(g) for g in models.GATE_ORDER} == {g: before.gate_status(g) for g in models.GATE_ORDER}
     assert after.current_phase == before.current_phase
+
+
+def test_the_gate_output_reaches_the_recorded_gap(colliding: Callable[..., dict[str, Any]]) -> None:
+    """The quality gate said why it refused, and that sentence used to be computed and dropped."""
+    bundle = colliding()
+    result = merge(bundle, implement=resolves("whatever\n"), gate=lambda _cwd: (1, "FAILED tests/test_x.py::test_y"))
+
+    conflict.escalate(bundle["repo"], result)
+
+    events = event_chain.load(Path(bundle["root"]) / ".rein/events.ndjson")
+    gap = next(e for e in events if e.event == "knowledge_gap")
+    assert "FAILED tests/test_x.py::test_y" in gap.detail["gate_output"]

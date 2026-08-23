@@ -285,3 +285,15 @@ def test_a_workflow_that_never_runs_the_check_is_not_reported(tmp_path: Path) ->
     (workflows / "ci.yml").write_text("jobs:\n  unit:\n    steps:\n      - run: pytest\n", encoding="utf-8")
 
     assert policy_check.workflows_missing_stack_inputs(repo_mod.Repo(tmp_path)) == []
+
+
+def test_an_unreadable_workflow_blocks_rather_than_passes(tmp_path: Path) -> None:
+    """Not knowing whether CI can judge a stack is not the same as knowing it can."""
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_bytes(b"\xff\xfe not utf-8")
+
+    missing = policy_check.workflows_missing_stack_inputs(repo_mod.Repo(tmp_path))
+
+    assert len(missing) == 1
+    assert "cannot be read" in missing[0]
