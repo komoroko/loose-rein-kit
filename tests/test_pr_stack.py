@@ -1100,3 +1100,195 @@ def test_ready_never_repoints_a_branch(cycle: Callable[..., dict[str, Any]]) -> 
 
     assert rc == 2  # the review no longer binds the head, so it stops before anything
     assert branches(bundle["root"]) == before
+
+
+# --- restacking ---------------------------------------------------------------
+
+
+def real_git(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: Any) -> tuple[int, str]:
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def stacked(bundle: dict[str, Any]) -> tuple[pr_stack.Documents, list[pr_stack.Slice]]:
+    """A materialised stack whose pull requests are open — the state `--restack` is written for.
+
+    The ledger matters: a fix belongs to the slice that introduced the code, and only an *opened*
+    slice's boundary is frozen against the branch it now points at.
+    """
+    repo = bundle["repo"]
+    docs = documents(bundle)
+    slices = pr_stack.derive(repo, docs, base="main")
+    pr_stack.materialize(repo, slices)
+    run, _ = recorder()
+    bodies = pr_stack.write_bodies(repo, docs, slices, base="main")
+    pr_stack.publish(repo, docs, slices, bodies, remote="origin", run=run)
+    return documents(bundle), slices
+
+
+def restack(bundle: dict[str, Any], *, implement: Any = None, gate: Any = None) -> pr_stack.Propagation:
+    repo = bundle["repo"]
+    docs = documents(bundle)
+    return pr_stack.restack(
+        repo,
+        docs,
+        pr_stack.derive(repo, docs, base="main"),
+        implement=implement or _no_implementer,
+        quality_gate=gate or (lambda _cwd: (0, "")),
+        run=real_git,
+    )
+
+
+def _no_implementer(_c: Any, _cwd: str) -> str:
+    raise AssertionError("no conflict should have needed an implementer")
+
+
+def test_a_fix_on_a_lower_slice_reaches_the_ones_above_it(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    fix = commit_on(bundle["root"], slices[0].branch, "fix the finding", path="src/T-001.py")
+
+    result = restack(bundle)
+
+    assert result.ok
+    for branch in (slices[1].branch, slices[2].branch, WORK_BRANCH):
+        assert fix in git(bundle["root"], "log", "--format=%H", branch).splitlines()
+
+
+def test_restack_rewrites_nothing_below(cycle: Callable[..., dict[str, Any]]) -> None:
+    """Every commit stays where it is, so no already-open pull request is force-pushed."""
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    before = [git(bundle["root"], "rev-parse", s.head_sha) for s in slices]
+    commit_on(bundle["root"], slices[0].branch, "fix", path="src/T-001.py")
+
+    restack(bundle)
+
+    for sha in before:
+        assert git(bundle["root"], "cat-file", "-t", sha) == "commit"
+
+
+def test_restack_leaves_the_repository_head_alone(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "fix", path="src/T-001.py")
+    checked_out = git(bundle["root"], "rev-parse", "--abbrev-ref", "HEAD")
+
+    restack(bundle)
+
+    assert git(bundle["root"], "rev-parse", "--abbrev-ref", "HEAD") == checked_out
+    assert not (bundle["root"] / ".worktrees" / "_restack").exists()
+
+
+def test_restack_is_free_to_re_run(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "fix", path="src/T-001.py")
+    restack(bundle)
+
+    again = restack(bundle)
+
+    assert again.ok
+    assert again.merged == ()
+
+
+def test_a_mechanical_conflict_is_resolved_and_the_walk_continues(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "ours", path="src/shared.py")
+    commit_on(bundle["root"], slices[1].branch, "theirs", path="src/shared.py")
+
+    def implement(c: Any, cwd: str) -> str:
+        for path in c.paths:
+            (Path(cwd) / path).write_text("both\n", encoding="utf-8")
+            subprocess.run(["git", "-C", cwd, "add", "--", path], check=True)
+        return "implemented"
+
+    result = restack(bundle, implement=implement)
+
+    assert result.ok
+    assert slices[1].branch in result.resolved
+    assert git(bundle["root"], "show", f"{WORK_BRANCH}:src/shared.py") == "both"
+
+
+def test_a_semantic_conflict_stops_the_walk(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "ours", path="src/shared.py")
+    commit_on(bundle["root"], slices[1].branch, "theirs", path="src/shared.py")
+
+    result = restack(bundle, implement=lambda _c, _cwd: "needs-revision")
+
+    assert not result.ok
+    assert result.stopped_at == slices[1].branch
+    assert result.resolution is not None and result.resolution.kind == "semantic"
+    # Nothing was carried past the disagreement.
+    assert WORK_BRANCH not in result.merged
+
+
+def test_a_stopped_walk_still_removes_its_worktree(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "ours", path="src/shared.py")
+    commit_on(bundle["root"], slices[1].branch, "theirs", path="src/shared.py")
+
+    restack(bundle, implement=lambda _c, _cwd: "needs-revision")
+
+    assert not (bundle["root"] / ".worktrees" / "_restack").exists()
+
+
+def test_propagation_gaps_are_empty_after_a_clean_restack(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "fix", path="src/T-001.py")
+    restack(bundle)
+
+    assert pr_stack.propagation_gaps(bundle["repo"], documents(bundle), slices) == []
+
+
+def test_propagation_gaps_name_the_slice_the_work_branch_lacks(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "fix", path="src/T-001.py")
+
+    assert pr_stack.propagation_gaps(bundle["repo"], documents(bundle), slices) == ["T-001"]
+
+
+def test_restack_is_refused_once_gate_four_is_approved_through_the_cli(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    rc, _ = run_cli(cycle(gates={"build": "approved"}), "--restack")
+
+    assert rc == 2
+
+
+def test_the_three_actions_are_separate_steps(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+
+    assert run_cli(bundle, "--push", "--restack")[0] == 2
+    assert run_cli(bundle, "--ready", "--restack")[0] == 2
+
+
+def test_a_trailing_slice_with_no_diff_is_not_a_slice(cycle: Callable[..., dict[str, Any]]) -> None:
+    """A restack's own merge commits are reachable from the work branch and carry nothing new."""
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "fix", path="src/T-001.py")
+    restack(bundle)
+
+    after = derive(bundle, list(event_chain.load(bundle["root"] / ".rein/events.ndjson")))
+
+    assert [s.label for s in after] == ["T-001", "T-002", "T-003"]
+
+
+def test_a_trailing_commit_that_does_change_something_is_still_a_slice(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    bundle = cycle()
+    commit_on(bundle["root"], WORK_BRANCH, "docs at the gate", path="docs/10-requirements.md")
+
+    assert [s.label for s in derive(bundle)] == ["T-001", "T-002", "T-003", "tail"]
+
+
+def test_restack_with_nothing_materialised_does_nothing(cycle: Callable[..., dict[str, Any]]) -> None:
+    assert restack(cycle()).merged == ()

@@ -48,6 +48,7 @@ event, or lock is written — running it never changes what a later real run see
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import logging
@@ -56,7 +57,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -66,6 +67,7 @@ from rein import (
     build_git,
     build_prompts,
     common,
+    conflict,
     control_plane,
     dag,
     digests,
@@ -1373,6 +1375,56 @@ class Orchestrator:
             role="implementer",
         )
 
+    # --- conflict resolution ---------------------------------------------------
+    #
+    # Two seams the merge paths need and this class already owns: launching an implementer, and
+    # running the deterministic half of the DoD. `conflict` holds the decision they feed; keeping
+    # the plumbing here is what stops that module importing this one.
+
+    def _graph_task(self, task_id: str) -> dag.Task | None:
+        if not task_id or self._plan is None:
+            return None
+        try:
+            return dag.join(self._plan, self.state).get(task_id)
+        except (dag.DagError, KeyError):
+            return None
+
+    def task_gate(self, cwd: str) -> tuple[int, str]:
+        """The **deterministic** half of the task-stage DoD over `cwd`. `(0, "")` when every step passed.
+
+        Command steps only. A merge resolution is judged on whether the tree still holds up, and
+        that is what an exit status answers; spending a reviewer agent on merge glue would be a
+        different question asked at several times the price. The steps themselves are the frozen
+        ones — `stage` and `paths` came from gate ③ like every other part of the DoD.
+        """
+        for step in self._steps_at("task"):
+            if step.kind != "command" or not step.command:
+                continue
+            failure = self._run_cmd_step(step, cwd)
+            if failure:
+                return 1, f"{step.name}: {failure}"
+        return 0, ""
+
+    def resolve_conflict(self, collision: conflict.Conflict, cwd: str) -> str:
+        """Launch an implementer against a conflicted worktree; return the outcome it reported.
+
+        The prompt carries **both sides' purpose**, not just the hunks (`build_prompts.conflict_prompt`).
+        What comes back is a claim travelling the one channel a claim may travel — `rein report` —
+        and `conflict` decides what it is worth.
+        """
+        ours = self._graph_task(collision.ours_task)
+        theirs = self._graph_task(collision.theirs_task)
+        prompt = build_prompts.conflict_prompt(ours, theirs, collision.paths, gate_cmds=self.config.gate_cmds)
+        self._launch(
+            [*self.config.adapter_argv, *write_flags(self.config.adapter_argv), prompt],
+            cwd=cwd,
+            where=f"{collision.ours_task or 'merge'}: conflict",
+            env=self._leaf_env(ours) if ours is not None else None,
+            task_id=collision.ours_task,
+            role="implementer",
+        )
+        return str(self._read_report(ours).get("outcome", "")) if ours is not None else ""
+
     def _run_cmd_step(self, step: GateStep, cwd: str) -> str:
         """Run one cmd step in its executor profile. "" on pass, a compact failure otherwise.
 
@@ -2630,3 +2682,18 @@ def _supervise(config: Config, repo: repo_mod.Repo, interval_sec: int) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+@contextlib.contextmanager
+def resolving(repo: repo_mod.Repo) -> Iterator[Orchestrator]:
+    """An orchestrator with a live control plane, for a caller that only needs conflict resolution.
+
+    The build lock then the control socket, the same order and for the same reasons `run()` takes
+    them: nothing else may be driving the repository while an implementer is writing in it, and a
+    leaf that cannot reach the control plane cannot report an outcome at all — which would make
+    every conflict look semantic.
+    """
+    orchestrator = Orchestrator(Config.load(repo), dry_run=False, repo=repo)
+    with build_lock(repo), control_plane.serving(repo) as server:
+        orchestrator.control = server
+        yield orchestrator

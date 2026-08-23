@@ -109,7 +109,7 @@ def merge(bundle: dict[str, Any], *, implement: Any, gate: Any, attempts: int = 
     )
 
 
-def resolves(text: str) -> Any:
+def resolves(text: str) -> conflict.Implementer:
     """An implementer that writes `text` over every conflicted path and reports success."""
 
     def implement(c: conflict.Conflict, cwd: str) -> str:

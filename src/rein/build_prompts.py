@@ -210,3 +210,53 @@ def integration_fix_prompt(ids: str, failure_log: str, *, gate_cmds: Sequence[st
         f"Keep {_gate_list(gate_cmds)} green.\n\n"
         f"Resolve this integration failure:\n{failure_log}"
     )
+
+
+def conflict_prompt(
+    ours: dag.Task | None,
+    theirs: dag.Task | None,
+    paths: Sequence[str],
+    *,
+    gate_cmds: Sequence[str],
+) -> str:
+    """Hand a merge conflict to the implementer **with both sides' purpose**, never just the hunks.
+
+    Showing the hunks alone is how a stopgap gets written: whoever resolves has to pick, and with
+    nothing to pick on they pick whatever compiles. What each side was *for* — its claims, its
+    acceptance criteria, its declared scope — is the only thing that makes one resolution right and
+    another a paper-over. The instruction to report `needs-revision` rather than invent a merge is
+    the other half: two frozen intentions that genuinely disagree are a defect in the plan, and the
+    implementer is the first to be in a position to see it.
+    """
+    listed = "\n".join(f"  - {path}" for path in paths)
+    return (
+        "You are resolving a merge conflict between two tasks of this cycle. Both sides are already\n"
+        "committed work that passed the quality gate on its own; what is in front of you is where they\n"
+        f"met.\n\nConflicted paths:\n{listed}\n\n"
+        f"{_side('The branch you are merging INTO (ours)', ours)}"
+        f"{_side('The branch being merged IN (theirs)', theirs)}"
+        "Resolve so that **both sides still do what they were for**. Keep each side's change inside its\n"
+        "own declared scope, stage the resolved files, and do not commit — the loop commits, and it "
+        "records both task ids and every path you touched.\n"
+        f"Keep {_gate_list(gate_cmds)} green.\n\n"
+        "If the two sides genuinely contradict each other — they cannot both hold, so any resolution\n"
+        "would have to drop or reinterpret one of them — **do not invent a merge**. Run\n"
+        "`rein report --outcome needs-revision --summary <which two intentions collide and why>`. "
+        "That is a defect in the plan, and papering over it here is exactly what must not happen. "
+        "Otherwise finish with `rein report --outcome implemented`."
+    )
+
+
+def _side(label: str, task: dag.Task | None) -> str:
+    if task is None:
+        return f"{label}: (no task — these commits belong to none)\n\n"
+    claims = ", ".join(task.claim_ids) or "(none)"
+    scope = ", ".join(task.scope_include) or "(undeclared — unbounded)"
+    criteria = "".join(f"    - {a.get('id', '?')}: {a.get('statement', '')}\n" for a in task.acceptance)
+    criteria = criteria or "    (none declared)\n"
+    return (
+        f"{label}: {task.id} \u2014 {task.title}\n"
+        f"  claims it answers: {claims}\n"
+        f"  declared scope:    {scope}\n"
+        f"  acceptance:\n{criteria}\n"
+    )

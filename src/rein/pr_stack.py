@@ -33,7 +33,7 @@ import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from rein import common, dag, event_chain, models, pr_draft, status_api
+from rein import common, conflict, dag, event_chain, models, pr_draft, status_api
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -181,6 +181,17 @@ def _commits_between(repo: repo_mod.Repo, base: str, head: str) -> tuple[str, ..
     if rc != 0:
         return ()
     return tuple(line.strip() for line in out.splitlines() if line.strip())
+
+
+def has_diff(repo: repo_mod.Repo, base: str, head: str) -> bool:
+    """Whether `base..head` changes any file. Commits alone are not a change.
+
+    A `--restack` merges each slice forward, and those merge commits are reachable from the work
+    branch and not from the slice below — so a purely commit-counting reading would find a trailing
+    slice there. It carries no diff, and a pull request with no diff is not a pull request.
+    """
+    rc, _ = repo._git_rc("diff", "--quiet", base, head)
+    return rc != 0
 
 
 def is_ancestor(repo: repo_mod.Repo, ancestor: str, descendant: str) -> bool:
@@ -390,7 +401,7 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
             "the order tasks landed in is not a topological order of the plan's DAG: " + "; ".join(problems)
         )
 
-    if segment:
+    if segment and has_diff(repo, previous_sha, segment[-1]):
         slices.append(
             Slice(
                 index=index,
@@ -706,6 +717,140 @@ def slice_body(
     return "\n".join(lines) + "\n"
 
 
+# --- restacking ---------------------------------------------------------------
+
+#: Where the propagation happens for every branch that is not checked out anywhere. The work
+#: branch usually *is* checked out, in the canonical checkout, and git refuses the same branch in
+#: two worktrees — so that hop is merged at the root, exactly where `build_git.merge_leaf` already
+#: merges every leaf.
+RESTACK_WORKTREE = "_restack"
+
+
+@dataclass(frozen=True)
+class Propagation:
+    """One `--restack` run: what reached where, and what stopped it."""
+
+    merged: tuple[str, ...] = ()
+    resolved: tuple[str, ...] = ()
+    stopped_at: str = ""
+    resolution: conflict.Resolution | None = None
+
+    @property
+    def ok(self) -> bool:
+        return not self.stopped_at
+
+
+def _worktree(repo: repo_mod.Repo, config: models.Config, branch: str) -> str:
+    """A throwaway worktree with `branch` checked out. Removed by :func:`_drop_worktree`."""
+    path = repo.path(config.worktree_dir) / RESTACK_WORKTREE
+    _git_write(repo, "worktree", "remove", "--force", str(path))
+    _git_write(repo, "worktree", "prune")
+    rc, out = _git_write(repo, "worktree", "add", "--force", str(path), branch)
+    if rc != 0:
+        raise StackError(f"could not create the restack worktree at {path}: {out}")
+    return str(path)
+
+
+def _drop_worktree(repo: repo_mod.Repo, path: str) -> None:
+    _git_write(repo, "worktree", "remove", "--force", path)
+    _git_write(repo, "worktree", "prune")
+
+
+def restack(
+    repo: repo_mod.Repo,
+    docs: Documents,
+    slices: Sequence[Slice],
+    *,
+    implement: conflict.Implementer,
+    quality_gate: conflict.QualityGate,
+    run: Callable[..., tuple[int, str]] = common.run,
+) -> Propagation:
+    """Carry each slice's fixes up into the one above it, and finally into the work branch.
+
+    A fix for a review finding is committed onto the slice that introduced the code — that is the
+    whole point of freezing slice boundaries — and the slices above it then do not have it. This
+    walks the chain bottom-up with `git merge`, so every commit stays where it is: no slice below
+    is rewritten, so no already-open pull request is force-pushed.
+
+    A conflict here is classified before it is resolved (`conflict`), and only the mechanical kind
+    is carried through. The other kinds stop the walk, because a stack propagated past a
+    disagreement between two frozen intentions would bury the disagreement in the merge.
+    """
+    # Only branches that exist: a slice nobody materialised has nothing to propagate, and asking
+    # git to check it out would report a missing ref where the real answer is "not yet a stack".
+    chain = [*(s.branch for s in slices if _rev_parse(repo, s.branch)), docs.config.work_branch]
+    if len(chain) < 2:
+        return Propagation()
+    merged: list[str] = []
+    resolved: list[str] = []
+    path = _worktree(repo, docs.config, chain[0])
+    try:
+        for position in range(1, len(chain)):
+            source, target = chain[position - 1], chain[position]
+            cwd = _checkout_for(repo, target, path, run)
+            resolution = conflict.merge_with_resolution(
+                docs.plan,
+                cwd=cwd,
+                source_ref=source,
+                ours_task=_task_of(slices, target),
+                theirs_task=_task_of(slices, source),
+                implement=implement,
+                quality_gate=quality_gate,
+                run=run,
+            )
+            if not resolution.merged:
+                return Propagation(tuple(merged), tuple(resolved), stopped_at=target, resolution=resolution)
+            if resolution.kind == "mechanical":
+                resolved.append(target)
+            if resolution.kind != "noop":
+                merged.append(target)
+                print(f"  {source} → {target}: {resolution.kind}")
+    finally:
+        _drop_worktree(repo, path)
+    return Propagation(tuple(merged), tuple(resolved))
+
+
+def _checkout_for(repo: repo_mod.Repo, branch: str, worktree: str, run: Callable[..., tuple[int, str]]) -> str:
+    """Where `branch` can be merged into: the worktree that already holds it, else the throwaway one.
+
+    git refuses to check a branch out in two worktrees at once, and the work branch is normally
+    checked out in the canonical checkout — so merging into it happens there, which is also where
+    the build loop merges every leaf.
+    """
+    for root in _worktree_heads(repo, run):
+        if root[1] == branch:
+            return root[0]
+    rc, out = run(["git", "switch", branch], cwd=worktree)
+    if rc != 0:
+        raise StackError(f"could not check out {branch} in the restack worktree: {out}")
+    return worktree
+
+
+def _worktree_heads(repo: repo_mod.Repo, run: Callable[..., tuple[int, str]]) -> list[tuple[str, str]]:
+    """`(path, branch)` for every worktree that has a branch checked out."""
+    rc, out = run(["git", "worktree", "list", "--porcelain"], cwd=str(repo.root))
+    if rc != 0:
+        return []
+    found: list[tuple[str, str]] = []
+    path = ""
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree ") :].strip()
+        elif line.startswith("branch ") and path:
+            found.append((path, line[len("branch refs/heads/") :].strip()))
+    return found
+
+
+def _task_of(slices: Sequence[Slice], branch: str) -> str:
+    return next((s.task_id for s in slices if s.branch == branch), "")
+
+
+def propagation_gaps(repo: repo_mod.Repo, docs: Documents, slices: Sequence[Slice]) -> list[str]:
+    """Slices the work branch does not contain — what a finished `--restack` must leave empty."""
+    tip = _rev_parse(repo, docs.config.work_branch)
+    return [s.label for s in slices if not is_ancestor(repo, _rev_parse(repo, s.branch) or s.head_sha, tip)]
+
+
 # --- publishing ---------------------------------------------------------------
 
 #: Where the bodies are written. One file per slice, named so the stack's order is the sort order.
@@ -946,6 +1091,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="once gate ④ is approved: rewrite each body and lift the drafts (confirms at a terminal)",
     )
+    parser.add_argument(
+        "--restack",
+        action="store_true",
+        help="carry each slice's review fixes up into the slices above it and into the work branch (by merge)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="derive and report; touch neither refs nor files")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
@@ -957,19 +1107,22 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
-    if args.push and args.ready:
-        logger.error("--push opens drafts and --ready lifts them; they are two steps, not one flag")
+    chosen = [name for name, on in (("--push", args.push), ("--ready", args.ready), ("--restack", args.restack)) if on]
+    if len(chosen) > 1:
+        logger.error(f"{' and '.join(chosen)} are separate steps with a human between them, not one flag")
         return 2
-    mode = "ready" if args.ready else "push"
+    mode = "ready" if args.ready else "restack" if args.restack else "push"
 
     try:
         docs = Documents.read(repo)
         slices = derive(repo, docs, base=args.base)
         if not _report(preconditions(repo, docs, slices, mode=mode, base=args.base)):
             return 2
-        # `--ready` never repoints a ref: the pull requests it lifts are open on the branches as
-        # they stand, and moving one now would be a force-push under a reviewer.
-        outcome = Materialized() if args.ready else materialize(repo, slices, dry_run=args.dry_run)
+        # Neither `--ready` nor `--restack` repoints a ref. The pull requests they touch are open
+        # on the branches as they stand, and moving one now would be a force-push under a reviewer;
+        # `--restack` moves them forward by merging, which is a commit, not a repoint.
+        skip = args.ready or args.restack
+        outcome = Materialized() if skip else materialize(repo, slices, dry_run=args.dry_run)
     except (StackError, dag.DagError, models.DocumentError, store_mod.StoreError) as exc:
         logger.error(str(exc))
         return 2
@@ -982,6 +1135,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print(f"\ndry run: would create {len(outcome.created)} branch(es), advance {len(outcome.advanced)}")
         return 0
+
+    if args.restack:
+        try:
+            return _run_restack(repo, docs, slices)
+        except (StackError, store_mod.StoreError) as exc:
+            logger.error(str(exc))
+            return 2
 
     try:
         bodies = write_bodies(repo, docs, slices, base=args.base)
@@ -1014,6 +1174,43 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print("\n" + MERGE_NOTE)
     return 0
+
+
+def _run_restack(repo: repo_mod.Repo, docs: Documents, slices: Sequence[Slice]) -> int:
+    """`--restack`, with a live control plane so the implementer can report an outcome at all.
+
+    Imported here rather than at module scope: `build_loop` pulls in the whole execution stack, and
+    every other path through this module — including the one the gate-guard hook shares a process
+    with — has no use for it.
+    """
+    from rein import build_loop
+
+    with build_loop.resolving(repo) as orchestrator:
+        result = restack(
+            repo,
+            docs,
+            slices,
+            implement=orchestrator.resolve_conflict,
+            quality_gate=orchestrator.task_gate,
+        )
+    if result.ok:
+        gaps = propagation_gaps(repo, docs, slices)
+        if gaps:
+            logger.error(f"slice(s) {', '.join(gaps)} still are not in {docs.config.work_branch} — nothing propagated")
+            return 2
+        print(
+            f"\n{len(result.merged)} branch(es) advanced ({len(result.resolved)} needed a conflict resolved).\n"
+            "The work branch moved, so the machine review no longer binds it: run `rein review generate`."
+        )
+        return 0
+
+    resolution = result.resolution
+    assert resolution is not None
+    logger.error(f"propagation stopped at {result.stopped_at}: {resolution.escalation}")
+    marked = conflict.escalate(repo, resolution)
+    if marked:
+        logger.error(f"marked needs-revision: {', '.join(marked)} — `rein status` shows them")
+    return 2
 
 
 if __name__ == "__main__":
