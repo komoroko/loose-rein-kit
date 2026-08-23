@@ -180,9 +180,9 @@ def test_branch_names_avoid_the_leaf_branch_namespace(cycle: Callable[..., dict[
     slices = derive(cycle())
 
     assert [s.branch for s in slices] == [
-        f"{WORK_BRANCH}-pr-01-T-001",
-        f"{WORK_BRANCH}-pr-02-T-002",
-        f"{WORK_BRANCH}-pr-03-T-003",
+        f"{WORK_BRANCH}-pr-{DEMO_CYCLE}-01-T-001",
+        f"{WORK_BRANCH}-pr-{DEMO_CYCLE}-02-T-002",
+        f"{WORK_BRANCH}-pr-{DEMO_CYCLE}-03-T-003",
     ]
     # The leaf branches build_git leaves behind must not collide with any of them.
     assert not {s.branch for s in slices} & {f"{WORK_BRANCH}-{t}" for t in ("T-001", "T-002", "T-003")}
@@ -208,7 +208,7 @@ def test_commits_outside_any_task_become_a_tail_slice(cycle: Callable[..., dict[
     tail = slices[-1]
     assert tail.is_tail and tail.task_id == ""
     assert tail.head_sha == deliverable
-    assert tail.branch == f"{WORK_BRANCH}-pr-04-tail"
+    assert tail.branch == f"{WORK_BRANCH}-pr-{DEMO_CYCLE}-04-tail"
     assert tail.base_ref == slices[-2].branch
 
 
@@ -603,7 +603,7 @@ def test_the_stack_table_marks_the_current_slice(cycle: Callable[..., dict[str, 
 
     first, second = body(bundle, 0), body(bundle, 1)
 
-    assert f"| 01 | T-001 | `{WORK_BRANCH}-pr-01-T-001` | `main` | not pushed ← **this one** |" in first
+    assert f"| 01 | T-001 | `{WORK_BRANCH}-pr-{DEMO_CYCLE}-01-T-001` | `main` | not pushed ← **this one** |" in first
     assert "← **this one**" in second.split("| 02 |")[1].split("\n")[0]
     for text in (first, second):
         assert text.count("← **this one**") == 1
@@ -693,7 +693,7 @@ def test_materialize_fast_forwards_a_slice_that_has_no_pull_request(cycle: Calla
 
     result = pr_stack.materialize(bundle["repo"], grown)
 
-    assert result.created == (f"{WORK_BRANCH}-pr-04-tail",)
+    assert result.created == (f"{WORK_BRANCH}-pr-{DEMO_CYCLE}-04-tail",)
     assert len(result.unchanged) == 3
 
 
@@ -759,7 +759,7 @@ def test_the_default_run_writes_bodies_and_prints_draft_commands(cycle: Callable
     assert rc == 0
     assert (bundle["root"] / ".rein/pr-stack/01-T-001.md").is_file()
     assert out.count("gh pr create --draft") == 3
-    assert "--base main --head build/demo-pr-01-T-001" in out
+    assert f"--base main --head {WORK_BRANCH}-pr-{DEMO_CYCLE}-01-T-001" in out
 
 
 def test_the_default_run_never_invokes_gh(
@@ -899,7 +899,7 @@ def test_publish_stops_at_the_first_failure_and_says_where(cycle: Callable[..., 
 def test_a_partial_publish_says_what_stays_open(cycle: Callable[..., dict[str, Any]]) -> None:
     bundle = cycle()
     failing: dict[tuple[str, ...], tuple[int, str]] = {
-        ("git", "push", "-u", "origin", f"{WORK_BRANCH}-pr-03-T-003"): (1, "rejected")
+        ("git", "push", "-u", "origin", f"{WORK_BRANCH}-pr-{DEMO_CYCLE}-03-T-003"): (1, "rejected")
     }
     run, _ = recorder(failing)
 
@@ -910,7 +910,7 @@ def test_a_partial_publish_says_what_stays_open(cycle: Callable[..., dict[str, A
 def test_a_partial_publish_leaves_a_log_matching_what_exists(cycle: Callable[..., dict[str, Any]]) -> None:
     bundle = cycle()
     rejected: dict[tuple[str, ...], tuple[int, str]] = {
-        ("git", "push", "-u", "origin", f"{WORK_BRANCH}-pr-03-T-003"): (1, "rejected")
+        ("git", "push", "-u", "origin", f"{WORK_BRANCH}-pr-{DEMO_CYCLE}-03-T-003"): (1, "rejected")
     }
     run, _ = recorder(rejected)
 
@@ -1325,3 +1325,40 @@ def test_a_workflow_that_hands_ci_what_it_needs_does_not_block_publishing(
     )
 
     assert preconditions(bundle, "push").ok
+
+
+def test_a_second_cycle_does_not_reuse_the_first_cycle_s_branch_names(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    """`cycle-close` archives the audit log, so the ledger that froze cycle 1's slices is gone.
+
+    If the name is derived from the work branch and the index alone, cycle 2's slice 01 is the same
+    ref as cycle 1's — and cycle 1's commit is an ancestor of cycle 2's, so `materialize` would
+    fast-forward it. That silently pushes new work onto a branch GitHub already has a pull request
+    for.
+    """
+    bundle = cycle()
+    first = derive(bundle)
+    pr_stack.materialize(bundle["repo"], first)
+    published = {s.branch for s in first}
+
+    # A second cycle over the same work branch: new plan, new commits, no ledger. Task ids restart
+    # at T-001 — every cycle's plan.yaml numbers its own tasks — which is what makes them collide.
+    git(bundle["root"], "branch", "-D", f"{WORK_BRANCH}-T-001")
+    landed = land_task(bundle["root"], "T-001", path="src/second-cycle.py")
+    repo = bundle["repo"]
+    store = store_mod.Store(repo)
+    plan, state = store.read_plan(), store.read_state()
+    assert plan is not None and state is not None
+    plan_doc = dict(plan.raw)
+    plan_doc["cycle"] = {**plan_doc["cycle"], "id": "cycle-2", "base_commit": git(bundle["root"], "rev-parse", "main")}
+    plan_doc["tasks"] = [make_task("T-001", claim_ids=["C-001"])]
+    repo.plan.write_bytes(store_mod.dump_yaml(plan_doc))
+    state_doc = dict(state.raw)
+    state_doc["cycle_id"] = "cycle-2"
+    state_doc["tasks"] = {"T-001": {"status": "done", "completed_commit": landed}}
+    repo.state.write_bytes(store_mod.dump_yaml(state_doc))
+
+    second = derive(bundle)
+
+    assert not published & {s.branch for s in second}, "cycle 2 reused a branch cycle 1 published"

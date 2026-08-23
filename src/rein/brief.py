@@ -284,19 +284,35 @@ def _as_built(paths: Sequence[str], blob_facts: BlobFacts | None) -> list[dict[s
     return out
 
 
+#: The step name that means "this one launches the deliverable". Nothing in the config schema marks
+#: it, so the name is the only signal there is — which is exactly why the absence of a step by this
+#: name has to be reported as *that*, and not as "the smoke step has no command".
+LAUNCH_STEP = "smoke"
+
+
 def _operations(config: models.Config | None) -> dict[str, Any]:
     """Whether anything ever launched the deliverable, and whether the gate insists on it.
 
-    A green test suite over a package that cannot start is the failure the smoke step exists to
-    catch, so "smoke has no command" is a fact a reviewer must see at gate ④ rather than infer from
-    the absence of one.
+    A green test suite over a package that cannot start is the failure the launch step exists to
+    catch, so it is a fact a reviewer must see at gate ④ rather than infer from the absence of one.
+
+    Two states used to collapse into one empty result, and the scaffold's own default fell through
+    both. A step under another name reported `{}`, which the review screen rendered as "the smoke
+    step has no command" — a claim about a step that may well have had one. And the shipped
+    `["true"]` reported a non-empty command, so the panel said nothing at all about a deliverable
+    that had never been started. `placeholder` is the same argv test `doctor.check_quality_gate`
+    applies, so the two cannot say different things about one config.
     """
     if config is None:
         return {}
     for step in config.quality_gate:
-        if step.name != "smoke":
+        if step.kind != "command" or step.name != LAUNCH_STEP:
             continue
-        return {"command": list(step.command), "required": step.required}
+        return {
+            "command": list(step.command),
+            "required": step.required,
+            "placeholder": tuple(step.command) in models.PLACEHOLDER_COMMANDS,
+        }
     return {}
 
 

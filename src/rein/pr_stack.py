@@ -270,8 +270,8 @@ def opened_event_detail(slice_: Slice, url: str, action: str = LEDGER_OPENED) ->
 # --- derivation ---------------------------------------------------------------
 
 
-def branch_name(work_branch: str, index: int, task_id: str) -> str:
-    return models.stack_branch(work_branch, index, task_id)
+def branch_name(work_branch: str, cycle_id: str, index: int, task_id: str) -> str:
+    return models.stack_branch(work_branch, cycle_id, index, task_id)
 
 
 def _landing_order_problems(graph: dag.Graph, landed: Sequence[str]) -> list[str]:
@@ -383,7 +383,7 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
                 index=index,
                 task_id=task_id,
                 title=task.title if task is not None else task_id,
-                branch=branch_name(work_branch, index, task_id),
+                branch=branch_name(work_branch, plan.cycle_id, index, task_id),
                 base_ref=previous_branch,
                 base_sha=previous_sha,
                 head_sha=commit,
@@ -406,7 +406,7 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
                 index=index,
                 task_id="",
                 title="commits outside any task",
-                branch=branch_name(work_branch, index, ""),
+                branch=branch_name(work_branch, plan.cycle_id, index, ""),
                 base_ref=previous_branch,
                 base_sha=previous_sha,
                 head_sha=segment[-1],

@@ -583,11 +583,23 @@ function orientStage(d) {
       html += '<div class="warn">Those steps ran for nothing: every task\'s diff missed their paths, or ' +
         "the run never got that far.</div>";
     }
-    const ops = b.operations || {};
-    if (!(ops.command || []).length) {
+    // Three states, not two. A missing launch step and a launch step that ran nothing are
+    // different facts, and the shipped placeholder is the third of them: it has a command, and
+    // that command cannot fail.
+    const ops = b.operations;
+    const consequence = "Tests can be green while packaging, the entry point or dependency " +
+      "resolution is broken.";
+    if (!ops) {
+      html += '<div class="warn">No quality-gate step is named <span class="mono">smoke</span>, so ' +
+        "nothing declares which step launches the deliverable — and nothing in this run started it. " +
+        consequence + "</div>";
+    } else if (!(ops.command || []).length) {
       html += '<div class="warn">The smoke step has no command: nothing in this run ever started the ' +
-        "deliverable. Tests can be green while packaging, the entry point or dependency resolution is " +
-        "broken.</div>";
+        "deliverable. " + consequence + "</div>";
+    } else if (ops.placeholder) {
+      html += '<div class="warn">The smoke step is still the placeholder (<span class="mono">' +
+        esc((ops.command || []).join(" ")) + "</span>): it exits zero without starting anything, so " +
+        "nothing in this run launched the deliverable. " + consequence + "</div>";
     }
   }
 

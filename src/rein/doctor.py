@@ -1035,15 +1035,6 @@ def check_plan(repo: repo_mod.Repo, plan: models.Plan | None, state: models.Stat
     return findings
 
 
-#: Commands that run, exit zero, and establish nothing. `["true"]` is what the scaffold ships for
-#: `smoke`; the others are the same gesture written differently. Matched on the **argv**, never on
-#: the step's name — `brief.py` keys its own smoke reporting on `name == "smoke"`, and a rename
-#: silences it, which is exactly the failure this check must not inherit.
-PLACEHOLDER_COMMANDS: frozenset[tuple[str, ...]] = frozenset(
-    {("true",), ("/bin/true",), (":",), ("echo",), ("exit", "0")}
-)
-
-
 def check_quality_gate(config: models.Config | None) -> list[Finding]:
     """Steps that are in the DoD but establish nothing yet.
 
@@ -1062,7 +1053,7 @@ def check_quality_gate(config: models.Config | None) -> list[Finding]:
     for step in config.quality_gate:
         if step.kind != "command":
             continue
-        if tuple(step.command) in PLACEHOLDER_COMMANDS:
+        if tuple(step.command) in models.PLACEHOLDER_COMMANDS:
             findings.append(
                 Finding(
                     "WARN",

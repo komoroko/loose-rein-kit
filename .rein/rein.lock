@@ -27,7 +27,7 @@ prompts:
     schema/config.schema.json: sha256:5e68c20a3e68045030de6675d3f5eec08f0d9f3620a1707ca11d82c118957810
     schema/event.schema.json: sha256:42f054f7f19d371daf3fedc4dad1342406d8d227bd1ecbc2bec3a27783271bc7
     schema/plan.schema.json: sha256:d757ab47606c25899a5755fbd954b36019fa7f47622397e681d7f0e92bba153d
-    schema/review.schema.json: sha256:eb029956857af9a86529530ad30915035c7d6fb04f410e70a91003fd735c19b4
+    schema/review.schema.json: sha256:dc6f27dc7e39957c5c75d1a2b088ed9faf071d5efbb4684d8eb8540709d90bc1
     schema/state.schema.json: sha256:7886f698b8593727831a860f1f3b523101725d745a5d79142fa4ff8c079871ea
 integrations:
   claude:
