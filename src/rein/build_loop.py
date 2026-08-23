@@ -2657,7 +2657,8 @@ class Orchestrator:
 
         (There is no "you left a step empty" nudge here any more: the config schema requires a
         `command` for every command step, so an empty one cannot reach this code. The scaffold
-        ships a placeholder `["true"]` instead, which `doctor` can see and a silent skip cannot.)
+        ships a placeholder `["true"]` instead, which `doctor.check_quality_gate` reports and a
+        silent skip cannot.)
 
         This deliberately does not invite an approval. Green tests plus an AI's summary is not
         evidence that the code does what the plan says: gate ④ approves a grounded review — a

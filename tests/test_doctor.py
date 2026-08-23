@@ -586,12 +586,28 @@ def test_a_whole_thread_passes(tmp_path: Path) -> None:
     assert not [f for f in grouped["plan"] if f.level == "FAIL"]
 
 
-def test_an_empty_plan_reports_unknown_not_whole(tmp_path: Path) -> None:
-    """The false green this replaced: check_plan used to report the thread whole against an
-    empty plan."""
-    repo = repo_mod.Repo(seed_repo(tmp_path, plan=make_plan(claims=[], tasks=[])))
+def test_an_empty_plan_is_not_reported_as_a_broken_thread(tmp_path: Path) -> None:
+    """Two things this must not do: report the thread whole (the false green it replaced), and
+    warn about work that has not started. A template plan has no thread to follow yet."""
+    # docs=True mirrors a real fresh repo: `rein init` scaffolds them, so the only thing missing
+    # is the content of the plan itself.
+    repo = repo_mod.Repo(seed_repo(tmp_path, plan=make_plan(claims=[], tasks=[]), docs=True))
     plan = models.Plan(make_plan(claims=[], tasks=[]))
+
     results = doctor.check_plan(repo, plan, None)
+
+    trace = [f for f in results if f.area == "trace"]
+    assert [f.level for f in trace] == ["INFO"]
+    assert "no thread to follow" in trace[0].message
+
+
+def test_a_filled_plan_with_no_requirement_id_still_warns(tmp_path: Path) -> None:
+    """The warning is about a thread that should exist and does not — not about an empty plan."""
+    document = make_plan(claims=[make_claim(requirement_ids=[])])
+    repo = repo_mod.Repo(seed_repo(tmp_path, plan=document))
+
+    results = doctor.check_plan(repo, models.Plan(document), None)
+
     assert any(f.level == "WARN" and "unknown, not whole" in f.message for f in results)
 
 
@@ -1024,3 +1040,87 @@ def test_an_adapter_that_cannot_resume_says_what_that_costs() -> None:
     assert "fresh launch" in results[0].message
 
     assert doctor.check_retry_continuity(models.Config(make_config()))[0].level == "PASS"
+
+
+# --- the DoD steps that establish nothing --------------------------------------
+
+
+def _gate(*steps: dict[str, object]) -> models.Config:
+    return models.Config(make_config(quality_gate=list(steps)))
+
+
+def _cmd(name: str, command: list[str], *, required: bool = True) -> dict[str, object]:
+    return {
+        "name": name,
+        "kind": "command",
+        "command": command,
+        "executor_profile": "quality",
+        "retries": 1,
+        "required": required,
+    }
+
+
+def test_a_placeholder_command_is_reported() -> None:
+    """`build_loop` has claimed since it was written that doctor can see this. It could not."""
+    results = doctor.check_quality_gate(_gate(_cmd("smoke", ["true"], required=False)))
+
+    assert [f.level for f in results] == ["WARN"]
+    assert "exits zero and establishes nothing" in results[0].message
+
+
+def test_a_placeholder_is_matched_on_its_argv_not_its_step_name() -> None:
+    """`brief.py` keys on `name == "smoke"`; a rename silences it. This must not inherit that."""
+    results = doctor.check_quality_gate(_gate(_cmd("launch", ["/bin/true"])))
+
+    assert [f.level for f in results] == ["WARN"]
+    assert "step 'launch'" in results[0].message
+
+
+def test_a_step_that_is_not_required_is_reported_as_skippable() -> None:
+    results = doctor.check_quality_gate(_gate(_cmd("smoke", ["./run", "--once"], required=False)))
+
+    assert [f.level for f in results] == ["WARN"]
+    assert "not `required`" in results[0].message
+
+
+def test_a_gate_that_establishes_something_passes() -> None:
+    results = doctor.check_quality_gate(_gate(_cmd("test", ["python", "-m", "pytest"])))
+
+    assert [f.level for f in results] == ["PASS"]
+
+
+def test_an_agent_step_is_not_judged_by_its_command() -> None:
+    review = {"name": "review", "kind": "agent", "agent_role": "code_reviewer", "retries": 1, "required": True}
+    results = doctor.check_quality_gate(_gate(review))
+
+    assert [f.level for f in results] == ["PASS"]
+
+
+# --- sandbox: a FAIL that means "fix before continuing" ------------------------
+
+
+def test_unsandboxed_profiles_are_a_warning_before_the_build_phase(tmp_path: Path) -> None:
+    """`FAIL` is defined as fix-before-continuing, and a repo at `brief` has nothing to continue to."""
+    config = models.Config(make_config())
+    state = models.State(make_state(phase="requirements"))
+
+    results = doctor.check_sandbox(config, state)
+
+    assert [f.level for f in results if "run repository-derived code" in f.message] == ["WARN"]
+    assert "Not yet blocking" in results[0].message
+
+
+def test_unsandboxed_profiles_are_a_failure_once_the_build_starts(tmp_path: Path) -> None:
+    config = models.Config(make_config())
+    state = models.State(make_state(phase="build"))
+
+    results = doctor.check_sandbox(config, state)
+
+    assert [f.level for f in results if "run repository-derived code" in f.message] == ["FAIL"]
+
+
+def test_with_no_state_at_all_the_strict_reading_wins(tmp_path: Path) -> None:
+    """Not knowing the phase is not a reason to relax a boundary."""
+    results = doctor.check_sandbox(models.Config(make_config()), None)
+
+    assert [f.level for f in results if "run repository-derived code" in f.message] == ["FAIL"]
