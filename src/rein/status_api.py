@@ -283,7 +283,7 @@ def _handoffs(state: models.State | None) -> dict[str, dict[str, str]]:
     return out
 
 
-def _completed_commits(state: models.State | None) -> dict[str, str]:
+def completed_commits(state: models.State | None) -> dict[str, str]:
     """Per done task, the work-branch commit that landed it — what makes the board's "done" reviewable."""
     tasks = state.raw.get("tasks") if state else None
     if not isinstance(tasks, dict):
@@ -301,7 +301,7 @@ def _tasks_block(graph: dag.Graph, state: models.State | None = None) -> dict[st
     fan = graph.fan_out()
     counts = graph.counts()
     handoffs = _handoffs(state)
-    commits = _completed_commits(state)
+    commits = completed_commits(state)
     return {
         "counts": {s: counts[s] for s in dag.STATUS_ORDER},
         "total": len(graph.tasks),
