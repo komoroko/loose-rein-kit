@@ -4,6 +4,125 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.5] - 2026-08-23
+
+A cycle could only ever leave as one pull request. Eight tasks arrived as one diff, and the person
+who had to read it was handed the whole of it at once. Everything needed to cut it apart was
+already written down — `build_loop` records the commit that landed each task, and the plan holds
+the DAG that says what each was for — so this release turns those two into a **stack**: one pull
+request per task, opened as drafts, lifted when a human approves the grounded review.
+
+Three things change for a repository that never publishes a stack, and each is a level or a
+default that was saying something the situation did not.
+
+**`rein doctor` now FAILs a permissions file that pre-authorizes `rein pr-stack`**, the same way it
+already refuses `rein approve` and `rein cycle-close`. A broad entry such as `Bash(rein:*)` reaches
+it, so a repository carrying one starts failing here — which is the point: the verb pushes branches
+and opens pull requests.
+
+**A merge conflict in the build loop no longer only blocks the task.** It is classified first, and
+a mechanical one is resolved and merged; that costs an implementer launch a conflict used to cost
+nothing. An implementer that reports nothing still lands on `semantic`, which is the same blocked
+task as before with a `knowledge_gap` recording why.
+
+**`state.yaml`'s `completed_commit` means "the commit that landed the task", not "the work-branch
+commit".** A task whose pull request is open lands on that slice's branch; `pr-stack --restack`
+brings it into the work branch afterwards. No migration — the field's shape is unchanged.
+
+### One pull request per task, and a fix that goes back to the right one
+
+`rein pr-stack` cuts the work branch at each task's `completed_commit`, points a branch at every
+slice, writes one body each, and prints the `gh pr create --draft` lines. `--push` runs them after
+a confirmation typed at a terminal; `--ready` rewrites the bodies with what the review found and
+lifts the drafts once gate ④ is approved. The body says a different thing on each side of that
+gate, because a reader of one slice cannot be left to infer that the review covered the whole
+stack and never judged this slice alone.
+
+**A stack is never rebased.** The usual restack — rebase plus force-push — would strand every
+`completed_commit`, `review.subject_head_sha` and gate receipt on commits that no longer exist. The
+audit chain binds real commits, so rewriting history is destroying the record. A review fix is
+committed onto the slice that introduced the code and carried upward by `--restack`, which merges;
+a slice's boundary freezes when its pull request opens, so a fix moves that branch forward without
+inventing a new slice for it. Which slices are open is read out of the audit log rather than asked
+of GitHub — the log is already the record, and it answers offline.
+
+Merge bottom first with `--merge --delete-branch`. Squash or rebase-merge puts the content into the
+base as a different commit and every pull request above it shows the diff again; deleting the base
+branch is what retargets the next one at main. Both are stated wherever the stack is, because
+neither is style advice.
+
+### A conflict is classified before it is resolved
+
+`scope` cuts each task's territory and the loop already refuses a diff that reached outside it, so
+a collision between two of this cycle's branches is a reading of the plan. Mechanical — both sides
+added to a surface that is shared by construction — is the only kind an agent may resolve. Semantic
+is a defect in the plan, and resolving it in the merge is the stopgap: taking one side, or gluing
+both together until it compiles, hides the fact that two frozen intentions disagree. Gate rule 3
+already prescribes the root fix, and `conflict.escalate` performs it.
+
+`mechanical` is never established by what the implementer said. `rein report --outcome` carries a
+claim, not a verdict, so it counts only once the merged tree passes the quality gate and the caller
+reads the exit status — one retry, then escalation.
+
+### The findings a human was mapping by hand
+
+Gate ④ produces findings against code and the loop repairs tasks. `rein revise --from-review`
+closes that gap from what is already recorded: each finding is grounded in a validated code anchor,
+each task declares the paths it owns, and a failing claim needs no path at all because the plan
+names its task. A finding no declared scope covers is **reported, never guessed at** — picking the
+nearest task would invent the answer. It refuses once gate ④ is approved: deriving from an approved
+review is the front half of rewinding an approval, and that stays a human's privilege.
+
+### A stacked pull request's base is not a base
+
+The base-side check rests on CI taking the base from its own event context, so the head cannot name
+it. A stacked pull request's base is the slice below it — a branch the head's author created — so
+"the head did not remove what the base had" says nothing. `policy-check` now accepts `--base-ref`
+and `--default-branch` and, for a stack base, compares against `merge-base(default, head)`: a
+commit the author did not write, and a *stronger* check than the flat case because it catches a
+weakening introduced anywhere in the stack. The two inputs are not required of every workflow — a
+repository that never publishes a stack is unaffected — so the requirement lands where it matters:
+`pr-stack` refuses to publish a stack whose pull requests the check could not judge.
+
+### The first day, which did not work
+
+`rein init` wrote a quality gate calling `make test` and `make check`, then wrote no makefile —
+"Products no longer need make" is the stated policy — and the packaged image has no `make` either.
+An adopter who followed `doctor`'s own advice to sandbox the profiles pinned their definition of
+done to an image that could not execute it. Three shipped things, each correct alone, contradicting
+each other on the first day. The defaults are now what that image can run (`python -m pytest`,
+`python -m compileall`), stated in the config as a floor and not a quality bar, with the escape
+hatch for anything more — `dockerfile:`, which had a key in the schema and a mention nowhere else —
+now documented in both configs and both READMEs with a worked example.
+
+`brownfield_config` had stopped matching anything on the way: it replaced the literal
+`command: [make, test]`, so this very change would have silently switched the substitution off and
+every brownfield repo would have been initialized with a DoD that ignored its own detected
+commands. It is anchored on the step's name now, and a missing anchor raises.
+
+### Three doctor levels that meant something else
+
+`build_loop` has said since it was written that the scaffold ships a placeholder `["true"]` "which
+`doctor` can see" — and nothing in `doctor.py` read `quality_gate` at all. The sentence described a
+check that did not exist. `check_quality_gate` reports a placeholder command and a non-`required`
+command step, matched on the **argv** rather than the step's name, because `brief.py` keys on
+`name == "smoke"` and a rename silences it.
+
+The sandbox FAIL was phase-independent, so the first `rein doctor` after `rein init` returned a
+non-zero exit for code nothing had run yet. It is now WARN before the build phase and FAIL from it
+onward — and FAIL when the phase is unknown, because not knowing is not a reason to relax a
+boundary. And an empty plan is no longer reported as a broken requirement thread: `check_plan` told
+"no plan" from "a plan" but not from "a plan with nothing in it".
+
+### Measured, at last
+
+`pytest-cov` is in the dev group and both `make test` and CI report coverage: 89% of `src/rein`.
+Not gated on a threshold — a threshold is the next argument, and what was missing was the number,
+in a repository that tells everyone else an unmeasured budget is a statement of intent. The
+aggregate `tests` status also required only `unit`, leaving the integration layer — the one that
+exercises the OCI sandbox against a real runtime, which is this tool's central security claim —
+out of the single check anything insisted on.
+
 ## [0.3.4] - 2026-08-22
 
 Four defects from a field run. Two are the same sentence twice — the machine asked a question it had

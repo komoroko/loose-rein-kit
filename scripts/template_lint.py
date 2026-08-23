@@ -426,17 +426,19 @@ def runtime_artifacts(config_text: str) -> set[str]:
     """The artifacts the tool writes *into* the repository, derived from the code that writes them.
 
     They come from opposite places: the worktree directory is configurable
-    (`execution.worktree_dir`), the PR draft and the dossier directory are constants
-    (`pr_draft.OUT_PATH`, `dossier.RELATIVE_PATH`). Deriving them all instead of listing them is
-    the whole point — a hand-written ignore list outlives what it describes, which is how
+    (`execution.worktree_dir`), the PR draft, the stacked PR bodies and the dossier directory are
+    constants (`pr_draft.OUT_PATH`, `pr_stack.OUT_DIR`, `dossier.RELATIVE_PATH`). Deriving them all
+    instead of listing them is the whole point — a hand-written ignore list outlives what it
+    describes, which is how
     .gitignore came to name three `build-loop.*` files for releases after the loop's locks and
     journal moved to $XDG_RUNTIME_DIR, outside the repository entirely.
     """
-    from rein import dossier, pr_draft
+    from rein import dossier, pr_draft, pr_stack
 
     return {
         models.Config.parse(config_text).worktree_dir.rstrip("/") + "/",
         pr_draft.OUT_PATH,
+        pr_stack.OUT_DIR.rstrip("/") + "/",
         dossier.RELATIVE_PATH.rstrip("/") + "/",
     }
 

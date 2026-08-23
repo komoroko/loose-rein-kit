@@ -2,10 +2,10 @@
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
 format: rein-grounded-v1
-tool_version: 0.3.4
+tool_version: 0.3.5
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.3.4
+  version: 0.3.5
   files:
     AGENTS.rein.md: sha256:12cfc8196715e30f528242d31a61909abae5c278fc078a2cc60e58aa0d64f7dc
     oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
@@ -31,7 +31,7 @@ prompts:
     schema/state.schema.json: sha256:7886f698b8593727831a860f1f3b523101725d745a5d79142fa4ff8c079871ea
 integrations:
   claude:
-    version: 0.3.4
+    version: 0.3.5
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:d420f000ac6892cba6f1d753f5a3894018c0e334ad1df77cf2b0904b237ad430
@@ -51,7 +51,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.3.4
+    version: 0.3.5
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:fe72706426bcbb74f939842df53b792ca5c1bba52d3bf1909cb74b0e0ed0f09c
@@ -67,9 +67,9 @@ integrations:
       .codex/agents/implementer.toml: sha256:1c93b60464227ec637eed7290f3bb6d2a6f8c5d39bb904f131557a2ebf780b6b
       .codex/agents/requirements-analyst.toml: sha256:9249d1d6d8632d2fec155ec3577b802e723ea3b2235c8ae87389d08cde865038
       .codex/hooks.json: sha256:e78f4e7bf63b3c5fca54b9c341ac9898f2ba18497bc158bd3ea7aaea8f663c40
-      .codex/rein.md: sha256:4e1af8e8639166daf0ba8d477c488c88f26c3bee646f16d30bc57c7ed8e3bfb0
+      .codex/rein.md: sha256:cbab098969a073df23034aff06eeebad5174a0d385c877159d96196af7153c0b
   copilot:
-    version: 0.3.4
+    version: 0.3.5
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:6a9126f67cd68da0494217e0b47a2c2344031ec0573e04d45d70feb250c7c68d
@@ -77,7 +77,7 @@ integrations:
       .github/agents/implementer.agent.md: sha256:b1953ab17a6c7ef6b671c8fa148746ca3864ab40499503eba21ec1f8b3e05921
       .github/agents/requirements-analyst.agent.md: sha256:b73ca2bbc692eabb91767be46efcdb5bead1cb876d6602f90fb58d2980faeed5
       .github/hooks/rein.json: sha256:2eacdbf36f1c05dfcf5266383b57dbf46f31306cfb5d93d93bc6926b0b3f7949
-      .github/instructions/rein.instructions.md: sha256:edf155f912b95a34c1a4846faf660b7055c13bec8f578b9de5d0501415532c0a
+      .github/instructions/rein.instructions.md: sha256:f6624f315e950e44bbc6a9513559074b35f1799b8d26c87658a16ae9399f1c29
       .github/prompts/build.prompt.md: sha256:11e784509cfc9694d9256f3299e36663452a4b89aab03377027b0f04d14636e5
       .github/prompts/design.prompt.md: sha256:0e899f78a22a8671e7e5bb991727d461418887fbb24b4cfecfdd8ff667b65544
       .github/prompts/onboard.prompt.md: sha256:6c590a600ebd0e5b4a17121e5b4eef4931a3d110ad88abffdcc4bb0b0594be6e
