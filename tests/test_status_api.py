@@ -569,3 +569,53 @@ def test_the_gate_and_phase_maps_agree_with_the_vocabulary() -> None:
     assert set(status_api.PHASE_GATE.values()) == set(models.GATE_ORDER)
     assert set(status_api.GATE_PHASE) == set(models.GATE_ORDER)
     assert set(status_api.PHASE_COMMAND) <= set(models.PHASE_ORDER)
+
+
+def test_a_blocking_finding_the_plan_owns_is_recommended_before_the_phase_command() -> None:
+    """Typing the ids in by hand is the clerical half of a decision the plan already made."""
+    rec = status_api.next_action(
+        current_phase="build",
+        gates={
+            "requirements": "approved",
+            "design": "approved",
+            "tasks": "approved",
+            "build": "pending",
+            "release": "pending",
+        },
+        counts={"todo": 0, "in-progress": 0, "done": 2, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
+        attention_count=0,
+        chain_defects=0,
+        template_mode=False,
+        placeholders=False,
+        gate_chain_broken=False,
+        plan_missing=False,
+        unsandboxed_profiles=[],
+        attributed_findings=2,
+    )
+
+    assert rec.command.startswith("rein revise --to build --from-review")
+    assert "rein pr-stack --restack" in rec.also
+
+
+def test_no_finding_leaves_the_build_recommendation_alone() -> None:
+    rec = status_api.next_action(
+        current_phase="build",
+        gates={
+            "requirements": "approved",
+            "design": "approved",
+            "tasks": "approved",
+            "build": "pending",
+            "release": "pending",
+        },
+        counts={"todo": 1, "in-progress": 0, "done": 0, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
+        attention_count=0,
+        chain_defects=0,
+        template_mode=False,
+        placeholders=False,
+        gate_chain_broken=False,
+        plan_missing=False,
+        unsandboxed_profiles=[],
+        attributed_findings=0,
+    )
+
+    assert "--from-review" not in rec.command

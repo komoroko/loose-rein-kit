@@ -9,6 +9,7 @@ withdrawn decision is not a decision.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -252,3 +253,91 @@ def test_the_reason_lands_in_the_audit_chain(tmp_path: Path) -> None:
     assert "plan_invalidated" in kinds  # rewinding to tasks un-freezes the plan
     revised = next(e for e in events if e.event == "gate_revised")
     assert revised.detail["reason"] == "the requirement was wrong"
+
+
+# --- --from-review ------------------------------------------------------------
+
+
+def _review_with_blocking_finding(path: str = "src/api/client.py") -> dict[str, Any]:
+    review = make_review(generated=True)
+    review["machine"]["security"] = {
+        "findings": [
+            {
+                "id": "SEC-001",
+                "severity": "high",
+                "category": "authz_bypass",
+                "attack_scenario": "anyone can read anyone's record",
+                "blocking": True,
+                "code_anchors": [{"path": path, "start_line": 1, "end_line": 2, "blob": "git-blob:" + "a" * 40}],
+            }
+        ]
+    }
+    return review
+
+
+def _scoped_plan() -> dict[str, Any]:
+    task = make_task("T-001", claim_ids=["C-001"])
+    task["scope"] = {"include": ["src/api/"]}
+    return make_plan(tasks=[task])
+
+
+def test_from_review_derives_the_impacted_task(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = seed_repo(
+        tmp_path,
+        plan=_scoped_plan(),
+        state=make_state(tasks={"T-001": "done"}),
+        review=_review_with_blocking_finding(),
+    )
+
+    rc = revise.main(["--repo", str(root), "--to", "build", "--from-review", "--dry-run"])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "SEC-001" in out
+    assert "T-001" in out
+
+
+def test_from_review_marks_what_it_derived(tmp_path: Path) -> None:
+    root = seed_repo(
+        tmp_path,
+        plan=_scoped_plan(),
+        state=make_state(tasks={"T-001": "done"}),
+        review=_review_with_blocking_finding(),
+    )
+
+    rc = revise.main(["--repo", str(root), "--to", "build", "--from-review", "--reason", "SEC-001"])
+
+    state = store_mod.Store(repo_mod.Repo(root)).read_state()
+    assert rc == 0
+    assert state is not None and state.task_status["T-001"] == "needs-revision"
+
+
+def test_from_review_is_refused_once_gate_four_is_approved(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """Marking tasks off an approved review is the front half of rewinding an approval."""
+    root = seed_repo(
+        tmp_path,
+        plan=_scoped_plan(),
+        state=make_state(gates={"build": "approved"}, tasks={"T-001": "done"}),
+        review=_review_with_blocking_finding(),
+    )
+
+    rc = revise.main(["--repo", str(root), "--to", "build", "--from-review", "--dry-run"])
+
+    assert rc == 2
+    assert "the decision is yours" in caplog.text
+
+
+def test_from_review_refuses_rather_than_guessing_when_nothing_is_owned(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    root = seed_repo(
+        tmp_path,
+        plan=_scoped_plan(),
+        state=make_state(tasks={"T-001": "done"}),
+        review=_review_with_blocking_finding("vendor/thing.py"),
+    )
+
+    rc = revise.main(["--repo", str(root), "--to", "build", "--from-review", "--dry-run"])
+
+    assert rc == 2
+    assert "nothing to derive" in caplog.text
