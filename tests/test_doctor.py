@@ -220,8 +220,14 @@ def test_a_surface_an_older_release_wrote_is_not_reported_as_healthy(tmp_path: P
         ("Bash(rein approve:*)", ["rein approve"]),
         ("Bash(rein approve build)", ["rein approve"]),
         ("Bash(rein cycle-close:*)", ["rein cycle-close"]),
-        # Broader than the verb, so it carries the verb with it.
-        ("Bash(rein:*)", ["rein approve", "rein cycle-close"]),
+        # An outward-facing verb is stopped whole, not per flag: prefix matching runs both ways,
+        # so the bare verb catches `--push` and `--ready` alike.
+        ("Bash(rein pr-stack:*)", ["rein pr-stack"]),
+        ("Bash(rein pr-stack --push)", ["rein pr-stack"]),
+        # Broader than the verb, so it carries every one of them with it.
+        ("Bash(rein:*)", ["rein approve", "rein cycle-close", "rein pr-stack"]),
+        # The neighbouring verb that only assembles a body and never reaches the network.
+        ("Bash(rein pr-draft:*)", []),
         # Neighbours that must not be mistaken for it.
         ("Bash(rein status:*)", []),
         ("Bash(echo rein approve)", []),

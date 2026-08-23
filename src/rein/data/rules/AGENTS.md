@@ -164,9 +164,18 @@ audit** at `/verify` (detail: build.md, verify.md).
   worktree's record survives its deletion.
 - Per-task commits **`T-NNN: <summary>`**; commit each phase's deliverables at its gate approval.
 - **Push / PR / merge to main are outward-facing** — human approval only, same for GitHub Issues.
+- A cycle may ship as **one pull request** (`rein pr-draft` assembles the body) or as a **stack of
+  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before gate ④ and is lifted
+  by `rein pr-stack --ready` once a human approves it; both steps confirm at a terminal first, and
+  neither may be pre-authorized. Merge a stack **bottom first with `--merge --delete-branch`** —
+  never squash or rebase, which puts the content into the base as a different commit and makes
+  every pull request above it show the diff again.
+- **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
+  and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
+  `completed_commit` and gate receipt on commits that no longer exist.
 - `command-preauthorization` of known-safe commands cuts repeated prompts **without touching
   gates** (generic commands in the installed settings; product-specific ones in the product's
-  own) — never pre-authorize push / PR / **merge to main** / `cycle-close`, nor `rein
+  own) — never pre-authorize push / PR / **merge to main** / `cycle-close` / `pr-stack`, nor `rein
   approve` (gate rule 2). A worktree merge into the work branch is not one of those: the build
   loop does it, so it is pre-authorized. `rein doctor` checks the gate-opening verbs in code,
   including in the gitignored local settings file.

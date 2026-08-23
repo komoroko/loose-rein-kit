@@ -220,6 +220,16 @@ Then, per cycle:
 7. **Ship as a PR** — `rein pr-draft` assembles the PR body from the SSOT into
    `.rein/pr-draft.md` (read-only). Creating and pushing the PR stays yours.
 
+   Or ship it as a **stack, one pull request per task**. `rein pr-stack` cuts the work branch at
+   each task's recorded landing commit, points a branch at each slice, and writes one body per
+   slice; `--push` opens them **as drafts** after a confirmation typed at a terminal, and
+   `--ready` lifts them once gate ④ is approved. A review fix is committed onto the slice that
+   introduced the code and carried upward by `--restack`, which merges — **a stack is never
+   rebased**, because rewriting history strands every `completed_commit` and gate receipt on
+   commits that no longer exist. Merge bottom first with `gh pr merge --merge --delete-branch`:
+   squash or rebase would land the content in the base as a different commit and make every pull
+   request above it show the diff again.
+
 8. **Close the cycle** — after gate ⑤, `rein cycle-close --name <slug>` archives to
    `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human
    operation, like opening a gate.

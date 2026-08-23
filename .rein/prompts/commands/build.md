@@ -194,8 +194,22 @@ is the point; never fold them into the implementer's session.
 
 ## When all tasks complete (gate ④)
 
-0. **Answer any open change requests first.** Run `rein changes list --gate build --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds gate ④ shut, and approving is what closes the addressed ones.
-1. **Generate the grounded review — the artefact gate ④ approves.** Run `rein review
+0. **If this cycle ships as a stack, publish it now — as drafts.** `rein pr-stack` cuts the work
+   branch into one pull request per task and prints the `gh pr create --draft` lines; `--push`
+   does it, after a confirmation typed at a terminal. **You never run `--push` for the human** (the
+   same rule as `rein approve` — `rein doctor` refuses to let it be pre-authorized). They open as
+   drafts because the grounded review below has not run yet, and that is the point: a reviewer can
+   start reading one slice at a time while nothing looks approved. Skip this step for a cycle that
+   ships as a single pull request.
+
+   From here, **a fix for a review finding is committed onto the slice that introduced the code, not
+   onto the work branch.** `rein revise --to build --from-review` derives which task answers each
+   blocking finding, `rein build` re-runs those tasks and lands each fix on the pull request that
+   owns it, and `rein pr-stack --restack` carries the fixes up the stack by merging. **Never rebase
+   a stack**: it strands every `completed_commit` and gate receipt on commits that no longer exist.
+
+1. **Answer any open change requests first.** Run `rein changes list --gate build --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds gate ④ shut, and approving is what closes the addressed ones.
+2. **Generate the grounded review — the artefact gate ④ approves.** Run `rein review
    generate` (bound to the current HEAD). It runs a deterministic Coverage Manifest, a **blind**
    actual-behaviour extraction (never given the plan), the Expected/Actual comparison, and the
    structured security and maintainability review — writing `.rein/review.yaml` and recording
@@ -209,12 +223,12 @@ is the point; never fold them into the implementer's session.
    those to the implementer to fix (a fix moves HEAD, so re-generate; a later commit leaves the
    review stale) and record judgment calls as escalation events for the human. Do not present
    gate ④ while a blocker stands.
-2. `notify-and-wait`: tell the human the gate-④ approval is pending.
+3. `notify-and-wait`: tell the human the gate-④ approval is pending.
    - **(Only with GitHub integration)** Run `rein issue-sync` to reflect each task's
      latest status (done → close, etc.) to Issues. Best-effort; do not stop the gate if it
      fails (auto-skips if `github.enabled: false` / gh/remote absent). It stays outside the
      deterministic loop — networking does not belong there.
-3. Present the implementation summary as an **`approval-presentation`** and confirm "may we approve
+4. Present the implementation summary as an **`approval-presentation`** and confirm "may we approve
    this as implementation-complete?". **Open with the review's scope, before any result**: the
    commit range it is bound to, how large the change is, what the review could **not** read, and
    whether it fits the review budget. Then the completed tasks, key additions/changes, test results, **the grounded-review
@@ -234,13 +248,13 @@ is the point; never fold them into the implementer's session.
      to build at all — an unnoticed empty smoke silently defeats its purpose).
    - **Always present a self-assessment as well** (`.rein/prompts/rules/gate-workflow.md` "Gate self-assessment"),
      including the outcomes of spots that produced blocked/needs-revision.
-4. **While waiting for approval**, only outcome-independent speculative work
+5. **While waiting for approval**, only outcome-independent speculative work
    (`.rein/prompts/rules/gate-workflow.md` "While a gate is pending"; record it as
    speculative-work events):
    concretizing functional test cases in `docs/test/test-plan.md`, a trial run of
    `make audit`, and other `/verify` prep pulled forward. Do not make changes that could
    require redoing the implementation.
-5. Once a human approves (acknowledging the `approval-presentation`, or an explicit "approve")
+6. Once a human approves (acknowledging the `approval-presentation`, or an explicit "approve")
    — **running the next command (`/verify`) is not itself approval** — ask the human to run
    `rein approve build` **themselves**, never for them (mechanics: AGENTS.md "Gate rules" 2).
    Declining is recorded as a change request, not lost — see step 0. Point to "next is `/verify`",

@@ -821,8 +821,13 @@ def _check_claude_matcher(repo: repo_mod.Repo) -> list[Finding]:
 
 
 #: The verbs whose pre-authorization breaks gate rule 2 outright: each one, run without a prompt,
-#: opens a gate or closes a cycle with no human in the loop.
-GATE_OPENING_VERBS = ("rein approve", "rein cycle-close")
+#: opens a gate, closes a cycle, or puts something outside this machine with no human in the loop.
+#:
+#: `rein pr-stack` is listed bare rather than by its `--push` / `--ready` flags. Prefix matching
+#: runs in both directions, so the bare verb also catches `Bash(rein pr-stack:*)` — and losing the
+#: ability to pre-authorize its read-only default run is the cheaper mistake: a verb with an
+#: outward-facing path in it should be stopped whole.
+GATE_OPENING_VERBS = ("rein approve", "rein cycle-close", "rein pr-stack")
 #: Both permission files. The local one is the one that matters: it is gitignored, so an entry
 #: added there appears in no diff, no code review, and no scripts/template_lint.py run.
 PERMISSION_FILES = (SETTINGS_PATH, ".claude/settings.local.json")

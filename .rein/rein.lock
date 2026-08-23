@@ -7,7 +7,7 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.3.4
   files:
-    AGENTS.rein.md: sha256:9c559355130144ccd27e5f829a12bc30b78be41ca9398a54b37eb5eee6e4d96f
+    AGENTS.rein.md: sha256:12cfc8196715e30f528242d31a61909abae5c278fc078a2cc60e58aa0d64f7dc
     oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
     oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
     oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
@@ -15,14 +15,14 @@ prompts:
     prompts/agents/architect.md: sha256:01f47a9e7b0342ca76fae5a3aa4539b9fd82bca60e7435458e8cf34a66a17d12
     prompts/agents/implementer.md: sha256:93bc38fe32fba10f398d96575ee1a90596689a1aff5791ff7ffcf6ac5539aedd
     prompts/agents/requirements-analyst.md: sha256:f856541626e80f3439a3681c70a9ab09f557b0e3dc5c4ddd229f214b5f8efab3
-    prompts/commands/build.md: sha256:ddad6a2a3b2935c59f9e7b856c47510b9ac20b401ca3f1c307802bfad90e57c4
+    prompts/commands/build.md: sha256:5571ca682eb78b6250183054012d8ca78a1509b408d0591953c99a8918626305
     prompts/commands/design.md: sha256:3990596267138462fb9864c3718f0b767171235287c71712add6cc38b9e1c470
     prompts/commands/onboard.md: sha256:47fd4093b4eda0b469312622f19b0152d2bde1374670976966fd7aa22495ce23
     prompts/commands/req.md: sha256:49f472fa26f5c91161a8edcd93eedf6f1e1fe95825a7e5e0b00be3e1eb54295b
-    prompts/commands/revise.md: sha256:5ae3017afa8961f2a5f2ceb08771de4bf45cf0ef48a1b13b9b95e372ab025125
+    prompts/commands/revise.md: sha256:7585403488b36fb67395a21a634a889c4f58f2eb69ef53012f7a9b3fac904ff5
     prompts/commands/status.md: sha256:8766d7b065516ed45adc793ac3d226d71987a8a86a4cc7abd9f5efccfdc63186
     prompts/commands/tasks.md: sha256:ef26fa578b566ffc00d40f5cdebeccc394cd2144a357052cdf3561d16b2e9c8e
-    prompts/commands/verify.md: sha256:2c6d2a9ab1ec8696c6f7e211ef6eab0234b95908cfbdb62e83f2565f9c814024
+    prompts/commands/verify.md: sha256:d5b942372f8fb6b30b7d30352756c46c3971491408b348a4f924d13343a07db8
     prompts/rules/gate-workflow.md: sha256:1ed5fa25ab442ebcf53eb06e7317d06051dcdca68f385767bf58b518506a3d9b
     schema/config.schema.json: sha256:5e68c20a3e68045030de6675d3f5eec08f0d9f3620a1707ca11d82c118957810
     schema/event.schema.json: sha256:42f054f7f19d371daf3fedc4dad1342406d8d227bd1ecbc2bec3a27783271bc7

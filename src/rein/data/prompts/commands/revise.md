@@ -24,6 +24,7 @@ Symmetric with the human opening a gate, **rewinding approval is also the human'
      rein revise --impacted T-00x,T-00y
      ```
      (combinable with `--to` in one invocation; `--dry-run` previews; `rein dag --impacted` enumerates the same set read-only). Missing an impacted task is the dangerous direction, so the **whole closure is marked mechanically** — nothing in it runs until reconciled.
+   - When the upstream change *is* the gate-④ machine review, `--from-review` derives the seed ids instead of you typing them: each blocking finding is grounded in a code anchor, and the plan already says which task's scope owns that path (a failing claim needs no path at all — the plan names its task). It prints the mapping first, and a finding no declared scope covers is **reported, never guessed at** — you name that one with `--impacted`. It refuses once gate ④ is approved, because deriving from an approved review is the front half of rewinding an approval: there the human names the tasks.
    - Marking is all this step does. The marked closure is then reclassified inside the re-run of `/tasks` ("Re-run after a roll back", which owns the keep / modify / obsolete / new taxonomy and what becomes of a task that was `done`) — nothing in the closure runs until that reconcile has happened.
 5. **Guide to rebuilding**: "next is `/<phase>`". Reflect the above reconcile inside the re-run of `/design`/`/tasks`, and present the **impact (the impacted list and classification)** to the human at gate ③ for re-approval.
 
