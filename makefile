@@ -35,9 +35,13 @@ pre-push:
 # materialized-artifact check. CI runs this same target.
 check: pre-commit pre-push template-lint sync-check
 
-# The package's test suite (the same suite CI's matrix runs).
+# The package's test suite (the same suite CI's matrix runs), with coverage measured.
+#
+# Measured, not gated. A threshold is the next argument and a different one; what this repository
+# had until now was no number at all, while telling everyone else that an unmeasured budget is a
+# statement of intent.
 test:
-	uv run --frozen pytest -vv tests/
+	uv run --frozen pytest -vv --cov=src/rein --cov-report=term-missing tests/
 
 # Drift canaries across the hand-maintained template files (wrapper parity, capability-mapping
 # set-equality, vocabulary echoes, README EN↔JA structure, pyproject↔CHANGELOG, data parity).

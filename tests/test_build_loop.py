@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from rein import build_loop, common, dag, digests, dossier, evidence, executors, faults, models
+from rein import build_loop, common, conflict, dag, digests, dossier, evidence, executors, faults, models, pr_stack
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -382,10 +383,10 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop, "_integration_gate", lambda merged: (True, ""))
-    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: next(heads))
+    monkeypatch.setattr(loop.ws, "landed", lambda task_id: next(heads))
 
     loop._consume_parallel(tasks)
 
@@ -1350,7 +1351,7 @@ def test_a_stopped_leaf_keeps_its_worktree_while_its_batchmates_still_merge(
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
     monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop, "_branch_changed_paths", lambda branch: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
     monkeypatch.setattr(loop, "_cleanup_worktree", lambda task: cleaned.append(task.id))
 
     def record_merge(task: dag.Task, branch: str) -> bool:
@@ -1846,3 +1847,237 @@ def test_a_baseline_that_cannot_run_marks_nothing(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(loop, "_run_cmd_step", unrunnable)
     loop._establish_baseline()
     assert loop._baseline_red == {}
+
+
+# --- where a task's work lands ------------------------------------------------
+
+
+def test_a_task_with_no_open_pull_request_lands_on_the_work_branch(tmp_path: Path) -> None:
+    """Every first build. Nothing about this path changes when there is no stack."""
+    loop = orchestrator(tmp_path)
+
+    assert loop.ws.target_branch("T-001") == loop.branch
+    assert loop.ws.landing == {}
+
+
+def test_a_task_whose_pull_request_is_open_lands_on_that_branch(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-002": "build/x-pr-02-T-002"}
+
+    assert loop.ws.target_branch("T-002") == "build/x-pr-02-T-002"
+    assert loop.ws.target_branch("T-001") == loop.branch
+
+
+def test_a_leaf_is_branched_from_its_target_not_from_the_work_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fix has to start from the pull request it belongs to, or it would not contain it."""
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-002": "slice-branch"}
+    calls: list[list[str]] = []
+    monkeypatch.setattr(loop.ws, "_salvage_leftovers", lambda task_id, branch, path: "")
+    monkeypatch.setattr(loop.ws, "git", lambda args, cwd=None: calls.append(args))
+
+    loop.ws.add_worktree("T-002")
+
+    assert calls[0][:3] == ["worktree", "add", "-b"]
+    assert calls[0][-1] == "slice-branch"
+
+
+def test_the_landing_map_comes_from_the_audit_log(tmp_path: Path) -> None:
+    loop = orchestrator(tmp_path)
+    slice_ = pr_stack.Slice(
+        index=2,
+        task_id="T-002",
+        title="t",
+        branch="b-pr-02-T-002",
+        base_ref="b-pr-01-T-001",
+        base_sha="0" * 40,
+        head_sha="1" * 40,
+    )
+    with store_mod.Store(loop.repo).transaction() as tx:
+        tx.append(
+            pr_stack.LEDGER_EVENT,
+            cycle_id=loop.cycle_id,
+            detail=pr_stack.opened_event_detail(slice_, "https://example.invalid/pr/2"),
+        )
+
+    loop._load_landing()
+
+    assert loop.ws.landing == {"T-002": "b-pr-02-T-002"}
+
+
+def test_a_slice_already_ready_is_not_landed_on(tmp_path: Path) -> None:
+    """Past gate ④ a change is a human's call, not something a re-run puts there quietly."""
+    loop = orchestrator(tmp_path)
+    slice_ = pr_stack.Slice(
+        index=2,
+        task_id="T-002",
+        title="t",
+        branch="b-pr-02-T-002",
+        base_ref="main",
+        base_sha="0" * 40,
+        head_sha="1" * 40,
+    )
+    with store_mod.Store(loop.repo).transaction() as tx:
+        for action in (pr_stack.LEDGER_OPENED, pr_stack.LEDGER_READY):
+            tx.append(
+                pr_stack.LEDGER_EVENT,
+                cycle_id=loop.cycle_id,
+                detail=pr_stack.opened_event_detail(slice_, "https://example.invalid/pr/2", action),
+            )
+
+    loop._load_landing()
+
+    assert loop.ws.landing == {}
+
+
+def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The combined tree is not on the work branch yet — `--restack` is what makes it."""
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-002": "slice-branch"}
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
+    gated: list[list[str]] = []
+
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": None)
+    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
+    monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
+    monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
+    monkeypatch.setattr(loop.ws, "landed", lambda task_id: "a" * 40)
+
+    def record_gate(merged: list[dag.Task]) -> tuple[bool, str]:
+        gated.append([t.id for t in merged])
+        return True, ""
+
+    monkeypatch.setattr(loop, "_integration_gate", record_gate)
+
+    loop._consume_parallel(tasks)
+
+    assert gated == [["T-001", "T-003"]]
+
+
+def test_a_leaf_is_diffed_against_its_target_branch_not_the_work_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The base and the branch used to be separate arguments and the base was always the work branch.
+
+    A leaf landing on a slice branch was then diffed against a branch it never forked from, so its
+    changed-path set carried every commit the slices below had added — and `_gate_violations`
+    judged paths the task had not touched.
+    """
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-002": "build/x-pr-c1-02-T-002"}
+    calls: list[list[str]] = []
+
+    def record(cmd: list[str], cwd: str | None = None, **_: object) -> tuple[int, str]:
+        calls.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(loop.ws, "_run", record)
+
+    loop._branch_changed_paths("T-002")
+    loop._branch_changed_paths("T-001")
+
+    ranges = [cmd[-1] for cmd in calls if cmd[:3] == ["git", "diff", "--name-only"]]
+    assert ranges[0].startswith("build/x-pr-c1-02-T-002...")
+    assert ranges[1].startswith(f"{loop.branch}...")
+
+
+def test_the_review_step_is_told_the_scope_it_actually_has(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-002": "build/x-pr-c1-02-T-002"}
+    monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
+    task = dag.Task(id="T-002", title="leaf", kind="parallel")
+
+    _, command = loop._review_scope(task, cwd=str(tmp_path / "leaf"), base="")
+
+    assert command == "git diff build/x-pr-c1-02-T-002...HEAD"
+
+
+# --- the wiring from a merge conflict to an implementer ------------------------
+
+
+def test_a_merge_conflict_goes_through_the_classifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`merge_leaf` used to abort and block, full stop. Its conflict path had no test at all."""
+    loop = orchestrator(tmp_path)
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(loop.ws, "merge_cwd", lambda task_id: loop.root)
+    monkeypatch.setattr(loop.ws, "merge_leaf", lambda task_id, branch, cwd: False)
+    monkeypatch.setattr(loop.ws, "git", lambda args, cwd=None: None)
+
+    def resolved(plan: Any, **kw: Any) -> conflict.Resolution:
+        seen.append((kw["ours_task"], kw["theirs_task"]))
+        return conflict.Resolution(kind="mechanical")
+
+    monkeypatch.setattr(conflict, "merge_with_resolution", resolved)
+
+    assert loop.merge_leaf(task, "build/x-T-001") is True
+    assert seen == [("", "T-001")]
+
+
+def test_an_unresolved_conflict_escalates_and_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-001": "build/x-pr-c1-01-T-001"}
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    escalated: list[conflict.Resolution] = []
+    monkeypatch.setattr(loop.ws, "merge_cwd", lambda task_id: loop.root)
+    monkeypatch.setattr(loop.ws, "merge_leaf", lambda task_id, branch, cwd: False)
+
+    def refused(plan: Any, **kw: Any) -> conflict.Resolution:
+        return conflict.Resolution(
+            kind="semantic",
+            conflict=conflict.Conflict(kw["ours_task"], kw["theirs_task"], ("src/a.py",)),
+            escalation="they contradict",
+        )
+
+    def record(repo: Any, resolution: conflict.Resolution) -> list[str]:
+        escalated.append(resolution)
+        return []
+
+    monkeypatch.setattr(conflict, "merge_with_resolution", refused)
+    monkeypatch.setattr(conflict, "escalate", record)
+
+    assert loop.merge_leaf(task, "build/x-T-001") is False
+    assert [r.kind for r in escalated] == ["semantic"]
+    # A task landing on its own slice is both sides of the merge, so its scope is checkable.
+    collision = escalated[0].conflict
+    assert collision is not None and collision.ours_task == "T-001"
+
+
+def test_resolving_hands_out_an_orchestrator_with_a_live_control_plane(tmp_path: Path) -> None:
+    """The lock and the socket, in the order `run()` takes them. Nothing had ever entered this."""
+    root = build_repo(tmp_path)
+    with build_loop.resolving(repo_mod.Repo(root)) as orchestrator_:
+        assert orchestrator_.control is not None
+        assert orchestrator_.control.socket_path.exists()
+        assert callable(orchestrator_.resolve_conflict)
+        assert callable(orchestrator_.task_gate)
+
+
+def test_the_task_gate_runs_only_the_deterministic_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    ran: list[str] = []
+
+    def note(step: Any, cwd: str) -> str:
+        ran.append(step.name)
+        return ""
+
+    monkeypatch.setattr(loop, "_run_cmd_step", note)
+
+    assert loop.task_gate(str(tmp_path)) == (0, "")
+    assert ran and all(s.kind == "command" for s in loop._steps_at("task") if s.name in ran)
+
+
+def test_the_task_gate_reports_the_step_that_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "2 tests failed")
+
+    status, log = loop.task_gate(str(tmp_path))
+
+    assert status == 1 and "2 tests failed" in log

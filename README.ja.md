@@ -135,9 +135,14 @@ rein oci build --all --write-config # 3つの同梱イメージをビルドし�
 rein oci verify                     # pin が揃っているか確認する
 ```
 
-`rein init` とウィザードは適切なタイミングでこれを促し、その場で実行することもできる。独自
-Containerfile・再 pin・実行時フラグの詳細は、`.rein/config.yaml` の
-`SANDBOXES` コメントブロックに記載してある。
+`rein init` とウィザードは適切なタイミングでこれを促し、その場で実行することもできる。
+
+同梱イメージに入っているのは python・uv・pytest だけで、ネットワークも無い。同梱の既定ゲートを
+動かすには足りるが、それ以上は動かない。**リンタ・型検査・依存関係の解決を要するゲートには専用の
+イメージが要る**。Containerfile を書き(`.rein/oci/<name>/Containerfile` に置けば同梱分と並ぶ)、
+プロファイルの `containerfile:` を `dockerfile:` に置き換えて指し、
+`rein oci build --profile <そのプロファイル名> --write-config` でビルドと pin を行う。再 pin・
+実行時フラグ・記述例の詳細は、`.rein/config.yaml` の `SANDBOXES` コメントブロックに記載してある。
 
 ## 使い方
 
@@ -221,6 +226,15 @@ rein project add  # ダッシュボードのプロジェクト切替対象にリ
 
 7. **PR にする** — `rein pr-draft` が SSOT から PR 本文を組み立て、`.rein/pr-draft.md` に出力する
    (読み取り専用)。PR の作成と push は人間が行う。
+
+   1 タスク 1 PR の**スタック**として出すこともできる。`rein pr-stack` は、各タスクが着地した
+   コミットで作業ブランチを切り分け、スライスごとにブランチを張り、本文を 1 枚ずつ書く。
+   `--push` は端末で確認を取ってから **draft として** PR を開き、`--ready` はゲート④の承認後に
+   draft を外す。レビュー指摘の修正は、そのコードを入れたスライスにコミットし、`--restack` が
+   マージで上へ伝播させる。**スタックを rebase してはならない** — 履歴を書き換えると、
+   `completed_commit` とゲート受領証が指すコミットが消えるためである。マージは下から順に
+   `gh pr merge --merge --delete-branch` で行う。squash や rebase では本文が別コミットとして
+   base に入り、上位の PR すべてに同じ差分が再び現れる。
 
 8. **サイクルを閉じる** — ゲート⑤のあと `rein cycle-close --name <slug>` を実行すると、docs が
    `docs/archive/<日付>-<slug>/` へアーカイブされ、新しいスキャフォールドが復元され、ゲートと
@@ -347,8 +361,11 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 参照。
 
 > **DoD のコマンドはプロジェクト固有**: `quality_gate` に一度だけ書く。同梱の既定値
-> `make test` / `make check` はプレースホルダで、brownfield では `rein init` が検出したコマンドを
-> 埋める。それ以外の場合は、自分のプロジェクトのコマンドに置き換えること。
+> (`python -m pytest`、`python -m compileall`)は、同梱の `python` サンドボックスイメージが
+> 実際に実行できる最低限である。このイメージには python・uv・pytest しか入っておらず、
+> ネットワークも無い。brownfield では `rein init` が検出したコマンドを埋める。それ以外の場合は
+> 自分のプロジェクトのコマンドに置き換え、それが上記を超えるものを要求するなら
+> `dockerfile:` でプロファイルを自前のイメージに向けること。
 
 ## セキュリティ検査
 

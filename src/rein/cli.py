@@ -53,6 +53,7 @@ VERBS: dict[str, str] = {
     "cycle-close": "cycle",
     "issue-sync": "issue_sync",
     "pr-draft": "pr_draft",
+    "pr-stack": "pr_stack",
     "oci": "oci_cli",
     "guard": "gate_guard",
     "policy-check": "policy_check",
@@ -93,7 +94,7 @@ operations:
   approve <gate> [--check]     readiness check, then the human's confirmation at this terminal
   changes add|list|address     ask for changes instead of approving (holds the gate shut)
   oci build|verify             build the sandbox images and pin their digests
-  revise --to <phase> ...      roll back upstream (gates reset in a chain)
+  revise --to <phase> ...      roll back upstream (gates reset in a chain; --from-review derives the impacted tasks)
   review generate|complete|show  the grounded machine review (gate ④'s evidence)
   build [--dry-run|--supervise]  the deterministic /build orchestrator (--supervise: retry in-process on exit 3)
   task reset <id> --reason …   put a blocked task back on the frontier (recorded, never hand-edited)
@@ -103,6 +104,7 @@ operations:
   cycle-close --name <slug>    archive the finished delta cycle and reset
   issue-sync [--dry-run]       one-way mirror of plan.yaml's tasks -> GitHub Issues (opt-in)
   pr-draft [args]              assemble a PR body from the SSOT (read-only)
+  pr-stack [--push]            cut the work branch into one draft PR per task (--push confirms at a terminal)
   evidence show|record         acceptance evidence this loop cannot obtain (record what you observed)
   report --outcome … --summary …  how an implementer ends its attempt (implemented|blocked|needs-revision)
   decision add --statement …   record an implementation decision (routes via the control plane)

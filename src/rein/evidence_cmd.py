@@ -153,9 +153,7 @@ def _record_once(repo: repo_mod.Repo, task_id: str, entry: dict[str, Any]) -> No
 
 
 def _recorded(state: models.State, task_id: str) -> list[dict[str, Any]]:
-    entry = state.raw.get("tasks", {}).get(task_id)
-    value = entry.get("acceptance") if isinstance(entry, dict) else None
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+    return [dict(item) for item in state.recorded_acceptance(task_id)]
 
 
 def _tree_fingerprint(repo: repo_mod.Repo) -> str:

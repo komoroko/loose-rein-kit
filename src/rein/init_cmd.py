@@ -126,10 +126,29 @@ def brownfield_config(text: str, test_cmd: str, check_cmd: str) -> str:
             flags=re.MULTILINE,
         )
     if test_cmd:
-        text = text.replace("command: [make, test]", f"command: {_argv_yaml(test_cmd)}", 1)
+        text = _set_step_command(text, "test", test_cmd)
     if check_cmd:
-        text = text.replace("command: [make, check]", f"command: {_argv_yaml(check_cmd)}", 1)
+        text = _set_step_command(text, "check", check_cmd)
     return text
+
+
+def _set_step_command(text: str, step: str, command: str) -> str:
+    """Replace the `command:` of the named quality-gate step, anchored on the step's **name**.
+
+    Anchored on the name rather than on the argv it happens to ship with: this used to match the
+    literal `command: [make, test]`, so the day that default changed the substitution would have
+    silently done nothing and every brownfield repo would have been initialized with a DoD that
+    ignored its own detected commands. A missing anchor raises instead — the input is the packaged
+    scaffold, so it not being there means the scaffold moved, not that a user did something odd.
+    """
+    pattern = rf"(^  - name: {re.escape(step)}\n(?:    [^\n]*\n)*?    command: )\[[^\]]*\]$"
+    replaced, count = re.subn(pattern, lambda m: m.group(1) + _argv_yaml(command), text, count=1, flags=re.MULTILINE)
+    if count != 1:
+        raise ValueError(
+            f"the packaged scaffold config has no quality-gate step named {step!r} with a `command:` — "
+            "init cannot write the detected command into a config whose shape it no longer recognises"
+        )
+    return replaced
 
 
 def fill_brief(text: str, summary: str) -> str:

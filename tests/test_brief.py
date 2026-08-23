@@ -275,13 +275,44 @@ def test_every_step_established_for_nothing_leaves_only_the_exceptions() -> None
     assert section["established_for_nothing"] == [step.name for step in _config().quality_gate]
 
 
+def _operations_for(*steps: dict[str, Any]) -> dict[str, Any] | None:
+    sections = brief.derive(plan=None, state=None, config=_config(quality_gate=list(steps)))
+    value = sections.get("operations")
+    return value if isinstance(value, dict) else None
+
+
+def _step(name: str, command: list[str], *, required: bool = False) -> dict[str, Any]:
+    return {"name": name, "kind": "command", "command": command, "executor_profile": "quality", "required": required}
+
+
 def test_operations_reports_the_smoke_command_and_whether_it_is_required() -> None:
-    gate = [
-        {"name": "test", "kind": "command", "command": ["make", "test"], "executor_profile": "quality"},
-        {"name": "smoke", "kind": "command", "command": [], "executor_profile": "quality", "required": False},
-    ]
-    sections = brief.derive(plan=None, state=None, config=_config(quality_gate=gate))
-    assert sections["operations"] == {"command": [], "required": False}
+    assert _operations_for(_step("test", ["make", "test"]), _step("smoke", [])) == {
+        "command": [],
+        "required": False,
+        "placeholder": False,
+    }
+
+
+def test_the_shipped_placeholder_is_reported_as_one() -> None:
+    """`["true"]` has a command and cannot fail. The panel used to say nothing at all about it."""
+    assert _operations_for(_step("smoke", ["true"], required=True)) == {
+        "command": ["true"],
+        "required": True,
+        "placeholder": True,
+    }
+
+
+def test_a_real_launch_command_is_not_a_placeholder() -> None:
+    assert _operations_for(_step("smoke", ["./app", "--version"])) == {
+        "command": ["./app", "--version"],
+        "required": False,
+        "placeholder": False,
+    }
+
+
+def test_no_step_named_smoke_reports_nothing_rather_than_an_empty_command() -> None:
+    """ "No step declares the launch" is a different fact from "the launch step ran nothing"."""
+    assert _operations_for(_step("launch", ["./app"])) is None
 
 
 # --- the account of a task that did not land -----------------------------------

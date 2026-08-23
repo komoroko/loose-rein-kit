@@ -135,8 +135,14 @@ rein oci build --all --write-config # build and pin the three packaged images (n
 rein oci verify                     # confirm the pins are present
 ```
 
-`rein init` and the wizard prompt for this at the right time and can run it for you. Detail
-(custom Containerfiles, re-pinning, runtime flags): the `SANDBOXES` comment block in
+`rein init` and the wizard prompt for this at the right time and can run it for you.
+
+The packaged images carry python, uv and pytest and run with no network — enough for the shipped
+default gate and nothing more. **A gate that needs a linter, a type checker, or a dependency
+closure needs its own image**: write a Containerfile (`.rein/oci/<name>/Containerfile` keeps it
+beside the packaged ones), point the profile at it with `dockerfile:` instead of `containerfile:`,
+and `rein oci build --profile <that profile> --write-config` builds and pins it. Detail
+(re-pinning, runtime flags, a worked example): the `SANDBOXES` comment block in
 `.rein/config.yaml`.
 
 ## Daily use
@@ -219,6 +225,16 @@ Then, per cycle:
 
 7. **Ship as a PR** — `rein pr-draft` assembles the PR body from the SSOT into
    `.rein/pr-draft.md` (read-only). Creating and pushing the PR stays yours.
+
+   Or ship it as a **stack, one pull request per task**. `rein pr-stack` cuts the work branch at
+   each task's recorded landing commit, points a branch at each slice, and writes one body per
+   slice; `--push` opens them **as drafts** after a confirmation typed at a terminal, and
+   `--ready` lifts them once gate ④ is approved. A review fix is committed onto the slice that
+   introduced the code and carried upward by `--restack`, which merges — **a stack is never
+   rebased**, because rewriting history strands every `completed_commit` and gate receipt on
+   commits that no longer exist. Merge bottom first with `gh pr merge --merge --delete-branch`:
+   squash or rebase would land the content in the base as a different commit and make every pull
+   request above it show the diff again.
 
 8. **Close the cycle** — after gate ⑤, `rein cycle-close --name <slug>` archives to
    `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human
@@ -341,9 +357,11 @@ holding the lock — and safe to retry, with nothing marked and no budget spent.
 --supervise` retries `3` automatically (`--supervise-interval-sec`, default 900). See
 "Troubleshooting" for what each stop looks like and how to resume.
 
-> **DoD commands are the project's own**: `quality_gate` names them once (the shipped
-> defaults `make test` / `make check` are placeholders — `rein init` fills detected commands
-> in a brownfield repo; substitute yours otherwise).
+> **DoD commands are the project's own**: `quality_gate` names them once. The shipped defaults
+> (`python -m pytest`, `python -m compileall`) are the floor the packaged `python` sandbox image
+> can actually run — it carries python, uv and pytest and has no network. `rein init` fills
+> detected commands in a brownfield repo; otherwise substitute yours, and point the profile at
+> your own image with `dockerfile:` when they need more than that.
 
 ## Security review
 

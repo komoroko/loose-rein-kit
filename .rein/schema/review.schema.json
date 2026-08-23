@@ -1050,12 +1050,16 @@
               }
             },
             "operations": {
-              "description": "The launch check. An empty `command` means the DoD never started the deliverable — a green suite over a package that cannot boot is what this exists to make visible.",
+              "description": "The launch check. Absent means no step declares one; an empty `command` or `placeholder: true` means the DoD never started the deliverable — a green suite over a package that cannot boot is what this exists to make visible.",
               "type": "object",
               "additionalProperties": false,
               "properties": {
                 "command": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 512 } },
-                "required": { "type": "boolean" }
+                "required": { "type": "boolean" },
+                "placeholder": {
+                  "description": "The step's argv exits zero and establishes nothing (`[\"true\"]` and its siblings — the same set `doctor.check_quality_gate` reports). A command that cannot fail is not a launch.",
+                  "type": "boolean"
+                }
               }
             },
             "verification": {

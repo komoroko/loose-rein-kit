@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections.abc import Sequence
 
 from rein import common, dag, event_chain, models
 from rein import repo as repo_mod
@@ -33,19 +34,23 @@ def _digest_line(label: str, value: str | None) -> str:
     return f"- {label}: {value or '(not recorded)'}"
 
 
-def build_body(repo: repo_mod.Repo, base: str = "main") -> str:
-    """The PR body. Reads only; every figure is derived from the SSOT."""
-    store = store_mod.Store(repo)
-    state = store.read_state()
-    plan = store.read_plan()
-    review = store.read_review()
-    events, defects = event_chain.scan(repo.events)
+def cycle_facts(
+    state: models.State,
+    plan: models.Plan | None,
+    review: models.Review | None,
+    events: Sequence[models.Event],
+    defects: Sequence[event_chain.ChainDefect],
+    *,
+    base: str = "main",
+) -> list[str]:
+    """Everything the SSOT says about the cycle as a whole, as body lines.
 
-    lines = ["## Grounded implementation review", ""]
-    if state is None:
-        return "\n".join([*lines, "- (no .rein/state.yaml — nothing to summarize)"])
-
-    lines.append(f"- Cycle: `{state.cycle_id}`   base: `{base}`")
+    Split out of :func:`build_body` because a stacked pull request needs the same block under a
+    slice's own section (`pr_stack`), and two renderings of the same figures are two chances for
+    one of them to drift. The documents arrive already read: the caller has them, and reading
+    them twice would let the two halves of one body disagree about what it is describing.
+    """
+    lines = [f"- Cycle: `{state.cycle_id}`   base: `{base}`"]
     lines.append(_digest_line("Plan digest", plan.digest() if plan else None))
     binding = review.machine.get("binding") if review and review.is_generated else None
     change_digest = binding.get("change_digest") if isinstance(binding, dict) else None
@@ -93,6 +98,21 @@ def build_body(repo: repo_mod.Repo, base: str = "main") -> str:
         except dag.DagError as exc:
             lines += ["", f"- task graph inconsistent: {exc}"]
 
+    return lines
+
+
+def build_body(repo: repo_mod.Repo, base: str = "main") -> str:
+    """The PR body for a cycle shipped as one pull request. Reads only; every figure is from the SSOT."""
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    plan = store.read_plan()
+    review = store.read_review()
+    events, defects = event_chain.scan(repo.events)
+
+    lines = ["## Grounded implementation review", ""]
+    if state is None:
+        return "\n".join([*lines, "- (no .rein/state.yaml — nothing to summarize)"])
+    lines += cycle_facts(state, plan, review, events, defects, base=base)
     return "\n".join(lines) + "\n"
 
 

@@ -46,6 +46,49 @@ GATE_ORDER: tuple[str, ...] = ("requirements", "design", "tasks", "build", "rele
 GATE_VALUES = frozenset(GATE_ORDER)
 GATE_STATUS_VALUES = frozenset({"pending", "approved"})
 
+#: Commands that run, exit zero, and establish nothing. `["true"]` is what the scaffold ships for
+#: its launch step; the others are the same gesture written differently. Shared vocabulary because
+#: two places have to agree on it and neither may import the other: `doctor.check_quality_gate`,
+#: which reports a DoD step that cannot fail, and `brief`, which tells a gate-④ reviewer whether
+#: anything ever started the deliverable. Matched on the **argv**, never on the step's name.
+PLACEHOLDER_COMMANDS: frozenset[tuple[str, ...]] = frozenset(
+    {("true",), ("/bin/true",), (":",), ("echo",), ("exit", "0")}
+)
+
+
+#: How a stacked pull request's branch is named:
+#: `<work_branch>-pr-<cycle>-NN-<task or tail>`. Here rather than in `pr_stack` because two modules
+#: that never import each other have to agree on it — the one that creates these branches, and the
+#: base-side CI check that has to recognise a base it must not trust (`policy_check`). `-` and not
+#: `/` because git refuses a ref that is a path prefix of another, which `<branch>/pr/01` next to
+#: `<branch>` would be.
+#:
+#: **The cycle is in the name, and it has to be.** The work branch is fixed per project and every
+#: cycle's plan numbers its own tasks from `T-001`, so a name built from the branch and the index
+#: alone repeats exactly. `cycle-close` archives the audit log with it, so the ledger that froze
+#: cycle 1's slices is gone by then — the second cycle would find cycle 1's branch, see its commit
+#: is an ancestor of the new one, fast-forward it, and push new work onto a ref GitHub already has
+#: a pull request for.
+STACK_BRANCH_INFIX = "-pr-"
+STACK_TAIL_SUFFIX = "tail"
+
+
+def stack_branch(work_branch: str, cycle_id: str, index: int, task_id: str) -> str:
+    """The branch name for slice `index` of `cycle_id`'s stack on `work_branch`."""
+    cycle = cycle_id or "cycle"
+    return f"{work_branch}{STACK_BRANCH_INFIX}{cycle}-{index:02d}-{task_id or STACK_TAIL_SUFFIX}"
+
+
+def is_stack_branch(ref: str) -> bool:
+    """Whether `ref` names a slice of a stack — a base the head author created, not a trusted one.
+
+    Membership of the namespace, not a parse of it. A false positive costs nothing where this is
+    used: `policy_check` answers it by measuring against the default branch instead, which is the
+    stricter reading. A false *negative* would let a base the author wrote pass as a trusted one.
+    """
+    return STACK_BRANCH_INFIX in ref
+
+
 #: current_phase values in lifecycle order (`brief` precedes gate ①, `done` follows gate ⑤).
 PHASE_ORDER: tuple[str, ...] = ("brief", "requirements", "design", "tasks", "build", "verify", "done")
 PHASE_VALUES = frozenset(PHASE_ORDER)
@@ -822,6 +865,16 @@ class State:
         if not isinstance(value, dict):
             return {}
         return {k: _str(v, "status", "todo") for k, v in value.items() if isinstance(v, dict)}
+
+    def recorded_acceptance(self, task_id: str) -> tuple[Mapping[str, Any], ...]:
+        """The observations `rein evidence record` has written for `task_id`, newest last.
+
+        Each one binds the tree it was made against, so a reader comparing that to the current
+        tree can tell a live observation from one the code has since retired.
+        """
+        entry = self.raw.get("tasks", {}).get(task_id)
+        value = entry.get("acceptance") if isinstance(entry, dict) else None
+        return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
     def gate_chain_violations(self) -> list[tuple[str, str]]:
         """Every (approved gate, first pending gate upstream of it) pair.

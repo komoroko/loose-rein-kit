@@ -501,7 +501,7 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
     reflexively type `tasks`. What is load-bearing is the pause with the digests above it, the
     TTY, and **the default being no** — a stray Enter must never approve anything.
     """
-    if not sys.stdin.isatty():
+    if not common.stdin_is_terminal():
         raise ApprovalError(
             f"gate '{gate}' needs a confirmation typed at a terminal, and stdin is not one. "
             "Run this in your shell — there is deliberately no flag that skips it."
@@ -514,8 +514,7 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         print(f"{len(addressed)} change request(s) you raised were addressed:")
         print(change_request.render(addressed) + "\n")
     print(AUTHORITY_NOTE)
-    print(f"\nApprove gate '{gate}'? [y/N] ", end="", flush=True)
-    if sys.stdin.readline().strip().lower() not in ("y", "yes"):
+    if not common.ask_yes_no(f"Approve gate '{gate}'?"):
         raise ApprovalError(
             f"nothing was approved. If the deliverable needs work, record it against the gate so it "
             f"survives this session and holds the gate shut until it is answered:\n"

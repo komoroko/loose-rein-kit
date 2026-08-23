@@ -72,7 +72,7 @@ export function showTaskDetail(id) {
   const parts = [h.failed_step ? "last failed at " + esc(h.failed_step) : "",
                  salvage[h.salvage_state] || ""].filter(Boolean);
   const handoff = parts.length ? "<dt>carried over</dt><div>" + parts.join(" · ") + "</div>" : "";
-  // The work-branch commit that landed the task, so "done" is something you can go and read.
+  // The commit that landed the task, so "done" is something you can go and read.
   const commit = t.commit
     ? '<dt>landed in</dt><div class="mono">' + esc(String(t.commit).slice(0, 12)) + "</div>"
     : "";

@@ -48,6 +48,7 @@ event, or lock is written — running it never changes what a later real run see
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import logging
@@ -56,7 +57,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -66,6 +67,7 @@ from rein import (
     build_git,
     build_prompts,
     common,
+    conflict,
     control_plane,
     dag,
     digests,
@@ -369,7 +371,7 @@ def set_task_status(
 ) -> None:
     """Write one task's status and the event that explains it, in one transaction.
 
-    `commit` is the work-branch commit that landed the task — recorded as `completed_commit` and
+    `commit` is the commit that landed the task — recorded as `completed_commit` and
     carried in the same event, so "which commit closed T-NNN" is answerable from either the SSOT
     or the log without a second event to count twice.
 
@@ -1263,8 +1265,8 @@ class Orchestrator:
         if self.dry_run:
             return [], ""
         if cwd != self.root:
-            paths = self.ws.branch_changed_paths(self.ws.branch_for(task.id), cwd=cwd)
-            return paths, f"git diff {self.branch}...HEAD"
+            paths = self.ws.branch_changed_paths(task.id, cwd=cwd)
+            return paths, f"git diff {self.ws.target_branch(task.id)}...HEAD"
         if base:
             return self.ws.changed_since(base), f"git diff {base[:12]}..HEAD"
         return [], ""
@@ -1372,6 +1374,56 @@ class Orchestrator:
             task_id=task.id,
             role="implementer",
         )
+
+    # --- conflict resolution ---------------------------------------------------
+    #
+    # Two seams the merge paths need and this class already owns: launching an implementer, and
+    # running the deterministic half of the DoD. `conflict` holds the decision they feed; keeping
+    # the plumbing here is what stops that module importing this one.
+
+    def _graph_task(self, task_id: str) -> dag.Task | None:
+        if not task_id or self._plan is None:
+            return None
+        try:
+            return dag.join(self._plan, self.state).get(task_id)
+        except (dag.DagError, KeyError):
+            return None
+
+    def task_gate(self, cwd: str) -> tuple[int, str]:
+        """The **deterministic** half of the task-stage DoD over `cwd`. `(0, "")` when every step passed.
+
+        Command steps only. A merge resolution is judged on whether the tree still holds up, and
+        that is what an exit status answers; spending a reviewer agent on merge glue would be a
+        different question asked at several times the price. The steps themselves are the frozen
+        ones — `stage` and `paths` came from gate ③ like every other part of the DoD.
+        """
+        for step in self._steps_at("task"):
+            if step.kind != "command" or not step.command:
+                continue
+            failure = self._run_cmd_step(step, cwd)
+            if failure:
+                return 1, f"{step.name}: {failure}"
+        return 0, ""
+
+    def resolve_conflict(self, collision: conflict.Conflict, cwd: str) -> str:
+        """Launch an implementer against a conflicted worktree; return the outcome it reported.
+
+        The prompt carries **both sides' purpose**, not just the hunks (`build_prompts.conflict_prompt`).
+        What comes back is a claim travelling the one channel a claim may travel — `rein report` —
+        and `conflict` decides what it is worth.
+        """
+        ours = self._graph_task(collision.ours_task)
+        theirs = self._graph_task(collision.theirs_task)
+        prompt = build_prompts.conflict_prompt(ours, theirs, collision.paths, gate_cmds=self.config.gate_cmds)
+        self._launch(
+            [*self.config.adapter_argv, *write_flags(self.config.adapter_argv), prompt],
+            cwd=cwd,
+            where=f"{collision.ours_task or 'merge'}: conflict",
+            env=self._leaf_env(ours) if ours is not None else None,
+            task_id=collision.ours_task,
+            role="implementer",
+        )
+        return str(self._read_report(ours).get("outcome", "")) if ours is not None else ""
 
     def _run_cmd_step(self, step: GateStep, cwd: str) -> str:
         """Run one cmd step in its executor profile. "" on pass, a compact failure otherwise.
@@ -1997,8 +2049,8 @@ class Orchestrator:
         verdicts = ((p, gate_guard.evaluate(str(self.repo.path(p)), self.repo)) for p in paths)
         return [(p, reason) for p, (ok, reason) in verdicts if not ok]
 
-    def _branch_changed_paths(self, branch: str) -> list[str]:
-        return self.ws.branch_changed_paths(branch)
+    def _branch_changed_paths(self, task_id: str) -> list[str]:
+        return self.ws.branch_changed_paths(task_id)
 
     def _changed_since(self, base: str) -> list[str]:
         return self.ws.changed_since(base)
@@ -2026,18 +2078,83 @@ class Orchestrator:
     def _cleanup_worktree(self, task: dag.Task) -> None:
         self.ws.cleanup_worktree(task.id)
 
-    def merge_leaf(self, task: dag.Task, branch: str) -> bool:
-        return self.ws.merge_leaf(task.id, branch)
+    def _load_landing(self) -> None:
+        """Which tasks already have an open pull request, and on which branch their work belongs.
 
-    def _landed(self) -> str:
-        """The work-branch commit the caller just created, as `completed_commit`.
-
-        Read at the moment the task's commit becomes HEAD — right after the serial finalize, or
-        right after that one leaf's merge — never once at the end of a batch. A batch's leaves
-        merge one after another, so a hash read after all of them names the last merge for every
-        member of the batch, and an integration gate that commits a fix moves it further still.
+        Read from the audit log, not configured: `pr-stack` records every pull request it opens,
+        and that record is what says a task's next commit belongs on a slice branch rather than on
+        the work branch. A slice already *ready* is excluded — past gate ④ a change is a human's
+        call, not something a re-run lands on quietly. Empty when no stack has been published,
+        which is every first build, and why nothing about that path changes.
         """
-        return "" if self.dry_run else self.ws.head()
+        from rein import pr_stack
+
+        events, _ = event_chain.scan(self.repo.events)
+        self.ws.landing = {r.task_id: r.branch for r in pr_stack.ledger(events) if r.task_id and not r.ready}
+
+    def merge_leaf(self, task: dag.Task, branch: str) -> bool:
+        """Merge one leaf into its target branch, classifying a conflict rather than only failing on it.
+
+        A conflict used to abort and block the task, full stop. It still ends that way when the two
+        sides genuinely disagree — but "genuinely" is now established rather than assumed: the
+        collision goes through `conflict`, which resolves the mechanical kind and escalates the
+        rest with the reason recorded. An implementer that reports nothing at all lands on
+        `semantic`, which is the same blocked task as before, now with a `knowledge_gap` beside it.
+        """
+        cwd = self.ws.merge_cwd(task.id)
+        if self.dry_run or not cwd:
+            with self._merge_checkout(task) as scratch:
+                return self._merge_into(task, branch, scratch)
+        return self._merge_into(task, branch, cwd)
+
+    @contextlib.contextmanager
+    def _merge_checkout(self, task: dag.Task) -> Iterator[str]:
+        """A checkout holding this task's target branch, made only when no worktree already has it."""
+        if self.dry_run:
+            yield self.root
+            return
+        with build_git.scratch_worktree(
+            self.repo, self.config.worktree_dir, "_merge", self.ws.target_branch(task.id), _late_run
+        ) as path:
+            yield path
+
+    def _merge_into(self, task: dag.Task, branch: str, cwd: str) -> bool:
+        if self.dry_run:
+            return self.ws.merge_leaf(task.id, branch, cwd)
+        if self.ws.merge_leaf(task.id, branch, cwd):
+            return True
+        resolution = conflict.merge_with_resolution(
+            self._plan or models.Plan({}),
+            cwd=cwd,
+            source_ref=branch,
+            ours_task=self._landing_owner(task.id),
+            theirs_task=task.id,
+            implement=self.resolve_conflict,
+            quality_gate=self.task_gate,
+            run=_late_run,
+        )
+        if resolution.merged:
+            print(f"    [merge] {task.id}: conflict resolved ({resolution.kind})")
+            self.ws.git(["worktree", "remove", "--force", self.ws.worktree_path(task.id)])
+            return True
+        conflict.escalate(self.repo, resolution)
+        self._escalate("merge_conflict", f"{task.id}: {resolution.escalation}", task=task.id)
+        return False
+
+    def _landing_owner(self, task_id: str) -> str:
+        """The task whose branch this one lands on — itself when a pull request already holds it."""
+        return task_id if self.ws.landing.get(task_id) else ""
+
+    def _landed(self, task_id: str) -> str:
+        """The commit the caller just created on this task's target branch, as `completed_commit`.
+
+        Read at the moment the task's commit becomes that branch's tip — right after the serial
+        finalize, or right after that one leaf's merge — never once at the end of a batch. A
+        batch's leaves merge one after another, so a hash read after all of them names the last
+        merge for every member of the batch, and an integration gate that commits a fix moves it
+        further still.
+        """
+        return "" if self.dry_run else self.ws.landed(task_id)
 
     # -- main loop --
 
@@ -2117,6 +2234,7 @@ class Orchestrator:
                 + "\n".join(f"  - {b.render()}" for b in blockers)
             )
             return common.EXIT_CANNOT_PROCEED
+        self._load_landing()
         if self.dry_run:
             return self._run_loop()  # read-only: no lock either, and no contention to guard against
         try:
@@ -2255,7 +2373,7 @@ class Orchestrator:
             if task.status != "awaiting-evidence" or self._unestablished_acceptance(task):
                 continue
             print(f"  [evidence] {task.id}: the outstanding observation has been recorded — finishing")
-            self._set_status(task.id, "done", commit=self._landed())
+            self._set_status(task.id, "done", commit=self._landed(task.id))
             promoted = True
         return promoted
 
@@ -2401,7 +2519,7 @@ class Orchestrator:
                 # without its commit (one commit = one task is the record gate ④ reviews).
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
-            self._set_status(task.id, self._completion_status(task), commit=self._landed())
+            self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
 
     def _consume_parallel(self, tasks: list[dag.Task]) -> None:
         """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
@@ -2469,7 +2587,7 @@ class Orchestrator:
             # bypassed hook can carry a gate violation; merging would bury it in the work branch's
             # HEAD where --check-diff never looks again. Check the branch's full diff first.
             if not self.dry_run:
-                violations = self._gate_violations(self._branch_changed_paths(branches[task.id]))
+                violations = self._gate_violations(self._branch_changed_paths(task.id))
                 if violations:
                     self._block_for_gate_violation(task.id, f"leaf branch {branches[task.id]}", violations)
                     self._cleanup_worktree(task)  # not merged; the branch keeps the diff for review
@@ -2477,7 +2595,7 @@ class Orchestrator:
                     continue
             if self.merge_leaf(task, branches[task.id]):
                 merged.append(task)  # done is decided after the integration gate below
-                landed[task.id] = self._landed()  # this leaf's merge commit, before the next one
+                landed[task.id] = self._landed(task.id)  # this leaf's merge commit, before the next one
             else:
                 self._set_status(task.id, "blocked")
                 self._cleanup_worktree(task)  # conflict: aborted merge, worktree no longer needed
@@ -2487,6 +2605,18 @@ class Orchestrator:
         # knob: each leaf was green only in isolation, so a batch that merged two or more of them
         # has never been verified as one tree until now. A `stage: integration` step is the other
         # reason to run it — those never ran per task, so even a single leaf has to face them.
+        #
+        # Only the leaves that landed on the *work branch* are in that join. A task whose pull
+        # request is open landed on its own slice branch, so the combined tree does not exist here
+        # yet — `rein pr-stack --restack` is what brings them together, and it runs this same gate
+        # once it has. Gating on a tree that is not the one under test would be the worse error.
+        elsewhere = [t for t in merged if self.ws.landing.get(t.id)]
+        if elsewhere:
+            print(
+                f"    [merge] {', '.join(t.id for t in elsewhere)} landed on their pull-request branches; "
+                "`rein pr-stack --restack` joins them into the work branch"
+            )
+        merged = [t for t in merged if not self.ws.landing.get(t.id)]
         if merged and (len(merged) >= 2 or self._steps_at("integration") != self._steps_at("task")):
             # An EnvironmentFault here propagates with the merged tasks still `in-progress`, and
             # that is the honest state: they merged, but nothing has verified the combined tree.
@@ -2527,7 +2657,8 @@ class Orchestrator:
 
         (There is no "you left a step empty" nudge here any more: the config schema requires a
         `command` for every command step, so an empty one cannot reach this code. The scaffold
-        ships a placeholder `["true"]` instead, which `doctor` can see and a silent skip cannot.)
+        ships a placeholder `["true"]` instead, which `doctor.check_quality_gate` reports and a
+        silent skip cannot.)
 
         This deliberately does not invite an approval. Green tests plus an AI's summary is not
         evidence that the code does what the plan says: gate ④ approves a grounded review — a
@@ -2630,3 +2761,18 @@ def _supervise(config: Config, repo: repo_mod.Repo, interval_sec: int) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+@contextlib.contextmanager
+def resolving(repo: repo_mod.Repo) -> Iterator[Orchestrator]:
+    """An orchestrator with a live control plane, for a caller that only needs conflict resolution.
+
+    The build lock then the control socket, the same order and for the same reasons `run()` takes
+    them: nothing else may be driving the repository while an implementer is writing in it, and a
+    leaf that cannot reach the control plane cannot report an outcome at all — which would make
+    every conflict look semantic.
+    """
+    orchestrator = Orchestrator(Config.load(repo), dry_run=False, repo=repo)
+    with build_lock(repo), control_plane.serving(repo) as server:
+        orchestrator.control = server
+        yield orchestrator

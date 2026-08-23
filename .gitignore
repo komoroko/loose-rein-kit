@@ -34,8 +34,9 @@ site/
 # "# …" is part of the pattern — which is how both entries below matched nothing at all.
 # temporary worktrees build_loop.py creates for parallel tasks
 .worktrees/
-# generated PR body (rein pr-draft); regenerate rather than track
+# generated PR bodies (rein pr-draft / pr-stack); regenerate rather than track
 .rein/pr-draft.md
+.rein/pr-stack/
 # per-task dossiers the loop writes for its agents; derived from the plan and the diff, rebuilt
 # for every launch, and deleted with the worktree they were written into
 .rein/work/

@@ -184,3 +184,116 @@ def test_a_head_that_removes_the_commit_stage_guard_is_refused(repo: repo_mod.Re
 def test_a_repository_that_never_wired_a_hook_is_not_weakening_anything(repo: repo_mod.Repo) -> None:
     """The comparison is against the base, not an assertion that every repo must have every hook."""
     assert not [p for p in policy_check.check(repo, _base(repo), _head(repo)) if "gate guard" in p]
+
+
+# --- a stacked pull request's base is not a base ------------------------------
+
+
+def _stack_repo(tmp_path: Path) -> tuple[Path, str, str, str]:
+    """main, then a stack branch off it with one commit. Returns (root, main sha, base sha, head sha)."""
+    root = tmp_path / "stack"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    (root / "a.txt").write_text("base\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "base")
+    main_sha = _git(root, "rev-parse", "HEAD")
+    _git(root, "switch", "-q", "-c", "build/x-pr-01-T-001")
+    (root / "a.txt").write_text("one\n", encoding="utf-8")
+    _git(root, "commit", "-q", "-am", "T-001")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    _git(root, "switch", "-q", "-c", "build/x-pr-02-T-002")
+    (root / "a.txt").write_text("two\n", encoding="utf-8")
+    _git(root, "commit", "-q", "-am", "T-002")
+    return root, main_sha, base_sha, _git(root, "rev-parse", "HEAD")
+
+
+def test_a_flat_pull_request_keeps_the_base_it_was_given(tmp_path: Path) -> None:
+    root, _, base_sha, head_sha = _stack_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+
+    resolved, problems = policy_check.trusted_base(repo, base_sha, head_sha, "main", "main")
+
+    assert problems == []
+    assert resolved == base_sha
+
+
+def test_a_stack_base_is_replaced_by_the_merge_base_with_the_default_branch(tmp_path: Path) -> None:
+    """The slice below is a branch the head's author created — it says nothing about a weakening."""
+    root, main_sha, base_sha, head_sha = _stack_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+
+    resolved, problems = policy_check.trusted_base(repo, base_sha, head_sha, "build/x-pr-01-T-001", "main")
+
+    assert problems == []
+    assert resolved == main_sha
+
+
+def test_a_stack_base_with_no_default_branch_fails_rather_than_falling_back(tmp_path: Path) -> None:
+    root, _, base_sha, head_sha = _stack_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+
+    resolved, problems = policy_check.trusted_base(repo, base_sha, head_sha, "build/x-pr-01-T-001", "")
+
+    assert resolved == ""
+    assert any("no trusted commit to compare against" in p for p in problems)
+
+
+def test_a_stack_base_with_no_merge_base_says_to_fetch_more_history(tmp_path: Path) -> None:
+    root, _, base_sha, head_sha = _stack_repo(tmp_path)
+    repo = repo_mod.Repo(root)
+
+    resolved, problems = policy_check.trusted_base(repo, base_sha, head_sha, "build/x-pr-01-T-001", "no-such-branch")
+
+    assert resolved == ""
+    assert any("fetch-depth: 0" in p for p in problems)
+
+
+def test_check_stops_rather_than_comparing_against_an_untrusted_base(tmp_path: Path) -> None:
+    root, _, base_sha, head_sha = _stack_repo(tmp_path)
+
+    violations = policy_check.check(
+        repo_mod.Repo(root), base_sha, head_sha, base_ref="build/x-pr-01-T-001", default_branch=""
+    )
+
+    assert len(violations) == 1
+    assert "no trusted commit" in violations[0]
+
+
+def test_this_repository_hands_ci_what_a_stack_needs(tmp_path: Path) -> None:
+    """The check that keeps `ci.yml` and `pr-stack`'s precondition from drifting apart."""
+    assert policy_check.workflows_missing_stack_inputs(repo_mod.Repo(Path.cwd())) == []
+
+
+def test_a_workflow_missing_the_base_ref_is_reported(tmp_path: Path) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n  policy:\n    steps:\n      - run: rein policy-check --base-sha x --head-sha y\n",
+        encoding="utf-8",
+    )
+
+    missing = policy_check.workflows_missing_stack_inputs(repo_mod.Repo(tmp_path))
+
+    assert len(missing) == 1
+    assert "base branch name" in missing[0]
+
+
+def test_a_workflow_that_never_runs_the_check_is_not_reported(tmp_path: Path) -> None:
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text("jobs:\n  unit:\n    steps:\n      - run: pytest\n", encoding="utf-8")
+
+    assert policy_check.workflows_missing_stack_inputs(repo_mod.Repo(tmp_path)) == []
+
+
+def test_an_unreadable_workflow_blocks_rather_than_passes(tmp_path: Path) -> None:
+    """Not knowing whether CI can judge a stack is not the same as knowing it can."""
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_bytes(b"\xff\xfe not utf-8")
+
+    missing = policy_check.workflows_missing_stack_inputs(repo_mod.Repo(tmp_path))
+
+    assert len(missing) == 1
+    assert "cannot be read" in missing[0]

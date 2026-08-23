@@ -17,9 +17,9 @@ outside the loop, which is what keeps statuses, merges and the audit chain machi
 2. **Reusing existing functions, utilities, and patterns comes first.** Match the conventions, naming, and style of the surrounding code.
 3. **Implement the minimum the ticket's acceptance criteria require (YAGNI).** No speculative generality: no config knobs, hooks, abstraction layers, or "while I'm here" extras that no acceptance criterion asks for — an unrequested capability is scope creep even when it seems obviously useful. If you believe something more is genuinely needed, report it instead of building it.
 4. Implement the task's "to do". **Do not exceed scope** — your dossier's `task.scope` is the plan's own statement of where this task's work belongs, and the caller checks your diff against it. Landing work elsewhere blocks the task as a `scope_violation`, because a scope change to an approved plan is a human's decision. **If the acceptance criteria cannot be met without touching a path outside that scope — the test file they require, an ADR the design mandates — stop before you do the work** and report `rein report --outcome needs-revision`, naming the path and the criterion that needs it — the same decision reaching the same human, minus a full attempt spent saying what you already know now.
-5. Following the task ticket's "automated-test approach", write unit/integration tests and **run them green**. Use `make test` (or the project's test command if absent) to run tests.
+5. Following the task ticket's "automated-test approach", write unit/integration tests and **run them green**. Run them with the project's own test command — `quality_gate` in `.rein/config.yaml` is where it is written down once.
 6. Do not finish with tests red. Attempt fixes.
-7. To finish, run `make check` (= pre-commit + pre-push; lint/format/typecheck; or the equivalent command if absent) and **fix until no findings remain**. If `/build`'s quality gate returns `/code-review` must-fix findings, fix them here too and re-confirm tests green and `make check` clean.
+7. To finish, run the project's check command (lint/format/typecheck — again, `quality_gate` names it) and **fix until no findings remain**. If `/build`'s quality gate returns `/code-review` must-fix findings, fix them here too and re-confirm both commands green.
 8. **For a runnable deliverable (CLI, server, …), keep the launch path working**: tests can be green while packaging/entry points are broken, and the quality gate's `smoke` step (or the caller) will catch it. If your task creates the first working entry point, say so in your report so the caller can fill in the config's `smoke.run`.
 
 ## Completion/escalation — always end with `rein report`
@@ -35,7 +35,7 @@ rein report --outcome implemented --summary "what you built, in a sentence or tw
 
 - **`--outcome implemented`** — the ticket's acceptance criteria are met and your tests are green.
   This claims nothing on its own: it opens the quality gate, which the caller runs itself.
-  **Do not paste command output as evidence.** The caller re-runs `make test` / `make check`
+  **Do not paste command output as evidence.** The caller re-runs the `quality_gate` commands
   independently on the merged state and decides by exit status — a green you report is not a green
   it counts, so pasting one costs tokens and buys nothing. Say *what* you did, not what scrolled past.
 - **`--outcome blocked`** — you are stuck and cannot get there. `--summary` must carry the actual

@@ -607,3 +607,31 @@ def test_the_declared_kinds_are_a_subset_of_the_actual_statement_categories() ->
 def test_a_declared_kind_outside_the_enum_is_refused_by_the_schema() -> None:
     plan = make_plan(tasks=[make_task("T-001", operator_surface=[{"kind": "vibes", "name": "x", "paths": ["src/"]}])])
     assert any("vibes" in error or "kind" in error for error in models.schema_errors(plan, "plan"))
+
+
+# --- vocabulary two modules have to agree on -----------------------------------
+
+
+def test_a_stack_branch_name_carries_the_cycle() -> None:
+    """Task ids restart at T-001 every cycle, so the branch alone repeats across them."""
+    first = models.stack_branch("build/x", "cycle-1", 1, "T-001")
+    second = models.stack_branch("build/x", "cycle-2", 1, "T-001")
+
+    assert first == "build/x-pr-cycle-1-01-T-001"
+    assert first != second
+
+
+def test_a_tail_slice_is_named_tail() -> None:
+    assert models.stack_branch("build/x", "c1", 4, "") == "build/x-pr-c1-04-tail"
+
+
+def test_a_stack_branch_is_recognised_and_an_ordinary_one_is_not() -> None:
+    assert models.is_stack_branch("build/x-pr-cycle-1-01-T-001")
+    assert not models.is_stack_branch("main")
+    assert not models.is_stack_branch("build/x")
+    assert not models.is_stack_branch("build/x-T-001")
+
+
+def test_the_placeholder_set_names_commands_that_cannot_fail() -> None:
+    assert ("true",) in models.PLACEHOLDER_COMMANDS
+    assert ("python", "-m", "pytest") not in models.PLACEHOLDER_COMMANDS

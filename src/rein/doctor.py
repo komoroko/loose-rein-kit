@@ -480,23 +480,33 @@ def check_runtime(repo: repo_mod.Repo) -> list[Finding]:
     return findings
 
 
-def check_sandbox(config: models.Config | None) -> list[Finding]:
-    """Executor profiles: anything running repository code must be an OCI profile (plan §10.1)."""
+def check_sandbox(config: models.Config | None, state: models.State | None = None) -> list[Finding]:
+    """Executor profiles: anything running repository code must be an OCI profile (plan §10.1).
+
+    Unsandboxed profiles are a FAIL **from the build phase onward**, and a WARN before it — the
+    same tri-state `check_adapters` uses, for the same reason. `FAIL` is defined at the top of this
+    module as "fix before continuing", and a repository that has not written its requirements yet
+    has nothing to continue *to*: nothing has run repository-derived code, so nothing has run it on
+    the host. Returning a non-zero exit on the first `rein doctor` after `rein init` made the level
+    say something the situation did not.
+    """
     if config is None:
         return []
     findings: list[Finding] = []
     offenders = config.unsandboxed_code_profiles()
+    building = state is None or state.current_phase in ("build", "verify", "done")
     if offenders:
         findings.append(
             Finding(
-                "FAIL",
+                "FAIL" if building else "WARN",
                 "sandbox",
                 f"profile(s) {', '.join(offenders)} run repository-derived code on the host. A test file is "
                 f"code an agent wrote, and it would run with your credentials. Run "
                 f"`{config.sandbox_setup_command()}` — it builds each packaged image, pins the digests here and "
                 "flips those profiles to `kind: oci`. Then check that the image can actually run the step you "
                 "pointed at it: the packaged images carry python, uv and pytest, so a step invoking `make` or "
-                "needing a dependency closure needs its own Containerfile first.",
+                "needing a dependency closure needs its own Containerfile first."
+                + ("" if building else " Not yet blocking: nothing has run repository code in this phase."),
             )
         )
     for name, profile in sorted(config.profiles.items()):
@@ -821,8 +831,13 @@ def _check_claude_matcher(repo: repo_mod.Repo) -> list[Finding]:
 
 
 #: The verbs whose pre-authorization breaks gate rule 2 outright: each one, run without a prompt,
-#: opens a gate or closes a cycle with no human in the loop.
-GATE_OPENING_VERBS = ("rein approve", "rein cycle-close")
+#: opens a gate, closes a cycle, or puts something outside this machine with no human in the loop.
+#:
+#: `rein pr-stack` is listed bare rather than by its `--push` / `--ready` flags. Prefix matching
+#: runs in both directions, so the bare verb also catches `Bash(rein pr-stack:*)` — and losing the
+#: ability to pre-authorize its read-only default run is the cheaper mistake: a verb with an
+#: outward-facing path in it should be stopped whole.
+GATE_OPENING_VERBS = ("rein approve", "rein cycle-close", "rein pr-stack")
 #: Both permission files. The local one is the one that matters: it is gitignored, so an entry
 #: added there appears in no diff, no code review, and no scripts/template_lint.py run.
 PERMISSION_FILES = (SETTINGS_PATH, ".claude/settings.local.json")
@@ -1001,9 +1016,65 @@ def check_plan(repo: repo_mod.Repo, plan: models.Plan | None, state: models.Stat
     findings += [Finding("FAIL", "trace", e) for e in report.errors]
     findings += [Finding("WARN", "trace", w) for w in report.warnings]
     if not report.checked:
-        findings.append(Finding("WARN", "trace", "no requirement id on either side — the thread is unknown, not whole"))
+        # A plan that is still the template — no claim, no task — has no thread to follow yet, and
+        # saying so is not the same as reporting a broken one. `check_plan` already distinguishes
+        # "no plan" from "a plan"; it did not distinguish "a plan with nothing in it", so the very
+        # first `rein doctor` in a fresh repository reported a warning about work not yet started.
+        empty = not plan.claims and not plan.tasks
+        findings.append(
+            Finding(
+                "INFO" if empty else "WARN",
+                "trace",
+                "no claims or tasks yet — there is no thread to follow until /req and /tasks fill them"
+                if empty
+                else "no requirement id on either side — the thread is unknown, not whole",
+            )
+        )
     elif not report.errors and not report.warnings:
         findings.append(Finding("PASS", "trace", "the requirement → claim → task thread is whole"))
+    return findings
+
+
+def check_quality_gate(config: models.Config | None) -> list[Finding]:
+    """Steps that are in the DoD but establish nothing yet.
+
+    `build_loop._present_gate4` has said since it was written that the scaffold ships a placeholder
+    `["true"]` "which `doctor` can see and a silent skip cannot" — and nothing here read
+    `quality_gate` at all, so `doctor` could see no such thing. The sentence described a check that
+    did not exist, which is the same defect class 0.3.4 spent a release closing.
+
+    Two shapes are reported, and neither is an error: a placeholder command, and a command step
+    marked `required: false`. Both are legitimate for a library with no entry point to launch. What
+    is not legitimate is forgetting one is there while calling the gate green.
+    """
+    if config is None:
+        return []
+    findings: list[Finding] = []
+    for step in config.quality_gate:
+        if step.kind != "command":
+            continue
+        if tuple(step.command) in models.PLACEHOLDER_COMMANDS:
+            findings.append(
+                Finding(
+                    "WARN",
+                    "quality-gate",
+                    f"step '{step.name}' runs {list(step.command)}, which exits zero and establishes nothing. "
+                    "Replace it with what actually exercises the deliverable — a gate that cannot fail is "
+                    "not part of the definition of done.",
+                )
+            )
+        elif not step.required:
+            findings.append(
+                Finding(
+                    "WARN",
+                    "quality-gate",
+                    f"step '{step.name}' is not `required`, so an empty command would skip it silently. "
+                    "Fine for a library; for anything with an entry point, set `required: true`.",
+                )
+            )
+    if not findings and config.quality_gate:
+        message = f"all {len(config.quality_gate)} DoD step(s) establish something"
+        findings.append(Finding("PASS", "quality-gate", message))
     return findings
 
 
@@ -1170,7 +1241,8 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
 
     findings += check_integrations(repo, config)
     findings += check_runtime(repo)
-    findings += check_sandbox(config)
+    findings += check_sandbox(config, state)
+    findings += check_quality_gate(config)
     findings += check_nested_sandbox(config)
     findings += check_independence(config, plan)
     findings += check_adapters(config, state)

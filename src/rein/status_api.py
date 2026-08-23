@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from rein import common, dag, dag_trace, event_chain, models, strict_yaml
+from rein import common, dag, dag_trace, event_chain, findings, models, strict_yaml
 from rein import events as events_mod
 from rein import lock as lock_mod
 from rein import repo as repo_mod
@@ -113,6 +113,7 @@ def next_action(
     unsandboxed_build_targets: list[str] | None = None,
     gate_ready: bool | None = None,
     open_change_requests: int = 0,
+    attributed_findings: int = 0,
 ) -> Recommendation:
     """The deterministic decision table (first match wins).
 
@@ -231,6 +232,19 @@ def next_action(
                     "run this yourself at a terminal; an agent never runs it for you.",
                     also=("rein ui", f"rein approve {gate} --check"),
                 )
+            # 8b. The machine review found blocking things and the plan already says which task
+            # answers each. Typing those ids in by hand is the clerical half of a decision that is
+            # otherwise fully derived — and doing it before re-running the build is what makes the
+            # re-run land the fix on the right pull request.
+            if current_phase == "build" and attributed_findings:
+                return Recommendation(
+                    command="rein revise --to build --from-review --reason <what the review found>",
+                    kind="fix",
+                    reason=f"The machine review has {attributed_findings} blocking finding(s) whose task the "
+                    "plan already names. Mark them, re-run the build — a task whose pull request is open has "
+                    "its fix land there — then carry the fixes up the stack.",
+                    also=("rein build", "rein pr-stack --restack"),
+                )
             also: tuple[str, ...] = (f"rein approve {gate} --check",)
             if current_phase == "build":
                 also = ("rein build", *also)
@@ -283,8 +297,14 @@ def _handoffs(state: models.State | None) -> dict[str, dict[str, str]]:
     return out
 
 
-def _completed_commits(state: models.State | None) -> dict[str, str]:
-    """Per done task, the work-branch commit that landed it — what makes the board's "done" reviewable."""
+def completed_commits(state: models.State | None) -> dict[str, str]:
+    """Per done task, the commit that landed it — what makes the board's "done" reviewable.
+
+    Normally on the work branch. A task whose pull request is already open lands on that slice's
+    branch instead (`build_git.GitWorkspace.target_branch`), and `pr-stack --restack` brings it
+    into the work branch afterwards — so this is "where the task landed", not "where on the work
+    branch".
+    """
     tasks = state.raw.get("tasks") if state else None
     if not isinstance(tasks, dict):
         return {}
@@ -301,7 +321,7 @@ def _tasks_block(graph: dag.Graph, state: models.State | None = None) -> dict[st
     fan = graph.fan_out()
     counts = graph.counts()
     handoffs = _handoffs(state)
-    commits = _completed_commits(state)
+    commits = completed_commits(state)
     return {
         "counts": {s: counts[s] for s in dag.STATUS_ORDER},
         "total": len(graph.tasks),
@@ -688,6 +708,7 @@ def collect_status(
         # None when readiness was not probed — the table must not read that as "blocked".
         gate_ready=None if gate_blockers is None else not gate_blockers,
         open_change_requests=len(state.change_requests_for(probe_gate, "open")) if state and probe_gate else 0,
+        attributed_findings=len(findings.seeds(findings.attribute(plan, review))) if plan else 0,
     )
     # A /-command only exists inside an agent whose surface was installed; recommending one in a
     # repo with no integration would send the user to a command their agent has never heard of.

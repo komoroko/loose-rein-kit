@@ -30,6 +30,7 @@
       "Bash(rein sync --check:*)",
       "Bash(make test:*)",
       "Bash(make check:*)",
+      "Bash(python -m pytest:*)",
       "Bash(make audit:*)",
       "Bash(uv run pytest:*)"
     ]
