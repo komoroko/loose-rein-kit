@@ -46,6 +46,26 @@ GATE_ORDER: tuple[str, ...] = ("requirements", "design", "tasks", "build", "rele
 GATE_VALUES = frozenset(GATE_ORDER)
 GATE_STATUS_VALUES = frozenset({"pending", "approved"})
 
+#: How a stacked pull request's branch is named: `<work_branch>-pr-NN-<task or tail>`. Here rather
+#: than in `pr_stack` because two modules that never import each other have to agree on it — the
+#: one that creates these branches, and the base-side CI check that has to recognise a base it must
+#: not trust (`policy_check`). `-` and not `/` because git refuses a ref that is a path prefix of
+#: another, which `<branch>/pr/01` next to `<branch>` would be.
+STACK_BRANCH_INFIX = "-pr-"
+STACK_TAIL_SUFFIX = "tail"
+_STACK_BRANCH_RE = re.compile(rf"{re.escape(STACK_BRANCH_INFIX)}[0-9]{{2,}}-.+$")
+
+
+def stack_branch(work_branch: str, index: int, task_id: str) -> str:
+    """The branch name for slice `index` of `work_branch`'s stack."""
+    return f"{work_branch}{STACK_BRANCH_INFIX}{index:02d}-{task_id or STACK_TAIL_SUFFIX}"
+
+
+def is_stack_branch(ref: str) -> bool:
+    """Whether `ref` names a slice of a stack — a base the head author created, not a trusted one."""
+    return bool(_STACK_BRANCH_RE.search(ref))
+
+
 #: current_phase values in lifecycle order (`brief` precedes gate ①, `done` follows gate ⑤).
 PHASE_ORDER: tuple[str, ...] = ("brief", "requirements", "design", "tasks", "build", "verify", "done")
 PHASE_VALUES = frozenset(PHASE_ORDER)

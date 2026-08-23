@@ -1292,3 +1292,36 @@ def test_a_trailing_commit_that_does_change_something_is_still_a_slice(
 
 def test_restack_with_nothing_materialised_does_nothing(cycle: Callable[..., dict[str, Any]]) -> None:
     assert restack(cycle()).merged == ()
+
+
+def test_publishing_is_refused_when_ci_could_not_judge_the_stack(cycle: Callable[..., dict[str, Any]]) -> None:
+    """A stacked PR's base is one this author created; without base.ref CI measures it against itself."""
+    bundle = cycle()
+    workflows = bundle["root"] / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n  policy:\n    steps:\n      - run: rein policy-check --base-sha x --head-sha y\n",
+        encoding="utf-8",
+    )
+
+    result = preconditions(bundle, "push")
+
+    assert not result.ok
+    assert any("measure it against itself" in problem for problem in result.errors)
+
+
+def test_a_workflow_that_hands_ci_what_it_needs_does_not_block_publishing(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    bundle = cycle()
+    workflows = bundle["root"] / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "jobs:\n  policy:\n    steps:\n      - run: >-\n"
+        "          rein policy-check --base-sha x --head-sha y\n"
+        '          --base-ref "${{ github.event.pull_request.base.ref }}"\n'
+        '          --default-branch "origin/${{ github.event.repository.default_branch }}"\n',
+        encoding="utf-8",
+    )
+
+    assert preconditions(bundle, "push").ok

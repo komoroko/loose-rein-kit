@@ -108,11 +108,18 @@ jobs:
       # verifier to check it, so that one run is not self-verified. Every later PR is checked by the
       # base side. The exact SHAs come from the event, so the head cannot declare its own base.
       #
+      # base.ref and the default branch are what let the check tell a flat pull request from a slice
+      # of a stack. A stacked PR's base is the slice below it — a branch the head's author created —
+      # so it is not a base at all; the check falls back to the merge base with the default branch,
+      # which the author did not write. Both values come from the event context for the same reason
+      # the SHAs do.
       - name: Run policy-check (base-side meta-policy)
         run: >-
           uv run --frozen rein policy-check
           --base-sha "${{ github.event.pull_request.base.sha }}"
           --head-sha "${{ github.event.pull_request.head.sha }}"
+          --base-ref "${{ github.event.pull_request.base.ref }}"
+          --default-branch "origin/${{ github.event.repository.default_branch }}"
 
   # Aggregate gate over the unit matrix. Branch protection requires the single stable name "tests".
   tests:

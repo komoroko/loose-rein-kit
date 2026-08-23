@@ -33,7 +33,7 @@ import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from rein import build_git, common, conflict, dag, event_chain, models, pr_draft, status_api
+from rein import build_git, common, conflict, dag, event_chain, models, policy_check, pr_draft, status_api
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -51,10 +51,9 @@ LEDGER_READY = "ready"
 
 #: Slice branches live in their own namespace so they never collide with the per-task leaf
 #: branches `build_git` creates (`<work_branch>-T-NNN`), which outlive a blocked or salvaged task.
-#: `-` rather than `/` for the same reason `build_git.branch_for` gives: git refuses a ref that is
-#: a path prefix of another.
-BRANCH_INFIX = "-pr-"
-TAIL_SUFFIX = "tail"
+#: The naming itself lives in `models` — `policy_check` has to recognise one of these as a base it
+#: must not trust, and it does not import this module.
+TAIL_SUFFIX = models.STACK_TAIL_SUFFIX
 
 
 class StackError(RuntimeError):
@@ -272,7 +271,7 @@ def opened_event_detail(slice_: Slice, url: str, action: str = LEDGER_OPENED) ->
 
 
 def branch_name(work_branch: str, index: int, task_id: str) -> str:
-    return f"{work_branch}{BRANCH_INFIX}{index:02d}-{task_id or TAIL_SUFFIX}"
+    return models.stack_branch(work_branch, index, task_id)
 
 
 def _landing_order_problems(graph: dag.Graph, landed: Sequence[str]) -> list[str]:
@@ -484,6 +483,17 @@ def preconditions(
         unopened = [s.label for s in slices if not s.opened]
         if unopened:
             errors.append(f"slice(s) {', '.join(unopened)} have no pull request yet — run `rein pr-stack --push` first")
+
+    if mode == "push":
+        # A stack's pull requests are based on branches this author created, so the base-side CI
+        # check cannot judge them unless the workflow hands it the base *ref* and the default
+        # branch (`policy_check.trusted_base`). Publishing anyway would produce pull requests whose
+        # only unfakeable check silently compares them against a base they wrote.
+        for gap in policy_check.workflows_missing_stack_inputs(repo):
+            errors.append(
+                f"{gap} — a stacked pull request's base is one you created, so without those the "
+                "base-side policy check would measure it against itself"
+            )
 
     base_sha = _rev_parse(repo, base)
     tip = _rev_parse(repo, config.work_branch)
