@@ -823,6 +823,16 @@ class State:
             return {}
         return {k: _str(v, "status", "todo") for k, v in value.items() if isinstance(v, dict)}
 
+    def recorded_acceptance(self, task_id: str) -> tuple[Mapping[str, Any], ...]:
+        """The observations `rein evidence record` has written for `task_id`, newest last.
+
+        Each one binds the tree it was made against, so a reader comparing that to the current
+        tree can tell a live observation from one the code has since retired.
+        """
+        entry = self.raw.get("tasks", {}).get(task_id)
+        value = entry.get("acceptance") if isinstance(entry, dict) else None
+        return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
+
     def gate_chain_violations(self) -> list[tuple[str, str]]:
         """Every (approved gate, first pending gate upstream of it) pair.
 

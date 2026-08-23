@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -116,24 +117,25 @@ def cycle(tmp_path: Path) -> Callable[..., dict[str, Any]]:
             state=state,
             config=make_config(branch=WORK_BRANCH),
             events=events,
-            **({"review": review} if review is not None else {}),
+            review=review if review is not None else make_review(),
         )
         return {"root": root, "base": base, "landed": landed, "repo": repo_mod.Repo(root)}
 
     return build
 
 
-def read(repo: repo_mod.Repo) -> tuple[models.Plan, models.State | None, models.Config]:
-    store = store_mod.Store(repo)
-    plan, state, config = store.read_plan(), store.read_state(), store.read_config()
-    assert plan is not None and config is not None
-    return plan, state, config
+def documents(bundle: dict[str, Any], events: list[models.Event] | None = None) -> pr_stack.Documents:
+    """The SSOT as `pr_stack` reads it, with `events` standing in for the log when given.
+
+    Tests pass events explicitly rather than writing them into `events.ndjson` because what is
+    under test is the reading of the ledger, not the chaining that `event_chain` already covers.
+    """
+    docs = pr_stack.Documents.read(bundle["repo"])
+    return docs if events is None else replace(docs, events=tuple(events))
 
 
 def derive(bundle: dict[str, Any], events: list[models.Event] | None = None) -> list[pr_stack.Slice]:
-    repo = bundle["repo"]
-    plan, state, config = read(repo)
-    return pr_stack.derive(repo, plan, state, config, events or [], base="main")
+    return pr_stack.derive(bundle["repo"], documents(bundle, events), base="main")
 
 
 def ledger_event(slice_: pr_stack.Slice, url: str = "https://example.invalid/pr/1") -> models.Event:
@@ -374,10 +376,9 @@ def test_a_work_branch_that_does_not_exist_is_refused(cycle: Callable[..., dict[
 
 def preconditions(bundle: dict[str, Any], mode: str, *, events: list[models.Event] | None = None) -> Any:
     repo = bundle["repo"]
-    plan, state, config = read(repo)
-    slices = pr_stack.derive(repo, plan, state, config, events or [], base="main")
-    review = store_mod.Store(repo).read_review()
-    return pr_stack.preconditions(repo, plan, state, review, slices, [], config, mode=mode, base="main")
+    docs = documents(bundle, events)
+    slices = pr_stack.derive(repo, docs, base="main")
+    return pr_stack.preconditions(repo, docs, slices, mode=mode, base="main")
 
 
 def test_push_is_allowed_before_gate_four(cycle: Callable[..., dict[str, Any]]) -> None:
@@ -438,8 +439,7 @@ def test_ready_passes_once_the_gate_the_review_and_the_pull_requests_all_agree(
     for s in slices:
         git(bundle["root"], "branch", s.branch, s.head_sha)
     head = git(bundle["root"], "rev-parse", WORK_BRANCH)
-    repo = bundle["repo"]
-    repo.review.write_bytes(store_mod.dump_yaml(make_review(generated=True, head_sha=head)))
+    bundle["repo"].review.write_bytes(store_mod.dump_yaml(make_review(generated=True, head_sha=head)))
     events = chained([ledger_event(s) for s in slices])
 
     result = preconditions(bundle, "ready", events=events)
@@ -450,12 +450,11 @@ def test_ready_passes_once_the_gate_the_review_and_the_pull_requests_all_agree(
 def test_an_audit_chain_defect_stops_every_mode(cycle: Callable[..., dict[str, Any]]) -> None:
     bundle = cycle()
     repo = bundle["repo"]
-    plan, state, config = read(repo)
-    slices = pr_stack.derive(repo, plan, state, config, [], base="main")
+    docs = documents(bundle)
+    slices = pr_stack.derive(repo, docs, base="main")
+    damaged = replace(docs, defects=(event_chain.ChainDefect(2, "link", "prev digest does not match"),))
 
-    result = pr_stack.preconditions(
-        repo, plan, state, None, slices, ["a broken link"], config, mode="push", base="main"
-    )
+    result = pr_stack.preconditions(repo, damaged, slices, mode="push", base="main")
 
     assert not result.ok
     assert any("audit chain" in problem for problem in result.errors)
@@ -482,3 +481,165 @@ def test_render_names_every_slice_and_its_base(cycle: Callable[..., dict[str, An
 
 def test_render_says_so_when_there_is_nothing_to_show() -> None:
     assert "nothing has landed" in pr_stack.render([])
+
+
+# --- pull-request bodies ------------------------------------------------------
+
+
+def body(bundle: dict[str, Any], current: int = 0, events: list[models.Event] | None = None) -> str:
+    docs = documents(bundle, events)
+    slices = pr_stack.derive(bundle["repo"], docs, base="main")
+    return pr_stack.slice_body(bundle["repo"], docs, slices, current, base="main")
+
+
+def test_a_draft_body_says_it_has_not_been_reviewed(cycle: Callable[..., dict[str, Any]]) -> None:
+    text = body(cycle())
+
+    assert "**Draft.**" in text
+    assert "gate ④: pending" in text
+    assert "Slice 1 of 3" in text
+
+
+def test_a_draft_body_prints_no_cycle_digests(cycle: Callable[..., dict[str, Any]]) -> None:
+    """An unapproved review's figures would dress a draft in a finished review's authority."""
+    text = body(cycle())
+
+    assert "### Cycle facts" not in text
+    assert "Change digest" not in text
+
+
+def test_an_approved_body_says_the_slice_was_not_reviewed_alone(cycle: Callable[..., dict[str, Any]]) -> None:
+    head = "b" * 40
+    bundle = cycle(gates={"build": "approved"}, review=make_review(generated=True, head_sha=head))
+
+    text = body(bundle)
+
+    assert "**This slice was not reviewed on its own.**" in text
+    assert "once, over the whole stack" in text
+    assert head[:12] in text
+    assert "### Cycle facts" in text
+
+
+def test_a_verdict_is_never_collapsed_into_one_word(cycle: Callable[..., dict[str, Any]]) -> None:
+    review = make_review(generated=True, head_sha="c" * 40)
+    review["machine"]["claims"] = [
+        {
+            "claim_id": "C-001",
+            "verdict": "aligned",
+            "integrity": {"status": "verified"},
+            "semantic_support": {"status": "supported", "assessment_basis": "machine_assessed"},
+            "conformance": {"status": "unknown"},
+        }
+    ]
+    bundle = cycle(gates={"build": "approved"}, review=review)
+
+    text = body(bundle)
+
+    assert "**C-001** — C-001 holds" in text
+    assert "integrity verified" in text
+    assert "semantic support supported" in text
+    assert "conformance unknown" in text
+
+
+def test_a_draft_body_states_the_claim_without_a_verdict(cycle: Callable[..., dict[str, Any]]) -> None:
+    text = body(cycle())
+
+    assert "**C-001** — C-001 holds" in text
+    assert "verdict" not in text
+
+
+def test_a_claim_the_review_never_reached_is_reported_as_such(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle(gates={"build": "approved"}, review=make_review(generated=True, head_sha="d" * 40))
+
+    text = body(bundle)
+
+    assert "not reviewed" in text
+
+
+def test_an_external_criterion_with_no_observation_says_awaiting_evidence(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    bundle = cycle()
+    _replace_task_acceptance(
+        bundle,
+        "T-001",
+        [{"id": "A-1", "statement": "the operator sees the banner", "evidence": {"kind": "external"}}],
+    )
+
+    text = body(bundle)
+
+    assert "**A-1** — the operator sees the banner · `external`" in text
+    assert "**awaiting evidence**" in text
+
+
+def test_a_recorded_observation_names_the_tree_it_binds(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    _replace_task_acceptance(
+        bundle,
+        "T-001",
+        [{"id": "A-1", "statement": "the operator sees the banner", "evidence": {"kind": "external"}}],
+    )
+    _record_observation(bundle, "T-001", {"id": "A-1", "tree": "sha256:" + "e" * 64, "note": "seen on staging"})
+
+    text = body(bundle)
+
+    assert "recorded against tree `sha256:e" in text
+    assert "seen on staging" in text
+
+
+def test_a_task_with_no_acceptance_says_the_gate_is_the_criterion(cycle: Callable[..., dict[str, Any]]) -> None:
+    assert "none declared — the criterion is the gate ④ review itself" in body(cycle())
+
+
+def test_the_body_lists_the_commits_the_slice_carries(cycle: Callable[..., dict[str, Any]]) -> None:
+    text = body(cycle())
+
+    assert "### Commits (2)" in text
+    assert "T-001: work" in text
+
+
+def test_the_stack_table_marks_the_current_slice(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+
+    first, second = body(bundle, 0), body(bundle, 1)
+
+    assert f"| 01 | T-001 | `{WORK_BRANCH}-pr-01-T-001` | `main` | not pushed ← **this one** |" in first
+    assert "← **this one**" in second.split("| 02 |")[1].split("\n")[0]
+    for text in (first, second):
+        assert text.count("← **this one**") == 1
+
+
+def test_the_body_forbids_squash_and_says_why(cycle: Callable[..., dict[str, Any]]) -> None:
+    text = body(cycle())
+
+    assert "Never squash" in text
+    assert "show this diff again" in text
+    assert "--delete-branch" in text
+
+
+def test_a_tail_slice_has_no_claim_to_answer(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    commit_on(bundle["root"], WORK_BRANCH, "docs at the gate", path="docs/10-requirements.md")
+
+    text = body(bundle, 3)
+
+    assert "commits outside any task" in text
+    assert "belong to none" in text
+
+
+def _replace_task_acceptance(bundle: dict[str, Any], task_id: str, acceptance: list[dict[str, Any]]) -> None:
+    repo = bundle["repo"]
+    plan = store_mod.Store(repo).read_plan()
+    assert plan is not None
+    document = dict(plan.raw)
+    document["tasks"] = [{**t, "acceptance": acceptance} if t["id"] == task_id else t for t in document["tasks"]]
+    repo.plan.write_bytes(store_mod.dump_yaml(document))
+
+
+def _record_observation(bundle: dict[str, Any], task_id: str, entry: dict[str, Any]) -> None:
+    repo = bundle["repo"]
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    document = dict(state.raw)
+    document["tasks"] = {**document["tasks"], task_id: {**document["tasks"][task_id], "acceptance": [entry]}}
+    repo.state.write_bytes(store_mod.dump_yaml(document))

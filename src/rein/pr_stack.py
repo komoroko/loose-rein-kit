@@ -28,11 +28,12 @@ CLI half behind an interactive confirmation.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from rein import dag, models, status_api
+from rein import dag, event_chain, models, pr_draft, status_api
 from rein import repo as repo_mod
+from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,35 @@ class LedgerRecord:
     head: str
     url: str = ""
     ready: bool = False
+
+
+@dataclass(frozen=True)
+class Documents:
+    """The four SSOT documents plus the audit log, read once.
+
+    Every entry point here needs most of them, and reading the store per call is how two halves of
+    one pull-request body end up describing different states of the repository.
+    """
+
+    plan: models.Plan
+    state: models.State
+    config: models.Config
+    review: models.Review | None
+    events: tuple[models.Event, ...]
+    defects: tuple[event_chain.ChainDefect, ...]
+
+    @classmethod
+    def read(cls, repo: repo_mod.Repo) -> Documents:
+        store = store_mod.Store(repo)
+        plan, state, config = store.read_plan(), store.read_state(), store.read_config()
+        if plan is None:
+            raise StackError(f"no plan at {repo.plan} — a stack is cut along the plan's tasks")
+        if state is None:
+            raise StackError(f"no state at {repo.state} — nothing records which tasks landed where")
+        if config is None:
+            raise StackError(f"no config at {repo.config} — nothing names the work branch")
+        events, defects = event_chain.scan(repo.events)
+        return cls(plan, state, config, store.read_review(), tuple(events), tuple(defects))
 
 
 @dataclass(frozen=True)
@@ -250,21 +280,14 @@ def _landing_order_problems(graph: dag.Graph, landed: Sequence[str]) -> list[str
     return problems
 
 
-def derive(
-    repo: repo_mod.Repo,
-    plan: models.Plan,
-    state: models.State | None,
-    config: models.Config,
-    events: Iterable[models.Event],
-    *,
-    base: str = "main",
-) -> list[Slice]:
+def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[Slice]:
     """The stack: one slice per task that landed, plus a tail for whatever landed outside a task.
 
     Slices whose pull request is already open are restored from the ledger and **not recomputed** —
     their boundary is fixed and their head is whatever their branch now points at. Everything past
     the last opened slice is cut fresh out of the work branch's first-parent history.
     """
+    plan, state, config, events = docs.plan, docs.state, docs.config, docs.events
     work_branch = config.work_branch
     if not work_branch:
         raise StackError("config.yaml names no project.work_branch — there is no branch to slice")
@@ -387,16 +410,7 @@ MODES = ("push", "restack", "ready")
 
 
 def preconditions(
-    repo: repo_mod.Repo,
-    plan: models.Plan,
-    state: models.State | None,
-    review: models.Review | None,
-    slices: Sequence[Slice],
-    defects: Sequence[object],
-    config: models.Config,
-    *,
-    mode: str,
-    base: str = "main",
+    repo: repo_mod.Repo, docs: Documents, slices: Sequence[Slice], *, mode: str, base: str = "main"
 ) -> Preconditions:
     """What has to hold before `mode` may run. Errors stop the run; warnings are printed and passed.
 
@@ -408,6 +422,7 @@ def preconditions(
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r} — one of {', '.join(MODES)}")
+    state, review, config, defects = docs.state, docs.review, docs.config, docs.defects
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -417,7 +432,7 @@ def preconditions(
             "cannot be verified (`rein doctor` lists them)"
         )
 
-    approved = state is not None and state.gate_status("build") == "approved"
+    approved = state.gate_status("build") == "approved"
     if mode == "ready" and not approved:
         errors.append(
             "gate ④ (build) is not approved — a slice may not leave draft before the grounded review "
@@ -468,6 +483,149 @@ def preconditions(
         else:
             warnings.append(f"{base} has moved since this cycle branched — the pull requests will merge on top of it")
     return Preconditions(errors=errors, warnings=warnings)
+
+
+# --- pull-request bodies ------------------------------------------------------
+
+
+def _subjects(repo: repo_mod.Repo, slice_: Slice) -> list[str]:
+    """`<short sha> <subject>` for each commit the slice carries, oldest first."""
+    rc, out = repo._git_rc("log", "--reverse", "--format=%h %s", f"{slice_.base_sha}..{slice_.head_sha}")
+    if rc != 0:
+        return []
+    return [line.rstrip() for line in out.splitlines() if line.strip()]
+
+
+def _axis(result: Mapping[str, object], name: str) -> str:
+    value = result.get(name)
+    return str(value.get("status", "unknown")) if isinstance(value, dict) else "unknown"
+
+
+def _claim_lines(docs: Documents, slice_: Slice, *, approved: bool) -> list[str]:
+    """What this slice was for, and — once the gate is open — what the review made of it.
+
+    The three axes are printed separately and never collapsed into one word. A claim has no single
+    `verified`: integrity, semantic support and conformance are decided apart, and rendering them
+    as one verdict is the precise misreading gate ④ exists to prevent.
+    """
+    task = docs.plan.task(slice_.task_id) if slice_.task_id else None
+    if task is None:
+        return ["- (no task — these commits belong to none, so there is no claim to answer)"]
+    if not task.claim_ids:
+        return ["- (this task answers no claim)"]
+    verdicts = {
+        str(r.get("claim_id")): r
+        for r in (docs.review.claim_results if docs.review is not None and docs.review.is_generated else ())
+    }
+    lines: list[str] = []
+    for claim_id in task.claim_ids:
+        claim = docs.plan.claim(claim_id)
+        statement = claim.statement if claim is not None else "(no such claim in the plan)"
+        lines.append(f"- **{claim_id}** — {statement}")
+        if not approved:
+            continue
+        result = verdicts.get(claim_id)
+        if result is None:
+            lines.append("  - verdict: **not reviewed** — the machine review says nothing about this claim")
+            continue
+        lines.append(
+            f"  - verdict: **{result.get('verdict', 'unknown')}** — integrity {_axis(result, 'integrity')} / "
+            f"semantic support {_axis(result, 'semantic_support')} / conformance {_axis(result, 'conformance')}"
+        )
+    return lines
+
+
+def _acceptance_lines(docs: Documents, slice_: Slice) -> list[str]:
+    """This task's own bar, and for the criteria the loop cannot establish, whether anybody saw it."""
+    task = docs.plan.task(slice_.task_id) if slice_.task_id else None
+    if task is None or not task.acceptance:
+        return ["- (none declared — the criterion is the gate ④ review itself)"]
+    recorded = {str(item.get("id")): item for item in docs.state.recorded_acceptance(slice_.task_id)}
+    lines: list[str] = []
+    for criterion in task.acceptance:
+        ac_id = str(criterion.get("id", "?"))
+        spec = criterion.get("evidence")
+        kind = str(spec.get("kind", "")) if isinstance(spec, dict) else ""
+        how = f"`{kind}`" if kind else "prose only — left to the gate ④ review"
+        lines.append(f"- **{ac_id}** — {criterion.get('statement', '')} · {how}")
+        if kind != "external":
+            continue
+        observation = recorded.get(ac_id)
+        if observation is None:
+            lines.append("  - **awaiting evidence** — nobody has recorded an observation yet")
+        else:
+            tree = str(observation.get("tree", ""))[:12]
+            lines.append(f"  - recorded against tree `{tree}`: {observation.get('note', '')}")
+    return lines
+
+
+def _stack_table(slices: Sequence[Slice], current: int, *, base: str) -> list[str]:
+    lines = ["| # | slice | branch | base | state |", "|---|---|---|---|---|"]
+    for position, s in enumerate(slices):
+        state = "open" if s.opened else "not pushed"
+        here = " ← **this one**" if position == current else ""
+        lines.append(f"| {s.index:02d} | {s.label} | `{s.branch}` | `{s.base_ref or base}` | {state}{here} |")
+    return lines
+
+
+def slice_body(
+    repo: repo_mod.Repo, docs: Documents, slices: Sequence[Slice], current: int, *, base: str = "main"
+) -> str:
+    """One slice's pull-request body.
+
+    The opening banner is the load-bearing part, and it says a different thing on each side of
+    gate ④. Before the gate: this has not been reviewed, which is why it is a draft. After it: the
+    review ran **once, over the whole stack** — so a reader of this pull request alone must be told
+    that this slice was never judged on its own, and what the review that covers it was bound to.
+
+    The cycle-wide figures come in only once the gate is open. Printing digests off an unapproved
+    review would dress a draft in the authority of a finished one.
+    """
+    slice_ = slices[current]
+    approved = docs.state.gate_status("build") == "approved"
+    heading = f"{slice_.label} — {slice_.title}" if slice_.task_id else slice_.title
+    lines = [f"## {heading}", ""]
+
+    position = f"Slice {current + 1} of {len(slices)} of cycle `{docs.state.cycle_id}`"
+    if approved:
+        binding = docs.review.machine.get("binding") if docs.review and docs.review.is_generated else None
+        change = binding.get("change_digest") if isinstance(binding, dict) else None
+        head = binding.get("subject_head_sha") if isinstance(binding, dict) else None
+        lines += [
+            f"> {position}. The grounded review ran **once, over the whole stack** "
+            f"(change digest `{change or 'not recorded'}`, head `{str(head or '')[:12] or 'not recorded'}`).",
+            "> **This slice was not reviewed on its own.**",
+        ]
+    else:
+        lines += [
+            f"> ⚠️ **Draft.** {position}. The grounded review has not run over it yet (gate ④: "
+            f"{docs.state.gate_status('build')}).",
+            "> It leaves draft when a human approves that review — not before.",
+        ]
+
+    lines += ["", "### What this slice is for", ""]
+    lines += _claim_lines(docs, slice_, approved=approved)
+    lines += ["", "### Acceptance", ""]
+    lines += _acceptance_lines(docs, slice_)
+
+    subjects = _subjects(repo, slice_)
+    lines += ["", f"### Commits ({len(subjects)})", ""]
+    lines += [f"- `{line}`" for line in subjects] or ["- (none)"]
+
+    lines += ["", "### The stack", ""]
+    lines += _stack_table(slices, current, base=base)
+    lines += [
+        "",
+        "Merge bottom first with `gh pr merge --merge --delete-branch`. Never squash and never "
+        "rebase-merge: either puts content into the base under a different commit, and every "
+        "pull request above this one would then show this diff again. Deleting the branch is what "
+        "retargets the next one.",
+    ]
+
+    if approved:
+        lines += ["", "### Cycle facts", ""]
+        lines += pr_draft.cycle_facts(docs.state, docs.plan, docs.review, docs.events, docs.defects, base=base)
+    return "\n".join(lines) + "\n"
 
 
 def render(slices: Sequence[Slice], *, base: str = "main") -> str:
