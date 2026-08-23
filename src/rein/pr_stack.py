@@ -28,6 +28,7 @@ CLI half behind an interactive confirmation.
 from __future__ import annotations
 
 import logging
+import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -483,6 +484,82 @@ def preconditions(
         else:
             warnings.append(f"{base} has moved since this cycle branched — the pull requests will merge on top of it")
     return Preconditions(errors=errors, warnings=warnings)
+
+
+# --- materialising the refs ---------------------------------------------------
+
+
+def _git_write(repo: repo_mod.Repo, *args: str) -> tuple[int, str]:
+    """The one place this module *changes* the repository: `git branch -f`, and nothing else.
+
+    `Repo._git` says read-only and means it, so writing through it would make that docstring a lie
+    for every other caller. Kept to its own function for the same reason `build_git` keeps every
+    git call in one class: a grep for what mutates the repository has to have one answer.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(repo.root), *args],
+        capture_output=True,
+        text=True,
+        timeout=repo_mod.GIT_TIMEOUT_SEC,
+    )
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+@dataclass(frozen=True)
+class Materialized:
+    """What one `materialize` run did, per slice — so the caller can say it rather than guess."""
+
+    created: tuple[str, ...] = ()
+    advanced: tuple[str, ...] = ()
+    unchanged: tuple[str, ...] = ()
+
+    @property
+    def touched(self) -> tuple[str, ...]:
+        return self.created + self.advanced
+
+
+def materialize(repo: repo_mod.Repo, slices: Sequence[Slice], *, dry_run: bool = False) -> Materialized:
+    """Point each slice's branch at the commit the slice ends on. Creates no commits.
+
+    Bottom first, so a reader watching the refs appear sees the stack build in the order it will be
+    merged. Three rules, and the first two are what keep an open pull request honest:
+
+    * A slice whose pull request is **open** may not move. Repointing it is a force-push in all but
+      name, and the whole design rests on not doing that (module docstring). Normally unreachable —
+      :func:`derive` freezes those slices at whatever their branch says — so reaching it means the
+      repository and the audit log disagree, and guessing which is right is not this function's
+      business.
+    * A branch that already exists may only **fast-forward**. Anything else would drop commits that
+      are on the branch and not on the new head, which is the same loss by a quieter route.
+    * Nothing is created for a slice already pointing where it should. Re-running is free.
+    """
+    created: list[str] = []
+    advanced: list[str] = []
+    unchanged: list[str] = []
+    for slice_ in slices:
+        current = _rev_parse(repo, slice_.branch)
+        if current == slice_.head_sha:
+            unchanged.append(slice_.branch)
+            continue
+        if current and slice_.opened:
+            raise StackError(
+                f"{slice_.branch} has an open pull request and points at {current[:12]}, but the stack "
+                f"says {slice_.head_sha[:12]}. Moving it would be a force-push onto a pull request "
+                "somebody may already be reading — reconcile the repository and the audit log first."
+            )
+        if current and not is_ancestor(repo, current, slice_.head_sha):
+            raise StackError(
+                f"{slice_.branch} points at {current[:12]}, which is not an ancestor of "
+                f"{slice_.head_sha[:12]} — moving it there would drop commits the branch already has"
+            )
+        if dry_run:
+            (created if not current else advanced).append(slice_.branch)
+            continue
+        rc, out = _git_write(repo, "branch", "-f", slice_.branch, slice_.head_sha)
+        if rc != 0:
+            raise StackError(f"could not point {slice_.branch} at {slice_.head_sha[:12]}: {out}")
+        (created if not current else advanced).append(slice_.branch)
+    return Materialized(tuple(created), tuple(advanced), tuple(unchanged))
 
 
 # --- pull-request bodies ------------------------------------------------------

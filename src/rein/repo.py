@@ -26,7 +26,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-_GIT_TIMEOUT_SEC = 10
+GIT_TIMEOUT_SEC = 10
 
 #: The SSOT directory as a POSIX prefix. Everything under it is orchestration state and never the
 #: product, so it is excluded from four answers that have to agree: what "the tree" is
@@ -159,7 +159,7 @@ class Repo:
                 ["git", "-C", str(self.root), *args],
                 capture_output=True,
                 text=True,
-                timeout=_GIT_TIMEOUT_SEC,
+                timeout=GIT_TIMEOUT_SEC,
             )
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -177,7 +177,7 @@ class Repo:
                 ["git", "-C", str(self.root), *args],
                 capture_output=True,
                 text=True,
-                timeout=_GIT_TIMEOUT_SEC,
+                timeout=GIT_TIMEOUT_SEC,
             )
         except (OSError, subprocess.SubprocessError):
             return 1, ""

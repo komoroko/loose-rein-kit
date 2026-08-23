@@ -643,3 +643,89 @@ def _record_observation(bundle: dict[str, Any], task_id: str, entry: dict[str, A
     document = dict(state.raw)
     document["tasks"] = {**document["tasks"], task_id: {**document["tasks"][task_id], "acceptance": [entry]}}
     repo.state.write_bytes(store_mod.dump_yaml(document))
+
+
+# --- materialising the refs ---------------------------------------------------
+
+
+def branches(root: Path) -> dict[str, str]:
+    out = git(root, "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads")
+    return dict(line.split(" ", 1) for line in out.splitlines() if line)
+
+
+def test_materialize_points_every_branch_at_its_slice(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    slices = derive(bundle)
+
+    result = pr_stack.materialize(bundle["repo"], slices)
+
+    refs = branches(bundle["root"])
+    assert result.created == tuple(s.branch for s in slices)
+    for s in slices:
+        assert refs[s.branch] == s.head_sha
+
+
+def test_materialize_creates_no_commits(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    before = git(bundle["root"], "rev-parse", WORK_BRANCH)
+
+    pr_stack.materialize(bundle["repo"], derive(bundle))
+
+    assert git(bundle["root"], "rev-parse", WORK_BRANCH) == before
+
+
+def test_materialize_is_free_to_re_run(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    slices = derive(bundle)
+    pr_stack.materialize(bundle["repo"], slices)
+
+    again = pr_stack.materialize(bundle["repo"], slices)
+
+    assert again.touched == ()
+    assert again.unchanged == tuple(s.branch for s in slices)
+
+
+def test_materialize_fast_forwards_a_slice_that_has_no_pull_request(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    pr_stack.materialize(bundle["repo"], derive(bundle))
+    commit_on(bundle["root"], WORK_BRANCH, "docs at the gate", path="docs/10-requirements.md")
+    grown = derive(bundle)  # a tail slice appears, and only it is new
+
+    result = pr_stack.materialize(bundle["repo"], grown)
+
+    assert result.created == (f"{WORK_BRANCH}-pr-04-tail",)
+    assert len(result.unchanged) == 3
+
+
+def test_materialize_refuses_to_move_a_branch_with_an_open_pull_request(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    bundle = cycle()
+    slices = derive(bundle)
+    pr_stack.materialize(bundle["repo"], slices)
+    # The audit log says slice 1 is open; the stack now claims it ends somewhere else.
+    forged = [replace(slices[0], opened=True, head_sha=slices[1].head_sha)]
+
+    with pytest.raises(pr_stack.StackError, match="force-push"):
+        pr_stack.materialize(bundle["repo"], forged)
+
+
+def test_materialize_refuses_a_move_that_would_drop_commits(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    slices = derive(bundle)
+    pr_stack.materialize(bundle["repo"], slices)
+    # Rewinding slice 2 onto slice 1's head loses everything slice 2 carried.
+    forged = [replace(slices[1], head_sha=slices[0].head_sha)]
+
+    with pytest.raises(pr_stack.StackError, match="drop commits"):
+        pr_stack.materialize(bundle["repo"], forged)
+
+
+def test_a_dry_run_reports_what_it_would_do_and_writes_nothing(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    slices = derive(bundle)
+
+    result = pr_stack.materialize(bundle["repo"], slices, dry_run=True)
+
+    assert result.created == tuple(s.branch for s in slices)
+    assert not set(branches(bundle["root"])) & {s.branch for s in slices}
