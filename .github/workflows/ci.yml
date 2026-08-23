@@ -65,7 +65,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Run the unit suite (fakes only, no docker/ssh)
-        run: uv run --frozen pytest -q -m "not integration" tests/
+        run: uv run --frozen pytest -q -m "not integration" --cov=src/rein --cov-report=term-missing tests/
 
   integration:
     name: integration tests (docker / git / ssh)
@@ -124,9 +124,14 @@ jobs:
   # Aggregate gate over the unit matrix. Branch protection requires the single stable name "tests".
   tests:
     name: tests
-    needs: unit
+    # The integration layer is what exercises the OCI sandbox against a real container runtime, and
+    # sandbox isolation is the central security claim this tool makes. Leaving it out of the single
+    # required status meant the one check that proves that claim was the one nothing insisted on.
+    needs: [unit, integration]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Every matrix job succeeded
-        run: test "${{ needs.unit.result }}" = "success"
+      - name: Every required job succeeded
+        run: |
+          test "${{ needs.unit.result }}" = "success"
+          test "${{ needs.integration.result }}" = "success"
