@@ -9,34 +9,30 @@ approve/decide at the "gate" on each phase boundary**.
 The harness is an **installed CLI** (`rein`); a product repository carries only its *state* —
 `.rein/` (the SSOT + lock + materialized prompts/schema) and `docs/` (deliverables).
 
-Works with **Claude Code** and **VS Code GitHub Copilot** (full support, incl. hook-enforced
-gates — Copilot's hook mechanism is a VS Code preview feature), and with **Codex** and any other
-agent that reads `AGENTS.md` (rules + procedures; gates by convention). See "Agent support".
-
 ## How it works
 
 ```mermaid
 flowchart LR
     brief["brief<br/>(human writes the vision)"]:::human
     req["/req<br/>requirements"]:::agent
-    g1{"① freeze requirements"}:::gate
+    g1{"① freeze requirements"}:::human
     design["/design<br/>design"]:::agent
-    g2{"② technical choices"}:::gate
+    g2{"② technical choices"}:::human
     tasks["/tasks<br/>task breakdown"]:::agent
-    g3{"③ task plan"}:::gate
+    g3{"③ task plan"}:::human
     build["/build<br/>implementation loop"]:::agent
-    g4{"④ implementation done"}:::gate
+    g4{"④ implementation done"}:::human
     verify["/verify<br/>verification"]:::agent
-    g5{"⑤ release decision"}:::gate
-    done["done"]:::human
+    g5{"⑤ release decision"}:::human
+    done(["done"])
 
     subgraph TASKS["task set (dependency graph DAG)"]
         direction TB
-        T1["foundation T-001"]:::task
-        T2["leaf T-002"]:::task
-        T3["leaf T-003"]:::task
-        Tn["leaf T-00n…"]:::task
-        TI["integration T-0xx"]:::task
+        T1["foundation T-001"]:::agent
+        T2["leaf T-002"]:::agent
+        T3["leaf T-003"]:::agent
+        Tn["leaf T-00n…"]:::agent
+        TI["integration T-0xx"]:::agent
         T1 --> T2
         T1 --> T3
         T1 --> Tn
@@ -51,42 +47,99 @@ flowchart LR
     g3 -->|"parallel (max 3)"| build
     build --> g4 --> verify --> g5 --> done
 
-    RV(("/revise")):::revise
-    g1 -.- RV
-    g2 -.- RV
-    RV -.- g4
-    RV -.- g5
+    RV(("/revise")):::human
+    g4 -.-> RV
+    g5 -.-> RV
+    RV -.-> g1
+    RV -.-> g2
 
-    classDef agent fill:#cfe8ff,stroke:#3b82f6,color:#06325e;
-    classDef gate fill:#ffe9c7,stroke:#f59e0b,color:#7a4a00;
-    classDef human fill:#d7f5dd,stroke:#22a04b,color:#0b3d1d;
-    classDef task fill:#e6e0f8,stroke:#7c6bbd,color:#2e2160;
-    classDef revise fill:#ffe0dc,stroke:#ee5544,color:#8a2b1e;
-    linkStyle 18,19,20,21 stroke:#ee5544,color:#ee5544,stroke-width:1.5px;
+    classDef agent fill:#dbeafe,stroke:#2563eb,color:#0b3a6f;
+    classDef human fill:#86dfaa,stroke:#0f7a3d,color:#04301a;
+    style TASKS fill:#f1f6fe,stroke:#c9ddf7,color:#57606a;
+    style done fill:#ffffff,stroke:#9aa0a6,color:#26282b;
+    linkStyle 18,19,20,21 stroke:#dc2626,color:#dc2626,stroke-width:1.5px;
 ```
 
-- 🟦 phases the agent runs
-- 🟧 gates ①–⑤ — **only the human** opens them
-- 🟩 points of human involvement
-- 🟪 tasks — a DAG: foundation → parallel leaves → integration
-- 🟥 `/revise` — rolling back upstream (the red dotted lines)
+- **Green** marks where a human acts: the brief, the five gates, and `/revise`.
+- **Blue** marks what the agent runs: each phase, and the task set it consumes.
+- **Red dotted arrows** are a rollback; they run backwards, from the late gates to the early ones.
 
 The flow moves left to right and **cannot advance while the prerequisite gate is unapproved**;
 `/build` consumes the task set in parallel (max 3). `/revise` resets the gates from the target
 onward to `pending` in a chain — also at the human's discretion.
 
-## Where to start
+Each phase is one command, and each stops at the end to ask for your approval:
 
-Install the CLI once (see "Setup"), then:
+| Step | Command | What happens | Your role |
+|------|----------|--------------|-----------|
+| requirements | `/req`    | structure requirements by sounding out | ① freeze requirements |
+| design | `/design` | approach + technical-choice options | ② decide/approve technical choices |
+| breakdown | `/tasks`  | task tickets with a test approach | ③ approve the task plan |
+| implementation | `/build`  | autonomous loop (test-green condition) | ④ review/approve completion |
+| verification | `/verify` | run functional + non-functional tests | ⑤ decide on release |
 
-| Your situation | Entry point |
+## Setup
+
+Six steps, in order. `rein doctor` checks every one of them at any point; when it is green, open a
+new agent session and start with `/req`.
+
+**1. Prerequisites** — a POSIX environment, plus a container runtime (docker/podman) for the
+sandbox:
+
+| Environment | Status |
 |---|---|
-| New product from scratch (greenfield) | "Setup" → "Usage" |
-| An ongoing repo (brownfield) | "Setup" — `rein init` auto-detects it — then `/onboard` |
-| Already set up — next change | Write it into `docs/00-product-brief.md`, run `/req` (if the previous cycle is open, `rein cycle-close --name <slug>` first) |
-| Release decided (gate ⑤) | `rein cycle-close --name <slug>` — archive this cycle's docs, reset for the next |
-| Refresh the materialized tooling | `rein upgrade` (and `rein uninstall --all` to retract) |
-| Lost or resuming | `/status` (tells you the next command), or `rein ui` for a local browser dashboard |
+| Linux | supported |
+| WSL | supported — the way to run this on a Windows machine |
+| macOS | supported |
+| Windows native | **not validated.** Nothing refuses to start, but the guarantees are not there: file locking falls back to `msvcrt`, directory `fsync` is skipped, and the control plane a parallel build talks to needs a Unix domain socket. Use WSL. |
+
+**2. Install the CLI** so its hooks resolve on PATH:
+
+```bash
+uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # provides `rein`
+# replace vX.Y.Z with the latest release tag: https://github.com/komoroko/loose-rein-kit/releases
+```
+
+**3. Provide a headless agent CLI** — it is what the implementation phase (`rein build`) drives.
+The default is `claude -p`; switch with `rein agent codex` (`gemini` also works). Without one,
+`rein build` refuses to start.
+
+**4. Seed the repository** — the same command for a new and an existing repo. Brownfield is
+auto-detected and changes what `init` writes (see "Adopting into an existing repository"):
+
+```bash
+cd myrepo && git init
+
+rein start   # interactive wizard; it asks only for the product name and a one-line brief
+# or non-interactively (idempotent):
+#   rein init --name <product> [--branch build/<product>] [--source git+https://github.com/komoroko/loose-rein-kit]
+```
+
+**5. Add your agent's surfaces** — opt-in, whenever you need them:
+
+```bash
+rein install claude         # writes .claude/ wrappers + merges settings.json
+rein install copilot        # writes .github/ prompt/agent/hook wrappers
+rein install codex          # writes .agents/skills/ + .codex/ agent/hook wrappers
+```
+
+These files are usually discovered only at session or editor start, so open a **new** session
+(or restart the editor) afterwards.
+
+**6. Build the sandbox images** — repository code and tests run in a sandbox rather than on the
+host, so a test an agent wrote never runs with your credentials. `rein doctor` FAILs until the
+images are pinned:
+
+```bash
+rein oci build --all --write-config # build and pin the three packaged images (needs docker/podman)
+rein oci verify                     # confirm the pins are present
+```
+
+`rein init` and the wizard prompt for this at the right time and can run it for you. Detail
+(custom Containerfiles, re-pinning, runtime flags): the `SANDBOXES` comment block in
+`.rein/config.yaml`.
+
+## Daily use
 
 The daily human surface is a handful of verbs (everything else stays behind the dashboard's
 buttons — `rein --help` lists them all):
@@ -104,100 +157,105 @@ dropdown in its header) that retargets the whole board without restarting the se
 always adds the repo you launched it from. For a single command, `rein --repo <path> <verb>`
 (or `REIN_ROOT=<path>`) targets another repo without changing directory.
 
-## Design principles
+Then, per cycle:
 
-- **Architecture** — `rein build` is a deterministic DAG scheduler; each phase runs as a
-  dedicated role agent.
-- **Context** — SSOT files hold the truth; role agents read only what they need; the
-  `events.ndjson` audit log never rotates. Detail: "Context budget" in
-  `.rein/prompts/rules/gate-workflow.md`.
-- **Tools** — minimal scoped role-agent grants; the quality gate has a retry cap.
+1. **Write the brief** — a few lines on "what to build" in `docs/00-product-brief.md`. It is the
+   only starting point a human writes.
 
-## Setup
+2. **Run the phases in order** — the table above gives that order. `rein next` always says which
+   one is next, and `/status` shows the same board in chat with the task DAG.
 
-Prerequisites — a POSIX environment, plus a container runtime (docker/podman) for the sandbox:
+3. **Open a gate** — it is the human's act, never the agent's, and there are two places
+   to do it. Both check readiness first, print the digests the approval would cover, and reach the
+   same single recording path; the receipt records which channel confirmed.
 
-| Environment | Status |
-|---|---|
-| Linux | supported |
-| WSL | supported — the way to run this on a Windows machine |
-| macOS | supported |
-| Windows native | **not validated.** Nothing refuses to start, but the guarantees are not there: file locking falls back to `msvcrt`, directory `fsync` is skipped, and the control plane a parallel build talks to needs a Unix domain socket. Use WSL. |
+   ```bash
+   rein approve build            # readiness check, then:
+   #   gate 'build' is ready. This approval will cover:
+   #     plan_digest          sha256:…
+   #     attested_chain_root  sha256:…
+   #   Approve gate 'build'? [y/N] y
+   #   gate 'build' opened (GA-BUILD-a1b2c3d4)
+   ```
 
-Install the CLI so its hooks resolve on PATH:
+   The other place is `rein ui`, from the same pane that just showed you the deliverable. Why
+   nothing but a person can reach either is in "Authority to open a gate".
 
-```bash
-uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # provides `rein`
-# replace vX.Y.Z with the latest release tag: https://github.com/komoroko/loose-rein-kit/releases
-```
+4. **Ask for changes** — when the deliverable is not right, this is a first-class answer, not a
+   dead end. Say no at the prompt, or use the dashboard's *Request changes*:
 
-The implementation phase (`rein build`) additionally needs a **headless agent CLI** — `claude -p`
-by default; switch with `rein agent codex` (sets the role's adapter in `.rein/config.yaml`;
-`gemini` also works). Without one `rein build` refuses to start, and `rein doctor` says so.
+   ```bash
+   rein changes add requirements --target docs/10-requirements.md#R-3 \
+                                 --reason "the acceptance criterion is unmeasurable"
+   ```
 
-Seed a repository — the same command for a **greenfield** and a **brownfield** repo (brownfield is
-auto-detected; see "Adopting into an existing repository"):
+   An open request **holds the gate shut** and lives in `state.yaml`, so it survives past the
+   session that raised it. The `--target` anchor makes the agent fix that slice, not re-run the
+   whole phase. It answers with `rein changes address <id> --note <what changed>`, which unblocks
+   the gate and shows the note on your approval screen.
 
-```bash
-cd myrepo && git init            # any repo — new or existing
+5. **Roll back** — on an upstream defect found *after* a gate was approved, `/revise <phase>`
+   resets the gates from the target onward. `rein revise --impacted T-00x` marks the named seed
+   tasks and their transitive dependents `needs-revision`; nothing moves automatically.
+   Naming an early foundation task pulls in everything downstream of it, so pick seeds narrowly.
 
-# interactive wizard (recommended; asks only the product name — defaulting to the folder — and a
-# brief line. The branch defaults to build/<name>, the source URL is auto-detected from the
-# install, and the headless CLI keeps its default — all overridable later, see below.)
-rein start
-# or non-interactively (idempotent):
-#   rein init --name <product> [--branch build/<product>] [--source git+https://github.com/komoroko/loose-rein-kit]
+6. **Check progress** — at any time, from any of these.
 
-# optional, per developer environment — add an agent's surfaces on demand:
-rein install claude         # writes .claude/ wrappers + merges settings.json
-rein install copilot        # writes .github/ prompt/agent/hook wrappers
-rein install codex          # writes .agents/skills/ + .codex/ agent/hook wrappers
-```
+   - `rein next` — just the next recommended command (`--json` for integrations)
+   - `rein status` — leads with **Waiting on you**: everything standing between the repo and
+     its next gate, worst first, each with a severity and the command that clears it. The blocking
+     rows are the same list `rein approve <gate> --check` refuses on, so the board can never
+     say "nothing needs attention" about a gate that will not open.
+   - `/status` — the same board in chat, plus the task DAG
+   - `rein ui` — the dashboard: an Overview board with that queue; a **Review tab** for reading
+     and approving the gate under decision in one pane (scope → what changed and how it was
+     reviewed → what the change now requires of a person → Decision Cards for every unsettled
+     claim, gap, or finding, each with its evidence, blocking the freeze until answered); a Tasks
+     tab (DAG, layer progress); an Activity tab (live event feed). Optional bell notifies on a
+     waiting gate/escalation. Actions are a fixed whitelist — reads, diagnostics, and decision
+     recording (approve / resolve / revise / cycle-close); phase execution and push/PR/merge are
+     not available here.
+   - `rein dag --mermaid` — render the task dependency diagram
 
-Editor/agent integrations typically discover these command/prompt files only at session or
-editor start, so open a **new** session (or restart the editor) after running `rein
-install claude|copilot|codex` — one already running won't pick up files added mid-session. In that
-new session, start with **`/req`** (`rein next` always shows where you are and what to
-run — see "Usage").
+7. **Ship as a PR** — `rein pr-draft` assembles the PR body from the SSOT into
+   `.rein/pr-draft.md` (read-only). Creating and pushing the PR stays yours.
 
-`rein init` writes **only state**:
+8. **Close the cycle** — after gate ⑤, `rein cycle-close --name <slug>` archives to
+   `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human
+   operation, like opening a gate.
 
-- the four SSOT documents (`plan.yaml` / `state.yaml` / `review.yaml` / `config.yaml`,
-  placeholder-filled) and the docs scaffolds;
-- the materialized `.rein/prompts` + `.rein/schema` + `.rein/AGENTS.rein.md`,
-  a pristine scaffold snapshot, and `.rein/rein.lock` (the tool version/source + a
-  content hash per installed file);
-- a marker-guarded pointer block appended to `AGENTS.md`;
-- the work branch, created and switched to (implement there, not on main), with the gate guard
-  flipped live.
-
-Nothing else is touched: no build files, no makefile, no agent surfaces unless you
-`rein install` them. A brownfield repo also gets the `/onboard` hint.
-
-Keeping the materialized files current:
+Keeping the installation current:
 
 - `rein sync` — re-materializes the prompts/schema from the installed package (pristine files
   are refreshed; locally modified ones are kept and listed; `--force` overrides; `--check` reports
   drift without writing)
-- `rein upgrade` — shows the changelog transition, then refreshes everything the tool
-  materialized
+- `rein upgrade` — shows the changelog transition, then refreshes everything the tool materialized
 - `uv tool upgrade loose-rein-kit` — upgrades the CLI *code* itself
 
-### The sandbox images
+## Authority to open a gate
 
-`rein doctor` fails until repository code and tests run in a sandbox rather than on the host, so
-a test file an agent wrote never runs with your credentials. Before your first `/build`:
+`gates.<name>` in `.rein/state.yaml` reaches `approved` on exactly one path: a human approval that
+`rein` recorded. Everything below is how that stays true when the agent is the one doing the work.
 
-```bash
-rein oci build --all --write-config # build and pin the three packaged images (needs docker/podman)
-rein oci verify                     # confirm the pins are present
-```
+- **One recording path, two places to use it.** `rein approve <gate>` at your own terminal, or the
+  dashboard's approval footer. Both check readiness first and print the digests the approval will
+  cover; the receipt binds those digests and records which channel confirmed — never which human.
+- **It cannot happen by accident, by default, or via a pre-authorized config.** `rein approve`
+  requires an interactive TTY (a piped stdin, CI job, or agent subprocess all fail it), the
+  dashboard uses a single-use launch link printed only to the terminal `rein ui` runs in, and
+  `rein doctor` checks that no settings file pre-authorizes a gate-opening verb — including the
+  gitignored local one. There is no `--force`.
+- **The agent is fenced out at three stages.** Editing a next-phase deliverable while its gate is
+  `pending` is denied at edit time by the `rein guard` hook; writes made through the shell
+  (`sed -i`, a heredoc patch) miss that matcher and are caught at commit stage by
+  `rein guard --check-diff`; and CI's base-side `rein policy-check` fails a pull request that tries
+  to weaken either. A key like `gates.enforce_hook` is refused outright, hand-editing a gate line is
+  denied, and an unreadable gate fails closed.
+- **Rewinding an approval is a human privilege too.** `/revise` resets gates from the target onward
+  in a chain, invalidating the receipts and the review built on top of them; an upstream `pending`
+  never leaves a downstream gate `approved`. Nothing rewinds automatically.
 
-`rein init`, `rein next`, and the dashboard all prompt for this at the right time; the wizard can
-run it for you. Detail (custom Containerfiles, re-pinning, runtime flags): the `SANDBOXES`
-comment block in `.rein/config.yaml`.
-
-## Repository settings you have to make yourself
+### Settings you provide yourself
 
 Loose Rein reads and diagnoses these; it never sets them. Branch protection, required checks,
 and secrets are repository administration — a tool that could grant itself the checks that
@@ -216,106 +274,43 @@ judge it would not be a boundary. Set them once, on the hosting side:
 repository, and the first `policy-check` run — the commit that introduces it — is not
 self-verified, because there is no earlier base-side verifier to check it.
 
-## Adopting into an existing repository (brownfield)
+## Evidence over the agent's account
 
-There is no separate adopt command — `rein init` is the single entry point and **auto-detects**
-an existing codebase (a `src/`, `package.json`, `pyproject.toml`, …). In that mode it:
+An agent's account of its own work is self-consistent by construction, so it is never what a gate
+is decided on. What is:
 
-- scopes `config.yaml`'s `guard.paths` to the docs deliverables only, so pending gates never freeze
-  your existing code (re-enable code paths like `src/: tasks` when ready);
-- fills the quality-gate test/check commands from your tooling when recognizable (override with
-  `--test-cmd` / `--check-cmd`);
-- annotates `docs/00-product-brief.md` with the adopted-note pointing at `/onboard`.
+- **A claim with no evidence is `unknown`, never prose.** `.rein/plan.yaml` freezes one claim per
+  requirement (`R-N`/`NFR-N`) — the **Expected Model** — and `claim_ids` threads each task back to
+  the claim it answers, cross-checked by `rein dag --trace`.
+- **Gate ④ compares Expected against Actual.** `rein review generate` (bound to the reviewed HEAD)
+  runs a deterministic Coverage Manifest, a **blind** extraction of what the code actually does —
+  that extractor is never given the plan — then the Expected/Actual comparison and the structured
+  security and maintainability review. What it reads is the product, not `.rein/`.
+- **There is no single `verified`.** Findings sit on three separate axes — integrity, semantic
+  support, conformance — and "extra behaviours: 0" appears only with the Coverage Manifest that
+  earned it. A blocking security finding, a diverged high/critical claim, an ungrounded
+  high/critical extra behaviour, or an insufficient manifest blocks the gate. A later commit leaves
+  the review stale until it is regenerated.
+- **`done` means the DoD went green against the tree the task actually produced** — a content
+  fingerprint recorded beside the status, not a claim the implementer makes. An attempt that
+  changed nothing never reaches the gate: a green over an unchanged tree is a fact about code that
+  was already there.
+- **Whoever judges does not repair.** The per-task reviewer is launched read-only and writes
+  findings; the implementer resolves them and the reviewer looks again. An implementer ends with
+  `rein report --outcome implemented|blocked|needs-revision` — a claim about its work, checked
+  against the real diff, never a verdict.
+- **Evidence this loop cannot obtain is named as such.** An acceptance criterion marked `external`
+  — a staging check, a device, a person — merges the work and parks the task at
+  `awaiting-evidence` until somebody records what they saw with `rein evidence record`. That record
+  binds the tree it was made against, so changing the code retires it.
+- **The environment is pinned too.** Repository code and tests run in the OCI sandbox, pinned by
+  digest rather than tag, so the environment a review ran in cannot change after that review was
+  approved.
+- **All of it lands on a hash-chained log.** `.rein/events.ndjson` records every state change and
+  why; a gate receipt pins the chain root, so a deleted, reordered, or re-hashed line breaks the
+  chain that receipt stands on.
 
-Existing files are **never overwritten** (idempotent re-runs). Then, inside the repo:
-
-1. **`/onboard`** — surveys the codebase read-only and fills `docs/05-current-state.md` (the
-   persistent baseline). Existing behavior is **not** reverse-generated into requirements or done
-   tasks; traceability (R-N) covers each cycle's delta only. Half-done work is anchored by an
-   **absorb task** that pins the existing partial code green before new work stacks on it.
-2. **Delta cycles** — each `brief → /req → … → /verify` pass describes **one change**, closed with
-   `rein cycle-close` (same steps as "Usage"). `docs/00-product-brief.md` and
-   `docs/05-current-state.md` persist across cycles.
-3. **Retract any time** — `rein uninstall claude|copilot|codex` retracts an agent surface (pristine
-   files only; the settings merge is reverted entry-by-entry), and `rein uninstall --all`
-   removes every materialized artifact and the lock. Your repo state (SSOT, `docs/`) is never
-   touched.
-
-## Usage
-
-1. Write a few lines on "what to build" in `docs/00-product-brief.md` (the only starting point a
-   human writes).
-2. Run these in order — each stops at the end to ask for approval:
-
-   | Step | Command | What happens | Your role |
-   |------|----------|--------------|-----------|
-   | requirements | `/req`    | structure requirements by sounding out | ① freeze requirements |
-   | design | `/design` | approach + technical-choice options | ② decide/approve technical choices |
-   | breakdown | `/tasks`  | task tickets with a test approach | ③ approve the task plan |
-   | implementation | `/build`  | autonomous loop (test-green condition) | ④ review/approve completion |
-   | verification | `/verify` | run functional + non-functional tests | ⑤ decide on release |
-
-3. **Open a gate** yourself — it is the human's act, never the agent's, and there are two places
-   to do it. Both check readiness first, print the digests the approval would cover, and reach the
-   same single recording path; the receipt records which channel confirmed.
-
-   ```bash
-   rein approve build            # readiness check, then:
-   #   gate 'build' is ready. This approval will cover:
-   #     plan_digest          sha256:…
-   #     attested_chain_root  sha256:…
-   #   Approve gate 'build'? [y/N] y
-   #   gate 'build' opened (GA-BUILD-a1b2c3d4)
-   ```
-
-   Or in `rein ui`, from the same pane that just showed you the deliverable — no extra step.
-
-   **An approval cannot happen by accident, by default, or via a pre-authorized config**:
-   `rein approve` requires an interactive TTY (a piped stdin, CI job, or agent subprocess all
-   fail it), the dashboard uses a single-use launch link printed only to the terminal `rein ui`
-   runs in, and `rein doctor` checks that no settings file pre-authorizes a gate-opening verb.
-   There is no `--force`, and hand-editing a gate line is denied by the guard.
-
-4. **Ask for changes** instead, when the deliverable is not right. This is a first-class answer,
-   not a dead end — say no at the prompt, or use the dashboard's *Request changes*:
-
-   ```bash
-   rein changes add requirements --target docs/10-requirements.md#R-3 \
-                                 --reason "the acceptance criterion is unmeasurable"
-   ```
-
-   An open request **holds the gate shut** and lives in `state.yaml`, so it survives past the
-   session that raised it. The `--target` anchor makes the agent fix that slice, not re-run the
-   whole phase. It answers with `rein changes address <id> --note <what changed>`, which unblocks
-   the gate and shows the note on your approval screen.
-
-5. **Roll back** on an upstream defect *after* a gate was approved: `/revise <phase>` resets gates
-   from the target onward. `rein revise --impacted T-00x` marks the named seed tasks and their
-   transitive dependents `needs-revision` — nothing moves automatically. Naming an early
-   foundation task pulls in everything downstream of it, so pick seeds narrowly.
-6. **Check progress** anytime:
-   - `rein next` — just the next recommended command (`--json` for integrations)
-   - `rein status` — leads with **Waiting on you**: everything standing between the repo and
-     its next gate, worst first, each with a severity and the command that clears it. The blocking
-     rows are the same list `rein approve <gate> --check` refuses on, so the board can never
-     say "nothing needs attention" about a gate that will not open.
-   - `/status` — the same board in chat, plus the task DAG
-   - `rein ui` — the dashboard: an Overview board with that queue; a **Review tab** for reading
-     and approving the gate under decision in one pane (scope → what changed and how it was
-     reviewed → what the change now requires of a person → Decision Cards for every unsettled
-     claim, gap, or finding, each with its evidence, blocking the freeze until answered); a Tasks
-     tab (DAG, layer progress); an Activity tab (live event feed). Optional bell notifies on a
-     waiting gate/escalation. Actions are a fixed whitelist — reads, diagnostics, and decision
-     recording (approve / resolve / revise / cycle-close); phase execution and push/PR/merge are
-     not available here.
-   - `rein dag --mermaid` — render the task dependency diagram
-7. **Ship as a PR**: `rein pr-draft` assembles the PR body from the SSOT into
-   `.rein/pr-draft.md` (read-only); creating/pushing the PR stays yours.
-8. **Close the cycle** after gate ⑤: `rein cycle-close --name <slug>` archives to
-   `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human
-   operation, like opening a gate.
-
-### Running the implementation phase autonomously
+## The deterministic build loop
 
 Canon: `.rein/prompts/commands/build.md` + `AGENTS.md`.
 
@@ -350,7 +345,7 @@ holding the lock — and safe to retry, with nothing marked and no budget spent.
 > defaults `make test` / `make check` are placeholders — `rein init` fills detected commands
 > in a brownfield repo; substitute yours otherwise).
 
-### Security review
+## Security review
 
 Three layers:
 
@@ -362,7 +357,32 @@ Three layers:
 The findings are structured (severity + code anchor + blocking flag), not prose, and a later commit
 leaves the review stale until it is regenerated.
 
-### GitHub Issues integration (optional)
+## Adopting into an existing repository (brownfield)
+
+There is no separate adopt command — `rein init` is the single entry point and **auto-detects**
+an existing codebase (a `src/`, `package.json`, `pyproject.toml`, …). In that mode it:
+
+- scopes `config.yaml`'s `guard.paths` to the docs deliverables only, so pending gates never freeze
+  your existing code (re-enable code paths like `src/: tasks` when ready);
+- fills the quality-gate test/check commands from your tooling when recognizable (override with
+  `--test-cmd` / `--check-cmd`);
+- annotates `docs/00-product-brief.md` with the adopted-note pointing at `/onboard`.
+
+Existing files are **never overwritten** (idempotent re-runs). Then, inside the repo:
+
+1. **`/onboard`** — surveys the codebase read-only and fills `docs/05-current-state.md` (the
+   persistent baseline). Existing behavior is **not** reverse-generated into requirements or done
+   tasks; traceability (R-N) covers each cycle's delta only. Half-done work is anchored by an
+   **absorb task** that pins the existing partial code green before new work stacks on it.
+2. **Delta cycles** — each `brief → /req → … → /verify` pass describes **one change**, closed with
+   `rein cycle-close` (same steps as "Daily use"). `docs/00-product-brief.md` and
+   `docs/05-current-state.md` persist across cycles.
+3. **Retract any time** — `rein uninstall claude|copilot|codex` retracts an agent surface (pristine
+   files only; the settings merge is reverted entry-by-entry), and `rein uninstall --all`
+   removes every materialized artifact and the lock. Your repo state (SSOT, `docs/`) is never
+   touched.
+
+## GitHub Issues integration (optional)
 
 **Off by default.** Enable with `github.enabled: true` (needs the `gh` CLI + a GitHub remote;
 auto-skips if absent). `rein issue-sync` **one-way-mirrors** the plan's tasks to Issues — one issue
@@ -403,14 +423,17 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
 - **"template placeholders"** — run `rein start` (or `rein init --name <product>`) first.
 - **`rein: command not found` in a hook** — install the CLI on PATH (see "Setup"); `rein doctor`
   FAILs when the hook binary is unresolvable.
-- **`/req` (or other phase commands) don't show up in your agent** — the agent surface is
-  opt-in and not run automatically by `rein start`/`init`: run `rein install
-  claude` (writes `.claude/commands/` + merges `.claude/settings.json`) or `rein install
-  copilot` (writes the `.github/` wrappers), matching whichever agent you use. These are
-  typically discovered only at session/editor start, so also open a **new** session (or
-  restart the editor) afterward — one already running won't pick up files added mid-session.
+- **`/req` (or other phase commands) don't show up in your agent** — the agent surface is opt-in
+  and not run automatically by `rein start`/`init`: run `rein install claude|copilot|codex` for
+  whichever agent you use, then open a new session (Setup, step 5).
 
 ## Repository layout
+
+`rein init` writes **only state**: the four SSOT documents (placeholder-filled) and the docs
+scaffolds, the materialized prompts/schema plus a pristine scaffold snapshot and `.rein/rein.lock`,
+a marker-guarded pointer block appended to `AGENTS.md`, and the work branch, created and switched
+to with the gate guard flipped live. No build files, no makefile, and no agent surfaces unless you
+`rein install` them; existing files are never overwritten.
 
 | Path | Role |
 |------|------|
@@ -430,6 +453,10 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
 The orchestration code itself lives in the installed `rein` package, not in the repo.
 
 ## Agent support
+
+Loose Rein works with **Claude Code** and **VS Code GitHub Copilot** (full support, incl.
+hook-enforced gates — Copilot's hook mechanism is a VS Code preview feature), and with **Codex**
+and any other agent that reads `AGENTS.md` (rules + procedures; gates by convention).
 
 The rules (`AGENTS.md`) and procedures (`.rein/prompts/`) name human-interaction points with a
 **capability vocabulary**; each agent's mapping file says how to realize it.
@@ -453,8 +480,6 @@ column in `AGENTS.md`'s capability vocabulary table.
   skill/subagent discovery paths come from openai/codex's source and docs, not an observed
   session. Codex also reads project-scoped config **only once the project is trusted**; until
   then only the commit-stage check applies.
-- On every host, writes made **through the shell** (`sed -i`, a heredoc patch) miss the edit-time
-  hook's matcher. The commit-stage `rein guard --check-diff` is what catches those.
 - Agent hooks in VS Code Copilot are a **preview** feature — if off, the gates still hold by
   convention.
 - Parallel leaf tasks degrade to serial where delegation isn't available. `rein doctor`

@@ -921,7 +921,7 @@ def check_ci(repo: repo_mod.Repo) -> list[Finding]:
                 "ci",
                 "no workflow runs `rein policy-check`, so nothing verifies a pull request from the "
                 "trusted base side — a head that weakens the policy judging it would go unnoticed. See "
-                "'Repository settings you have to make yourself' in the README.",
+                "'Settings you provide yourself' in the README.",
             ),
         ]
 
