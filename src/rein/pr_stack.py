@@ -27,12 +27,13 @@ CLI half behind an interactive confirmation.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from rein import dag, event_chain, models, pr_draft, status_api
+from rein import common, dag, event_chain, models, pr_draft, status_api
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -705,6 +706,136 @@ def slice_body(
     return "\n".join(lines) + "\n"
 
 
+# --- publishing ---------------------------------------------------------------
+
+#: Where the bodies are written. One file per slice, named so the stack's order is the sort order.
+OUT_DIR = ".rein/pr-stack"
+
+#: How long one `git push` or `gh` call may take before it is killed. Generous — a push over a slow
+#: link is normal — but finite, because a stack half-published by a hung command is the worst state.
+NETWORK_TIMEOUT_SEC = 300
+
+MERGE_NOTE = (
+    "Merge bottom first:\n"
+    "  gh pr merge <url> --merge --delete-branch\n"
+    "Never --squash and never --rebase: either lands this content in the base as a different\n"
+    "commit, and every pull request above it then shows this diff again. --delete-branch is not\n"
+    "optional either — deleting the base branch is what retargets the next pull request at main."
+)
+
+
+class PublishError(RuntimeError):
+    """Publishing stopped part-way. The message says how far it got; nothing is retried silently."""
+
+
+def write_bodies(repo: repo_mod.Repo, docs: Documents, slices: Sequence[Slice], *, base: str) -> list[str]:
+    """One body per slice under :data:`OUT_DIR`. Returns the paths, in stack order."""
+    out = repo.path(OUT_DIR)
+    out.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    for position, slice_ in enumerate(slices):
+        path = out / f"{slice_.index:02d}-{slice_.label}.md"
+        path.write_text(slice_body(repo, docs, slices, position, base=base), encoding="utf-8")
+        written.append(f"{OUT_DIR}/{path.name}")
+    return written
+
+
+def create_command(slice_: Slice, body_path: str) -> list[str]:
+    """The `gh` invocation that opens this slice's pull request — **always as a draft**.
+
+    One function so the printed line and the executed argv cannot diverge: a human who copies what
+    was printed must get exactly what `--push` would have run.
+    """
+    return [
+        "gh",
+        "pr",
+        "create",
+        "--draft",
+        "--base",
+        slice_.base_ref,
+        "--head",
+        slice_.branch,
+        "--title",
+        f"{slice_.label}: {slice_.title}",
+        "--body-file",
+        body_path,
+    ]
+
+
+def _confirm_push(slices: Sequence[Slice], remote: str, *, base: str) -> None:
+    """The pause before anything leaves this machine. Same rule as a gate approval, different subject.
+
+    A terminal is required and there is no flag that skips it, the default is no, and what is on
+    screen is specific: every branch, its base, and the fact that all of them open as drafts. The
+    gate rule this sits beside is `doctor.GATE_OPENING_VERBS` — `rein pr-stack` may not be
+    pre-authorized, so this prompt cannot be configured away.
+    """
+    if not common.stdin_is_terminal():
+        raise PublishError(
+            "pushing and opening pull requests needs a confirmation typed at a terminal, and stdin "
+            "is not one. Run this in your shell — there is deliberately no flag that skips it."
+        )
+    print(f"This will push {len(slices)} branch(es) to '{remote}' and open {len(slices)} DRAFT pull request(s):\n")
+    print(render(slices, base=base))
+    print(
+        "\nThey open as drafts because the grounded review has not approved them yet. "
+        "`rein pr-stack --ready` lifts them once gate ④ is open."
+    )
+    if not common.ask_yes_no(f"Push and open {len(slices)} draft pull request(s)?"):
+        raise PublishError("nothing was pushed.")
+
+
+def publish(
+    repo: repo_mod.Repo,
+    docs: Documents,
+    slices: Sequence[Slice],
+    body_paths: Sequence[str],
+    *,
+    remote: str,
+    run: Callable[..., tuple[int, str]] = common.run,
+) -> list[str]:
+    """Push each branch and open its draft pull request, bottom first. Returns the URLs.
+
+    **Stops at the first failure.** A stack is an ordered thing: carrying on past a branch that did
+    not push would open a pull request based on a branch the remote does not have. What is already
+    published stays published and is named in the error — half a stack that says so is recoverable,
+    half a stack that pretends to be whole is not.
+
+    Each pull request is recorded in the audit log as it is created, one transaction each, so an
+    interrupted run leaves a log that matches what actually exists on the remote.
+    """
+    urls: list[str] = []
+    for slice_, body_path in zip(slices, body_paths, strict=True):
+        rc, out = run(["git", "push", "-u", remote, slice_.branch], cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
+        if rc != 0:
+            raise PublishError(_stopped_at(slice_, urls, f"pushing {slice_.branch} failed: {out}"))
+        rc, out = run(create_command(slice_, body_path), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
+        if rc != 0:
+            raise PublishError(_stopped_at(slice_, urls, f"opening the pull request for {slice_.branch} failed: {out}"))
+        url = out.strip().splitlines()[-1].strip() if out.strip() else ""
+        record(repo, docs, slice_, url, LEDGER_OPENED)
+        urls.append(url)
+        print(f"  {slice_.index:02d} {slice_.label}: {url or '(gh printed no url)'}")
+    return urls
+
+
+def _stopped_at(slice_: Slice, done: Sequence[str], why: str) -> str:
+    published = f"{len(done)} pull request(s) are already open and stay open" if done else "nothing was published"
+    return f"{why}\n  stopped at slice {slice_.index:02d} ({slice_.label}); {published}"
+
+
+def record(repo: repo_mod.Repo, docs: Documents, slice_: Slice, url: str, action: str) -> None:
+    """Write one pull-request action into the audit log — the ledger :func:`derive` reads back."""
+    with store_mod.Store(repo).transaction() as tx:
+        tx.append(
+            LEDGER_EVENT,
+            cycle_id=docs.state.cycle_id,
+            actor="local-confirmation",
+            subject_ids=[slice_.task_id] if slice_.task_id else [],
+            detail=opened_event_detail(slice_, url, action),
+        )
+
+
 def render(slices: Sequence[Slice], *, base: str = "main") -> str:
     """The stack as a human reads it: bottom first, each line naming what it is based on."""
     if not slices:
@@ -718,3 +849,83 @@ def render(slices: Sequence[Slice], *, base: str = "main") -> str:
             f"[{state}] {len(s.commits)} commit(s)  {s.label}: {s.title}"
         )
     return "\n".join(lines)
+
+
+# --- CLI ----------------------------------------------------------------------
+
+
+def _report(result: Preconditions) -> bool:
+    for warning in result.warnings:
+        logger.warning(warning)
+    for problem in result.errors:
+        logger.error(problem)
+    return result.ok
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="cut the work branch into one draft pull request per task (stacked)",
+        epilog="Push and pull-request creation are outward-facing: --push confirms at a terminal first.",
+    )
+    parser.add_argument("--base", default="main", help="the branch the bottom of the stack targets (default: main)")
+    parser.add_argument("--remote", default="origin", help="the remote to push to (default: origin)")
+    parser.add_argument(
+        "--push",
+        action="store_true",
+        help="after a confirmation typed at a terminal, push the branches and open the draft pull requests",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="derive and report; touch neither refs nor files")
+    parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    args = parser.parse_args(argv)
+    common.configure_logging()
+
+    try:
+        repo = repo_mod.get(args.repo)
+    except repo_mod.RepoNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+
+    try:
+        docs = Documents.read(repo)
+        slices = derive(repo, docs, base=args.base)
+        if not _report(preconditions(repo, docs, slices, mode="push", base=args.base)):
+            return 2
+        outcome = materialize(repo, slices, dry_run=args.dry_run)
+    except (StackError, dag.DagError, models.DocumentError, store_mod.StoreError) as exc:
+        logger.error(str(exc))
+        return 2
+
+    if not slices:
+        print("no task has landed on the work branch yet — nothing to stack")
+        return 0
+
+    print(render(slices, base=args.base))
+    if args.dry_run:
+        print(f"\ndry run: would create {len(outcome.created)} branch(es), advance {len(outcome.advanced)}")
+        return 0
+
+    try:
+        bodies = write_bodies(repo, docs, slices, base=args.base)
+    except (StackError, OSError) as exc:
+        logger.error(f"could not write the pull-request bodies: {exc}")
+        return 2
+
+    if not args.push:
+        print("\nReview the bodies, then open the stack bottom first:")
+        for slice_, body_path in zip(slices, bodies, strict=True):
+            print("  " + " ".join(create_command(slice_, body_path)))
+        print("\n" + MERGE_NOTE)
+        return 0
+
+    try:
+        _confirm_push(slices, args.remote, base=args.base)
+        publish(repo, docs, slices, bodies, remote=args.remote)
+    except (PublishError, store_mod.StoreError) as exc:
+        logger.error(str(exc))
+        return 2
+    print("\n" + MERGE_NOTE)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

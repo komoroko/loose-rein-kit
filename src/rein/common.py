@@ -53,6 +53,29 @@ RC_TIMEOUT = 124
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
 
+def stdin_is_terminal() -> bool:
+    """Whether stdin is an interactive terminal.
+
+    Kept here because two places need the same rule and a second copy is how one of them
+    eventually grows a flag that skips it. What the terminal establishes is not that a human
+    answered but that a piped stdin, a CI job, or an agent's captured subprocess cannot answer
+    by accident.
+    """
+    return sys.stdin.isatty()
+
+
+def ask_yes_no(prompt: str) -> bool:
+    """`[y/N]` on stdin. **The default being no is the load-bearing half**: a stray Enter declines.
+
+    Deliberately not "type the word back": retyping something already on the command line
+    establishes nothing, since whoever would reflexively press `y` would as reflexively type it.
+    What carries weight is the pause, the terminal :func:`stdin_is_terminal` insists on, and the
+    default.
+    """
+    print(f"\n{prompt} [y/N] ", end="", flush=True)
+    return sys.stdin.readline().strip().lower() in ("y", "yes")
+
+
 def run(
     cmd: list[str],
     cwd: str | None = None,

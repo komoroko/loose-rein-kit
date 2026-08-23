@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from rein import event_chain, models, pr_stack
+from rein import common, event_chain, models, pr_stack
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import DEMO_CYCLE, make_config, make_plan, make_review, make_state, make_task, seed_repo
@@ -729,3 +729,227 @@ def test_a_dry_run_reports_what_it_would_do_and_writes_nothing(cycle: Callable[.
 
     assert result.created == tuple(s.branch for s in slices)
     assert not set(branches(bundle["root"])) & {s.branch for s in slices}
+
+
+# --- the CLI ------------------------------------------------------------------
+
+
+def run_cli(bundle: dict[str, Any], *args: str) -> tuple[int, str]:
+    import contextlib
+    import io
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        rc = pr_stack.main(["--repo", str(bundle["root"]), *args])
+    return rc, buffer.getvalue()
+
+
+def test_the_verb_is_registered() -> None:
+    from rein import cli
+
+    assert cli.VERBS["pr-stack"] == "pr_stack"
+    assert "pr-stack" in cli.HELP
+
+
+def test_the_default_run_writes_bodies_and_prints_draft_commands(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+
+    rc, out = run_cli(bundle)
+
+    assert rc == 0
+    assert (bundle["root"] / ".rein/pr-stack/01-T-001.md").is_file()
+    assert out.count("gh pr create --draft") == 3
+    assert "--base main --head build/demo-pr-01-T-001" in out
+
+
+def test_the_default_run_never_invokes_gh(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same rule `pr-draft` holds: creating a pull request is the human's action."""
+    bundle = cycle()
+    monkeypatch.setattr(common, "run", _forbidden)
+
+    assert run_cli(bundle)[0] == 0
+
+
+def _forbidden(*_args: Any, **_kwargs: Any) -> tuple[int, str]:
+    raise AssertionError("the default run must not execute anything")
+
+
+def test_the_printed_command_is_the_one_push_would_run(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    slices = derive(bundle)
+
+    _, out = run_cli(bundle)
+
+    for slice_ in slices:
+        printed = " ".join(pr_stack.create_command(slice_, f".rein/pr-stack/{slice_.index:02d}-{slice_.label}.md"))
+        assert printed in out
+
+
+def test_every_created_pull_request_is_a_draft(cycle: Callable[..., dict[str, Any]]) -> None:
+    slices = derive(cycle())
+
+    assert all("--draft" in pr_stack.create_command(s, "body.md") for s in slices)
+
+
+def test_the_run_says_how_to_merge_and_forbids_squash(cycle: Callable[..., dict[str, Any]]) -> None:
+    _, out = run_cli(cycle())
+
+    assert "--merge --delete-branch" in out
+    assert "Never --squash" in out
+
+
+def test_a_dry_run_touches_neither_refs_nor_files(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+
+    rc, out = run_cli(bundle, "--dry-run")
+
+    assert rc == 0
+    assert "dry run: would create 3 branch(es)" in out
+    assert not (bundle["root"] / ".rein/pr-stack").exists()
+    assert not set(branches(bundle["root"])) & {s.branch for s in derive(bundle)}
+
+
+def test_a_failing_precondition_stops_the_run(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle(gates={"build": "approved"})
+    # An approved gate only warns for --push; a broken audit chain is what actually stops it.
+    (bundle["root"] / ".rein/events.ndjson").write_text("{ not json\n", encoding="utf-8")
+
+    assert run_cli(bundle)[0] == 2
+
+
+# --- publishing ---------------------------------------------------------------
+
+
+def recorder(results: dict[tuple[str, ...], tuple[int, str]] | None = None) -> tuple[Any, list[list[str]]]:
+    """A `common.run` stand-in that records argv and answers from a prefix table."""
+    calls: list[list[str]] = []
+    table = results or {}
+
+    def run(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: Any) -> tuple[int, str]:
+        calls.append(cmd)
+        for prefix, result in table.items():
+            if tuple(cmd[: len(prefix)]) == tuple(prefix):
+                return result
+        return 0, "https://example.invalid/pr/1\n"
+
+    return run, calls
+
+
+def published(bundle: dict[str, Any], run: Any) -> tuple[list[str], list[pr_stack.Slice]]:
+    repo = bundle["repo"]
+    docs = documents(bundle)
+    slices = pr_stack.derive(repo, docs, base="main")
+    pr_stack.materialize(repo, slices)
+    bodies = pr_stack.write_bodies(repo, docs, slices, base="main")
+    return pr_stack.publish(repo, docs, slices, bodies, remote="origin", run=run), slices
+
+
+def test_publish_pushes_then_opens_each_pull_request_bottom_first(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, calls = recorder()
+
+    urls, slices = published(bundle, run)
+
+    assert len(urls) == 3
+    verbs = [(cmd[0], cmd[-1] if cmd[0] == "git" else cmd[cmd.index("--head") + 1]) for cmd in calls]
+    assert verbs == [
+        ("git", slices[0].branch),
+        ("gh", slices[0].branch),
+        ("git", slices[1].branch),
+        ("gh", slices[1].branch),
+        ("git", slices[2].branch),
+        ("gh", slices[2].branch),
+    ]
+
+
+def test_publish_records_every_pull_request_in_the_audit_log(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, _ = recorder()
+
+    _, slices = published(bundle, run)
+
+    records = pr_stack.ledger(event_chain.load(bundle["root"] / ".rein/events.ndjson"))
+    assert [r.index for r in records] == [1, 2, 3]
+    assert [r.branch for r in records] == [s.branch for s in slices]
+    assert all(r.url == "https://example.invalid/pr/1" for r in records)
+
+
+def test_the_ledger_publish_wrote_is_the_ledger_derive_reads(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, _ = recorder()
+    published(bundle, run)
+
+    again = derive(bundle, list(event_chain.load(bundle["root"] / ".rein/events.ndjson")))
+
+    assert [s.opened for s in again] == [True, True, True]
+
+
+def test_publish_stops_at_the_first_failure_and_says_where(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, calls = recorder({("gh", "pr", "create"): (1, "pull request already exists")})
+
+    with pytest.raises(pr_stack.PublishError, match="stopped at slice 01"):
+        published(bundle, run)
+
+    assert len(calls) == 2  # the first push and the first gh, then nothing
+
+
+def test_a_partial_publish_says_what_stays_open(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    failing: dict[tuple[str, ...], tuple[int, str]] = {
+        ("git", "push", "-u", "origin", f"{WORK_BRANCH}-pr-03-T-003"): (1, "rejected")
+    }
+    run, _ = recorder(failing)
+
+    with pytest.raises(pr_stack.PublishError, match="2 pull request\\(s\\) are already open"):
+        published(bundle, run)
+
+
+def test_a_partial_publish_leaves_a_log_matching_what_exists(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    rejected: dict[tuple[str, ...], tuple[int, str]] = {
+        ("git", "push", "-u", "origin", f"{WORK_BRANCH}-pr-03-T-003"): (1, "rejected")
+    }
+    run, _ = recorder(rejected)
+
+    with pytest.raises(pr_stack.PublishError):
+        published(bundle, run)
+
+    records = pr_stack.ledger(event_chain.load(bundle["root"] / ".rein/events.ndjson"))
+    assert [r.index for r in records] == [1, 2]
+
+
+def test_pushing_without_a_terminal_is_refused(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: False)
+    slices = derive(cycle())
+
+    with pytest.raises(pr_stack.PublishError, match="no flag that skips it"):
+        pr_stack._confirm_push(slices, "origin", base="main")
+
+
+def test_declining_the_prompt_pushes_nothing(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: False)
+    slices = derive(cycle())
+
+    with pytest.raises(pr_stack.PublishError, match="nothing was pushed"):
+        pr_stack._confirm_push(slices, "origin", base="main")
+
+
+def test_the_prompt_says_the_pull_requests_are_drafts(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: True)
+
+    pr_stack._confirm_push(derive(cycle()), "origin", base="main")
+
+    printed = capsys.readouterr().out
+    assert "DRAFT pull request(s)" in printed
+    assert "--ready" in printed

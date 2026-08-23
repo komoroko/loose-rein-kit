@@ -53,6 +53,7 @@ VERBS: dict[str, str] = {
     "cycle-close": "cycle",
     "issue-sync": "issue_sync",
     "pr-draft": "pr_draft",
+    "pr-stack": "pr_stack",
     "oci": "oci_cli",
     "guard": "gate_guard",
     "policy-check": "policy_check",
@@ -103,6 +104,7 @@ operations:
   cycle-close --name <slug>    archive the finished delta cycle and reset
   issue-sync [--dry-run]       one-way mirror of plan.yaml's tasks -> GitHub Issues (opt-in)
   pr-draft [args]              assemble a PR body from the SSOT (read-only)
+  pr-stack [--push]            cut the work branch into one draft PR per task (--push confirms at a terminal)
   evidence show|record         acceptance evidence this loop cannot obtain (record what you observed)
   report --outcome … --summary …  how an implementer ends its attempt (implemented|blocked|needs-revision)
   decision add --statement …   record an implementation decision (routes via the control plane)
