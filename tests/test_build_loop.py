@@ -15,10 +15,11 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from rein import build_loop, common, dag, digests, dossier, evidence, executors, faults, models, pr_stack
+from rein import build_loop, common, conflict, dag, digests, dossier, evidence, executors, faults, models, pr_stack
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -1996,3 +1997,87 @@ def test_the_review_step_is_told_the_scope_it_actually_has(tmp_path: Path, monke
     _, command = loop._review_scope(task, cwd=str(tmp_path / "leaf"), base="")
 
     assert command == "git diff build/x-pr-c1-02-T-002...HEAD"
+
+
+# --- the wiring from a merge conflict to an implementer ------------------------
+
+
+def test_a_merge_conflict_goes_through_the_classifier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`merge_leaf` used to abort and block, full stop. Its conflict path had no test at all."""
+    loop = orchestrator(tmp_path)
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    seen: list[tuple[str, str]] = []
+    monkeypatch.setattr(loop.ws, "merge_cwd", lambda task_id: loop.root)
+    monkeypatch.setattr(loop.ws, "merge_leaf", lambda task_id, branch, cwd: False)
+    monkeypatch.setattr(loop.ws, "git", lambda args, cwd=None: None)
+
+    def resolved(plan: Any, **kw: Any) -> conflict.Resolution:
+        seen.append((kw["ours_task"], kw["theirs_task"]))
+        return conflict.Resolution(kind="mechanical")
+
+    monkeypatch.setattr(conflict, "merge_with_resolution", resolved)
+
+    assert loop.merge_leaf(task, "build/x-T-001") is True
+    assert seen == [("", "T-001")]
+
+
+def test_an_unresolved_conflict_escalates_and_blocks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-001": "build/x-pr-c1-01-T-001"}
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    escalated: list[conflict.Resolution] = []
+    monkeypatch.setattr(loop.ws, "merge_cwd", lambda task_id: loop.root)
+    monkeypatch.setattr(loop.ws, "merge_leaf", lambda task_id, branch, cwd: False)
+
+    def refused(plan: Any, **kw: Any) -> conflict.Resolution:
+        return conflict.Resolution(
+            kind="semantic",
+            conflict=conflict.Conflict(kw["ours_task"], kw["theirs_task"], ("src/a.py",)),
+            escalation="they contradict",
+        )
+
+    def record(repo: Any, resolution: conflict.Resolution) -> list[str]:
+        escalated.append(resolution)
+        return []
+
+    monkeypatch.setattr(conflict, "merge_with_resolution", refused)
+    monkeypatch.setattr(conflict, "escalate", record)
+
+    assert loop.merge_leaf(task, "build/x-T-001") is False
+    assert [r.kind for r in escalated] == ["semantic"]
+    # A task landing on its own slice is both sides of the merge, so its scope is checkable.
+    collision = escalated[0].conflict
+    assert collision is not None and collision.ours_task == "T-001"
+
+
+def test_resolving_hands_out_an_orchestrator_with_a_live_control_plane(tmp_path: Path) -> None:
+    """The lock and the socket, in the order `run()` takes them. Nothing had ever entered this."""
+    root = build_repo(tmp_path)
+    with build_loop.resolving(repo_mod.Repo(root)) as orchestrator_:
+        assert orchestrator_.control is not None
+        assert orchestrator_.control.socket_path.exists()
+        assert callable(orchestrator_.resolve_conflict)
+        assert callable(orchestrator_.task_gate)
+
+
+def test_the_task_gate_runs_only_the_deterministic_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    ran: list[str] = []
+
+    def note(step: Any, cwd: str) -> str:
+        ran.append(step.name)
+        return ""
+
+    monkeypatch.setattr(loop, "_run_cmd_step", note)
+
+    assert loop.task_gate(str(tmp_path)) == (0, "")
+    assert ran and all(s.kind == "command" for s in loop._steps_at("task") if s.name in ran)
+
+
+def test_the_task_gate_reports_the_step_that_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "2 tests failed")
+
+    status, log = loop.task_gate(str(tmp_path))
+
+    assert status == 1 and "2 tests failed" in log

@@ -7,6 +7,7 @@ real command disagreed, which is the one failure this module cannot afford.
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 from collections.abc import Callable
 from dataclasses import replace
@@ -1396,3 +1397,68 @@ def test_two_tasks_recording_the_same_landing_commit_are_refused(
 
     with pytest.raises(pr_stack.StackError, match="One commit cannot be two pull requests"):
         derive(bundle)
+
+
+def test_the_restack_verb_wires_the_orchestrator_to_the_classifier(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run_restack` is the only thing that connects a real implementer to a propagation.
+
+    Everything below it is tested with injected fakes, so nothing had ever executed the join.
+    """
+    bundle = cycle()
+    docs, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "fix", path="src/T-001.py")
+    handed: dict[str, Any] = {}
+
+    class FakeOrchestrator:
+        def resolve_conflict(self, collision: Any, cwd: str) -> str:
+            return "implemented"
+
+        def task_gate(self, cwd: str) -> tuple[int, str]:
+            return 0, ""
+
+    @contextlib.contextmanager
+    def resolving(repo: Any) -> Any:
+        handed["repo"] = repo
+        yield FakeOrchestrator()
+
+    from rein import build_loop
+
+    monkeypatch.setattr(build_loop, "resolving", resolving)
+
+    assert pr_stack._run_restack(bundle["repo"], documents(bundle), slices) == 0
+    assert handed["repo"] is bundle["repo"]
+    assert git(bundle["root"], "merge-base", "--is-ancestor", slices[0].branch, WORK_BRANCH) == ""
+
+
+def test_a_stopped_propagation_escalates_and_returns_two(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = cycle()
+    _, slices = stacked(bundle)
+    commit_on(bundle["root"], slices[0].branch, "ours", path="src/shared.py")
+    commit_on(bundle["root"], slices[1].branch, "theirs", path="src/shared.py")
+
+    class Refusing:
+        def resolve_conflict(self, collision: Any, cwd: str) -> str:
+            return "needs-revision"
+
+        def task_gate(self, cwd: str) -> tuple[int, str]:
+            raise AssertionError("a semantic conflict never reaches the gate")
+
+    @contextlib.contextmanager
+    def resolving(repo: Any) -> Any:
+        yield Refusing()
+
+    from rein import build_loop
+
+    monkeypatch.setattr(build_loop, "resolving", resolving)
+
+    assert pr_stack._run_restack(bundle["repo"], documents(bundle), slices) == 2
+
+    state = store_mod.Store(bundle["repo"]).read_state()
+    assert state is not None
+    assert state.task_status["T-002"] == "needs-revision"
+    events = event_chain.load(bundle["root"] / ".rein/events.ndjson")
+    assert any(e.event == "knowledge_gap" for e in events)
