@@ -953,3 +953,150 @@ def test_the_prompt_says_the_pull_requests_are_drafts(
     printed = capsys.readouterr().out
     assert "DRAFT pull request(s)" in printed
     assert "--ready" in printed
+
+
+# --- lifting out of draft -----------------------------------------------------
+
+
+def approved_stack(bundle: dict[str, Any], run: Any) -> tuple[pr_stack.Documents, list[pr_stack.Slice], list[str]]:
+    """A published stack whose gate ④ is approved and whose review binds the current head."""
+    repo = bundle["repo"]
+    docs = documents(bundle)
+    slices = pr_stack.derive(repo, docs, base="main")
+    pr_stack.materialize(repo, slices)
+    bodies = pr_stack.write_bodies(repo, docs, slices, base="main")
+    pr_stack.publish(repo, docs, slices, bodies, remote="origin", run=run)
+
+    state = make_state(gates={"build": "approved"}, tasks={t: "done" for t in bundle["landed"]})
+    for task_id, commit in bundle["landed"].items():
+        state["tasks"][task_id]["completed_commit"] = commit
+    repo.state.write_bytes(store_mod.dump_yaml(state))
+    head = git(bundle["root"], "rev-parse", WORK_BRANCH)
+    repo.review.write_bytes(store_mod.dump_yaml(make_review(generated=True, head_sha=head)))
+
+    docs = documents(bundle)
+    bodies = pr_stack.write_bodies(repo, docs, slices, base="main")
+    return docs, slices, bodies
+
+
+def test_lift_rewrites_the_body_before_taking_it_out_of_draft(cycle: Callable[..., dict[str, Any]]) -> None:
+    """A ready pull request whose body still says "not reviewed yet" contradicts itself."""
+    bundle = cycle()
+    run, calls = recorder()
+    docs, slices, bodies = approved_stack(bundle, run)
+    calls.clear()
+
+    pr_stack.lift(bundle["repo"], docs, slices, bodies, run=run)
+
+    verbs = [cmd[2] for cmd in calls]
+    assert verbs == ["edit", "ready", "edit", "ready", "edit", "ready"]
+
+
+def test_the_rewritten_body_carries_the_approved_banner(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, _ = recorder()
+    approved_stack(bundle, run)
+
+    text = (bundle["root"] / ".rein/pr-stack/01-T-001.md").read_text(encoding="utf-8")
+
+    assert "**Draft.**" not in text
+    assert "**This slice was not reviewed on its own.**" in text
+
+
+def test_lift_records_each_pull_request_as_ready(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices, bodies = approved_stack(bundle, run)
+
+    pr_stack.lift(bundle["repo"], docs, slices, bodies, run=run)
+
+    records = pr_stack.ledger(event_chain.load(bundle["root"] / ".rein/events.ndjson"))
+    assert all(r.ready for r in records)
+
+
+def test_lift_is_free_to_re_run(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, calls = recorder()
+    docs, slices, bodies = approved_stack(bundle, run)
+    pr_stack.lift(bundle["repo"], docs, slices, bodies, run=run)
+    calls.clear()
+
+    again = pr_stack.lift(bundle["repo"], documents(bundle), slices, bodies, run=run)
+
+    assert again == []
+    assert calls == []
+
+
+def test_lift_stops_at_the_first_failure(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices, bodies = approved_stack(bundle, run)
+    failing, _ = recorder({("gh", "pr", "ready"): (1, "not a draft")})
+
+    with pytest.raises(pr_stack.PublishError, match="stopped at slice 01"):
+        pr_stack.lift(bundle["repo"], docs, slices, bodies, run=failing)
+
+
+def test_ready_refuses_a_slice_with_no_recorded_pull_request(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle(gates={"build": "approved"})
+    docs = documents(bundle)
+    slices = pr_stack.derive(bundle["repo"], docs, base="main")
+    run, _ = recorder()
+
+    with pytest.raises(pr_stack.PublishError, match="no recorded pull request"):
+        pr_stack.lift(bundle["repo"], docs, slices, ["a.md", "b.md", "c.md"], run=run)
+
+
+def test_lifting_without_a_terminal_is_refused(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: False)
+    bundle = cycle(gates={"build": "approved"})
+
+    with pytest.raises(pr_stack.PublishError, match="no flag that skips it"):
+        pr_stack._confirm_ready(documents(bundle), derive(bundle), [])
+
+
+def test_the_ready_prompt_shows_the_receipt_that_covers_it(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: True)
+    bundle = cycle(gates={"build": "approved"})
+
+    pr_stack._confirm_ready(documents(bundle), derive(bundle), [])
+
+    printed = capsys.readouterr().out
+    assert "GA-BUILD-0001" in printed
+    assert "attested_chain_root" in printed
+
+
+def test_declining_the_ready_prompt_lifts_nothing(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: False)
+    bundle = cycle(gates={"build": "approved"})
+
+    with pytest.raises(pr_stack.PublishError, match="still drafts"):
+        pr_stack._confirm_ready(documents(bundle), derive(bundle), [])
+
+
+def test_push_and_ready_are_two_steps_not_one_flag(cycle: Callable[..., dict[str, Any]]) -> None:
+    rc, _ = run_cli(cycle(), "--push", "--ready")
+
+    assert rc == 2
+
+
+def test_ready_never_repoints_a_branch(cycle: Callable[..., dict[str, Any]]) -> None:
+    """The branches a reviewer is reading must not move underneath them."""
+    bundle = cycle()
+    run, _ = recorder()
+    approved_stack(bundle, run)
+    commit_on(bundle["root"], WORK_BRANCH, "landed after approval", path="docs/10-requirements.md")
+    before = branches(bundle["root"])
+
+    rc, _ = run_cli(bundle, "--ready")
+
+    assert rc == 2  # the review no longer binds the head, so it stops before anything
+    assert branches(bundle["root"]) == before

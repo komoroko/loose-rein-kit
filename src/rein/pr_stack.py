@@ -819,9 +819,76 @@ def publish(
     return urls
 
 
-def _stopped_at(slice_: Slice, done: Sequence[str], why: str) -> str:
-    published = f"{len(done)} pull request(s) are already open and stay open" if done else "nothing was published"
-    return f"{why}\n  stopped at slice {slice_.index:02d} ({slice_.label}); {published}"
+def _confirm_ready(docs: Documents, slices: Sequence[Slice], records: Sequence[LedgerRecord]) -> None:
+    """The pause before draft pull requests become ready. Same discipline as :func:`_confirm_push`.
+
+    What is specific on this screen is the receipt: lifting a draft is the act that says *a human
+    approved this*, so the approval id and the digests it covers are what the person answering has
+    to be looking at. If those are not what they approved, the answer is no.
+    """
+    if not common.stdin_is_terminal():
+        raise PublishError(
+            "lifting pull requests out of draft needs a confirmation typed at a terminal, and stdin "
+            "is not one. Run this in your shell — there is deliberately no flag that skips it."
+        )
+    receipt = docs.state.gate_receipt("build") or {}
+    print(f"gate ④ (build) is approved: {receipt.get('approval_id', '(no approval id)')}\n")
+    print("That approval covers:")
+    for key in ("validation_digest", "attested_chain_root", "result_chain_root"):
+        print(f"  {key.ljust(20)}  {receipt.get(key, '(not recorded)')}")
+    print(f"\n{len(records)} draft pull request(s) would become ready for review:")
+    for record_ in records:
+        print(f"  {record_.index:02d} {record_.task_id or TAIL_SUFFIX}: {record_.url or record_.branch}")
+    print("\nEach body is rewritten first, so it states what the review found rather than that it is still pending.")
+    if not common.ask_yes_no(f"Lift {len(records)} pull request(s) out of draft?"):
+        raise PublishError("nothing was lifted; the pull requests are still drafts.")
+
+
+def lift(
+    repo: repo_mod.Repo,
+    docs: Documents,
+    slices: Sequence[Slice],
+    body_paths: Sequence[str],
+    *,
+    run: Callable[..., tuple[int, str]] = common.run,
+) -> list[str]:
+    """Rewrite each body with the approved facts, then take the pull request out of draft.
+
+    Bottom first, and the body goes first for each one: a pull request that turned ready while its
+    body still said "the grounded review has not run over it yet" would be contradicting itself at
+    the moment a reviewer arrives. Stops at the first failure for the reason :func:`publish` does.
+    """
+    lifted: list[str] = []
+    records = {r.index: r for r in ledger(docs.events)}
+    for slice_, body_path in zip(slices, body_paths, strict=True):
+        record_ = records.get(slice_.index)
+        if record_ is None or not record_.url:
+            raise PublishError(
+                _stopped_at(slice_, lifted, f"slice {slice_.index:02d} has no recorded pull request", state="ready")
+            )
+        if record_.ready:
+            continue
+        rc, out = run(
+            ["gh", "pr", "edit", record_.url, "--body-file", body_path], cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC
+        )
+        if rc != 0:
+            raise PublishError(
+                _stopped_at(slice_, lifted, f"rewriting the body of {record_.url} failed: {out}", state="ready")
+            )
+        rc, out = run(["gh", "pr", "ready", record_.url], cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
+        if rc != 0:
+            raise PublishError(
+                _stopped_at(slice_, lifted, f"lifting {record_.url} out of draft failed: {out}", state="ready")
+            )
+        record(repo, docs, slice_, record_.url, LEDGER_READY)
+        lifted.append(record_.url)
+        print(f"  {slice_.index:02d} {slice_.label}: ready — {record_.url}")
+    return lifted
+
+
+def _stopped_at(slice_: Slice, done: Sequence[str], why: str, *, state: str = "open") -> str:
+    already = f"{len(done)} pull request(s) are already {state} and stay {state}" if done else "nothing changed"
+    return f"{why}\n  stopped at slice {slice_.index:02d} ({slice_.label}); {already}"
 
 
 def record(repo: repo_mod.Repo, docs: Documents, slice_: Slice, url: str, action: str) -> None:
@@ -874,6 +941,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="after a confirmation typed at a terminal, push the branches and open the draft pull requests",
     )
+    parser.add_argument(
+        "--ready",
+        action="store_true",
+        help="once gate ④ is approved: rewrite each body and lift the drafts (confirms at a terminal)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="derive and report; touch neither refs nor files")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
@@ -885,12 +957,19 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
+    if args.push and args.ready:
+        logger.error("--push opens drafts and --ready lifts them; they are two steps, not one flag")
+        return 2
+    mode = "ready" if args.ready else "push"
+
     try:
         docs = Documents.read(repo)
         slices = derive(repo, docs, base=args.base)
-        if not _report(preconditions(repo, docs, slices, mode="push", base=args.base)):
+        if not _report(preconditions(repo, docs, slices, mode=mode, base=args.base)):
             return 2
-        outcome = materialize(repo, slices, dry_run=args.dry_run)
+        # `--ready` never repoints a ref: the pull requests it lifts are open on the branches as
+        # they stand, and moving one now would be a force-push under a reviewer.
+        outcome = Materialized() if args.ready else materialize(repo, slices, dry_run=args.dry_run)
     except (StackError, dag.DagError, models.DocumentError, store_mod.StoreError) as exc:
         logger.error(str(exc))
         return 2
@@ -909,6 +988,16 @@ def main(argv: list[str] | None = None) -> int:
     except (StackError, OSError) as exc:
         logger.error(f"could not write the pull-request bodies: {exc}")
         return 2
+
+    if args.ready:
+        try:
+            _confirm_ready(docs, slices, ledger(docs.events))
+            lifted = lift(repo, docs, slices, bodies)
+        except (PublishError, store_mod.StoreError) as exc:
+            logger.error(str(exc))
+            return 2
+        print(f"\n{len(lifted)} pull request(s) are ready for review.\n\n{MERGE_NOTE}")
+        return 0
 
     if not args.push:
         print("\nReview the bodies, then open the stack bottom first:")
