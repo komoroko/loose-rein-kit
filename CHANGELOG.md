@@ -58,7 +58,8 @@ Also in that thread: the security reviewer is refused for dropping a finding a p
 recorded as blocking, and it was being refused on knowledge nobody had given it — the ids were an
 argument to the validator and never reached the request. A regeneration with a blocker standing had
 to re-invent `SEC-001` by coincidence to get past a check whose own instruction is "resolve the
-finding and re-run". They are in the request now.
+finding and re-run". They are in the request now, and the validator reads them from there — one
+source, rather than an enforcement and a disclosure that nothing made agree.
 
 Also: **`rein review generate --supervise`**, so a capacity stop no longer needs a human to notice
 and re-run the whole pipeline by hand. Same narrow licence as `rein build --supervise`, minus one

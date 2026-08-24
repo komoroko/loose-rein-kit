@@ -26,7 +26,9 @@ worktree — the canonical record of anything decided here goes through the cont
 
 **The blind extractor never gets one.** Gate ④'s actual-behaviour extraction is the one
 participant that is *supposed* to re-derive everything, having never seen the plan
-(`actual_extraction.FORBIDDEN_KEYS`). The duplicated read there is the point of the exercise.
+(`actual_extraction.FORBIDDEN_KEYS`). It re-derives it from its own request, which is all it is
+given: that stage is launched outside the repository precisely so it cannot go and read what a
+dossier would have handed it (`review._adapter_reviewer`).
 """
 
 from __future__ import annotations

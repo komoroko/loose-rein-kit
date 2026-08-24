@@ -85,23 +85,24 @@ def contract() -> str:
     return (
         "Read the change below and report WHAT THE CODE ACTUALLY DOES.\n"
         "\n"
-        "You are deliberately not told what it was meant to do. There is no requirement, plan, "
-        "ticket or author's explanation available to you, and inferring one is not the task: "
-        "report behaviour you can point at in the code, and nothing else.\n"
+        "Report only behaviour you can point at in the code. Do not reconstruct intent, do not say "
+        "what the change is *for*, and do not close a gap with what a careful author would "
+        "presumably have wanted. This reading is worth having precisely because it was made "
+        "without any of that, so a guess costs more than a silence.\n"
         "\n"
         "Answer with one JSON object and no other text:\n"
         '{"actual_statements": [{"id": "AST-001", "statement": "<what the code does>", '
         f'"category": "<one of {"|".join(categories())}>", '
         f'"confidence": "<one of {"|".join(sorted(CONFIDENCE_VALUES))}>", '
         '"code_anchors": [{"path": "<repo-relative path>", "start_line": <int>, '
-        '"end_line": <int>, "blob": "<the blob for that path from deterministic_facts.files>"}], '
+        '"end_line": <int>, "blob": "<the blob deterministic_facts.files gives for that path>"}], '
         '"observed_conditions": ["<optional>"], "unknowns": ["<optional>"]}], '
         '"coverage": {"risk_floor": "<not lower than deterministic_facts.risk_floor>"}}\n'
         "\n"
         "Every rule below is checked against the committed tree, not taken on trust:\n"
         "- A statement with no code anchor is refused. No anchor, no assertion.\n"
         "- `path`, `blob` and the line range must match a real committed blob. "
-        "`deterministic_facts.files` gives you the blob and the line count for every path in the "
+        "`deterministic_facts.files` lists a blob and a line count for every path in the "
         "change; use them rather than guessing, and never anchor outside that range.\n"
         "- Do not send an `integrity` field. Integrity is derived from your anchors, never claimed.\n"
         "- `coverage.risk_floor` may not be lower than the one in the deterministic facts.\n"

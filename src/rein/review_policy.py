@@ -235,6 +235,11 @@ def review_schema_enum(*path: str) -> tuple[str, ...]:
     node: Any = models.schema("review")["$defs"]["machine"]["properties"]
     for key in path:
         node = node[key]
+    if not isinstance(node, list):
+        # Without this a mistyped path lands on a mapping and iterates its *keys*, so a contract
+        # would name a vocabulary nobody chose and every answer using it would be refused at the
+        # write — with nothing anywhere saying the list came from the wrong place.
+        raise ReviewPolicyError(f"review.schema.json has no enum at {'.'.join(path)}")
     return tuple(str(value) for value in node)
 
 

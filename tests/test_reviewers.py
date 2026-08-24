@@ -324,7 +324,7 @@ def test_security_review_refuses_to_drop_a_prior_blocking_finding() -> None:
     payload: dict[str, Any] = {"findings": []}
     with pytest.raises(security_review.SecurityReviewError, match="clear its own block"):
         security_review.run_security_review(
-            {}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD", prior_blocking_ids=["SEC-1"]
+            {"prior_blocking": ["SEC-1"]}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD"
         )
 
 
@@ -341,7 +341,7 @@ def test_security_review_refuses_to_downgrade_a_prior_blocking_finding() -> None
     }
     with pytest.raises(security_review.SecurityReviewError, match="cannot clear a blocking flag"):
         security_review.run_security_review(
-            {}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD", prior_blocking_ids=["SEC-1"]
+            {"prior_blocking": ["SEC-1"]}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD"
         )
 
 

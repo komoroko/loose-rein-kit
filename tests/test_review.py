@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -456,25 +457,48 @@ def test_every_stage_carries_its_own_contract() -> None:
         assert request["contract"].strip()
 
 
-def test_the_extractor_contract_names_no_expectation() -> None:
+def test_the_extractor_contract_supplies_no_expectation() -> None:
     """The one stage whose whole value is that it has not seen the plan. Its own instructions are
-    the last place a mention of one would be noticed."""
+    the last place a mention of one would be noticed.
+
+    Checked against the module's own never-list rather than a hand-picked list of phrases, so this
+    keeps testing the right thing when that list moves. Saying an expectation is *absent* is not
+    supplying one, which is why the text may name the words it refuses to carry.
+    """
     contract = actual_extraction.contract()
-    assert not actual_extraction._forbidden_keys_in({"contract": contract})
-    for primed in ("expected model", "the plan", "requirement it", "was supposed to"):
-        assert primed not in contract.lower()
+    words = set(re.findall(r"[a-z_]+", contract.lower()))
+    supplied = {key for key in actual_extraction.FORBIDDEN_KEYS if key in words}
+    assert supplied == set(), f"the extractor's own contract names {sorted(supplied)}"
     assert "actually does" in contract.lower()
 
 
 def test_a_contract_names_only_vocabulary_the_schema_allows() -> None:
     """A contract is what a reviewer is told to produce and the schema is what refuses it, so the
-    two cannot be separate lists — the failure is a whole stage's output rejected at the write."""
-    for category in actual_extraction.categories():
+    two cannot be separate lists — the failure is a whole stage's output rejected at the write.
+
+    The expected side is read out of the schema *here*, by a second path, rather than by calling
+    the same helper the contract calls: asserting a function agrees with itself proves nothing.
+    """
+    schema = models.schema("review")["$defs"]["machine"]["properties"]
+    statement_categories = schema["actual_extraction"]["items"]["properties"]["category"]["enum"]
+    finding_categories = schema["security"]["properties"]["findings"]["items"]["properties"]["category"]["enum"]
+
+    assert set(actual_extraction.categories()) == set(statement_categories)
+    assert set(security_review.categories()) == set(finding_categories)
+    for category in statement_categories:
         assert category in actual_extraction.contract()
-    for category in security_review.categories():
+    for category in finding_categories:
         assert category in security_review.contract()
     for verdict in models.VERDICT_VALUES:
         assert verdict in conformance.contract()
+
+
+def test_a_schema_path_that_is_not_an_enum_is_refused() -> None:
+    """A mistyped path lands on a mapping and iterates its keys, so the contract would name a
+    vocabulary nobody chose and every answer using it would be refused at the write — with nothing
+    anywhere saying the list came from the wrong place."""
+    with pytest.raises(review_policy.ReviewPolicyError, match="no enum at"):
+        review_policy.review_schema_enum("actual_extraction", "items", "properties")
 
 
 def test_a_reviewer_is_told_which_blocks_it_may_not_drop() -> None:
@@ -510,9 +534,29 @@ def test_the_anchors_a_reviewer_needs_are_handed_over_not_looked_up(review_repo:
     seen: list[Mapping[str, Any]] = []
     base = _git(review_repo, "rev-parse", "HEAD~1")
     review.generate(repo_mod.Repo(review_repo), _capturing_reviewer(seen), base=base)
-    files = _extract_request(seen)["deterministic_facts"]["files"]
+    files = {entry["path"]: entry for entry in _extract_request(seen)["deterministic_facts"]["files"]}
     assert files["src.py"]["blob"] == f"git-blob:{_git(review_repo, 'rev-parse', 'HEAD:src.py')}"
-    assert files["src.py"]["lines"] == 3  # two lines and the empty one a trailing newline leaves
+    # Counted exactly as `review_policy.validate_anchor` counts it, so a range this permits is a
+    # range that passes: two lines and the empty one a trailing newline leaves.
+    assert files["src.py"]["lines"] == 3
+
+
+@pytest.mark.integration
+def test_a_product_file_called_plan_does_not_read_as_priming(review_repo: Path) -> None:
+    """`assert_blind` walks the request for Expected-Model *keys*, so a path used as a mapping key
+    is a filename being read as structure. A product with a root-level file called `plan` — or
+    `claims`, `solution`, `rationale` — failed every review with "the extractor request carries
+    Expected-Model keys ['plan']": a sentence about priming, describing a file nobody had primed
+    anything with. The payload this replaced was keyed by path too and had the same hole."""
+    (review_repo / "plan").write_text("a product file that happens to be called that\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add plan")
+
+    seen: list[Mapping[str, Any]] = []
+    base = _git(review_repo, "rev-parse", "HEAD~1")
+    review.generate(repo_mod.Repo(review_repo), _capturing_reviewer(seen), base=base)
+    listed = [entry["path"] for entry in _extract_request(seen)["deterministic_facts"]["files"]]
+    assert "plan" in listed
 
 
 @pytest.mark.integration

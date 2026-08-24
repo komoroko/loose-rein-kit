@@ -255,7 +255,7 @@ def _blob_facts(repo: repo_mod.Repo, head: str) -> brief.BlobFacts:
     return read
 
 
-def _file_facts(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffFile]) -> dict[str, Any]:
+def _file_facts(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffFile]) -> list[dict[str, Any]]:
     """The blob and the line count of each changed path at `head`, for anchoring.
 
     Every code anchor a reviewer produces is validated against the committed tree: the blob has to
@@ -264,10 +264,24 @@ def _file_facts(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffF
     in — the same access that let a blind extractor open `.rein/plan.yaml`. Handing the two facts
     over is what makes the launch able to answer without the repository at all.
 
+    **A list of records, never a mapping keyed by path.** `actual_extraction.assert_blind` walks
+    the request for Expected-Model *keys*, so a path used as a key is a filename being read as
+    structure: a product with a root-level file called `plan` — or `claims`, `solution`,
+    `rationale` — made every review fail with "the extractor request carries Expected-Model keys
+    ['plan']", a sentence about priming describing a file nobody had primed anything with. The
+    payload this replaced (`relevant_code`) was keyed by path too and had the same hole.
+
     Deliberately identity and size, not content: the bodies are what `Reviewable` replaced, and
     putting them back under another name would undo the measurement that removed them.
+
+    Every non-binary changed path is listed, mechanical ones included, even though their bodies are
+    withheld from the diff. The tempting symmetry — withhold the body, withhold the blob — sets a
+    trap instead of closing one: `review.schema.json` requires `blob` on every code anchor, so a
+    reviewer that anchors a path this list omits produces a statement the *write* rejects, and the
+    whole review fails on a schema error several steps from the cause. The contract tells it to say
+    less rather than reach past what it can anchor; that is the place for that rule, not here.
     """
-    facts: dict[str, Any] = {}
+    facts: list[dict[str, Any]] = []
     for file in files:
         if file.binary:
             continue
@@ -277,7 +291,7 @@ def _file_facts(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffF
         rc, content = repo._git_rc("show", f"{head}:{file.path}")
         if rc != 0:
             continue
-        facts[file.path] = {"blob": f"git-blob:{blob.strip()}", "lines": content.count("\n") + 1}
+        facts.append({"path": file.path, "blob": f"git-blob:{blob.strip()}", "lines": content.count("\n") + 1})
     return facts
 
 
@@ -565,9 +579,10 @@ def generate(
         anchorable = _file_facts(repo, head, facts.files)
         # What the last review found blocking *about this same base*. Taken from the copy read at
         # the top rather than re-read here, and taken before the call below, which is about to move
-        # off this thread — the store is not something to touch from two. It goes into the request
-        # as well as into the validator: the reviewer is refused for dropping one of these, and was
-        # being refused on knowledge nobody had given it.
+        # off this thread — the store is not something to touch from two. It goes *into the
+        # request*, which is both where the reviewer reads it and where the validator now takes it
+        # from: the reviewer is refused for dropping one of these, and was being refused on
+        # knowledge nobody had given it.
         prior_blocking = _prior_blocking_ids(existing, trusted_base)
 
         security_request = security_review.build_request(
@@ -608,10 +623,6 @@ def generate(
                     reviewer,
                     repo=repo,
                     commit=head,
-                    # Without it the check below — a reviewer may not clear its own block by
-                    # regenerating and omitting the finding — had nothing to compare against, so
-                    # the protection its own docstring describes never once applied.
-                    prior_blocking_ids=prior_blocking,
                 )
 
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -731,7 +742,7 @@ def _extract_and_compare(
     head: str,
     trusted_base: str,
     reviewable: Reviewable,
-    anchorable: Mapping[str, Any],
+    anchorable: Sequence[Mapping[str, Any]],
     coverage: Mapping[str, Any],
     risk_floor: str,
     effective: str,
@@ -758,7 +769,7 @@ def _extract_and_compare(
             "coverage": coverage,
             "risk_floor": risk_floor,
             "context": reviewable.as_facts(),
-            "files": dict(anchorable),
+            "files": [dict(entry) for entry in anchorable],
         },
     )
     extraction = actual_extraction.run_extractor(
@@ -1030,7 +1041,9 @@ def _adapter_reviewer(
             # interpreter that is not holding a global lock for us.
             with _SPEND_LOCK:
                 spend[role] = spend.get(role, 0) + len(payload.encode("utf-8"))
-        with tempfile.TemporaryDirectory(prefix="rein-review-") as elsewhere:
+        # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
+        # left something undeletable behind must not turn a finished review into a traceback.
+        with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as elsewhere:
             rc, out = common.run(list(argv), cwd=elsewhere, timeout=timeout or None, input_text=payload)
         if rc != 0:
             # What the adapter said, not merely that it stopped. `common.run` merges stderr into
