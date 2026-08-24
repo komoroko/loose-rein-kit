@@ -7,6 +7,7 @@ the wiring writes a schema-valid review.yaml and resets the human half.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -18,7 +19,17 @@ from typing import Any
 
 import pytest
 
-from rein import actual_extraction, common, conformance, diff_facts, event_chain, models, review, review_policy
+from rein import (
+    actual_extraction,
+    common,
+    conformance,
+    diff_facts,
+    event_chain,
+    models,
+    review,
+    review_policy,
+    security_review,
+)
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -402,6 +413,106 @@ def test_the_reviewable_diff_never_carries_the_expected_model(review_repo: Path)
     extract = _extract_request(seen)
     assert "relevant_code" not in extract
     assert ".rein/plan.yaml" not in extract["diff"]
+
+
+# -- the launch has nothing to read but its request ----------------------------
+#
+# The transport passed no `cwd`, so every stage inherited rein's — the repository root. An agent
+# CLI reads its working directory, and that directory is where `AGENTS.md` explains the Expected
+# Model and `.rein/plan.yaml` *is* the Expected Model. `assert_blind` guards the payload and could
+# never have caught it, because the priming did not travel in the payload.
+
+
+@pytest.mark.integration
+def test_a_reviewer_is_launched_outside_the_repository(review_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: Any) -> tuple[int, str]:
+        seen.append({"cwd": cwd, "listing": sorted(os.listdir(cwd)) if cwd else []})
+        return 0, json.dumps({"actual_statements": [], "coverage": {}})
+
+    monkeypatch.setattr(common, "run", fake_run)
+    reviewer = review._adapter_reviewer(repo_mod.Repo(review_repo), "actual_extractor")
+    reviewer({"diff": "", "deterministic_facts": {}})
+
+    assert seen, "the transport never launched anything"
+    where = seen[0]["cwd"]
+    assert where and Path(where).resolve() != review_repo.resolve()
+    assert seen[0]["listing"] == [], "the launch was given a directory with something in it"
+
+
+def test_every_stage_carries_its_own_contract() -> None:
+    """What the stage must produce used to be nowhere in the request, so the only thing telling it
+    was whatever the CLI loaded from the working directory — which is the same thing that primed
+    it. Cutting that directory is only honest if the question travels with the request."""
+    extract = actual_extraction.build_request(
+        trusted_base_sha="a" * 40, subject_head_sha="b" * 40, diff_text="d", deterministic_facts={}
+    )
+    compare = conformance.build_request(expected_model={"claims": []}, actual_statements=[], actual_digest="d")
+    security = security_review.build_request(
+        diff_text="d", deterministic_facts={}, trusted_base_sha="a" * 40, subject_head_sha="b" * 40
+    )
+    for request in (extract, compare, security):
+        assert request["contract"].strip()
+
+
+def test_the_extractor_contract_names_no_expectation() -> None:
+    """The one stage whose whole value is that it has not seen the plan. Its own instructions are
+    the last place a mention of one would be noticed."""
+    contract = actual_extraction.contract()
+    assert not actual_extraction._forbidden_keys_in({"contract": contract})
+    for primed in ("expected model", "the plan", "requirement it", "was supposed to"):
+        assert primed not in contract.lower()
+    assert "actually does" in contract.lower()
+
+
+def test_a_contract_names_only_vocabulary_the_schema_allows() -> None:
+    """A contract is what a reviewer is told to produce and the schema is what refuses it, so the
+    two cannot be separate lists — the failure is a whole stage's output rejected at the write."""
+    for category in actual_extraction.categories():
+        assert category in actual_extraction.contract()
+    for category in security_review.categories():
+        assert category in security_review.contract()
+    for verdict in models.VERDICT_VALUES:
+        assert verdict in conformance.contract()
+
+
+def test_a_reviewer_is_told_which_blocks_it_may_not_drop() -> None:
+    """`run_security_review` refuses an answer that drops a previously blocking finding, and was
+    refusing on knowledge the reviewer had never been given: the ids were a Python argument to the
+    validator and nothing more. A regeneration with a blocker standing had to re-invent `SEC-001`
+    by coincidence to pass a check whose own instruction is "resolve the finding and re-run"."""
+    request = security_review.build_request(
+        diff_text="d",
+        deterministic_facts={},
+        trusted_base_sha="a" * 40,
+        subject_head_sha="b" * 40,
+        prior_blocking_ids=["SEC-001"],
+    )
+    assert request["prior_blocking"] == ["SEC-001"]
+    assert "prior_blocking" in request["contract"]
+    # Nothing to carry is not an empty list to explain: the key stays out of the request entirely.
+    clean = security_review.build_request(
+        diff_text="d", deterministic_facts={}, trusted_base_sha="a" * 40, subject_head_sha="b" * 40
+    )
+    assert "prior_blocking" not in clean
+
+
+@pytest.mark.integration
+def test_the_anchors_a_reviewer_needs_are_handed_over_not_looked_up(review_repo: Path) -> None:
+    """Every anchor is validated against the committed blob and the file's line count. Both were
+    the reviewer's to find out, which it could only do by reading the repository it was launched
+    in — the same access this change removes."""
+    (review_repo / "src.py").write_text("x = 1\ny = 2\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add src")
+
+    seen: list[Mapping[str, Any]] = []
+    base = _git(review_repo, "rev-parse", "HEAD~1")
+    review.generate(repo_mod.Repo(review_repo), _capturing_reviewer(seen), base=base)
+    files = _extract_request(seen)["deterministic_facts"]["files"]
+    assert files["src.py"]["blob"] == f"git-blob:{_git(review_repo, 'rev-parse', 'HEAD:src.py')}"
+    assert files["src.py"]["lines"] == 3  # two lines and the empty one a trailing newline leaves
 
 
 @pytest.mark.integration

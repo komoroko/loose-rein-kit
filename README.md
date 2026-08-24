@@ -300,8 +300,9 @@ is decided on. What is:
   the claim it answers, cross-checked by `rein dag --trace`.
 - **Gate ④ compares Expected against Actual.** `rein review generate` (bound to the reviewed HEAD)
   runs a deterministic Coverage Manifest, a **blind** extraction of what the code actually does —
-  that extractor is never given the plan — then the Expected/Actual comparison and the structured
-  security and maintainability review. What it reads is the product, not `.rein/`.
+  that extractor is never given the plan, and is launched outside the repository so it cannot go and
+  read one — then the Expected/Actual comparison and the structured security and maintainability
+  review. What it reads is the product, not `.rein/`.
 - **There is no single `verified`.** Findings sit on three separate axes — integrity, semantic
   support, conformance — and "extra behaviours: 0" appears only with the Coverage Manifest that
   earned it. A blocking security finding, a diverged high/critical claim, an ungrounded

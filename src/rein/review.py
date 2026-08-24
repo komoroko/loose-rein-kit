@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -252,6 +253,32 @@ def _blob_facts(repo: repo_mod.Repo, head: str) -> brief.BlobFacts:
         return {"blob": blob, "bytes": int(size.strip())}
 
     return read
+
+
+def _file_facts(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffFile]) -> dict[str, Any]:
+    """The blob and the line count of each changed path at `head`, for anchoring.
+
+    Every code anchor a reviewer produces is validated against the committed tree: the blob has to
+    be the one at that path, and the line range has to be inside the file. Both facts used to be
+    the *reviewer's* to find out, which it could only do by reading the repository it was launched
+    in — the same access that let a blind extractor open `.rein/plan.yaml`. Handing the two facts
+    over is what makes the launch able to answer without the repository at all.
+
+    Deliberately identity and size, not content: the bodies are what `Reviewable` replaced, and
+    putting them back under another name would undo the measurement that removed them.
+    """
+    facts: dict[str, Any] = {}
+    for file in files:
+        if file.binary:
+            continue
+        rc, blob = repo._git_rc("rev-parse", f"{head}:{file.path}")
+        if rc != 0 or not blob.strip():  # deleted at head — there is nothing to anchor in
+            continue
+        rc, content = repo._git_rc("show", f"{head}:{file.path}")
+        if rc != 0:
+            continue
+        facts[file.path] = {"blob": f"git-blob:{blob.strip()}", "lines": content.count("\n") + 1}
+    return facts
 
 
 def _reviewable(
@@ -533,19 +560,27 @@ def generate(
             ceiling=limits["max_diff_bytes_per_partition"],
         )
 
+        # What a reviewer needs to anchor a statement, since it is launched with nothing to read
+        # but its request (`_adapter_reviewer`).
+        anchorable = _file_facts(repo, head, facts.files)
+        # What the last review found blocking *about this same base*. Taken from the copy read at
+        # the top rather than re-read here, and taken before the call below, which is about to move
+        # off this thread — the store is not something to touch from two. It goes into the request
+        # as well as into the validator: the reviewer is refused for dropping one of these, and was
+        # being refused on knowledge nobody had given it.
+        prior_blocking = _prior_blocking_ids(existing, trusted_base)
+
         security_request = security_review.build_request(
             diff_text=reviewable.text,
             deterministic_facts={
                 "signals": [h.signal for h in facts.signals],
                 "context": reviewable.as_facts(),
+                "files": anchorable,
             },
             trusted_base_sha=trusted_base,
             subject_head_sha=head,
+            prior_blocking_ids=prior_blocking,
         )
-        # What the last review found blocking *about this same base*. Taken from the copy read at
-        # the top rather than re-read here, and taken before the call below, which is about to move
-        # off this thread — the store is not something to touch from two.
-        prior_blocking = _prior_blocking_ids(existing, trusted_base)
 
         # The security review reads the same change the extractor does and consumes nothing the
         # extractor or the comparator produce, so it does not have to wait behind them. All three
@@ -590,6 +625,7 @@ def generate(
                     head=head,
                     trusted_base=trusted_base,
                     reviewable=reviewable,
+                    anchorable=anchorable,
                     coverage=coverage,
                     risk_floor=risk_floor,
                     effective=effective,
@@ -695,6 +731,7 @@ def _extract_and_compare(
     head: str,
     trusted_base: str,
     reviewable: Reviewable,
+    anchorable: Mapping[str, Any],
     coverage: Mapping[str, Any],
     risk_floor: str,
     effective: str,
@@ -721,6 +758,7 @@ def _extract_and_compare(
             "coverage": coverage,
             "risk_floor": risk_floor,
             "context": reviewable.as_facts(),
+            "files": dict(anchorable),
         },
     )
     extraction = actual_extraction.run_extractor(
@@ -961,6 +999,19 @@ def _adapter_reviewer(
     judgement about reviewing; it was a number, and a review it killed at 900 seconds cost the
     whole launch and was re-run from cold. The knob defaults to no limit for the reason its own
     docstring gives, and Ctrl-C is what stops a launch that really is stuck.
+
+    **It runs in an empty directory, not in the repository.** This transport passed no `cwd`, so
+    every stage inherited rein's — the repository root. An agent CLI reads its working directory:
+    the root is where `AGENTS.md` explains the Expected Model and `.rein/plan.yaml` *is* the
+    Expected Model, both a `git show` away from the one stage whose whole value is that it has
+    never seen them. `actual_extraction.assert_blind` guards the payload and could never have
+    caught this, because the priming did not travel in the payload.
+
+    Cutting the directory only works because the request now carries what the answer needs: the
+    stage contract (`<stage>.contract`) instead of whatever instructions the CLI picked up from a
+    project, and `deterministic_facts.files` instead of the `git rev-parse` a reviewer used to
+    have to run to anchor anything. What the launch can still read is the user's own global CLI
+    configuration, which is theirs and not this repository's to remove.
     """
     from rein import build_loop
 
@@ -979,7 +1030,8 @@ def _adapter_reviewer(
             # interpreter that is not holding a global lock for us.
             with _SPEND_LOCK:
                 spend[role] = spend.get(role, 0) + len(payload.encode("utf-8"))
-        rc, out = common.run(list(argv), timeout=timeout or None, input_text=payload)
+        with tempfile.TemporaryDirectory(prefix="rein-review-") as elsewhere:
+            rc, out = common.run(list(argv), cwd=elsewhere, timeout=timeout or None, input_text=payload)
         if rc != 0:
             # What the adapter said, not merely that it stopped. `common.run` merges stderr into
             # `out`, so the reason was in hand and thrown away: a field report of three identical

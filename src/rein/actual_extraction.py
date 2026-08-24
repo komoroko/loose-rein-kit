@@ -58,6 +58,58 @@ class ExtractionError(RuntimeError):
     """The extractor was primed, or produced output that could not be trusted."""
 
 
+def categories() -> tuple[str, ...]:
+    """The Actual Statement categories, read from the schema that enforces them.
+
+    Read rather than restated so the contract below cannot name a vocabulary the write would then
+    refuse. The same reason `OPERATOR_SURFACE_KINDS` is a subset of this list rather than a list
+    of its own.
+    """
+    return review_policy.review_schema_enum("actual_extraction", "items", "properties", "category", "enum")
+
+
+def contract() -> str:
+    """What the extractor is being asked for, carried *in* the request.
+
+    It used to be carried nowhere. The transport launched the adapter in rein's own working
+    directory — the repository — and whatever the CLI loaded from there was the only thing telling
+    it what to produce. For this stage that is a hole in the floor: the repository root is where
+    `AGENTS.md` explains the Expected Model, and `.rein/plan.yaml` *is* the Expected Model. A blind
+    extraction that can read the plan is not blind, and `assert_blind` only ever guarded the
+    payload.
+
+    So the request says what it wants and the launch is given nothing else to read
+    (`review._adapter_reviewer`). Which means everything the answer needs has to be *in* here —
+    the anchors' blobs and line counts included, since the extractor can no longer look them up.
+    """
+    return (
+        "Read the change below and report WHAT THE CODE ACTUALLY DOES.\n"
+        "\n"
+        "You are deliberately not told what it was meant to do. There is no requirement, plan, "
+        "ticket or author's explanation available to you, and inferring one is not the task: "
+        "report behaviour you can point at in the code, and nothing else.\n"
+        "\n"
+        "Answer with one JSON object and no other text:\n"
+        '{"actual_statements": [{"id": "AST-001", "statement": "<what the code does>", '
+        f'"category": "<one of {"|".join(categories())}>", '
+        f'"confidence": "<one of {"|".join(sorted(CONFIDENCE_VALUES))}>", '
+        '"code_anchors": [{"path": "<repo-relative path>", "start_line": <int>, '
+        '"end_line": <int>, "blob": "<the blob for that path from deterministic_facts.files>"}], '
+        '"observed_conditions": ["<optional>"], "unknowns": ["<optional>"]}], '
+        '"coverage": {"risk_floor": "<not lower than deterministic_facts.risk_floor>"}}\n'
+        "\n"
+        "Every rule below is checked against the committed tree, not taken on trust:\n"
+        "- A statement with no code anchor is refused. No anchor, no assertion.\n"
+        "- `path`, `blob` and the line range must match a real committed blob. "
+        "`deterministic_facts.files` gives you the blob and the line count for every path in the "
+        "change; use them rather than guessing, and never anchor outside that range.\n"
+        "- Do not send an `integrity` field. Integrity is derived from your anchors, never claimed.\n"
+        "- `coverage.risk_floor` may not be lower than the one in the deterministic facts.\n"
+        "- Number the ids AST-001, AST-002, … A whole extraction is rejected if any part of it "
+        "fails, so say less rather than reaching past what you can anchor."
+    )
+
+
 def build_request(
     *,
     trusted_base_sha: str,
@@ -73,6 +125,7 @@ def build_request(
     happened) is not.
     """
     request: dict[str, Any] = {
+        "contract": contract(),
         "trusted_base_sha": trusted_base_sha,
         "subject_head_sha": subject_head_sha,
         "diff": diff_text,

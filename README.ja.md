@@ -302,7 +302,8 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
   各タスクを、それが答える claim へ紐づけ、`rein dag --trace` が突き合わせる。
 - **ゲート④は Expected と Actual を突き合わせる。** `rein review generate`(レビュー対象の HEAD に
   束ねて実行)が実行するのは、決定論的な Coverage Manifest、コードが実際に何をしているかの
-  **ブラインド抽出**(この抽出器には計画を一切渡さない)、Expected と Actual の比較、そして
+  **ブラインド抽出**(この抽出器には計画を一切渡さず、自分で読みに行けないようリポジトリの外で
+  起動する)、Expected と Actual の比較、そして
   構造化されたセキュリティ・保守性レビューである。読み取る対象はプロダクトであって `.rein/` では
   ない。
 - **単一の `verified` は存在しない。** 指摘は integrity・semantic support・conformance という

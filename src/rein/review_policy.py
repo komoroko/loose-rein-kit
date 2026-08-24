@@ -217,6 +217,27 @@ def validate_citations(referenced: Iterable[str], known: Iterable[str], *, what:
     return [f"{what}: cites unknown id {rid!r} (not in the frozen plan)" for rid in sorted(set(referenced) - known_set)]
 
 
+# --- the vocabulary a contract may name ---------------------------------------
+
+
+def review_schema_enum(*path: str) -> tuple[str, ...]:
+    """The enum `review.schema.json` holds at `path`, walked from `$defs.machine.properties`.
+
+    Read from the schema rather than restated in prose, because the prose in question is what a
+    reviewer is *told to produce* and the schema is what refuses it. Two lists would eventually
+    disagree, and the way that failure shows up is a whole stage's output rejected at the write
+    for naming a category somebody moved.
+
+    The path is spelled out by the caller rather than guessed at from a section name: the sections
+    are not the same shape (`actual_extraction` is an array, `security` is an object holding one),
+    and a helper that inferred the difference would be one more thing to be wrong.
+    """
+    node: Any = models.schema("review")["$defs"]["machine"]["properties"]
+    for key in path:
+        node = node[key]
+    return tuple(str(value) for value in node)
+
+
 # --- code anchors (plan §12.7) ------------------------------------------------
 
 
