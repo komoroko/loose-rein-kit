@@ -849,9 +849,9 @@ def test_the_security_stage_does_not_wait_behind_the_extraction(review_repo: Pat
 
 @pytest.mark.integration
 def test_a_failed_extraction_does_not_wait_out_the_security_stage(review_repo: Path) -> None:
-    """The failure that should surface in seconds used to take as long as the sibling it could not
-    cancel — a field run recorded a session-limit extraction failure 61 minutes after launch, and
-    paid for a whole security review nobody read.
+    """The failure that should surface in seconds used to wait out the sibling it could not cancel,
+    so it was reported when the *discarded* call ended: measured 1m36s and 3m54s late across two
+    runs of one cycle, each having paid in full for a security review nobody read.
 
     Pinned with a *real* subprocess on the security side, because that is the thing the fix acts on:
     `Future.cancel()` is a no-op on a running task, and `shutdown(wait=False, cancel_futures=True)`

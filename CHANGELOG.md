@@ -13,8 +13,9 @@ generate` could not stop work it had already given up on.
 the chain fails fast the security result is discarded — so the code called `Future.cancel()` on it.
 That is a documented no-op once a task has started, and with one worker and nothing competing for
 it this one always has. `ThreadPoolExecutor.__exit__` then blocks in `shutdown(wait=True)` until
-the adapter call finishes: a field run recorded a session-limit failure, which takes seconds,
-**61 minutes** after the command was launched, having paid for a whole security review nobody would
+the adapter call finishes, so a failure is reported when the *discarded* call ends rather than when
+it happens. Measured across two runs of one cycle, an extraction failure that takes seconds
+surfaced **1m36s and 3m54s late**, each run having paid in full for a security review nobody would
 read. `shutdown(wait=False, cancel_futures=True)` does not fix it either — `concurrent.futures`
 registers an atexit hook that joins every worker, so the wait moves to interpreter exit and the
 process returns no sooner. The only thing that ends a launch early is killing the process it

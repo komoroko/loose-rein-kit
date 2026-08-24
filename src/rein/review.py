@@ -606,9 +606,10 @@ def generate(
         # `cancel` is what makes the failure path honest. `Future.cancel()` cannot stop a task that
         # has started — with one worker and nothing competing for it, this one always has — and
         # `ThreadPoolExecutor.__exit__` then blocks in `shutdown(wait=True)` until the adapter call
-        # it failed to cancel finishes. A field run recorded an extraction failure that takes
-        # seconds *61 minutes* after the command was launched, having paid for a whole security
-        # review nobody would read. `shutdown(wait=False, cancel_futures=True)` does not fix it
+        # it failed to cancel finishes. So a failure is reported when the *discarded* call ends
+        # rather than when it happens — measured across two runs of one cycle, the extraction
+        # failure surfaced 1m36s and 3m54s late, each run having paid in full for a security review
+        # nobody would read. `shutdown(wait=False, cancel_futures=True)` does not fix it
         # either: `concurrent.futures.thread` registers an atexit hook that joins every worker, so
         # the wait moves from here to interpreter exit and the process returns no sooner. The only
         # thing that ends a launch early is killing the process it started.
@@ -1015,9 +1016,11 @@ def _adapter_reviewer(
 
     The launch takes `execution.agent_timeout_sec`, the same knob the build loop launches under,
     rather than the fifteen minutes that used to be written here. Fifteen minutes was not a
-    judgement about reviewing; it was a number, and a review it killed at 900 seconds cost the
-    whole launch and was re-run from cold. The knob defaults to no limit for the reason its own
-    docstring gives, and Ctrl-C is what stops a launch that really is stuck.
+    judgement about reviewing; it was a number, and it was not a comfortable one — field runs of
+    this pipeline came in at 6m27s and 6m40s, so a change a little larger than that cycle's would
+    have crossed it, thrown the whole launch away, and been re-run from cold. The knob defaults to
+    no limit for the reason its own docstring gives, and Ctrl-C is what stops a launch that really
+    is stuck.
 
     **It runs in an empty directory, not in the repository.** This transport passed no `cwd`, so
     every stage inherited rein's — the repository root. An agent CLI reads its working directory:
