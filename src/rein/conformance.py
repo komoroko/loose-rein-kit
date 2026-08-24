@@ -23,12 +23,59 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from rein import models, review_policy
 from rein import repo as repo_mod
-from rein import review_policy
 
 
 class ComparatorError(RuntimeError):
     """The Comparator was not independent, or produced output that could not be trusted."""
+
+
+def contract() -> str:
+    """What the Comparator is being asked for, carried *in* the request.
+
+    Carried here for the same reason the extractor's is (`actual_extraction.contract`): the launch
+    is given nothing to read but this. For this stage the point is less about blindness — it is
+    handed the Expected Model on purpose — than about the answer being a function of the request
+    rather than of whatever the CLI happened to load from a working directory.
+    """
+    verdicts = "|".join(sorted(models.VERDICT_VALUES))
+    return (
+        "Compare the Expected Model against the Actual, and report where they meet and where they "
+        "do not.\n"
+        "\n"
+        "`actual_statements` is READ-ONLY. It was extracted by somebody who never saw the expected "
+        "claims, and it is bound by `actual_digest`. You may cite it; you may not rewrite it, add "
+        "to it, or return it.\n"
+        "\n"
+        "Answer with one JSON object and no other text:\n"
+        '{"actual_digest": "<echo the one you were given, unchanged>", '
+        '"claims": [{"claim_id": "<a claim id from the expected model>", '
+        '"actual_statement_ids": ["AST-001"], '
+        f'"verdict": "<one of {verdicts}>", '
+        '"integrity": {"status": "verified|failed|unavailable"}, '
+        '"semantic_support": {"status": "supported|contradicted|conflicted|unknown", '
+        '"assessment_basis": "machine_assessed"}, '
+        '"conformance": {"status": "observed|partial|unknown"}, "unknowns": ["<optional>"]}], '
+        '"actual_coverage_gaps": [{"id": "GAP-001", "kind": "actual_coverage_gap", '
+        '"risk": "low|medium|high|critical", "blocking": <bool>}], '
+        '"extra_behaviors": [{"id": "EXTRA-001", "actual_statement_ids": ["AST-002"], '
+        f'"category": "<one of {"|".join(sorted(EXTRA_CATEGORIES))}>", '
+        '"risk": "low|medium|high|critical", "grounded": <bool>, "blocking": <bool>}]}\n'
+        "\n"
+        "Every rule below is checked, not trusted:\n"
+        "- A claim id you did not receive, or an Actual Statement id the extractor did not "
+        "produce, is a fabricated citation and the whole comparison is rejected.\n"
+        "- `assessment_basis` is `machine_assessed`. You are a machine; the other values mean an "
+        "experiment, an expert, or a proof, and claiming one is a lie about who did the work.\n"
+        "- A claim's `risk` may not be lower than the change's effective risk.\n"
+        "- `extra_behaviors` is behaviour in the Actual that no expected claim accounts for. Each "
+        "one must cite the Actual Statement it was read from — that section is the only answer to "
+        '"did this build something nobody asked for?", and an empty list is a finding, not a '
+        "formality.\n"
+        "- There is no single `verified`. The three axes are separate on purpose: integrity is a "
+        "fact, semantic_support is your judgement, conformance is an observation."
+    )
 
 
 def build_request(
@@ -39,6 +86,7 @@ def build_request(
 ) -> dict[str, Any]:
     """Assemble the Comparator's input (plan §12.3). The Actual arrives read-only, digest-bound."""
     return {
+        "contract": contract(),
         "expected_model": dict(expected_model),
         "actual_statements": [dict(a) for a in actual_statements],
         "actual_digest": actual_digest,

@@ -95,7 +95,7 @@ operations:
   changes add|list|address     ask for changes instead of approving (holds the gate shut)
   oci build|verify             build the sandbox images and pin their digests
   revise --to <phase> ...      roll back upstream (gates reset in a chain; --from-review derives the impacted tasks)
-  review generate|complete|show  the grounded machine review (gate ④'s evidence)
+  review generate|complete|show  the grounded machine review (generate --supervise waits out a capacity stop)
   build [--dry-run|--supervise]  the deterministic /build orchestrator (--supervise: retry in-process on exit 3)
   task reset <id> --reason …   put a blocked task back on the frontier (recorded, never hand-edited)
   dag [--render|--trace|...]   derive/inspect the task DAG (read-only; /tasks & /status use it)

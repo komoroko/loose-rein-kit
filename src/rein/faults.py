@@ -97,6 +97,22 @@ _NETWORK_UNREACHABLE_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
+#: The request did not fit. Deliberately a *predicate* and not a branch in :func:`classify_launch`:
+#: whether waiting helps is not the same question as whether a fresh launch would. It never helps
+#: — the same request will be the same size in an hour — but a *resumed* session that has outgrown
+#: its window is fixed by relaunching cold, which is why the classifier keeps calling this
+#: transient and the callers ask this separately before deciding what to do about it.
+_CONTEXT_OVERFLOW_RE = re.compile(
+    r"""
+      \bprompt\ is\ too\ long\b
+    | \bcontext[\ _-]?length[\ _-]?exceeded\b
+    | \bmaximum\ context\ length\b
+    | \bcontext\ window\ (?:exceeded|is\ full)\b
+    | \binput\ (?:is\ )?too\ long\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 #: A capacity message usually carries the time it lifts ("resets 3:30am (Asia/Tokyo)"). Worth
 #: showing a human deciding when to re-run — as the CLI's own words, never parsed into a
 #: timestamp anything would act on.
@@ -183,6 +199,17 @@ def is_capacity(output: str) -> bool:
 def is_network_unreachable(output: str) -> bool:
     """Does this output look like a DNS/connection failure from a `network: none` sandbox?"""
     return bool(_NETWORK_UNREACHABLE_RE.search(output))
+
+
+def is_context_overflow(output: str) -> bool:
+    """Did the launch fail because the request did not fit the model's window?
+
+    Worth asking on its own because it is the one machine failure that **re-running identically
+    cannot fix**: an unattended retry loop would spend the same request, at the same size, for the
+    same answer, forever. What can fix it is sending less — a narrower review scope, or a cold
+    launch in place of a resumed session that has outgrown its window.
+    """
+    return bool(_CONTEXT_OVERFLOW_RE.search(output))
 
 
 def reset_hint(output: str) -> str:

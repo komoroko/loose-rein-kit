@@ -9,14 +9,26 @@ editor write.
 Killing only the process started leaves its children alive — a `make test` that spawned pytest,
 which spawned a server, would leave the server holding the port and fail the next run for the
 wrong reason.
+
+That same group kill is the only way a launch can be ended *early*, which is what
+:class:`Cancellation` exposes. Two things depend on it. A caller that has stopped wanting an
+answer — gate ④'s security stage once its sibling has already failed — can stop paying for it,
+which `concurrent.futures` cannot express (`Future.cancel()` is a documented no-op once the task
+is running). And a human pressing Ctrl-C can actually stop an agent. The child is in its own
+session, so the terminal's SIGINT reaches this process and not it — while `Popen.__exit__`
+explicitly declines to wait on a KeyboardInterrupt, "assuming the SIGINT was also already sent to
+our child processes". Here it was not. Measured: the launch was orphaned and went on running,
+holding its quota, with nothing left to read what it eventually said.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import sys
-from collections.abc import Iterable
+import threading
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 # --- diagnostics logging ------------------------------------------------------
@@ -48,6 +60,9 @@ def configure_logging(*, level: int = logging.INFO) -> None:
 
 #: rc for a command killed after its timeout — the coreutils `timeout` convention.
 RC_TIMEOUT = 124
+#: rc for a command a caller cancelled through :class:`Cancellation`. Deliberately distinct from
+#: :data:`RC_TIMEOUT`: nothing ran out of time, somebody stopped wanting the answer.
+RC_CANCELLED = 125
 #: Output past this is truncated with a marker. A runaway command must not exhaust memory
 #: before its timeout fires.
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -76,6 +91,71 @@ def ask_yes_no(prompt: str) -> bool:
     return sys.stdin.readline().strip().lower() in ("y", "yes")
 
 
+class Cancellation:
+    """A handle another thread can trip to end a :func:`run` before it finishes.
+
+    `concurrent.futures.Future.cancel()` is a no-op once a task has started, and a
+    `ThreadPoolExecutor` joins its workers on the way out of its `with` block *and* again at
+    interpreter exit (`concurrent.futures.thread` registers `_python_exit`). So "stop waiting for
+    that stage" cannot be said with futures at all: the only thing that ends a launch early is
+    killing the process it started, and that is what this is.
+
+    Bound to the thread that does the running (:func:`cancelling`) rather than threaded through
+    the call chain, because what gets cancelled here is reached through an *injected* callable —
+    a reviewer transport whose signature belongs to whoever supplied it, fakes included.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # Every launch currently held, not the last one: a token bound to two threads that both
+        # ran would otherwise have kept only the second, and `cancel` would have left the first
+        # running while reporting that it had stopped everything.
+        self._procs: set[Any] = set()
+        self._cancelled = False
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        """Kill every launch this token holds, and refuse every later one bound to it."""
+        with self._lock:
+            self._cancelled = True
+            held = list(self._procs)
+        for proc in held:
+            _kill_group(proc)
+
+    def _attach(self, proc: Any) -> bool:
+        """Take the launch; False when this token was already tripped, so the caller kills it.
+
+        The window between `Popen` returning and this call is why :meth:`cancel` cannot simply be
+        "kill the process": for a moment there is not one yet, and losing that race would leave a
+        launch running that somebody had already stopped waiting for.
+        """
+        with self._lock:
+            self._procs.add(proc)
+            return not self._cancelled
+
+    def _detach(self, proc: Any) -> None:
+        with self._lock:
+            self._procs.discard(proc)
+
+
+_bound_cancellation = threading.local()
+
+
+@contextlib.contextmanager
+def cancelling(token: Cancellation) -> Iterator[Cancellation]:
+    """Bind `token` to this thread: every :func:`run` on it is then killable from outside."""
+    previous = getattr(_bound_cancellation, "token", None)
+    _bound_cancellation.token = token
+    try:
+        yield token
+    finally:
+        _bound_cancellation.token = previous
+
+
 def run(
     cmd: list[str],
     cwd: str | None = None,
@@ -92,13 +172,19 @@ def run(
     group is created and only the leader is killed — the children are left, which is one of the
     reasons the supported-environment table calls Windows native unvalidated.
 
+    `timeout` is `None` by default and every agent launch leaves it that way. A wall clock cannot
+    tell a model that is working from one that is stuck, and the two mistakes do not cost the same:
+    killing a working agent throws away the whole run's output and quota and makes the retry pay
+    for it again, while failing to kill a stuck one only stalls — and a stall is now interruptible,
+    because the `BaseException` path below kills the group on Ctrl-C. A step whose runtime *is*
+    knowable (a test suite, a build, a network call) still passes one.
+
     `env`, when given, *replaces* the environment rather than extending it — an executor
     profile's allowlist is only an allowlist if nothing leaks in around it.
     """
-    import os
-    import signal
     import subprocess  # lazy: keep `import common` light for the hook path (gate_guard on every edit)
 
+    token: Cancellation | None = getattr(_bound_cancellation, "token", None)
     popen_kwargs: dict[str, Any] = {}
     if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):  # Windows
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -120,24 +206,45 @@ def run(
         return 127, f"could not run {cmd[0]!r}: {exc}"
 
     with proc:
+        if token is not None and not token._attach(proc):
+            _kill_group(proc)  # cancelled in the window between Popen and the attach
         try:
             output, _ = proc.communicate(input=input_text, timeout=timeout)
+            if token is not None and token.cancelled:
+                # Whatever the killed process managed to say is not an answer to anything.
+                return RC_CANCELLED, _cap(f"{output or ''}\ncancelled by the caller (process group killed)")
             return proc.returncode, _cap(output or "")
         except subprocess.TimeoutExpired:
             # subprocess's own timeout handling kills the direct child only, so anything it
             # spawned survives — a stuck server keeps the port and the next run fails for a
             # reason that has nothing to do with the code. Kill the whole group instead.
-            _kill_group(proc, os, signal)
+            _kill_group(proc)
             output, _ = proc.communicate()
             elapsed = int(timeout) if timeout is not None else 0
             return RC_TIMEOUT, _cap(f"{output or ''}\ntimed out after {elapsed}s (process group killed)")
+        except BaseException:
+            # A Ctrl-C, a supervisor's SIGTERM, anything. `start_new_session=True` put the child
+            # in its own session, so the terminal's SIGINT reached this process and not it — and
+            # `Popen.__exit__` declines to wait on a KeyboardInterrupt precisely because it
+            # assumes the opposite ("the SIGINT was also already sent to our child processes").
+            # So Ctrl-C used to return promptly and leave the agent running, orphaned, still
+            # spending. Kill the group, then let the exception carry on: stopping is the caller's
+            # decision and this only makes it true of the process as well as of us.
+            _kill_group(proc)
+            raise
+        finally:
+            if token is not None:
+                token._detach(proc)
 
 
-def _kill_group(proc: Any, os_mod: Any, signal_mod: Any) -> None:
+def _kill_group(proc: Any) -> None:
     """SIGKILL the whole process group, falling back to the single process where that fails."""
-    if hasattr(os_mod, "killpg"):
+    import os
+    import signal
+
+    if hasattr(os, "killpg"):
         try:
-            os_mod.killpg(os_mod.getpgid(proc.pid), signal_mod.SIGKILL)
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             return
         except (ProcessLookupError, PermissionError, OSError):
             pass  # already gone, or a platform that will not let us — fall through

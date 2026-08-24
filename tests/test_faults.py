@@ -171,6 +171,41 @@ def test_the_reset_time_is_quoted_not_parsed() -> None:
     assert faults.reset_hint("nothing about time here") == ""
 
 
+# --- a request that did not fit -----------------------------------------------
+#
+# The one machine failure re-running identically cannot fix: the same request will be the same
+# size in fifteen minutes. Asked separately from the classification because "would waiting help?"
+# and "would a *fresh* launch help?" are different questions, and here the answers differ.
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "API Error: Prompt is too long",
+        "context_length_exceeded",
+        "This model's maximum context length is 200000 tokens",
+        "the context window is full",
+    ],
+)
+def test_a_request_that_did_not_fit_is_recognized(output: str) -> None:
+    assert faults.is_context_overflow(output)
+
+
+def test_capacity_is_not_a_request_that_did_not_fit() -> None:
+    """Waiting fixes one and never the other, so a supervisor has to be able to tell them apart."""
+    assert not faults.is_context_overflow("You've hit your session limit · resets 3:30am")
+    assert not faults.is_context_overflow("AssertionError: expected 3, got 4")
+
+
+def test_a_request_that_did_not_fit_still_classifies_as_transient() -> None:
+    """The classifier is deliberately left alone. A resumed session that outgrew its window is
+    fixed by relaunching cold, and `build_loop._invoke_implementer` only reaches that relaunch for
+    a transient, non-capacity fault — so calling this permanent would take the fix away from the
+    one caller that has it."""
+    assert faults.classify_launch(1, "Prompt is too long") is faults.Fault.ENV_TRANSIENT
+    assert not faults.is_capacity("Prompt is too long")
+
+
 # --- the exception ------------------------------------------------------------
 
 

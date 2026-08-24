@@ -58,12 +58,64 @@ class ExtractionError(RuntimeError):
     """The extractor was primed, or produced output that could not be trusted."""
 
 
+def categories() -> tuple[str, ...]:
+    """The Actual Statement categories, read from the schema that enforces them.
+
+    Read rather than restated so the contract below cannot name a vocabulary the write would then
+    refuse. The same reason `OPERATOR_SURFACE_KINDS` is a subset of this list rather than a list
+    of its own.
+    """
+    return review_policy.review_schema_enum("actual_extraction", "items", "properties", "category", "enum")
+
+
+def contract() -> str:
+    """What the extractor is being asked for, carried *in* the request.
+
+    It used to be carried nowhere. The transport launched the adapter in rein's own working
+    directory — the repository — and whatever the CLI loaded from there was the only thing telling
+    it what to produce. For this stage that is a hole in the floor: the repository root is where
+    `AGENTS.md` explains the Expected Model, and `.rein/plan.yaml` *is* the Expected Model. A blind
+    extraction that can read the plan is not blind, and `assert_blind` only ever guarded the
+    payload.
+
+    So the request says what it wants and the launch is given nothing else to read
+    (`review._adapter_reviewer`). Which means everything the answer needs has to be *in* here —
+    the anchors' blobs and line counts included, since the extractor can no longer look them up.
+    """
+    return (
+        "Read the change below and report WHAT THE CODE ACTUALLY DOES.\n"
+        "\n"
+        "Report only behaviour you can point at in the code. Do not reconstruct intent, do not say "
+        "what the change is *for*, and do not close a gap with what a careful author would "
+        "presumably have wanted. This reading is worth having precisely because it was made "
+        "without any of that, so a guess costs more than a silence.\n"
+        "\n"
+        "Answer with one JSON object and no other text:\n"
+        '{"actual_statements": [{"id": "AST-001", "statement": "<what the code does>", '
+        f'"category": "<one of {"|".join(categories())}>", '
+        f'"confidence": "<one of {"|".join(sorted(CONFIDENCE_VALUES))}>", '
+        '"code_anchors": [{"path": "<repo-relative path>", "start_line": <int>, '
+        '"end_line": <int>, "blob": "<the blob deterministic_facts.files gives for that path>"}], '
+        '"observed_conditions": ["<optional>"], "unknowns": ["<optional>"]}], '
+        '"coverage": {"risk_floor": "<not lower than deterministic_facts.risk_floor>"}}\n'
+        "\n"
+        "Every rule below is checked against the committed tree, not taken on trust:\n"
+        "- A statement with no code anchor is refused. No anchor, no assertion.\n"
+        "- `path`, `blob` and the line range must match a real committed blob. "
+        "`deterministic_facts.files` lists a blob and a line count for every path in the "
+        "change; use them rather than guessing, and never anchor outside that range.\n"
+        "- Do not send an `integrity` field. Integrity is derived from your anchors, never claimed.\n"
+        "- `coverage.risk_floor` may not be lower than the one in the deterministic facts.\n"
+        "- Number the ids AST-001, AST-002, … A whole extraction is rejected if any part of it "
+        "fails, so say less rather than reaching past what you can anchor."
+    )
+
+
 def build_request(
     *,
     trusted_base_sha: str,
     subject_head_sha: str,
     diff_text: str,
-    relevant_code: Mapping[str, str],
     deterministic_facts: Mapping[str, Any],
     runtime_observations: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -74,10 +126,10 @@ def build_request(
     happened) is not.
     """
     request: dict[str, Any] = {
+        "contract": contract(),
         "trusted_base_sha": trusted_base_sha,
         "subject_head_sha": subject_head_sha,
         "diff": diff_text,
-        "relevant_code": {str(path): str(body) for path, body in relevant_code.items()},
         "deterministic_facts": dict(deterministic_facts),
     }
     if runtime_observations:
@@ -90,7 +142,7 @@ def assert_blind(request: Mapping[str, Any]) -> None:
     """Raise if any forbidden (Expected-Model) key appears anywhere in the request.
 
     A structural guard, not a substitute for building the request correctly: it walks the whole
-    tree so a forbidden key nested inside `deterministic_facts` or `relevant_code` is caught too.
+    tree so a forbidden key nested inside `deterministic_facts` is caught too.
     """
     found = sorted(_forbidden_keys_in(request))
     if found:

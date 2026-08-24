@@ -59,7 +59,6 @@ def test_extractor_request_excludes_the_expected_model() -> None:
         trusted_base_sha="a" * 40,
         subject_head_sha="b" * 40,
         diff_text="diff",
-        relevant_code={"src/app.py": "code"},
         deterministic_facts={"signals": []},
     )
     for forbidden in actual_extraction.FORBIDDEN_KEYS:
@@ -95,7 +94,6 @@ def test_extractor_output_with_a_valid_anchor_is_accepted(committed_repo: repo_m
             trusted_base_sha="a" * 40,
             subject_head_sha="b" * 40,
             diff_text="d",
-            relevant_code={},
             deterministic_facts={},
         ),
         reviewer,
@@ -122,7 +120,7 @@ def test_extractor_rejects_a_fabricated_anchor(committed_repo: repo_mod.Repo) ->
         }
     )
     request = actual_extraction.build_request(
-        trusted_base_sha="a" * 40, subject_head_sha="b" * 40, diff_text="d", relevant_code={}, deterministic_facts={}
+        trusted_base_sha="a" * 40, subject_head_sha="b" * 40, diff_text="d", deterministic_facts={}
     )
     with pytest.raises(actual_extraction.ExtractionError, match="fabricated or stale"):
         actual_extraction.run_extractor(request, reviewer, repo=committed_repo, commit="HEAD")
@@ -148,7 +146,7 @@ def test_extractor_rejects_a_self_granted_integrity(committed_repo: repo_mod.Rep
         }
     )
     request = actual_extraction.build_request(
-        trusted_base_sha="a" * 40, subject_head_sha="b" * 40, diff_text="d", relevant_code={}, deterministic_facts={}
+        trusted_base_sha="a" * 40, subject_head_sha="b" * 40, diff_text="d", deterministic_facts={}
     )
     with pytest.raises(actual_extraction.ExtractionError, match="integrity"):
         actual_extraction.run_extractor(request, reviewer, repo=committed_repo, commit="HEAD")
@@ -157,7 +155,7 @@ def test_extractor_rejects_a_self_granted_integrity(committed_repo: repo_mod.Rep
 def test_extractor_rejects_a_statement_without_an_anchor(committed_repo: repo_mod.Repo) -> None:
     reviewer = fake({"actual_statements": [{"id": "AST-1", "statement": "x", "category": "io", "confidence": "high"}]})
     request = actual_extraction.build_request(
-        trusted_base_sha="a" * 40, subject_head_sha="b" * 40, diff_text="d", relevant_code={}, deterministic_facts={}
+        trusted_base_sha="a" * 40, subject_head_sha="b" * 40, diff_text="d", deterministic_facts={}
     )
     with pytest.raises(actual_extraction.ExtractionError, match="at least one code anchor"):
         actual_extraction.run_extractor(request, reviewer, repo=committed_repo, commit="HEAD")
@@ -326,7 +324,7 @@ def test_security_review_refuses_to_drop_a_prior_blocking_finding() -> None:
     payload: dict[str, Any] = {"findings": []}
     with pytest.raises(security_review.SecurityReviewError, match="clear its own block"):
         security_review.run_security_review(
-            {}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD", prior_blocking_ids=["SEC-1"]
+            {"prior_blocking": ["SEC-1"]}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD"
         )
 
 
@@ -343,7 +341,7 @@ def test_security_review_refuses_to_downgrade_a_prior_blocking_finding() -> None
     }
     with pytest.raises(security_review.SecurityReviewError, match="cannot clear a blocking flag"):
         security_review.run_security_review(
-            {}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD", prior_blocking_ids=["SEC-1"]
+            {"prior_blocking": ["SEC-1"]}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD"
         )
 
 

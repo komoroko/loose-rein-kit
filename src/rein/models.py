@@ -1228,7 +1228,20 @@ class Config:
 
     @property
     def agent_timeout_sec(self) -> int:
-        return self._int(self.execution, "agent_timeout_sec", 3600)
+        """How long one agent launch may run; **0 means no limit, and that is the default.**
+
+        A wall clock cannot tell a model that is working from one that is stuck, and the two
+        mistakes do not cost the same. Killing a working agent throws away the whole launch — its
+        output, its quota, the session a retry would have resumed — and the retry then pays for all
+        of it again from cold, which is the compounding waste this codebase keeps finding. Failing
+        to kill a stuck one only stalls, and a stall is interruptible: `common.run` kills the
+        process group on Ctrl-C, which until now it did not — the launch was orphaned into its own
+        session and went on running, so the clock here was never what a human relied on anyway.
+
+        A step whose runtime *is* knowable keeps its ceiling — that is `command_timeout_sec`, and
+        `faults.classify_step` still reads a test suite that hangs as a fact about the code.
+        """
+        return self._int(self.execution, "agent_timeout_sec", 0)
 
     @property
     def launch_retries(self) -> int:

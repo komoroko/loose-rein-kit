@@ -1171,6 +1171,11 @@ class Orchestrator:
             )
             return
         except EnvironmentFault as fault:
+            # The case this branch is most worth having is a session that outgrew the model's
+            # window: what did not fit is its own accumulated context, and a cold launch is exactly
+            # how it stops being carried. It reaches here already — transient, not capacity — which
+            # is why `faults.is_context_overflow` stays a predicate for callers that have no
+            # session to reset rather than a classification that would take this retry away.
             if not resume or not fault.retryable or faults.is_capacity(fault.output):
                 raise
             print(f"    [resume] {task.id}: resuming session failed (rc={fault.rc}); relaunching fresh")

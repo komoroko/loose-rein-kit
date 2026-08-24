@@ -28,22 +28,75 @@ class SecurityReviewError(RuntimeError):
     """The security review produced output that could not be trusted."""
 
 
+def categories() -> tuple[str, ...]:
+    """The finding categories, read from the schema that enforces them."""
+    return review_policy.review_schema_enum(
+        "security", "properties", "findings", "items", "properties", "category", "enum"
+    )
+
+
+def contract() -> str:
+    """What the security reviewer is being asked for, carried *in* the request.
+
+    Carried here for the same reason the other two stages' contracts are
+    (`actual_extraction.contract`): the launch is given nothing else to read, so everything the
+    answer needs — the anchors' blobs and line counts included — has to arrive with the question.
+    """
+    return (
+        "Review the change below for security and for the ways it could be attacked. Findings, "
+        "not prose: the gate reads the flag, never the paragraph.\n"
+        "\n"
+        "Answer with one JSON object and no other text:\n"
+        '{"findings": [{"id": "SEC-001", '
+        f'"severity": "<one of {"|".join(sorted(SEVERITY_VALUES))}>", '
+        f'"category": "<one of {"|".join(categories())}>", '
+        '"attack_scenario": "<who does what, and what they get>", "blocking": <bool>, '
+        '"code_anchors": [{"path": "<repo-relative path>", "start_line": <int>, '
+        '"end_line": <int>, "blob": "<the blob deterministic_facts.files gives for that path>"}]}]}\n'
+        "\n"
+        "Every rule below is checked, not trusted:\n"
+        "- A finding must state an attack scenario. A category on its own says nothing anybody "
+        "can act on.\n"
+        "- `blocking` is an explicit boolean. While one blocking finding stands, gate 4 does not "
+        "open, and no amount of explanation waves it through.\n"
+        "- Anchors are verified against the committed tree. `deterministic_facts.files` lists a "
+        "blob and a line count for every path in the change; use them.\n"
+        "- `prior_blocking`, when present, lists findings a previous review recorded as blocking "
+        "about this same base. Dropping one, or re-filing it as non-blocking, is you clearing your "
+        "own block and it is refused: re-state it while the code still has it, and leave it out "
+        "only once the change resolves it.\n"
+        "- An empty `findings` list is a real answer. Say it rather than inventing something."
+    )
+
+
 def build_request(
     *,
     diff_text: str,
-    relevant_code: Mapping[str, str],
     deterministic_facts: Mapping[str, Any],
     trusted_base_sha: str,
     subject_head_sha: str,
+    prior_blocking_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
-    """The security reviewer's input: the change, the code, and the deterministic signals."""
-    return {
+    """The security reviewer's input: the change, widened around each hunk, and the signals.
+
+    `prior_blocking_ids` is in the request because :func:`run_security_review` refuses an answer
+    that drops one — and it was refusing on knowledge the reviewer had never been given. The ids
+    were a Python argument to the validator and nothing more, so a regeneration with a blocker
+    standing had to re-invent `SEC-001` by coincidence to get past a check whose own docstring says
+    "resolve the finding and re-run". A constraint that cannot be seen is not a constraint, it is a
+    trap; the review it fails is one nobody could have passed.
+    """
+    request: dict[str, Any] = {
+        "contract": contract(),
         "trusted_base_sha": trusted_base_sha,
         "subject_head_sha": subject_head_sha,
         "diff": diff_text,
-        "relevant_code": {str(p): str(b) for p, b in relevant_code.items()},
         "deterministic_facts": dict(deterministic_facts),
     }
+    prior = [str(fid) for fid in prior_blocking_ids if str(fid)]
+    if prior:
+        request["prior_blocking"] = prior
+    return request
 
 
 @dataclass(frozen=True)
@@ -60,25 +113,36 @@ class SecurityResult:
         return {"findings": [dict(f) for f in self.findings]}
 
 
+def prior_blocking_of(request: Mapping[str, Any]) -> list[str]:
+    """The blocking findings this request carries forward (`build_request`)."""
+    carried = request.get("prior_blocking")
+    return [str(fid) for fid in carried] if isinstance(carried, list) else []
+
+
 def run_security_review(
     request: Mapping[str, Any],
     reviewer: review_policy.Reviewer,
     *,
     repo: repo_mod.Repo,
     commit: str,
-    prior_blocking_ids: Iterable[str] = (),
 ) -> SecurityResult:
     """Run the security reviewer and validate its findings (plan §12.5, §12.7).
 
-    `prior_blocking_ids` are the blocking findings the previous review recorded *about the same
-    base* (`review._prior_blocking_ids`). A regeneration that drops one, or that re-emits it with
-    `blocking: false`, is a reviewer clearing its own block, and the policy refuses both — the
-    second was the wider door: the check compared id sets, so re-listing `SEC-001` as
-    non-blocking satisfied it exactly as well as fixing the finding did.
+    The blocking findings the previous review recorded *about the same base* are read from the
+    request, which is also where the reviewer reads them. They used to be a second argument to this
+    function, and nothing made the two agree: the enforcement and the disclosure were separate
+    facts, which is how the enforcement came to be applied to a reviewer that had never been shown
+    them. One source, or eventually one of them is wrong.
+
+    A regeneration that drops one, or that re-emits it with `blocking: false`, is a reviewer
+    clearing its own block, and the policy refuses both — the second was the wider door: the check
+    compared id sets, so re-listing `SEC-001` as non-blocking satisfied it exactly as well as
+    fixing the finding did.
 
     Each finding also records the base and head it was found against. A finding is a statement
     about a change, and until now nothing in the document said which one.
     """
+    prior_blocking_ids = prior_blocking_of(request)
     document = review_policy.parse_reviewer_output(reviewer(request), what="security review")
     raw = document.get("findings")
     if not isinstance(raw, list):

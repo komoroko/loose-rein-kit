@@ -26,6 +26,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import tempfile
+import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -40,6 +43,7 @@ from rein import (
     diff_facts,
     digests,
     event_chain,
+    faults,
     human_review,
     models,
     review_policy,
@@ -71,7 +75,7 @@ def change_digest(repo: repo_mod.Repo, commit: str) -> str:
     return digests.tree_digest(entries)
 
 
-def _diff(repo: repo_mod.Repo, base: str, head: str) -> str:
+def _diff(repo: repo_mod.Repo, base: str, head: str, *, context: int | None = None) -> str:
     """The change under review, which is the *product* — `.rein/` is not part of it.
 
     The same exclusion `change_digest` above takes, through the same constant, because the two
@@ -89,7 +93,8 @@ def _diff(repo: repo_mod.Repo, base: str, head: str) -> str:
     high risk is a gate ④ block whose instruction ("split the unreadable part out of this scope")
     cannot be carried out on the orchestration state itself.
     """
-    rc, out = repo._git_rc("diff", f"{base}..{head}", "--", *repo_mod.SSOT_PATHSPEC)
+    width = () if context is None else (f"-U{context}",)
+    rc, out = repo._git_rc("diff", *width, f"{base}..{head}", "--", *repo_mod.SSOT_PATHSPEC)
     if rc != 0:
         raise ReviewError(f"cannot diff {base}..{head}: {out.strip()}")
     return out
@@ -170,43 +175,66 @@ def _resolve_base(repo: repo_mod.Repo, plan: models.Plan | None, base: str | Non
     )
 
 
-# -- the code the reviewers are allowed to read -------------------------------
+# -- the change the reviewers are allowed to read -----------------------------
 
-#: Per-file and whole-request ceilings on the head-side code handed to a reviewer. A diff hunk
-#: without its surrounding function is often unreadable — "was this guard removed or moved?"
-#: cannot be answered from the hunk alone — but a whole repository does not fit a request, so
-#: the ceilings exist and, crucially, are *reported* when they bite.
-RELEVANT_CODE_CHARS = 40_000
-RELEVANT_CODE_TOTAL_CHARS = 240_000
+#: Git's own default context width, and the floor of the ladder below: the plain diff is what the
+#: Coverage Manifest and the byte budget are measured on, so no request is ever narrower than the
+#: change itself.
+PLAIN_CONTEXT = 3
+
+#: How much context around each hunk to ask git for, widest first. A hunk without its surroundings
+#: is often unreadable — "was this guard removed, or moved?" cannot be answered from the hunk alone
+#: — so the request buys as much of them as the budget allows and says which rung it landed on.
+CONTEXT_LADDER: tuple[int, ...] = (30, 15, 10)
 
 
 @dataclass(frozen=True)
-class RelevantCode:
-    """The head-side code handed to a reviewer, and what did not fit.
+class Reviewable:
+    """The change as a reviewer reads it: the diff, widened around each hunk, and what that cost.
 
-    `truncated` and `omitted` are not diagnostics for us — they go into the request, so a
-    reviewer can never read "this file is not here" as "there is nothing more to see". That is
-    the same rule the Coverage Manifest applies to the diff (plan §13.3, §2.4).
+    This replaces what used to be sent beside the diff — the whole head-side body of every changed
+    file, under a per-file and a whole-request character cap. That was the wrong shape twice over,
+    and measuring one cycle of this repository (17 files) says so:
+
+      * The bodies came to 776 KB against a 240 KB request cap, so **69% of them were dropped** —
+        by position in the diff, which is nobody's idea of what matters.
+      * What survived was `text[:40000]`, the *first* 40 KB of each file. For a 145 KB module that
+        is its docstring and its imports. The functions that actually changed were not in it.
+
+    So the request spent 240 KB on the parts of the changed files the change did not touch, dropped
+    two thirds of what it meant to send, and left the reviewer to work from the bare hunks anyway —
+    while pushing the whole request towards the context ceiling the adapter then failed on
+    ("Prompt is too long", a failure no retry can fix and every retry pays full price for).
+
+    Widening the diff answers the question the bodies were there to answer, and every byte of it is
+    adjacent to a change. `--function-context` was measured and rejected: with no funcname pattern
+    to anchor on it expands without bound, taking one 1.9 KB diff to 110 KB and a JSON schema's
+    1.4 KB to 50 KB.
+
+    `context_lines` and `narrowed_from` go *into* the request, so a reviewer can never read "the
+    rest of this function is not here" as "there is nothing more to see" — the same rule the
+    Coverage Manifest applies to the diff (plan §13.3, §2.4).
     """
 
-    files: dict[str, str]
-    truncated: tuple[str, ...] = ()
-    omitted: tuple[str, ...] = ()
+    text: str
+    context_lines: int
+    folded: tuple[str, ...] = ()
 
     def as_facts(self) -> dict[str, Any]:
-        return {
-            "provided": sorted(self.files),
-            "truncated_to_char_cap": list(self.truncated),
-            "omitted_over_request_cap": list(self.omitted),
-        }
+        facts: dict[str, Any] = {"unit": "diff", "context_lines": self.context_lines}
+        if self.context_lines < CONTEXT_LADDER[0]:
+            facts["narrowed_from"] = CONTEXT_LADDER[0]
+        if self.folded:
+            facts["mechanical_bodies_withheld"] = list(self.folded)
+        return facts
 
 
 def _blob_facts(repo: repo_mod.Repo, head: str) -> brief.BlobFacts:
     """How the brief names a declared path *as it ends up*: its blob at `head`, and its size.
 
     Bound to the reviewed commit rather than the working tree, for the same reason
-    `_relevant_code` is: the review is of what was committed, and showing an approver a file that
-    has moved since would put a different tree beside the findings about this one.
+    the reviewable diff is: the review is of what was committed, and showing an approver a file
+    that has moved since would put a different tree beside the findings about this one.
 
     Identity and size only. The body is fetched from the same commit when a reader asks, so
     review.yaml never becomes a second copy of the repository.
@@ -227,36 +255,74 @@ def _blob_facts(repo: repo_mod.Repo, head: str) -> brief.BlobFacts:
     return read
 
 
-def _relevant_code(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffFile]) -> RelevantCode:
-    """The head-side content of each changed file, under the ceilings above.
+def _file_facts(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffFile]) -> list[dict[str, Any]]:
+    """The blob and the line count of each changed path at `head`, for anchoring.
 
-    Read from the committed tree at `head`, never the working tree: the review is of what was
-    committed, and an uncommitted edit is not part of it.
+    Every code anchor a reviewer produces is validated against the committed tree: the blob has to
+    be the one at that path, and the line range has to be inside the file. Both facts used to be
+    the *reviewer's* to find out, which it could only do by reading the repository it was launched
+    in — the same access that let a blind extractor open `.rein/plan.yaml`. Handing the two facts
+    over is what makes the launch able to answer without the repository at all.
+
+    **A list of records, never a mapping keyed by path.** `actual_extraction.assert_blind` walks
+    the request for Expected-Model *keys*, so a path used as a key is a filename being read as
+    structure: a product with a root-level file called `plan` — or `claims`, `solution`,
+    `rationale` — made every review fail with "the extractor request carries Expected-Model keys
+    ['plan']", a sentence about priming describing a file nobody had primed anything with. The
+    payload this replaced (`relevant_code`) was keyed by path too and had the same hole.
+
+    Deliberately identity and size, not content: the bodies are what `Reviewable` replaced, and
+    putting them back under another name would undo the measurement that removed them.
+
+    Every non-binary changed path is listed, mechanical ones included, even though their bodies are
+    withheld from the diff. The tempting symmetry — withhold the body, withhold the blob — sets a
+    trap instead of closing one: `review.schema.json` requires `blob` on every code anchor, so a
+    reviewer that anchors a path this list omits produces a statement the *write* rejects, and the
+    whole review fails on a schema error several steps from the cause. The contract tells it to say
+    less rather than reach past what it can anchor; that is the place for that rule, not here.
     """
-    provided: dict[str, str] = {}
-    truncated: list[str] = []
-    omitted: list[str] = []
-    budget = RELEVANT_CODE_TOTAL_CHARS
+    facts: list[dict[str, Any]] = []
     for file in files:
         if file.binary:
             continue
-        if diff_facts.classify_path(file.path) in diff_facts.MECHANICAL_KINDS:
-            # A lockfile's whole body, on top of its whole diff. Neither was ever going to be read
-            # as code, and the manifest already reports it as not semantically analysed.
-            omitted.append(file.path)
+        rc, blob = repo._git_rc("rev-parse", f"{head}:{file.path}")
+        if rc != 0 or not blob.strip():  # deleted at head — there is nothing to anchor in
             continue
-        rc, text = repo._git_rc("show", f"{head}:{file.path}")
-        if rc != 0:  # deleted at head — the diff carries what it was, and there is nothing to read
+        rc, content = repo._git_rc("show", f"{head}:{file.path}")
+        if rc != 0:
             continue
-        if budget <= 0:
-            omitted.append(file.path)
-            continue
-        body = text[: min(RELEVANT_CODE_CHARS, budget)]
-        if len(body) < len(text):
-            truncated.append(file.path)
-        provided[file.path] = body
-        budget -= len(body)
-    return RelevantCode(files=provided, truncated=tuple(truncated), omitted=tuple(omitted))
+        facts.append({"path": file.path, "blob": f"git-blob:{blob.strip()}", "lines": content.count("\n") + 1})
+    return facts
+
+
+def _reviewable(
+    repo: repo_mod.Repo,
+    base: str,
+    head: str,
+    files: Sequence[diff_facts.DiffFile],
+    *,
+    plain: str,
+    ceiling: int,
+) -> Reviewable:
+    """The widest context that fits `ceiling`, falling back to the plain diff already in hand.
+
+    The ceiling is `max_diff_bytes_per_partition` — not a second limit invented here, but the one
+    byte budget a human already approves the review against (`_refuse_over_budget`). That is the
+    property worth having: **what a reviewer is sent cannot exceed what was approved**, where
+    before it was the approved diff *plus* an unbounded-by-anyone 240 KB of file bodies.
+
+    Ordered widest-first so the common case costs one `git diff`; a change large enough to need the
+    ladder pays a few more, which is cheap next to the model launch it is sizing.
+    """
+    for lines in CONTEXT_LADDER:
+        text, folded = fold_mechanical(_diff(repo, base, head, context=lines), files)
+        if len(text.encode("utf-8")) <= ceiling:
+            return Reviewable(text=text, context_lines=lines, folded=tuple(folded))
+    # Over the ceiling even at git's default width. Refusing here would be a second budget nobody
+    # approved: `_refuse_over_budget` has already passed on this diff, and the answer to a change
+    # too big to review is `/revise`, not a narrower window onto it.
+    text, folded = fold_mechanical(plain, files)
+    return Reviewable(text=text, context_lines=PLAIN_CONTEXT, folded=tuple(folded))
 
 
 # -- the expected model handed to the comparator ------------------------------
@@ -445,9 +511,14 @@ def generate(
         cycle = state.cycle_id if state else ""
         plan = store.read_plan()
         config = store.read_config()
+        # Read once and used three times over — the staleness digest, the reuse check, and the
+        # carried-over blocking findings all ask about the same document, and parsing it once per
+        # question meant three YAML loads of a file that can hold a whole review.
+        #
         # Captured before the pipeline runs, not inside the transaction: the whole point is to
         # refuse if review.yaml moved while the (slow, LLM-driven) stages were running.
-        seen_review = store_mod.read_digest(store.read_review())
+        existing = store.read_review()
+        seen_review = store_mod.read_digest(existing)
 
         cycle = cycle or (plan.cycle_id if plan else "")
         if not cycle:
@@ -478,7 +549,6 @@ def generate(
             "trusted_base_sha": trusted_base,
             "subject_head_sha": head,
         }
-        existing = store.read_review()
         if not force and _same_subject(existing, subject):
             assert existing is not None  # _same_subject is False for None
             print(
@@ -493,44 +563,71 @@ def generate(
         limits = {**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})}
         _refuse_over_budget(facts.coverage.analyzed_bytes, limits)
 
-        # The reviewers read the folded one. `change_digest` above is over the committed tree, so
-        # neither this nor `relevant`'s omissions can move what the review is bound to.
-        reviewable, folded = fold_mechanical(diff_text, facts.files)
-        relevant = _relevant_code(repo, head, facts.files)
+        # The reviewers read a widened, folded diff. `change_digest` above is over the committed
+        # tree, so neither the widening nor the folding can move what the review is bound to.
+        reviewable = _reviewable(
+            repo,
+            trusted_base,
+            head,
+            facts.files,
+            plain=diff_text,
+            ceiling=limits["max_diff_bytes_per_partition"],
+        )
+
+        # What a reviewer needs to anchor a statement, since it is launched with nothing to read
+        # but its request (`_adapter_reviewer`).
+        anchorable = _file_facts(repo, head, facts.files)
+        # What the last review found blocking *about this same base*. Taken from the copy read at
+        # the top rather than re-read here, and taken before the call below, which is about to move
+        # off this thread — the store is not something to touch from two. It goes *into the
+        # request*, which is both where the reviewer reads it and where the validator now takes it
+        # from: the reviewer is refused for dropping one of these, and was being refused on
+        # knowledge nobody had given it.
+        prior_blocking = _prior_blocking_ids(existing, trusted_base)
 
         security_request = security_review.build_request(
-            diff_text=reviewable,
-            relevant_code=relevant.files,
+            diff_text=reviewable.text,
             deterministic_facts={
                 "signals": [h.signal for h in facts.signals],
-                "relevant_code": relevant.as_facts(),
-                "mechanical_bodies_withheld": folded,
+                "context": reviewable.as_facts(),
+                "files": anchorable,
             },
             trusted_base_sha=trusted_base,
             subject_head_sha=head,
+            prior_blocking_ids=prior_blocking,
         )
-        # What the last review found blocking *about this same base*. Read here rather than at the
-        # call below, because the call is about to move off this thread and the store is not something
-        # to touch from two.
-        prior_blocking = _prior_blocking_ids(store.read_review(), trusted_base)
 
-        # The security review reads the diff and the relevant code; it consumes nothing the extractor
-        # or the comparator produce, so it does not have to wait behind them. Three LLM stages at up
-        # to 15 minutes each ran end to end for no reason but the order they were written in.
-        # Determinism is unaffected: the results are merged, and the events appended, in a fixed
-        # order below, and a failure in the extraction still surfaces ahead of one here.
+        # The security review reads the same change the extractor does and consumes nothing the
+        # extractor or the comparator produce, so it does not have to wait behind them. All three
+        # LLM stages ran end to end for no reason but the order they were written in. Determinism
+        # is unaffected: the results are merged, and the events appended, in a fixed order below,
+        # and a failure in the extraction still surfaces ahead of one here.
+        #
+        # `cancel` is what makes the failure path honest. `Future.cancel()` cannot stop a task that
+        # has started — with one worker and nothing competing for it, this one always has — and
+        # `ThreadPoolExecutor.__exit__` then blocks in `shutdown(wait=True)` until the adapter call
+        # it failed to cancel finishes. So a failure is reported when the *discarded* call ends
+        # rather than when it happens — measured across two runs of one cycle, the extraction
+        # failure surfaced 1m36s and 3m54s late, each run having paid in full for a security review
+        # nobody would read. `shutdown(wait=False, cancel_futures=True)` does not fix it
+        # either: `concurrent.futures.thread` registers an atexit hook that joins every worker, so
+        # the wait moves from here to interpreter exit and the process returns no sooner. The only
+        # thing that ends a launch early is killing the process it started.
+        cancel = common.Cancellation()
+
+        def run_security() -> security_review.SecurityResult:
+            # Bound on this thread — the worker's — because the transport is reached through the
+            # injected reviewer, whose signature is not ours to change.
+            with common.cancelling(cancel):
+                return security_review.run_security_review(
+                    security_request,
+                    reviewer,
+                    repo=repo,
+                    commit=head,
+                )
+
         with ThreadPoolExecutor(max_workers=1) as pool:
-            security_future = pool.submit(
-                security_review.run_security_review,
-                security_request,
-                reviewer,
-                repo=repo,
-                commit=head,
-                # Without it the check below — a reviewer may not clear its own block by
-                # regenerating and omitting the finding — had nothing to compare against, so the
-                # protection its own docstring describes never once applied.
-                prior_blocking_ids=prior_blocking,
-            )
+            security_future = pool.submit(run_security)
             try:
                 extraction, comparison = _extract_and_compare(
                     repo,
@@ -539,8 +636,8 @@ def generate(
                     config=config,
                     head=head,
                     trusted_base=trusted_base,
-                    diff_text=reviewable,
-                    relevant=relevant,
+                    reviewable=reviewable,
+                    anchorable=anchorable,
                     coverage=coverage,
                     risk_floor=risk_floor,
                     effective=effective,
@@ -549,8 +646,10 @@ def generate(
             except BaseException:
                 # The security stage's own failure is not the one to report: this one came first in
                 # the pipeline's order, and reporting whichever thread lost a race would make the
-                # error a reader sees depend on timing.
-                security_future.cancel()
+                # error a reader sees depend on timing. So the sibling is killed rather than
+                # awaited — the `with` above still joins the worker, but there is nothing left for
+                # it to wait on.
+                cancel.cancel()
                 raise
             entered("security_review")
             security = security_future.result()
@@ -643,8 +742,8 @@ def _extract_and_compare(
     config: models.Config | None,
     head: str,
     trusted_base: str,
-    diff_text: str,
-    relevant: RelevantCode,
+    reviewable: Reviewable,
+    anchorable: Sequence[Mapping[str, Any]],
     coverage: Mapping[str, Any],
     risk_floor: str,
     effective: str,
@@ -666,12 +765,12 @@ def _extract_and_compare(
     extract_request = actual_extraction.build_request(
         trusted_base_sha=trusted_base,
         subject_head_sha=head,
-        diff_text=diff_text,
-        relevant_code=relevant.files,
+        diff_text=reviewable.text,
         deterministic_facts={
             "coverage": coverage,
             "risk_floor": risk_floor,
-            "relevant_code": relevant.as_facts(),
+            "context": reviewable.as_facts(),
+            "files": [dict(entry) for entry in anchorable],
         },
     )
     extraction = actual_extraction.run_extractor(
@@ -780,8 +879,16 @@ def _same_subject(existing: models.Review | None, subject: Mapping[str, str]) ->
 
     Every key compared is deterministic and computed before any model runs, so this is an identity
     check rather than a guess: the committed tree under review, the Expected Model, the config the
-    approval covers, the sandbox, and the manifest of what could be read. An LLM stage is not a
-    function of anything else, which is why nothing else needs to be in here.
+    approval covers, the sandbox, and the manifest of what could be read.
+
+    **One input is deliberately left out: the stage contracts.** They are part of the request now
+    (`<stage>.contract`), so a reviewer stage really is a function of them, and an installed rein
+    that reworded one would read the same code differently. Putting them in this key anyway would
+    mean an upgrade regenerates every open review — and regenerating resets the human half, so a
+    `rein upgrade` part-way through gate ④ would silently discard a reviewer's answers about code
+    nobody had touched. That is the exact failure this check exists to prevent, and it is a worse
+    one than reusing a reading taken under last release's wording. `--force` is how to re-read
+    after an upgrade, deliberately, at a visible cost.
 
     A malformed or ungenerated review is not reusable, and neither is one whose binding is missing
     any of these — "it did not say" must never read as "it agreed".
@@ -881,12 +988,21 @@ def complete(repo: repo_mod.Repo, *, actor: str = "") -> None:
 # -- CLI ----------------------------------------------------------------------
 
 
+#: Guards the spend ledger the two stage threads both add to (`_adapter_reviewer`).
+_SPEND_LOCK = threading.Lock()
+
 #: How much of a failed adapter's output travels with the error. Its closing words are where a
 #: CLI says what stopped it, and an error message is read on a terminal, not scrolled.
 _ADAPTER_OUTPUT_TAIL = 1000
 
 
-def _adapter_reviewer(repo: repo_mod.Repo, role: str = "code_reviewer") -> review_policy.Reviewer:
+def _adapter_reviewer(
+    repo: repo_mod.Repo,
+    role: str = "code_reviewer",
+    *,
+    config: models.Config | None = None,
+    spend: dict[str, int] | None = None,
+) -> review_policy.Reviewer:
     """A production reviewer that hands the request as JSON to the adapter configured for `role`.
 
     Kept small on purpose: the request goes to the adapter on stdin and the adapter answers with
@@ -897,38 +1013,81 @@ def _adapter_reviewer(repo: repo_mod.Repo, role: str = "code_reviewer") -> revie
     means the same session answers as the Actual Extractor and as the Comparator, the
     independence violation §12.4 exists to prevent. The request goes on stdin — a whole diff as
     an argv element hits E2BIG on a large change.
+
+    The launch takes `execution.agent_timeout_sec`, the same knob the build loop launches under,
+    rather than the fifteen minutes that used to be written here. Fifteen minutes was not a
+    judgement about reviewing; it was a number, and it was not a comfortable one — field runs of
+    this pipeline came in at 6m27s and 6m40s, so a change a little larger than that cycle's would
+    have crossed it, thrown the whole launch away, and been re-run from cold. The knob defaults to
+    no limit for the reason its own docstring gives, and Ctrl-C is what stops a launch that really
+    is stuck.
+
+    **It runs in an empty directory, not in the repository.** This transport passed no `cwd`, so
+    every stage inherited rein's — the repository root. An agent CLI reads its working directory:
+    the root is where `AGENTS.md` explains the Expected Model and `.rein/plan.yaml` *is* the
+    Expected Model, both a `git show` away from the one stage whose whole value is that it has
+    never seen them. `actual_extraction.assert_blind` guards the payload and could never have
+    caught this, because the priming did not travel in the payload.
+
+    Cutting the directory only works because the request now carries what the answer needs: the
+    stage contract (`<stage>.contract`) instead of whatever instructions the CLI picked up from a
+    project, and `deterministic_facts.files` instead of the `git rev-parse` a reviewer used to
+    have to run to anchor anything. What the launch can still read is the user's own global CLI
+    configuration, which is theirs and not this repository's to remove.
     """
     from rein import build_loop
 
-    config = store_mod.Store(repo).read_config()
+    if config is None:
+        config = store_mod.Store(repo).read_config()
     adapter = (config.adapter(role) if config is not None else "") or "claude"
     argv = build_loop.ADAPTERS.get(adapter)
     if argv is None:
         raise ReviewError(f"agents.{role}.adapter is {adapter!r}, which this release cannot launch")
+    timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
     def call(request: Mapping[str, Any]) -> str:
-        rc, out = common.run(list(argv), timeout=900, input_text=json.dumps(request, ensure_ascii=False))
+        payload = json.dumps(request, ensure_ascii=False)
+        if spend is not None:
+            # The stages run on two threads, and read-modify-write is not one operation on any
+            # interpreter that is not holding a global lock for us.
+            with _SPEND_LOCK:
+                spend[role] = spend.get(role, 0) + len(payload.encode("utf-8"))
+        # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
+        # left something undeletable behind must not turn a finished review into a traceback.
+        with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as elsewhere:
+            rc, out = common.run(list(argv), cwd=elsewhere, timeout=timeout or None, input_text=payload)
         if rc != 0:
             # What the adapter said, not merely that it stopped. `common.run` merges stderr into
             # `out`, so the reason was in hand and thrown away: a field report of three identical
             # `exited 1` failures was diagnosable only by wrapping the CLI in a logging shim, and
             # the message behind them — "Prompt is too long" — named its own cause exactly.
             said = out.strip()[-_ADAPTER_OUTPUT_TAIL:]
-            raise review_policy.ReviewPolicyError(
-                f"the {role} adapter exited {rc}" + (f", saying:\n{said}" if said else " and said nothing")
+            raise review_policy.AdapterFailure(
+                f"the {role} adapter exited {rc}" + (f", saying:\n{said}" if said else " and said nothing"),
+                rc=rc,
+                output=out,
             )
         return out
 
     return call
 
 
-def _staged_reviewer(repo: repo_mod.Repo) -> review_policy.Reviewer:
+def _staged_reviewer(repo: repo_mod.Repo, *, spend: dict[str, int] | None = None) -> review_policy.Reviewer:
     """One callable that routes each stage's request to that stage's own configured adapter.
 
     The stage is identified by the request shape the stage builders produce — the same shapes
     the fakes in the test suite key on — so nothing has to thread a role through the pipeline.
+
+    `spend`, when given, collects the bytes actually put in front of each stage. Measured at the
+    transport because that is the only place the number is a fact rather than an estimate, and
+    worth measuring because what this pipeline sends is the thing that decides whether it can run
+    at all.
     """
-    by_role = {role: _adapter_reviewer(repo, role) for role in ("actual_extractor", "comparator", "security_reviewer")}
+    config = store_mod.Store(repo).read_config()
+    by_role = {
+        role: _adapter_reviewer(repo, role, config=config, spend=spend)
+        for role in ("actual_extractor", "comparator", "security_reviewer")
+    }
 
     def call(request: Mapping[str, Any]) -> str:
         if "expected_model" in request:
@@ -941,6 +1100,70 @@ def _staged_reviewer(repo: repo_mod.Repo) -> review_policy.Reviewer:
     return call
 
 
+def spend_summary(spend: Mapping[str, int]) -> str:
+    """What this generation put in front of a model, worst first. Empty when nothing was sent.
+
+    Bytes rather than tokens, for the reason `build_loop.spend_summary` gives: a token count
+    belongs to a tokenizer nobody here owns, and reporting an estimate as a measurement is the
+    habit this codebase is built against.
+    """
+    rows = sorted(spend.items(), key=lambda item: -item[1])
+    if not rows:
+        return ""
+    parts = ", ".join(f"{role} {sent / 1024:.0f}KiB" for role, sent in rows)
+    return f"review: sent {sum(spend.values()) / 1024:.0f}KiB over {len(rows)} stage(s) — {parts}"
+
+
+def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
+    """Would running this again, unchanged, plausibly do better?
+
+    Only a *launch* the machine failed and time can fix — the same narrow licence `rein build
+    --supervise` takes. And not a request that did not fit: that classifies as transient (a
+    resumed session which outgrew its window is fixed by relaunching cold, so the classifier is
+    right to), but this pipeline has no session to reset. The same request will be the same size
+    in fifteen minutes, and a supervisor spinning on it burns the quota that would have paid for
+    the smaller review.
+    """
+    if faults.is_context_overflow(failure.output):
+        return False
+    return faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT
+
+
+def _generate_cli(
+    repo: repo_mod.Repo,
+    spend: dict[str, int],
+    *,
+    force: bool,
+    supervise: bool,
+    interval_sec: int,
+    make_reviewer: Callable[[], review_policy.Reviewer] | None = None,
+) -> dict[str, Any]:
+    """Run the pipeline, optionally waiting out a machine failure that time alone fixes.
+
+    The same shape as `rein build --supervise`: only what :func:`_worth_waiting_for` allows is
+    retried. Everything else — a reviewer whose output could not be parsed, a budget refusal, an
+    unreadable SSOT — is a real answer, and sleeping on it would turn a verdict into a loop.
+
+    A fresh reviewer per attempt, so a retry re-reads the config rather than holding whatever was
+    true when the first one was built.
+    """
+    build_reviewer = make_reviewer or (lambda: _staged_reviewer(repo, spend=spend))
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return generate(repo, build_reviewer(), force=force)
+        except review_policy.AdapterFailure as failure:
+            if not supervise or not _worth_waiting_for(failure):
+                raise
+            hint = faults.reset_hint(failure.output)
+            logger.info(
+                f"[supervise] attempt {attempt}: {failure} — sleeping {interval_sec}s"
+                + (f" (the CLI said: {hint})" if hint else "")
+            )
+            time.sleep(interval_sec)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rein review", description="the grounded machine review (gate ④)")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -949,6 +1172,20 @@ def main(argv: list[str] | None = None) -> int:
         "--force",
         action="store_true",
         help="re-run the pipeline even when the subject has not moved (discards the human answers)",
+    )
+    gen.add_argument(
+        "--supervise",
+        action="store_true",
+        help=(
+            "when a stage's launch fails for a machine reason time alone fixes (capacity "
+            "exhausted, a signal), sleep and run it again instead of exiting"
+        ),
+    )
+    gen.add_argument(
+        "--supervise-interval-sec",
+        type=int,
+        default=900,
+        help="seconds to sleep between retries under --supervise (default: 900, the build loop's interval)",
     )
     sub.add_parser("complete", help="freeze the human review (all blockers must be clear)")
     sub.add_parser("show", help="print the current review.yaml")
@@ -963,7 +1200,19 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "generate":
-            generate(repo, _staged_reviewer(repo), force=args.force)
+            if args.supervise and args.supervise_interval_sec < 1:
+                logger.error("--supervise-interval-sec must be at least 1")
+                return 2
+            spend: dict[str, int] = {}
+            _generate_cli(
+                repo,
+                spend,
+                force=args.force,
+                supervise=args.supervise,
+                interval_sec=args.supervise_interval_sec,
+            )
+            if measured := spend_summary(spend):
+                print(measured)
             print("review.yaml generated — review it in `rein ui`, then `rein review complete`")
             return 0
         if args.cmd == "complete":

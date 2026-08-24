@@ -17,7 +17,7 @@ execution:
   max_parallel: 3            # concurrent independent leaf tasks within the frontier
   worktree_dir: .worktrees   # already .gitignore'd
   command_timeout_sec: 1800
-  agent_timeout_sec: 3600
+  agent_timeout_sec: 0        # 0 = no limit; a clock cannot tell working from stuck
 
 # Which sandbox each role runs in. The bodies are below.
 executors:

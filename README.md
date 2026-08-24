@@ -300,8 +300,9 @@ is decided on. What is:
   the claim it answers, cross-checked by `rein dag --trace`.
 - **Gate ④ compares Expected against Actual.** `rein review generate` (bound to the reviewed HEAD)
   runs a deterministic Coverage Manifest, a **blind** extraction of what the code actually does —
-  that extractor is never given the plan — then the Expected/Actual comparison and the structured
-  security and maintainability review. What it reads is the product, not `.rein/`.
+  that extractor is never given the plan, and is launched outside the repository so it cannot go and
+  read one — then the Expected/Actual comparison and the structured security and maintainability
+  review. What it reads is the product, not `.rein/`.
 - **There is no single `verified`.** Findings sit on three separate axes — integrity, semantic
   support, conformance — and "extra behaviours: 0" appears only with the Coverage Manifest that
   earned it. A blocking security finding, a diverged high/critical claim, an ungrounded
@@ -354,8 +355,15 @@ The rules:
 `rein build`'s exit code is the signal: `0` done (go to gate ④); `1`/`2` need a human (an
 escalation to read, or something to repair); `3` is transient — capacity, a signal, another run
 holding the lock — and safe to retry, with nothing marked and no budget spent. `rein build
---supervise` retries `3` automatically (`--supervise-interval-sec`, default 900). See
-"Troubleshooting" for what each stop looks like and how to resume.
+--supervise` retries `3` automatically (`--supervise-interval-sec`, default 900), and `rein review
+generate --supervise` does the same for the review pipeline's own capacity stops — but never for a
+request that did not fit, which is the same size on every attempt. See "Troubleshooting" for what
+each stop looks like and how to resume.
+
+An agent launch has **no time limit** by default (`execution.agent_timeout_sec: 0`). A clock cannot
+tell a model that is working from one that is stuck, and killing a working one throws the launch
+away and makes the retry pay for it again; Ctrl-C stops a stuck one, and now reaches it. Command
+steps keep their ceiling (`command_timeout_sec`) — their runtime is knowable.
 
 > **DoD commands are the project's own**: `quality_gate` names them once. The shipped defaults
 > (`python -m pytest`, `python -m compileall`) are the floor the packaged `python` sandbox image

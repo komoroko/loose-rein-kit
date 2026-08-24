@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -60,6 +62,82 @@ def test_a_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
         time.sleep(0.1)
     os.kill(child_pid, signal.SIGKILL)  # do not leak the process if the assertion is about to fail
     raise AssertionError(f"child {child_pid} outlived the timed-out parent")
+
+
+# --- cancellation: the only thing that ends a launch early --------------------
+#
+# `concurrent.futures.Future.cancel()` cannot stop a task that has started, and a
+# ThreadPoolExecutor joins its workers on the way out of the `with` *and* again at interpreter
+# exit. So a caller that stops wanting an answer has exactly one way to stop paying for it.
+
+
+def test_a_cancelled_run_returns_at_once_instead_of_at_its_own_pace() -> None:
+    token = common.Cancellation()
+    threading.Timer(0.2, token.cancel).start()
+    began = time.monotonic()
+    with common.cancelling(token):
+        rc, out = common.run([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert rc == common.RC_CANCELLED  # not RC_TIMEOUT: nothing ran out of time
+    assert time.monotonic() - began < 10
+    assert "cancelled by the caller" in out
+
+
+def test_a_token_tripped_before_the_launch_kills_it_anyway() -> None:
+    """The window between Popen returning and the token taking the process is why `cancel` cannot
+    simply be "kill it": for a moment there is nothing to kill, and losing that race would leave a
+    launch running that somebody had already given up on."""
+    token = common.Cancellation()
+    token.cancel()
+    began = time.monotonic()
+    with common.cancelling(token):
+        rc, _ = common.run([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert rc == common.RC_CANCELLED
+    assert time.monotonic() - began < 10
+
+
+def test_the_token_only_binds_its_own_thread() -> None:
+    token = common.Cancellation()
+    with common.cancelling(token):
+        pass
+    token.cancel()  # a token nothing is bound to has nothing to kill and must not raise
+    rc, out = common.run([sys.executable, "-c", "print('ok')"])
+    assert (rc, out.strip()) == (0, "ok")
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"), reason="POSIX process groups only")
+@pytest.mark.integration
+def test_an_interrupted_run_kills_the_launch_instead_of_orphaning_it(tmp_path: Path) -> None:
+    """Ctrl-C used to leave the agent running.
+
+    `start_new_session=True` puts the child in its own session, so the terminal's SIGINT reaches
+    this process and not it — while `Popen.__exit__` declines to wait on a KeyboardInterrupt
+    precisely because it assumes the opposite. Measured before the fix: the launch was orphaned and
+    went on running, holding its quota, with nobody left to read what it said.
+    """
+    marker = tmp_path / "child.pid"
+    script = textwrap.dedent(f"""
+        import os, signal, sys, threading, time
+        from rein import common
+        threading.Thread(
+            target=lambda: (time.sleep(0.4), os.kill(os.getpid(), signal.SIGINT)), daemon=True
+        ).start()
+        try:
+            common.run([sys.executable, "-c",
+                "import os, time; open({str(marker)!r}, 'w').write(str(os.getpid())); time.sleep(60)"])
+        except KeyboardInterrupt:
+            print("interrupted")
+    """)
+    proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+    assert "interrupted" in proc.stdout
+    pid = int(marker.read_text(encoding="utf-8"))
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.1)
+    os.kill(pid, signal.SIGKILL)
+    raise AssertionError(f"the launch {pid} outlived the interrupt")
 
 
 def test_run_reports_a_missing_command_instead_of_raising() -> None:
