@@ -501,6 +501,55 @@ def test_a_schema_path_that_is_not_an_enum_is_refused() -> None:
         review_policy.review_schema_enum("actual_extraction", "items", "properties")
 
 
+def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Actual Extractor and the Comparator must not be the same opinion (§12.4), and the whole
+    of what keeps them apart is this routing: one callable per role, picked from the shape of the
+    request. It had no test. A mix-up here does not fail — it produces a review that looks entirely
+    valid and was written by one model playing both parts.
+    """
+    routed: list[str] = []
+
+    def fake_adapter(
+        repo: repo_mod.Repo,
+        role: str = "code_reviewer",
+        *,
+        config: Any = None,
+        spend: dict[str, int] | None = None,
+    ) -> Any:
+        def call(request: Mapping[str, Any]) -> str:
+            routed.append(role)
+            if spend is not None:
+                spend[role] = spend.get(role, 0) + 1
+            return _fake_reviewer(request)
+
+        return call
+
+    monkeypatch.setattr(review, "_adapter_reviewer", fake_adapter)
+    spend: dict[str, int] = {}
+    reviewer = review._staged_reviewer(repo_mod.Repo(review_repo), spend=spend)
+
+    reviewer(
+        actual_extraction.build_request(
+            trusted_base_sha="a" * 40,
+            subject_head_sha="b" * 40,
+            diff_text="d",
+            deterministic_facts={"coverage": {}, "risk_floor": "low", "files": []},
+        )
+    )
+    reviewer(conformance.build_request(expected_model={"claims": []}, actual_statements=[], actual_digest="d"))
+    reviewer(
+        security_review.build_request(
+            diff_text="d",
+            deterministic_facts={"signals": [], "files": []},
+            trusted_base_sha="a" * 40,
+            subject_head_sha="b" * 40,
+        )
+    )
+
+    assert routed == ["actual_extractor", "comparator", "security_reviewer"]
+    assert set(spend) == set(routed)  # and the ledger is threaded through to every one of them
+
+
 def test_a_reviewer_is_told_which_blocks_it_may_not_drop() -> None:
     """`run_security_review` refuses an answer that drops a previously blocking finding, and was
     refusing on knowledge the reviewer had never been given: the ids were a Python argument to the
