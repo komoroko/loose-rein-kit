@@ -878,8 +878,16 @@ def _same_subject(existing: models.Review | None, subject: Mapping[str, str]) ->
 
     Every key compared is deterministic and computed before any model runs, so this is an identity
     check rather than a guess: the committed tree under review, the Expected Model, the config the
-    approval covers, the sandbox, and the manifest of what could be read. An LLM stage is not a
-    function of anything else, which is why nothing else needs to be in here.
+    approval covers, the sandbox, and the manifest of what could be read.
+
+    **One input is deliberately left out: the stage contracts.** They are part of the request now
+    (`<stage>.contract`), so a reviewer stage really is a function of them, and an installed rein
+    that reworded one would read the same code differently. Putting them in this key anyway would
+    mean an upgrade regenerates every open review — and regenerating resets the human half, so a
+    `rein upgrade` part-way through gate ④ would silently discard a reviewer's answers about code
+    nobody had touched. That is the exact failure this check exists to prevent, and it is a worse
+    one than reusing a reading taken under last release's wording. `--force` is how to re-read
+    after an upgrade, deliberately, at a visible cost.
 
     A malformed or ungenerated review is not reusable, and neither is one whose binding is missing
     any of these — "it did not say" must never read as "it agreed".
