@@ -63,7 +63,6 @@ def build_request(
     trusted_base_sha: str,
     subject_head_sha: str,
     diff_text: str,
-    relevant_code: Mapping[str, str],
     deterministic_facts: Mapping[str, Any],
     runtime_observations: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -77,7 +76,6 @@ def build_request(
         "trusted_base_sha": trusted_base_sha,
         "subject_head_sha": subject_head_sha,
         "diff": diff_text,
-        "relevant_code": {str(path): str(body) for path, body in relevant_code.items()},
         "deterministic_facts": dict(deterministic_facts),
     }
     if runtime_observations:
@@ -90,7 +88,7 @@ def assert_blind(request: Mapping[str, Any]) -> None:
     """Raise if any forbidden (Expected-Model) key appears anywhere in the request.
 
     A structural guard, not a substitute for building the request correctly: it walks the whole
-    tree so a forbidden key nested inside `deterministic_facts` or `relevant_code` is caught too.
+    tree so a forbidden key nested inside `deterministic_facts` is caught too.
     """
     found = sorted(_forbidden_keys_in(request))
     if found:

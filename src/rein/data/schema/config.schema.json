@@ -50,8 +50,9 @@
           "maximum": 86400
         },
         "agent_timeout_sec": {
+          "description": "Seconds one agent launch may run. 0 (the default) means no limit: a wall clock cannot tell a model that is working from one that is stuck, and killing a working one throws away the launch and makes the retry pay for it again. A stuck one is stopped by Ctrl-C, which kills the process group.",
           "type": "integer",
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 86400
         },
         "launch_retries": {

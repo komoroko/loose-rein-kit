@@ -530,6 +530,28 @@ def test_a_config_with_no_profiles_still_digests() -> None:
     assert digests.is_digest(bare.environment_digest())
 
 
+# --- how long a launch may run --------------------------------------------------
+
+
+def test_an_agent_launch_has_no_time_limit_by_default() -> None:
+    """A wall clock cannot tell a model that is working from one that is stuck, and the two
+    mistakes do not cost the same: killing a working agent throws the whole launch away and makes
+    the retry pay for it again from cold. A stall is stopped by Ctrl-C instead, which
+    `common.run` now makes reach the process."""
+    assert models.Config({"project": {"name": "demo"}}).agent_timeout_sec == 0
+
+
+def test_a_repository_may_still_ask_for_a_ceiling() -> None:
+    config = models.Config({"project": {"name": "demo"}, "execution": {"agent_timeout_sec": 1800}})
+    assert config.agent_timeout_sec == 1800
+
+
+def test_a_command_step_keeps_its_ceiling() -> None:
+    """The line is "a command whose runtime is knowable" against "an agent whose runtime is not" —
+    `faults.classify_step` still reads a test suite that hangs as a fact about the code."""
+    assert models.Config({"project": {"name": "demo"}}).command_timeout_sec == 1800
+
+
 # --- event ---------------------------------------------------------------------
 
 

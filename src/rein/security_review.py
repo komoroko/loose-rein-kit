@@ -31,17 +31,15 @@ class SecurityReviewError(RuntimeError):
 def build_request(
     *,
     diff_text: str,
-    relevant_code: Mapping[str, str],
     deterministic_facts: Mapping[str, Any],
     trusted_base_sha: str,
     subject_head_sha: str,
 ) -> dict[str, Any]:
-    """The security reviewer's input: the change, the code, and the deterministic signals."""
+    """The security reviewer's input: the change, widened around each hunk, and the signals."""
     return {
         "trusted_base_sha": trusted_base_sha,
         "subject_head_sha": subject_head_sha,
         "diff": diff_text,
-        "relevant_code": {str(p): str(b) for p, b in relevant_code.items()},
         "deterministic_facts": dict(deterministic_facts),
     }
 

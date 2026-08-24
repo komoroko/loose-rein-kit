@@ -24,7 +24,7 @@ prompts:
     prompts/commands/tasks.md: sha256:ef26fa578b566ffc00d40f5cdebeccc394cd2144a357052cdf3561d16b2e9c8e
     prompts/commands/verify.md: sha256:d5b942372f8fb6b30b7d30352756c46c3971491408b348a4f924d13343a07db8
     prompts/rules/gate-workflow.md: sha256:1ed5fa25ab442ebcf53eb06e7317d06051dcdca68f385767bf58b518506a3d9b
-    schema/config.schema.json: sha256:5e68c20a3e68045030de6675d3f5eec08f0d9f3620a1707ca11d82c118957810
+    schema/config.schema.json: sha256:a632f99654ce566def67317ce32901fef911d5e8ce7adc293f6839d07ad0a12e
     schema/event.schema.json: sha256:42f054f7f19d371daf3fedc4dad1342406d8d227bd1ecbc2bec3a27783271bc7
     schema/plan.schema.json: sha256:d757ab47606c25899a5755fbd954b36019fa7f47622397e681d7f0e92bba153d
     schema/review.schema.json: sha256:dc6f27dc7e39957c5c75d1a2b088ed9faf071d5efbb4684d8eb8540709d90bc1
@@ -88,6 +88,6 @@ integrations:
       .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-08-23'
+updated_at: '2026-08-24'
 rein:
   version: 0.1.0

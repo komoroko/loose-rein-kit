@@ -41,6 +41,21 @@ class ReviewPolicyError(RuntimeError):
     """A reviewer's output violated the policy and cannot be trusted."""
 
 
+class AdapterFailure(ReviewPolicyError):
+    """A reviewer's adapter exited nonzero, so there is no output to judge at all.
+
+    Its parent is about output that cannot be trusted; this is about a launch that produced none.
+    The distinction is worth a type only because something has to decide whether waiting would
+    help — `faults.classify_launch` answers that from `(rc, output)`, and the message string this
+    used to be had already flattened both into prose.
+    """
+
+    def __init__(self, message: str, *, rc: int, output: str) -> None:
+        super().__init__(message)
+        self.rc = rc
+        self.output = output
+
+
 # --- the untrusted reviewer boundary ------------------------------------------
 
 

@@ -7,9 +7,12 @@ the wiring writes a schema-valid review.yaml and resets the human half.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -303,42 +306,92 @@ def test_accepting_the_risk_is_not_a_disposition() -> None:
     assert "accept_risk" not in models.DISPOSITION_VALUES
 
 
-# -- the code the reviewers are allowed to read --------------------------------
+# -- the change the reviewers are allowed to read ------------------------------
+#
+# What used to be here pinned the *other* answer to the same question: the whole head-side body of
+# every changed file, sent beside the diff under a character cap. Measured over one cycle of this
+# repository that cap dropped 69% of what it meant to send, and what survived was each file's
+# first 40 KB — for a large module, its docstring and its imports, with the changed functions not
+# in it. The context now comes from the diff itself, where every byte of it is next to a change.
+
+
+def _extract_request(seen: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The extractor's request, keyed the way `_staged_reviewer` keys it.
+
+    The security reviewer also gets a `diff` and also gets no Expected Model, and it answers on
+    another thread — so anything less specific than this picks whichever request happened to be
+    appended first.
+    """
+    return next(
+        r
+        for r in seen
+        if "diff" in r and "expected_model" not in r and "signals" not in r.get("deterministic_facts", {})
+    )
 
 
 @pytest.mark.integration
-def test_the_reviewers_get_the_changed_files_not_only_the_diff(review_repo: Path) -> None:
+def test_the_reviewers_get_the_code_around_the_hunk_not_only_the_hunk(review_repo: Path) -> None:
     """A hunk without its surrounding code cannot answer "was this guard removed or moved?"."""
-    (review_repo / "src.py").write_text("def charge():\n    return 1\n", encoding="utf-8")
+    body = "".join(f"def before_{i}():\n    return {i}\n\n" for i in range(12))
+    (review_repo / "src.py").write_text(body, encoding="utf-8")
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "add src")
+    (review_repo / "src.py").write_text(body + "def charge():\n    return 1\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add charge")
 
     seen: list[Mapping[str, Any]] = []
     base = _git(review_repo, "rev-parse", "HEAD~1")
     review.generate(repo_mod.Repo(review_repo), _capturing_reviewer(seen), base=base)
-    extract = next(r for r in seen if "relevant_code" in r and "diff" in r)
-    assert "def charge" in extract["relevant_code"]["src.py"]
+    extract = _extract_request(seen)
+    assert "def charge" in extract["diff"]
+    # git's default three lines would stop at before_11; the widened one reaches further back.
+    assert "def before_5" in extract["diff"]
+    assert extract["deterministic_facts"]["context"]["context_lines"] == review.CONTEXT_LADDER[0]
 
 
-@pytest.mark.integration
-def test_a_file_over_the_cap_is_truncated_and_says_so(review_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A reviewer must never read "this is all of it" from a file that was cut short."""
-    monkeypatch.setattr(review, "RELEVANT_CODE_CHARS", 40)
-    (review_repo / "src.py").write_text("# padding\n" * 40, encoding="utf-8")
+def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None:
+    """A reviewer must never read "the rest of this function is not here" as "there is no more"."""
+    repo = repo_mod.Repo(review_repo)
+    body = "".join(f"def before_{i}():\n    return {i}\n\n" for i in range(40))
+    (review_repo / "src.py").write_text(body, encoding="utf-8")
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "add src")
-
-    seen: list[Mapping[str, Any]] = []
+    (review_repo / "src.py").write_text(body + "def charge():\n    return 1\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add charge")
     base = _git(review_repo, "rev-parse", "HEAD~1")
-    review.generate(repo_mod.Repo(review_repo), _capturing_reviewer(seen), base=base)
-    extract = next(r for r in seen if "relevant_code" in r and "diff" in r)
-    assert len(extract["relevant_code"]["src.py"]) == 40
-    assert extract["deterministic_facts"]["relevant_code"]["truncated_to_char_cap"] == ["src.py"]
+    files = diff_facts.analyze(review._diff(repo, base, "HEAD")).files
+
+    widest = review._reviewable(repo, base, "HEAD", files, plain="", ceiling=10**9)
+    assert widest.context_lines == review.CONTEXT_LADDER[0]
+    assert "narrowed_from" not in widest.as_facts()
+
+    # One byte less than the widest rung costs: the ladder has to step down, and say that it did.
+    narrowed = review._reviewable(repo, base, "HEAD", files, plain="", ceiling=len(widest.text.encode("utf-8")) - 1)
+    assert narrowed.context_lines < review.CONTEXT_LADDER[0]
+    assert narrowed.as_facts()["narrowed_from"] == review.CONTEXT_LADDER[0]
+    assert len(narrowed.text.encode("utf-8")) < len(widest.text.encode("utf-8"))
+
+
+def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: Path) -> None:
+    """`_refuse_over_budget` already passed on this diff; a second, quieter refusal here would
+    leave the operator with a review that cannot be taken and no sentence saying why."""
+    repo = repo_mod.Repo(review_repo)
+    (review_repo / "src.py").write_text("x = 1\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add src")
+    base = _git(review_repo, "rev-parse", "HEAD~1")
+    facts = diff_facts.analyze(review._diff(repo, base, "HEAD"))
+
+    reviewable = review._reviewable(repo, base, "HEAD", facts.files, plain="the plain one", ceiling=1)
+    assert reviewable.context_lines == review.PLAIN_CONTEXT
+    assert reviewable.text == "the plain one"
 
 
 @pytest.mark.integration
-def test_relevant_code_never_carries_the_expected_model(review_repo: Path) -> None:
-    """The extractor stays blind: a file named `plan` in the tree must not smuggle one in."""
+def test_the_reviewable_diff_never_carries_the_expected_model(review_repo: Path) -> None:
+    """The extractor stays blind: the SSOT is not part of the change it is shown."""
     (review_repo / "src.py").write_text("x = 1\n", encoding="utf-8")
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "add src")
@@ -346,8 +399,9 @@ def test_relevant_code_never_carries_the_expected_model(review_repo: Path) -> No
     seen: list[Mapping[str, Any]] = []
     base = _git(review_repo, "rev-parse", "HEAD~1")
     review.generate(repo_mod.Repo(review_repo), _capturing_reviewer(seen), base=base)
-    extract = next(r for r in seen if "relevant_code" in r and "diff" in r)
-    assert ".rein/plan.yaml" not in extract["relevant_code"]
+    extract = _extract_request(seen)
+    assert "relevant_code" not in extract
+    assert ".rein/plan.yaml" not in extract["diff"]
 
 
 @pytest.mark.integration
@@ -589,6 +643,54 @@ def test_the_security_stage_does_not_wait_behind_the_extraction(review_repo: Pat
     assert "findings" in machine["security"]  # the stage answered, off the chain's thread
 
 
+@pytest.mark.integration
+def test_a_failed_extraction_does_not_wait_out_the_security_stage(review_repo: Path) -> None:
+    """The failure that should surface in seconds used to take as long as the sibling it could not
+    cancel — a field run recorded a session-limit extraction failure 61 minutes after launch, and
+    paid for a whole security review nobody read.
+
+    Pinned with a *real* subprocess on the security side, because that is the thing the fix acts on:
+    `Future.cancel()` is a no-op on a running task, and `shutdown(wait=False, cancel_futures=True)`
+    only moves the wait to interpreter exit. Nothing but killing the process ends this early.
+    """
+    started = threading.Event()
+    child_pid: list[int] = []
+    pid_file = review_repo / "security.pid"
+
+    def reviewer(request: Mapping[str, Any]) -> str:
+        facts = request.get("deterministic_facts")
+        if isinstance(facts, dict) and "signals" in facts:
+            started.set()
+            common.run(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(120)",
+                ]
+            )
+            return "{}"
+        assert started.wait(timeout=10), "the security stage never started"
+        for _ in range(200):  # it has to be launched, not merely submitted, before we fail
+            recorded = pid_file.read_text(encoding="utf-8").strip() if pid_file.exists() else ""
+            if recorded.isdigit():  # the file exists before it is written; only a number counts
+                child_pid.append(int(recorded))
+                break
+            time.sleep(0.05)
+        raise review_policy.ReviewPolicyError("the actual_extractor adapter exited 1, saying: session limit")
+
+    began = time.monotonic()
+    with pytest.raises(review_policy.ReviewPolicyError, match="session limit"):
+        review.generate(repo_mod.Repo(review_repo), reviewer)
+    elapsed = time.monotonic() - began
+
+    assert elapsed < 30, f"the extraction failure waited {elapsed:.0f}s for the stage it discarded"
+    assert child_pid, "the security stage never got as far as a launch, so nothing was proved"
+    # Reaped, not merely signalled: leaving the `with` joined the worker, which returned only once
+    # `common.run` had collected the killed process — so this is a fact, not a race.
+    with pytest.raises(OSError):  # ProcessLookupError: the launch was killed, not left running
+        os.kill(child_pid[0], 0)
+
+
 def test_the_review_is_the_same_document_whatever_the_stages_race(review_repo: Path) -> None:
     """Concurrency buys wall-clock time and must buy nothing else: the merge order and the event
     order are fixed, so two generations of the same HEAD assemble identically."""
@@ -598,6 +700,75 @@ def test_the_review_is_the_same_document_whatever_the_stages_race(review_repo: P
     for machine in (first, second):
         machine["binding"].pop("generated_at", None)
     assert first == second
+
+
+# --- waiting out a machine failure, and refusing to wait out the other kind ----
+#
+# `review generate` had no `--supervise`, so a session limit meant a human noticing and running the
+# command again — each retry paying for the whole pipeline, which is what brings the *next* session
+# limit closer.
+
+
+def _adapter_failure(output: str, rc: int = 1) -> review_policy.AdapterFailure:
+    return review_policy.AdapterFailure(f"the actual_extractor adapter exited {rc}", rc=rc, output=output)
+
+
+def test_a_capacity_failure_is_worth_waiting_for() -> None:
+    assert review._worth_waiting_for(_adapter_failure("You've hit your session limit · resets 3pm"))
+
+
+def test_a_request_that_did_not_fit_is_not() -> None:
+    """It classifies as transient — rightly, for a build that can relaunch cold — but this pipeline
+    has no session to reset, so the same request would be the same size on every attempt."""
+    assert not review._worth_waiting_for(_adapter_failure("API Error: Prompt is too long"))
+
+
+def test_an_adapter_that_is_not_installed_is_not() -> None:
+    assert not review._worth_waiting_for(_adapter_failure("could not run 'claude': ...", rc=127))
+
+
+def test_supervise_runs_it_again_and_returns_the_review_that_worked(review_repo: Path) -> None:
+    attempts: list[int] = []
+
+    def flaky() -> Any:
+        attempts.append(1)
+        if len(attempts) == 1:
+
+            def fail(request: Mapping[str, Any]) -> str:
+                raise _adapter_failure("You've hit your session limit · resets 3pm")
+
+            return fail
+        return _fake_reviewer
+
+    machine = review._generate_cli(
+        repo_mod.Repo(review_repo),
+        {},
+        force=False,
+        supervise=True,
+        interval_sec=1,
+        make_reviewer=flaky,
+    )
+    assert len(attempts) == 2
+    assert machine["status"] == "generated"
+
+
+def test_without_supervise_the_first_failure_is_the_answer(review_repo: Path) -> None:
+    def fail(request: Mapping[str, Any]) -> str:
+        raise _adapter_failure("You've hit your session limit · resets 3pm")
+
+    with pytest.raises(review_policy.AdapterFailure):
+        review._generate_cli(
+            repo_mod.Repo(review_repo), {}, force=False, supervise=False, interval_sec=1, make_reviewer=lambda: fail
+        )
+
+
+def test_the_bytes_put_in_front_of_each_stage_are_reported() -> None:
+    """Measured at the transport, because what this pipeline sends is what decides whether it can
+    run at all — and an estimate reported as a measurement is the habit this codebase refuses."""
+    assert review.spend_summary({}) == ""
+    line = review.spend_summary({"actual_extractor": 4096, "security_reviewer": 2048})
+    assert line.startswith("review: sent 6KiB over 2 stage(s)")
+    assert line.index("actual_extractor") < line.index("security_reviewer")  # worst first
 
 
 # --- a subject that has not moved is not re-read -------------------------------
