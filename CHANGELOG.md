@@ -62,6 +62,16 @@ to re-invent `SEC-001` by coincidence to get past a check whose own instruction 
 finding and re-run". They are in the request now, and the validator reads them from there — one
 source, rather than an enforcement and a disclosure that nothing made agree.
 
+**rein could write an SSOT document it could not read back.** `strict_yaml` refuses YAML anchors
+and aliases on load, deliberately — an alias is an ambiguity and an expansion surface — and
+`yaml.safe_dump` emits one for any object reachable from two places in the same document. The
+writer did not know that. `review.assemble` stores the security findings under
+`security.findings` *and* hands the same objects to `decision_cards.derive_cards`, so **every
+review that found anything wrote a `review.yaml` that never parsed again**: gate ④ unreadable,
+with the loader naming a line and not the cause. Found while adding a test that needed a review
+with a finding in it. The store now dumps with a no-alias dumper, which repeats the object — the
+fix belongs at the one place both halves of the format meet, not at each composition site.
+
 **A partitioning nothing ever performed.** The Coverage Manifest raised a `partitioned` flag past
 2000 changed lines, `review.yaml` declared `coverage` an array of up to 128 entries with a
 `partition` index on each, and the whole vocabulary described a thing no code did: the manifest is

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from rein import models, store
+from rein import models, store, strict_yaml
 from rein import repo as repo_mod
 
 STATE: dict[str, Any] = {
@@ -327,6 +327,21 @@ def test_recovery_discards_a_prepared_transaction(repo: repo_mod.Repo) -> None:
 
     assert not orphan.exists()
     assert not st.journal.exists()
+
+
+def test_a_shared_object_is_repeated_rather_than_anchored() -> None:
+    """rein must not be able to write an SSOT document it cannot read back.
+
+    `strict_yaml` refuses anchors and aliases, and `yaml.safe_dump` emits them for any object
+    reachable from two places. `review.assemble` puts the security findings under
+    `security.findings` and also hands them to `decision_cards`, so every review with a security
+    finding wrote a `review.yaml` that never parsed again — the loader naming a line and not the
+    cause.
+    """
+    finding = {"id": "SEC-001", "severity": "high"}
+    text = store.dump_yaml({"security": {"findings": [finding]}, "cards": [{"evidence": [finding]}]}).decode("utf-8")
+    assert "&id" not in text and "*id" not in text
+    assert strict_yaml.load_mapping(text)["cards"][0]["evidence"] == [finding]
 
 
 def test_recovery_rolls_a_files_replaced_transaction_forward(repo: repo_mod.Repo) -> None:

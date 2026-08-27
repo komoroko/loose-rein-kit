@@ -42,6 +42,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, TypeVar
 
+import yaml
+
 from rein import digests, event_chain, models, strict_yaml
 from rein import repo as repo_mod
 
@@ -210,6 +212,26 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+class _NoAliasDumper(yaml.SafeDumper):
+    """A dumper that repeats a shared object instead of anchoring it.
+
+    `strict_yaml` refuses anchors and aliases on read — deliberately, because an alias is an
+    ambiguity and an expansion surface. The writer did not know that, so **rein could write an SSOT
+    document it could not read back**: whenever one object was reachable from two places in the
+    same document, `yaml.safe_dump` emitted `&id001` / `*id001` and the next load raised. It was
+    not hypothetical. `review.assemble` hands the security findings to `decision_cards.derive_cards`
+    and also stores them under `security.findings`, so *any* review with a security finding wrote a
+    `review.yaml` that could never be parsed again — gate ④ unreadable, and the loader pointing at
+    a line rather than at the cause.
+
+    Repeating the object is the right resolution rather than deep-copying at each composition site:
+    the two halves of one format have to agree, and only one of them can be enforced in one place.
+    """
+
+    def ignore_aliases(self, data: Any) -> bool:
+        return True
+
+
 def dump_yaml(mapping: Mapping[str, Any]) -> bytes:
     """Serialize an SSOT document to bytes.
 
@@ -217,9 +239,9 @@ def dump_yaml(mapping: Mapping[str, Any]) -> bytes:
     order reads far better than an alphabetical one. Ordering does not affect the digest,
     which is taken over the canonical form (:mod:`rein.digests`), not over these bytes.
     """
-    import yaml
-
-    return yaml.safe_dump(dict(mapping), sort_keys=False, allow_unicode=True, width=100).encode("utf-8")
+    return yaml.dump(
+        dict(mapping), Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, width=100
+    ).encode("utf-8")
 
 
 # --- file locking ---------------------------------------------------------------
