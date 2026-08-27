@@ -862,6 +862,9 @@ class Orchestrator:
     def _spend(self, role: str, prompt_bytes: int, *, resumed: bool = False) -> None:
         """Count one launch's input against the role that made it.
 
+        One call per *attempt*: the loop composes every prompt itself, so this is the one number
+        here that can be counted exactly, and a retry really does send it again.
+
         `resumed` distinguishes a launch that continues the agent's own session from one that
         starts cold. A cold launch re-reads its ticket, its design slice and the code it is working
         on from scratch — the `Adapter` docstring has called that the largest avoidable cost in a
@@ -1005,12 +1008,14 @@ class Orchestrator:
         attempt = 0
         adapter = argv[0] if argv else ""
         record = adapter_for(argv)
-        # What this run actually put in front of a model, measured rather than estimated: the loop
-        # composes every prompt itself, so it is the one thing here that can be counted exactly.
-        # `review_budget` at gate ④ is measured for the same reason — a limit nobody measures is a
-        # statement of intent, and this side of the run had no number at all.
-        self._spend(role or where, sum(len(part.encode("utf-8")) for part in argv), resumed=resumed)
+        prompt_bytes = sum(len(part.encode("utf-8")) for part in argv)
         while True:
+            # Counted per attempt, inside the loop, because a retry is another launch: the same
+            # argv goes to the provider again and is paid for again. Counting once per `_launch`
+            # under-reported every retried task, and put two fields called `launches` in the same
+            # `run_measured` event disagreeing with each other — the byte counter saying 1 where
+            # the billed one said 3.
+            self._spend(role or where, prompt_bytes, resumed=resumed)
             rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
             if rc == 0:
                 try:

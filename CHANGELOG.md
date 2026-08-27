@@ -83,6 +83,13 @@ replaced by them: bytes are what rein sent and are always knowable, tokens are w
 only a provider can say. The host's global CLI configuration stays outside both, and is named as
 such rather than estimated; its size is visible in the cached and input counts.
 
+A retry is another launch, and the byte counter never said so: it counted once per `_launch`
+regardless of how many times the same argv actually went to the provider. On its own that
+under-reported every retried task; beside the billed counter it put two fields called `launches`
+in one `run_measured` event disagreeing with each other, 1 against 3. Both are counted per attempt
+now.
+
+
 **The reuse unit is now one stage's answer, not one run of the pipeline.** `rein review generate`
 kept a single `subject` digest — the tree, the plan, the config, the sandbox, the coverage
 manifest and the task facts, in one key — and re-ran *all three* reviewer stages unless every one

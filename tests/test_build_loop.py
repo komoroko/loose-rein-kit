@@ -1576,6 +1576,27 @@ def test_a_launch_counts_what_it_was_told_to_read_not_only_what_was_sent(
     assert handed > ticket.stat().st_size
 
 
+def test_a_retried_launch_is_counted_by_both_measures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retry is another launch: the same argv goes to the provider again and is paid for again.
+
+    Counting once per `_launch` under-reported every retried task, and once the billed counter
+    landed beside it, one `run_measured` event carried two fields called `launches` disagreeing —
+    the byte one saying 1 where the billed one said 3.
+    """
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(build_loop, "_LAUNCH_BACKOFF_SEC", (0.0,))
+    attempts = iter([(1, "connection reset by peer"), (1, "connection reset by peer")])
+
+    def flaky(cmd: list[str], *a: object, **k: object) -> tuple[int, str]:
+        return next(attempts, (0, agent_output(cmd)))
+
+    monkeypatch.setattr(build_loop, "_run", flaky)
+    loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
+
+    assert loop.spend_totals()["implementer"]["launches"] == 3
+    assert loop.usage_totals()["implementer"].launches == 3
+
+
 def test_a_resumed_launch_is_not_counted_as_a_cold_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A cold launch re-reads its ticket, design slice and code from scratch. Whether that is the
     largest avoidable cost in a long build is a claim the run can now answer about itself."""
