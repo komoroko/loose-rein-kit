@@ -23,7 +23,7 @@ import pytest
 from rein import build_loop, common
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
 
 SESSION_LIMIT = (1, "You've hit your session limit · resets 3:30am (Asia/Tokyo)")
 WORK_BRANCH = "build/demo"
@@ -74,7 +74,7 @@ def implementer_writing(root: Path, *, stop_on: str = "") -> object:
             return common.run(cmd, cwd, timeout)
         task = Path(cwd or root).name
         (Path(cwd or root) / f"{task}.py").write_text(f"# {task} implementation\n", encoding="utf-8")
-        return SESSION_LIMIT if task == stop_on else (0, "")
+        return SESSION_LIMIT if task == stop_on else (0, agent_envelope(""))
 
     return _run
 

@@ -57,7 +57,7 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -83,6 +83,7 @@ from rein import (
 )
 from rein import repo as repo_mod
 from rein import store as store_mod
+from rein import usage as usage_mod
 
 logger = logging.getLogger(__name__)
 
@@ -165,10 +166,27 @@ class Adapter:
     #: features the outer one has already dropped, and it fails at the point where the agent tries
     #: to write, with a message that reaches nobody.
     own_sandbox: bool = False
+    #: What makes it report what a launch cost — the token counts, the model that answered, the
+    #: price — instead of bare text. Empty for a CLI whose envelope this release has not seen: an
+    #: unreported launch is recorded as unmeasured, never as zero (`usage.Usage.unavailable`).
+    #: Adding flags here without an `envelope` to read them is how the answer stops parsing.
+    usage_flags: tuple[str, ...] = ()
+    #: Reads that CLI's envelope into `(the answer, what it cost)`. Paired with `usage_flags`.
+    envelope: Callable[[str], tuple[str, usage_mod.Usage]] | None = None
 
     @property
     def resumable(self) -> bool:
         return bool(self.session_flags and self.resume_flags)
+
+    def launch_argv(self) -> tuple[str, ...]:
+        """How to launch it so that it reports what the launch cost."""
+        return self.argv + self.usage_flags
+
+    def read_output(self, output: str) -> tuple[str, usage_mod.Usage]:
+        """`(what it said, what it cost)`. An adapter with no envelope says it did not measure."""
+        if self.envelope is None:
+            return output, usage_mod.Usage.unavailable()
+        return self.envelope(output)
 
 
 #: Every agent CLI this release knows how to launch.
@@ -178,6 +196,8 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         argv=("claude", "-p"),
         session_flags=("--session-id",),
         resume_flags=("--resume",),
+        usage_flags=usage_mod.CLAUDE_JSON_FLAGS,
+        envelope=usage_mod.parse_claude_envelope,
     ),
     "codex": Adapter(
         name="codex",
@@ -188,8 +208,8 @@ ADAPTER_TABLE: dict[str, Adapter] = {
     "gemini": Adapter(name="gemini", argv=("gemini", "-p")),
 }
 
-#: Adapter name → launch argv. Kept because most callers want only this.
-ADAPTERS: dict[str, tuple[str, ...]] = {name: a.argv for name, a in ADAPTER_TABLE.items()}
+#: Adapter name → launch argv, usage flags included. Kept because most callers want only this.
+ADAPTERS: dict[str, tuple[str, ...]] = {name: a.launch_argv() for name, a in ADAPTER_TABLE.items()}
 
 
 def adapter_for(argv: Sequence[str]) -> Adapter | None:
@@ -798,6 +818,8 @@ class Orchestrator:
         # What this run put in front of a model, by role. Measured, not estimated — see
         # `spend_summary`.
         self._spent: dict[str, dict[str, int]] = {}
+        #: What the provider billed for each role's launches, when the adapter reports it.
+        self._usage: dict[str, usage_mod.Usage] = {}
         self._spend_lock = threading.Lock()
         # Tasks whose attempt ended before the quality gate, and the status that ending calls for.
         # The caller reads this instead of assuming every unsuccessful attempt is `blocked`: an
@@ -853,6 +875,22 @@ class Orchestrator:
             if not resumed:
                 spent["cold_launches"] += 1
 
+    def _spend_usage(self, role: str, spent: usage_mod.Usage) -> None:
+        """Count what the provider says one launch cost, against the role that made it.
+
+        Beside the byte counters rather than instead of them: bytes are what this process *sent*
+        and are always knowable; tokens are what the launch *cost* and only an adapter that reports
+        them can say. An adapter with no envelope records `unavailable`, which is a state with a
+        name — never a row of zeros that would read as free.
+        """
+        with self._spend_lock:
+            self._usage[role] = self._usage.get(role, usage_mod.Usage()) + spent
+
+    def usage_totals(self) -> dict[str, usage_mod.Usage]:
+        """This run's measured cost, by role. A copy — the caller must not hold the lock's data."""
+        with self._spend_lock:
+            return dict(self._usage)
+
     def _spend_handover(self, role: str, handed_bytes: int) -> None:
         """Count what a launch was *told to read*, as opposed to what was sent in its argv.
 
@@ -876,13 +914,15 @@ class Orchestrator:
     def spend_summary(self) -> str:
         """Where this run's input went, worst first. Empty when nothing was launched.
 
-        Bytes rather than tokens because bytes are what this process can know: a token count
-        belongs to a tokenizer nobody here owns, and reporting an estimate as a measurement is the
-        habit this whole codebase is built against. The ratio is stable enough that the *shape* —
-        which role, how many launches, how much each — is the actionable part either way.
+        Two lines answering two questions, because they are different measurements. Bytes are what
+        *this process sent* — always knowable, and the only number available for an adapter that
+        reports nothing. Tokens are what the launch *cost*, which only the provider can say, and
+        the gap between them is the point: the system prompt, the CLI's own project instructions
+        and the cache are all inside the second number and invisible to the first.
         """
         with self._spend_lock:
             rows = sorted(self._spent.items(), key=lambda item: -(item[1]["prompt_bytes"] + item[1]["handed_bytes"]))
+            measured = dict(self._usage)
         if not rows:
             return ""
         sent = sum(row["prompt_bytes"] for _, row in rows)
@@ -893,10 +933,13 @@ class Orchestrator:
             f"{role} {(row['prompt_bytes'] + row['handed_bytes']) / 1024:.0f}KiB/{row['launches']}"
             for role, row in rows
         ]
-        return (
+        lines = [
             f"input: {sent / 1024:.0f}KiB sent + {handed / 1024:.0f}KiB handed to read over "
             f"{launches} launches ({cold} cold) — " + ", ".join(parts)
-        )
+        ]
+        if billed := usage_mod.summarize(measured, what="billed"):
+            lines.append(billed)
+        return "\n".join(lines)
 
     def _note_diagnostic(self, task_id: str, patch: dict[str, Any]) -> None:
         """Hold a diagnostic until the next status write for this task carries it into the store."""
@@ -961,6 +1004,7 @@ class Orchestrator:
         """
         attempt = 0
         adapter = argv[0] if argv else ""
+        record = adapter_for(argv)
         # What this run actually put in front of a model, measured rather than estimated: the loop
         # composes every prompt itself, so it is the one thing here that can be counted exactly.
         # `review_budget` at gate ④ is measured for the same reason — a limit nobody measures is a
@@ -968,10 +1012,22 @@ class Orchestrator:
         self._spend(role or where, sum(len(part.encode("utf-8")) for part in argv), resumed=resumed)
         while True:
             rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
-            note = agent_launch_note(role=role or where, adapter=adapter, rc=rc, output=out, session=session)
             if rc == 0:
-                self._note_diagnostic(task_id, {"last_agent": note})
-                return out
+                try:
+                    said, spent = record.read_output(out) if record else (out, usage_mod.Usage.unavailable())
+                except usage_mod.AdapterEnvelopeError as exc:
+                    # The CLI can report a failed run on a process that exited 0. Without this the
+                    # failure would travel on as the agent's answer, and whatever went wrong would
+                    # be read as something the agent said.
+                    rc, out, said, spent = 1, f"{exc}\n{out}", "", usage_mod.Usage.unavailable()
+                self._spend_usage(role or where, spent)
+                if rc == 0:
+                    note = agent_launch_note(role=role or where, adapter=adapter, rc=0, output=said, session=session)
+                    self._note_diagnostic(task_id, {"last_agent": note})
+                    return said
+            else:
+                self._spend_usage(role or where, usage_mod.Usage.unavailable())
+            note = agent_launch_note(role=role or where, adapter=adapter, rc=rc, output=out, session=session)
             fault = faults.classify_launch(rc, out)
             if fault is faults.Fault.ENV_PERMANENT or faults.is_capacity(out) or not self._spend_launch_retry():
                 raised = EnvironmentFault(fault, where=where, rc=rc, output=out)
@@ -2303,6 +2359,7 @@ class Orchestrator:
         totals = self.spend_totals()
         if not totals or not self.cycle_id:
             return
+        billed = self.usage_totals()
         detail = {
             "run_id": self.run_id,
             "launches": sum(row["launches"] for row in totals.values()),
@@ -2310,6 +2367,10 @@ class Orchestrator:
             "prompt_bytes": sum(row["prompt_bytes"] for row in totals.values()),
             "handed_bytes": sum(row["handed_bytes"] for row in totals.values()),
             "by_role": totals,
+            # What the provider billed, where an adapter says so. `measured: false` is the record
+            # for one that does not — summing this over a cycle must never read a silent role as
+            # a free one.
+            "billed_by_role": {role: row.to_detail() for role, row in billed.items()},
         }
         try:
             with self.store.transaction() as tx:

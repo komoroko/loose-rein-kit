@@ -52,6 +52,7 @@ from rein import (
 )
 from rein import repo as repo_mod
 from rein import store as store_mod
+from rein import usage as usage_mod
 
 logger = logging.getLogger(__name__)
 
@@ -469,6 +470,7 @@ def generate(
     base: str | None = None,
     actor: str = "",
     force: bool = False,
+    spend: dict[str, usage_mod.Usage] | None = None,
 ) -> dict[str, Any]:
     """Run the whole pipeline and write `review.yaml`'s machine half; return the assembled machine.
 
@@ -724,7 +726,14 @@ def generate(
             for stage_name in _STAGE_ORDER:
                 if stage_name in ran:
                     tx.append(_STAGE_RAN_EVENT[stage_name], cycle_id=cycle, actor=actor)
-            tx.append("review_generated", cycle_id=cycle, actor=actor, detail={"change_digest": change})
+            tx.append(
+                "review_generated",
+                cycle_id=cycle,
+                actor=actor,
+                detail={"change_digest": change, "billed_by_role": {r: u.to_detail() for r, u in spend.items()}}
+                if spend
+                else {"change_digest": change},
+            )
         cache.prune()
     except Exception as exc:
         # `Exception`, not `BaseException`: a Ctrl-C is a human deciding to stop, and filing that
@@ -1196,7 +1205,7 @@ def _adapter_reviewer(
     role: str = "code_reviewer",
     *,
     config: models.Config | None = None,
-    spend: dict[str, int] | None = None,
+    spend: dict[str, usage_mod.Usage] | None = None,
 ) -> review_policy.Reviewer:
     """A production reviewer that hands the request as JSON to the adapter configured for `role`.
 
@@ -1235,23 +1244,20 @@ def _adapter_reviewer(
     if config is None:
         config = store_mod.Store(repo).read_config()
     adapter = (config.adapter(role) if config is not None else "") or "claude"
-    argv = build_loop.ADAPTERS.get(adapter)
-    if argv is None:
+    record = build_loop.ADAPTER_TABLE.get(adapter)
+    if record is None:
         raise ReviewError(f"agents.{role}.adapter is {adapter!r}, which this release cannot launch")
+    argv = record.launch_argv()
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
     def call(request: Mapping[str, Any]) -> str:
         payload = json.dumps(request, ensure_ascii=False)
-        if spend is not None:
-            # The stages run on two threads, and read-modify-write is not one operation on any
-            # interpreter that is not holding a global lock for us.
-            with _SPEND_LOCK:
-                spend[role] = spend.get(role, 0) + len(payload.encode("utf-8"))
         # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
         # left something undeletable behind must not turn a finished review into a traceback.
         with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as elsewhere:
             rc, out = common.run(list(argv), cwd=elsewhere, timeout=timeout or None, input_text=payload)
         if rc != 0:
+            _record_spend_usage(spend, role, usage_mod.Usage.unavailable())
             # What the adapter said, not merely that it stopped. `common.run` merges stderr into
             # `out`, so the reason was in hand and thrown away: a field report of three identical
             # `exited 1` failures was diagnosable only by wrapping the CLI in a logging shim, and
@@ -1262,21 +1268,43 @@ def _adapter_reviewer(
                 rc=rc,
                 output=out,
             )
-        return out
+        try:
+            answer, spent = record.read_output(out)
+        except usage_mod.AdapterEnvelopeError as exc:
+            # A CLI can report a failed run on a process that exited 0. Without this the failure
+            # travels on to the stage validator and is reported as a malformed reviewer answer —
+            # blaming the reviewer for something the launch said about itself.
+            _record_spend_usage(spend, role, usage_mod.Usage.unavailable())
+            raise review_policy.AdapterFailure(
+                f"the {role} adapter reported a failed run: {exc}", rc=0, output=out
+            ) from None
+        _record_spend_usage(spend, role, spent)
+        return answer
 
     return call
 
 
-def _staged_reviewer(repo: repo_mod.Repo, *, spend: dict[str, int] | None = None) -> review_policy.Reviewer:
+def _record_spend_usage(spend: dict[str, usage_mod.Usage] | None, role: str, spent: usage_mod.Usage) -> None:
+    """Add one launch's cost to the ledger. The stages run on two threads, so this takes the lock.
+
+    Read-modify-write is not one operation on any interpreter that is not holding a global lock
+    for us, and a lost row here would under-report a role rather than fail loudly.
+    """
+    if spend is None:
+        return
+    with _SPEND_LOCK:
+        spend[role] = spend.get(role, usage_mod.Usage()) + spent
+
+
+def _staged_reviewer(repo: repo_mod.Repo, *, spend: dict[str, usage_mod.Usage] | None = None) -> review_policy.Reviewer:
     """One callable that routes each stage's request to that stage's own configured adapter.
 
     The stage is identified by the request shape the stage builders produce — the same shapes
     the fakes in the test suite key on — so nothing has to thread a role through the pipeline.
 
-    `spend`, when given, collects the bytes actually put in front of each stage. Measured at the
-    transport because that is the only place the number is a fact rather than an estimate, and
-    worth measuring because what this pipeline sends is the thing that decides whether it can run
-    at all.
+    `spend`, when given, collects what each stage's launch cost, as the adapter reports it.
+    Measured at the transport because that is where the answer arrives, and worth measuring because
+    what this pipeline spends is the thing that decides whether it can run at all.
     """
     config = store_mod.Store(repo).read_config()
     by_role = {
@@ -1295,18 +1323,20 @@ def _staged_reviewer(repo: repo_mod.Repo, *, spend: dict[str, int] | None = None
     return call
 
 
-def spend_summary(spend: Mapping[str, int]) -> str:
-    """What this generation put in front of a model, worst first. Empty when nothing was sent.
+def spend_summary(spend: dict[str, usage_mod.Usage]) -> str:
+    """What this generation cost, by stage, worst first. Empty when nothing was launched.
 
-    Bytes rather than tokens, for the reason `build_loop.spend_summary` gives: a token count
-    belongs to a tokenizer nobody here owns, and reporting an estimate as a measurement is the
-    habit this codebase is built against.
+    Token counts rather than bytes on stdin. The old measure could not see the system prompt, the
+    CLI's own project instructions, or the cache — a probe of a one-word prompt came back with 10
+    input tokens and 20,956 cached ones — so it answered "what did rein send", never "what did
+    this cost". A stage whose adapter reports nothing is named as unmeasured (`usage.summarize`),
+    because a zero would read as free.
+
+    What stays outside this number: the host's global CLI configuration is part of every launch's
+    input and nothing here can itemize it. Its *size* is visible in the cache and input counts,
+    which is as far as an honest measurement goes.
     """
-    rows = sorted(spend.items(), key=lambda item: -item[1])
-    if not rows:
-        return ""
-    parts = ", ".join(f"{role} {sent / 1024:.0f}KiB" for role, sent in rows)
-    return f"review: sent {sum(spend.values()) / 1024:.0f}KiB over {len(rows)} stage(s) — {parts}"
+    return usage_mod.summarize(spend, what="review")
 
 
 def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
@@ -1326,7 +1356,7 @@ def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
 
 def _generate_cli(
     repo: repo_mod.Repo,
-    spend: dict[str, int],
+    spend: dict[str, usage_mod.Usage],
     *,
     force: bool,
     supervise: bool,
@@ -1350,7 +1380,7 @@ def _generate_cli(
     while True:
         attempt += 1
         try:
-            return generate(repo, build_reviewer(), force=force)
+            return generate(repo, build_reviewer(), force=force, spend=spend)
         except review_policy.AdapterFailure as failure:
             if not supervise or not _worth_waiting_for(failure):
                 raise
@@ -1404,7 +1434,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.supervise and args.supervise_interval_sec < 1:
                 logger.error("--supervise-interval-sec must be at least 1")
                 return 2
-            spend: dict[str, int] = {}
+            spend: dict[str, usage_mod.Usage] = {}
             _generate_cli(
                 repo,
                 spend,

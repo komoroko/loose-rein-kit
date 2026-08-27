@@ -166,6 +166,40 @@ def make_plan(
 # --- review.yaml --------------------------------------------------------------
 
 
+def agent_output(cmd: list[str], text: str = "") -> str:
+    """What the CLI in `cmd` would answer with — an envelope for the ones that report usage.
+
+    For a fake standing in for more than one adapter: `claude` is launched asking for its usage
+    and answers with an envelope, `codex` and `gemini` answer with bare text, and a fake that got
+    that backwards would be testing a transport nothing uses.
+    """
+    from rein import build_loop
+
+    record = build_loop.adapter_for(cmd)
+    return agent_envelope(text) if record and record.usage_flags else text
+
+
+def agent_envelope(text: str, *, input_tokens: int = 100, output_tokens: int = 20) -> str:
+    """What `claude -p` answers with now that it is launched asking for its usage.
+
+    A fake standing in for the CLI has to speak the CLI's protocol. Wrapping here rather than in
+    each fake keeps the shape in one place — and a fake that answered in the old bare-text shape
+    would be testing a transport nothing uses.
+    """
+    import json
+
+    return json.dumps(
+        {
+            "is_error": False,
+            "subtype": "success",
+            "result": text,
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            "modelUsage": {"claude-opus-5": {"inputTokens": input_tokens, "outputTokens": output_tokens}},
+        }
+    )
+
+
 def make_review(
     *,
     generated: bool = False,
@@ -431,7 +465,11 @@ def fake_git(
     *,
     record: list[list[str]] | None = None,
 ) -> RunFake:
-    """A `build_loop._run` stand-in: first command-prefix match wins, default `(0, "")`.
+    """A `build_loop._run` stand-in: first command-prefix match wins, default a successful launch.
+
+    The default answer goes through `agent_output`, so a stand-in for an adapter that reports its
+    usage answers in the envelope that adapter really returns. A rule's own result is passed
+    through untouched — a test that spells out what a command said means it.
 
     `record`, if given, receives each `cmd` list as it is called (order preserved).
     """
@@ -443,6 +481,6 @@ def fake_git(
         for prefix, result in rules.items():
             if tuple(cmd[: len(prefix)]) == tuple(prefix):
                 return result
-        return 0, ""
+        return 0, agent_output(cmd)
 
     return _run

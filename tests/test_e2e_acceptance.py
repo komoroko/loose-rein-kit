@@ -22,7 +22,7 @@ import pytest
 from rein import build_loop, common, evidence, evidence_cmd
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
 
 WORK_BRANCH = "build/demo"
 GATE = [{"name": "test", "kind": "command", "command": ["true"], "executor_profile": "quality", "retries": 1}]
@@ -74,7 +74,7 @@ def writing_agent(*, extra: dict[str, str] | None = None) -> object:
             target = where / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(body, encoding="utf-8")
-        return 0, ""
+        return 0, agent_envelope("")
 
     return _run
 
@@ -195,7 +195,7 @@ def test_a_recorded_observation_finishes_the_task_without_rebuilding_it(
     def watching(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
         if cmd and cmd[0] == "claude":
             launches.append(cmd)
-            return 0, ""
+            return 0, agent_envelope("")
         return common.run(cmd, cwd, timeout)
 
     monkeypatch.setattr(build_loop, "_run", watching)

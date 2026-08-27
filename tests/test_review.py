@@ -35,7 +35,8 @@ from rein import (
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import make_config, make_plan, make_state, seed_repo
+from rein import usage as usage_mod
+from tests._support import agent_envelope, make_config, make_plan, make_state, seed_repo
 
 
 def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
@@ -430,7 +431,7 @@ def test_a_reviewer_is_launched_outside_the_repository(review_repo: Path, monkey
 
     def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: Any) -> tuple[int, str]:
         seen.append({"cwd": cwd, "listing": sorted(os.listdir(cwd)) if cwd else []})
-        return 0, json.dumps({"actual_statements": [], "coverage": {}})
+        return 0, agent_envelope(json.dumps({"actual_statements": [], "coverage": {}}))
 
     monkeypatch.setattr(common, "run", fake_run)
     reviewer = review._adapter_reviewer(repo_mod.Repo(review_repo), "actual_extractor")
@@ -514,18 +515,18 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
         role: str = "code_reviewer",
         *,
         config: Any = None,
-        spend: dict[str, int] | None = None,
+        spend: dict[str, usage_mod.Usage] | None = None,
     ) -> Any:
         def call(request: Mapping[str, Any]) -> str:
             routed.append(role)
             if spend is not None:
-                spend[role] = spend.get(role, 0) + 1
+                spend[role] = spend.get(role, usage_mod.Usage()) + usage_mod.Usage.unavailable()
             return _fake_reviewer(request)
 
         return call
 
     monkeypatch.setattr(review, "_adapter_reviewer", fake_adapter)
-    spend: dict[str, int] = {}
+    spend: dict[str, usage_mod.Usage] = {}
     reviewer = review._staged_reviewer(repo_mod.Repo(review_repo), spend=spend)
 
     reviewer(
@@ -966,13 +967,21 @@ def test_without_supervise_the_first_failure_is_the_answer(review_repo: Path) ->
         )
 
 
-def test_the_bytes_put_in_front_of_each_stage_are_reported() -> None:
-    """Measured at the transport, because what this pipeline sends is what decides whether it can
-    run at all — and an estimate reported as a measurement is the habit this codebase refuses."""
+def test_what_each_stage_cost_is_reported_in_tokens_not_in_bytes_on_stdin() -> None:
+    """Bytes on stdin could not see the system prompt, the CLI's own project instructions, or the
+    cache, so they answered "what did rein send" and never "what did this cost"."""
     assert review.spend_summary({}) == ""
-    line = review.spend_summary({"actual_extractor": 4096, "security_reviewer": 2048})
-    assert line.startswith("review: sent 6KiB over 2 stage(s)")
+    heavy = usage_mod.Usage(available=True, launches=1, input_tokens=40_000, output_tokens=900)
+    light = usage_mod.Usage(available=True, launches=1, input_tokens=2_000, output_tokens=100)
+    line = review.spend_summary({"actual_extractor": heavy, "security_reviewer": light})
+    assert line.startswith("review: 42.0k input + 1000 output tokens over 2 launch(es)")
     assert line.index("actual_extractor") < line.index("security_reviewer")  # worst first
+
+
+def test_a_stage_whose_adapter_reports_nothing_is_named_rather_than_counted_as_free() -> None:
+    line = review.spend_summary({"security_reviewer": usage_mod.Usage.unavailable()})
+    assert "no adapter here reports token usage" in line
+    assert "usage unavailable for security_reviewer" in line
 
 
 # --- a subject that has not moved is not re-read -------------------------------

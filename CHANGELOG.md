@@ -62,6 +62,27 @@ to re-invent `SEC-001` by coincidence to get past a check whose own instruction 
 finding and re-run". They are in the request now, and the validator reads them from there — one
 source, rather than an enforcement and a disclosure that nothing made agree.
 
+**The measurement is what the launch cost, not what this process sent.** Both spend counters
+measured bytes on stdin, and both explained why: "a token count belongs to a tokenizer nobody here
+owns, and reporting an estimate as a measurement is the habit this codebase is built against."
+That is right about an estimate and wrong about a *report* — the CLI knows, and says so on
+request. A probe measured the gap: a one-word prompt came back billed for 10 input tokens and
+**20,956 cached ones**, all of it system prompt, project instructions and cache — context this
+process never sent and could never have counted. `rein build` and `rein review generate` now
+launch `claude` with `--output-format json` and record what came back: input, output, cached and
+reasoning tokens, the model id that actually answered, and the cost. It lands on the console, in
+`run_measured` and in `review_generated`.
+
+Reading the envelope also catches a failure that used to be silent: `is_error` can be set on a
+process that exited 0, and that answer went on to the stage validator to be reported as a
+malformed *reviewer* answer rather than as a launch that said it had failed.
+
+**An adapter that does not report usage records `measured: false`, never zero** — `codex` and
+`gemini`, whose envelopes this release has not seen. Bytes are kept beside the tokens rather than
+replaced by them: bytes are what rein sent and are always knowable, tokens are what it cost and
+only a provider can say. The host's global CLI configuration stays outside both, and is named as
+such rather than estimated; its size is visible in the cached and input counts.
+
 **The reuse unit is now one stage's answer, not one run of the pipeline.** `rein review generate`
 kept a single `subject` digest — the tree, the plan, the config, the sandbox, the coverage
 manifest and the task facts, in one key — and re-ran *all three* reviewer stages unless every one

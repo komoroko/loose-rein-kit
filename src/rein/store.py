@@ -239,9 +239,9 @@ def dump_yaml(mapping: Mapping[str, Any]) -> bytes:
     order reads far better than an alphabetical one. Ordering does not affect the digest,
     which is taken over the canonical form (:mod:`rein.digests`), not over these bytes.
     """
-    return yaml.dump(
-        dict(mapping), Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, width=100
-    ).encode("utf-8")
+    return yaml.dump(dict(mapping), Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, width=100).encode(
+        "utf-8"
+    )
 
 
 # --- file locking ---------------------------------------------------------------

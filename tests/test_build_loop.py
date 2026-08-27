@@ -23,7 +23,16 @@ from rein import build_loop, common, conflict, dag, digests, dossier, evidence, 
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import fake_git, make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import (
+    agent_envelope,
+    agent_output,
+    fake_git,
+    make_config,
+    make_plan,
+    make_state,
+    make_task,
+    seed_repo,
+)
 
 
 def graph_of(done: tuple[str, ...] = ()) -> dag.Graph:
@@ -204,7 +213,7 @@ def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[st
         target = dossier.findings_path(cwd or str(root), "T-001")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"findings": findings}), encoding="utf-8")
-        return 0, ""
+        return 0, agent_envelope("")
 
     return fake_run
 
@@ -259,7 +268,7 @@ def test_a_must_fix_finding_goes_to_the_implementer_and_the_reviewer_looks_again
             target = dossier.findings_path(cwd or str(root), "T-001")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps({"findings": next(rounds)}), encoding="utf-8")
-        return 0, ""
+        return 0, agent_output(cmd)
 
     monkeypatch.setattr(build_loop, "_run", fake_run)
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
@@ -303,7 +312,7 @@ def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.Monk
 
     def fake_run(cmd: list[str], **kwargs: object) -> tuple[int, str]:
         launched.append(cmd)
-        return 0, "{}"
+        return 0, agent_output(cmd, "{}")
 
     # review.py resolves `common.run` at call time, so patching the module both share is what
     # actually intercepts the launch — reaching through `review.common` is the same object by
@@ -1441,7 +1450,7 @@ def test_every_adapter_declares_what_it_can_do() -> None:
 
 def test_the_argv_table_is_derived_from_the_capability_records() -> None:
     """One definition per adapter. Two would drift, and the drift would be silent."""
-    assert build_loop.ADAPTERS == {name: a.argv for name, a in build_loop.ADAPTER_TABLE.items()}
+    assert build_loop.ADAPTERS == {name: a.launch_argv() for name, a in build_loop.ADAPTER_TABLE.items()}
 
 
 def test_a_resumable_implementer_stamps_then_resumes_its_session(
@@ -1453,7 +1462,7 @@ def test_a_resumable_implementer_stamps_then_resumes_its_session(
 
     def capture(cmd: list[str], **kwargs: object) -> tuple[int, str]:
         launched.append(cmd)
-        return 0, ""
+        return 0, agent_output(cmd)
 
     monkeypatch.setattr(build_loop, "_run", capture)
     task = dag.Task(id="T-001", title="base", kind="foundation")
@@ -1525,7 +1534,7 @@ def test_the_run_measures_its_own_prompt_input(tmp_path: Path, monkeypatch: pyte
     an impression.
     """
     loop = orchestrator(tmp_path)
-    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, ""))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, agent_output(cmd)))
     task = dag.Task(id="T-001", title="base", kind="foundation")
 
     loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="")
@@ -1571,7 +1580,7 @@ def test_a_resumed_launch_is_not_counted_as_a_cold_one(tmp_path: Path, monkeypat
     """A cold launch re-reads its ticket, design slice and code from scratch. Whether that is the
     largest avoidable cost in a long build is a claim the run can now answer about itself."""
     loop = orchestrator(tmp_path)
-    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, *a, **k: (0, agent_output(cmd)))
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer", resumed=True)
     row = loop.spend_totals()["implementer"]
@@ -1580,7 +1589,7 @@ def test_a_resumed_launch_is_not_counted_as_a_cold_one(tmp_path: Path, monkeypat
 
 def test_the_summary_reports_both_numbers_and_the_cold_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     loop = orchestrator(tmp_path)
-    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, *a, **k: (0, agent_output(cmd)))
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
     loop._spend_handover("implementer", 200_000)
     summary = loop.spend_summary()
@@ -1599,7 +1608,7 @@ def test_the_measurement_lands_in_the_audit_chain(tmp_path: Path, monkeypatch: p
     """In the chain rather than in state.yaml: the chain never rotates, so summing `run_measured`
     over a cycle is the cycle's total while each run stays separately readable."""
     loop = orchestrator(tmp_path)
-    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, *a, **k: (0, agent_output(cmd)))
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
     loop._spend_handover("code_reviewer", 1024)
     loop._record_spend()
