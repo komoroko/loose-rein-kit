@@ -19,7 +19,9 @@ machine:
   summary: {}
   statements: []       # every human-facing sentence, with its epistemic status and evidence
   actual_extraction: []  # what the code DOES, extracted without ever seeing the plan
-  coverage: []         # what could and could not be analysed — an empty list is not "clean"
+  # `coverage` — one manifest of what could and could not be analysed — appears only once a
+  # review has been generated. There is no empty manifest: absent means nobody looked, and the
+  # two must never render the same.
   claims: []           # per-claim: integrity / semantic_support / conformance, separately
   gaps: []
   extra_behaviors: []  # behaviour no claim accounts for

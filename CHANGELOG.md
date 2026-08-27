@@ -62,6 +62,27 @@ to re-invent `SEC-001` by coincidence to get past a check whose own instruction 
 finding and re-run". They are in the request now, and the validator reads them from there — one
 source, rather than an enforcement and a disclosure that nothing made agree.
 
+**A partitioning nothing ever performed.** The Coverage Manifest raised a `partitioned` flag past
+2000 changed lines, `review.yaml` declared `coverage` an array of up to 128 entries with a
+`partition` index on each, and the whole vocabulary described a thing no code did: the manifest is
+always one entry, and all three reviewer stages are handed one diff. The flag was read in exactly
+one place — the dashboard's scope JSON — and by no policy anywhere, so a change over the line
+reported that it had been split into readable pieces and nobody could act on the claim either way.
+The pipeline had already decided the opposite question, twice: `_reviewable` says the answer to a
+change too big to review is `/revise` and not a narrower window onto it, and `_refuse_over_budget`
+enforces exactly that before a model is launched. **Splitting would also break the extraction it
+was supposed to serve** — behaviour that spans two files cannot be read out of one fragment, and
+that is the seam "extra behaviours: 0" must never hide.
+
+So the vocabulary is gone rather than implemented: `machine.coverage` is one manifest, not a list;
+`partitioned`, the `partition` index, and `truncated` (a required field the schema pinned to
+`false` and one unreachable branch read) are deleted; and the budget is `max_diff_bytes`, which is
+what it always measured. Two related lies went with them — `derive_review_budget` hard-coded that
+budget's actual to `0` "because the detector partitions", so the review's own budget snapshot
+recorded a change of any size as costing nothing, and `coverage_gap_risk` priced a truncation that
+could not occur. **A repository setting `max_diff_bytes_per_partition` must rename the key**; the
+schema refuses the old one rather than reading past it.
+
 Also: **`rein review generate --supervise`**, so a capacity stop no longer needs a human to notice
 and re-run the whole pipeline by hand. Same narrow licence as `rein build --supervise`, minus one
 case — a request that did not fit is never retried, because it will be the same size in fifteen

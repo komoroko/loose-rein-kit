@@ -251,7 +251,7 @@
               "minimum": 0,
               "maximum": 100
             },
-            "max_diff_bytes_per_partition": {
+            "max_diff_bytes": {
               "type": "integer",
               "minimum": 4096,
               "maximum": 8388608

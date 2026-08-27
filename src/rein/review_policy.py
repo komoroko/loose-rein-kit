@@ -131,7 +131,7 @@ def coverage_gap_risk(facts: diff_facts_mod.DiffFacts) -> str:
     scope split included, since splitting never removes the file.
 
     The gap is therefore worth what was in the files it covers. Nothing could be read at all —
-    a binary, a diff the caller had to truncate — and it is `high`. Otherwise the signal
+    a binary — and it is `high`. Otherwise the signal
     detector did scan those files line by line (it is language-neutral), so the gap inherits the
     highest risk any signal matched *inside* them, and a dependency change contributes `medium`
     because no lexical scan accounts for what the new versions do. This never lowers a risk some
@@ -140,7 +140,7 @@ def coverage_gap_risk(facts: diff_facts_mod.DiffFacts) -> str:
     manifest = facts.coverage
     if manifest.coverage_status == "sufficient":
         return "low"
-    if manifest.truncated or not manifest.binary_semantics_analyzed:
+    if not manifest.binary_semantics_analyzed:
         return "high"
     unread = {entry.get("path", "") for entry in (*manifest.unsupported_files, *manifest.generated_files)}
     risks = [hit.risk for hit in facts.signals if hit.path in unread]
@@ -350,14 +350,14 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
     """
     if not models.risk_at_least(effective, "high"):
         return []
-    if not review.coverage:
+    manifest = review.coverage
+    if not manifest:
         return ["no coverage manifest — Extra Behavior is undeterminable, not zero, on a high/critical change"]
-    gaps = [c for c in review.coverage if str(c.get("coverage_status")) != "sufficient"]
-    if not gaps:
+    if str(manifest.get("coverage_status")) == "sufficient":
         return []
     return [
-        f"coverage is insufficient for a {effective} change ({len(gaps)} diff partition(s)) — "
-        "split the unreadable part out of this scope, or reduce the change's risk"
+        f"coverage is insufficient for a {effective} change — split the unreadable part out of "
+        "this scope, or reduce the change's risk"
     ]
 
 

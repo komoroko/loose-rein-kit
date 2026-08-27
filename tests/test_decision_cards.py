@@ -37,7 +37,6 @@ def _machine(**kwargs: Any) -> dict[str, Any]:
         "analyzed_files": 1,
         "analyzed_bytes": 1024,
         "analyzed_hunks": 1,
-        "truncated": False,
     }
     kwargs.setdefault("actual_statements", [])
     kwargs.setdefault("claims", [])

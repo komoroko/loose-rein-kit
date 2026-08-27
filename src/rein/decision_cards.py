@@ -280,6 +280,7 @@ def _is_domain(value: object) -> bool:
 def derive_review_budget(
     *,
     limits: Mapping[str, int],
+    diff_bytes: int,
     decision_cards: Sequence[Mapping[str, Any]] = (),
     statements: Sequence[Mapping[str, Any]] = (),
     gaps: Sequence[Mapping[str, Any]] = (),
@@ -289,6 +290,11 @@ def derive_review_budget(
     Recording it is what lets a receipt say which ceilings were in force when the review was
     signed; `human_review.budget_report` recomputes the live values for the screen, and the two agree
     because both read `models.BUDGET_NAMES` and the same definitions.
+
+    `diff_bytes` is the coverage manifest's `analyzed_bytes` and is required for the same reason
+    the schema requires it: a constant actual would make `max_diff_bytes` a budget no change of any
+    size could exceed. It used to be hard-coded to 0 here, on the grounds that the detector
+    partitioned large diffs — it never did.
     """
     actuals = {
         "max_critical_decisions": sum(1 for c in decision_cards if _risk_of(c) == "critical"),
@@ -296,9 +302,7 @@ def derive_review_budget(
         "max_unresolved_low_medium_unknowns": sum(
             1 for g in gaps if _risk_of(g) in ("low", "medium") and g.get("blocking") is not True
         ),
-        # Enforced upstream: diff_facts partitions rather than truncates, so at review time the
-        # measured value is always within budget by construction.
-        "max_diff_bytes_per_partition": 0,
+        "max_diff_bytes": diff_bytes,
     }
     return [
         {

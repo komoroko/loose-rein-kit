@@ -47,7 +47,6 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
         "diff_digest": "sha256:" + "d" * 64,
         "analyzed_files": 2,
         "analyzed_bytes": 1024,
-        "truncated": False,
         "coverage_status": "sufficient",
     }
     claims = [
@@ -632,7 +631,7 @@ def test_change_digest_excludes_the_rein_dir(review_repo: Path) -> None:
 
 def _budget_repo(root: Path, ceiling: int) -> Path:
     config = make_config()
-    config["review_policy"] = {"budgets": {"max_diff_bytes_per_partition": ceiling}}
+    config["review_policy"] = {"budgets": {"max_diff_bytes": ceiling}}
     seed_repo(root, state=make_state(project="rv", phase="build"), plan=make_plan(), config=config)
     _git(root, "init", "-q", "-b", "main")
     _git(root, "add", "-A")
@@ -685,13 +684,13 @@ def test_the_coverage_manifest_measures_the_product_not_the_bookkeeping(review_r
     head = _git(review_repo, "rev-parse", "HEAD")
     product = _git(review_repo, "diff", f"{base}..{head}", "--", ".", ":(exclude).rein")
     # `_git` strips, and the diff the manifest measured did not; compare on the payload instead.
-    assert machine["coverage"][0]["analyzed_bytes"] == len((product + "\n").encode("utf-8"))
-    assert not [entry for entry in machine["coverage"][0].get("generated_files", []) if ".rein" in entry["path"]]
+    assert machine["coverage"]["analyzed_bytes"] == len((product + "\n").encode("utf-8"))
+    assert not [entry for entry in machine["coverage"].get("generated_files", []) if ".rein" in entry["path"]]
 
 
 @pytest.mark.integration
 def test_a_diff_over_the_budget_is_refused_before_a_model_is_launched(tmp_path: Path) -> None:
-    """`max_diff_bytes_per_partition` was reachable only after the pipeline it makes impossible.
+    """`max_diff_bytes` was reachable only after the pipeline it makes impossible.
 
     The budget is measured at the freeze, off the finished manifest. So a change too big for the
     reviewer stages to run against never reached the sentence that says what to do about it: three
@@ -711,7 +710,7 @@ def test_a_diff_over_the_budget_is_refused_before_a_model_is_launched(tmp_path: 
         review.generate(repo, _capturing_reviewer(seen), base=seed)
 
     assert seen == [], "a reviewer was launched for a review that could never be frozen"
-    assert "max_diff_bytes_per_partition" in str(excinfo.value)
+    assert "max_diff_bytes" in str(excinfo.value)
     assert "/revise" in str(excinfo.value) and "review_policy.budgets" in str(excinfo.value)
     events, defects = event_chain.scan(repo.events)
     assert not defects, defects

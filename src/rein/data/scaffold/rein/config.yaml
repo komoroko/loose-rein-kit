@@ -162,7 +162,7 @@ review_policy:
     max_critical_decisions: 5
     max_human_statements: 30
     max_unresolved_low_medium_unknowns: 5
-    max_diff_bytes_per_partition: 524288
+    max_diff_bytes: 524288
 
 guard:
   # true while this repo IS the Loose Rein template (its scaffold originals share paths with

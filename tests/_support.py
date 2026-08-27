@@ -196,24 +196,21 @@ def make_review(
             "plan_digest": _digest("plan"),
             "environment_digest": _digest("toolchain"),
         },
-        "coverage": [
-            {
-                "diff_digest": _digest("diff"),
-                "analyzed_files": 3,
-                # Required by the schema, so always emitted — the point of requiring it is that an
-                # unmeasured partition cannot pass a byte budget it was never held to.
-                "analyzed_bytes": analyzed_bytes,
-                "truncated": False,
-                "coverage_status": coverage_status,
-            }
-        ],
+        "coverage": {
+            "diff_digest": _digest("diff"),
+            "analyzed_files": 3,
+            # Required by the schema, so always emitted — the point of requiring it is that an
+            # unmeasured manifest cannot pass a byte budget it was never held to.
+            "analyzed_bytes": analyzed_bytes,
+            "coverage_status": coverage_status,
+        },
         "actual_extraction": [],
         "claims": [],
         "extra_behaviors": extra_behaviors or [],
         "security": {"findings": security_findings or []},
     }
     if unsupported_files:
-        machine["coverage"][0]["unsupported_files"] = unsupported_files
+        machine["coverage"]["unsupported_files"] = unsupported_files
     if review_budget:
         machine["review_budget"] = review_budget
     if base_sha:

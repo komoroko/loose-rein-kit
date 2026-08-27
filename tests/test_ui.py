@@ -771,15 +771,12 @@ def _generated_review_with_card() -> dict[str, object]:
                 "plan_digest": "sha256:" + "b" * 64,
                 "environment_digest": "sha256:" + "c" * 64,
             },
-            "coverage": [
-                {
-                    "diff_digest": "sha256:" + "d" * 64,
-                    "analyzed_files": 1,
-                    "analyzed_bytes": 1024,
-                    "truncated": False,
-                    "coverage_status": "sufficient",
-                }
-            ],
+            "coverage": {
+                "diff_digest": "sha256:" + "d" * 64,
+                "analyzed_files": 1,
+                "analyzed_bytes": 1024,
+                "coverage_status": "sufficient",
+            },
             "actual_extraction": [],
             "claims": [],
             "brief": {

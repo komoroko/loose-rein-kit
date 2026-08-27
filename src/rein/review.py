@@ -306,8 +306,8 @@ def _reviewable(
 ) -> Reviewable:
     """The widest context that fits `ceiling`, falling back to the plain diff already in hand.
 
-    The ceiling is `max_diff_bytes_per_partition` — not a second limit invented here, but the one
-    byte budget a human already approves the review against (`_refuse_over_budget`). That is the
+    The ceiling is `max_diff_bytes` — not a second limit invented here, but the one byte budget a
+    human already approves the review against (`_refuse_over_budget`). That is the
     property worth having: **what a reviewer is sent cannot exceed what was approved**, where
     before it was the approved diff *plus* an unbounded-by-anyone 240 KB of file bodies.
 
@@ -383,7 +383,7 @@ def assemble(
         "status": "generated",
         "binding": dict(binding),
         "summary": summary,
-        "coverage": [dict(coverage)],
+        "coverage": dict(coverage),
         "actual_extraction": [dict(a) for a in actual_statements],
         "claims": [dict(c) for c in claims],
         "security": dict(security) if security is not None else {"findings": []},
@@ -420,6 +420,7 @@ def assemble(
     if budget_limits:
         machine["review_budget"] = decision_cards.derive_review_budget(
             limits=budget_limits,
+            diff_bytes=int(coverage["analyzed_bytes"]),
             decision_cards=cards,
             statements=statements,
             gaps=gaps,
@@ -433,8 +434,8 @@ def assemble(
 def _refuse_over_budget(diff_bytes: int, limits: Mapping[str, int]) -> None:
     """Refuse a review whose diff is already past the one byte-denominated budget.
 
-    `max_diff_bytes_per_partition` was measurable only *after* the pipeline ran: `human_review`
-    reads it off the finished coverage manifest, at the freeze. So a change big enough that the
+    `max_diff_bytes` was measurable only *after* the pipeline ran: `human_review` reads it off the
+    finished coverage manifest, at the freeze. So a change big enough that the
     three reviewer stages cannot be run against it at all never reached the budget's own
     instruction — the operator paid three model launches to be told "the adapter exited 1", and
     the sentence that would have said what to do about it lived behind the failure.
@@ -442,15 +443,15 @@ def _refuse_over_budget(diff_bytes: int, limits: Mapping[str, int]) -> None:
     It is the same wall either way. A diff over this limit cannot be frozen once generated, so
     nothing is refused here that would have been allowed later; what changes is that it is refused
     before the launches rather than after them, and with the budget's own name on it. Measured
-    over the whole diff, exactly as `_largest_partition_bytes` measures it, so passing here and
+    over the whole diff, exactly as `human_review.budget_actuals` measures it, so passing here and
     blowing it at the freeze is not a thing that can happen.
     """
-    ceiling = limits["max_diff_bytes_per_partition"]
+    ceiling = limits["max_diff_bytes"]
     if diff_bytes <= ceiling:
         return
     raise ReviewError(
         "review budget exceeded before the pipeline ran — split the scope, do not grow the "
-        f"screen: max_diff_bytes_per_partition is {ceiling} and this change's diff is "
+        f"screen: max_diff_bytes is {ceiling} and this change's diff is "
         f"{diff_bytes} bytes. Reduce what this cycle claims through `/revise` and review the "
         "remainder in its own gate ④ round, or raise the limit in `review_policy.budgets` as a "
         "deliberate, recorded decision about how much one person can hold at once."
@@ -571,7 +572,7 @@ def generate(
             head,
             facts.files,
             plain=diff_text,
-            ceiling=limits["max_diff_bytes_per_partition"],
+            ceiling=limits["max_diff_bytes"],
         )
 
         # What a reviewer needs to anchor a statement, since it is launched with nothing to read

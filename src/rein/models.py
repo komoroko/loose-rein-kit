@@ -168,7 +168,7 @@ AGENT_ROLE_VALUES = frozenset({"implementer", "code_reviewer", "actual_extractor
 # There is no single `verified`. Three axes are reported separately because they answer three
 # different questions, and one of them (`semantic_support`) is an opinion.
 
-#: Did the Coverage Manifest manage to analyse this partition of the diff?
+#: Did the Coverage Manifest manage to analyse the whole diff?
 COVERAGE_STATUS_VALUES = frozenset({"sufficient", "insufficient"})
 INTEGRITY_STATUS_VALUES = frozenset({"verified", "failed", "unavailable"})
 SEMANTIC_SUPPORT_VALUES = frozenset({"supported", "contradicted", "conflicted", "unknown"})
@@ -326,7 +326,7 @@ BUDGET_NAMES: tuple[str, ...] = (
     "max_critical_decisions",
     "max_human_statements",
     "max_unresolved_low_medium_unknowns",
-    "max_diff_bytes_per_partition",
+    "max_diff_bytes",
 )
 BUDGET_NAME_VALUES = frozenset(BUDGET_NAMES)
 
@@ -988,19 +988,26 @@ class Review:
         return tuple(f for f in self.security_findings if f.get("blocking") is True)
 
     @property
-    def coverage(self) -> tuple[Mapping[str, Any], ...]:
-        return _maps(self.machine, "coverage")
+    def coverage(self) -> Mapping[str, Any]:
+        """The one Coverage Manifest for this review's diff, or empty when there is none.
+
+        One, because the detector reads the whole diff or says which parts of it it could not.
+        This used to be a list, for a partitioning nothing ever performed: a change too large to
+        read in one sitting is refused by `review._refuse_over_budget` before a model is launched.
+        """
+        manifest = self.machine.get("coverage")
+        return manifest if isinstance(manifest, Mapping) else {}
 
     @property
     def coverage_sufficient(self) -> bool:
-        """True only when every coverage entry says so.
+        """True only when the coverage manifest says so.
 
         An absent coverage manifest is *not* sufficient, and neither is an ungenerated review:
         "we did not measure" and "we measured nothing missing" must never render the same
         (plan §2.4).
         """
-        entries = self.coverage
-        return self.is_generated and bool(entries) and all(_str(c, "coverage_status") == "sufficient" for c in entries)
+        manifest = self.coverage
+        return self.is_generated and bool(manifest) and _str(manifest, "coverage_status") == "sufficient"
 
 
 @dataclass(frozen=True)
