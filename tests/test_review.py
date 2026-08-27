@@ -28,6 +28,7 @@ from rein import (
     event_chain,
     models,
     review,
+    review_cache,
     review_policy,
     security_review,
 )
@@ -1020,8 +1021,31 @@ def test_regenerating_an_unmoved_subject_keeps_the_human_answers(review_repo: Pa
     assert after is not None and after.human_status == "in_progress"
 
 
-def test_force_re_reads_and_resets_the_human_half(review_repo: Path) -> None:
+def test_force_ignores_the_stored_answers_and_launches_every_stage(review_repo: Path) -> None:
     """The escape hatch says "read it again anyway", and pays the full price of saying so."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting, force=True)
+    assert len(calls) == 3, "every stage is re-read, not just the ones whose inputs moved"
+
+
+def test_a_re_reading_that_says_something_else_resets_the_human_half(review_repo: Path) -> None:
+    """The reset follows the *document*, not the command.
+
+    A regeneration whose reading changed is a different review and no prior answer speaks for it
+    (plan §6.6). One whose reading came out identical is the same review, and resetting over it
+    would discard answers about a document that still stands, which is what running the pipeline
+    on every invocation used to do fifteen times in one cycle.
+    """
+    import json
+
     repo = repo_mod.Repo(review_repo)
     review.generate(repo, _fake_reviewer)
     store = store_mod.Store(repo)
@@ -1031,17 +1055,41 @@ def test_force_re_reads_and_resets_the_human_half(review_repo: Path) -> None:
         tx.write("review", {**existing.raw, "human": {"status": "in_progress"}})
         tx.append("decision_recorded", cycle_id="demo-cycle")
 
-    review.generate(repo, _fake_reviewer, force=True)
+    def a_finding(request: Mapping[str, Any]) -> str:
+        facts = request.get("deterministic_facts", {})
+        if isinstance(facts, dict) and "signals" in facts:
+            return json.dumps(
+                {
+                    "findings": [
+                        {
+                            "id": "SEC-001",
+                            "severity": "high",
+                            "category": "credential_exposure",
+                            "attack_scenario": "the reviewer container could reach a host credential",
+                            "blocking": True,
+                        }
+                    ]
+                }
+            )
+        return _fake_reviewer(request)
+
+    review.generate(repo, a_finding, force=True)
     after = store.read_review()
     assert after is not None and after.human_status == "not_started"
     assert [e.event for e in store.read_events()].count("review_generated") == 2
 
 
-def test_a_task_promoted_after_the_review_is_re_read(review_repo: Path) -> None:
-    """`change_digest` covers the committed tree minus `.rein/`, so a task moving from
-    `awaiting-evidence` to `done` — after a human recorded what they saw — moves none of the code
-    digests. The orientation brief is derived from exactly that, and reusing across it served a
-    document the repository had since contradicted, at the gate whose whole point is that it has not."""
+def test_a_task_promoted_after_the_review_re_derives_the_brief_without_a_reviewer(review_repo: Path) -> None:
+    """A task moving to `done` moves no reviewer's input, and must move no reviewer.
+
+    `change_digest` covers the committed tree minus `.rein/`, so a task promoted from
+    `awaiting-evidence` after a human recorded what they saw moves none of the code digests. The
+    orientation brief is derived from exactly that, and reusing across it served a document the
+    repository had since contradicted. The repair was to add `tasks_digest` to a *pipeline-wide*
+    reuse key, which fixed the brief by paying for three model launches to re-read code nobody had
+    touched. The brief is now re-derived on every generation, and no stage's key mentions
+    `state.yaml` at all.
+    """
     import yaml
 
     repo = repo_mod.Repo(review_repo)
@@ -1053,10 +1101,110 @@ def test_a_task_promoted_after_the_review_is_re_read(review_repo: Path) -> None:
     document["tasks"] = {"T-001": {"status": "done", "evidence": {"steps": [{"name": "test"}]}}}
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
-    review.generate(repo, _fake_reviewer)
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
     after = store_mod.Store(repo).read_review()
     assert after is not None
     assert [row["task_id"] for row in after.machine["brief"]["delivered"]] == ["T-001"]
+    assert calls == [], "the brief is derived in code; re-deriving it must launch nothing"
+
+
+def test_editing_the_plan_re_runs_only_the_comparator(review_repo: Path) -> None:
+    """The extractor has never seen a plan, and the security reviewer never will.
+
+    One `subject` digest used to decide whether all three stages ran, so a one-word edit to a
+    claim re-read the whole change twice over for an answer that could not depend on it.
+    """
+    import yaml
+
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+
+    path = review_repo / ".rein" / "plan.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["claims"][0]["statement"] = document["claims"][0]["statement"] + " (reworded)"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
+    assert len(calls) == 1 and "expected_model" in calls[0]
+    events = [e.event for e in store_mod.Store(repo).read_events()]
+    assert events.count("comparison_generated") == 2
+    assert events.count("actual_extraction_generated") == 1
+    assert events.count("security_review_generated") == 1
+
+
+def test_a_stage_that_succeeded_before_a_failure_is_not_paid_for_twice(review_repo: Path) -> None:
+    """The pipeline writes nothing when a later stage fails, so an extraction measured at over six
+    minutes was thrown away because the comparator came back malformed."""
+    repo = repo_mod.Repo(review_repo)
+
+    def broken_comparator(request: Mapping[str, Any]) -> str:
+        if "expected_model" in request:
+            return "not json at all"
+        return _fake_reviewer(request)
+
+    with pytest.raises(review_policy.ReviewPolicyError):
+        review.generate(repo, broken_comparator)
+
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
+    assert len(calls) == 1 and "expected_model" in calls[0], "only the stage that failed is re-run"
+
+
+def test_a_completed_generation_keeps_only_the_answers_it_used(review_repo: Path) -> None:
+    """No expiry and no knob: what a finished run did not use, it deletes."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    cache = review_repo / review_cache.CACHE_DIR
+    assert len(list(cache.glob("*.json"))) == 3
+    first_extraction = next(cache.glob("actual_extraction-*.json"))
+
+    later = review_repo / "src" / "later.py"
+    later.parent.mkdir(parents=True, exist_ok=True)
+    later.write_text("VALUE = 2\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "another change")
+
+    review.generate(repo, _fake_reviewer)
+    assert not first_extraction.exists(), "the previous change's reading is gone, not accumulating"
+    assert len(list(cache.glob("*.json"))) == 3
+
+
+def test_a_stored_answer_that_no_longer_validates_is_dropped_and_re_read(review_repo: Path) -> None:
+    """A release that tightens a validator must not wedge every open review behind bytes that can
+    never pass again — and the re-read must be a real launch, not a silent pass."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    cache = review_repo / review_cache.CACHE_DIR
+    poisoned = next(cache.glob("actual_extraction-*.json"))
+    poisoned.write_text(json.dumps({"stage": "actual_extraction", "answer": "{}"}), encoding="utf-8")
+
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
+    assert any("expected_model" not in c and "signals" not in c.get("deterministic_facts", {}) for c in calls)
+    stored = json.loads(next(cache.glob("actual_extraction-*.json")).read_text(encoding="utf-8"))
+    assert stored["answer"] != "{}", "the entry that could not be believed was replaced, not kept"
 
 
 def test_a_moved_head_is_re_read(review_repo: Path) -> None:

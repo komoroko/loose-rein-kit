@@ -32,7 +32,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from rein import (
     actual_extraction,
@@ -46,6 +46,7 @@ from rein import (
     faults,
     human_review,
     models,
+    review_cache,
     review_policy,
     security_review,
 )
@@ -53,6 +54,9 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
+
+#: One stage's validated result — whatever `_cached_stage` was handed a runner for.
+T = TypeVar("T")
 
 #: The SSOT artefacts are bound by their own digests, so the change under review is the tree with
 #: them excluded — otherwise a review that writes review.yaml would invalidate itself (plan §17.3).
@@ -462,24 +466,27 @@ def generate(
     repo: repo_mod.Repo,
     reviewer: review_policy.Reviewer,
     *,
-    executor: Any = None,
     base: str | None = None,
     actor: str = "",
     force: bool = False,
 ) -> dict[str, Any]:
     """Run the whole pipeline and write `review.yaml`'s machine half; return the assembled machine.
 
-    The deterministic piece (the coverage manifest) runs unconditionally; the reviewer stages are called and
-    their *validated* outputs merged. The human half is reset to `not_started` — a fresh machine
-    review is a fresh review, and no prior human answer speaks for it (plan §6.6).
+    The deterministic pieces (the coverage manifest, the assembly, the orientation brief) run
+    unconditionally; the three reviewer stages are reused from `review_cache` when their own
+    inputs have not moved, and their *validated* outputs merged.
 
-    **A subject that has not moved is not re-read.** Everything the pipeline is a function of is a
-    digest computed before a model is called: the committed tree, the frozen plan, the config the
-    approval covers, the sandbox, the coverage manifest. When all of them match the review already
-    on disk, three reviewer stages would be paid for to produce a reading of the same bytes — and,
-    worse, the human half would be reset, discarding answers about a change nothing had touched.
-    A field run recorded `review_generated` fifteen times in one cycle for exactly this. `force`
-    is the way to say "read it again anyway", which is a deliberate act with a visible cost.
+    **Each stage is reused on its own inputs, not on the pipeline's.** One `subject` digest used to
+    decide whether all three ran, which meant editing `plan.yaml` re-read the code with an
+    extractor that has never seen a plan, and promoting a task to `done` re-ran every stage to
+    refresh an orientation brief no model produces. `_stage_keys` names what each stage is actually
+    a function of; `force` ignores the cache, which is a deliberate act with a visible cost.
+
+    **The human half is reset only when the machine half moves.** A fresh reading is a fresh
+    review and no prior human answer speaks for it (plan §6.6) — but an assembly that comes out
+    byte-identical is not a fresh reading, and resetting over it discards answers about a change
+    nothing touched. A field run recorded `review_generated` fifteen times in one cycle for
+    exactly that. Nothing is written and no event is appended when the machine half is unchanged.
 
     **A failure records itself.** Every `raise` below used to leave the audit chain with nothing in
     it: `events.ATTENTION_EVENTS` listed `review_failed` and `actual_extraction_failed` as things
@@ -550,13 +557,6 @@ def generate(
             "trusted_base_sha": trusted_base,
             "subject_head_sha": head,
         }
-        if not force and _same_subject(existing, subject):
-            assert existing is not None  # _same_subject is False for None
-            print(
-                "review: the subject has not moved since the last generation — reusing it "
-                "(nothing was re-read; `rein review generate --force` to run the pipeline anyway)"
-            )
-            return dict(existing.machine)
 
         # A config may set only the budgets it wants to move, so the effective ceilings are the
         # defaults with the repository's overrides on top — the same merge `human_review` does at
@@ -615,16 +615,35 @@ def generate(
         # the wait moves from here to interpreter exit and the process returns no sooner. The only
         # thing that ends a launch early is killing the process it started.
         cancel = common.Cancellation()
+        cache = review_cache.StageCache(repo.root, enabled=not force)
+        keys = _stage_keys(
+            config=config,
+            change=change,
+            coverage_digest=subject["coverage_digest"],
+            trusted_base=trusted_base,
+            head=head,
+            ceiling=limits["max_diff_bytes"],
+            risk_floor=risk_floor,
+            prior_blocking=prior_blocking,
+        )
+        ran: set[str] = set()
 
         def run_security() -> security_review.SecurityResult:
             # Bound on this thread — the worker's — because the transport is reached through the
             # injected reviewer, whose signature is not ours to change.
             with common.cancelling(cancel):
-                return security_review.run_security_review(
-                    security_request,
+                return _cached_stage(
+                    cache,
+                    "security_review",
+                    keys["security_review"],
+                    ran,
+                    lambda ask: security_review.run_security_review(
+                        security_request,
+                        ask,
+                        repo=repo,
+                        commit=head,
+                    ),
                     reviewer,
-                    repo=repo,
-                    commit=head,
                 )
 
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -643,6 +662,9 @@ def generate(
                     risk_floor=risk_floor,
                     effective=effective,
                     on_stage=entered,
+                    cache=cache,
+                    keys=keys,
+                    ran=ran,
                 )
             except BaseException:
                 # The security stage's own failure is not the one to report: this one came first in
@@ -684,14 +706,26 @@ def generate(
         )
 
         entered("write")
+        if _same_machine(existing, machine):
+            assert existing is not None  # _same_machine is False for None
+            print(
+                "review: nothing this review is made of has moved — the machine half stands and "
+                f"the human answers with it ({len(ran)} stage(s) re-read)"
+            )
+            cache.prune()
+            return dict(existing.machine)
+
         document = {"machine": machine, "human": {"status": "not_started"}}
         with store.transaction() as tx:
             tx.write("review", document, expect_digest=seen_review)
             tx.append("coverage_generated", cycle_id=cycle, actor=actor)
-            tx.append("actual_extraction_generated", cycle_id=cycle, actor=actor)
-            tx.append("comparison_generated", cycle_id=cycle, actor=actor)
-            tx.append("security_review_generated", cycle_id=cycle, actor=actor)
+            # Only the stages that actually ran. A log recording commands issued rather than
+            # changes made is a log nobody can aggregate, and a reused answer is not a new reading.
+            for stage_name in _STAGE_ORDER:
+                if stage_name in ran:
+                    tx.append(_STAGE_RAN_EVENT[stage_name], cycle_id=cycle, actor=actor)
             tx.append("review_generated", cycle_id=cycle, actor=actor, detail={"change_digest": change})
+        cache.prune()
     except Exception as exc:
         # `Exception`, not `BaseException`: a Ctrl-C is a human deciding to stop, and filing that
         # as a review failure would put a decision in the log as a defect. Same line the signal
@@ -705,6 +739,136 @@ def generate(
 #: an event of its own: it is the stage that reads the code without the plan, so its failure means
 #: there is no Actual at all — a different fact from a comparison that had one and could not use it.
 _STAGE_EVENT: Mapping[str, str] = {"actual_extraction": "actual_extraction_failed"}
+
+#: The reviewer stages in the order their events are appended, so a log reads the same whichever
+#: order two threads happened to finish in.
+_STAGE_ORDER: tuple[str, ...] = ("actual_extraction", "comparison", "security_review")
+
+#: What a stage that really ran records. A stage reused from the cache records nothing: it produced
+#: no new reading, and an event for it would be a command issued rather than a change made.
+_STAGE_RAN_EVENT: Mapping[str, str] = {
+    "actual_extraction": "actual_extraction_generated",
+    "comparison": "comparison_generated",
+    "security_review": "security_review_generated",
+}
+
+
+def _reviewer_identity(config: models.Config | None, role: str) -> dict[str, str]:
+    """Which model answers for `role`. Part of a stage key: a different model is a different answer."""
+    if config is None:
+        return {"adapter": "", "independence_group": ""}
+    return {"adapter": config.adapter(role), "independence_group": config.independence_group(role)}
+
+
+def _stage_keys(
+    *,
+    config: models.Config | None,
+    change: str,
+    coverage_digest: str,
+    trusted_base: str,
+    head: str,
+    ceiling: int,
+    risk_floor: str,
+    prior_blocking: Sequence[str],
+) -> dict[str, str]:
+    """What each reviewer stage is a function of, one key per stage (`review_cache`).
+
+    Written out rather than folded into one `subject` digest, because that is the whole repair:
+    the extractor and the security reviewer are not functions of `plan.yaml`, and none of the three
+    is a function of `state.yaml`'s task statuses — the orientation brief is, and no model produces
+    it. `comparison` is missing from here because it takes the Actual as an input and the Actual
+    does not exist yet; `_comparison_key` mints it once the extractor has answered.
+
+    Two digests that *are* in the binding are deliberately not in any key. `config_digest` covers
+    the whole frozen config — the quality gate, the guard paths, limits no reviewer reads — so
+    keying on it would re-run three models over a changed test command; the parts a stage really
+    depends on (its adapter, its group, the byte ceiling that decides how wide a diff it is sent)
+    are named instead. `environment_digest` describes the OCI sandbox, and a reviewer stage does
+    not run in one: `_adapter_reviewer` launches the CLI on the host, in an empty directory.
+    """
+    diff_inputs = {
+        "trusted_base_sha": trusted_base,
+        "subject_head_sha": head,
+        "change_digest": change,
+        # The ceiling picks the rung of the context ladder, so it decides the exact bytes sent.
+        "max_diff_bytes": ceiling,
+    }
+    return {
+        "actual_extraction": review_cache.stage_key(
+            "actual_extraction",
+            {
+                **diff_inputs,
+                **_reviewer_identity(config, "actual_extractor"),
+                "coverage_digest": coverage_digest,
+                "risk_floor": risk_floor,
+            },
+        ),
+        "security_review": review_cache.stage_key(
+            "security_review",
+            {
+                **diff_inputs,
+                **_reviewer_identity(config, "security_reviewer"),
+                # A finding the previous review left blocking is in the request, and the validator
+                # refuses an answer that drops one — so it changes what a valid answer is.
+                "prior_blocking_ids": sorted(prior_blocking),
+            },
+        ),
+    }
+
+
+def _comparison_key(
+    *,
+    config: models.Config | None,
+    plan_digest: str,
+    actual_digest: str,
+    effective: str,
+    independence: Mapping[str, Any],
+) -> str:
+    """The comparator's key. It reads the Expected and the Actual, and nothing else."""
+    return review_cache.stage_key(
+        "comparison",
+        {
+            **_reviewer_identity(config, "comparator"),
+            "plan_digest": plan_digest,
+            "actual_digest": actual_digest,
+            "effective_risk": effective,
+            "independence": independence,
+        },
+    )
+
+
+def _cached_stage(
+    cache: review_cache.StageCache,
+    stage: str,
+    key: str,
+    ran: set[str],
+    run: Callable[[review_policy.Reviewer], T],
+    reviewer: review_policy.Reviewer,
+) -> T:
+    """`run` the stage, reusing the stored answer to this exact question when there is one.
+
+    A hit is put back through `run`, so it is validated exactly as a fresh answer would be —
+    anchors re-checked against the commit, never-lists applied. A miss records the raw answer, but
+    only after `run` returned, so a malformed answer is never stored.
+
+    A stored answer that no longer validates is dropped and the stage runs for real. That is
+    recovery with a stated scope: the only way it happens is a rein release tightening a validator
+    under an entry taken before it, and leaving the entry in place would wedge the review behind
+    bytes that can never pass again. The re-run's own failure, if there is one, is what raises.
+    """
+    stored = cache.read(stage, key)
+    if stored is not None:
+        try:
+            return run(review_cache.replay(stored))
+        except Exception as exc:
+            logger.warning(f"the stored {stage} answer no longer validates ({exc}) — re-reading")
+            cache.drop(stage, key)
+    recorder = review_cache.Recorder(reviewer)
+    result = run(recorder)
+    ran.add(stage)
+    if recorder.answer is not None:
+        cache.write(stage, key, recorder.answer)
+    return result
 
 
 def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: str, reason: str) -> None:
@@ -749,6 +913,9 @@ def _extract_and_compare(
     risk_floor: str,
     effective: str,
     on_stage: Callable[[str], None] = lambda _name: None,
+    cache: review_cache.StageCache,
+    keys: Mapping[str, str],
+    ran: set[str],
 ) -> tuple[actual_extraction.ExtractionResult, conformance.ComparatorResult]:
     """The one genuinely sequential pair: the comparator reads what the extractor produced.
 
@@ -760,6 +927,11 @@ def _extract_and_compare(
     way to tell "the extractor failed" from "the comparator failed", and those are different
     facts: one means nothing was read out of the code, the other means the reading exists and
     could not be compared against the plan.
+
+    Each half is reused on its own key, which is why the comparator's is minted here rather than
+    passed in: it takes the Actual as an input, and the Actual is what the line above produces.
+    Reusing the extraction therefore reuses the comparison too, since an identical Actual keys the
+    same question — and moving `plan.yaml` alone re-runs only this second half.
     """
     # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
     on_stage("actual_extraction")
@@ -774,8 +946,15 @@ def _extract_and_compare(
             "files": [dict(entry) for entry in anchorable],
         },
     )
-    extraction = actual_extraction.run_extractor(
-        extract_request, reviewer, repo=repo, commit=head, risk_floor=risk_floor
+    extraction = _cached_stage(
+        cache,
+        "actual_extraction",
+        keys["actual_extraction"],
+        ran,
+        lambda ask: actual_extraction.run_extractor(
+            extract_request, ask, repo=repo, commit=head, risk_floor=risk_floor
+        ),
+        reviewer,
     )
 
     # Expected vs Actual — the Actual arrives read-only and digest-bound (§12.3).
@@ -786,15 +965,29 @@ def _extract_and_compare(
         actual_digest=extraction.actual_digest,
     )
     known_ids = _known_ids(plan, extraction.actual_statements)
-    comparison = conformance.run_comparator(
-        compare_request,
+    independence = _independence(config)
+    comparison = _cached_stage(
+        cache,
+        "comparison",
+        _comparison_key(
+            config=config,
+            plan_digest=plan.digest() if plan is not None else digests.of({}),
+            actual_digest=extraction.actual_digest,
+            effective=effective,
+            independence=independence,
+        ),
+        ran,
+        lambda ask: conformance.run_comparator(
+            compare_request,
+            ask,
+            repo=repo,
+            commit=head,
+            actual_statement_ids=[str(a.get("id")) for a in extraction.actual_statements],
+            known_ids=known_ids,
+            effective_risk=effective,
+            independence=independence,
+        ),
         reviewer,
-        repo=repo,
-        commit=head,
-        actual_statement_ids=[str(a.get("id")) for a in extraction.actual_statements],
-        known_ids=known_ids,
-        effective_risk=effective,
-        independence=_independence(config),
     )
 
     return extraction, comparison
@@ -875,29 +1068,30 @@ def _tasks_digest(state: models.State | None) -> str:
     return digests.of(tasks if isinstance(tasks, dict) else {}, drop=digests.VOLATILE_TIMESTAMP_KEYS)
 
 
-def _same_subject(existing: models.Review | None, subject: Mapping[str, str]) -> bool:
-    """Would regenerating produce a review of exactly what the one on disk already reviewed?
+def _same_machine(existing: models.Review | None, machine: Mapping[str, Any]) -> bool:
+    """Is the assembled machine half the one already on disk, word for word?
 
-    Every key compared is deterministic and computed before any model runs, so this is an identity
-    check rather than a guess: the committed tree under review, the Expected Model, the config the
-    approval covers, the sandbox, and the manifest of what could be read.
+    This is what decides whether the human answers survive, and it asks about the *product* rather
+    than about the inputs. The old check compared a `subject` digest of the inputs, which is a
+    weaker question in both directions: two runs of the same inputs can differ (a model is not a
+    function), and — the case that cost real work — a run whose inputs moved for reasons that
+    change nothing in the document still reset every answer a reviewer had recorded.
 
-    **One input is deliberately left out: the stage contracts.** They are part of the request now
-    (`<stage>.contract`), so a reviewer stage really is a function of them, and an installed rein
-    that reworded one would read the same code differently. Putting them in this key anyway would
-    mean an upgrade regenerates every open review — and regenerating resets the human half, so a
-    `rein upgrade` part-way through gate ④ would silently discard a reviewer's answers about code
-    nobody had touched. That is the exact failure this check exists to prevent, and it is a worse
-    one than reusing a reading taken under last release's wording. `--force` is how to re-read
-    after an upgrade, deliberately, at a visible cost.
+    `binding.generated_at` is excluded because it is the one field that moves on every run by
+    construction. Nothing else here is a timestamp, so nothing else needs excluding, and leaving it
+    in would make this check answer "no" always.
 
-    A malformed or ungenerated review is not reusable, and neither is one whose binding is missing
-    any of these — "it did not say" must never read as "it agreed".
+    A malformed or ungenerated review is not reusable — "it did not say" must never read as
+    "it agreed".
     """
     if existing is None or not existing.is_generated:
         return False
-    binding = existing.binding
-    return all(binding.get(key) == value for key, value in subject.items())
+    return digests.of(_without_generated_at(existing.machine)) == digests.of(_without_generated_at(machine))
+
+
+def _without_generated_at(machine: Mapping[str, Any]) -> dict[str, Any]:
+    binding = {key: value for key, value in dict(machine.get("binding", {}) or {}).items() if key != "generated_at"}
+    return {**dict(machine), "binding": binding}
 
 
 def _environment_digest(config: models.Config | None) -> str:
@@ -1145,6 +1339,9 @@ def _generate_cli(
     retried. Everything else — a reviewer whose output could not be parsed, a budget refusal, an
     unreadable SSOT — is a real answer, and sleeping on it would turn a verdict into a loop.
 
+    A retry costs only the stages that have not answered yet: `review_cache` keeps each stage's
+    answer as it validates, so waiting out a capacity stop no longer re-reads the whole change.
+
     A fresh reviewer per attempt, so a retry re-reads the config rather than holding whatever was
     true when the first one was built.
     """
@@ -1172,7 +1369,10 @@ def main(argv: list[str] | None = None) -> int:
     gen.add_argument(
         "--force",
         action="store_true",
-        help="re-run the pipeline even when the subject has not moved (discards the human answers)",
+        help=(
+            "ignore the stored stage answers and read the change again (a re-reading that says "
+            "the same thing leaves the human answers standing)"
+        ),
     )
     gen.add_argument(
         "--supervise",

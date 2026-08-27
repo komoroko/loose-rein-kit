@@ -62,6 +62,30 @@ to re-invent `SEC-001` by coincidence to get past a check whose own instruction 
 finding and re-run". They are in the request now, and the validator reads them from there — one
 source, rather than an enforcement and a disclosure that nothing made agree.
 
+**The reuse unit is now one stage's answer, not one run of the pipeline.** `rein review generate`
+kept a single `subject` digest — the tree, the plan, the config, the sandbox, the coverage
+manifest and the task facts, in one key — and re-ran *all three* reviewer stages unless every one
+of them matched. Each stage is a function of a different subset. Editing one word of a claim in
+`plan.yaml` therefore re-read the whole change with the blind extractor, which has never seen a
+plan, and re-ran the security review, which never will: **three launches for an answer only one of
+them could depend on.** Promoting a task to `done` after a human recorded evidence re-ran all
+three as well, to refresh an orientation brief that no model produces — a repair that had fixed a
+stale brief by adding `state.yaml` to a pipeline-wide key.
+
+Each stage now carries its own key, written out field by field, and `.rein/work/review-cache/`
+holds the answer to each question. Two things follow. **A stage that already answered is not paid
+for twice**: an extraction measured at over six minutes used to be discarded because the
+comparator came back malformed, and a `--supervise` retry re-read everything; entries are written
+the moment their own stage validates, so a re-run resumes. And **the human half is reset only when
+the machine half actually moves** — a re-reading that comes out identical is the same review, and
+the answers recorded against it stand. `--force` now means "read it again anyway"; whether that
+discards the human answers follows from whether the reading changed.
+
+A cache hit is put back through the stage's own validator, so anchors are re-checked against the
+commit and the never-lists still apply — nothing enters a review because it was on disk. A stored
+answer that stops validating (a release tightening a validator) is dropped and re-read rather than
+wedging the review. A completed generation deletes every entry it did not use: no expiry, no knob.
+
 **rein could write an SSOT document it could not read back.** `strict_yaml` refuses YAML anchors
 and aliases on load, deliberately — an alias is an ambiguity and an expansion surface — and
 `yaml.safe_dump` emits one for any object reachable from two places in the same document. The

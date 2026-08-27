@@ -63,9 +63,14 @@ class Reviewer(Protocol):
     """A reviewer: given a JSON-serializable request, it returns raw output text.
 
     The output is *untrusted* — it is parsed strictly and validated by this module before any
-    of it is believed. The real implementation runs an agent adapter in an OCI sandbox with a
-    strict JSON stdin/stdout contract, a timeout, and process cleanup; a fake stands in for it
-    in tests. Either way, nothing here trusts the text it returns.
+    of it is believed. The real implementation (`review._adapter_reviewer`) launches an agent CLI
+    on the host, in an empty directory, with a strict JSON stdin/stdout contract and process
+    cleanup; a fake stands in for it in tests, and `review_cache.replay` stands in for it when the
+    same question was already answered. Either way, nothing here trusts the text it returns.
+
+    Not a sandbox, and this docstring used to say it was. The OCI rule is about running
+    *repository-derived* code (`executors`); a reviewer runs no repository code — it is handed the
+    diff, and the empty working directory is what keeps it from reading anything else.
     """
 
     def __call__(self, request: Mapping[str, Any]) -> str: ...
