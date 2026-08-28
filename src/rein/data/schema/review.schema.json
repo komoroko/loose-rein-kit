@@ -69,6 +69,10 @@
       "type": "string",
       "pattern": "^AST-[0-9]{3,}$"
     },
+    "securityFindingId": {
+      "type": "string",
+      "pattern": "^SEC-[0-9]{3,}$"
+    },
     "taskId": {
       "type": "string",
       "pattern": "^T-[0-9]{3,}$"
@@ -289,6 +293,12 @@
             "unknown": {
               "type": "integer",
               "minimum": 0
+            },
+            "unanswered": {
+              "description": "Expected claims the Comparator returned no result for. A model's answer is open-world: what came back is not evidence that nothing else exists, so the claim list is framed by the frozen plan and what is missing is filled deterministically as `unknown` rather than silently shortening the review (plan 2.4).",
+              "type": "array",
+              "maxItems": 512,
+              "items": { "$ref": "#/$defs/claimId" }
             }
           }
         },
@@ -790,8 +800,7 @@
                 ],
                 "properties": {
                   "id": {
-                    "type": "string",
-                    "pattern": "^SEC-[0-9]{3,}$"
+                    "$ref": "#/$defs/securityFindingId"
                   },
                   "severity": {
                     "$ref": "#/$defs/risk"
@@ -832,6 +841,24 @@
                     "additionalProperties": false,
                     "properties": {
                       "trusted_base_sha": { "$ref": "#/$defs/commit" },
+                      "subject_head_sha": { "$ref": "#/$defs/commit" }
+                    }
+                  },
+                  "status": {
+                    "description": "Where this finding is in its life. Absent means `open`. A finding used to have no state at all — it existed only as presence in the newest generated list — so \"the change fixed it\" and \"the reviewer forgot it\" were the same observation, and the policy refused both. `resolved` is not the reviewer's word: it is recorded only when every anchor the finding named no longer resolves in the committed tree, which is a fact about the code rather than an opinion about it.",
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "resolved_at": {
+                    "description": "The commit whose tree no longer carries the code this finding anchored to. Required with `status: resolved`, and it is what makes the resolution re-checkable later.",
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "subject_head_sha"
+                    ],
+                    "properties": {
                       "subject_head_sha": { "$ref": "#/$defs/commit" }
                     }
                   },

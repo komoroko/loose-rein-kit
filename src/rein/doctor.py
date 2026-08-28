@@ -31,7 +31,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import rein
-from rein import common, dag, dag_trace, digests, event_chain, executors, gate_guard, install, models, strict_yaml
+from rein import (
+    adapters,
+    agent_cli,
+    common,
+    dag,
+    dag_trace,
+    digests,
+    event_chain,
+    executors,
+    gate_guard,
+    install,
+    models,
+    strict_yaml,
+)
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -576,8 +589,6 @@ def check_independence(config: models.Config | None, plan: models.Plan | None = 
     """
     if config is None:
         return []
-    from rein import agent_cli
-
     # The level comes from the branch that produced the message, not from searching the message:
     # recovering it with `"share the independence group" in w` meant a reworded sentence in
     # agent_cli could downgrade a FAIL to a WARN with nothing going red.
@@ -632,11 +643,9 @@ def check_nested_sandbox(config: models.Config | None) -> list[Finding]:
     """
     if config is None or not running_containerized():
         return []
-    from rein import agent_cli, build_loop
-
     findings: list[Finding] = []
     for name in sorted({config.adapter(role) or "claude" for role in agent_cli.ROLES}):
-        adapter = build_loop.ADAPTER_TABLE.get(name)
+        adapter = adapters.ADAPTER_TABLE.get(name)
         if adapter is not None and adapter.own_sandbox:
             findings.append(
                 Finding(
@@ -661,10 +670,8 @@ def check_retry_continuity(config: models.Config | None) -> list[Finding]:
     """
     if config is None:
         return []
-    from rein import build_loop
-
     name = config.adapter("implementer") or "claude"
-    adapter = build_loop.ADAPTER_TABLE.get(name)
+    adapter = adapters.ADAPTER_TABLE.get(name)
     if adapter is None:
         return []
     if adapter.resumable:
@@ -689,8 +696,6 @@ def check_adapters(config: models.Config | None, state: models.State | None) -> 
     """
     if config is None:
         return []
-    from rein import agent_cli, build_loop
-
     findings: list[Finding] = []
     binaries: dict[str, list[str]] = {}
     for role in agent_cli.ROLES:
@@ -698,10 +703,10 @@ def check_adapters(config: models.Config | None, state: models.State | None) -> 
         # The same rule the launchers apply, read here so a config that cannot be launched is
         # named by `rein doctor` rather than by the first phase that tried — an unknown adapter,
         # and a `model:` this release cannot pass to the CLI beside it.
-        if refusal := build_loop.launch_refusal(config, role):
+        if refusal := adapters.launch_refusal(config, role):
             findings.append(Finding("FAIL", "agents", refusal))
         else:
-            binaries.setdefault(build_loop.ADAPTER_TABLE[adapter].argv[0], []).append(role)
+            binaries.setdefault(adapters.ADAPTER_TABLE[adapter].argv[0], []).append(role)
     # Before the build phase a missing CLI is normal: nothing has needed it yet.
     level = "FAIL" if state is not None and state.current_phase == "build" else "WARN"
     for binary, roles in sorted(binaries.items()):

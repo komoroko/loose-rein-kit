@@ -11,7 +11,17 @@ brief, which no model produces.
 The unit of reuse here is **one stage's answer**, keyed by **that stage's own inputs**, written
 out field by field so the key says what the stage is a function of.
 
-Two properties fall out of caching the adapter's *response* rather than a parsed result:
+An entry records **who answered as well as what they answered**. It used to hold the stage name
+and the bytes and nothing else, which conflated four different identities — the question (this
+stage's key), the answer, the launch that produced it, and the human judgement built on top. The
+cost of that conflation was not bookkeeping: `review._independence_record` reads the model id off
+the launch's own usage report, so a replayed stage contributed none, `binding.independence` lost
+its `model`, and `review_policy.independence_observed` — the gate-④ check that a provider did not
+silently serve one model to both halves of a critical review — went quiet. A cache that disables a
+safety check when it hits is not a cache, it is a hole. So the launch's `usage.Usage` travels with
+the answer and is replayed with it, into a ledger kept separate from what this run actually paid.
+
+Two more properties fall out of caching the adapter's *response* rather than a parsed result:
 
 - **A stage that succeeded is not paid for twice.** The pipeline writes nothing when a later
   stage fails, so an extraction measured at over six minutes was discarded because the comparator
@@ -32,13 +42,23 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from rein import digests, review_policy
+from rein import usage as usage_mod
 
 #: Where a stage answer is kept, relative to the repository root.
 CACHE_DIR = ".rein/work/review-cache"
+
+
+@dataclass(frozen=True)
+class Entry:
+    """One stored stage answer and the launch that produced it."""
+
+    answer: str
+    usage: usage_mod.Usage = field(default_factory=usage_mod.Usage)
 
 
 def stage_key(stage: str, inputs: Mapping[str, Any]) -> str:
@@ -85,8 +105,13 @@ class StageCache:
         """
         return self.enabled and self._path(stage, key).is_file()
 
-    def read(self, stage: str, key: str) -> str | None:
-        """The stored answer to this exact question, or None when there is not one."""
+    def read(self, stage: str, key: str) -> Entry | None:
+        """The stored answer to this exact question and what produced it, or None for a miss.
+
+        An entry written before executions were recorded has no `execution` and is treated as a
+        miss: replaying it would put back exactly the provenance hole this records, and there is
+        nothing to migrate — `.rein/work/` is gitignored and dies with its worktree.
+        """
         if not self.enabled:
             return None
         path = self._path(stage, key)
@@ -98,21 +123,22 @@ class StageCache:
             # An unreadable entry is a cache that cannot answer, which is what a miss is. The write
             # that follows replaces it, so nothing accumulates.
             return None
-        answer = entry.get("answer")
-        if not isinstance(answer, str):
+        answer, execution = entry.get("answer"), entry.get("execution")
+        if not isinstance(answer, str) or not isinstance(execution, dict):
             return None
         with self._lock:
             self._used.add(path)
-        return answer
+        return Entry(answer=answer, usage=usage_mod.Usage.from_detail(execution))
 
-    def write(self, stage: str, key: str, answer: str) -> None:
-        """Store one stage's answer. Called only once that stage has validated it."""
+    def write(self, stage: str, key: str, answer: str, spent: usage_mod.Usage) -> None:
+        """Store one stage's answer beside the launch that gave it. Called once the stage validates."""
         path = self._path(stage, key)
         with self._lock:
             self._used.add(path)
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps({"stage": stage, "answer": answer}), encoding="utf-8")
+            entry = {"stage": stage, "key": key, "answer": answer, "execution": spent.to_detail()}
+            path.write_text(json.dumps(entry), encoding="utf-8")
         except OSError:
             # A cache that cannot be written costs a re-run, and a re-run is the behaviour this
             # module improves on rather than one it depends on. A review must not fail over a
@@ -146,25 +172,26 @@ class StageCache:
 
 
 class Recorder:
-    """A reviewer that keeps the last answer it passed through, so the caller can store it.
+    """A reviewer that keeps the last `Answer` it passed through, so the caller can store it.
 
-    A stage takes a `Reviewer` and hands back a parsed, validated result; the raw answer is what
-    the cache holds, and it is not otherwise reachable from outside the call.
+    A stage takes a `Reviewer` and hands back a parsed, validated result; the raw answer — and the
+    launch that produced it — is what the cache holds, and neither is otherwise reachable from
+    outside the call.
     """
 
     def __init__(self, reviewer: review_policy.Reviewer) -> None:
         self._reviewer = reviewer
-        self.answer: str | None = None
+        self.reply: review_policy.Answer | None = None
 
-    def __call__(self, request: Mapping[str, Any]) -> str:
-        self.answer = self._reviewer(request)
-        return self.answer
+    def __call__(self, request: Mapping[str, Any]) -> review_policy.Answer:
+        self.reply = self._reviewer(request)
+        return self.reply
 
 
 def replay(answer: str) -> review_policy.Reviewer:
-    """A reviewer that returns `answer` without launching anything."""
+    """A reviewer that returns `answer` without launching anything, so it cost nothing."""
 
-    def call(request: Mapping[str, Any]) -> str:  # noqa: ARG001 — the answer is already in hand
-        return answer
+    def call(request: Mapping[str, Any]) -> review_policy.Answer:  # noqa: ARG001 — the answer is in hand
+        return review_policy.Answer(answer)
 
     return call

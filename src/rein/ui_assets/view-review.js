@@ -392,8 +392,14 @@ function securityStage(d) {
   if (!findings.length) return "";
   return '<div class="subhead" style="margin-top:.8rem">SECURITY REVIEW</div>' + findings.map(f =>
     '<div class="card"><div class="subhead">' + esc(f.id) + " " + esc(f.category || "") + " " +
-    riskBadge(f.severity) + (f.blocking === true ? ' <span class="conf low">blocking</span>' : "") + "</div>" +
+    riskBadge(f.severity) +
+    (f.status === "resolved" ? ' <span class="conf high">resolved</span>'
+      : f.blocking === true ? ' <span class="conf low">blocking</span>' : "") + "</div>" +
     "<p>" + esc(f.attack_scenario || "") + "</p>" +
+    (f.status === "resolved"
+      ? '<div class="empty">the code this finding anchored to is gone at ' +
+        esc((f.resolved_at && f.resolved_at.subject_head_sha || "").slice(0, 12)) + "</div>"
+      : "") +
     (f.recommended_fix ? '<div class="empty">suggested fix: ' + esc(f.recommended_fix) + "</div>" : "") +
     "</div>").join("");
 }

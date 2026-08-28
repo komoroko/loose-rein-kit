@@ -11,11 +11,11 @@ verbs the human loop needs: ``complete`` (freeze the human review once every blo
 
 Two boundaries are load-bearing:
 
-- **The reviewer is injected.** ``generate`` takes a ``review_policy.Reviewer`` — a callable that
-  turns a request into JSON — so the deterministic assembly is testable with a fake, and the CLI
-  supplies the real adapter-backed one. The extractor is *never* handed the plan, the expected
-  claims, or the implementer's explanation (actual_extraction enforces this); the comparator gets the
-  Actual read-only and digest-bound.
+- **The reviewers are injected.** ``generate`` takes a ``review_policy.Reviewers`` — the reviewer
+  for each stage's role, plus what launching them has cost — so the deterministic assembly is
+  testable with a fake, and the CLI supplies the real adapter-backed one (``review_transport``).
+  The extractor is *never* handed the plan, the expected claims, or the implementer's explanation
+  (actual_extraction enforces this); the comparator gets the Actual read-only and digest-bound.
 - **The machine half is written whole and resets the human half.** Regenerating the review moves
   ``machine`` and therefore its digest, which is exactly what must invalidate every human answer
   built on the previous one (plan §6.6, §17.5). ``complete`` only ever touches ``human``.
@@ -24,19 +24,17 @@ Two boundaries are load-bearing:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import tempfile
-import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 from rein import (
     actual_extraction,
+    adapters,
     brief,
     common,
     conformance,
@@ -49,14 +47,13 @@ from rein import (
     models,
     review_cache,
     review_policy,
+    review_transport,
+    run_record,
     security_review,
 )
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
-
-if TYPE_CHECKING:  # `build_loop` imports this module back, so the capability record is a type-only name
-    from rein.build_loop import Adapter
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +350,7 @@ def assemble(
     coverage: Mapping[str, Any],
     actual_statements: Sequence[Mapping[str, Any]],
     claims: Sequence[Mapping[str, Any]],
+    unanswered: Sequence[str] = (),
     gaps: Sequence[Mapping[str, Any]] = (),
     extra_behaviors: Sequence[Mapping[str, Any]] = (),
     security: Mapping[str, Any] | None = None,
@@ -380,7 +378,7 @@ def assemble(
     half stays a pure shaping step a test can drive without a repository on disk.
     """
     verdicts = [str(c.get("verdict", "unknown")) for c in claims]
-    summary = {
+    summary: dict[str, Any] = {
         "claims_total": len(claims),
         "aligned": verdicts.count("aligned"),
         "diverged": verdicts.count("diverged"),
@@ -388,6 +386,8 @@ def assemble(
         "unverified": verdicts.count("unverified"),
         "unknown": verdicts.count("unknown"),
     }
+    if unanswered:
+        summary["unanswered"] = list(unanswered)
     machine: dict[str, Any] = {
         "status": "generated",
         "binding": dict(binding),
@@ -469,14 +469,17 @@ def _refuse_over_budget(diff_bytes: int, limits: Mapping[str, int]) -> None:
 
 def generate(
     repo: repo_mod.Repo,
-    reviewer: review_policy.Reviewer,
+    reviewers: review_policy.Reviewers,
     *,
     base: str | None = None,
     actor: str = "",
     force: bool = False,
-    spend: dict[str, usage_mod.Usage] | None = None,
 ) -> dict[str, Any]:
     """Run the whole pipeline and write `review.yaml`'s machine half; return the assembled machine.
+
+    `reviewers` is asked for the reviewer of each stage's own role and holds the ledger of what
+    launching them cost — read here, never written. The pipeline knows which stage it is running,
+    so the role is given rather than recovered from the request's shape.
 
     The deterministic pieces (the coverage manifest, the assembly, the orientation brief) run
     unconditionally; the three reviewer stages are reused from `review_cache` when their own
@@ -512,6 +515,13 @@ def generate(
     # read *from* those documents, so it is bound before them and stays "" when they are what broke.
     stage = "inputs"
     cycle = ""
+    #: How this run ended, for the measurement below. It starts at the pessimistic value so that a
+    #: raise anywhere — including one from a line that has not been written yet — is recorded as
+    #: what it was rather than as nothing.
+    outcome = "failed"
+    run_id = str(uuid.uuid4())
+    reused = usage_mod.Ledger()
+    plan_of_run: dict[str, Any] = {}
 
     def entered(name: str) -> None:
         nonlocal stage
@@ -582,7 +592,7 @@ def generate(
         )
 
         # What a reviewer needs to anchor a statement, since it is launched with nothing to read
-        # but its request (`_adapter_reviewer`).
+        # but its request (`review_transport`).
         anchorable = _file_facts(repo, head, facts.files)
         # What the last review found blocking *about this same base*. Taken from the copy read at
         # the top rather than re-read here, and taken before the call below, which is about to move
@@ -590,7 +600,7 @@ def generate(
         # request*, which is both where the reviewer reads it and where the validator now takes it
         # from: the reviewer is refused for dropping one of these, and was being refused on
         # knowledge nobody had given it.
-        prior_blocking = _prior_blocking_ids(existing, trusted_base)
+        prior_blocking = _prior_blocking(existing, trusted_base)
 
         security_request = security_review.build_request(
             diff_text=reviewable.text,
@@ -601,7 +611,7 @@ def generate(
             },
             trusted_base_sha=trusted_base,
             subject_head_sha=head,
-            prior_blocking_ids=prior_blocking,
+            prior_blocking=prior_blocking,
         )
 
         # The security review reads the same change the extractor does and consumes nothing the
@@ -630,13 +640,15 @@ def generate(
             head=head,
             ceiling=limits["max_diff_bytes"],
             risk_floor=risk_floor,
-            prior_blocking=prior_blocking,
+            prior_blocking=[str(f.get("id", "")) for f in prior_blocking],
         )
         ran: set[str] = set()
+        plan_of_run = _execution_plan(config, cache, keys)
+        print(_render_execution_plan(plan_of_run))
 
         def run_security() -> security_review.SecurityResult:
             # Bound on this thread — the worker's — because the transport is reached through the
-            # injected reviewer, whose signature is not ours to change.
+            # injected reviewers, whose signature is not ours to change.
             with common.cancelling(cancel):
                 return _cached_stage(
                     cache,
@@ -649,7 +661,8 @@ def generate(
                         repo=repo,
                         commit=head,
                     ),
-                    reviewer,
+                    reviewers,
+                    reused=reused,
                 )
 
         with ThreadPoolExecutor(max_workers=1) as pool:
@@ -657,7 +670,7 @@ def generate(
             try:
                 extraction, comparison = _extract_and_compare(
                     repo,
-                    reviewer,
+                    reviewers,
                     plan=plan,
                     config=config,
                     head=head,
@@ -671,6 +684,7 @@ def generate(
                     cache=cache,
                     keys=keys,
                     ran=ran,
+                    reused=reused,
                 )
             except BaseException:
                 # The security stage's own failure is not the one to report: this one came first in
@@ -689,7 +703,7 @@ def generate(
             "actual_digest": extraction.actual_digest,
             "generated_at": event_chain.now_iso(),
         }
-        if seen_models := _independence_record(config, spend):
+        if seen_models := _independence_record(config, reviewers.spend(), reused.totals()):
             binding["independence"] = seen_models
         gaps = _coverage_gaps(comparison.actual_coverage_gaps)
         machine = assemble(
@@ -697,6 +711,7 @@ def generate(
             coverage=coverage,
             actual_statements=extraction.actual_statements,
             claims=comparison.claims,
+            unanswered=comparison.unanswered,
             gaps=gaps,
             extra_behaviors=_extra_behaviors(comparison.extra_behaviors, gaps=gaps),
             security=security.to_section(),
@@ -725,6 +740,7 @@ def generate(
                 f"the human answers with it ({len(ran)} stage(s) re-read)"
             )
             cache.prune()
+            outcome = "unchanged"
             return dict(existing.machine)
 
         document = {"machine": machine, "human": {"status": "not_started"}}
@@ -736,21 +752,48 @@ def generate(
             for stage_name in _STAGE_ORDER:
                 if stage_name in ran:
                     tx.append(_STAGE_RAN_EVENT[stage_name], cycle_id=cycle, actor=actor)
-            tx.append(
-                "review_generated",
-                cycle_id=cycle,
-                actor=actor,
-                detail={"change_digest": change, "billed_by_role": {r: u.to_detail() for r, u in spend.items()}}
-                if spend
-                else {"change_digest": change},
-            )
+            # A blocking finding that stopped blocking is a state change, and the document is not
+            # where it survives: the next generation re-derives its findings from a reviewer with
+            # no memory of this one, so the resolved row is gone from `review.yaml` the moment the
+            # review is regenerated. The chain never rotates, and ids there need no uniqueness
+            # across time — nothing resolves a reference by them.
+            for closed in security.resolved:
+                tx.append(
+                    "security_finding_resolved",
+                    cycle_id=cycle,
+                    actor=actor,
+                    subject_ids=[str(closed.get("id", ""))],
+                    detail={
+                        "severity": str(closed.get("severity", "")),
+                        "resolved_at": dict(closed.get("resolved_at") or {}),
+                    },
+                )
+            tx.append("review_generated", cycle_id=cycle, actor=actor, detail={"change_digest": change})
         cache.prune()
+        outcome = "generated"
+    except KeyboardInterrupt:
+        # A human deciding to stop is not a failed run, and the measurement says so. Same line the
+        # `except` below draws, and the same one the signal classifier draws.
+        outcome = "interrupted"
+        raise
     except Exception as exc:
         # `Exception`, not `BaseException`: a Ctrl-C is a human deciding to stop, and filing that
         # as a review failure would put a decision in the log as a defect. Same line the signal
         # classifier draws (faults._EXTERNAL_SIGNALS leaves SIGINT out).
         _record_failure(store, cycle, actor, stage=stage, reason=str(exc))
         raise
+    finally:
+        run_record.record(
+            store,
+            kind="review",
+            cycle=cycle,
+            actor=actor,
+            run_id=run_id,
+            outcome=outcome,
+            plan=plan_of_run,
+            billed=reviewers.spend(),
+            reused=reused.totals(),
+        )
     return machine
 
 
@@ -803,7 +846,7 @@ def _stage_keys(
     keying on it would re-run three models over a changed test command; the parts a stage really
     depends on (its adapter, its group, the byte ceiling that decides how wide a diff it is sent)
     are named instead. `environment_digest` describes the OCI sandbox, and a reviewer stage does
-    not run in one: `_adapter_reviewer` launches the CLI on the host, in an empty directory.
+    not run in one: `review_transport` launches the CLI on the host, in an empty directory.
     """
     diff_inputs = {
         "trusted_base_sha": trusted_base,
@@ -862,7 +905,9 @@ def _cached_stage(
     key: str,
     ran: set[str],
     run: Callable[[review_policy.Reviewer], T],
-    reviewer: review_policy.Reviewer,
+    reviewers: review_policy.Reviewers,
+    *,
+    reused: usage_mod.Ledger,
 ) -> T:
     """`run` the stage, reusing the stored answer to this exact question when there is one.
 
@@ -874,20 +919,96 @@ def _cached_stage(
     recovery with a stated scope: the only way it happens is a rein release tightening a validator
     under an entry taken before it, and leaving the entry in place would wedge the review behind
     bytes that can never pass again. The re-run's own failure, if there is one, is what raises.
+
+    **A replay puts the original launch's provenance back too**, into `reused` — which model
+    answered, and what that reading cost when it was taken. Kept apart from the transport's ledger
+    because they answer different questions: the ledger is this run's bill and must not be inflated
+    by a launch it did not make, while `binding.independence` asks who produced each half of the
+    review and gets the same answer whether the bytes came from a provider or from disk. Without
+    this, reusing an extraction silently disarmed `review_policy.independence_observed` on a
+    critical change.
     """
+    role = review_policy.STAGE_ROLE[stage]
     stored = cache.read(stage, key)
     if stored is not None:
         try:
-            return run(review_cache.replay(stored))
+            result = run(review_cache.replay(stored.answer))
         except Exception as exc:
             logger.warning(f"the stored {stage} answer no longer validates ({exc}) — re-reading")
             cache.drop(stage, key)
-    recorder = review_cache.Recorder(reviewer)
+        else:
+            reused.add(role, stored.usage)
+            return result
+    recorder = review_cache.Recorder(reviewers.for_role(role))
     result = run(recorder)
     ran.add(stage)
-    if recorder.answer is not None:
-        cache.write(stage, key, recorder.answer)
+    if recorder.reply is not None:
+        cache.write(stage, key, recorder.reply.text, recorder.reply.usage)
     return result
+
+
+def _execution_plan(
+    config: models.Config | None,
+    cache: review_cache.StageCache,
+    keys: Mapping[str, str],
+) -> dict[str, Any]:
+    """What this run intends to do, settled before it does any of it.
+
+    The run/reuse decision, which role answers each stage and on which model, and whether the two
+    reading stages will share one reading of the change — all of it existed only as local variables
+    and a `cache.has` call somewhere inside the pipeline, so the only way to know what a review was
+    about to spend was to watch it spend it. Deciding it up front costs nothing (`_stage_keys` and
+    `cache.has` are already in hand) and makes the intention a thing that can be printed, recorded
+    beside what actually happened, and disagreed with.
+
+    `comparison` is `undecided` rather than `run`: its key takes the Actual as an input and the
+    Actual does not exist yet (`_comparison_key`). Saying "run" would be a guess, and the whole
+    point of writing the plan down is that it does not contain any.
+    """
+    stages: list[dict[str, Any]] = []
+    for stage in _STAGE_ORDER:
+        role = review_policy.STAGE_ROLE[stage]
+        key = keys.get(stage, "")
+        stages.append(
+            {
+                "stage": stage,
+                "role": role,
+                "key": key,
+                "decision": ("reuse" if cache.has(stage, key) else "run") if key else "undecided",
+                "adapter": config.adapter(role) if config is not None else "",
+                "model": config.model(role) if config is not None else "",
+            }
+        )
+    plan: dict[str, Any] = {"stages": stages}
+    shared = _shares_reading(config)
+    if shared is not None:
+        plan["shared_reading"] = shared
+    return plan
+
+
+def _shares_reading(config: models.Config | None) -> bool | None:
+    """Will the extractor and the security reviewer branch one reading? None when it cannot be said.
+
+    The transport refuses a role this release cannot launch, which is a real answer in the
+    production path and no answer at all here — the reviewers are injected, so `generate` runs
+    against transports that were never going to launch a CLI. "Cannot say" is left out of the plan
+    rather than rendered as `false`.
+    """
+    try:
+        return review_transport.shares_reading(config)
+    except adapters.LaunchRefused:
+        return None
+
+
+def _render_execution_plan(plan: dict[str, Any]) -> str:
+    """The plan, in one line, before the launches it describes."""
+    parts = []
+    for row in plan.get("stages", []):
+        where = row["model"] or row["adapter"] or "cli default"
+        parts.append(f"{row['stage']}={row['decision']} ({where})")
+    shared = plan.get("shared_reading")
+    tail = "" if shared is None else f"; shared reading: {'yes' if shared else 'no'}"
+    return "review plan: " + ", ".join(parts) + tail
 
 
 def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: str, reason: str) -> None:
@@ -920,7 +1041,7 @@ def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: st
 
 def _extract_and_compare(
     repo: repo_mod.Repo,
-    reviewer: review_policy.Reviewer,
+    reviewers: review_policy.Reviewers,
     *,
     plan: models.Plan | None,
     config: models.Config | None,
@@ -935,6 +1056,7 @@ def _extract_and_compare(
     cache: review_cache.StageCache,
     keys: Mapping[str, str],
     ran: set[str],
+    reused: usage_mod.Ledger,
 ) -> tuple[actual_extraction.ExtractionResult, conformance.ComparatorResult]:
     """The one genuinely sequential pair: the comparator reads what the extractor produced.
 
@@ -973,7 +1095,8 @@ def _extract_and_compare(
         lambda ask: actual_extraction.run_extractor(
             extract_request, ask, repo=repo, commit=head, risk_floor=risk_floor
         ),
-        reviewer,
+        reviewers,
+        reused=reused,
     )
 
     # Expected vs Actual — the Actual arrives read-only and digest-bound (§12.3).
@@ -1003,10 +1126,12 @@ def _extract_and_compare(
             commit=head,
             actual_statement_ids=[str(a.get("id")) for a in extraction.actual_statements],
             known_ids=known_ids,
+            expected_claim_ids=[c.id for c in plan.claims] if plan is not None else [],
             effective_risk=effective,
             independence=independence,
         ),
-        reviewer,
+        reviewers,
+        reused=reused,
     )
 
     return extraction, comparison
@@ -1019,8 +1144,11 @@ def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str
     return ids
 
 
-def _prior_blocking_ids(review: models.Review | None, trusted_base: str) -> list[str]:
+def _prior_blocking(review: models.Review | None, trusted_base: str) -> list[dict[str, Any]]:
     """The blocking findings the previous review recorded **about the same base**, if any.
+
+    Whole findings, anchors included: `security_review.resolution_of` decides whether a dropped one
+    was fixed or forgotten by re-reading the code it named, and an id says nothing about that.
 
     The carry-over exists so a reviewer cannot clear its own block by regenerating and quietly
     omitting the finding. That is right, and it was being applied by id alone — with nothing
@@ -1040,7 +1168,7 @@ def _prior_blocking_ids(review: models.Review | None, trusted_base: str) -> list
     recorded = str(review.raw.get("machine", {}).get("binding", {}).get("trusted_base_sha", ""))
     if not recorded or recorded != trusted_base:
         return []
-    return [str(f.get("id", "")) for f in review.blocking_security_findings]
+    return [dict(f) for f in review.blocking_security_findings]
 
 
 def _effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> str:
@@ -1057,7 +1185,11 @@ def _effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> st
     return review_policy.effective_risk(inputs)
 
 
-def _independence_record(config: models.Config | None, spend: Mapping[str, usage_mod.Usage] | None) -> dict[str, Any]:
+def _independence_record(
+    config: models.Config | None,
+    spend: Mapping[str, usage_mod.Usage] | None,
+    reused: Mapping[str, usage_mod.Usage] | None = None,
+) -> dict[str, Any]:
     """Which model each reviewer was *asked* for and which one *answered*, for the binding.
 
     `binding.independence` was declared in the schema, rendered by the dashboard, and written by
@@ -1069,6 +1201,12 @@ def _independence_record(config: models.Config | None, spend: Mapping[str, usage
     A role whose adapter reports no usage carries no `model`, which is the honest record: nobody
     measured, and `review_policy.independence_observed` stays silent rather than reading an absent
     observation as agreement.
+
+    `reused` is where a replayed stage's observation comes from. A stage served from
+    `review_cache` makes no launch, so it contributed nothing to `spend` and its `model` went
+    missing from the binding — which quietly stood the critical-independence check down on exactly
+    the runs a cache hit makes cheap. The model that answered is a property of the answer, not of
+    who paid for it.
     """
     record: dict[str, Any] = {}
     for role in ("actual_extractor", "comparator", "security_reviewer"):
@@ -1076,7 +1214,7 @@ def _independence_record(config: models.Config | None, spend: Mapping[str, usage
         group = config.independence_group(role) if config is not None else ""
         if group:
             entry["group"] = group
-        observed = (spend or {}).get(role)
+        observed = (spend or {}).get(role) or (reused or {}).get(role)
         # One id, or nothing. Two would mean the launch itself switched models part-way, which is
         # not a fact about this role's opinion and must not be recorded as one.
         if observed is not None and len(observed.models) == 1:
@@ -1231,383 +1369,6 @@ def complete(repo: repo_mod.Repo, *, actor: str = "") -> None:
 # -- CLI ----------------------------------------------------------------------
 
 
-#: Guards the spend ledger the two stage threads both add to (`_adapter_reviewer`).
-_SPEND_LOCK = threading.Lock()
-
-#: How much of a failed adapter's output travels with the error. Its closing words are where a
-#: CLI says what stopped it, and an error message is read on a terminal, not scrolled.
-_ADAPTER_OUTPUT_TAIL = 1000
-
-
-#: What the priming turn is told to answer. Content-free on purpose: whatever the model says in
-#: that turn is in *both* branches' context afterwards, so it must carry no reading of the change.
-_PRIME_ACK = "READY"
-
-#: The stage-request key the reading lives under, and what replaces it in a branch.
-_READING_KEY = "diff"
-
-
-def _adapter_for_role(config: models.Config | None, role: str) -> Adapter:
-    """The capability record of the CLI `role` is pointed at. Raises if this release cannot launch it."""
-    from rein import build_loop
-
-    if refusal := build_loop.launch_refusal(config, role):
-        raise ReviewError(refusal)
-    return build_loop.ADAPTER_TABLE[(config.adapter(role) if config is not None else "") or "claude"]
-
-
-def _model_for_role(config: models.Config | None, role: str) -> str:
-    return config.model(role) if config is not None else ""
-
-
-def _role_argv(config: models.Config | None, role: str) -> tuple[str, ...]:
-    """Exactly what launches `role` — the CLI, its model, and its usage flags."""
-    return _adapter_for_role(config, role).launch_argv(_model_for_role(config, role))
-
-
-def shareable_reading(config: models.Config | None, roles: Sequence[str]) -> Adapter | None:
-    """The adapter `roles` can share one reading through, or None when they cannot.
-
-    Two conditions:
-
-    - **The same launch.** Not "the same adapter name" — the argv these roles are actually launched
-      with, model included. Two roles on different models do not share: a cache written by one
-      model is not another's, and the reading would be paid for twice anyway.
-    - **A CLI that can branch a session.** *Continuing* one — the second stage reading the first
-      stage's answer — is exactly the correlated blindness this exists to avoid, so a CLI that can
-      resume but not fork is not good enough (`Adapter.forkable`).
-
-    The independence group is not consulted separately, because it no longer says anything the argv
-    does not: it is derived from `<adapter>/<model>`, and both are in the argv. Two roles that share
-    a launch share a group by construction.
-    """
-    records = [_adapter_for_role(config, role) for role in roles]
-    if len({_role_argv(config, role) for role in roles}) != 1 or not records[0].forkable:
-        return None
-    return records[0]
-
-
-class SharedReading:
-    """One reading of the change, primed once and **branched** for each stage that needs it.
-
-    The extractor and the security reviewer are handed the same diff — up to `max_diff_bytes`, so
-    up to half a megabyte — and were launched separately, each paying to read it in full. Measured
-    on an 82 KB payload: two independent launches cost $0.2153, a priming turn plus two branches
-    cost $0.1298. Repeated on a 58 KB payload with real request shapes: $0.196 against $0.126.
-
-    **Serialising them into one session is not the answer**, which is why this branches rather than
-    continues: the second stage would read the first stage's conclusions and inherit its frame, and
-    catching what the extraction's frame missed is the whole value of the security review. A fork
-    shares everything read before the fork and none of what any branch then concludes.
-
-    Three facts this rests on, all measured rather than assumed — the alternatives look identical
-    from the outside and are not:
-
-    - Sending the same prefix to two *separate* one-shot launches does **not** hit the cache. The
-      session is the only mechanism that works — two branches read 51,969 tokens from cache where
-      two separate launches with an identical prefix read 16,737 and paid to write the rest again.
-    - Two branches resumed **in parallel** both hit the cache, so the pipeline keeps the
-      concurrency it has.
-    - A branch sent a request the size of a real one (a 4 KB contract beside the pointer) hits it
-      too, immediately after the priming turn, with no settling time.
-
-    **The saving is typical, not guaranteed.** One run out of four measured had the first branch
-    miss and pay to write the prefix again; the second branch then read what *it* had written, and
-    the round still came out at or below two independent launches. The floor is what happens if the
-    cache never serves at all — three full reads instead of two — so this is a bet on a mechanism
-    that was observed working, not a guarantee. It is priced accordingly: nothing downstream
-    depends on the hit, only the bill does.
-
-    The priming turn is lazy — the first stage to ask creates it, the other waits on the lock —
-    because nothing here knows in advance how many stages will actually launch. When one stage is
-    served from `review_cache` and the other is not, this pays a priming turn for a single branch:
-    about 7% more than launching it alone, against 40% less whenever both run, which is the common
-    case. A channel for telling the transport what the cache is about to do would cost more than
-    the case is worth.
-    """
-
-    def __init__(
-        self,
-        repo: repo_mod.Repo,
-        record: Adapter,
-        *,
-        argv: Sequence[str] | None = None,
-        timeout: float,
-        spend: dict[str, usage_mod.Usage] | None = None,
-    ) -> None:
-        self._repo = repo
-        self._record = record
-        #: The priming turn must run the same launch the branches do — a cache written by one
-        #: model is not another model's, so a prime on the CLI default under branches pinned to a
-        #: model pays for the reading and serves nobody. Measured: the branch that followed such a
-        #: prime wrote the whole prefix again.
-        self._argv = tuple(argv) if argv is not None else record.launch_argv()
-        self._timeout = timeout
-        self._spend = spend
-        self._lock = threading.Lock()
-        self._session = ""
-        self._digest = ""
-
-    def branch_flags(self, request: Mapping[str, Any]) -> tuple[str, ...]:
-        """The flags that put this request on its own branch of the shared reading.
-
-        Empty for a request that carries no reading — the comparator's, which is handed the Actual
-        rather than the code and has nothing to share.
-        """
-        if _READING_KEY not in request:
-            return ()
-        session = self._prime(request)
-        return (*self._record.resume_flags, session, *self._record.fork_flags)
-
-    def without_the_reading(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
-        """`request` with the reading replaced by a pointer at the turn that carries it.
-
-        Only this one key moves. `deterministic_facts.context` and `.files` are shared too, but the
-        diff is ~98% of the payload, and a request that exists in two shapes is a request that will
-        drift — `build_request` keeps producing exactly one.
-        """
-        if _READING_KEY not in request:
-            return request
-        self._prime(request)
-        return {
-            **request,
-            _READING_KEY: {"in_previous_message": True, "digest": self._digest},
-        }
-
-    def _prime(self, request: Mapping[str, Any]) -> str:
-        """Create the shared session, once, and return its id.
-
-        The reading is checked against the primed one rather than assumed to match: two stages
-        branching one session must be branching it about the same bytes, and a mismatch is a bug in
-        the pipeline above rather than something to paper over by sending the diff again.
-        """
-        digest = digests.of_bytes(str(request.get(_READING_KEY, "")).encode("utf-8"))
-        with self._lock:
-            if self._session:
-                if digest != self._digest:
-                    raise ReviewError(
-                        "two stages were about to branch one reading of different changes "
-                        f"({self._digest} vs {digest}) — the pipeline moved underneath the review"
-                    )
-                return self._session
-            session = str(uuid.uuid4())
-            payload = {
-                "instruction": (
-                    "Read the change below. Do not analyse it yet and do not describe it: a "
-                    f"question about it follows in the next message. Reply with exactly {_PRIME_ACK}."
-                ),
-                "trusted_base_sha": str(request.get("trusted_base_sha", "")),
-                "subject_head_sha": str(request.get("subject_head_sha", "")),
-                _READING_KEY: request.get(_READING_KEY, ""),
-            }
-            # The same guard the extractor's own request gets. This is a new path into the
-            # extractor's context, and a new path without the guard is how priming comes back.
-            actual_extraction.assert_blind(payload)
-            self._launch(session, payload)
-            self._session, self._digest = session, digest
-            return session
-
-    def _launch(self, session: str, payload: Mapping[str, Any]) -> None:
-        """Send the priming turn. Its failure is the review's failure, not a reason to fall back.
-
-        There is deliberately no "prime failed, launch the stages separately instead" path: that
-        would hide a broken adapter behind a bill twice the size, and `--supervise` already waits
-        out the failures that time alone fixes.
-        """
-        argv = list(self._argv) + [*self._record.session_flags, session]
-        with tempfile.TemporaryDirectory(prefix="rein-reading-", ignore_cleanup_errors=True) as elsewhere:
-            rc, out = common.run(
-                argv, cwd=elsewhere, timeout=self._timeout or None, input_text=json.dumps(payload, ensure_ascii=False)
-            )
-        if rc != 0:
-            _record_spend_usage(self._spend, _SHARED_READING_ROLE, usage_mod.Usage.unavailable())
-            said = out.strip()[-_ADAPTER_OUTPUT_TAIL:]
-            raise review_policy.AdapterFailure(
-                f"the shared reading could not be primed — the adapter exited {rc}"
-                + (f", saying:\n{said}" if said else " and said nothing"),
-                rc=rc,
-                output=out,
-            )
-        try:
-            _, spent = self._record.read_output(out)
-        except usage_mod.AdapterEnvelopeError as exc:
-            _record_spend_usage(self._spend, _SHARED_READING_ROLE, usage_mod.Usage.unavailable())
-            raise review_policy.AdapterFailure(
-                f"the shared reading could not be primed — the adapter reported a failed run: {exc}",
-                rc=0,
-                output=out,
-            ) from None
-        _record_spend_usage(self._spend, _SHARED_READING_ROLE, spent)
-
-
-#: The two stages handed the same reading of the change. The comparator is deliberately absent: it
-#: is given the Actual and the Expected, never the code, so it has no reading to share — and §12.4
-#: forbids it sharing one with the extractor in any case.
-_READING_ROLES: tuple[str, ...] = ("actual_extractor", "security_reviewer")
-
-#: The priming turn belongs to no stage — it is what both of them read — so it is counted under a
-#: name of its own. Folding it into either role would make that role's cost a fiction.
-_SHARED_READING_ROLE = "shared_reading"
-
-
-def _adapter_reviewer(
-    repo: repo_mod.Repo,
-    role: str = "code_reviewer",
-    *,
-    config: models.Config | None = None,
-    spend: dict[str, usage_mod.Usage] | None = None,
-    reading: SharedReading | None = None,
-) -> review_policy.Reviewer:
-    """A production reviewer that hands the request as JSON to the adapter configured for `role`.
-
-    Kept small on purpose: the request goes to the adapter on stdin and the adapter answers with
-    the single JSON document the stage validators parse. Every stage revalidates the output, so
-    this is a transport, not a trust boundary.
-
-    `role` selects the adapter, so each stage gets its own: one callable serving every stage
-    means the same session answers as the Actual Extractor and as the Comparator, the
-    independence violation §12.4 exists to prevent. The request goes on stdin — a whole diff as
-    an argv element hits E2BIG on a large change.
-
-    The launch takes `execution.agent_timeout_sec`, the same knob the build loop launches under,
-    rather than the fifteen minutes that used to be written here. Fifteen minutes was not a
-    judgement about reviewing; it was a number, and it was not a comfortable one — field runs of
-    this pipeline came in at 6m27s and 6m40s, so a change a little larger than that cycle's would
-    have crossed it, thrown the whole launch away, and been re-run from cold. The knob defaults to
-    no limit for the reason its own docstring gives, and Ctrl-C is what stops a launch that really
-    is stuck.
-
-    **It runs in an empty directory, not in the repository.** This transport passed no `cwd`, so
-    every stage inherited rein's — the repository root. An agent CLI reads its working directory:
-    the root is where `AGENTS.md` explains the Expected Model and `.rein/plan.yaml` *is* the
-    Expected Model, both a `git show` away from the one stage whose whole value is that it has
-    never seen them. `actual_extraction.assert_blind` guards the payload and could never have
-    caught this, because the priming did not travel in the payload.
-
-    Cutting the directory only works because the request now carries what the answer needs: the
-    stage contract (`<stage>.contract`) instead of whatever instructions the CLI picked up from a
-    project, and `deterministic_facts.files` instead of the `git rev-parse` a reviewer used to
-    have to run to anchor anything. What the launch can still read is the user's own global CLI
-    configuration, which is theirs and not this repository's to remove.
-    """
-
-    if config is None:
-        config = store_mod.Store(repo).read_config()
-    record = _adapter_for_role(config, role)
-    role_argv = _role_argv(config, role)
-    timeout = float(config.agent_timeout_sec) if config is not None else 0.0
-
-    def call(request: Mapping[str, Any]) -> str:
-        argv = list(role_argv) + list(reading.branch_flags(request) if reading else ())
-        payload = json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False)
-        # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
-        # left something undeletable behind must not turn a finished review into a traceback.
-        with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as elsewhere:
-            rc, out = common.run(argv, cwd=elsewhere, timeout=timeout or None, input_text=payload)
-        if rc != 0:
-            _record_spend_usage(spend, role, usage_mod.Usage.unavailable())
-            # What the adapter said, not merely that it stopped. `common.run` merges stderr into
-            # `out`, so the reason was in hand and thrown away: a field report of three identical
-            # `exited 1` failures was diagnosable only by wrapping the CLI in a logging shim, and
-            # the message behind them — "Prompt is too long" — named its own cause exactly.
-            said = out.strip()[-_ADAPTER_OUTPUT_TAIL:]
-            raise review_policy.AdapterFailure(
-                f"the {role} adapter exited {rc}" + (f", saying:\n{said}" if said else " and said nothing"),
-                rc=rc,
-                output=out,
-            )
-        try:
-            answer, spent = record.read_output(out)
-        except usage_mod.AdapterEnvelopeError as exc:
-            # A CLI can report a failed run on a process that exited 0. Without this the failure
-            # travels on to the stage validator and is reported as a malformed reviewer answer —
-            # blaming the reviewer for something the launch said about itself.
-            _record_spend_usage(spend, role, usage_mod.Usage.unavailable())
-            raise review_policy.AdapterFailure(
-                f"the {role} adapter reported a failed run: {exc}", rc=0, output=out
-            ) from None
-        _record_spend_usage(spend, role, spent)
-        return answer
-
-    return call
-
-
-def _record_spend_usage(spend: dict[str, usage_mod.Usage] | None, role: str, spent: usage_mod.Usage) -> None:
-    """Add one launch's cost to the ledger. The stages run on two threads, so this takes the lock.
-
-    Read-modify-write is not one operation on any interpreter that is not holding a global lock
-    for us, and a lost row here would under-report a role rather than fail loudly.
-    """
-    if spend is None:
-        return
-    with _SPEND_LOCK:
-        spend[role] = spend.get(role, usage_mod.Usage()) + spent
-
-
-def _staged_reviewer(repo: repo_mod.Repo, *, spend: dict[str, usage_mod.Usage] | None = None) -> review_policy.Reviewer:
-    """One callable that routes each stage's request to that stage's own configured adapter.
-
-    The stage is identified by the request shape the stage builders produce — the same shapes
-    the fakes in the test suite key on — so nothing has to thread a role through the pipeline.
-
-    `spend`, when given, collects what each stage's launch cost, as the adapter reports it.
-    Measured at the transport because that is where the answer arrives, and worth measuring because
-    what this pipeline spends is the thing that decides whether it can run at all.
-    """
-    config = store_mod.Store(repo).read_config()
-    # The extractor and the security reviewer read the same diff. When they can share one reading
-    # without sharing a conclusion, they do; otherwise `shareable_reading` says no and each is
-    # launched exactly as before.
-    shared = shareable_reading(config, _READING_ROLES)
-    reading = (
-        SharedReading(
-            repo,
-            shared,
-            argv=_role_argv(config, _READING_ROLES[0]),
-            timeout=float(config.agent_timeout_sec) if config is not None else 0.0,
-            spend=spend,
-        )
-        if shared is not None
-        else None
-    )
-    by_role = {
-        role: _adapter_reviewer(
-            repo,
-            role,
-            config=config,
-            spend=spend,
-            reading=reading if role in _READING_ROLES else None,
-        )
-        for role in ("actual_extractor", "comparator", "security_reviewer")
-    }
-
-    def call(request: Mapping[str, Any]) -> str:
-        if "expected_model" in request:
-            return by_role["comparator"](request)
-        facts = request.get("deterministic_facts")
-        if isinstance(facts, Mapping) and "signals" in facts:
-            return by_role["security_reviewer"](request)
-        return by_role["actual_extractor"](request)
-
-    return call
-
-
-def spend_summary(spend: dict[str, usage_mod.Usage]) -> str:
-    """What this generation cost, by stage, worst first. Empty when nothing was launched.
-
-    Token counts rather than bytes on stdin. The old measure could not see the system prompt, the
-    CLI's own project instructions, or the cache — a probe of a one-word prompt came back with 10
-    input tokens and 20,956 cached ones — so it answered "what did rein send", never "what did
-    this cost". A stage whose adapter reports nothing is named as unmeasured (`usage.summarize`),
-    because a zero would read as free.
-
-    What stays outside this number: the host's global CLI configuration is part of every launch's
-    input and nothing here can itemize it. Its *size* is visible in the cache and input counts,
-    which is as far as an honest measurement goes.
-    """
-    return usage_mod.summarize(spend, what="review")
-
-
 def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
     """Would running this again, unchanged, plausibly do better?
 
@@ -1625,14 +1386,13 @@ def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
 
 def _generate_cli(
     repo: repo_mod.Repo,
-    spend: dict[str, usage_mod.Usage],
     *,
     force: bool,
     supervise: bool,
     interval_sec: int,
-    make_reviewer: Callable[[], review_policy.Reviewer] | None = None,
-) -> dict[str, Any]:
-    """Run the pipeline, optionally waiting out a machine failure that time alone fixes.
+    make_reviewers: Callable[[], review_policy.Reviewers] | None = None,
+) -> tuple[dict[str, Any], dict[str, usage_mod.Usage]]:
+    """`(the machine review, what the attempts cost)`, waiting out a machine failure time can fix.
 
     The same shape as `rein build --supervise`: only what :func:`_worth_waiting_for` allows is
     retried. Everything else — a reviewer whose output could not be parsed, a budget refusal, an
@@ -1641,15 +1401,19 @@ def _generate_cli(
     A retry costs only the stages that have not answered yet: `review_cache` keeps each stage's
     answer as it validates, so waiting out a capacity stop no longer re-reads the whole change.
 
-    A fresh reviewer per attempt, so a retry re-reads the config rather than holding whatever was
-    true when the first one was built.
+    A fresh transport per attempt, so a retry re-reads the config rather than holding whatever was
+    true when the first one was built — and the bill is returned rather than filled in through a
+    dict the caller passed down, because a supervised run's bill is every launch it made and the
+    per-attempt transports are the only things that know.
     """
-    build_reviewer = make_reviewer or (lambda: _staged_reviewer(repo, spend=spend))
+    build_reviewers = make_reviewers or (lambda: review_transport.StagedReviewers(repo))
+    spend: dict[str, usage_mod.Usage] = {}
     attempt = 0
     while True:
         attempt += 1
+        reviewers = build_reviewers()
         try:
-            return generate(repo, build_reviewer(), force=force, spend=spend)
+            return generate(repo, reviewers, force=force), spend
         except review_policy.AdapterFailure as failure:
             if not supervise or not _worth_waiting_for(failure):
                 raise
@@ -1659,6 +1423,9 @@ def _generate_cli(
                 + (f" (the CLI said: {hint})" if hint else "")
             )
             time.sleep(interval_sec)
+        finally:
+            for role, row in reviewers.spend().items():
+                usage_mod.merged(spend, role, row)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1703,15 +1470,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.supervise and args.supervise_interval_sec < 1:
                 logger.error("--supervise-interval-sec must be at least 1")
                 return 2
-            spend: dict[str, usage_mod.Usage] = {}
-            _generate_cli(
+            _, spend = _generate_cli(
                 repo,
-                spend,
                 force=args.force,
                 supervise=args.supervise,
                 interval_sec=args.supervise_interval_sec,
             )
-            if measured := spend_summary(spend):
+            if measured := usage_mod.summarize(spend, what="review"):
                 print(measured)
             print("review.yaml generated — review it in `rein ui`, then `rein review complete`")
             return 0
@@ -1725,6 +1490,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
     except (
         ReviewError,
+        review_transport.TransportError,
+        adapters.LaunchRefused,
         review_policy.ReviewPolicyError,
         store_mod.StoreError,
         models.DocumentError,

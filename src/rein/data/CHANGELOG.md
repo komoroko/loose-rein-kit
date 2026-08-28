@@ -4,6 +4,124 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.8] - 2026-08-28
+
+One habit again, seen from the other side. 0.3.7 was about things this repository *declared* and
+nothing performed. This is about things it *read*: an answer from a model taken to be the whole
+answer, a cache hit taken to be free of consequence, an acknowledgement taken on trust because
+nobody looked at it, and a run of the pipeline that left no record of having happened at all.
+
+**An answer is open-world; the claim list is not.** The one check on the Comparator ran the wrong
+way. Every claim id it returned had to exist in the frozen plan — so a fabricated `C-999` was
+refused, and a *missing* `C-001` was invisible. A comparator answering three of eight claims
+produced a review saying `claims_total: 3, aligned: 3`, with no verdict, no decision card and no
+gate block for the other five: five requirements nobody had looked at, in a document whose whole
+purpose is to say what was looked at. The claim list is now framed by the plan, and a claim nobody
+answered is filled in as `unknown` with `integrity: unavailable` — which `decision_cards` already
+treats as unsettled and `human_review` already refuses to let lapse at `high`. Filled rather than
+refused because one dropped row would otherwise throw three launches away; `machine.summary`
+carries `unanswered` so the reader sees which. A claim answered *twice* is refused: two verdicts
+for one claim is a contradictory answer, not a partial one, and keeping the first silently
+discarded the `diverged` that would have raised the card.
+
+**A cache hit stood a safety check down.** `binding.independence` records which model produced each
+half of the review, read off each launch's own usage envelope. A stage served from `review_cache`
+makes no launch, so it contributed nothing, the `model` field went missing — and
+`independence_observed` reads a missing observation as silence, not as a failure. Reusing an
+extraction on a `critical` change therefore disarmed, without a word, the check that a provider had
+not served one model to both halves of the review. A cache entry now records **who answered as well
+as what they answered**, and a replay puts that provenance back into a ledger kept apart from what
+the run actually paid: the bill must not be inflated by a launch nobody made, and the question
+"who produced this half" has the same answer whether the bytes came from a provider or from disk.
+An entry written before this has no `execution` block and reads as a miss.
+
+**Nobody read the acknowledgement.** `SharedReading` primes one session with the diff and *forks*
+it — never continues it — so that the blind extractor and the security reviewer cannot inherit each
+other's conclusions. The priming turn says `Reply with exactly READY`, and its answer was discarded
+unread. A model that ignored the instruction and analysed the diff instead put that analysis into
+**both** branches' context: the correlated blindness the fork exists to prevent, arriving through
+the door it opened. `actual_extraction.assert_blind` guards the payload and could never have seen
+it, because this was the answer. The ack is now required verbatim, and there is no fallback: a
+prime that fails is the review failing, not a reason to pay twice and carry on.
+
+**A blocking security finding shut gate ④ for the rest of the cycle.** The finding was carried
+forward while the trusted base held — on a work branch, that is the whole cycle — and the reviewer
+was refused for dropping it *and* for re-stating it as non-blocking. So fixing the vulnerability
+made the review unproducible: the next reviewer correctly stopped reporting code that was gone, and
+that was exactly the refusal. The state of a finding was "is it in the latest list", which cannot
+tell "the change fixed it" from "the reviewer forgot", so the system safely refused both. There was
+no test for the path because there was no path.
+
+A finding now has a life, and the state transition is grounded in the committed tree rather than in
+a reviewer's word. It is `open`; whether the change closed it is decided by re-reading the code it
+anchored to. Gone from this head, and it is recorded `resolved` against the head that removed it —
+kept in that generation's findings, and appended to the audit chain as `security_finding_resolved`,
+which is where the record outlives a document the next generation rewrites. Still there, and the
+drop is refused as before. Deliberately **not** `review_policy.validate_anchor`, which fails the
+moment the file's blob differs and would read any unrelated edit to the same file as a fix — the
+anchored *text* is what the finding was about. A finding that named no anchor has nothing to
+re-check and is closed by a human's `dispute_finding`, which was already in the schema, already
+offered on every decision card, and until now had no effect on the gate whatsoever. A resolved
+finding no longer raises a card of its own: `resolution_of` answered that question against the tree,
+and leaving the card in meant fixing the code was what stopped the human review freezing.
+
+**Ids the model minted were the basis of referential integrity, and nothing checked them.** `AST-*`
+and `SEC-*` are the reviewer's own. Neither shape nor uniqueness was verified before other code
+resolved references by them: the comparator is validated against a `set` of the extractor's ids, so
+a duplicate collapses silently, and `findings` indexes statements by id, so a duplicate takes the
+last writer — an extra behaviour ends up anchored, and attributed to a task, by a statement nobody
+cited. `id` absent became the string `"None"`. Both stages now refuse a malformed or repeated id,
+reading the pattern from the schema rather than restating it. The suite's own fixtures had been
+using `SEC-1` and `AST-9`, which were never schema-valid; nothing had ever looked.
+
+**The run is the thing that ends; the artefact is a thing that sometimes moves.** What a generation
+cost was a field on `review_generated`, which made recording it conditional on the document
+changing — so the two runs that most need measuring were the two that recorded nothing: a
+regeneration whose machine half came out byte-identical, launches paid for and no event, and a
+failure, which is the most expensive outcome there is. Every run now appends `run_measured` however
+it ends (`generated` / `unchanged` / `failed` / `interrupted`), carrying what it was billed, what it
+replayed, and **the plan it was going to follow**: run or reuse per stage, on which adapter and
+model, and whether the two reading stages will branch one reading. That decision existed only as
+local variables and a `cache.has` call somewhere inside the pipeline, so the only way to know what a
+review was about to spend was to watch it spend it. It is printed before the launches it describes.
+No cost ceiling was added: with no estimate in front of it, a limit that stops halfway only discards
+what has already been paid for.
+
+`run_measured` had been written by *two* modules in two different shapes, while both docstrings
+said it exists so that summing it over a cycle gives the cycle's total — the build loop's carried
+byte counters and no `outcome`, the review's an `outcome` and no counters, and `event.schema.json`
+constrains no detail, so nothing caught it. One writer now (`run_record`), one shape, and the build
+loop gains the `outcome` it never had. The run-wide totals it used to carry are gone: they were the
+sums of `by_role`, and a sum stored beside its own addends is a field that can disagree with itself.
+
+**A launch's result is a value.** The `Reviewer` contract returned text, so the other two facts a
+launch produces travelled out of band — a mutable ledger threaded down four layers and written from
+two threads, and, separately, a `contextvars.ContextVar` so the stage cache could record which model
+answered. Two channels for one value, one of them ambient, and a flag at three call sites to keep
+the ambient one from charging a stage for the shared reading's priming turn. It now returns
+`Answer(text, usage)`, the ledger belongs to the transport because the transport is what pays, and
+the pipeline asks for the reviewer of the role it is running rather than the transport recovering
+that role by inspecting the request's shape (`"expected_model" in request`), which had made the
+request shapes part of the dispatch contract by accident.
+
+**Where things live.** `Adapter`, `ADAPTER_TABLE`, `launch_refusal` and `write_flags` are now
+`adapters.py`. They had lived inside a 2,900-line orchestrator, so `agent_cli`, `doctor` and the
+review transport each wrote a function-local `from rein import build_loop` to dodge the import
+cycle that reaching for them created; the cycle was never the problem, the placement was — the
+`Adapter` docstrings already talked about the review transport. The role→argv resolver existed
+twice and raised two different exceptions for one refusal; it is `adapters.launch_argv` raising
+`LaunchRefused`. The 430 lines of `review.py` about launching an agent CLI are `review_transport.py`
+(`review.py`: 1,955 → 1,486). Deleted for having no reader: `models.State.execution`,
+`Repo.prompts` / `.scaffold` / `.rules` / `.docs`, `Orchestrator._git`, five `Orchestrator` methods
+that forwarded one line to `self.ws`, and four of the five `_int` coercions (now `common.as_int`).
+`Usage.from_detail` sits beside the `to_detail` it inverts.
+
+**Breaking, with no compatibility path** — all of it internal, none of it in a repository's own
+files: the `run_measured` detail shape; the `Reviewer` protocol and the `Reviewers` that `generate`
+takes; the module the adapter table lives in; and a `review_cache` entry with no `execution` block,
+which reads as a miss and re-runs that stage. `.rein/work/` is gitignored and dies with its
+worktree, so there is nothing to migrate.
+
 ## [0.3.7] - 2026-08-28
 
 What follows is mostly one habit: a thing this repository declared and nothing performed. A

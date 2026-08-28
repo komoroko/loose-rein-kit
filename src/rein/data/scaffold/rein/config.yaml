@@ -116,7 +116,7 @@ agents:
     model: sonnet
   # Deliberately the extractor's model, not the comparator's: 12.4 constrains the
   # extractor/comparator pair and says nothing about this role, and matching the extractor lets
-  # the two stages that read the same diff share one reading of it (`review.SharedReading`).
+  # the two stages that read the same diff share one reading of it (`review_transport.SharedReading`).
   # They still reach independent verdicts — the session is branched, never continued.
   security_reviewer:
     adapter: claude

@@ -383,6 +383,14 @@ Three layers:
 The findings are structured (severity + code anchor + blocking flag), not prose, and a later commit
 leaves the review stale until it is regenerated.
 
+A finding has a life. It is `open` until the change closes it, and the next generation decides
+which happened by re-reading the code it anchored to rather than by asking the reviewer: gone from
+the tree, and the finding is recorded `resolved` against the head that removed it — kept in that
+generation's findings, and appended to the audit chain as `security_finding_resolved`, which is
+where it outlives a document the next generation rewrites; still there, and dropping it is refused
+as a reviewer clearing its own block. A finding with no anchor is closed by a human's `dispute_finding`
+or not at all.
+
 ## Adopting into an existing repository (brownfield)
 
 There is no separate adopt command — `rein init` is the single entry point and **auto-detects**

@@ -174,9 +174,9 @@ class OciExecutor(Executor):
             argv += ["--read-only"]
         tmp_mb = profile.raw.get("writable_tmp_mb", 512)
         argv += ["--tmpfs", f"/tmp:size={int(tmp_mb) if isinstance(tmp_mb, int) else 512}m,mode=1777"]
-        argv += ["--pids-limit", str(_int(profile.raw.get("pids_limit"), 256))]
-        argv += ["--memory", f"{_int(profile.raw.get('memory_mb'), 1024)}m"]
-        argv += ["--cpus", str(_int(profile.raw.get("cpu_count"), 2))]
+        argv += ["--pids-limit", str(common.as_int(profile.raw.get("pids_limit"), 256))]
+        argv += ["--memory", f"{common.as_int(profile.raw.get('memory_mb'), 1024)}m"]
+        argv += ["--cpus", str(common.as_int(profile.raw.get("cpu_count"), 2))]
         # An empty, ephemeral HOME: the container cannot read the host's ~/.ssh, ~/.aws, etc.
         argv += ["--env", "HOME=/tmp"]
         # …which also means git has no config to find, and the repository it is handed is owned by
@@ -197,10 +197,6 @@ class OciExecutor(Executor):
         argv.append(reference or profile.image)
         argv += list(spec.command)
         return argv
-
-
-def _int(value: object, default: int) -> int:
-    return value if isinstance(value, int) else default
 
 
 def for_profile(profile: models.ExecutorProfile) -> Executor:

@@ -23,7 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from rein import digests, event_chain, models, store
+from rein import adapters, digests, event_chain, models, store
 
 GATE_ORDER = models.GATE_ORDER
 
@@ -173,9 +173,7 @@ def agent_output(cmd: list[str], text: str = "") -> str:
     and answers with an envelope, `codex` and `gemini` answer with bare text, and a fake that got
     that backwards would be testing a transport nothing uses.
     """
-    from rein import build_loop
-
-    record = build_loop.adapter_for(cmd)
+    record = adapters.adapter_for(cmd)
     return agent_envelope(text) if record and record.usage_flags else text
 
 

@@ -222,7 +222,12 @@ is the point; never fold them into the implementer's session.
    high/critical extra behaviour, or an insufficient Coverage Manifest blocks the gate — return
    those to the implementer to fix (a fix moves HEAD, so re-generate; a later commit leaves the
    review stale) and record judgment calls as escalation events for the human. Do not present
-   gate ④ while a blocker stands.
+   gate ④ while a blocker stands. **A security finding closes itself**: the next generation
+   re-checks the code each blocking finding anchored to, and records the finding `resolved` when
+   that code is gone — in that generation's findings and in the audit chain, which is where it
+   outlives a document the next generation rewrites. Fixing it is the way through, and re-stating
+   it is refused only while the code is still there. One that named no anchor is closed by a
+   human's `dispute_finding` in the review, never by the reviewer omitting it.
 3. `notify-and-wait`: tell the human the gate-④ approval is pending.
    - **(Only with GitHub integration)** Run `rein issue-sync` to reflect each task's
      latest status (done → close, etc.) to Issues. Best-effort; do not stop the gate if it

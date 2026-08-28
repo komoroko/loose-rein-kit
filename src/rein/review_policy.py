@@ -24,12 +24,13 @@ against crafted-malicious reviewer payloads without running a model.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from rein import common, digests, models, strict_yaml
 from rein import diff_facts as diff_facts_mod
-from rein import digests, models, strict_yaml
 from rein import repo as repo_mod
+from rein import usage as usage_mod
 
 # Output caps (plan §12.7). A reviewer past these is refused — never silently truncated.
 MAX_OUTPUT_BYTES = 512 * 1024
@@ -59,11 +60,44 @@ class AdapterFailure(ReviewPolicyError):
 # --- the untrusted reviewer boundary ------------------------------------------
 
 
-class Reviewer(Protocol):
-    """A reviewer: given a JSON-serializable request, it returns raw output text.
+#: Which configured role answers for each reviewer stage. One map, because two modules read it:
+#: the pipeline asks for the role its stage needs, and the transport builds a launcher for each
+#: role in it. Written twice, they drift, and a drift here is a stage answered by the wrong
+#: adapter — the §12.4 violation that does not fail, it just produces a review one model wrote
+#: both halves of. The ledgers are keyed by role, not by stage, because that is what
+#: `binding.independence` and the spend summary are keyed on.
+STAGE_ROLE: Mapping[str, str] = {
+    "actual_extraction": "actual_extractor",
+    "comparison": "comparator",
+    "security_review": "security_reviewer",
+}
 
-    The output is *untrusted* — it is parsed strictly and validated by this module before any
-    of it is believed. The real implementation (`review._adapter_reviewer`) launches an agent CLI
+
+@dataclass(frozen=True)
+class Answer:
+    """One reviewer launch's whole result: what it said, and what saying it cost.
+
+    A launch produces two facts and this used to be able to carry one. The cost went out of band
+    instead — into a ledger dict threaded down through four layers and mutated from two threads,
+    and *again* into a `contextvars.ContextVar` so that the cache entry could record which model
+    answered. Two channels for one value, one of them ambient, and a flag at three call sites to
+    keep the ambient one from charging a stage for a launch it did not make. Returning it is the
+    whole fix.
+
+    `usage` is unmeasured (`available=False`) for an adapter that reports no envelope, and for
+    `review_cache.replay`, which launches nothing — the stored provenance of a replayed answer is
+    read from its cache entry, not from here.
+    """
+
+    text: str
+    usage: usage_mod.Usage = field(default_factory=usage_mod.Usage)
+
+
+class Reviewer(Protocol):
+    """A reviewer: given a JSON-serializable request, it answers.
+
+    The answer is *untrusted* — it is parsed strictly and validated by this module before any
+    of it is believed. The real implementation (`review_transport`) launches an agent CLI
     on the host, in an empty directory, with a strict JSON stdin/stdout contract and process
     cleanup; a fake stands in for it in tests, and `review_cache.replay` stands in for it when the
     same question was already answered. Either way, nothing here trusts the text it returns.
@@ -73,7 +107,25 @@ class Reviewer(Protocol):
     diff, and the empty working directory is what keeps it from reading anything else.
     """
 
-    def __call__(self, request: Mapping[str, Any]) -> str: ...
+    def __call__(self, request: Mapping[str, Any]) -> Answer: ...
+
+
+class Reviewers(Protocol):
+    """Every role's reviewer, and the running bill of what launching them has cost.
+
+    The pipeline knows which stage it is running and therefore which role must answer it; it used
+    to throw that away and hand one callable to all three, which then recovered the role by
+    *sniffing the request shape* (`"expected_model" in request`). A role is not something to infer
+    from a payload when the caller already has it.
+
+    The ledger belongs to the transport because the transport is what pays — including for the
+    launches no single stage owns (a shared reading's priming turn) and the ones that failed
+    before returning anything. `spend` is read, never written, by the pipeline.
+    """
+
+    def for_role(self, role: str) -> Reviewer: ...
+
+    def spend(self) -> dict[str, usage_mod.Usage]: ...
 
 
 def parse_reviewer_output(raw: str, *, what: str = "reviewer output") -> dict[str, Any]:
@@ -248,6 +300,41 @@ def review_schema_enum(*path: str) -> tuple[str, ...]:
     return tuple(str(value) for value in node)
 
 
+def review_schema_pattern(name: str) -> str:
+    """The regex `review.schema.json` holds at `$defs.<name>.pattern`.
+
+    Read rather than restated for the same reason :func:`review_schema_enum` is: an id shape
+    written down twice eventually disagrees, and the way that failure shows up is a whole stage
+    rejected at the write for an id the stage itself had accepted.
+    """
+    node = models.schema("review")["$defs"].get(name, {})
+    pattern = node.get("pattern") if isinstance(node, dict) else None
+    if not isinstance(pattern, str):
+        raise ReviewPolicyError(f"review.schema.json has no pattern at $defs.{name}")
+    return pattern
+
+
+def reject_duplicate_ids(entries: Iterable[Mapping[str, Any]], *, what: str) -> list[str]:
+    """(problems) for a reviewer answer that minted the same id twice.
+
+    Ids are the reviewer's, and everything downstream resolves references by them: the comparator
+    is validated against a `set` of the extractor's ids, and `findings` indexes statements by id
+    to find their anchors. A duplicate silently collapses in the first and takes the last writer in
+    the second, so an extra behaviour ends up anchored — and attributed to a task — by a statement
+    nobody cited.
+    """
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for entry in entries:
+        eid = str(entry.get("id", ""))
+        if eid in seen and eid not in duplicates:
+            duplicates.append(eid)
+        seen.add(eid)
+    return [
+        f"{what}: id {eid!r} was used more than once — ids are how everything else refers to this" for eid in duplicates
+    ]
+
+
 # --- code anchors (plan §12.7) ------------------------------------------------
 
 
@@ -272,14 +359,10 @@ def validate_anchor(repo: repo_mod.Repo, commit: str, anchor: Mapping[str, Any])
     if rc != 0:
         return [f"anchor {path}@{commit[:12]}: cannot read the committed blob"]
     total = content.count("\n") + 1
-    start, end = _int(anchor.get("start_line")), _int(anchor.get("end_line"))
+    start, end = common.as_int(anchor.get("start_line"), -1), common.as_int(anchor.get("end_line"), -1)
     if start < 1 or end < start or end > total:
         return [f"anchor {path}: line range {start}-{end} is outside the file (1-{total})"]
     return []
-
-
-def _int(value: object) -> int:
-    return value if isinstance(value, int) else -1
 
 
 # --- self-attestation the policy forbids (plan §24.2, §24.3) ------------------
@@ -405,10 +488,30 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
     ]
 
 
-def blocking_reasons(review: models.Review, effective: str) -> list[str]:
+def disputed_subjects(human: Mapping[str, Any]) -> set[str]:
+    """Subjects a human recorded `dispute_finding` against — "the reviewer is wrong", with a reason.
+
+    The one way a security finding the code did *not* change can stop blocking. `dispute_finding`
+    is already in the schema's disposition list and was already offered on every decision card; it
+    simply had no effect on the gate, so a finding with no anchors — nothing for
+    `security_review.resolution_of` to re-check — had no exit at all. This is not "accept the
+    risk", which the card deliberately does not offer: it is a human saying the finding is not
+    true, on the record, in a document a gate receipt binds.
+    """
+    return {
+        str(entry.get("subject_id", ""))
+        for entry in human.get("dispositions", []) or []
+        if isinstance(entry, Mapping) and str(entry.get("action", "")) == "dispute_finding"
+    }
+
+
+def blocking_reasons(review: models.Review, effective: str, human: Mapping[str, Any] | None = None) -> list[str]:
     """Every mechanical reason this review cannot open gate 4, aggregated (plan §14, §15)."""
+    disputed = disputed_subjects(human if human is not None else review.human)
     reasons: list[str] = []
     for finding in review.blocking_security_findings:
+        if str(finding.get("id", "")) in disputed:
+            continue
         reasons.append(f"blocking security finding {finding.get('id', '?')}: {finding.get('attack_scenario', '')}")
     for gap in review.machine.get("gaps", []) if isinstance(review.machine.get("gaps"), list) else []:
         if isinstance(gap, Mapping) and gap.get("blocking") is True:

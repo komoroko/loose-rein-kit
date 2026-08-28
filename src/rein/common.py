@@ -68,6 +68,18 @@ RC_CANCELLED = 125
 MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
 
+def as_int(value: object, default: int = 0) -> int:
+    """`value` when it really is an int, `default` otherwise. `bool` is not an int here.
+
+    Every document this system reads is untrusted text — a config a human edited, a provider's
+    usage envelope, a reviewer's JSON — so every read of a number is a coercion, and the coercion
+    had been written five times over in five modules with three different signatures. `True` is
+    excluded deliberately: JSON's `true` arriving where a count belongs is a malformed document,
+    not the number one.
+    """
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
 def stdin_is_terminal() -> bool:
     """Whether stdin is an interactive terminal.
 

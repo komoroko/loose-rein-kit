@@ -57,13 +57,14 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from rein import (
+    adapters,
     build_git,
     build_prompts,
     common,
@@ -79,6 +80,7 @@ from rein import (
     gate_guard,
     models,
     preflight,
+    run_record,
     strict_yaml,
 )
 from rein import repo as repo_mod
@@ -96,6 +98,22 @@ EnvironmentFault = faults.EnvironmentFault
 #: of worktrees. That wait belongs to whatever will re-run `rein build`, which is why capacity
 #: exhaustion skips these retries entirely and exits with `EXIT_RETRY_LATER` straight away.
 _LAUNCH_BACKOFF_SEC: tuple[float, ...] = (5.0, 15.0, 30.0)
+
+
+def _wait_out_the_machine(where: str, rc: int, attempt: int) -> None:
+    """Say that a launch failed for a machine reason, and wait before running it again.
+
+    A named unit rather than three lines inside `_launch`, because this is the only thing about
+    the retry a caller can observe. It was observable only by intercepting `time.sleep` for the
+    whole process — and the process sleeps for reasons that have nothing to do with this one:
+    `subprocess.Popen.wait(timeout=...)` polls with `time.sleep`, so two tests that counted this
+    backoff by patching the global were really counting every subprocess wait in the run, and
+    failed intermittently whenever the machine was busy enough for one to poll.
+    """
+    delay = _LAUNCH_BACKOFF_SEC[min(attempt, len(_LAUNCH_BACKOFF_SEC) - 1)]
+    print(f"    [launch] {where}: the launch failed (rc={rc}) for a machine reason; retrying in {delay:g}s")
+    time.sleep(delay)
+
 
 #: Where a sandboxed gate step sees the tree it is testing. One constant, so the mount and the
 #: working directory cannot disagree about where the repository is.
@@ -131,148 +149,13 @@ def _worktree_common_git_dir(checkout: Path) -> Path | None:
         return None
 
 
-@dataclass(frozen=True)
-class Adapter:
-    """What one agent CLI can do, as a declaration rather than as branches spread through the loop.
-
-    This started as two hard-coded dicts and one `if adapter == "claude"`, and every one of them
-    was load-bearing in a way nothing could see from outside. The write flags decided whether an
-    implementer could change a byte; the claude test decided whether a retry re-read the whole
-    ticket from cold; and nothing recorded that `codex` brings its own process sandbox — which is
-    what fails, unfixably, when `rein` is itself already running inside a container.
-
-    Making these fields lets `doctor` reason about the combination instead of the operator
-    discovering it as a task that mysteriously changed nothing.
-    """
-
-    name: str
-    #: How to launch it headless. The prompt is appended as the last argv element.
-    argv: tuple[str, ...]
-    #: What makes it able to change the tree. Empty when it can already. `codex exec` runs
-    #: read-only unless told otherwise, so without this every task produced an empty diff and
-    #: nothing said why. The review transport in `review.py` deliberately never gets these — a
-    #: reviewer that cannot write is the point.
-    write_flags: tuple[str, ...] = ()
-    #: How to stamp a launch with a session id, and how to resume that id. Both empty means the
-    #: CLI gets a fresh launch per retry: it re-reads its ticket, its design slice and the code
-    #: from cold every time, which is the single largest avoidable cost in a long build.
-    #: `codex` is empty on purpose and not for lack of a resume verb — it has one, but it resumes
-    #: *the last session*, and with `max_parallel` leaves in flight there is no way to say which
-    #: session that is. Guessing would hand one leaf another leaf's context.
-    session_flags: tuple[str, ...] = ()
-    resume_flags: tuple[str, ...] = ()
-    #: Whether the CLI establishes its own process isolation (seccomp/landlock/bwrap) around the
-    #: work it does. Two nested sandboxes is not twice as safe: the inner one needs kernel
-    #: features the outer one has already dropped, and it fails at the point where the agent tries
-    #: to write, with a message that reaches nobody.
-    own_sandbox: bool = False
-    #: What makes it report what a launch cost — the token counts, the model that answered, the
-    #: price — instead of bare text. Empty for a CLI whose envelope this release has not seen: an
-    #: unreported launch is recorded as unmeasured, never as zero (`usage.Usage.unavailable`).
-    #: Adding flags here without an `envelope` to read them is how the answer stops parsing.
-    usage_flags: tuple[str, ...] = ()
-    #: Reads that CLI's envelope into `(the answer, what it cost)`. Paired with `usage_flags`.
-    envelope: Callable[[str], tuple[str, usage_mod.Usage]] | None = None
-    #: How to tell this CLI which model to run. Empty for one whose flag this release has not
-    #: verified — and an unapplied model is not a small thing here: `agents.<role>.model` is what
-    #: the gate-④ independence check is derived from, so a config naming a model the launcher
-    #: cannot pass would declare a separation nothing performs. `_argv_for` refuses that
-    #: combination rather than launching the CLI's default under another model's name.
-    model_flags: tuple[str, ...] = ()
-    #: What makes a resume *branch* the session instead of continuing it: the forks share
-    #: everything read before the fork and none of what any of them then concludes. That is the
-    #: difference between sharing the reading and sharing the readings, and it is what lets two
-    #: stages that must reach independent verdicts be handed one (large, expensive) diff once
-    #: (`review._shared_reading`). Empty for a CLI that cannot branch a session.
-    fork_flags: tuple[str, ...] = ()
-
-    @property
-    def resumable(self) -> bool:
-        return bool(self.session_flags and self.resume_flags)
-
-    @property
-    def forkable(self) -> bool:
-        """Whether one reading can be handed to two launches without their answers meeting."""
-        return bool(self.resumable and self.fork_flags)
-
-    def launch_argv(self, model: str = "") -> tuple[str, ...]:
-        """How to launch it: running `model` when one is named, and reporting what it cost.
-
-        A named model this CLI cannot be told to run is refused by the caller
-        (`Config._argv_for`, `review._adapter_for_role`), never quietly dropped — the model is
-        what the independence check is derived from, so launching the default under another
-        model's name is the exact lie this field exists to stop.
-        """
-        chosen = (*self.model_flags, model) if model and self.model_flags else ()
-        return self.argv + chosen + self.usage_flags
-
-    def read_output(self, output: str) -> tuple[str, usage_mod.Usage]:
-        """`(what it said, what it cost)`. An adapter with no envelope says it did not measure."""
-        if self.envelope is None:
-            return output, usage_mod.Usage.unavailable()
-        return self.envelope(output)
-
-
-#: Every agent CLI this release knows how to launch.
-ADAPTER_TABLE: dict[str, Adapter] = {
-    "claude": Adapter(
-        name="claude",
-        argv=("claude", "-p"),
-        session_flags=("--session-id",),
-        resume_flags=("--resume",),
-        fork_flags=("--fork-session",),
-        model_flags=("--model",),
-        usage_flags=usage_mod.CLAUDE_JSON_FLAGS,
-        envelope=usage_mod.parse_claude_envelope,
-    ),
-    "codex": Adapter(
-        name="codex",
-        argv=("codex", "exec"),
-        write_flags=("--sandbox", "workspace-write"),
-        own_sandbox=True,
-    ),
-    "gemini": Adapter(name="gemini", argv=("gemini", "-p")),
+#: How a run ended, by the exit code it ended on — the `outcome` its measurement records.
+_RUN_OUTCOME: Mapping[int, str] = {
+    common.EXIT_DONE: "done",
+    common.EXIT_HUMAN_NEEDED: "human-needed",
+    common.EXIT_CANNOT_PROCEED: "cannot-proceed",
+    common.EXIT_RETRY_LATER: "retry-later",
 }
-
-
-def adapter_for(argv: Sequence[str]) -> Adapter | None:
-    """The capability record of whatever CLI `argv` launches, or None for an unknown one."""
-    return ADAPTER_TABLE.get(argv[0]) if argv else None
-
-
-def launch_refusal(config: models.Config | None, role: str) -> str:
-    """Why `role` cannot be launched as configured, or `""` when it can.
-
-    One rule, read at every moment that can act on it: `rein agent` refuses to *write* such a
-    config, `rein doctor` names it, and the build loop and the review pipeline refuse to launch
-    under it. It lived only at the two launch sites, which is the latest of those moments and the
-    most expensive: `rein agent codex` — the bulk switch that command's own docstring documents —
-    put `adapter: codex` beside the scaffold's `model: opus` on all three review roles, exited 0,
-    warned about the independence of two models `codex` would never be told to run, and failed at
-    `rein build`, three gates later.
-    """
-    adapter = (config.adapter(role) if config is not None else "") or "claude"
-    record = ADAPTER_TABLE.get(adapter)
-    if record is None:
-        return (
-            f"agents.{role}.adapter is {adapter!r}, which this release does not know how to launch "
-            f"(one of: {', '.join(sorted(ADAPTER_TABLE))})"
-        )
-    model = config.model(role) if config is not None else ""
-    if model and not record.model_flags:
-        return (
-            f"agents.{role}.model is {model!r} and this release cannot tell {adapter!r} which model "
-            "to run, so the launch would take the CLI's default under that name. The gate-④ "
-            "independence check is derived from the model, so that is a separation nothing performs "
-            "— drop the model, or point the role at an adapter whose model flag is known."
-        )
-    return ""
-
-
-def write_flags(argv: tuple[str, ...]) -> tuple[str, ...]:
-    """The write-enabling flags for the CLI `argv` launches, keyed on the CLI's own name."""
-    adapter = adapter_for(argv)
-    return adapter.write_flags if adapter else ()
 
 
 @dataclass(frozen=True)
@@ -347,20 +230,14 @@ class Config:
         """The deterministic commands of the gate, for prompts and display."""
         return [s.display for s in self.steps if s.kind == "command" and s.command]
 
-    @staticmethod
-    def _argv_for(config: models.Config, role: str) -> tuple[str, ...]:
-        """The argv that launches `role`'s configured adapter. Refuses an adapter it cannot launch.
-
-        Resolved up front for every role the gate will use, so an unlaunchable adapter stops the
-        build before an implementer has been paid for — rather than at the first step that needed
-        it, halfway through a task.
-        """
-        if refusal := launch_refusal(config, role):
-            raise ValueError(refusal)
-        return ADAPTER_TABLE[config.adapter(role) or "claude"].launch_argv(config.model(role))
-
     @classmethod
     def from_models(cls, config: models.Config) -> Config:
+        """The knobs, with every role the run will launch resolved up front.
+
+        Resolving here rather than at the first step that needs it is what makes an unlaunchable
+        adapter stop the build before an implementer has been paid for, instead of halfway
+        through a task.
+        """
         steps = tuple(
             GateStep(
                 name=step.name,
@@ -372,13 +249,15 @@ class Config:
                 agent_role=step.agent_role,
                 # An agent step launches the role it declares. The schema already requires
                 # `agent_role` here; resolving it is what makes the declaration true.
-                agent_argv=cls._argv_for(config, step.agent_role) if step.kind == "agent" and step.agent_role else (),
+                agent_argv=(
+                    adapters.launch_argv(config, step.agent_role) if step.kind == "agent" and step.agent_role else ()
+                ),
                 paths=step.paths,
                 stage=step.stage,
             )
             for step in config.quality_gate
         )
-        argv = cls._argv_for(config, "implementer")
+        argv = adapters.launch_argv(config, "implementer")
         return cls(
             raw=config,
             max_parallel=max(1, config.max_parallel),
@@ -1054,7 +933,7 @@ class Orchestrator:
         """
         attempt = 0
         adapter = argv[0] if argv else ""
-        record = adapter_for(argv)
+        record = adapters.adapter_for(argv)
         prompt_bytes = sum(len(part.encode("utf-8")) for part in argv)
         while True:
             # Counted per attempt, inside the loop, because a retry is another launch: the same
@@ -1085,9 +964,7 @@ class Orchestrator:
                 raised = EnvironmentFault(fault, where=where, rc=rc, output=out)
                 self._note_diagnostic(task_id, {"last_agent": note, "last_fault": fault_note(raised)})
                 raise raised
-            delay = _LAUNCH_BACKOFF_SEC[min(attempt, len(_LAUNCH_BACKOFF_SEC) - 1)]
-            print(f"    [launch] {where}: the launch failed (rc={rc}) for a machine reason; retrying in {delay:g}s")
-            time.sleep(delay)
+            _wait_out_the_machine(where, rc, attempt)
             attempt += 1
 
     def _escalate(self, kind: str, message: str, *, task: str | Sequence[str] = "") -> None:
@@ -1224,8 +1101,8 @@ class Orchestrator:
         )
 
     @property
-    def _implementer_adapter(self) -> Adapter | None:
-        return adapter_for(self.config.adapter_argv)
+    def _implementer_adapter(self) -> adapters.Adapter | None:
+        return adapters.adapter_for(self.config.adapter_argv)
 
     @property
     def _resume_capable(self) -> bool:
@@ -1263,7 +1140,7 @@ class Orchestrator:
         prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, base, "implementer"))
         where = f"{task.id}: implementer"
         adapter = self._implementer_adapter
-        flags = list(write_flags(self.config.adapter_argv))
+        flags = list(adapters.write_flags(self.config.adapter_argv))
         if session and adapter is not None:
             flags += [*(adapter.resume_flags if resume else adapter.session_flags), session]
         try:
@@ -1290,7 +1167,7 @@ class Orchestrator:
         # A fresh token: the first one was spent on the launch that failed, and the server
         # accepts each nonce once.
         self._launch(
-            [*self.config.adapter_argv, *write_flags(self.config.adapter_argv), prompt],
+            [*self.config.adapter_argv, *adapters.write_flags(self.config.adapter_argv), prompt],
             cwd=cwd,
             where=where,
             env=self._leaf_env(task),
@@ -1476,7 +1353,7 @@ class Orchestrator:
         self._launch(
             [
                 *self.config.adapter_argv,
-                *write_flags(self.config.adapter_argv),
+                *adapters.write_flags(self.config.adapter_argv),
                 build_prompts.review_fix_prompt(
                     task, findings, gate_cmds=self.config.gate_cmds, dossier_path=dossier_path
                 ),
@@ -1529,7 +1406,7 @@ class Orchestrator:
         theirs = self._graph_task(collision.theirs_task)
         prompt = build_prompts.conflict_prompt(ours, theirs, collision.paths, gate_cmds=self.config.gate_cmds)
         self._launch(
-            [*self.config.adapter_argv, *write_flags(self.config.adapter_argv), prompt],
+            [*self.config.adapter_argv, *adapters.write_flags(self.config.adapter_argv), prompt],
             cwd=cwd,
             where=f"{collision.ours_task or 'merge'}: conflict",
             env=self._leaf_env(ours) if ours is not None else None,
@@ -2060,7 +1937,7 @@ class Orchestrator:
         self._launch(
             [
                 *self.config.adapter_argv,
-                *write_flags(self.config.adapter_argv),
+                *adapters.write_flags(self.config.adapter_argv),
                 self._integration_fix_prompt(ids, failure_log),
             ],
             cwd=self.root,
@@ -2119,15 +1996,6 @@ class Orchestrator:
 
     # -- worktree / merge --
 
-    def _git(self, args: list[str], cwd: str | None = None) -> None:
-        self.ws.git(args, cwd)
-
-    def _worktree_path(self, task: dag.Task) -> str:
-        return self.ws.worktree_path(task.id)
-
-    def _add_worktree(self, task: dag.Task) -> str:
-        return self.ws.add_worktree(task.id, str(self._handoff_for(task).get("salvage_branch", "")))
-
     def _safe_run_task(self, task: dag.Task, cwd: str) -> LeafOutcome:
         """Call _run_task_to_done safely from a thread, so one leaf cannot strand the batch.
 
@@ -2146,9 +2014,6 @@ class Orchestrator:
         except StopLoop as exc:
             return LeafOutcome(ok=False, log=str(exc))
 
-    def _finalize_commit(self, cwd: str, message: str) -> bool:
-        return self.ws.finalize_commit(cwd, message)
-
     def _gate_violations(self, paths: list[str]) -> list[tuple[str, str]]:
         """Gate-guard verdict for each path; [(path, deny reason)] for the denied ones.
 
@@ -2161,12 +2026,6 @@ class Orchestrator:
         """
         verdicts = ((p, gate_guard.evaluate(str(self.repo.path(p)), self.repo)) for p in paths)
         return [(p, reason) for p, (ok, reason) in verdicts if not ok]
-
-    def _branch_changed_paths(self, task_id: str) -> list[str]:
-        return self.ws.branch_changed_paths(task_id)
-
-    def _changed_since(self, base: str) -> list[str]:
-        return self.ws.changed_since(base)
 
     def _escalate_gate_violation(self, task_id: str, where: str, violations: list[tuple[str, str]]) -> None:
         listing = "\n".join(f"  {p} — {reason}" for p, reason in violations)
@@ -2350,6 +2209,9 @@ class Orchestrator:
         self._load_landing()
         if self.dry_run:
             return self._run_loop()  # read-only: no lock either, and no contention to guard against
+        #: How this run ended, for the measurement below. It starts at the pessimistic value so
+        #: that a raise anywhere is recorded as what it was rather than as nothing.
+        outcome = "failed"
         try:
             # Lock order is build.lock -> store.lock, always; the control plane takes the store
             # lock per request inside it. The socket lives for exactly this run: a leaf that
@@ -2357,13 +2219,15 @@ class Orchestrator:
             with build_lock(self.repo), control_plane.serving(self.repo) as server:
                 self.control = server
                 try:
-                    return self._run_loop()
+                    rc = self._run_loop()
+                    outcome = _RUN_OUTCOME.get(rc, "failed")
+                    return rc
                 finally:
                     # In the `finally` because a run that stopped for capacity established real
                     # facts before it stopped, and making the next attempt re-establish them is
                     # exactly the waste the ledger exists to end.
                     self.ledger.flush()
-                    self._record_spend()
+                    self._record_spend(outcome)
                     for summary in (self.ledger.summary(), self.spend_summary()):
                         if summary:
                             print(f"[{summary}]")
@@ -2391,44 +2255,23 @@ class Orchestrator:
             self.config.raw, self.config.raw.quality_gate, roles, runtime=executors.container_runtime()
         )
 
-    def _record_spend(self) -> None:
-        """Append this run's measurement to the audit chain. Never raises.
+    def _record_spend(self, outcome: str) -> None:
+        """Append this run's measurement to the audit chain (`run_record`). Never raises.
 
-        In the chain rather than in `state.yaml` for two reasons. A run ends in one of four ways
-        and `EXIT_RETRY_LATER` — capacity exhausted mid-build — is the likely one on a long build;
-        an in-process counter dies with it, and a `state.yaml` field would only hold the last run's
-        figure. The chain never rotates, so summing `run_measured` over a cycle is the cycle's
-        total, and each run stays separately readable.
-
-        It records nothing when nothing launched: a run that took the lock and found no frontier
-        did not measure zero, it measured nothing, and an event saying "0 bytes" would be a
-        different claim.
-
-        A failure to append is swallowed. This is the last thing a run does and it is a
-        measurement — losing the number is a worse outcome than the run reporting it, but stopping
-        a finished build over a bookkeeping write would be worse than both.
+        `outcome` is how the run ended, in exit-code terms. It was missing here and present in the
+        review pipeline's copy of this event, which is one of the ways the two shapes had drifted
+        apart; the words differ because the two runs end differently, and `kind` is what tells a
+        reader which vocabulary it is reading.
         """
-        totals = self.spend_totals()
-        if not totals or not self.cycle_id:
-            return
-        billed = self.usage_totals()
-        detail = {
-            "run_id": self.run_id,
-            "launches": sum(row["launches"] for row in totals.values()),
-            "cold_launches": sum(row["cold_launches"] for row in totals.values()),
-            "prompt_bytes": sum(row["prompt_bytes"] for row in totals.values()),
-            "handed_bytes": sum(row["handed_bytes"] for row in totals.values()),
-            "by_role": totals,
-            # What the provider billed, where an adapter says so. `measured: false` is the record
-            # for one that does not — summing this over a cycle must never read a silent role as
-            # a free one.
-            "billed_by_role": {role: row.to_detail() for role, row in billed.items()},
-        }
-        try:
-            with self.store.transaction() as tx:
-                tx.append("run_measured", cycle_id=self.cycle_id, detail=detail)
-        except Exception as exc:  # noqa: BLE001 - a lost measurement must not fail a finished run
-            logger.debug(f"could not record the run measurement ({exc})")
+        run_record.record(
+            self.store,
+            kind="build",
+            cycle=self.cycle_id,
+            run_id=self.run_id,
+            outcome=outcome,
+            by_role=self.spend_totals(),
+            billed=self.usage_totals(),
+        )
 
     def _source_problems(self) -> list[str]:
         """Why the prose this build would read is not the prose gate ③ approved.
@@ -2620,7 +2463,7 @@ class Orchestrator:
             # below), where --no-verify and already-in-HEAD commits both escape the commit-stage
             # guard — so re-check everything the task changed before accepting it as done.
             if not self.dry_run and pre_head:
-                violations = self._gate_violations(self._changed_since(pre_head))
+                violations = self._gate_violations(self.ws.changed_since(pre_head))
                 if violations:
                     self._block_for_gate_violation(task.id, "its work-branch changes", violations)
                     raise StopLoop(
@@ -2632,7 +2475,7 @@ class Orchestrator:
             # Finalize the task diff only. The .rein/ orchestration state (tasks.yaml status, etc.)
             # is not included in the per-task commit (keeping one commit = one task). If the
             # implementer has not committed, this finalizes the diff (no-op otherwise).
-            if not self._finalize_commit(self.root, f"{task.id}: {task.title}"):
+            if not self.ws.finalize_commit(self.root, f"{task.id}: {task.title}"):
                 # The tree on the work branch keeps the diff, but the task must not be marked done
                 # without its commit (one commit = one task is the record gate ④ reviews).
                 self._set_status(task.id, "blocked")
@@ -2654,10 +2497,13 @@ class Orchestrator:
         for task in tasks:
             self._set_status(task.id, "in-progress")
         # Worktree creation is serial (avoid git lock contention). The implementation is run in parallel after.
-        branches = {task.id: self._add_worktree(task) for task in tasks}
+        branches = {
+            task.id: self.ws.add_worktree(task.id, str(self._handoff_for(task).get("salvage_branch", "")))
+            for task in tasks
+        }
         results: dict[str, LeafOutcome] = {}
         with ThreadPoolExecutor(max_workers=max(1, self.config.max_parallel)) as pool:
-            futures = {pool.submit(self._safe_run_task, t, self._worktree_path(t)): t for t in tasks}
+            futures = {pool.submit(self._safe_run_task, t, self.ws.worktree_path(t.id)): t for t in tasks}
             for future, task in futures.items():
                 results[task.id] = future.result()
 
@@ -2696,7 +2542,7 @@ class Orchestrator:
                 continue
             # The leaf's full diff must be on its branch before the merge — an implementer that
             # forgot to commit would otherwise lose that work when the worktree is removed.
-            if not self._finalize_commit(self._worktree_path(task), f"{task.id}: {task.title}"):
+            if not self.ws.finalize_commit(self.ws.worktree_path(task.id), f"{task.id}: {task.title}"):
                 # Keep the worktree (it may hold the only copy) and let the rest of the batch merge.
                 self._set_status(task.id, "blocked")
                 blocked_any = True
@@ -2705,7 +2551,7 @@ class Orchestrator:
             # bypassed hook can carry a gate violation; merging would bury it in the work branch's
             # HEAD where --check-diff never looks again. Check the branch's full diff first.
             if not self.dry_run:
-                violations = self._gate_violations(self._branch_changed_paths(task.id))
+                violations = self._gate_violations(self.ws.branch_changed_paths(task.id))
                 if violations:
                     self._block_for_gate_violation(task.id, f"leaf branch {branches[task.id]}", violations)
                     self._cleanup_worktree(task)  # not merged; the branch keeps the diff for review
@@ -2848,7 +2694,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         config = Config.load(repo)
-    except (OSError, ValueError, models.DocumentError, strict_yaml.StrictParseError) as exc:
+    except (OSError, ValueError, adapters.LaunchRefused, models.DocumentError, strict_yaml.StrictParseError) as exc:
         logger.error(f"cannot load .rein/config.yaml: {exc} — `rein doctor` validates it")
         return 1
     if not args.supervise:
