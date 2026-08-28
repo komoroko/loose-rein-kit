@@ -31,7 +31,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from rein import data, digests, strict_yaml
+from rein import common, data, digests, strict_yaml
 
 # --- vocabulary ---------------------------------------------------------------
 #
@@ -367,6 +367,10 @@ EVENT_ORDER: tuple[str, ...] = (
     "actual_extraction_failed",
     "comparison_generated",
     "security_review_generated",
+    # A blocking finding stopped blocking. In the chain because that is a state change and the
+    # chain is the only place it survives: `review.yaml` holds one generation's findings, and the
+    # next generation re-derives the list from a reviewer with no memory of the last one.
+    "security_finding_resolved",
     "review_generated",
     "review_failed",
     "decision_recorded",
@@ -384,6 +388,13 @@ EVENT_VALUES = frozenset(EVENT_ORDER)
 #: reader can tell them apart rather than seeing an unqualified "approved".
 CONFIRMATION_CHANNELS: tuple[str, ...] = ("terminal", "ui-session")
 CONFIRMATION_CHANNEL_VALUES = frozenset(CONFIRMATION_CHANNELS)
+
+#: A security finding's life. `open` holds gate ④ shut; `resolved` is recorded only when the code
+#: the finding anchored to is no longer in the tree (`security_review.resolution_of`) — a fact
+#: about the change, never the reviewer's word for it. A finding is never deleted, so the document
+#: keeps the record of what closed it and against which head.
+SECURITY_FINDING_STATUS_ORDER: tuple[str, ...] = ("open", "resolved")
+SECURITY_FINDING_STATUS_VALUES = frozenset(SECURITY_FINDING_STATUS_ORDER)
 
 #: A change request's life. `open` holds the gate shut; `addressed` is the agent saying it has
 #: been answered and naming how, which stops it blocking but puts it on the approval screen; a
@@ -855,11 +866,6 @@ class State:
         return [cr for cr in self.change_requests if cr.get("gate") == gate and cr.get("status") in wanted]
 
     @property
-    def execution(self) -> Mapping[str, Any]:
-        value = self.raw.get("execution")
-        return value if isinstance(value, dict) else {}
-
-    @property
     def task_status(self) -> Mapping[str, str]:
         value = self.raw.get("tasks")
         if not isinstance(value, dict):
@@ -985,7 +991,14 @@ class Review:
 
     @property
     def blocking_security_findings(self) -> tuple[Mapping[str, Any], ...]:
-        return tuple(f for f in self.security_findings if f.get("blocking") is True)
+        """Findings that still hold gate ④ shut: `blocking`, and not closed by the change itself.
+
+        A `resolved` finding stays in the document — that is the record of what closed it and
+        against which head — but it is not a blocker any more. Filtering here rather than at each
+        reader is what keeps `doctor`, `findings`, `human_review`, `pr_draft`, `review_policy` and
+        `status_api` from having to agree about it separately.
+        """
+        return tuple(f for f in self.security_findings if f.get("blocking") is True and f.get("status") != "resolved")
 
     @property
     def coverage(self) -> Mapping[str, Any]:
@@ -1217,13 +1230,9 @@ class Config:
         value = self.raw.get("execution")
         return value if isinstance(value, dict) else {}
 
-    def _int(self, section: Mapping[str, Any], key: str, default: int) -> int:
-        value = section.get(key)
-        return value if isinstance(value, int) else default
-
     @property
     def max_parallel(self) -> int:
-        return self._int(self.execution, "max_parallel", 3)
+        return common.as_int(self.execution.get("max_parallel"), 3)
 
     @property
     def worktree_dir(self) -> str:
@@ -1231,7 +1240,7 @@ class Config:
 
     @property
     def command_timeout_sec(self) -> int:
-        return self._int(self.execution, "command_timeout_sec", 1800)
+        return common.as_int(self.execution.get("command_timeout_sec"), 1800)
 
     @property
     def agent_timeout_sec(self) -> int:
@@ -1248,7 +1257,7 @@ class Config:
         A step whose runtime *is* knowable keeps its ceiling — that is `command_timeout_sec`, and
         `faults.classify_step` still reads a test suite that hangs as a fact about the code.
         """
-        return self._int(self.execution, "agent_timeout_sec", 0)
+        return common.as_int(self.execution.get("agent_timeout_sec"), 0)
 
     @property
     def launch_retries(self) -> int:
@@ -1258,7 +1267,7 @@ class Config:
         property of the machine, and spending a task's budget on it would charge the code for
         something it did not do.
         """
-        return self._int(self.execution, "launch_retries", 2)
+        return common.as_int(self.execution.get("launch_retries"), 2)
 
     @property
     def profiles(self) -> dict[str, ExecutorProfile]:

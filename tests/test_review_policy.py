@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from rein import diff_facts, models, review_policy
+from rein import decision_cards, diff_facts, models, review_policy
 from rein import repo as repo_mod
 
 # --- effective risk (plan §13.5) ----------------------------------------------
@@ -245,3 +245,86 @@ def test_roundtrip_json_is_parseable() -> None:
     # Sanity: a well-formed reviewer document round-trips through the strict parser.
     document = review_policy.parse_reviewer_output(json.dumps({"findings": []}))
     assert document == {"findings": []}
+
+
+# --- a security finding's life, seen from the gate (D4) -----------------------
+
+_A_FINDING = {
+    "id": "SEC-001",
+    "severity": "high",
+    "category": "credential_exposure",
+    "attack_scenario": "the reviewer container reaches a host credential",
+    "blocking": True,
+}
+
+
+def test_a_resolved_finding_no_longer_holds_the_gate_shut() -> None:
+    """`resolved` is not the reviewer's word for it: `security_review.resolution_of` records it only
+    when the code the finding anchored to is gone from the tree. The finding stays in the document —
+    that is the record of what closed it — and stops being a blocker."""
+    review = _review(machine={"security": {"findings": [{**_A_FINDING, "status": "resolved"}]}})
+    assert review.blocking_security_findings == ()
+    assert review.security_findings, "a resolved finding is kept, never deleted"
+    assert not [r for r in review_policy.blocking_reasons(review, "low") if "SEC-001" in r]
+
+
+def test_an_open_finding_still_holds_the_gate_shut() -> None:
+    review = _review(machine={"security": {"findings": [_A_FINDING]}})
+    assert [r for r in review_policy.blocking_reasons(review, "low") if "SEC-001" in r]
+
+
+def test_a_human_may_dispute_a_finding_the_change_did_not_touch() -> None:
+    """The only way out for a finding with no anchors — nothing for `resolution_of` to re-check, so
+    it cannot say it was fixed. `dispute_finding` was already in the schema's disposition list and
+    already offered on every decision card; it simply had no effect on the gate. It is not "accept
+    the risk", which no card offers: it is a human saying the finding is not true, on the record."""
+    review = models.Review(
+        {
+            "machine": {"status": "generated", "security": {"findings": [_A_FINDING]}},
+            "human": {
+                "status": "in_progress",
+                "dispositions": [{"subject_id": "SEC-001", "action": "dispute_finding"}],
+            },
+        }
+    )
+    assert not [r for r in review_policy.blocking_reasons(review, "low") if "SEC-001" in r]
+    # Any other disposition is not a dispute. "I will revise the implementation" leaves it standing.
+    still = models.Review(
+        {
+            "machine": review.machine,
+            "human": {"status": "in_progress", "dispositions": [{"subject_id": "SEC-001", "action": "reduce_scope"}]},
+        }
+    )
+    assert [r for r in review_policy.blocking_reasons(still, "low") if "SEC-001" in r]
+
+
+def test_a_resolved_finding_asks_the_human_nothing() -> None:
+    """A card is a question. `security_review.resolution_of` answered this one against the
+    committed tree, which is a stronger answer than the card would collect — and left in, a fixed
+    `high` finding raised a mandatory card, so fixing the code was what stopped the freeze."""
+    resolved = {**_A_FINDING, "blocking": False, "status": "resolved", "resolved_at": {"subject_head_sha": "f" * 40}}
+    _, cards = decision_cards.derive_cards(
+        claims=[], gaps=[], extra_behaviors=[], security_findings=[resolved], plan_risk={}, plan_domains={}
+    )
+    assert cards == []
+
+
+def test_an_open_finding_still_asks() -> None:
+    _, cards = decision_cards.derive_cards(
+        claims=[],
+        gaps=[],
+        extra_behaviors=[],
+        security_findings=[{**_A_FINDING, "status": "open"}],
+        plan_risk={},
+        plan_domains={},
+    )
+    assert [c["risk"] for c in cards] == ["high"]
+
+
+def test_a_finding_with_no_status_at_all_still_asks() -> None:
+    """Fail closed, the same way `blocking_security_findings` does: only the word `resolved`
+    silences a finding, never the absence of one."""
+    _, cards = decision_cards.derive_cards(
+        claims=[], gaps=[], extra_behaviors=[], security_findings=[_A_FINDING], plan_risk={}, plan_domains={}
+    )
+    assert [c["risk"] for c in cards] == ["high"]

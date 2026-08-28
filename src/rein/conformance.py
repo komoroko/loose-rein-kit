@@ -19,7 +19,7 @@ groups (plan §12.4): one model session answering both halves is not a second op
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,7 +74,10 @@ def contract() -> str:
         '"did this build something nobody asked for?", and an empty list is a finding, not a '
         "formality.\n"
         "- There is no single `verified`. The three axes are separate on purpose: integrity is a "
-        "fact, semantic_support is your judgement, conformance is an observation."
+        "fact, semantic_support is your judgement, conformance is an observation.\n"
+        "- Answer for EVERY claim in the expected model. A claim you leave out is not read as "
+        "absent, it is recorded as `unknown` and put in front of a human as an unanswered "
+        "decision; say `unknown` yourself, with what you were missing, rather than being silent."
     )
 
 
@@ -115,11 +118,16 @@ EXTRA_CATEGORIES = frozenset(
 
 @dataclass(frozen=True)
 class ComparatorResult:
-    """The validated per-claim comparison, the actual-coverage gaps, and the extra behaviours."""
+    """The validated per-claim comparison, the actual-coverage gaps, and the extra behaviours.
+
+    `claims` is one entry per claim in the *frozen plan*, not one per entry the Comparator
+    returned. `unanswered` names the ones it was silent about, which is the difference.
+    """
 
     claims: tuple[dict[str, Any], ...]
     actual_coverage_gaps: tuple[dict[str, Any], ...]
     extra_behaviors: tuple[dict[str, Any], ...] = ()
+    unanswered: tuple[str, ...] = ()
 
 
 def run_comparator(
@@ -130,15 +138,31 @@ def run_comparator(
     commit: str,
     actual_statement_ids: Iterable[str],
     known_ids: Iterable[str],
+    expected_claim_ids: Iterable[str],
     effective_risk: str,
     independence: Mapping[str, Any],
 ) -> ComparatorResult:
-    """Run the Comparator and validate it against the never-list (plan §24.3) and independence."""
+    """Run the Comparator and validate it against the never-list (plan §24.3) and independence.
+
+    **The claim list is framed by the plan, not by the answer.** A model's output is open-world:
+    what came back is the claims it chose to speak about, and nothing in it says whether that was
+    all of them. Read as a closed ledger — which is how this used to read it — a Comparator that
+    returned three of eight claims produced a review saying `claims_total: 3, aligned: 3`, with no
+    verdict, no decision card and no gate block for the other five. The one check that existed ran
+    the other way (`validate_citations`: every id returned must exist in the plan), so a fabricated
+    claim was caught and a missing one was invisible.
+
+    So the frozen plan supplies the rows and the Comparator fills them. A claim it was silent about
+    is completed here as `unknown` on all three axes — the same "we did not measure" state the rest
+    of this codebase names rather than infers — which `decision_cards` turns into a card a human
+    must answer. Completed rather than refused because refusing would throw away three launches
+    over one omission, and on a plan with many claims there would be no way out of it.
+    """
     ok, message = review_policy.independence_ok(independence, effective_risk)
     if not ok:
         raise ComparatorError(message)
 
-    document = review_policy.parse_reviewer_output(reviewer(request), what="conformance")
+    document = review_policy.parse_reviewer_output(reviewer(request).text, what="conformance")
 
     # §24.3: the Comparator must not rewrite the Actual. It references statements read-only.
     for forbidden in ("actual_statements", "actual_extraction"):
@@ -179,13 +203,66 @@ def run_comparator(
             problems += _validate_extra(extra, actual_ids=actual_ids)
             extras.append(dict(extra))
 
+    # A claim answered twice is not a partial answer to fill in, it is a contradictory one: two
+    # verdicts for one claim, and picking either is this module deciding which the comparator
+    # meant. Refused rather than de-duplicated — a `diverged` beside an `aligned` is exactly the
+    # row that raises a decision card, and dropping it would open the gate on the quieter half.
+    problems += review_policy.reject_duplicate_ids(
+        [{"id": claim.get("claim_id")} for claim in claims], what="conformance"
+    )
     if problems:
         raise ComparatorError("conformance rejected:\n" + "\n".join(f"  - {p}" for p in problems))
+
+    framed, unanswered = _frame_by_expected(claims, expected_claim_ids)
     return ComparatorResult(
-        claims=tuple(claims),
+        claims=tuple(framed),
         actual_coverage_gaps=tuple(gaps),
         extra_behaviors=tuple(extras),
+        unanswered=tuple(unanswered),
     )
+
+
+#: What a claim the Comparator never spoke about is recorded as. Every axis says the same thing —
+#: nobody looked — because inventing any other value here would be this file answering a question
+#: it did not ask. `machine_assessed` is the only honest basis: no experiment, expert or proof was
+#: involved in producing this row, and the schema has no basis meaning "none".
+_UNANSWERED_TEXT = "the comparator returned no result for this claim"
+
+
+def _unanswered_claim(claim_id: str) -> dict[str, Any]:
+    return {
+        "claim_id": claim_id,
+        "verdict": "unknown",
+        "integrity": {"status": "unavailable"},
+        "semantic_support": {"status": "unknown", "assessment_basis": "machine_assessed"},
+        "conformance": {"status": "unknown"},
+        "unknowns": [_UNANSWERED_TEXT],
+    }
+
+
+def _frame_by_expected(
+    claims: Sequence[Mapping[str, Any]], expected_claim_ids: Iterable[str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The plan's claims in the plan's order, each carrying the Comparator's row or an `unknown`.
+
+    An answer that reached here has one row per claim id at most: `reject_duplicate_ids` above
+    refuses two, because choosing between two verdicts for one claim is not this function's to
+    make.
+    """
+    answered: dict[str, dict[str, Any]] = {str(claim.get("claim_id", "")): dict(claim) for claim in claims}
+    framed: list[dict[str, Any]] = []
+    unanswered: list[str] = []
+    for cid in expected_claim_ids:
+        row = answered.pop(cid, None)
+        if row is None:
+            row = _unanswered_claim(cid)
+            unanswered.append(cid)
+        framed.append(row)
+    # Anything left answered a claim the plan does not have. `validate_citations` already refused
+    # that above, so this is unreachable by a valid answer — and appending rather than dropping
+    # keeps this function from being the place a claim silently disappears.
+    framed += list(answered.values())
+    return framed, unanswered
 
 
 def actual_digest_of(request: Mapping[str, Any]) -> str:

@@ -28,7 +28,7 @@ worktree — the canonical record of anything decided here goes through the cont
 participant that is *supposed* to re-derive everything, having never seen the plan
 (`actual_extraction.FORBIDDEN_KEYS`). It re-derives it from its own request, which is all it is
 given: that stage is launched outside the repository precisely so it cannot go and read what a
-dossier would have handed it (`review._adapter_reviewer`).
+dossier would have handed it (`review_transport`).
 """
 
 from __future__ import annotations

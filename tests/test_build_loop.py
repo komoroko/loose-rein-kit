@@ -19,10 +19,24 @@ from typing import Any
 
 import pytest
 
-from rein import build_loop, common, conflict, dag, digests, dossier, evidence, executors, faults, models, pr_stack
+from rein import (
+    adapters,
+    build_loop,
+    common,
+    conflict,
+    dag,
+    digests,
+    dossier,
+    evidence,
+    executors,
+    faults,
+    models,
+    pr_stack,
+)
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
+from rein import usage as usage_mod
 from tests._support import (
     agent_envelope,
     agent_output,
@@ -150,7 +164,7 @@ def test_config_normalizes_the_quality_gate(tmp_path: Path) -> None:
 def test_an_unknown_adapter_is_refused_up_front() -> None:
     config = make_config()
     config["agents"]["implementer"]["adapter"] = "mystery"  # type: ignore[index]
-    with pytest.raises(ValueError, match="does not know how to launch"):
+    with pytest.raises(adapters.LaunchRefused, match="does not know how to launch"):
         build_loop.Config.from_models(models.Config(config))
 
 
@@ -200,9 +214,9 @@ def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
     config = _config_with_split_adapters()
     step = config.steps[0]
     assert step.agent_role == "code_reviewer"
-    assert step.agent_argv == build_loop.ADAPTER_TABLE["codex"].launch_argv()
+    assert step.agent_argv == adapters.ADAPTER_TABLE["codex"].launch_argv()
     # The implementer's own adapter is untouched — the two are resolved independently.
-    assert config.adapter_argv == build_loop.ADAPTER_TABLE["claude"].launch_argv()
+    assert config.adapter_argv == adapters.ADAPTER_TABLE["claude"].launch_argv()
 
 
 def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[str]]) -> object:
@@ -228,7 +242,7 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
     assert launched, "the agent step never launched anything"
-    assert tuple(launched[0][:2]) == build_loop.ADAPTER_TABLE["codex"].launch_argv(), (
+    assert tuple(launched[0][:2]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
         f"the agent step launched {launched[0][:2]} — it must use agents.code_reviewer, not agents.implementer"
     )
 
@@ -295,15 +309,15 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
     """The flags are one CLI's own vocabulary, not a portable concept — nothing else grows them."""
-    assert build_loop.write_flags(build_loop.ADAPTER_TABLE["claude"].launch_argv()) == ()
-    assert build_loop.write_flags(build_loop.ADAPTER_TABLE["gemini"].launch_argv()) == ()
-    assert build_loop.write_flags(()) == ()
+    assert adapters.write_flags(adapters.ADAPTER_TABLE["claude"].launch_argv()) == ()
+    assert adapters.write_flags(adapters.ADAPTER_TABLE["gemini"].launch_argv()) == ()
+    assert adapters.write_flags(()) == ()
 
 
 def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A reviewer that cannot write is the point. review.py launches the bare adapter argv, so
+    """A reviewer that cannot write is the point. The transport launches the bare adapter argv, so
     the read-only default is the one the reviewer wants — assert it stays that way."""
-    from rein import common, review
+    from rein import common, review_transport
 
     raw = make_config()
     raw["agents"]["code_reviewer"] = {"adapter": "codex"}
@@ -314,19 +328,20 @@ def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.Monk
         launched.append(cmd)
         return 0, agent_output(cmd, "{}")
 
-    # review.py resolves `common.run` at call time, so patching the module both share is what
-    # actually intercepts the launch — reaching through `review.common` is the same object by
-    # accident of import, and mypy is right that it is not part of review's interface.
+    # The transport resolves `common.run` at call time, so patching the module both share is what
+    # actually intercepts the launch — reaching through `review_transport.common` is the same
+    # object by accident of import, and mypy is right that it is not part of its interface.
     monkeypatch.setattr(common, "run", fake_run)
-    review._adapter_reviewer(repo, "code_reviewer")({"request": "x"})
-    assert launched[0] == list(build_loop.ADAPTER_TABLE["codex"].launch_argv())
+    ledger = usage_mod.Ledger()
+    review_transport._adapter_reviewer(repo, "code_reviewer", ledger=ledger)({"request": "x"})
+    assert launched[0] == list(adapters.ADAPTER_TABLE["codex"].launch_argv())
 
 
 def test_an_unlaunchable_role_adapter_stops_the_build_before_it_starts() -> None:
     """Refused up front, not at the first step that needed it — halfway through a task."""
     raw = make_config(quality_gate=list(_AGENT_GATE))
     raw["agents"]["code_reviewer"] = {"adapter": "nonesuch"}
-    with pytest.raises(ValueError, match="agents.code_reviewer.adapter"):
+    with pytest.raises(adapters.LaunchRefused, match="agents.code_reviewer.adapter"):
         build_loop.Config.from_models(models.Config(raw))
 
 
@@ -388,11 +403,11 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     recorded: dict[str, str] = {}
 
     monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": recorded.update({tid: commit}))
-    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
-    monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
+    monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop, "_integration_gate", lambda merged: (True, ""))
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: next(heads))
@@ -409,7 +424,7 @@ def test_a_leaf_gate_violation_blocks_without_merging(tmp_path: Path, monkeypatc
     task = dag.Task(id="T-002", title="leaf", kind="parallel")
     violations = [("docs/10-requirements.md", "gate 'requirements' is pending")]
 
-    monkeypatch.setattr(loop, "_add_worktree", lambda t: f"build/x-{t.id}")
+    monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(
         loop, "_safe_run_task", lambda t, cwd: build_loop.LeafOutcome(ok=False, log="x", violations=violations)
     )
@@ -1299,7 +1314,11 @@ def test_an_exhausted_session_is_not_retried_in_process(tmp_path: Path, monkeypa
     record: list[list[str]] = []
     loop = orchestrator(tmp_path, config=make_config(launch_retries=3))
     monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT, record))
-    monkeypatch.setattr(time, "sleep", lambda _: pytest.fail("a capacity limit must not be slept on"))
+    monkeypatch.setattr(
+        build_loop,
+        "_wait_out_the_machine",
+        lambda *_: pytest.fail("a capacity limit must not be slept on"),
+    )
 
     assert loop._run_loop() == common.EXIT_RETRY_LATER
     assert len([c for c in record if c[0] == "claude"]) == 1
@@ -1312,7 +1331,10 @@ def test_a_blip_is_retried_from_the_runs_own_budget(tmp_path: Path, monkeypatch:
     slept: list[float] = []
     loop = orchestrator(tmp_path, config=make_config(launch_retries=2))
     monkeypatch.setattr(build_loop, "_run", launch_failing((143, ""), record))
-    monkeypatch.setattr(time, "sleep", slept.append)
+    # The backoff itself, not every sleep in the process: `subprocess.Popen.wait(timeout=...)`
+    # polls with `time.sleep`, so patching the global counted every subprocess wait this run made
+    # and failed whenever the machine was busy enough for one to poll.
+    monkeypatch.setattr(build_loop, "_wait_out_the_machine", lambda where, rc, attempt: slept.append(attempt))
 
     assert loop._run_loop() == common.EXIT_RETRY_LATER
     assert len([c for c in record if c[0] == "claude"]) == 3  # the launch plus its two retries
@@ -1356,11 +1378,11 @@ def test_a_stopped_leaf_keeps_its_worktree_while_its_batchmates_still_merge(
     merged: list[str] = []
 
     monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": statuses.append((tid, status)))
-    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
-    monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
+    monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "_cleanup_worktree", lambda task: cleaned.append(task.id))
 
     def record_merge(task: dag.Task, branch: str) -> bool:
@@ -1397,7 +1419,7 @@ def test_a_real_verdict_outranks_a_machine_fault_in_the_same_batch(
         "T-001": build_loop.LeafOutcome(ok=False, log="gate red"),
         "T-002": build_loop.LeafOutcome(ok=False, fault=fault),
     }
-    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
     monkeypatch.setattr(loop, "_cleanup_worktree", lambda task: None)
 
@@ -1439,12 +1461,12 @@ def test_every_adapter_declares_what_it_can_do() -> None:
     tree, continue a session, isolate itself. Asserting on the declarations is asserting on the
     only thing any caller reads.
     """
-    codex = build_loop.ADAPTER_TABLE["codex"]
+    codex = adapters.ADAPTER_TABLE["codex"]
     assert codex.write_flags == ("--sandbox", "workspace-write")
     assert codex.own_sandbox, "codex sandboxes itself — the fact the nested-sandbox check needs"
     assert not codex.resumable, "codex resumes the *last* session, which parallel leaves cannot name"
 
-    claude = build_loop.ADAPTER_TABLE["claude"]
+    claude = adapters.ADAPTER_TABLE["claude"]
     assert claude.resumable and not claude.own_sandbox and not claude.write_flags
 
 
@@ -1616,7 +1638,7 @@ def test_a_run_that_launched_nothing_records_no_measurement(tmp_path: Path) -> N
     """A run that took the lock and found no frontier did not measure zero — it measured nothing,
     and an event saying "0 bytes" would be a different claim."""
     loop = orchestrator(tmp_path)
-    loop._record_spend()
+    loop._record_spend("done")
     assert [e for e in loop.store.read_events() if e.event == "run_measured"] == []
 
 
@@ -1627,14 +1649,20 @@ def test_the_measurement_lands_in_the_audit_chain(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(build_loop, "_run", lambda cmd, *a, **k: (0, agent_output(cmd)))
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
     loop._spend_handover("code_reviewer", 1024)
-    loop._record_spend()
+    loop._record_spend("retry-later")
 
     measured = [e for e in loop.store.read_events() if e.event == "run_measured"]
     assert len(measured) == 1
     detail = measured[0].detail
-    assert detail["launches"] == 1 and detail["cold_launches"] == 1
-    assert detail["handed_bytes"] == 1024 and detail["prompt_bytes"] > 0
+    # The per-role columns and nothing derived from them: the run-wide totals this used to carry
+    # beside `by_role` were the sums of these, and a sum recorded next to its own addends is a
+    # field that can disagree with itself.
+    assert detail["kind"] == "build" and detail["outcome"] == "retry-later"
     assert set(detail["by_role"]) == {"implementer", "code_reviewer"}
+    assert detail["by_role"]["implementer"]["launches"] == 1
+    assert detail["by_role"]["implementer"]["cold_launches"] == 1
+    assert detail["by_role"]["code_reviewer"]["handed_bytes"] == 1024
+    assert detail["by_role"]["implementer"]["prompt_bytes"] > 0
 
 
 # --- what is not worth another round ------------------------------------------
@@ -1967,11 +1995,11 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     gated: list[list[str]] = []
 
     monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": None)
-    monkeypatch.setattr(loop, "_add_worktree", lambda task: f"build/x-{task.id}")
+    monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
-    monkeypatch.setattr(loop, "_finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop, "_branch_changed_paths", lambda task_id: [])
+    monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: "a" * 40)
 
@@ -2005,8 +2033,8 @@ def test_a_leaf_is_diffed_against_its_target_branch_not_the_work_branch(
 
     monkeypatch.setattr(loop.ws, "_run", record)
 
-    loop._branch_changed_paths("T-002")
-    loop._branch_changed_paths("T-001")
+    loop.ws.branch_changed_paths("T-002")
+    loop.ws.branch_changed_paths("T-001")
 
     ranges = [cmd[-1] for cmd in calls if cmd[:3] == ["git", "diff", "--name-only"]]
     assert ranges[0].startswith("build/x-pr-c1-02-T-002...")

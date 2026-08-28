@@ -21,8 +21,12 @@ one whose envelope this release has actually seen.
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from rein import common
 
 #: The flags that make an adapter answer with a usage envelope instead of bare text.
 CLAUDE_JSON_FLAGS: tuple[str, ...] = ("--output-format", "json")
@@ -80,6 +84,29 @@ class Usage:
             models=tuple(sorted(set(self.models) | set(other.models))),
         )
 
+    @classmethod
+    def from_detail(cls, detail: Mapping[str, Any]) -> Usage:
+        """A `Usage` back out of the shape `to_detail` wrote. Unmeasured stays unmeasured.
+
+        The inverse belongs beside the thing it inverts. It was written in `review_cache`, next to
+        the one caller that needed it, along with a fifth copy of the int coercion below.
+        """
+        if detail.get("measured") is not True:
+            return cls(available=False, launches=_int(detail, "launches"))
+        cost = detail.get("cost_usd")
+        seen = detail.get("models")
+        return cls(
+            available=True,
+            launches=_int(detail, "launches"),
+            input_tokens=_int(detail, "input_tokens"),
+            output_tokens=_int(detail, "output_tokens"),
+            cache_read_tokens=_int(detail, "cache_read_tokens"),
+            cache_creation_tokens=_int(detail, "cache_creation_tokens"),
+            reasoning_tokens=_int(detail, "reasoning_tokens"),
+            cost_usd=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else 0.0,
+            models=tuple(str(m) for m in seen) if isinstance(seen, list) else (),
+        )
+
     def to_detail(self) -> dict[str, Any]:
         """The shape an audit event carries. Absent when nothing was measured — not a row of zeros."""
         if not self.available:
@@ -98,12 +125,13 @@ class Usage:
 
 
 def _int(source: Any, *keys: str) -> int:
+    """The int at `keys` under `source`, or 0 — an envelope's nesting walked before the coercion."""
     value: Any = source
     for key in keys:
         if not isinstance(value, dict):
             return 0
         value = value.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    return common.as_int(value)
 
 
 def parse_claude_envelope(output: str) -> tuple[str, Usage]:
@@ -197,3 +225,30 @@ def summarize(rows: dict[str, Usage], *, what: str) -> str:
 def merged(rows: dict[str, Usage], role: str, one: Usage) -> None:
     """Add one launch's usage to `role`'s running total, in place."""
     rows[role] = rows.get(role, Usage()) + one
+
+
+class Ledger:
+    """What a run's launches have cost, by role. Written from every thread that launches.
+
+    One object rather than a dict the caller owns and every layer mutates. Two of these are kept
+    while a gate-④ review runs — what the transport paid, and what a replayed stage cost when it
+    was first taken — and both are written from the two threads the pipeline runs its stages on.
+    `merged` above is a read-modify-write, which is not one operation on any interpreter that is
+    not holding a global lock for us: a lost row would under-report a role rather than fail loudly.
+
+    The bill records a launch that *failed* too. A launch that exited nonzero was still paid for,
+    and the failure path is where the record has to be made: a raise carries no return value.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._rows: dict[str, Usage] = {}
+
+    def add(self, role: str, spent: Usage) -> None:
+        with self._lock:
+            merged(self._rows, role, spent)
+
+    def totals(self) -> dict[str, Usage]:
+        """A copy — the caller must not hold the lock's data."""
+        with self._lock:
+            return dict(self._rows)

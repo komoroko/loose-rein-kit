@@ -134,22 +134,6 @@ class Repo:
     def lock(self) -> Path:
         return self.root / ".rein/rein.lock"
 
-    @property
-    def prompts(self) -> Path:
-        return self.root / ".rein/prompts"
-
-    @property
-    def scaffold(self) -> Path:
-        return self.root / ".rein/scaffold"
-
-    @property
-    def rules(self) -> Path:
-        return self.root / ".rein/AGENTS.rein.md"
-
-    @property
-    def docs(self) -> Path:
-        return self.root / "docs"
-
     # --- identity and checkout kind ------------------------------------------
 
     def _git(self, *args: str) -> str:

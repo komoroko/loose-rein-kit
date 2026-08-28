@@ -107,7 +107,9 @@ def _subjects(
     """Every finding that needs a human decision, in a stable order: claims, gaps, extras, security.
 
     A grounded extra behaviour is deliberately not a subject: the requirement that grounds it has
-    already been decided. An ungrounded one is the loop asking "did you want this at all?".
+    already been decided. An ungrounded one is the loop asking "did you want this at all?". Nor is
+    a settled claim, nor a security finding the change resolved — a card is a question, and these
+    have answers that did not come from a human and do not need one.
     """
     subjects: list[dict[str, Any]] = []
     for claim in claims:
@@ -173,6 +175,13 @@ def _subjects(
             }
         )
     for finding in security_findings:
+        # A finding the change closed is not a question for a human: `security_review.resolution_of`
+        # settled it against the committed tree, which is a stronger answer than the one this card
+        # would ask for. Left in, a fixed `high` finding raised a mandatory card asking "what is
+        # done about it?" — so fixing the code was what stopped the human review freezing. The test
+        # is `== "resolved"`, not `!= "open"`, so anything unrecognised still asks.
+        if str(finding.get("status", "")) == "resolved":
+            continue
         sid = str(finding.get("id", ""))
         subjects.append(
             {

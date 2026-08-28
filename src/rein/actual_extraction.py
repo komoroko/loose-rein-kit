@@ -22,12 +22,19 @@ rejected, not displayed.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from rein import digests, review_policy
 from rein import repo as repo_mod
+
+#: The shape an Actual Statement id must have — `review.schema.json`'s `actualStatementId`, read
+#: from the schema so the two cannot drift. Checked *here* rather than only at the write, because
+#: everything between the two resolves references by this id: a duplicate collapses in the set the
+#: comparator is validated against, and a missing one becomes the literal string "None".
+STATEMENT_ID_RE = re.compile(review_policy.review_schema_pattern("actualStatementId"))
 
 #: Keys that must never reach the extractor — the Expected Model in any of its forms (plan §12.2,
 #: §24.2). Checked against the whole serialized request, not just its top level.
@@ -79,7 +86,7 @@ def contract() -> str:
     payload.
 
     So the request says what it wants and the launch is given nothing else to read
-    (`review._adapter_reviewer`). Which means everything the answer needs has to be *in* here —
+    (`review_transport`). Which means everything the answer needs has to be *in* here —
     the anchors' blobs and line counts included, since the extractor can no longer look them up.
     """
     return (
@@ -190,7 +197,7 @@ def run_extractor(
     Comparator cannot be handed anything the extractor did not actually produce.
     """
     assert_blind(request)  # never send a primed request, even one built elsewhere
-    document = review_policy.parse_reviewer_output(reviewer(request), what="actual extraction")
+    document = review_policy.parse_reviewer_output(reviewer(request).text, what="actual extraction")
 
     raw_statements = document.get("actual_statements")
     if not isinstance(raw_statements, list):
@@ -204,6 +211,8 @@ def run_extractor(
             continue
         problems += _validate_statement(statement, repo=repo, commit=commit)
         statements.append(dict(statement))
+
+    problems += review_policy.reject_duplicate_ids(statements, what="actual extraction")
 
     coverage = document.get("coverage")
     coverage_map = dict(coverage) if isinstance(coverage, Mapping) else {}
@@ -223,6 +232,8 @@ def run_extractor(
 def _validate_statement(statement: Mapping[str, Any], *, repo: repo_mod.Repo, commit: str) -> list[str]:
     problems: list[str] = []
     sid = str(statement.get("id", "?"))
+    if not STATEMENT_ID_RE.match(sid):
+        problems.append(f"{sid!r} is not an Actual Statement id — the shape is AST-001, AST-002, …")
     confidence = str(statement.get("confidence", ""))
     if confidence not in CONFIDENCE_VALUES:
         problems.append(f"{sid}: confidence {confidence!r} is not one of {sorted(CONFIDENCE_VALUES)}")

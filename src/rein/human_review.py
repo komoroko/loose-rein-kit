@@ -336,10 +336,13 @@ def completion_blockers(
     blocking_extras = [str(e.get("id")) for e in review.extra_behaviors if e.get("blocking") is True]
     if blocking_extras:
         blockers.append(f"blocking extra behaviours: {', '.join(blocking_extras)}")
-    if review.blocking_security_findings:
-        blockers.append(
-            "blocking security findings: " + ", ".join(str(f.get("id")) for f in review.blocking_security_findings)
-        )
+    # Read through the same disposition the gate reads it through, or a finding a human has
+    # disputed on the record would still hold the freeze shut and the dispute would be a note
+    # nobody could act on.
+    disputed = review_policy.disputed_subjects(human)
+    standing = [f for f in review.blocking_security_findings if str(f.get("id", "")) not in disputed]
+    if standing:
+        blockers.append("blocking security findings: " + ", ".join(str(f.get("id")) for f in standing))
     return blockers
 
 

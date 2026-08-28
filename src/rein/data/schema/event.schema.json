@@ -37,6 +37,7 @@
         "actual_extraction_failed",
         "comparison_generated",
         "security_review_generated",
+        "security_finding_resolved",
         "review_generated",
         "review_failed",
         "decision_recorded",

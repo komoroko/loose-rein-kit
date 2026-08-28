@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from rein import build_loop, usage
+from rein import adapters, usage
 
 # The shape a real `claude -p --output-format json` run returned, trimmed to the fields read here.
 # Recorded from an actual launch rather than invented: the whole point of this module is that the
@@ -66,7 +66,7 @@ def test_output_that_is_not_the_promised_envelope_is_refused() -> None:
 
 def test_an_adapter_that_does_not_report_records_unmeasured_rather_than_zero() -> None:
     """ "We did not measure" and "it was free" must never render the same (plan §2.4)."""
-    codex = build_loop.ADAPTER_TABLE["codex"]
+    codex = adapters.ADAPTER_TABLE["codex"]
     assert codex.usage_flags == () and codex.envelope is None
     answer, spent = codex.read_output("some free-form output")
     assert answer == "some free-form output"
@@ -76,9 +76,9 @@ def test_an_adapter_that_does_not_report_records_unmeasured_rather_than_zero() -
 
 def test_only_an_adapter_with_an_envelope_asks_for_one() -> None:
     """Flags without a reader is how the answer stops parsing, so they travel together."""
-    for adapter in build_loop.ADAPTER_TABLE.values():
+    for adapter in adapters.ADAPTER_TABLE.values():
         assert bool(adapter.usage_flags) == (adapter.envelope is not None), adapter.name
-    assert build_loop.ADAPTER_TABLE["claude"].launch_argv()[-2:] == usage.CLAUDE_JSON_FLAGS
+    assert adapters.ADAPTER_TABLE["claude"].launch_argv()[-2:] == usage.CLAUDE_JSON_FLAGS
 
 
 def test_merging_a_reported_launch_with_an_unreported_one_keeps_both_facts() -> None:
@@ -109,7 +109,7 @@ def test_the_summary_is_empty_when_nothing_launched() -> None:
 
 
 def test_a_named_model_reaches_the_launch() -> None:
-    claude = build_loop.ADAPTER_TABLE["claude"]
+    claude = adapters.ADAPTER_TABLE["claude"]
     assert claude.launch_argv("opus")[:4] == ("claude", "-p", "--model", "opus")
     assert "--model" not in claude.launch_argv(), "no model named means the CLI's own default"
 
@@ -128,7 +128,7 @@ def test_a_model_an_adapter_cannot_be_told_to_run_is_refused_not_dropped() -> No
     stop — the independence check is derived from it."""
     from rein import models
 
-    assert build_loop.ADAPTER_TABLE["codex"].model_flags == ()
+    assert adapters.ADAPTER_TABLE["codex"].model_flags == ()
     config = models.Config({"agents": {"implementer": {"adapter": "codex", "model": "gpt"}}})
-    with pytest.raises(ValueError, match="cannot tell"):
-        build_loop.Config._argv_for(config, "implementer")
+    with pytest.raises(adapters.LaunchRefused, match="cannot tell"):
+        adapters.launch_argv(config, "implementer")
