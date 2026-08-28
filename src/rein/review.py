@@ -29,10 +29,11 @@ import logging
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from rein import (
     actual_extraction,
@@ -53,6 +54,9 @@ from rein import (
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
+
+if TYPE_CHECKING:  # `build_loop` imports this module back, so the capability record is a type-only name
+    from rein.build_loop import Adapter
 
 logger = logging.getLogger(__name__)
 
@@ -1200,12 +1204,215 @@ _SPEND_LOCK = threading.Lock()
 _ADAPTER_OUTPUT_TAIL = 1000
 
 
+#: What the priming turn is told to answer. Content-free on purpose: whatever the model says in
+#: that turn is in *both* branches' context afterwards, so it must carry no reading of the change.
+_PRIME_ACK = "READY"
+
+#: The stage-request key the reading lives under, and what replaces it in a branch.
+_READING_KEY = "diff"
+
+
+def _adapter_for_role(config: models.Config | None, role: str) -> Adapter:
+    """The capability record of the CLI `role` is pointed at. Raises if this release cannot launch it."""
+    from rein import build_loop
+
+    adapter = (config.adapter(role) if config is not None else "") or "claude"
+    record = build_loop.ADAPTER_TABLE.get(adapter)
+    if record is None:
+        raise ReviewError(f"agents.{role}.adapter is {adapter!r}, which this release cannot launch")
+    return record
+
+
+def shareable_reading(config: models.Config | None, roles: Sequence[str]) -> Adapter | None:
+    """The adapter `roles` can share one reading through, or None when they cannot.
+
+    Two conditions:
+
+    - **The same launch.** Not "the same adapter name" — the argv these roles are actually launched
+      with, which is what decides whether there is one process to have a session in. Written this
+      way so that the day anything makes a role's launch differ (a per-role `--model`, say), the
+      sharing stops on its own instead of quietly crossing a boundary somebody added elsewhere.
+    - **A CLI that can branch a session.** *Continuing* one — the second stage reading the first
+      stage's answer — is exactly the correlated blindness this exists to avoid, so a CLI that can
+      resume but not fork is not good enough (`Adapter.forkable`).
+
+    **`independence_group` is deliberately not consulted here**, which is worth stating because it
+    looks like it should be. Nothing in the launcher varies by it: no `--model` is passed anywhere,
+    so two roles in different groups run the same model on the same CLI today, and refusing to
+    share on that basis would be honouring a separation that does not exist at launch time. The
+    argv check above is what will catch it if one is ever implemented. (What the group *does* bind
+    is the extractor/comparator check at gate ④ — `_independence` — which this pair is not part of.)
+    """
+    records = [_adapter_for_role(config, role) for role in roles]
+    if len({record.launch_argv() for record in records}) != 1 or not records[0].forkable:
+        return None
+    return records[0]
+
+
+class SharedReading:
+    """One reading of the change, primed once and **branched** for each stage that needs it.
+
+    The extractor and the security reviewer are handed the same diff — up to `max_diff_bytes`, so
+    up to half a megabyte — and were launched separately, each paying to read it in full. Measured
+    on an 82 KB payload: two independent launches cost $0.2153, a priming turn plus two branches
+    cost $0.1298. Repeated on a 58 KB payload with real request shapes: $0.196 against $0.126.
+
+    **Serialising them into one session is not the answer**, which is why this branches rather than
+    continues: the second stage would read the first stage's conclusions and inherit its frame, and
+    catching what the extraction's frame missed is the whole value of the security review. A fork
+    shares everything read before the fork and none of what any branch then concludes.
+
+    Three facts this rests on, all measured rather than assumed — the alternatives look identical
+    from the outside and are not:
+
+    - Sending the same prefix to two *separate* one-shot launches does **not** hit the cache. The
+      session is the only mechanism that works — two branches read 51,969 tokens from cache where
+      two separate launches with an identical prefix read 16,737 and paid to write the rest again.
+    - Two branches resumed **in parallel** both hit the cache, so the pipeline keeps the
+      concurrency it has.
+    - A branch sent a request the size of a real one (a 4 KB contract beside the pointer) hits it
+      too, immediately after the priming turn, with no settling time.
+
+    **The saving is typical, not guaranteed.** One run out of four measured had the first branch
+    miss and pay to write the prefix again; the second branch then read what *it* had written, and
+    the round still came out at or below two independent launches. The floor is what happens if the
+    cache never serves at all — three full reads instead of two — so this is a bet on a mechanism
+    that was observed working, not a guarantee. It is priced accordingly: nothing downstream
+    depends on the hit, only the bill does.
+
+    The priming turn is lazy — the first stage to ask creates it, the other waits on the lock —
+    because nothing here knows in advance how many stages will actually launch. When one stage is
+    served from `review_cache` and the other is not, this pays a priming turn for a single branch:
+    about 7% more than launching it alone, against 40% less whenever both run, which is the common
+    case. A channel for telling the transport what the cache is about to do would cost more than
+    the case is worth.
+    """
+
+    def __init__(
+        self,
+        repo: repo_mod.Repo,
+        record: Adapter,
+        *,
+        timeout: float,
+        spend: dict[str, usage_mod.Usage] | None = None,
+    ) -> None:
+        self._repo = repo
+        self._record = record
+        self._timeout = timeout
+        self._spend = spend
+        self._lock = threading.Lock()
+        self._session = ""
+        self._digest = ""
+
+    def branch_flags(self, request: Mapping[str, Any]) -> tuple[str, ...]:
+        """The flags that put this request on its own branch of the shared reading.
+
+        Empty for a request that carries no reading — the comparator's, which is handed the Actual
+        rather than the code and has nothing to share.
+        """
+        if _READING_KEY not in request:
+            return ()
+        session = self._prime(request)
+        return (*self._record.resume_flags, session, *self._record.fork_flags)
+
+    def without_the_reading(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+        """`request` with the reading replaced by a pointer at the turn that carries it.
+
+        Only this one key moves. `deterministic_facts.context` and `.files` are shared too, but the
+        diff is ~98% of the payload, and a request that exists in two shapes is a request that will
+        drift — `build_request` keeps producing exactly one.
+        """
+        if _READING_KEY not in request:
+            return request
+        self._prime(request)
+        return {
+            **request,
+            _READING_KEY: {"in_previous_message": True, "digest": self._digest},
+        }
+
+    def _prime(self, request: Mapping[str, Any]) -> str:
+        """Create the shared session, once, and return its id.
+
+        The reading is checked against the primed one rather than assumed to match: two stages
+        branching one session must be branching it about the same bytes, and a mismatch is a bug in
+        the pipeline above rather than something to paper over by sending the diff again.
+        """
+        digest = digests.of_bytes(str(request.get(_READING_KEY, "")).encode("utf-8"))
+        with self._lock:
+            if self._session:
+                if digest != self._digest:
+                    raise ReviewError(
+                        "two stages were about to branch one reading of different changes "
+                        f"({self._digest} vs {digest}) — the pipeline moved underneath the review"
+                    )
+                return self._session
+            session = str(uuid.uuid4())
+            payload = {
+                "instruction": (
+                    "Read the change below. Do not analyse it yet and do not describe it: a "
+                    f"question about it follows in the next message. Reply with exactly {_PRIME_ACK}."
+                ),
+                "trusted_base_sha": str(request.get("trusted_base_sha", "")),
+                "subject_head_sha": str(request.get("subject_head_sha", "")),
+                _READING_KEY: request.get(_READING_KEY, ""),
+            }
+            # The same guard the extractor's own request gets. This is a new path into the
+            # extractor's context, and a new path without the guard is how priming comes back.
+            actual_extraction.assert_blind(payload)
+            self._launch(session, payload)
+            self._session, self._digest = session, digest
+            return session
+
+    def _launch(self, session: str, payload: Mapping[str, Any]) -> None:
+        """Send the priming turn. Its failure is the review's failure, not a reason to fall back.
+
+        There is deliberately no "prime failed, launch the stages separately instead" path: that
+        would hide a broken adapter behind a bill twice the size, and `--supervise` already waits
+        out the failures that time alone fixes.
+        """
+        argv = list(self._record.launch_argv()) + [*self._record.session_flags, session]
+        with tempfile.TemporaryDirectory(prefix="rein-reading-", ignore_cleanup_errors=True) as elsewhere:
+            rc, out = common.run(
+                argv, cwd=elsewhere, timeout=self._timeout or None, input_text=json.dumps(payload, ensure_ascii=False)
+            )
+        if rc != 0:
+            _record_spend_usage(self._spend, _SHARED_READING_ROLE, usage_mod.Usage.unavailable())
+            said = out.strip()[-_ADAPTER_OUTPUT_TAIL:]
+            raise review_policy.AdapterFailure(
+                f"the shared reading could not be primed — the adapter exited {rc}"
+                + (f", saying:\n{said}" if said else " and said nothing"),
+                rc=rc,
+                output=out,
+            )
+        try:
+            _, spent = self._record.read_output(out)
+        except usage_mod.AdapterEnvelopeError as exc:
+            _record_spend_usage(self._spend, _SHARED_READING_ROLE, usage_mod.Usage.unavailable())
+            raise review_policy.AdapterFailure(
+                f"the shared reading could not be primed — the adapter reported a failed run: {exc}",
+                rc=0,
+                output=out,
+            ) from None
+        _record_spend_usage(self._spend, _SHARED_READING_ROLE, spent)
+
+
+#: The two stages handed the same reading of the change. The comparator is deliberately absent: it
+#: is given the Actual and the Expected, never the code, so it has no reading to share — and §12.4
+#: forbids it sharing one with the extractor in any case.
+_READING_ROLES: tuple[str, ...] = ("actual_extractor", "security_reviewer")
+
+#: The priming turn belongs to no stage — it is what both of them read — so it is counted under a
+#: name of its own. Folding it into either role would make that role's cost a fiction.
+_SHARED_READING_ROLE = "shared_reading"
+
+
 def _adapter_reviewer(
     repo: repo_mod.Repo,
     role: str = "code_reviewer",
     *,
     config: models.Config | None = None,
     spend: dict[str, usage_mod.Usage] | None = None,
+    reading: SharedReading | None = None,
 ) -> review_policy.Reviewer:
     """A production reviewer that hands the request as JSON to the adapter configured for `role`.
 
@@ -1239,23 +1446,19 @@ def _adapter_reviewer(
     have to run to anchor anything. What the launch can still read is the user's own global CLI
     configuration, which is theirs and not this repository's to remove.
     """
-    from rein import build_loop
 
     if config is None:
         config = store_mod.Store(repo).read_config()
-    adapter = (config.adapter(role) if config is not None else "") or "claude"
-    record = build_loop.ADAPTER_TABLE.get(adapter)
-    if record is None:
-        raise ReviewError(f"agents.{role}.adapter is {adapter!r}, which this release cannot launch")
-    argv = record.launch_argv()
+    record = _adapter_for_role(config, role)
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
     def call(request: Mapping[str, Any]) -> str:
-        payload = json.dumps(request, ensure_ascii=False)
+        argv = list(record.launch_argv()) + list(reading.branch_flags(request) if reading else ())
+        payload = json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False)
         # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
         # left something undeletable behind must not turn a finished review into a traceback.
         with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as elsewhere:
-            rc, out = common.run(list(argv), cwd=elsewhere, timeout=timeout or None, input_text=payload)
+            rc, out = common.run(argv, cwd=elsewhere, timeout=timeout or None, input_text=payload)
         if rc != 0:
             _record_spend_usage(spend, role, usage_mod.Usage.unavailable())
             # What the adapter said, not merely that it stopped. `common.run` merges stderr into
@@ -1307,8 +1510,28 @@ def _staged_reviewer(repo: repo_mod.Repo, *, spend: dict[str, usage_mod.Usage] |
     what this pipeline spends is the thing that decides whether it can run at all.
     """
     config = store_mod.Store(repo).read_config()
+    # The extractor and the security reviewer read the same diff. When they can share one reading
+    # without sharing a conclusion, they do; otherwise `shareable_reading` says no and each is
+    # launched exactly as before.
+    shared = shareable_reading(config, _READING_ROLES)
+    reading = (
+        SharedReading(
+            repo,
+            shared,
+            timeout=float(config.agent_timeout_sec) if config is not None else 0.0,
+            spend=spend,
+        )
+        if shared is not None
+        else None
+    )
     by_role = {
-        role: _adapter_reviewer(repo, role, config=config, spend=spend)
+        role: _adapter_reviewer(
+            repo,
+            role,
+            config=config,
+            spend=spend,
+            reading=reading if role in _READING_ROLES else None,
+        )
         for role in ("actual_extractor", "comparator", "security_reviewer")
     }
 

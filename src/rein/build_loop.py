@@ -173,10 +173,21 @@ class Adapter:
     usage_flags: tuple[str, ...] = ()
     #: Reads that CLI's envelope into `(the answer, what it cost)`. Paired with `usage_flags`.
     envelope: Callable[[str], tuple[str, usage_mod.Usage]] | None = None
+    #: What makes a resume *branch* the session instead of continuing it: the forks share
+    #: everything read before the fork and none of what any of them then concludes. That is the
+    #: difference between sharing the reading and sharing the readings, and it is what lets two
+    #: stages that must reach independent verdicts be handed one (large, expensive) diff once
+    #: (`review._shared_reading`). Empty for a CLI that cannot branch a session.
+    fork_flags: tuple[str, ...] = ()
 
     @property
     def resumable(self) -> bool:
         return bool(self.session_flags and self.resume_flags)
+
+    @property
+    def forkable(self) -> bool:
+        """Whether one reading can be handed to two launches without their answers meeting."""
+        return bool(self.resumable and self.fork_flags)
 
     def launch_argv(self) -> tuple[str, ...]:
         """How to launch it so that it reports what the launch cost."""
@@ -196,6 +207,7 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         argv=("claude", "-p"),
         session_flags=("--session-id",),
         resume_flags=("--resume",),
+        fork_flags=("--fork-session",),
         usage_flags=usage_mod.CLAUDE_JSON_FLAGS,
         envelope=usage_mod.parse_claude_envelope,
     ),

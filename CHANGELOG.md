@@ -62,6 +62,35 @@ to re-invent `SEC-001` by coincidence to get past a check whose own instruction 
 finding and re-run". They are in the request now, and the validator reads them from there — one
 source, rather than an enforcement and a disclosure that nothing made agree.
 
+**One reading of the change, two verdicts.** The blind extractor and the security reviewer are
+handed the same diff — up to `max_diff_bytes`, so up to half a megabyte — and were launched
+separately, each paying to read all of it. Serialising them into one session is not the fix: the
+second stage would read the first stage's conclusions and inherit its frame, and catching what the
+extraction's frame missed is the security review's whole value. `--fork-session` separates exactly
+the right thing — **the reading is shared, the readings are not.** A priming turn carries the diff
+once; each stage branches from it and neither sees the other's answer.
+
+Every part of that was measured, because the alternatives look identical from the outside and are
+not. Sending the same prefix to two *separate* one-shot launches does **not** hit the cache — two
+separate launches with an identical prefix read 16,737 tokens from cache and paid to write the
+rest again, where two branches read 51,969. Two branches resumed in parallel both hit it, so the
+pipeline keeps its concurrency. On an 82 KB payload: $0.2153 against $0.1298; on a 58 KB payload
+with real request shapes, $0.196 against $0.126. One run in four had the first branch miss and pay
+to write the prefix again — the round still came out at or below two independent launches, and
+nothing downstream depends on the hit, only the bill does.
+
+Whether two roles may share is decided on **the argv they are actually launched with**, not on the
+adapter's name and not on `independence_group`: nothing in the launcher varies by the group — no
+`--model` is passed anywhere — so refusing to share on that basis would honour a separation that
+does not exist at launch time, and the argv check is what will catch one if it is ever implemented.
+`fork_flags` is declared on the `Adapter` record beside the write, session and usage flags, so
+`codex` and `gemini` degrade to today's two launches rather than needing a branch anywhere. The
+priming turn is held to `actual_extraction.assert_blind` like the extractor's own request — a new
+path into that context without the guard is how priming comes back — and is counted in the spend
+ledger under `shared_reading`, because folding it into either stage would make that stage's cost a
+fiction. A priming turn that fails stops the review; there is deliberately no "prime failed, launch
+them separately" path, which would hide a broken adapter behind a bill twice the size.
+
 **The measurement is what the launch cost, not what this process sent.** Both spend counters
 measured bytes on stdin, and both explained why: "a token count belongs to a tokenizer nobody here
 owns, and reporting an estimate as a measurement is the habit this codebase is built against."

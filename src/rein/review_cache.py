@@ -76,6 +76,15 @@ class StageCache:
     def _path(self, stage: str, key: str) -> Path:
         return self.dir / f"{stage}-{key.removeprefix('sha256:')}.json"
 
+    def has(self, stage: str, key: str) -> bool:
+        """Is this exact question already answered? Asked *without* claiming the entry.
+
+        `read` records what this run used, which is what `prune` keeps. This is for deciding
+        something before the stages run — whether one shared reading is worth priming — and a
+        decision must not make the thing it asked about look used.
+        """
+        return self.enabled and self._path(stage, key).is_file()
+
     def read(self, stage: str, key: str) -> str | None:
         """The stored answer to this exact question, or None when there is not one."""
         if not self.enabled:

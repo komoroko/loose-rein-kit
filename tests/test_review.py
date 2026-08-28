@@ -25,6 +25,7 @@ from rein import (
     common,
     conformance,
     diff_facts,
+    digests,
     event_chain,
     models,
     review,
@@ -516,6 +517,7 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
         *,
         config: Any = None,
         spend: dict[str, usage_mod.Usage] | None = None,
+        reading: review.SharedReading | None = None,
     ) -> Any:
         def call(request: Mapping[str, Any]) -> str:
             routed.append(role)
@@ -549,6 +551,172 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
 
     assert routed == ["actual_extractor", "comparator", "security_reviewer"]
     assert set(spend) == set(routed)  # and the ledger is threaded through to every one of them
+
+
+# --- one reading of the change, two verdicts -----------------------------------
+#
+# The extractor and the security reviewer are handed the same diff — up to `max_diff_bytes`, so up
+# to half a megabyte — and were launched separately, each paying to read all of it. Measured on an
+# 82 KB payload: two independent launches $0.2153, a priming turn plus two branches $0.1298.
+#
+# Serialising them into one session is not the answer. The second stage would read the first
+# stage's conclusions, and catching what the extraction's frame missed is the security review's
+# whole value. A fork shares the reading and not the readings.
+
+
+def _record(name: str) -> Any:
+    from rein import build_loop
+
+    return build_loop.ADAPTER_TABLE[name]
+
+
+def _reading(spend: dict[str, usage_mod.Usage] | None = None) -> review.SharedReading:
+    return review.SharedReading(repo_mod.Repo(Path(".")), _record("claude"), timeout=0.0, spend=spend)
+
+
+def _a_reading_request(diff: str = "the diff") -> dict[str, Any]:
+    return actual_extraction.build_request(
+        trusted_base_sha="a" * 40,
+        subject_head_sha="b" * 40,
+        diff_text=diff,
+        deterministic_facts={"coverage": {}, "risk_floor": "low", "files": []},
+    )
+
+
+def _a_security_request(diff: str = "the diff") -> dict[str, Any]:
+    return security_review.build_request(
+        diff_text=diff,
+        deterministic_facts={"signals": [], "files": []},
+        trusted_base_sha="a" * 40,
+        subject_head_sha="b" * 40,
+    )
+
+
+def test_only_a_cli_that_can_branch_a_session_can_share_a_reading() -> None:
+    """Resuming is not enough. A CLI that can only *continue* a session would hand the second stage
+    the first stage's answer, which is the correlated blindness this exists to avoid."""
+    from rein import build_loop
+
+    assert _record("claude").forkable
+    assert not _record("codex").forkable and not _record("gemini").forkable
+    for adapter in build_loop.ADAPTER_TABLE.values():
+        assert not adapter.fork_flags or adapter.resumable, adapter.name
+
+
+def test_two_roles_on_one_launch_share_a_reading_and_two_launches_do_not() -> None:
+    """Decided on the argv the roles are actually launched with, not on the adapter's name and not
+    on `independence_group` — nothing in the launcher varies by the group today."""
+    roles = ("actual_extractor", "security_reviewer")
+    same = models.Config.parse(json.dumps(make_config()))
+    assert review.shareable_reading(same, roles) is not None
+
+    raw = make_config()
+    raw["agents"]["security_reviewer"] = {"adapter": "codex"}
+    split = models.Config.parse(json.dumps(raw))
+    assert review.shareable_reading(split, roles) is None
+
+    raw = make_config()
+    raw["agents"]["actual_extractor"] = {"adapter": "gemini"}
+    raw["agents"]["security_reviewer"] = {"adapter": "gemini"}
+    unforkable = models.Config.parse(json.dumps(raw))
+    assert review.shareable_reading(unforkable, roles) is None
+
+
+def test_a_declared_group_does_not_decide_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scaffold gives these two roles different `independence_group`s and the same CLI with no
+    `--model` anywhere, so the groups describe a separation the launcher does not make. Refusing to
+    share on them would honour a difference that does not exist at launch time."""
+    raw = make_config()
+    raw["agents"]["actual_extractor"] = {"adapter": "claude", "independence_group": "claude/opus"}
+    raw["agents"]["security_reviewer"] = {"adapter": "claude", "independence_group": "claude/sonnet"}
+    config = models.Config.parse(json.dumps(raw))
+    assert review.shareable_reading(config, ("actual_extractor", "security_reviewer")) is not None
+
+
+def test_a_branch_carries_a_pointer_where_the_reading_was(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One key moves. `deterministic_facts` is shared too, but the diff is ~98% of the payload and
+    a request that exists in two shapes is a request that will drift."""
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    reading = _reading()
+
+    branched = reading.without_the_reading(_a_reading_request("A" * 500))
+    assert branched["diff"] == {"in_previous_message": True, "digest": digests.of_bytes(b"A" * 500)}
+    assert branched["contract"] == _a_reading_request()["contract"]
+    assert len(sent) == 1 and sent[0]["diff"] == "A" * 500, "the priming turn carries the real reading"
+
+
+def test_the_comparator_has_no_reading_to_share(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is given the Actual and the Expected, never the code — and §12.4 forbids it sharing with
+    the extractor in any case. Its request must pass through untouched and prime nothing."""
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    reading = _reading()
+    request = conformance.build_request(expected_model={"claims": []}, actual_statements=[], actual_digest="d")
+
+    assert reading.without_the_reading(request) is request
+    assert reading.branch_flags(request) == ()
+    assert sent == [], "the comparator primed a reading it does not read"
+
+
+def test_one_priming_turn_serves_both_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    reading = _reading()
+
+    first = reading.branch_flags(_a_reading_request())
+    second = reading.branch_flags(_a_security_request())
+
+    assert len(sent) == 1, "the reading was primed once, not once per stage"
+    assert first == second, "both stages branch the same session"
+    assert first[0] == "--resume" and first[-1] == "--fork-session"
+
+
+def test_branching_one_session_about_two_different_changes_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mismatch is the pipeline moving underneath the review, not something to paper over by
+    sending the diff again."""
+    monkeypatch.setattr(common, "run", _capturing_run([]))
+    reading = _reading()
+    reading.branch_flags(_a_reading_request("one change"))
+    with pytest.raises(review.ReviewError, match="different changes"):
+        reading.branch_flags(_a_security_request("another change"))
+
+
+def test_the_priming_turn_is_held_to_the_same_blindness_as_the_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new path into the extractor's context without the guard is how priming comes back."""
+    monkeypatch.setattr(common, "run", _capturing_run([]))
+    primed: list[Mapping[str, Any]] = []
+    monkeypatch.setattr(actual_extraction, "assert_blind", lambda request: primed.append(request))
+    _reading().branch_flags(_a_reading_request())
+    assert primed and "diff" in primed[0]
+
+
+def test_a_priming_turn_that_fails_stops_the_review_rather_than_falling_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A "prime failed, launch them separately" path would hide a broken adapter behind a bill
+    twice the size; `--supervise` already waits out what time alone fixes."""
+    monkeypatch.setattr(common, "run", lambda *a, **k: (1, "Prompt is too long"))
+    with pytest.raises(review_policy.AdapterFailure, match="could not be primed"):
+        _reading().branch_flags(_a_reading_request())
+
+
+def test_the_priming_turn_is_counted_under_a_name_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It belongs to no stage — it is what both of them read. Folding it into either role would
+    make that role's cost a fiction."""
+    monkeypatch.setattr(common, "run", _capturing_run([]))
+    spend: dict[str, usage_mod.Usage] = {}
+    _reading(spend).branch_flags(_a_reading_request())
+    assert set(spend) == {"shared_reading"}
+    assert spend["shared_reading"].launches == 1
+
+
+def _capturing_run(sent: list[dict[str, Any]]) -> Any:
+    def run(cmd: list[str], cwd: str | None = None, **kwargs: Any) -> tuple[int, str]:
+        sent.append(json.loads(kwargs.get("input_text") or "{}"))
+        return 0, agent_envelope(review._PRIME_ACK)
+
+    return run
 
 
 def test_a_reviewer_is_told_which_blocks_it_may_not_drop() -> None:
