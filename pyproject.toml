@@ -1,6 +1,6 @@
 [project]
 name = "loose-rein-kit"
-version = "0.3.6"
+version = "0.3.7"
 description = "Human-on-the-Loop development harness: frozen requirement claims, blind actual-behaviour review, and human-confirmed gate approval as an installable CLI"
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -4,63 +4,18 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
-## [0.3.6] - 2026-08-24
+## [0.3.7] - 2026-08-28
 
-Four things this release stops doing, all of them found by pulling on one thread: `rein review
-generate` could not stop work it had already given up on.
+What follows is mostly one habit: a thing this repository declared and nothing performed. A
+separation between the two reviewers that no launch made. A partitioning of the Coverage Manifest
+that no code did. A `launches` counter that said 1 where three launches had happened. One cache key
+deciding all three reviewer stages at once, so editing the plan re-read the code with an extractor
+that has never seen a plan. And beside them, two halves of one format that never had to agree:
+rein could write a `review.yaml` it could not read back.
 
-**A cancel that never cancelled.** The security review runs beside the extraction chain, and when
-the chain fails fast the security result is discarded — so the code called `Future.cancel()` on it.
-That is a documented no-op once a task has started, and with one worker and nothing competing for
-it this one always has. `ThreadPoolExecutor.__exit__` then blocks in `shutdown(wait=True)` until
-the adapter call finishes, so a failure is reported when the *discarded* call ends rather than when
-it happens. Measured across two runs of one cycle, an extraction failure that takes seconds
-surfaced **1m36s and 3m54s late**, each run having paid in full for a security review nobody would
-read. `shutdown(wait=False, cancel_futures=True)` does not fix it either — `concurrent.futures`
-registers an atexit hook that joins every worker, so the wait moves to interpreter exit and the
-process returns no sooner. The only thing that ends a launch early is killing the process it
-started, which `common.Cancellation` now does.
-
-**Ctrl-C was not stopping agents.** The same missing path, one layer down. Every launch gets its
-own session so a timeout can kill its children, which also means the terminal's SIGINT reaches
-rein and not the agent — while `Popen.__exit__` declines to wait on a KeyboardInterrupt precisely
-because it assumes the opposite. Measured: the launch was orphaned and went on running, holding its
-quota, with nothing left to read what it said. `common.run` now kills the process group on the way
-out, whatever the way out is.
-
-**`execution.agent_timeout_sec` now defaults to `0`, meaning no limit.** A wall clock cannot tell a
-model that is working from one that is stuck, and the two mistakes do not cost the same: killing a
-working agent throws away the launch, its quota and the session a retry would have resumed, and the
-retry pays for all of it again from cold. The wiring already read `0` as "no limit"; only the schema
-forbade saying it. Command steps keep `command_timeout_sec` — their runtime is knowable. The review
-transport, which had 900 seconds hardcoded, now takes the same knob as every other launch.
-**Repositories carrying `agent_timeout_sec: 3600` keep it**; drop it, or set `0`, to take the new
-default.
-
-**The reviewers were being sent the wrong 240 KB.** `relevant_code` sent each changed file's whole
-head-side body under a character cap. Measured over one cycle of this repository (17 files): the
-bodies came to 776 KB against the 240 KB cap, so 69% were dropped by position in the diff, and what
-survived was each file's *first* 40 KB — for a 145 KB module, its docstring and its imports, with
-the changed functions not in it. The context now comes from the diff itself, widened around each
-hunk under a ladder that stops at `max_diff_bytes_per_partition`, so **what a reviewer is sent can
-no longer exceed what a human approved**. Same range, measured: 282 KiB/stage to 134 KiB/stage,
-every byte of it adjacent to a change. `--function-context` was measured and rejected — with no
-funcname pattern to anchor on it expands without bound (one 1.9 KB diff to 110 KB).
-
-**A blind extractor that could read the plan.** The review transport passed no working directory,
-so every stage inherited rein's: the repository root, where `AGENTS.md` explains the Expected Model
-and `.rein/plan.yaml` *is* the Expected Model. `assert_blind` guards the payload and could never
-have caught it, because the priming did not travel in the payload. Each stage now states its own
-contract *in* the request — the vocabulary read from `review.schema.json` so the two cannot drift —
-and hands over the blob and line count of every changed path, which is what a reviewer used to need
-the repository for. The launch then runs in an empty directory.
-
-Also in that thread: the security reviewer is refused for dropping a finding a previous review
-recorded as blocking, and it was being refused on knowledge nobody had given it — the ids were an
-argument to the validator and never reached the request. A regeneration with a blocker standing had
-to re-invent `SEC-001` by coincidence to get past a check whose own instruction is "resolve the
-finding and re-run". They are in the request now, and the validator reads them from there — one
-source, rather than an enforcement and a disclosure that nothing made agree.
+The rest is the measurement that replaces the guessing: what a launch cost is now what the provider
+billed, read out of the adapter's own envelope — and an adapter that does not report it records
+`measured: false` rather than a row of zeros.
 
 **A declared separation that nothing performed.** `agents.<role>.independence_group` was authored
 beside the adapter, described as `provider/model`, and **passed to nothing**: no `--model` reached
@@ -208,6 +163,64 @@ budget's actual to `0` "because the detector partitions", so the review's own bu
 recorded a change of any size as costing nothing, and `coverage_gap_risk` priced a truncation that
 could not occur. **A repository setting `max_diff_bytes_per_partition` must rename the key**; the
 schema refuses the old one rather than reading past it.
+
+## [0.3.6] - 2026-08-24
+
+Four things this release stops doing, all of them found by pulling on one thread: `rein review
+generate` could not stop work it had already given up on.
+
+**A cancel that never cancelled.** The security review runs beside the extraction chain, and when
+the chain fails fast the security result is discarded — so the code called `Future.cancel()` on it.
+That is a documented no-op once a task has started, and with one worker and nothing competing for
+it this one always has. `ThreadPoolExecutor.__exit__` then blocks in `shutdown(wait=True)` until
+the adapter call finishes, so a failure is reported when the *discarded* call ends rather than when
+it happens. Measured across two runs of one cycle, an extraction failure that takes seconds
+surfaced **1m36s and 3m54s late**, each run having paid in full for a security review nobody would
+read. `shutdown(wait=False, cancel_futures=True)` does not fix it either — `concurrent.futures`
+registers an atexit hook that joins every worker, so the wait moves to interpreter exit and the
+process returns no sooner. The only thing that ends a launch early is killing the process it
+started, which `common.Cancellation` now does.
+
+**Ctrl-C was not stopping agents.** The same missing path, one layer down. Every launch gets its
+own session so a timeout can kill its children, which also means the terminal's SIGINT reaches
+rein and not the agent — while `Popen.__exit__` declines to wait on a KeyboardInterrupt precisely
+because it assumes the opposite. Measured: the launch was orphaned and went on running, holding its
+quota, with nothing left to read what it said. `common.run` now kills the process group on the way
+out, whatever the way out is.
+
+**`execution.agent_timeout_sec` now defaults to `0`, meaning no limit.** A wall clock cannot tell a
+model that is working from one that is stuck, and the two mistakes do not cost the same: killing a
+working agent throws away the launch, its quota and the session a retry would have resumed, and the
+retry pays for all of it again from cold. The wiring already read `0` as "no limit"; only the schema
+forbade saying it. Command steps keep `command_timeout_sec` — their runtime is knowable. The review
+transport, which had 900 seconds hardcoded, now takes the same knob as every other launch.
+**Repositories carrying `agent_timeout_sec: 3600` keep it**; drop it, or set `0`, to take the new
+default.
+
+**The reviewers were being sent the wrong 240 KB.** `relevant_code` sent each changed file's whole
+head-side body under a character cap. Measured over one cycle of this repository (17 files): the
+bodies came to 776 KB against the 240 KB cap, so 69% were dropped by position in the diff, and what
+survived was each file's *first* 40 KB — for a 145 KB module, its docstring and its imports, with
+the changed functions not in it. The context now comes from the diff itself, widened around each
+hunk under a ladder that stops at `max_diff_bytes_per_partition`, so **what a reviewer is sent can
+no longer exceed what a human approved**. Same range, measured: 282 KiB/stage to 134 KiB/stage,
+every byte of it adjacent to a change. `--function-context` was measured and rejected — with no
+funcname pattern to anchor on it expands without bound (one 1.9 KB diff to 110 KB).
+
+**A blind extractor that could read the plan.** The review transport passed no working directory,
+so every stage inherited rein's: the repository root, where `AGENTS.md` explains the Expected Model
+and `.rein/plan.yaml` *is* the Expected Model. `assert_blind` guards the payload and could never
+have caught it, because the priming did not travel in the payload. Each stage now states its own
+contract *in* the request — the vocabulary read from `review.schema.json` so the two cannot drift —
+and hands over the blob and line count of every changed path, which is what a reviewer used to need
+the repository for. The launch then runs in an empty directory.
+
+Also in that thread: the security reviewer is refused for dropping a finding a previous review
+recorded as blocking, and it was being refused on knowledge nobody had given it — the ids were an
+argument to the validator and never reached the request. A regeneration with a blocker standing had
+to re-invent `SEC-001` by coincidence to get past a check whose own instruction is "resolve the
+finding and re-run". They are in the request now, and the validator reads them from there — one
+source, rather than an enforcement and a disclosure that nothing made agree.
 
 Also: **`rein review generate --supervise`**, so a capacity stop no longer needs a human to notice
 and re-run the whole pipeline by hand. Same narrow licence as `rein build --supervise`, minus one
