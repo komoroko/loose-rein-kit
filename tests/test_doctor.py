@@ -550,6 +550,15 @@ def test_an_adapter_this_release_cannot_launch_fails_whatever_is_on_path() -> No
     assert "'cursor'" in results[0].message
 
 
+def test_a_model_the_adapter_cannot_be_told_to_run_fails() -> None:
+    """The launchers refuse it; doctor is where that is meant to be found, not `rein build`."""
+    config = make_config()
+    config["agents"]["comparator"] = {"adapter": "codex", "model": "o1"}  # type: ignore[index]
+    results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
+    assert [f.level for f in results if f.level == "FAIL"], results
+    assert any("cannot tell 'codex' which model to run" in f.message for f in results)
+
+
 def test_the_runtime_fallback_warns_that_it_is_weaker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
     repo = healthy(tmp_path)

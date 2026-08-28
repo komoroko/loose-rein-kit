@@ -1251,17 +1251,9 @@ def _adapter_for_role(config: models.Config | None, role: str) -> Adapter:
     """The capability record of the CLI `role` is pointed at. Raises if this release cannot launch it."""
     from rein import build_loop
 
-    adapter = (config.adapter(role) if config is not None else "") or "claude"
-    record = build_loop.ADAPTER_TABLE.get(adapter)
-    if record is None:
-        raise ReviewError(f"agents.{role}.adapter is {adapter!r}, which this release cannot launch")
-    if _model_for_role(config, role) and not record.model_flags:
-        raise ReviewError(
-            f"agents.{role}.model names a model this release cannot tell {adapter!r} to run, so the "
-            "launch would take the CLI's default under that name — and the gate-④ independence check "
-            "is derived from the model. Drop it, or use an adapter whose model flag is known."
-        )
-    return record
+    if refusal := build_loop.launch_refusal(config, role):
+        raise ReviewError(refusal)
+    return build_loop.ADAPTER_TABLE[(config.adapter(role) if config is not None else "") or "claude"]
 
 
 def _model_for_role(config: models.Config | None, role: str) -> str:

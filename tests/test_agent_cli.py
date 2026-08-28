@@ -171,10 +171,37 @@ def test_setting_an_adapter_rewrites_the_config(tmp_path: Path) -> None:
 
 def test_the_rewrite_is_still_schema_valid(tmp_path: Path) -> None:
     seed_repo(tmp_path)
-    agent_cli.main(["codex", "--role", "comparator", "--model", "o1", "--repo", str(tmp_path)])
+    agent_cli.main(["claude", "--role", "comparator", "--model", "haiku", "--repo", str(tmp_path)])
     config = parsed(tmp_path)  # would raise DocumentError if the surgery broke the shape
-    assert config.model("comparator") == "o1"
-    assert config.independence_group("comparator") == "codex/o1", "the group is derived, never authored"
+    assert config.model("comparator") == "haiku"
+    assert config.independence_group("comparator") == "claude/haiku", "the group is derived, never authored"
+
+
+def test_a_model_the_adapter_cannot_be_told_to_run_is_refused_before_it_is_written(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Schema-valid is not launchable, and the write is the moment that can still say so.
+
+    `codex` takes no model flag this release knows, so the config below is one every launcher
+    refuses. It used to be written anyway, exit 0, and discovered at `rein build`.
+    """
+    seed_repo(tmp_path)
+    before = (tmp_path / ".rein/config.yaml").read_text(encoding="utf-8")
+    assert agent_cli.main(["codex", "--role", "comparator", "--model", "o1", "--repo", str(tmp_path)]) == 2
+    assert "cannot tell 'codex' which model to run" in capsys.readouterr().err
+    assert (tmp_path / ".rein/config.yaml").read_text(encoding="utf-8") == before, "nothing is written"
+
+
+def test_a_bulk_switch_onto_an_adapter_with_no_model_flag_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`rein agent codex` on the scaffold: three review roles already name a model `codex` cannot take."""
+    seed_repo(tmp_path)
+    assert agent_cli.main(["codex", "--repo", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    for role in ("actual_extractor", "comparator", "security_reviewer"):
+        assert f"agents.{role}.model" in err, role
+    assert parsed(tmp_path).adapter("comparator") == "claude", "the config on disk is untouched"
 
 
 def test_a_switch_that_collapses_the_pair_warns(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -200,9 +200,9 @@ def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
     config = _config_with_split_adapters()
     step = config.steps[0]
     assert step.agent_role == "code_reviewer"
-    assert step.agent_argv == build_loop.ADAPTERS["codex"]
+    assert step.agent_argv == build_loop.ADAPTER_TABLE["codex"].launch_argv()
     # The implementer's own adapter is untouched — the two are resolved independently.
-    assert config.adapter_argv == build_loop.ADAPTERS["claude"]
+    assert config.adapter_argv == build_loop.ADAPTER_TABLE["claude"].launch_argv()
 
 
 def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[str]]) -> object:
@@ -228,7 +228,7 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
     assert launched, "the agent step never launched anything"
-    assert tuple(launched[0][:2]) == build_loop.ADAPTERS["codex"], (
+    assert tuple(launched[0][:2]) == build_loop.ADAPTER_TABLE["codex"].launch_argv(), (
         f"the agent step launched {launched[0][:2]} — it must use agents.code_reviewer, not agents.implementer"
     )
 
@@ -295,8 +295,8 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
     """The flags are one CLI's own vocabulary, not a portable concept — nothing else grows them."""
-    assert build_loop.write_flags(build_loop.ADAPTERS["claude"]) == ()
-    assert build_loop.write_flags(build_loop.ADAPTERS["gemini"]) == ()
+    assert build_loop.write_flags(build_loop.ADAPTER_TABLE["claude"].launch_argv()) == ()
+    assert build_loop.write_flags(build_loop.ADAPTER_TABLE["gemini"].launch_argv()) == ()
     assert build_loop.write_flags(()) == ()
 
 
@@ -319,7 +319,7 @@ def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.Monk
     # accident of import, and mypy is right that it is not part of review's interface.
     monkeypatch.setattr(common, "run", fake_run)
     review._adapter_reviewer(repo, "code_reviewer")({"request": "x"})
-    assert launched[0] == list(build_loop.ADAPTERS["codex"])
+    assert launched[0] == list(build_loop.ADAPTER_TABLE["codex"].launch_argv())
 
 
 def test_an_unlaunchable_role_adapter_stops_the_build_before_it_starts() -> None:
@@ -1446,11 +1446,6 @@ def test_every_adapter_declares_what_it_can_do() -> None:
 
     claude = build_loop.ADAPTER_TABLE["claude"]
     assert claude.resumable and not claude.own_sandbox and not claude.write_flags
-
-
-def test_the_argv_table_is_derived_from_the_capability_records() -> None:
-    """One definition per adapter. Two would drift, and the drift would be silent."""
-    assert build_loop.ADAPTERS == {name: a.launch_argv() for name, a in build_loop.ADAPTER_TABLE.items()}
 
 
 def test_a_resumable_implementer_stamps_then_resumes_its_session(

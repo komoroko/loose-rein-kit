@@ -594,7 +594,7 @@ def check_independence(config: models.Config | None, plan: models.Plan | None = 
                 "WARN",
                 "review",
                 f"{w} No claim in this plan is `critical` yet, so nothing needs it today — "
-                "declare the groups before one is, with `rein agent <cli> --role <role> --group <provider/model>`.",
+                "name the models before one is, with `rein agent <cli> --role <role> --model <model>`.",
             )
             for w in warnings
         ]
@@ -695,14 +695,13 @@ def check_adapters(config: models.Config | None, state: models.State | None) -> 
     binaries: dict[str, list[str]] = {}
     for role in agent_cli.ROLES:
         adapter = config.adapter(role) or "claude"
-        argv = build_loop.ADAPTERS.get(adapter)
-        if argv is None:
-            known = ", ".join(sorted(build_loop.ADAPTERS))
-            findings.append(
-                Finding("FAIL", "agents", f"agents.{role}.adapter is {adapter!r} — known adapters: {known}")
-            )
+        # The same rule the launchers apply, read here so a config that cannot be launched is
+        # named by `rein doctor` rather than by the first phase that tried — an unknown adapter,
+        # and a `model:` this release cannot pass to the CLI beside it.
+        if refusal := build_loop.launch_refusal(config, role):
+            findings.append(Finding("FAIL", "agents", refusal))
         else:
-            binaries.setdefault(argv[0], []).append(role)
+            binaries.setdefault(build_loop.ADAPTER_TABLE[adapter].argv[0], []).append(role)
     # Before the build phase a missing CLI is normal: nothing has needed it yet.
     level = "FAIL" if state is not None and state.current_phase == "build" else "WARN"
     for binary, roles in sorted(binaries.items()):

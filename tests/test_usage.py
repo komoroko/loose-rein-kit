@@ -78,7 +78,7 @@ def test_only_an_adapter_with_an_envelope_asks_for_one() -> None:
     """Flags without a reader is how the answer stops parsing, so they travel together."""
     for adapter in build_loop.ADAPTER_TABLE.values():
         assert bool(adapter.usage_flags) == (adapter.envelope is not None), adapter.name
-    assert build_loop.ADAPTERS["claude"][-2:] == usage.CLAUDE_JSON_FLAGS
+    assert build_loop.ADAPTER_TABLE["claude"].launch_argv()[-2:] == usage.CLAUDE_JSON_FLAGS
 
 
 def test_merging_a_reported_launch_with_an_unreported_one_keeps_both_facts() -> None:

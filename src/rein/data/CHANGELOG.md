@@ -86,6 +86,17 @@ CLIs. The scaffold puts the security reviewer on the *extractor's* model rather 
 comparator's: §12.4 constrains the extractor/comparator pair and says nothing about that role, and
 matching the extractor is what lets the two stages that read the same diff share one reading of it.
 
+**The same rule, and only the last moment applied it.** A `model:` this release cannot pass to
+the CLI beside it is a separation nothing performs — and that was read at the two launch sites and
+nowhere else. So `rein agent codex`, the bulk switch that command's own docstring
+documents, put `adapter: codex` beside the scaffold's `model:` on all three review roles, exited
+`0`, warned about the independence of two models `codex` would never be told to run, and failed at
+`rein build`, three gates after the command that wrote it. `rein doctor` said nothing about it. The rule is
+one function now (`build_loop.launch_refusal`, which also absorbed the unknown-adapter check that
+had drifted into three wordings), read at every moment that can act on it: `rein agent` refuses to
+write such a config, `rein doctor` names it, and both launchers still refuse it. `ADAPTERS` went
+with the last caller that wanted an argv without a model.
+
 **One reading of the change, two verdicts.** The blind extractor and the security reviewer are
 handed the same diff — up to `max_diff_bytes`, so up to half a megabyte — and were launched
 separately, each paying to read all of it. Serialising them into one session is not the fix: the
@@ -104,9 +115,10 @@ to write the prefix again — the round still came out at or below two independe
 nothing downstream depends on the hit, only the bill does.
 
 Whether two roles may share is decided on **the argv they are actually launched with**, not on the
-adapter's name and not on `independence_group`: nothing in the launcher varies by the group — no
-`--model` is passed anywhere — so refusing to share on that basis would honour a separation that
-does not exist at launch time, and the argv check is what will catch one if it is ever implemented.
+adapter's name: the model is part of that argv, so two roles on different models do not share — a
+cache written by one model is not another's, and the reading would be paid for twice anyway. The
+independence group is not consulted separately, because it is derived from `<adapter>/<model>` and
+says nothing the argv does not.
 `fork_flags` is declared on the `Adapter` record beside the write, session and usage flags, so
 `codex` and `gemini` degrade to today's two launches rather than needing a branch anywhere. The
 priming turn is held to `actual_extraction.assert_blind` like the extractor's own request — a new
@@ -141,7 +153,6 @@ regardless of how many times the same argv actually went to the provider. On its
 under-reported every retried task; beside the billed counter it put two fields called `launches`
 in one `run_measured` event disagreeing with each other, 1 against 3. Both are counted per attempt
 now.
-
 
 **The reuse unit is now one stage's answer, not one run of the pipeline.** `rein review generate`
 kept a single `subject` digest — the tree, the plan, the config, the sandbox, the coverage

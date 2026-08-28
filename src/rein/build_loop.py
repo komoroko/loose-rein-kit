@@ -234,13 +234,39 @@ ADAPTER_TABLE: dict[str, Adapter] = {
     "gemini": Adapter(name="gemini", argv=("gemini", "-p")),
 }
 
-#: Adapter name → launch argv, usage flags included. Kept because most callers want only this.
-ADAPTERS: dict[str, tuple[str, ...]] = {name: a.launch_argv() for name, a in ADAPTER_TABLE.items()}
-
 
 def adapter_for(argv: Sequence[str]) -> Adapter | None:
     """The capability record of whatever CLI `argv` launches, or None for an unknown one."""
     return ADAPTER_TABLE.get(argv[0]) if argv else None
+
+
+def launch_refusal(config: models.Config | None, role: str) -> str:
+    """Why `role` cannot be launched as configured, or `""` when it can.
+
+    One rule, read at every moment that can act on it: `rein agent` refuses to *write* such a
+    config, `rein doctor` names it, and the build loop and the review pipeline refuse to launch
+    under it. It lived only at the two launch sites, which is the latest of those moments and the
+    most expensive: `rein agent codex` — the bulk switch that command's own docstring documents —
+    put `adapter: codex` beside the scaffold's `model: opus` on all three review roles, exited 0,
+    warned about the independence of two models `codex` would never be told to run, and failed at
+    `rein build`, three gates later.
+    """
+    adapter = (config.adapter(role) if config is not None else "") or "claude"
+    record = ADAPTER_TABLE.get(adapter)
+    if record is None:
+        return (
+            f"agents.{role}.adapter is {adapter!r}, which this release does not know how to launch "
+            f"(one of: {', '.join(sorted(ADAPTER_TABLE))})"
+        )
+    model = config.model(role) if config is not None else ""
+    if model and not record.model_flags:
+        return (
+            f"agents.{role}.model is {model!r} and this release cannot tell {adapter!r} which model "
+            "to run, so the launch would take the CLI's default under that name. The gate-④ "
+            "independence check is derived from the model, so that is a separation nothing performs "
+            "— drop the model, or point the role at an adapter whose model flag is known."
+        )
+    return ""
 
 
 def write_flags(argv: tuple[str, ...]) -> tuple[str, ...]:
@@ -329,22 +355,9 @@ class Config:
         build before an implementer has been paid for — rather than at the first step that needed
         it, halfway through a task.
         """
-        adapter = config.adapter(role) or "claude"
-        record = ADAPTER_TABLE.get(adapter)
-        if record is None:
-            raise ValueError(
-                f"agents.{role}.adapter is {adapter!r}, which this release does not know how to launch "
-                f"(one of: {', '.join(sorted(ADAPTER_TABLE))})"
-            )
-        model = config.model(role)
-        if model and not record.model_flags:
-            raise ValueError(
-                f"agents.{role}.model is {model!r} and this release cannot tell {adapter!r} which model "
-                "to run, so the launch would take the CLI's default under that name. The independence "
-                "group is derived from the model, so that is a separation nothing performs — drop the "
-                "model, or point the role at an adapter whose model flag is known."
-            )
-        return record.launch_argv(model)
+        if refusal := launch_refusal(config, role):
+            raise ValueError(refusal)
+        return ADAPTER_TABLE[config.adapter(role) or "claude"].launch_argv(config.model(role))
 
     @classmethod
     def from_models(cls, config: models.Config) -> Config:

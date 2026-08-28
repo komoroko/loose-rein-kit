@@ -215,6 +215,17 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
+    from rein import build_loop  # local: the adapter table is the build loop's, and this is a small command
+
+    # Schema-valid is not launchable. `rein agent codex` on the scaffold puts `adapter: codex`
+    # beside a `model:` no `codex` launch can be told to run, and that used to be discovered at
+    # `rein build` — three gates after the command that wrote it exited 0. Refused here, before
+    # anything is written, so the config on disk stays one the loop can run.
+    if refusals := [r for role in roles if (r := build_loop.launch_refusal(new_config, role))]:
+        for refusal in refusals:
+            logger.error(refusal)
+        return 2
+
     repo.config.write_text(updated, encoding="utf-8")
     print(f"adapter '{args.adapter}' set for: {', '.join(roles)}")
     for warning in independence_report(new_config):

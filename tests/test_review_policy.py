@@ -134,6 +134,7 @@ def test_reviewer_cannot_clear_a_policy_blocking_flag() -> None:
 def _review(machine: dict[str, Any]) -> models.Review:
     return models.Review({"machine": {"status": "generated", **machine}, "human": {"status": "not_started"}})
 
+
 # --- independence (plan §12.4, E2E-26) ----------------------------------------
 
 

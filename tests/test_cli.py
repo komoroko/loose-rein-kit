@@ -42,7 +42,9 @@ def test_next_passes_through_to_status_api(repo: Path, capsys: pytest.CaptureFix
 
 
 def test_agent_passes_through_to_agent_cli(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli.main(["agent", "codex"]) == 0
+    # One role, and one that names no model: a bulk switch onto `codex` is refused, because the
+    # scaffold's review roles name models `codex` cannot be told to run.
+    assert cli.main(["agent", "codex", "--role", "implementer"]) == 0
     assert "adapter: codex" in (repo / ".rein" / "config.yaml").read_text(encoding="utf-8")
 
 
