@@ -4,6 +4,166 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.7] - 2026-08-28
+
+What follows is mostly one habit: a thing this repository declared and nothing performed. A
+separation between the two reviewers that no launch made. A partitioning of the Coverage Manifest
+that no code did. A `launches` counter that said 1 where three launches had happened. One cache key
+deciding all three reviewer stages at once, so editing the plan re-read the code with an extractor
+that has never seen a plan. And beside them, two halves of one format that never had to agree:
+rein could write a `review.yaml` it could not read back.
+
+The rest is the measurement that replaces the guessing: what a launch cost is now what the provider
+billed, read out of the adapter's own envelope — and an adapter that does not report it records
+`measured: false` rather than a row of zeros.
+
+**A declared separation that nothing performed.** `agents.<role>.independence_group` was authored
+beside the adapter, described as `provider/model`, and **passed to nothing**: no `--model` reached
+any CLI, so two roles declaring `claude/opus` and `claude/sonnet` ran the same model on the same
+CLI. `review_policy.independence_ok` compared those two strings and passed — so a critical review's
+independence requirement, the one thing §12.4 exists to enforce, was satisfied by two different
+labels beside one opinion. And `binding.independence`, which the schema declares and the dashboard
+renders, was written by nobody: the gate receipt bound no record of who produced either half.
+
+The field is now `agents.<role>.model`, and the independence group is **derived** from
+`<adapter>/<model>` — one field, so a separation cannot be declared without being performed. The
+model is passed to the CLI (`Adapter.model_flags`), and an adapter this release cannot tell which
+model to run **refuses** a config that names one rather than launching the default under that
+name. `binding.independence` now records both what was asked for and, from the launch's own report,
+the model id that actually answered; a new gate check refuses a critical review whose two halves
+were answered by the same model, whatever the configuration claimed. `prompt_digest` is gone —
+declared in the schema, read by the old check, written by nobody.
+
+Two consequences to act on. **`independence_group` in a config is refused; write `model` instead**
+(`rein agent claude --role comparator --model sonnet`; `--group` is gone). And **the provider is
+now the adapter**, not the first half of a label — two roles are two providers when they are two
+CLIs. The scaffold puts the security reviewer on the *extractor's* model rather than the
+comparator's: §12.4 constrains the extractor/comparator pair and says nothing about that role, and
+matching the extractor is what lets the two stages that read the same diff share one reading of it.
+
+**The same rule, and only the last moment applied it.** A `model:` this release cannot pass to
+the CLI beside it is a separation nothing performs — and that was read at the two launch sites and
+nowhere else. So `rein agent codex`, the bulk switch that command's own docstring
+documents, put `adapter: codex` beside the scaffold's `model:` on all three review roles, exited
+`0`, warned about the independence of two models `codex` would never be told to run, and failed at
+`rein build`, three gates after the command that wrote it. `rein doctor` said nothing about it. The rule is
+one function now (`build_loop.launch_refusal`, which also absorbed the unknown-adapter check that
+had drifted into three wordings), read at every moment that can act on it: `rein agent` refuses to
+write such a config, `rein doctor` names it, and both launchers still refuse it. `ADAPTERS` went
+with the last caller that wanted an argv without a model.
+
+**One reading of the change, two verdicts.** The blind extractor and the security reviewer are
+handed the same diff — up to `max_diff_bytes`, so up to half a megabyte — and were launched
+separately, each paying to read all of it. Serialising them into one session is not the fix: the
+second stage would read the first stage's conclusions and inherit its frame, and catching what the
+extraction's frame missed is the security review's whole value. `--fork-session` separates exactly
+the right thing — **the reading is shared, the readings are not.** A priming turn carries the diff
+once; each stage branches from it and neither sees the other's answer.
+
+Every part of that was measured, because the alternatives look identical from the outside and are
+not. Sending the same prefix to two *separate* one-shot launches does **not** hit the cache — two
+separate launches with an identical prefix read 16,737 tokens from cache and paid to write the
+rest again, where two branches read 51,969. Two branches resumed in parallel both hit it, so the
+pipeline keeps its concurrency. On an 82 KB payload: $0.2153 against $0.1298; on a 58 KB payload
+with real request shapes, $0.196 against $0.126. One run in four had the first branch miss and pay
+to write the prefix again — the round still came out at or below two independent launches, and
+nothing downstream depends on the hit, only the bill does.
+
+Whether two roles may share is decided on **the argv they are actually launched with**, not on the
+adapter's name: the model is part of that argv, so two roles on different models do not share — a
+cache written by one model is not another's, and the reading would be paid for twice anyway. The
+independence group is not consulted separately, because it is derived from `<adapter>/<model>` and
+says nothing the argv does not.
+`fork_flags` is declared on the `Adapter` record beside the write, session and usage flags, so
+`codex` and `gemini` degrade to today's two launches rather than needing a branch anywhere. The
+priming turn is held to `actual_extraction.assert_blind` like the extractor's own request — a new
+path into that context without the guard is how priming comes back — and is counted in the spend
+ledger under `shared_reading`, because folding it into either stage would make that stage's cost a
+fiction. A priming turn that fails stops the review; there is deliberately no "prime failed, launch
+them separately" path, which would hide a broken adapter behind a bill twice the size.
+
+**The measurement is what the launch cost, not what this process sent.** Both spend counters
+measured bytes on stdin, and both explained why: "a token count belongs to a tokenizer nobody here
+owns, and reporting an estimate as a measurement is the habit this codebase is built against."
+That is right about an estimate and wrong about a *report* — the CLI knows, and says so on
+request. A probe measured the gap: a one-word prompt came back billed for 10 input tokens and
+**20,956 cached ones**, all of it system prompt, project instructions and cache — context this
+process never sent and could never have counted. `rein build` and `rein review generate` now
+launch `claude` with `--output-format json` and record what came back: input, output, cached and
+reasoning tokens, the model id that actually answered, and the cost. It lands on the console, in
+`run_measured` and in `review_generated`.
+
+Reading the envelope also catches a failure that used to be silent: `is_error` can be set on a
+process that exited 0, and that answer went on to the stage validator to be reported as a
+malformed *reviewer* answer rather than as a launch that said it had failed.
+
+**An adapter that does not report usage records `measured: false`, never zero** — `codex` and
+`gemini`, whose envelopes this release has not seen. Bytes are kept beside the tokens rather than
+replaced by them: bytes are what rein sent and are always knowable, tokens are what it cost and
+only a provider can say. The host's global CLI configuration stays outside both, and is named as
+such rather than estimated; its size is visible in the cached and input counts.
+
+A retry is another launch, and the byte counter never said so: it counted once per `_launch`
+regardless of how many times the same argv actually went to the provider. On its own that
+under-reported every retried task; beside the billed counter it put two fields called `launches`
+in one `run_measured` event disagreeing with each other, 1 against 3. Both are counted per attempt
+now.
+
+**The reuse unit is now one stage's answer, not one run of the pipeline.** `rein review generate`
+kept a single `subject` digest — the tree, the plan, the config, the sandbox, the coverage
+manifest and the task facts, in one key — and re-ran *all three* reviewer stages unless every one
+of them matched. Each stage is a function of a different subset. Editing one word of a claim in
+`plan.yaml` therefore re-read the whole change with the blind extractor, which has never seen a
+plan, and re-ran the security review, which never will: **three launches for an answer only one of
+them could depend on.** Promoting a task to `done` after a human recorded evidence re-ran all
+three as well, to refresh an orientation brief that no model produces — a repair that had fixed a
+stale brief by adding `state.yaml` to a pipeline-wide key.
+
+Each stage now carries its own key, written out field by field, and `.rein/work/review-cache/`
+holds the answer to each question. Two things follow. **A stage that already answered is not paid
+for twice**: an extraction measured at over six minutes used to be discarded because the
+comparator came back malformed, and a `--supervise` retry re-read everything; entries are written
+the moment their own stage validates, so a re-run resumes. And **the human half is reset only when
+the machine half actually moves** — a re-reading that comes out identical is the same review, and
+the answers recorded against it stand. `--force` now means "read it again anyway"; whether that
+discards the human answers follows from whether the reading changed.
+
+A cache hit is put back through the stage's own validator, so anchors are re-checked against the
+commit and the never-lists still apply — nothing enters a review because it was on disk. A stored
+answer that stops validating (a release tightening a validator) is dropped and re-read rather than
+wedging the review. A completed generation deletes every entry it did not use: no expiry, no knob.
+
+**rein could write an SSOT document it could not read back.** `strict_yaml` refuses YAML anchors
+and aliases on load, deliberately — an alias is an ambiguity and an expansion surface — and
+`yaml.safe_dump` emits one for any object reachable from two places in the same document. The
+writer did not know that. `review.assemble` stores the security findings under
+`security.findings` *and* hands the same objects to `decision_cards.derive_cards`, so **every
+review that found anything wrote a `review.yaml` that never parsed again**: gate ④ unreadable,
+with the loader naming a line and not the cause. Found while adding a test that needed a review
+with a finding in it. The store now dumps with a no-alias dumper, which repeats the object — the
+fix belongs at the one place both halves of the format meet, not at each composition site.
+
+**A partitioning nothing ever performed.** The Coverage Manifest raised a `partitioned` flag past
+2000 changed lines, `review.yaml` declared `coverage` an array of up to 128 entries with a
+`partition` index on each, and the whole vocabulary described a thing no code did: the manifest is
+always one entry, and all three reviewer stages are handed one diff. The flag was read in exactly
+one place — the dashboard's scope JSON — and by no policy anywhere, so a change over the line
+reported that it had been split into readable pieces and nobody could act on the claim either way.
+The pipeline had already decided the opposite question, twice: `_reviewable` says the answer to a
+change too big to review is `/revise` and not a narrower window onto it, and `_refuse_over_budget`
+enforces exactly that before a model is launched. **Splitting would also break the extraction it
+was supposed to serve** — behaviour that spans two files cannot be read out of one fragment, and
+that is the seam "extra behaviours: 0" must never hide.
+
+So the vocabulary is gone rather than implemented: `machine.coverage` is one manifest, not a list;
+`partitioned`, the `partition` index, and `truncated` (a required field the schema pinned to
+`false` and one unreachable branch read) are deleted; and the budget is `max_diff_bytes`, which is
+what it always measured. Two related lies went with them — `derive_review_budget` hard-coded that
+budget's actual to `0` "because the detector partitions", so the review's own budget snapshot
+recorded a change of any size as costing nothing, and `coverage_gap_risk` priced a truncation that
+could not occur. **A repository setting `max_diff_bytes_per_partition` must rename the key**; the
+schema refuses the old one rather than reading past it.
+
 ## [0.3.6] - 2026-08-24
 
 Four things this release stops doing, all of them found by pulling on one thread: `rein review

@@ -185,9 +185,6 @@
               "claims"
             ],
             "properties": {
-              "coverage": {
-                "minItems": 1
-              },
               "binding": {
                 "required": [
                   "change_digest",
@@ -424,133 +421,118 @@
           }
         },
         "coverage": {
-          "description": "What the detector could and could not analyse. More than one entry when a large diff was partitioned. `insufficient` anywhere means extra-behaviour counts read as 'undeterminable', never as '0' (plan 2.4).",
-          "type": "array",
-          "maxItems": 128,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "diff_digest",
-              "analyzed_files",
-              "analyzed_bytes",
-              "coverage_status",
-              "truncated"
-            ],
-            "properties": {
-              "diff_digest": {
-                "$ref": "#/$defs/digest"
-              },
-              "partition": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "analyzed_files": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "analyzed_hunks": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "analyzed_bytes": {
-                "description": "Size in bytes of the diff this entry covers. Required: the `max_diff_bytes_per_partition` budget is denominated in bytes, so an entry without a measured value gives that budget no actual and it can never be exceeded. It was optional, read with a default of 0, and documented as \"within budget\" — an unmeasured partition passing a size check it was never held to. A review generated before the measure is regenerated, not tolerated.",
-                "type": "integer",
-                "minimum": 0
-              },
-              "unsupported_files": {
-                "type": "array",
-                "maxItems": 512,
-                "items": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "path",
-                    "reason"
-                  ],
-                  "properties": {
-                    "path": {
-                      "$ref": "#/$defs/repoPath"
-                    },
-                    "reason": {
-                      "enum": [
-                        "binary",
-                        "generated",
-                        "unsupported_language",
-                        "parser_failure",
-                        "too_large",
-                        "vendored"
-                      ]
-                    },
-                    "detail": {
-                      "description": "Which extension, or which analyzer went missing. `reason` is the closed vocabulary a query can aggregate; this is what a human needs to act on it, since 'register an analyzer for .psd' is only actionable if something says .psd.",
-                      "type": "string",
-                      "maxLength": 500
-                    }
+          "description": "What the detector could and could not analyse, for the whole diff. `insufficient` means extra-behaviour counts read as 'undeterminable', never as '0' (plan 2.4).",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "diff_digest",
+            "analyzed_files",
+            "analyzed_bytes",
+            "coverage_status"
+          ],
+          "properties": {
+            "diff_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "analyzed_files": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "analyzed_hunks": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "analyzed_bytes": {
+              "description": "Size in bytes of the diff this manifest covers. Required: the `max_diff_bytes` budget is denominated in bytes, so a manifest without a measured value gives that budget no actual and it can never be exceeded. A review generated before the measure is regenerated, not tolerated.",
+              "type": "integer",
+              "minimum": 0
+            },
+            "unsupported_files": {
+              "type": "array",
+              "maxItems": 512,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "path",
+                  "reason"
+                ],
+                "properties": {
+                  "path": {
+                    "$ref": "#/$defs/repoPath"
+                  },
+                  "reason": {
+                    "enum": [
+                      "binary",
+                      "generated",
+                      "unsupported_language",
+                      "parser_failure",
+                      "too_large",
+                      "vendored"
+                    ]
+                  },
+                  "detail": {
+                    "description": "Which extension, or which analyzer went missing. `reason` is the closed vocabulary a query can aggregate; this is what a human needs to act on it, since 'register an analyzer for .psd' is only actionable if something says .psd.",
+                    "type": "string",
+                    "maxLength": 500
                   }
                 }
-              },
-              "generated_files": {
-                "type": "array",
-                "maxItems": 512,
-                "items": {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": [
-                    "path"
-                  ],
-                  "properties": {
-                    "path": {
-                      "$ref": "#/$defs/repoPath"
-                    },
-                    "source_locator": {
-                      "type": "string",
-                      "maxLength": 500
-                    }
+              }
+            },
+            "generated_files": {
+              "type": "array",
+              "maxItems": 512,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "path"
+                ],
+                "properties": {
+                  "path": {
+                    "$ref": "#/$defs/repoPath"
+                  },
+                  "source_locator": {
+                    "type": "string",
+                    "maxLength": 500
                   }
                 }
-              },
-              "languages": {
-                "type": "object",
-                "maxProperties": 64,
-                "additionalProperties": {
-                  "enum": [
-                    "ast",
-                    "ast_plus_llm",
-                    "token_only",
-                    "unsupported"
-                  ]
-                }
-              },
-              "analyzers": {
-                "description": "External analyzer name -> the digest of the executable that answered, for every analyzer whose reading is counted in `analyzed_files`. A file counted as read with nobody named is a claim no one can check afterwards (out-of-scope 11).",
-                "type": "object",
-                "maxProperties": 32,
-                "additionalProperties": {
-                  "$ref": "#/$defs/digest"
-                }
-              },
-              "deleted_lines_analyzed": {
-                "type": "boolean"
-              },
-              "dependency_semantics_analyzed": {
-                "type": "boolean"
-              },
-              "binary_semantics_analyzed": {
-                "type": "boolean"
-              },
-              "truncated": {
-                "const": false
-              },
-              "partitioned": {
-                "type": "boolean"
-              },
-              "coverage_status": {
+              }
+            },
+            "languages": {
+              "type": "object",
+              "maxProperties": 64,
+              "additionalProperties": {
                 "enum": [
-                  "sufficient",
-                  "insufficient"
+                  "ast",
+                  "ast_plus_llm",
+                  "token_only",
+                  "unsupported"
                 ]
               }
+            },
+            "analyzers": {
+              "description": "External analyzer name -> the digest of the executable that answered, for every analyzer whose reading is counted in `analyzed_files`. A file counted as read with nobody named is a claim no one can check afterwards (out-of-scope 11).",
+              "type": "object",
+              "maxProperties": 32,
+              "additionalProperties": {
+                "$ref": "#/$defs/digest"
+              }
+            },
+            "deleted_lines_analyzed": {
+              "type": "boolean"
+            },
+            "dependency_semantics_analyzed": {
+              "type": "boolean"
+            },
+            "binary_semantics_analyzed": {
+              "type": "boolean"
+            },
+            "coverage_status": {
+              "enum": [
+                "sufficient",
+                "insufficient"
+              ]
             }
           }
         },
@@ -1150,7 +1132,7 @@
                   "max_critical_decisions",
                   "max_human_statements",
                   "max_unresolved_low_medium_unknowns",
-                  "max_diff_bytes_per_partition"
+                  "max_diff_bytes"
                 ]
               },
               "limit": {
@@ -1170,20 +1152,22 @@
       }
     },
     "independenceGroup": {
+      "description": "Who produced one half of the review: the model the config asked for, and the one the launch reported having used. Both optional and neither inferred from the other — `group` is a configuration and `model` is a measurement, and a provider that serves a different model than it was told to is exactly the case where they disagree. `prompt_digest` is gone: it was declared here, read by the independence check, and written by nobody, and the check is settled on the model now.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "group"
-      ],
       "properties": {
         "group": {
+          "description": "`<adapter>/<model>` from config.yaml, derived rather than authored so it cannot name a separation the launch does not make.",
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$"
         },
-        "prompt_digest": {
-          "$ref": "#/$defs/digest"
+        "model": {
+          "description": "The model id the launch reported. Absent when the adapter reports no usage — which is 'nobody measured', never 'it agreed'.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         }
       }
     },

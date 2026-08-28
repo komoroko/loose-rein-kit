@@ -503,7 +503,7 @@ def test_check_sandbox_passes_when_the_local_image_matches_the_pin(monkeypatch: 
 
 def test_a_shared_independence_group_fails() -> None:
     config = make_config()
-    config["agents"]["comparator"]["independence_group"] = "claude/opus"  # type: ignore[index]
+    config["agents"]["comparator"]["model"] = "opus"  # type: ignore[index]
     results = doctor.check_independence(models.Config(config))
     assert results[0].level == "FAIL"
     assert "share the independence group" in results[0].message
@@ -519,7 +519,8 @@ def test_two_models_of_one_provider_pass_but_warn() -> None:
 
 def test_two_providers_pass_cleanly() -> None:
     config = make_config()
-    config["agents"]["comparator"]["independence_group"] = "openai/gpt"  # type: ignore[index]
+    # The provider is the adapter, not a label beside it — two providers means two CLIs.
+    config["agents"]["comparator"] = {"adapter": "codex", "model": "gpt"}  # type: ignore[index]
     assert doctor.check_independence(models.Config(config))[0].level == "PASS"
 
 
@@ -547,6 +548,15 @@ def test_an_adapter_this_release_cannot_launch_fails_whatever_is_on_path() -> No
     results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
     assert results[0].level == "FAIL"
     assert "'cursor'" in results[0].message
+
+
+def test_a_model_the_adapter_cannot_be_told_to_run_fails() -> None:
+    """The launchers refuse it; doctor is where that is meant to be found, not `rein build`."""
+    config = make_config()
+    config["agents"]["comparator"] = {"adapter": "codex", "model": "o1"}  # type: ignore[index]
+    results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
+    assert [f.level for f in results if f.level == "FAIL"], results
+    assert any("cannot tell 'codex' which model to run" in f.message for f in results)
 
 
 def test_the_runtime_fallback_warns_that_it_is_weaker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -979,7 +989,7 @@ def test_an_undeclared_independence_pair_is_a_warning_until_a_critical_claim_nee
     """
     config = make_config()
     for role in ("actual_extractor", "comparator"):
-        config["agents"][role].pop("independence_group", None)  # type: ignore[index]
+        config["agents"][role].pop("model", None)  # type: ignore[index]
 
     results = doctor.check_independence(models.Config(config), models.Plan(make_plan()))
     assert [f.level for f in results] == ["WARN"]
@@ -989,7 +999,7 @@ def test_an_undeclared_independence_pair_is_a_warning_until_a_critical_claim_nee
 def test_an_undeclared_independence_pair_fails_once_a_critical_claim_exists() -> None:
     config = make_config()
     for role in ("actual_extractor", "comparator"):
-        config["agents"][role].pop("independence_group", None)  # type: ignore[index]
+        config["agents"][role].pop("model", None)  # type: ignore[index]
     plan = make_plan(claims=[{"id": "C-001", "statement": "it holds", "risk": "critical"}])
 
     results = doctor.check_independence(models.Config(config), models.Plan(plan))
@@ -999,7 +1009,7 @@ def test_an_undeclared_independence_pair_fails_once_a_critical_claim_exists() ->
 def test_a_shared_group_stays_a_failure_whatever_the_plan_says() -> None:
     """A plan change cannot make one group into two: that is a configuration, not a judgement."""
     config = make_config()
-    config["agents"]["comparator"]["independence_group"] = "claude/opus"  # type: ignore[index]
+    config["agents"]["comparator"]["model"] = "opus"  # type: ignore[index]
     results = doctor.check_independence(models.Config(config), models.Plan(make_plan()))
     assert results[0].level == "FAIL"
 

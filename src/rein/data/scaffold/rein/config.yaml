@@ -105,15 +105,22 @@ agents:
     adapter: claude
   code_reviewer:
     adapter: claude
+  # `model` is passed to the CLI, and the independence group a critical change is checked
+  # against is derived from it (`<adapter>/<model>`) — so a separation written here is one the
+  # launch actually makes. The extractor and the comparator must differ (plan 12.4).
   actual_extractor:
     adapter: claude
-    independence_group: claude/opus
+    model: opus
   comparator:
     adapter: claude
-    independence_group: claude/sonnet
+    model: sonnet
+  # Deliberately the extractor's model, not the comparator's: 12.4 constrains the
+  # extractor/comparator pair and says nothing about this role, and matching the extractor lets
+  # the two stages that read the same diff share one reading of it (`review.SharedReading`).
+  # They still reach independent verdicts — the session is branched, never continued.
   security_reviewer:
     adapter: claude
-    independence_group: claude/sonnet
+    model: opus
 
 # The single definition of the DoD. `command` is an argv array — no shell, so a pipe or a
 # redirect has to live in a script a reviewer can read.
@@ -162,7 +169,7 @@ review_policy:
     max_critical_decisions: 5
     max_human_statements: 30
     max_unresolved_low_medium_unknowns: 5
-    max_diff_bytes_per_partition: 524288
+    max_diff_bytes: 524288
 
 guard:
   # true while this repo IS the Loose Rein template (its scaffold originals share paths with

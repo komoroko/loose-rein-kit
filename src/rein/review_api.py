@@ -317,35 +317,32 @@ def _coverage_totals(review: models.Review) -> dict[str, object]:
     the asymmetry a reviewer needs: nobody can act on "eleven files were fine", and everybody can
     act on "ui.min.js was never parsed".
     """
-    files = hunks = bytes_read = 0
-    unsupported: list[dict[str, str]] = []
-    generated: list[str] = []
-    status = "sufficient"
-    partitioned = False
-    for entry in review.coverage:
-        files += int(entry.get("analyzed_files", 0) or 0)
-        hunks += int(entry.get("analyzed_hunks", 0) or 0)
-        # No default: `analyzed_bytes` is required by the schema, and 0 for an unmeasured partition
-        # is what let a byte budget pass a partition it never measured (see _largest_partition_bytes).
-        bytes_read = max(bytes_read, int(entry["analyzed_bytes"]))
-        partitioned = partitioned or bool(entry.get("partitioned"))
-        if str(entry.get("coverage_status")) != "sufficient":
-            status = "insufficient"
-        for item in entry.get("unsupported_files", []) or []:
-            unsupported.append(
-                {
-                    "path": str(item.get("path", "")),
-                    "reason": str(item.get("reason", "")),
-                    "detail": str(item.get("detail", "")),
-                }
-            )
-        generated += [str(item.get("path", "")) for item in entry.get("generated_files", []) or []]
+    manifest = review.coverage
+    if not manifest:
+        return {
+            "analyzed_files": 0,
+            "analyzed_hunks": 0,
+            "analyzed_bytes": 0,
+            "coverage_status": "unknown",
+            "unsupported_files": [],
+            "generated_files": [],
+        }
+    unsupported = [
+        {
+            "path": str(item.get("path", "")),
+            "reason": str(item.get("reason", "")),
+            "detail": str(item.get("detail", "")),
+        }
+        for item in manifest.get("unsupported_files", []) or []
+    ]
+    generated = [str(item.get("path", "")) for item in manifest.get("generated_files", []) or []]
     return {
-        "analyzed_files": files,
-        "analyzed_hunks": hunks,
-        "analyzed_bytes": bytes_read,
-        "coverage_status": status if review.coverage else "unknown",
-        "partitioned": partitioned,
+        "analyzed_files": int(manifest.get("analyzed_files", 0) or 0),
+        "analyzed_hunks": int(manifest.get("analyzed_hunks", 0) or 0),
+        # No default: `analyzed_bytes` is required by the schema, and 0 for an unmeasured manifest
+        # is what let a byte budget pass a change it never measured (see human_review._diff_bytes).
+        "analyzed_bytes": int(manifest["analyzed_bytes"]),
+        "coverage_status": str(manifest.get("coverage_status", "unknown")),
         "unsupported_files": unsupported,
         "generated_files": sorted(set(generated)),
     }

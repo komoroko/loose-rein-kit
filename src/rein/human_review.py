@@ -44,7 +44,7 @@ DEFAULT_BUDGET: dict[str, int] = {
     "max_critical_decisions": 5,
     "max_human_statements": 30,
     "max_unresolved_low_medium_unknowns": 5,
-    "max_diff_bytes_per_partition": 524288,
+    "max_diff_bytes": 524288,
 }
 
 #: Dispositions that discharge an expertise gap (plan §14.9). "Accept the risk" is deliberately not
@@ -211,29 +211,25 @@ def _unresolved_low_medium_unknowns(review: models.Review, human: Mapping[str, A
     return count
 
 
-def _largest_partition_bytes(review: models.Review) -> int:
-    """The biggest single diff partition this review covers, in bytes.
-
-    The budget is per *partition*, not per change, so the measure is the max rather than the sum: a
-    change split into readable pieces is within budget however many pieces there are, and one
-    unreadable piece is over it however small the rest were.
+def _diff_bytes(review: models.Review) -> int:
+    """How large the change this review covers is, in bytes.
 
     `analyzed_bytes` is required by the schema, so there is no absent case to default. It used to be
-    optional and read as 0 here — an unmeasured partition passing a size check it was never held to,
+    optional and read as 0 here — an unmeasured manifest passing a size check it was never held to,
     which is the one direction this file must never round towards. A review written before the
     measure is regenerated rather than tolerated.
     """
-    return max((int(entry["analyzed_bytes"]) for entry in review.coverage), default=0)
+    manifest = review.coverage
+    return int(manifest["analyzed_bytes"]) if manifest else 0
 
 
 def budget_actuals(review: models.Review, human: Mapping[str, Any]) -> dict[str, int]:
     """The measured value for each budget line, derived from the review content (plan §14.10).
 
-    `max_diff_bytes_per_partition` is measured from the coverage manifest, not assumed enforced
-    upstream: `diff_facts` raises its `partitioned` flag past a *line* count and never measures
-    bytes, so a constant actual here would make the one byte-denominated budget impossible to
-    exceed by a change of any size — and "a blown budget splits the scope" (config.yaml,
-    gate-workflow.md, review.schema.json) something that could never happen.
+    `max_diff_bytes` is measured from the coverage manifest, not assumed enforced upstream: a
+    constant actual here would make the one byte-denominated budget impossible to exceed by a
+    change of any size — and "a blown budget splits the scope" (config.yaml, gate-workflow.md,
+    review.schema.json) something that could never happen.
     """
     return {
         "max_critical_decisions": sum(1 for c in _machine_list(review, "decision_cards") if _risk(c) == "critical"),
@@ -241,7 +237,7 @@ def budget_actuals(review: models.Review, human: Mapping[str, Any]) -> dict[str,
         "max_human_statements": len(_machine_list(review, "statements")),
         "max_scenarios": len(_machine_list(review, "scenarios")),
         "max_unresolved_low_medium_unknowns": _unresolved_low_medium_unknowns(review, human),
-        "max_diff_bytes_per_partition": _largest_partition_bytes(review),
+        "max_diff_bytes": _diff_bytes(review),
     }
 
 

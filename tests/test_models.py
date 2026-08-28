@@ -398,11 +398,10 @@ machine:
     plan_digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
     environment_digest: sha256:8888888888888888888888888888888888888888888888888888888888888888
   coverage:
-    - diff_digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
-      analyzed_files: 27
-      analyzed_bytes: 12345
-      truncated: false
-      coverage_status: sufficient
+    diff_digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
+    analyzed_files: 27
+    analyzed_bytes: 12345
+    coverage_status: sufficient
   actual_extraction:
     - id: AST-003
       statement: the retry path passes the same idempotency key to the next attempt
@@ -452,11 +451,27 @@ def test_absent_coverage_is_not_sufficient() -> None:
     assert not review.is_generated
 
 
-def test_truncated_coverage_is_rejected_outright() -> None:
-    # Reading only the head or tail of a huge diff and calling it analysed is not allowed;
-    # the detector must partition instead (plan §13.4).
-    with pytest.raises(models.DocumentError, match="truncated"):
-        models.Review.parse(REVIEW.replace("truncated: false", "truncated: true"))
+def test_a_list_of_coverage_manifests_is_rejected_outright() -> None:
+    """One manifest, one whole diff.
+
+    The list shape existed for a partitioning nothing ever performed. A review that read only part
+    of a change must not be storable at all (plan §13.4) — the answer to a change too large to read
+    is `/revise`, and `review._refuse_over_budget` says so before a model is launched.
+    """
+    listed = REVIEW.replace(
+        """  coverage:
+    diff_digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
+    analyzed_files: 27
+    analyzed_bytes: 12345
+    coverage_status: sufficient""",
+        """  coverage:
+    - diff_digest: sha256:9999999999999999999999999999999999999999999999999999999999999999
+      analyzed_files: 27
+      analyzed_bytes: 12345
+      coverage_status: sufficient""",
+    )
+    with pytest.raises(models.DocumentError, match="coverage"):
+        models.Review.parse(listed)
 
 
 def test_the_human_half_no_longer_accepts_a_challenge_answer() -> None:

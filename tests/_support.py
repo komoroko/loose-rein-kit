@@ -166,6 +166,40 @@ def make_plan(
 # --- review.yaml --------------------------------------------------------------
 
 
+def agent_output(cmd: list[str], text: str = "") -> str:
+    """What the CLI in `cmd` would answer with — an envelope for the ones that report usage.
+
+    For a fake standing in for more than one adapter: `claude` is launched asking for its usage
+    and answers with an envelope, `codex` and `gemini` answer with bare text, and a fake that got
+    that backwards would be testing a transport nothing uses.
+    """
+    from rein import build_loop
+
+    record = build_loop.adapter_for(cmd)
+    return agent_envelope(text) if record and record.usage_flags else text
+
+
+def agent_envelope(text: str, *, input_tokens: int = 100, output_tokens: int = 20) -> str:
+    """What `claude -p` answers with now that it is launched asking for its usage.
+
+    A fake standing in for the CLI has to speak the CLI's protocol. Wrapping here rather than in
+    each fake keeps the shape in one place — and a fake that answered in the old bare-text shape
+    would be testing a transport nothing uses.
+    """
+    import json
+
+    return json.dumps(
+        {
+            "is_error": False,
+            "subtype": "success",
+            "result": text,
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            "modelUsage": {"claude-opus-5": {"inputTokens": input_tokens, "outputTokens": output_tokens}},
+        }
+    )
+
+
 def make_review(
     *,
     generated: bool = False,
@@ -196,24 +230,21 @@ def make_review(
             "plan_digest": _digest("plan"),
             "environment_digest": _digest("toolchain"),
         },
-        "coverage": [
-            {
-                "diff_digest": _digest("diff"),
-                "analyzed_files": 3,
-                # Required by the schema, so always emitted — the point of requiring it is that an
-                # unmeasured partition cannot pass a byte budget it was never held to.
-                "analyzed_bytes": analyzed_bytes,
-                "truncated": False,
-                "coverage_status": coverage_status,
-            }
-        ],
+        "coverage": {
+            "diff_digest": _digest("diff"),
+            "analyzed_files": 3,
+            # Required by the schema, so always emitted — the point of requiring it is that an
+            # unmeasured manifest cannot pass a byte budget it was never held to.
+            "analyzed_bytes": analyzed_bytes,
+            "coverage_status": coverage_status,
+        },
         "actual_extraction": [],
         "claims": [],
         "extra_behaviors": extra_behaviors or [],
         "security": {"findings": security_findings or []},
     }
     if unsupported_files:
-        machine["coverage"][0]["unsupported_files"] = unsupported_files
+        machine["coverage"]["unsupported_files"] = unsupported_files
     if review_budget:
         machine["review_budget"] = review_budget
     if base_sha:
@@ -274,8 +305,12 @@ def make_config(
         "agents": {
             "implementer": {"adapter": "claude"},
             "code_reviewer": {"adapter": "claude"},
-            "actual_extractor": {"adapter": "claude", "independence_group": "claude/opus"},
-            "comparator": {"adapter": "claude", "independence_group": "claude/sonnet"},
+            # The model is what the independence group derives from, and what actually gets passed
+            # to the CLI — the extractor and the security reviewer share one so they share a
+            # reading, the comparator differs because §12.4 requires it to.
+            "actual_extractor": {"adapter": "claude", "model": "opus"},
+            "comparator": {"adapter": "claude", "model": "sonnet"},
+            "security_reviewer": {"adapter": "claude", "model": "opus"},
         },
         "quality_gate": quality_gate
         or [
@@ -434,7 +469,11 @@ def fake_git(
     *,
     record: list[list[str]] | None = None,
 ) -> RunFake:
-    """A `build_loop._run` stand-in: first command-prefix match wins, default `(0, "")`.
+    """A `build_loop._run` stand-in: first command-prefix match wins, default a successful launch.
+
+    The default answer goes through `agent_output`, so a stand-in for an adapter that reports its
+    usage answers in the envelope that adapter really returns. A rule's own result is passed
+    through untouched — a test that spells out what a command said means it.
 
     `record`, if given, receives each `cmd` list as it is called (order preserved).
     """
@@ -446,6 +485,6 @@ def fake_git(
         for prefix, result in rules.items():
             if tuple(cmd[: len(prefix)]) == tuple(prefix):
                 return result
-        return 0, ""
+        return 0, agent_output(cmd)
 
     return _run

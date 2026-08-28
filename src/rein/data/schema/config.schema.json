@@ -96,7 +96,7 @@
       }
     },
     "agents": {
-      "description": "The AI roles. `independence_group` is what a critical change's independence requirement is checked against: the actual extractor and the comparator must not share one (plan 12.4).",
+      "description": "The AI roles. `adapter` is the CLI, `model` is what that CLI is told to run; together they are the independence group a critical change is checked against, and the check is settled on the model the launch reports having used rather than on either (plan 12.4).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -251,7 +251,7 @@
               "minimum": 0,
               "maximum": 100
             },
-            "max_diff_bytes_per_partition": {
+            "max_diff_bytes": {
               "type": "integer",
               "minimum": 4096,
               "maximum": 8388608
@@ -462,11 +462,12 @@
           "maxLength": 64,
           "pattern": "^[a-z0-9][a-z0-9_-]*$"
         },
-        "independence_group": {
-          "description": "provider/model. Distinct strings are what the critical-independence check compares; same provider with a distinct model passes but is weaker, and doctor says so.",
+        "model": {
+          "description": "Which model this role runs. Passed to the CLI (`Adapter.model_flags`), so it is what actually answers rather than a label beside it — the independence group is derived from `<adapter>/<model>` and cannot disagree with the launch. Omit it to take the CLI's own default, which is then unnameable in advance and read back from what the launch reports.",
           "type": "string",
+          "minLength": 1,
           "maxLength": 128,
-          "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$"
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
         }
       }
     }

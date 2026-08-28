@@ -246,12 +246,11 @@ class TestScopeStage:
             "    trusted_base_sha: " + "f" * 40 + "\n"
             "    subject_head_sha: " + head + "\n"
             "  coverage:\n"
-            "    - diff_digest: sha256:" + "d" * 64 + "\n"
-            "      analyzed_files: 11\n"
-            "      analyzed_hunks: 87\n"
-            "      analyzed_bytes: 421888\n"
-            "      truncated: false\n"
-            "      coverage_status: sufficient\n" + extra_coverage + "human:\n  status: not_started\n",
+            "    diff_digest: sha256:" + "d" * 64 + "\n"
+            "    analyzed_files: 11\n"
+            "    analyzed_hunks: 87\n"
+            "    analyzed_bytes: 421888\n"
+            "    coverage_status: sufficient\n" + extra_coverage + "human:\n  status: not_started\n",
         )
 
     def test_the_scope_stage_comes_first(self, make_repo: MakeRepo) -> None:
@@ -279,14 +278,14 @@ class TestScopeStage:
         assert coverage["analyzed_files"] == 11 and coverage["analyzed_bytes"] == 421888
         assert scope["decisions_required"] == 0  # no cards recorded, so nothing is outstanding
         names = {row["name"] for row in scope["budget"]}
-        assert "max_diff_bytes_per_partition" in names
+        assert "max_diff_bytes" in names
 
     def test_what_the_review_could_not_read_is_named_by_path(self, make_repo: MakeRepo) -> None:
         """A count cannot be acted on; "ui.min.js was never parsed" can."""
         root = make_repo()
         self._generated(
             root,
-            extra_coverage="      unsupported_files:\n        - path: web/ui.min.js\n          reason: generated\n",
+            extra_coverage="    unsupported_files:\n      - path: web/ui.min.js\n        reason: generated\n",
         )
         coverage = review_api.stage_data(root, "scope")["scope"]["coverage"]  # type: ignore[index]
         assert coverage["unsupported_files"] == [{"path": "web/ui.min.js", "reason": "generated", "detail": ""}]

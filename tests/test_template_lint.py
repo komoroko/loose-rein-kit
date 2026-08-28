@@ -515,6 +515,21 @@ def test_check_scaffold_config_parity_allows_the_identity_and_nothing_else(tmp_p
     assert any("outside the project identity" in p for p in problems)
 
 
+def test_check_ssot_validates_catches_a_schema_change_that_missed_the_live_documents(tmp_path: Path) -> None:
+    """`make check` never ran `rein doctor`, so a schema change could ship a template whose very
+    first `rein doctor` fails — as collapsing `machine.coverage` to one manifest nearly did."""
+    review = tmp_path / ".rein" / "review.yaml"
+    review.parent.mkdir(parents=True, exist_ok=True)
+    review.write_text("machine:\n  status: not_generated\nhuman:\n  status: not_started\n", encoding="utf-8")
+    assert template_lint.check_ssot_validates(tmp_path) == []
+
+    review.write_text(
+        "machine:\n  status: not_generated\n  coverage: []\nhuman:\n  status: not_started\n", encoding="utf-8"
+    )
+    problems = template_lint.check_ssot_validates(tmp_path)
+    assert any("review.yaml" in p and "coverage" in p for p in problems)
+
+
 def test_check_version_lock_green_and_drifts() -> None:
     """`uv sync --frozen` refuses a lock that disagrees with pyproject, so this drift kills CI at
     dependency install — while `uv run --frozen` keeps the whole local gate green."""

@@ -214,7 +214,7 @@ is the point; never fold them into the implementer's session.
    actual-behaviour extraction (never given the plan), the Expected/Actual comparison, and the
    structured security and maintainability review — writing `.rein/review.yaml` and recording
    the pipeline events. What it reads is the **product**, not `.rein/`, and the diff is measured
-   against `review_policy.budgets.max_diff_bytes_per_partition` *before* a model is launched — over
+   against `review_policy.budgets.max_diff_bytes` *before* a model is launched — over
    it the answer is to split the scope (`/revise`), never to grow the request.
    Findings sit on three separate axes (integrity / semantic support / conformance); there is no
    single `verified`, and "extra behaviours: 0" appears only with the Coverage Manifest that

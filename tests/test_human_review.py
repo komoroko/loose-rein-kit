@@ -26,15 +26,12 @@ def _review(*, machine: dict[str, Any] | None = None, human: dict[str, Any] | No
             "plan_digest": "sha256:" + "b" * 64,
             "environment_digest": "sha256:" + "c" * 64,
         },
-        "coverage": [
-            {
-                "diff_digest": "sha256:" + "d" * 64,
-                "analyzed_files": 1,
-                "analyzed_bytes": 1024,
-                "truncated": False,
-                "coverage_status": "sufficient",
-            }
-        ],
+        "coverage": {
+            "diff_digest": "sha256:" + "d" * 64,
+            "analyzed_files": 1,
+            "analyzed_bytes": 1024,
+            "coverage_status": "sufficient",
+        },
         "actual_extraction": [],
         "claims": [],
     }
@@ -197,53 +194,46 @@ def test_a_config_limit_overrides_the_default() -> None:
 
 
 def test_a_diff_too_large_for_one_sitting_blows_its_budget() -> None:
-    """A hardcoded actual of 0 for `max_diff_bytes_per_partition` would mean it never fires.
+    """A hardcoded actual of 0 for `max_diff_bytes` would mean it never fires.
 
-    The reasoning was that partitioning enforced the limit upstream — but the detector partitions on
-    a *line* count and never measured bytes, so the one budget denominated in bytes could not be
-    exceeded by a change of any size. The whole point of the budget is that a change too large to
-    hold in one head splits, so it has to be measurable.
+    The reasoning was that partitioning enforced the limit upstream — but nothing ever partitioned
+    anything, so the one budget denominated in bytes could not be exceeded by a change of any size.
+    The whole point of the budget is that a change too large to hold in one head splits, so it has
+    to be measurable.
     """
-    coverage = [
-        {
-            "diff_digest": "sha256:" + "d" * 64,
-            "analyzed_files": 400,
-            "analyzed_bytes": 900_000,  # the default ceiling is 524288
-            "truncated": False,
-            "coverage_status": "sufficient",
-        }
-    ]
+    coverage = {
+        "diff_digest": "sha256:" + "d" * 64,
+        "analyzed_files": 400,
+        "analyzed_bytes": 900_000,  # the default ceiling is 524288
+        "coverage_status": "sufficient",
+    }
     review = _review(machine={"coverage": coverage})
-    assert human_review.scope_split_required(review, dict(review.human)) == ["max_diff_bytes_per_partition"]
+    assert human_review.scope_split_required(review, dict(review.human)) == ["max_diff_bytes"]
     blocker = next(b for b in human_review.completion_blockers(review, dict(review.human)) if "budget" in b)
     assert "/revise" in blocker and "review_policy.budgets" in blocker
     assert not human_review.can_freeze(review, dict(review.human))
 
 
-def test_the_budget_is_per_partition_so_the_measure_is_the_max_not_the_sum() -> None:
-    """A change split into readable pieces is within budget however many pieces there are."""
-    coverage = [
-        {
-            "diff_digest": "sha256:" + c * 64,
-            "analyzed_files": 10,
-            "analyzed_bytes": 300_000,
-            "truncated": False,
-            "coverage_status": "sufficient",
-        }
-        for c in "de"
-    ]
-    review = _review(machine={"coverage": coverage})  # 600_000 summed, 300_000 per partition
-    assert human_review.budget_actuals(review, dict(review.human))["max_diff_bytes_per_partition"] == 300_000
+def test_the_budget_is_measured_over_the_whole_change() -> None:
+    """One manifest, one whole diff — the actual is the size of the change, not of a fragment."""
+    coverage = {
+        "diff_digest": "sha256:" + "d" * 64,
+        "analyzed_files": 10,
+        "analyzed_bytes": 300_000,
+        "coverage_status": "sufficient",
+    }
+    review = _review(machine={"coverage": coverage})
+    assert human_review.budget_actuals(review, dict(review.human))["max_diff_bytes"] == 300_000
     assert human_review.scope_split_required(review, dict(review.human)) == []
 
 
-def test_a_coverage_entry_that_measured_nothing_is_refused_rather_than_read_as_zero() -> None:
+def test_a_coverage_manifest_that_measured_nothing_is_refused_rather_than_read_as_zero() -> None:
     """`analyzed_bytes` was optional and defaulted to 0 here, documented as "within budget" — an
-    unmeasured partition passing a size check it was never held to. That is the one direction this
+    unmeasured manifest passing a size check it was never held to. That is the one direction this
     file must not round towards, so the schema requires it and a document without it does not parse.
     A review written before the measure is regenerated, not tolerated."""
     document = make_review(generated=True)
-    del document["machine"]["coverage"][0]["analyzed_bytes"]
+    del document["machine"]["coverage"]["analyzed_bytes"]
     with pytest.raises(models.DocumentError) as caught:
         models.Review.parse(json.dumps(document))
     assert "analyzed_bytes" in str(caught.value)
@@ -315,18 +305,15 @@ def test_freeze_refuses_while_a_blocker_stands() -> None:
         human_review.freeze(review, dict(review.human))
 
 
-def _unreadable_coverage() -> list[dict[str, Any]]:
-    """One partition holding a file nothing could tokenize — a font, an image, a `.bin`."""
-    return [
-        {
-            "diff_digest": "sha256:" + "d" * 64,
-            "analyzed_files": 3,
-            "analyzed_bytes": 2048,
-            "truncated": False,
-            "coverage_status": "insufficient",
-            "unsupported_files": [{"path": "assets/logo.woff2", "reason": "binary"}],
-        }
-    ]
+def _unreadable_coverage() -> dict[str, Any]:
+    """A change holding a file nothing could tokenize — a font, an image, a `.bin`."""
+    return {
+        "diff_digest": "sha256:" + "d" * 64,
+        "analyzed_files": 3,
+        "analyzed_bytes": 2048,
+        "coverage_status": "insufficient",
+        "unsupported_files": [{"path": "assets/logo.woff2", "reason": "binary"}],
+    }
 
 
 def test_one_unreadable_file_does_not_shut_a_low_risk_review() -> None:

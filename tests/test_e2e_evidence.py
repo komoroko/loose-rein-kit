@@ -24,7 +24,7 @@ import pytest
 from rein import build_loop, common, digests, dossier, evidence, strict_yaml
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
 
 WORK_BRANCH = "build/demo"
 
@@ -130,7 +130,7 @@ def agent(*, writes: bool = True, reports: str = "", runs: list[list[str]] | Non
             (where / f"{where.name}.py").write_text(f"# {where.name}\n", encoding="utf-8")
         if reports:
             call_report(where, env, ["--task", where.name, "--outcome", reports, "--summary", "the fake agent said so"])
-        return 0, "the agent's closing words"
+        return 0, agent_envelope("the agent's closing words")
 
     return _run
 
@@ -224,7 +224,7 @@ def test_a_report_naming_paths_it_did_not_change_is_a_finding(
         where = Path(cwd or ".")
         (where / "real.py").write_text("# real\n", encoding="utf-8")
         call_report(where, env, ["--task", where.name, "--outcome", "implemented", "--touched", "imagined.py"])
-        return 0, ""
+        return 0, agent_envelope("")
 
     monkeypatch.setattr(build_loop, "_run", _run)
 
@@ -399,7 +399,7 @@ def test_the_agent_is_told_what_it_is_rather_than_left_to_infer_it(
         if cmd and cmd[0] == "claude":
             seen.append({k: v for k, v in (env or {}).items() if k.startswith("REIN_")})
             Path(cwd or ".").joinpath("x.py").write_text("# x\n", encoding="utf-8")
-            return 0, ""
+            return 0, agent_envelope("")
         return common.run(cmd, cwd, timeout)
 
     monkeypatch.setattr(build_loop, "_run", _run)
@@ -422,7 +422,7 @@ def test_the_dossier_is_written_where_the_agent_is_told_to_read_it(
             found.append(json.loads(path.read_text(encoding="utf-8")))
             assert str(path.relative_to(Path(cwd or "."))) in cmd[-1], "the prompt must name the dossier"
             Path(cwd or ".").joinpath("x.py").write_text("# x\n", encoding="utf-8")
-            return 0, ""
+            return 0, agent_envelope("")
         return common.run(cmd, cwd, timeout)
 
     monkeypatch.setattr(build_loop, "_run", _run)

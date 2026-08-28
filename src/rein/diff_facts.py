@@ -7,12 +7,17 @@ dependency lock, a new route, a `timeout=`, a deleted `if` guard — is matched 
 by regex, never by an LLM's discretion. Each match is a *candidate* the reviewers must ground
 or a human must judge; the detector never decides it is benign.
 
-**Say what it could not read.** The Coverage Manifest (plan §13.3) records, per diff, which
+**Say what it could not read.** The Coverage Manifest (plan §13.3) records, for the diff, which
 files were analyzed and which were not, and why: a binary blob, an unsupported language, a
-generated file, a truncated hunk. `coverage_status` is `insufficient` whenever something that
-bears on a high/critical change went unanalyzed (plan §13.4). This is what stops "Extra
-Behavior: 0" from meaning "we looked everywhere and found nothing" when it really means "we
-could not look" — the two must never render the same (plan §2.4).
+generated file. `coverage_status` is `insufficient` whenever something that bears on a
+high/critical change went unanalyzed (plan §13.4). This is what stops "Extra Behavior: 0" from
+meaning "we looked everywhere and found nothing" when it really means "we could not look" — the
+two must never render the same (plan §2.4).
+
+**One manifest, one whole diff.** The detector never cuts the change up: it reads all of it or
+says which parts it could not. A change too large to be read in one sitting is refused outright
+by `review._refuse_over_budget`, before a model is launched, because the answer to it is
+`/revise` and not a narrower window onto the same change.
 
 The detector reports a `risk_floor`: the highest risk implied by the signals it matched. An AI
 review cannot lower it (plan §13.5) — a diff that deletes a validation guard is at least
@@ -27,11 +32,6 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from rein import digests, models
-
-#: A huge diff is *partitioned* and every partition analyzed — never truncated to its head/tail
-#: (plan §13.4). This is the partition size in changed lines, not a read limit.
-PARTITION_LINES = 2000
-
 
 # --- diff model ---------------------------------------------------------------
 
@@ -422,8 +422,8 @@ class CoverageManifest:
     analyzed_files: int
     analyzed_hunks: int
     #: Size of the diff this manifest covers, in bytes. Recorded because it is what the
-    #: `max_diff_bytes_per_partition` budget is denominated in: without it that budget has no
-    #: measurable actual, and a budget whose actual is a constant is not a budget.
+    #: `max_diff_bytes` budget is denominated in: without it that budget has no measurable
+    #: actual, and a budget whose actual is a constant is not a budget.
     analyzed_bytes: int
     unsupported_files: tuple[dict[str, str], ...]
     generated_files: tuple[dict[str, str], ...]
@@ -431,8 +431,6 @@ class CoverageManifest:
     deleted_lines_analyzed: bool
     dependency_semantics_analyzed: bool
     binary_semantics_analyzed: bool
-    truncated: bool
-    partitioned: bool
     coverage_status: str = field(default="")
     #: analyzer name → the digest of the executable that answered, for every external analyzer
     #: whose reading is counted above. Nobody named means nobody to check.
@@ -449,8 +447,6 @@ class CoverageManifest:
             "deleted_lines_analyzed": self.deleted_lines_analyzed,
             "dependency_semantics_analyzed": self.dependency_semantics_analyzed,
             "binary_semantics_analyzed": self.binary_semantics_analyzed,
-            "truncated": self.truncated,
-            "partitioned": self.partitioned,
             "coverage_status": self.coverage_status,
         }
         if self.unsupported_files:
@@ -521,7 +517,6 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
         analyzed += 1
         analyzed_hunks += len(file.hunks)
 
-    partitioned = _changed_line_count(files) > PARTITION_LINES
     manifest = CoverageManifest(
         diff_digest=diff_digest,
         analyzed_files=analyzed,
@@ -535,10 +530,6 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
         # Detecting a dependency *file* changed is not understanding what the new versions do.
         dependency_semantics_analyzed=not has_dependency_change,
         binary_semantics_analyzed=not has_binary,
-        # The detector never truncates: it partitions. `truncated` stays False unless a caller
-        # that genuinely could not read the whole diff sets it.
-        truncated=False,
-        partitioned=partitioned,
         analyzers=used_analyzers,
     )
     # Status is decided against the effective risk by review_policy; a manifest on its own
@@ -564,8 +555,6 @@ def _default_status(manifest: CoverageManifest, deleted_lines_present: bool) -> 
     if manifest.unsupported_files or manifest.generated_files:
         return "insufficient"
     if not manifest.dependency_semantics_analyzed or not manifest.binary_semantics_analyzed:
-        return "insufficient"
-    if manifest.truncated:
         return "insufficient"
     if manifest.analyzed_files == 0 and deleted_lines_present:
         return "insufficient"
@@ -613,10 +602,6 @@ def _widen_method(existing: str | None, method: str) -> str:
     if existing is None:
         return method
     return existing if order.index(existing) >= order.index(method) else method
-
-
-def _changed_line_count(files: list[DiffFile]) -> int:
-    return sum(len(f.changed_lines) for f in files)
 
 
 # --- top-level ----------------------------------------------------------------

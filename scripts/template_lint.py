@@ -617,6 +617,32 @@ _CONFIG_IDENTITY_PREFIXES = ("name:", "work_branch:")
 _SCAFFOLD_CONFIG = "src/rein/data/scaffold/rein/config.yaml"
 
 
+def check_ssot_validates(root: Path) -> list[str]:
+    """The template's own `.rein/*.yaml` still validate against the schema it ships.
+
+    This repository carries a live `.rein/` and the schema those documents are judged by, and a
+    schema change lands in one without touching the other. `rein doctor` says so, but nothing in
+    `make check` ran it — so a release could ship a template whose very first `rein doctor` fails.
+    It has: collapsing `machine.coverage` from a list to one manifest left `.rein/review.yaml`
+    holding a `[]` the new schema refuses.
+
+    Only the shape is checked, not the content: these are this repository's own working documents,
+    and what they say is its business.
+    """
+    failures = []
+    for name in ("config", "state", "plan", "review"):
+        path = root / ".rein" / f"{name}.yaml"
+        if not path.is_file():
+            continue
+        try:
+            document = strict_yaml.load_mapping(path.read_text(encoding="utf-8"), what=f"{name}.yaml")
+        except strict_yaml.StrictParseError as exc:
+            failures.append(f".rein/{name}.yaml does not parse: {exc}")
+            continue
+        failures += [f".rein/{name}.yaml: {error}" for error in models.schema_errors(document, name)]
+    return failures
+
+
 def check_scaffold_config_parity(root: Path) -> list[str]:
     """The repo's config.yaml and the scaffolded one differ only in the project identity."""
     live, scaffold = root / CONFIG_PATH, root / _SCAFFOLD_CONFIG
@@ -858,6 +884,7 @@ def main(argv: list[str] | None = None) -> int:
         failures += check_declared_properties_are_read(root)
         failures += check_oci_profile_mentions(root)
         failures += check_scaffold_config_parity(root)
+        failures += check_ssot_validates(root)
         failures += check_readme_parity(files["README.md"], files["README.ja.md"])
         version = install.read_version(root)
         failures += check_version_changelog(version, (root / "CHANGELOG.md").read_text(encoding="utf-8"))

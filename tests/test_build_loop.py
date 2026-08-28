@@ -23,7 +23,16 @@ from rein import build_loop, common, conflict, dag, digests, dossier, evidence, 
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import fake_git, make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import (
+    agent_envelope,
+    agent_output,
+    fake_git,
+    make_config,
+    make_plan,
+    make_state,
+    make_task,
+    seed_repo,
+)
 
 
 def graph_of(done: tuple[str, ...] = ()) -> dag.Graph:
@@ -191,9 +200,9 @@ def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
     config = _config_with_split_adapters()
     step = config.steps[0]
     assert step.agent_role == "code_reviewer"
-    assert step.agent_argv == build_loop.ADAPTERS["codex"]
+    assert step.agent_argv == build_loop.ADAPTER_TABLE["codex"].launch_argv()
     # The implementer's own adapter is untouched — the two are resolved independently.
-    assert config.adapter_argv == build_loop.ADAPTERS["claude"]
+    assert config.adapter_argv == build_loop.ADAPTER_TABLE["claude"].launch_argv()
 
 
 def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[str]]) -> object:
@@ -204,7 +213,7 @@ def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[st
         target = dossier.findings_path(cwd or str(root), "T-001")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"findings": findings}), encoding="utf-8")
-        return 0, ""
+        return 0, agent_envelope("")
 
     return fake_run
 
@@ -219,7 +228,7 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
     assert launched, "the agent step never launched anything"
-    assert tuple(launched[0][:2]) == build_loop.ADAPTERS["codex"], (
+    assert tuple(launched[0][:2]) == build_loop.ADAPTER_TABLE["codex"].launch_argv(), (
         f"the agent step launched {launched[0][:2]} — it must use agents.code_reviewer, not agents.implementer"
     )
 
@@ -259,7 +268,7 @@ def test_a_must_fix_finding_goes_to_the_implementer_and_the_reviewer_looks_again
             target = dossier.findings_path(cwd or str(root), "T-001")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(json.dumps({"findings": next(rounds)}), encoding="utf-8")
-        return 0, ""
+        return 0, agent_output(cmd)
 
     monkeypatch.setattr(build_loop, "_run", fake_run)
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
@@ -286,8 +295,8 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
     """The flags are one CLI's own vocabulary, not a portable concept — nothing else grows them."""
-    assert build_loop.write_flags(build_loop.ADAPTERS["claude"]) == ()
-    assert build_loop.write_flags(build_loop.ADAPTERS["gemini"]) == ()
+    assert build_loop.write_flags(build_loop.ADAPTER_TABLE["claude"].launch_argv()) == ()
+    assert build_loop.write_flags(build_loop.ADAPTER_TABLE["gemini"].launch_argv()) == ()
     assert build_loop.write_flags(()) == ()
 
 
@@ -303,14 +312,14 @@ def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.Monk
 
     def fake_run(cmd: list[str], **kwargs: object) -> tuple[int, str]:
         launched.append(cmd)
-        return 0, "{}"
+        return 0, agent_output(cmd, "{}")
 
     # review.py resolves `common.run` at call time, so patching the module both share is what
     # actually intercepts the launch — reaching through `review.common` is the same object by
     # accident of import, and mypy is right that it is not part of review's interface.
     monkeypatch.setattr(common, "run", fake_run)
     review._adapter_reviewer(repo, "code_reviewer")({"request": "x"})
-    assert launched[0] == list(build_loop.ADAPTERS["codex"])
+    assert launched[0] == list(build_loop.ADAPTER_TABLE["codex"].launch_argv())
 
 
 def test_an_unlaunchable_role_adapter_stops_the_build_before_it_starts() -> None:
@@ -1439,11 +1448,6 @@ def test_every_adapter_declares_what_it_can_do() -> None:
     assert claude.resumable and not claude.own_sandbox and not claude.write_flags
 
 
-def test_the_argv_table_is_derived_from_the_capability_records() -> None:
-    """One definition per adapter. Two would drift, and the drift would be silent."""
-    assert build_loop.ADAPTERS == {name: a.argv for name, a in build_loop.ADAPTER_TABLE.items()}
-
-
 def test_a_resumable_implementer_stamps_then_resumes_its_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1453,7 +1457,7 @@ def test_a_resumable_implementer_stamps_then_resumes_its_session(
 
     def capture(cmd: list[str], **kwargs: object) -> tuple[int, str]:
         launched.append(cmd)
-        return 0, ""
+        return 0, agent_output(cmd)
 
     monkeypatch.setattr(build_loop, "_run", capture)
     task = dag.Task(id="T-001", title="base", kind="foundation")
@@ -1525,7 +1529,7 @@ def test_the_run_measures_its_own_prompt_input(tmp_path: Path, monkeypatch: pyte
     an impression.
     """
     loop = orchestrator(tmp_path)
-    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, ""))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, agent_output(cmd)))
     task = dag.Task(id="T-001", title="base", kind="foundation")
 
     loop._invoke_implementer(task, cwd=str(tmp_path), failure_log="")
@@ -1567,11 +1571,32 @@ def test_a_launch_counts_what_it_was_told_to_read_not_only_what_was_sent(
     assert handed > ticket.stat().st_size
 
 
+def test_a_retried_launch_is_counted_by_both_measures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retry is another launch: the same argv goes to the provider again and is paid for again.
+
+    Counting once per `_launch` under-reported every retried task, and once the billed counter
+    landed beside it, one `run_measured` event carried two fields called `launches` disagreeing —
+    the byte one saying 1 where the billed one said 3.
+    """
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(build_loop, "_LAUNCH_BACKOFF_SEC", (0.0,))
+    attempts = iter([(1, "connection reset by peer"), (1, "connection reset by peer")])
+
+    def flaky(cmd: list[str], *a: object, **k: object) -> tuple[int, str]:
+        return next(attempts, (0, agent_output(cmd)))
+
+    monkeypatch.setattr(build_loop, "_run", flaky)
+    loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
+
+    assert loop.spend_totals()["implementer"]["launches"] == 3
+    assert loop.usage_totals()["implementer"].launches == 3
+
+
 def test_a_resumed_launch_is_not_counted_as_a_cold_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A cold launch re-reads its ticket, design slice and code from scratch. Whether that is the
     largest avoidable cost in a long build is a claim the run can now answer about itself."""
     loop = orchestrator(tmp_path)
-    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, *a, **k: (0, agent_output(cmd)))
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer", resumed=True)
     row = loop.spend_totals()["implementer"]
@@ -1580,7 +1605,7 @@ def test_a_resumed_launch_is_not_counted_as_a_cold_one(tmp_path: Path, monkeypat
 
 def test_the_summary_reports_both_numbers_and_the_cold_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     loop = orchestrator(tmp_path)
-    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, *a, **k: (0, agent_output(cmd)))
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
     loop._spend_handover("implementer", 200_000)
     summary = loop.spend_summary()
@@ -1599,7 +1624,7 @@ def test_the_measurement_lands_in_the_audit_chain(tmp_path: Path, monkeypatch: p
     """In the chain rather than in state.yaml: the chain never rotates, so summing `run_measured`
     over a cycle is the cycle's total while each run stays separately readable."""
     loop = orchestrator(tmp_path)
-    monkeypatch.setattr(build_loop, "_run", lambda *a, **k: (0, ""))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, *a, **k: (0, agent_output(cmd)))
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
     loop._spend_handover("code_reviewer", 1024)
     loop._record_spend()

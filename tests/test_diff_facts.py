@@ -122,7 +122,7 @@ def test_a_manifest_naming_an_unread_file_can_actually_be_written() -> None:
                 "plan_digest": "sha256:" + "b" * 64,
                 "environment_digest": "sha256:" + "c" * 64,
             },
-            "coverage": [entry],
+            "coverage": entry,
             "actual_extraction": [],
             "claims": [],
         },
@@ -157,15 +157,22 @@ def test_dependency_change_leaves_semantics_unanalyzed() -> None:
     assert facts.coverage.coverage_status == "insufficient"
 
 
-def test_huge_diff_is_partitioned_never_truncated() -> None:
-    added = [f"    x{i} = {i}" for i in range(diff_facts.PARTITION_LINES + 50)]
-    facts = diff_facts.analyze(_diff("src/big.py", added=added))
-    assert facts.coverage.partitioned is True
-    assert facts.coverage.truncated is False  # the detector partitions; it never drops lines
+def test_a_huge_diff_is_read_whole_and_says_so() -> None:
+    """The detector neither splits nor truncates: it reads all of it, or names what it could not.
+
+    A change too big to review in one sitting is refused by `review._refuse_over_budget` before a
+    model is launched. There is no size at which the manifest starts describing a fragment.
+    """
+    added = [f"    x{i} = {i}" for i in range(4000)]
+    diff = _diff("src/big.py", added=added)
+    facts = diff_facts.analyze(diff)
+    assert facts.coverage.analyzed_files == 1
+    assert facts.coverage.analyzed_bytes == len(diff.encode("utf-8"))
+    assert facts.coverage.coverage_status == "sufficient"
 
 
 def test_coverage_manifest_only_emits_schema_fields() -> None:
-    """`coverage[]` is `additionalProperties: false`, so an unknown key is a rejected review.
+    """`machine.coverage` is `additionalProperties: false`, so an unknown key is a rejected review.
 
     The permitted set is read from the packaged schema rather than restated here: a hand-copied
     list is one more place to forget, and forgetting it means the detector emits a manifest the
@@ -173,7 +180,7 @@ def test_coverage_manifest_only_emits_schema_fields() -> None:
     caused it.
     """
     schema = json.loads(data.read_text("schema/review.schema.json"))
-    allowed = set(schema["$defs"]["machine"]["properties"]["coverage"]["items"]["properties"])
+    allowed = set(schema["$defs"]["machine"]["properties"]["coverage"]["properties"])
 
     facts = diff_facts.analyze(_diff("src/util.py", added=["    return 1"]))
     manifest = facts.coverage.to_manifest()
@@ -182,7 +189,7 @@ def test_coverage_manifest_only_emits_schema_fields() -> None:
 
 
 def test_coverage_records_the_diff_size_the_budget_is_denominated_in() -> None:
-    """`max_diff_bytes_per_partition` needs a measured actual, or it is a budget that cannot blow."""
+    """`max_diff_bytes` needs a measured actual, or it is a budget that cannot blow."""
     diff = _diff("src/util.py", added=["    return 1"])
     facts = diff_facts.analyze(diff)
     assert facts.coverage.analyzed_bytes == len(diff.encode("utf-8"))

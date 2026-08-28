@@ -25,16 +25,19 @@ from rein import (
     common,
     conformance,
     diff_facts,
+    digests,
     event_chain,
     models,
     review,
+    review_cache,
     review_policy,
     security_review,
 )
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import make_config, make_plan, make_state, seed_repo
+from rein import usage as usage_mod
+from tests._support import agent_envelope, make_config, make_plan, make_state, seed_repo
 
 
 def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
@@ -47,7 +50,6 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
         "diff_digest": "sha256:" + "d" * 64,
         "analyzed_files": 2,
         "analyzed_bytes": 1024,
-        "truncated": False,
         "coverage_status": "sufficient",
     }
     claims = [
@@ -430,7 +432,7 @@ def test_a_reviewer_is_launched_outside_the_repository(review_repo: Path, monkey
 
     def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: Any) -> tuple[int, str]:
         seen.append({"cwd": cwd, "listing": sorted(os.listdir(cwd)) if cwd else []})
-        return 0, json.dumps({"actual_statements": [], "coverage": {}})
+        return 0, agent_envelope(json.dumps({"actual_statements": [], "coverage": {}}))
 
     monkeypatch.setattr(common, "run", fake_run)
     reviewer = review._adapter_reviewer(repo_mod.Repo(review_repo), "actual_extractor")
@@ -514,18 +516,19 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
         role: str = "code_reviewer",
         *,
         config: Any = None,
-        spend: dict[str, int] | None = None,
+        spend: dict[str, usage_mod.Usage] | None = None,
+        reading: review.SharedReading | None = None,
     ) -> Any:
         def call(request: Mapping[str, Any]) -> str:
             routed.append(role)
             if spend is not None:
-                spend[role] = spend.get(role, 0) + 1
+                spend[role] = spend.get(role, usage_mod.Usage()) + usage_mod.Usage.unavailable()
             return _fake_reviewer(request)
 
         return call
 
     monkeypatch.setattr(review, "_adapter_reviewer", fake_adapter)
-    spend: dict[str, int] = {}
+    spend: dict[str, usage_mod.Usage] = {}
     reviewer = review._staged_reviewer(repo_mod.Repo(review_repo), spend=spend)
 
     reviewer(
@@ -548,6 +551,183 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
 
     assert routed == ["actual_extractor", "comparator", "security_reviewer"]
     assert set(spend) == set(routed)  # and the ledger is threaded through to every one of them
+
+
+# --- one reading of the change, two verdicts -----------------------------------
+#
+# The extractor and the security reviewer are handed the same diff — up to `max_diff_bytes`, so up
+# to half a megabyte — and were launched separately, each paying to read all of it. Measured on an
+# 82 KB payload: two independent launches $0.2153, a priming turn plus two branches $0.1298.
+#
+# Serialising them into one session is not the answer. The second stage would read the first
+# stage's conclusions, and catching what the extraction's frame missed is the security review's
+# whole value. A fork shares the reading and not the readings.
+
+
+def _record(name: str) -> Any:
+    from rein import build_loop
+
+    return build_loop.ADAPTER_TABLE[name]
+
+
+def _reading(spend: dict[str, usage_mod.Usage] | None = None) -> review.SharedReading:
+    return review.SharedReading(repo_mod.Repo(Path(".")), _record("claude"), timeout=0.0, spend=spend)
+
+
+def _a_reading_request(diff: str = "the diff") -> dict[str, Any]:
+    return actual_extraction.build_request(
+        trusted_base_sha="a" * 40,
+        subject_head_sha="b" * 40,
+        diff_text=diff,
+        deterministic_facts={"coverage": {}, "risk_floor": "low", "files": []},
+    )
+
+
+def _a_security_request(diff: str = "the diff") -> dict[str, Any]:
+    return security_review.build_request(
+        diff_text=diff,
+        deterministic_facts={"signals": [], "files": []},
+        trusted_base_sha="a" * 40,
+        subject_head_sha="b" * 40,
+    )
+
+
+def test_only_a_cli_that_can_branch_a_session_can_share_a_reading() -> None:
+    """Resuming is not enough. A CLI that can only *continue* a session would hand the second stage
+    the first stage's answer, which is the correlated blindness this exists to avoid."""
+    from rein import build_loop
+
+    assert _record("claude").forkable
+    assert not _record("codex").forkable and not _record("gemini").forkable
+    for adapter in build_loop.ADAPTER_TABLE.values():
+        assert not adapter.fork_flags or adapter.resumable, adapter.name
+
+
+def test_two_roles_on_one_launch_share_a_reading_and_two_launches_do_not() -> None:
+    """Decided on the argv the roles are actually launched with, not on the adapter's name and not
+    on `independence_group` — nothing in the launcher varies by the group today."""
+    roles = ("actual_extractor", "security_reviewer")
+    same = models.Config.parse(json.dumps(make_config()))
+    assert review.shareable_reading(same, roles) is not None
+
+    raw = make_config()
+    raw["agents"]["security_reviewer"] = {"adapter": "codex"}
+    split = models.Config.parse(json.dumps(raw))
+    assert review.shareable_reading(split, roles) is None
+
+    raw = make_config()
+    raw["agents"]["actual_extractor"] = {"adapter": "gemini"}
+    raw["agents"]["security_reviewer"] = {"adapter": "gemini"}
+    unforkable = models.Config.parse(json.dumps(raw))
+    assert review.shareable_reading(unforkable, roles) is None
+
+
+def test_two_roles_on_different_models_do_not_share_a_reading() -> None:
+    """The model is in the argv now, so it is in the comparison. A cache written by one model is
+    not another's, and the reading would be paid for twice anyway."""
+    raw = make_config()
+    raw["agents"]["actual_extractor"] = {"adapter": "claude", "model": "opus"}
+    raw["agents"]["security_reviewer"] = {"adapter": "claude", "model": "sonnet"}
+    split = models.Config.parse(json.dumps(raw))
+    assert review.shareable_reading(split, ("actual_extractor", "security_reviewer")) is None
+
+
+def test_the_shipped_scaffold_lets_the_two_diff_readers_share() -> None:
+    """§12.4 constrains the extractor/comparator pair and says nothing about the security reviewer,
+    so the scaffold puts it on the extractor's model — the two stages that read the same diff read
+    it once. They still reach independent verdicts: the session is branched, never continued."""
+    from rein import data, strict_yaml
+
+    scaffold = models.Config(strict_yaml.load_mapping(data.read_text("scaffold/rein/config.yaml")))
+    assert scaffold.model("actual_extractor") == scaffold.model("security_reviewer")
+    assert scaffold.model("comparator") != scaffold.model("actual_extractor")
+    assert review.shareable_reading(scaffold, ("actual_extractor", "security_reviewer")) is not None
+
+
+def test_a_branch_carries_a_pointer_where_the_reading_was(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One key moves. `deterministic_facts` is shared too, but the diff is ~98% of the payload and
+    a request that exists in two shapes is a request that will drift."""
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    reading = _reading()
+
+    branched = reading.without_the_reading(_a_reading_request("A" * 500))
+    assert branched["diff"] == {"in_previous_message": True, "digest": digests.of_bytes(b"A" * 500)}
+    assert branched["contract"] == _a_reading_request()["contract"]
+    assert len(sent) == 1 and sent[0]["diff"] == "A" * 500, "the priming turn carries the real reading"
+
+
+def test_the_comparator_has_no_reading_to_share(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It is given the Actual and the Expected, never the code — and §12.4 forbids it sharing with
+    the extractor in any case. Its request must pass through untouched and prime nothing."""
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    reading = _reading()
+    request = conformance.build_request(expected_model={"claims": []}, actual_statements=[], actual_digest="d")
+
+    assert reading.without_the_reading(request) is request
+    assert reading.branch_flags(request) == ()
+    assert sent == [], "the comparator primed a reading it does not read"
+
+
+def test_one_priming_turn_serves_both_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    reading = _reading()
+
+    first = reading.branch_flags(_a_reading_request())
+    second = reading.branch_flags(_a_security_request())
+
+    assert len(sent) == 1, "the reading was primed once, not once per stage"
+    assert first == second, "both stages branch the same session"
+    assert first[0] == "--resume" and first[-1] == "--fork-session"
+
+
+def test_branching_one_session_about_two_different_changes_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mismatch is the pipeline moving underneath the review, not something to paper over by
+    sending the diff again."""
+    monkeypatch.setattr(common, "run", _capturing_run([]))
+    reading = _reading()
+    reading.branch_flags(_a_reading_request("one change"))
+    with pytest.raises(review.ReviewError, match="different changes"):
+        reading.branch_flags(_a_security_request("another change"))
+
+
+def test_the_priming_turn_is_held_to_the_same_blindness_as_the_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new path into the extractor's context without the guard is how priming comes back."""
+    monkeypatch.setattr(common, "run", _capturing_run([]))
+    primed: list[Mapping[str, Any]] = []
+    monkeypatch.setattr(actual_extraction, "assert_blind", lambda request: primed.append(request))
+    _reading().branch_flags(_a_reading_request())
+    assert primed and "diff" in primed[0]
+
+
+def test_a_priming_turn_that_fails_stops_the_review_rather_than_falling_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A "prime failed, launch them separately" path would hide a broken adapter behind a bill
+    twice the size; `--supervise` already waits out what time alone fixes."""
+    monkeypatch.setattr(common, "run", lambda *a, **k: (1, "Prompt is too long"))
+    with pytest.raises(review_policy.AdapterFailure, match="could not be primed"):
+        _reading().branch_flags(_a_reading_request())
+
+
+def test_the_priming_turn_is_counted_under_a_name_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It belongs to no stage — it is what both of them read. Folding it into either role would
+    make that role's cost a fiction."""
+    monkeypatch.setattr(common, "run", _capturing_run([]))
+    spend: dict[str, usage_mod.Usage] = {}
+    _reading(spend).branch_flags(_a_reading_request())
+    assert set(spend) == {"shared_reading"}
+    assert spend["shared_reading"].launches == 1
+
+
+def _capturing_run(sent: list[dict[str, Any]]) -> Any:
+    def run(cmd: list[str], cwd: str | None = None, **kwargs: Any) -> tuple[int, str]:
+        sent.append(json.loads(kwargs.get("input_text") or "{}"))
+        return 0, agent_envelope(review._PRIME_ACK)
+
+    return run
 
 
 def test_a_reviewer_is_told_which_blocks_it_may_not_drop() -> None:
@@ -632,7 +812,7 @@ def test_change_digest_excludes_the_rein_dir(review_repo: Path) -> None:
 
 def _budget_repo(root: Path, ceiling: int) -> Path:
     config = make_config()
-    config["review_policy"] = {"budgets": {"max_diff_bytes_per_partition": ceiling}}
+    config["review_policy"] = {"budgets": {"max_diff_bytes": ceiling}}
     seed_repo(root, state=make_state(project="rv", phase="build"), plan=make_plan(), config=config)
     _git(root, "init", "-q", "-b", "main")
     _git(root, "add", "-A")
@@ -685,13 +865,13 @@ def test_the_coverage_manifest_measures_the_product_not_the_bookkeeping(review_r
     head = _git(review_repo, "rev-parse", "HEAD")
     product = _git(review_repo, "diff", f"{base}..{head}", "--", ".", ":(exclude).rein")
     # `_git` strips, and the diff the manifest measured did not; compare on the payload instead.
-    assert machine["coverage"][0]["analyzed_bytes"] == len((product + "\n").encode("utf-8"))
-    assert not [entry for entry in machine["coverage"][0].get("generated_files", []) if ".rein" in entry["path"]]
+    assert machine["coverage"]["analyzed_bytes"] == len((product + "\n").encode("utf-8"))
+    assert not [entry for entry in machine["coverage"].get("generated_files", []) if ".rein" in entry["path"]]
 
 
 @pytest.mark.integration
 def test_a_diff_over_the_budget_is_refused_before_a_model_is_launched(tmp_path: Path) -> None:
-    """`max_diff_bytes_per_partition` was reachable only after the pipeline it makes impossible.
+    """`max_diff_bytes` was reachable only after the pipeline it makes impossible.
 
     The budget is measured at the freeze, off the finished manifest. So a change too big for the
     reviewer stages to run against never reached the sentence that says what to do about it: three
@@ -711,7 +891,7 @@ def test_a_diff_over_the_budget_is_refused_before_a_model_is_launched(tmp_path: 
         review.generate(repo, _capturing_reviewer(seen), base=seed)
 
     assert seen == [], "a reviewer was launched for a review that could never be frozen"
-    assert "max_diff_bytes_per_partition" in str(excinfo.value)
+    assert "max_diff_bytes" in str(excinfo.value)
     assert "/revise" in str(excinfo.value) and "review_policy.budgets" in str(excinfo.value)
     events, defects = event_chain.scan(repo.events)
     assert not defects, defects
@@ -966,13 +1146,21 @@ def test_without_supervise_the_first_failure_is_the_answer(review_repo: Path) ->
         )
 
 
-def test_the_bytes_put_in_front_of_each_stage_are_reported() -> None:
-    """Measured at the transport, because what this pipeline sends is what decides whether it can
-    run at all — and an estimate reported as a measurement is the habit this codebase refuses."""
+def test_what_each_stage_cost_is_reported_in_tokens_not_in_bytes_on_stdin() -> None:
+    """Bytes on stdin could not see the system prompt, the CLI's own project instructions, or the
+    cache, so they answered "what did rein send" and never "what did this cost"."""
     assert review.spend_summary({}) == ""
-    line = review.spend_summary({"actual_extractor": 4096, "security_reviewer": 2048})
-    assert line.startswith("review: sent 6KiB over 2 stage(s)")
+    heavy = usage_mod.Usage(available=True, launches=1, input_tokens=40_000, output_tokens=900)
+    light = usage_mod.Usage(available=True, launches=1, input_tokens=2_000, output_tokens=100)
+    line = review.spend_summary({"actual_extractor": heavy, "security_reviewer": light})
+    assert line.startswith("review: 42.0k input + 1000 output tokens over 2 launch(es)")
     assert line.index("actual_extractor") < line.index("security_reviewer")  # worst first
+
+
+def test_a_stage_whose_adapter_reports_nothing_is_named_rather_than_counted_as_free() -> None:
+    line = review.spend_summary({"security_reviewer": usage_mod.Usage.unavailable()})
+    assert "no adapter here reports token usage" in line
+    assert "usage unavailable for security_reviewer" in line
 
 
 # --- a subject that has not moved is not re-read -------------------------------
@@ -1021,8 +1209,31 @@ def test_regenerating_an_unmoved_subject_keeps_the_human_answers(review_repo: Pa
     assert after is not None and after.human_status == "in_progress"
 
 
-def test_force_re_reads_and_resets_the_human_half(review_repo: Path) -> None:
+def test_force_ignores_the_stored_answers_and_launches_every_stage(review_repo: Path) -> None:
     """The escape hatch says "read it again anyway", and pays the full price of saying so."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting, force=True)
+    assert len(calls) == 3, "every stage is re-read, not just the ones whose inputs moved"
+
+
+def test_a_re_reading_that_says_something_else_resets_the_human_half(review_repo: Path) -> None:
+    """The reset follows the *document*, not the command.
+
+    A regeneration whose reading changed is a different review and no prior answer speaks for it
+    (plan §6.6). One whose reading came out identical is the same review, and resetting over it
+    would discard answers about a document that still stands, which is what running the pipeline
+    on every invocation used to do fifteen times in one cycle.
+    """
+    import json
+
     repo = repo_mod.Repo(review_repo)
     review.generate(repo, _fake_reviewer)
     store = store_mod.Store(repo)
@@ -1032,17 +1243,41 @@ def test_force_re_reads_and_resets_the_human_half(review_repo: Path) -> None:
         tx.write("review", {**existing.raw, "human": {"status": "in_progress"}})
         tx.append("decision_recorded", cycle_id="demo-cycle")
 
-    review.generate(repo, _fake_reviewer, force=True)
+    def a_finding(request: Mapping[str, Any]) -> str:
+        facts = request.get("deterministic_facts", {})
+        if isinstance(facts, dict) and "signals" in facts:
+            return json.dumps(
+                {
+                    "findings": [
+                        {
+                            "id": "SEC-001",
+                            "severity": "high",
+                            "category": "credential_exposure",
+                            "attack_scenario": "the reviewer container could reach a host credential",
+                            "blocking": True,
+                        }
+                    ]
+                }
+            )
+        return _fake_reviewer(request)
+
+    review.generate(repo, a_finding, force=True)
     after = store.read_review()
     assert after is not None and after.human_status == "not_started"
     assert [e.event for e in store.read_events()].count("review_generated") == 2
 
 
-def test_a_task_promoted_after_the_review_is_re_read(review_repo: Path) -> None:
-    """`change_digest` covers the committed tree minus `.rein/`, so a task moving from
-    `awaiting-evidence` to `done` — after a human recorded what they saw — moves none of the code
-    digests. The orientation brief is derived from exactly that, and reusing across it served a
-    document the repository had since contradicted, at the gate whose whole point is that it has not."""
+def test_a_task_promoted_after_the_review_re_derives_the_brief_without_a_reviewer(review_repo: Path) -> None:
+    """A task moving to `done` moves no reviewer's input, and must move no reviewer.
+
+    `change_digest` covers the committed tree minus `.rein/`, so a task promoted from
+    `awaiting-evidence` after a human recorded what they saw moves none of the code digests. The
+    orientation brief is derived from exactly that, and reusing across it served a document the
+    repository had since contradicted. The repair was to add `tasks_digest` to a *pipeline-wide*
+    reuse key, which fixed the brief by paying for three model launches to re-read code nobody had
+    touched. The brief is now re-derived on every generation, and no stage's key mentions
+    `state.yaml` at all.
+    """
     import yaml
 
     repo = repo_mod.Repo(review_repo)
@@ -1054,10 +1289,110 @@ def test_a_task_promoted_after_the_review_is_re_read(review_repo: Path) -> None:
     document["tasks"] = {"T-001": {"status": "done", "evidence": {"steps": [{"name": "test"}]}}}
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
-    review.generate(repo, _fake_reviewer)
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
     after = store_mod.Store(repo).read_review()
     assert after is not None
     assert [row["task_id"] for row in after.machine["brief"]["delivered"]] == ["T-001"]
+    assert calls == [], "the brief is derived in code; re-deriving it must launch nothing"
+
+
+def test_editing_the_plan_re_runs_only_the_comparator(review_repo: Path) -> None:
+    """The extractor has never seen a plan, and the security reviewer never will.
+
+    One `subject` digest used to decide whether all three stages ran, so a one-word edit to a
+    claim re-read the whole change twice over for an answer that could not depend on it.
+    """
+    import yaml
+
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+
+    path = review_repo / ".rein" / "plan.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["claims"][0]["statement"] = document["claims"][0]["statement"] + " (reworded)"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
+    assert len(calls) == 1 and "expected_model" in calls[0]
+    events = [e.event for e in store_mod.Store(repo).read_events()]
+    assert events.count("comparison_generated") == 2
+    assert events.count("actual_extraction_generated") == 1
+    assert events.count("security_review_generated") == 1
+
+
+def test_a_stage_that_succeeded_before_a_failure_is_not_paid_for_twice(review_repo: Path) -> None:
+    """The pipeline writes nothing when a later stage fails, so an extraction measured at over six
+    minutes was thrown away because the comparator came back malformed."""
+    repo = repo_mod.Repo(review_repo)
+
+    def broken_comparator(request: Mapping[str, Any]) -> str:
+        if "expected_model" in request:
+            return "not json at all"
+        return _fake_reviewer(request)
+
+    with pytest.raises(review_policy.ReviewPolicyError):
+        review.generate(repo, broken_comparator)
+
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
+    assert len(calls) == 1 and "expected_model" in calls[0], "only the stage that failed is re-run"
+
+
+def test_a_completed_generation_keeps_only_the_answers_it_used(review_repo: Path) -> None:
+    """No expiry and no knob: what a finished run did not use, it deletes."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    cache = review_repo / review_cache.CACHE_DIR
+    assert len(list(cache.glob("*.json"))) == 3
+    first_extraction = next(cache.glob("actual_extraction-*.json"))
+
+    later = review_repo / "src" / "later.py"
+    later.parent.mkdir(parents=True, exist_ok=True)
+    later.write_text("VALUE = 2\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "another change")
+
+    review.generate(repo, _fake_reviewer)
+    assert not first_extraction.exists(), "the previous change's reading is gone, not accumulating"
+    assert len(list(cache.glob("*.json"))) == 3
+
+
+def test_a_stored_answer_that_no_longer_validates_is_dropped_and_re_read(review_repo: Path) -> None:
+    """A release that tightens a validator must not wedge every open review behind bytes that can
+    never pass again — and the re-read must be a real launch, not a silent pass."""
+    repo = repo_mod.Repo(review_repo)
+    review.generate(repo, _fake_reviewer)
+    cache = review_repo / review_cache.CACHE_DIR
+    poisoned = next(cache.glob("actual_extraction-*.json"))
+    poisoned.write_text(json.dumps({"stage": "actual_extraction", "answer": "{}"}), encoding="utf-8")
+
+    calls: list[Mapping[str, Any]] = []
+
+    def counting(request: Mapping[str, Any]) -> str:
+        calls.append(request)
+        return _fake_reviewer(request)
+
+    review.generate(repo, counting)
+    assert any("expected_model" not in c and "signals" not in c.get("deterministic_facts", {}) for c in calls)
+    stored = json.loads(next(cache.glob("actual_extraction-*.json")).read_text(encoding="utf-8"))
+    assert stored["answer"] != "{}", "the entry that could not be believed was replaced, not kept"
 
 
 def test_a_moved_head_is_re_read(review_repo: Path) -> None:
