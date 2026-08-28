@@ -24,10 +24,10 @@ prompts:
     prompts/commands/tasks.md: sha256:ef26fa578b566ffc00d40f5cdebeccc394cd2144a357052cdf3561d16b2e9c8e
     prompts/commands/verify.md: sha256:d5b942372f8fb6b30b7d30352756c46c3971491408b348a4f924d13343a07db8
     prompts/rules/gate-workflow.md: sha256:1ed5fa25ab442ebcf53eb06e7317d06051dcdca68f385767bf58b518506a3d9b
-    schema/config.schema.json: sha256:28456509b1fe2a8ba5efe235bc525b4912dc5b6bd3923872cdc7b367d04132c5
+    schema/config.schema.json: sha256:e4a2f34dbd7bf0110579a1ba6da5cdda7b57cbb8985c17511999b36a779c93cf
     schema/event.schema.json: sha256:42f054f7f19d371daf3fedc4dad1342406d8d227bd1ecbc2bec3a27783271bc7
     schema/plan.schema.json: sha256:d757ab47606c25899a5755fbd954b36019fa7f47622397e681d7f0e92bba153d
-    schema/review.schema.json: sha256:0c7dc624f6aebef6b415fe99273e524922ad42872035fa2a48018c6b29ced646
+    schema/review.schema.json: sha256:4c1f81bc15ab08a5f6bdacf1817ccb674a35b35275726ecf14acada6c89c7c98
     schema/state.schema.json: sha256:7886f698b8593727831a860f1f3b523101725d745a5d79142fa4ff8c079871ea
 integrations:
   claude:
@@ -88,6 +88,6 @@ integrations:
       .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-08-27'
+updated_at: '2026-08-28'
 rein:
   version: 0.1.0

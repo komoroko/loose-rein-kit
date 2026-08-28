@@ -11,7 +11,7 @@ setup that silently violates it would fail much later, at gate ④, as an unexpl
   rein agent --show
   rein agent claude                          # every role
   rein agent claude --role implementer
-  rein agent claude --role comparator --group claude/sonnet
+  rein agent claude --role comparator --model sonnet
 
 The rewrite is surgical: only the touched keys change, and every comment in config.yaml
 survives, because a YAML round-trip would silently delete the comments that explain the file.
@@ -95,8 +95,8 @@ def _set_role_key(text: str, role: str, key: str, value: str) -> tuple[str, bool
     return text[:section_start] + new_section + text[section_end:], True
 
 
-def apply_switch(text: str, adapter: str, roles: tuple[str, ...], group: str = "", *, strict: bool = True) -> str:
-    """The config text with `adapter` (and optionally `independence_group`) set for `roles`.
+def apply_switch(text: str, adapter: str, roles: tuple[str, ...], model: str = "", *, strict: bool = True) -> str:
+    """The config text with `adapter` (and optionally `model`) set for `roles`.
 
     `strict=False` skips roles this config does not declare, which is what a bulk set needs: a
     config may legitimately omit a role it does not use, and refusing the whole operation over
@@ -111,8 +111,8 @@ def apply_switch(text: str, adapter: str, roles: tuple[str, ...], group: str = "
                 f"agents.{role} is not declared in .rein/config.yaml — add the role block first "
                 "(the scaffold declares all five)"
             )
-        if group:
-            text, _ = _set_role_key(text, role, "independence_group", group)
+        if model:
+            text, _ = _set_role_key(text, role, "model", model)
     return text
 
 
@@ -132,8 +132,8 @@ def independence_status(config: models.Config) -> tuple[str, list[str]]:
     if not left or not right:
         missing = [r for r in INDEPENDENT_PAIR if not config.independence_group(r)]
         return "FAIL", [
-            f"no independence_group set for: {', '.join(missing)} — a critical change cannot satisfy "
-            "the independence requirement without them"
+            f"no model named for: {', '.join(missing)} — each takes the CLI's default, which is one "
+            "launch twice, and a critical change cannot satisfy the independence requirement that way"
         ]
     if left == right:
         return "FAIL", [
@@ -161,9 +161,12 @@ def independence_report(config: models.Config) -> list[str]:
 
 
 def render_show(config: models.Config) -> str:
-    lines = ["| role | adapter | independence group |", "|------|---------|--------------------|"]
+    lines = ["| role | adapter | model | independence group |", "|------|---------|-------|--------------------|"]
     for role in ROLES:
-        lines.append(f"| {role} | {config.adapter(role) or '-'} | {config.independence_group(role) or '-'} |")
+        lines.append(
+            f"| {role} | {config.adapter(role) or '-'} | {config.model(role) or '(cli default)'} "
+            f"| {config.independence_group(role) or '-'} |"
+        )
     warnings = independence_report(config)
     if warnings:
         lines += ["", "### Independence"] + [f"- {w}" for w in warnings]
@@ -174,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="point the AI roles at an adapter")
     parser.add_argument("adapter", nargs="?", default="", help="the adapter name to set")
     parser.add_argument("--role", default="", help=f"one role (default: all). One of: {', '.join(ROLES)}")
-    parser.add_argument("--group", default="", help="independence_group to set alongside (provider/model)")
+    parser.add_argument("--model", default="", help="the model this role runs (the independence group derives from it)")
     parser.add_argument("--show", action="store_true", help="print the current roles and stop")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
@@ -200,13 +203,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.role and args.role not in ROLES:
         logger.error(f"unknown role {args.role!r} (one of {', '.join(ROLES)})")
         return 2
-    if args.group and not args.role:
-        logger.error("--group applies to one role — pass --role too, or the whole pair would share a group")
+    if args.model and not args.role:
+        logger.error("--model applies to one role — pass --role too, or the whole pair would share a model")
         return 2
 
     roles = (args.role,) if args.role else ROLES
     try:
-        updated = apply_switch(text, args.adapter, roles, args.group, strict=bool(args.role))
+        updated = apply_switch(text, args.adapter, roles, args.model, strict=bool(args.role))
         new_config = models.Config.parse(updated)
     except (AgentCliError, models.DocumentError, strict_yaml.StrictParseError) as exc:
         logger.error(str(exc))

@@ -37,10 +37,10 @@ agents:
     adapter: claude
   actual_extractor:
     adapter: claude          # trailing comment survives
-    independence_group: claude/opus
+    model: opus
   comparator:
     adapter: claude
-    independence_group: claude/sonnet
+    model: sonnet
 """
 
 
@@ -72,14 +72,14 @@ def test_setting_every_role_at_once() -> None:
     assert updated.count("adapter: gemini") == 2
 
 
-def test_the_group_can_be_set_alongside() -> None:
-    updated = agent_cli.apply_switch(SCAFFOLD, "codex", ("comparator",), "codex/o1")
-    assert "independence_group: codex/o1" in updated
+def test_the_model_can_be_set_alongside() -> None:
+    updated = agent_cli.apply_switch(SCAFFOLD, "codex", ("comparator",), "o1")
+    assert "model: o1" in updated
 
 
-def test_a_missing_group_key_is_added() -> None:
-    updated = agent_cli.apply_switch(SCAFFOLD, "codex", ("code_reviewer",), "codex/o1")
-    assert "independence_group: codex/o1" in updated
+def test_a_missing_model_key_is_added() -> None:
+    updated = agent_cli.apply_switch(SCAFFOLD, "codex", ("code_reviewer",), "o1")
+    assert "model: o1" in updated
 
 
 def test_an_undeclared_role_is_refused() -> None:
@@ -92,7 +92,7 @@ def test_an_undeclared_role_is_refused() -> None:
 
 def test_a_shared_group_is_reported_as_a_block() -> None:
     config = make_config()
-    config["agents"]["comparator"]["independence_group"] = "claude/opus"  # type: ignore[index]
+    config["agents"]["comparator"]["model"] = "opus"  # type: ignore[index]
     warnings = agent_cli.independence_report(models.Config(config))
     assert any("share the independence group" in w for w in warnings)
     assert any("blind spots" in w for w in warnings)
@@ -100,8 +100,8 @@ def test_a_shared_group_is_reported_as_a_block() -> None:
 
 def test_a_missing_group_is_reported() -> None:
     config = make_config()
-    del config["agents"]["comparator"]["independence_group"]  # type: ignore[index]
-    assert any("no independence_group set" in w for w in agent_cli.independence_report(models.Config(config)))
+    del config["agents"]["comparator"]["model"]  # type: ignore[index]
+    assert any("no model named for" in w for w in agent_cli.independence_report(models.Config(config)))
 
 
 def test_two_models_of_one_provider_are_reported_as_weaker_not_equivalent() -> None:
@@ -121,11 +121,12 @@ def test_the_level_comes_from_the_branch_not_from_the_wording() -> None:
     """doctor used to recover FAIL-vs-WARN by searching the message text, so rewording a
     sentence here could silently downgrade a blocking finding."""
     shared = make_config()
-    shared["agents"]["comparator"]["independence_group"] = "claude/opus"  # type: ignore[index]
+    shared["agents"]["comparator"]["model"] = "opus"  # type: ignore[index]
     missing = make_config()
-    del missing["agents"]["comparator"]["independence_group"]  # type: ignore[index]
+    del missing["agents"]["comparator"]["model"]  # type: ignore[index]
     two = make_config()
-    two["agents"]["comparator"]["independence_group"] = "openai/gpt"  # type: ignore[index]
+    # The provider is the adapter now, not a label beside it — two providers means two CLIs.
+    two["agents"]["comparator"] = {"adapter": "codex", "model": "gpt"}  # type: ignore[index]
 
     assert agent_cli.independence_status(models.Config(shared))[0] == "FAIL"
     assert agent_cli.independence_status(models.Config(missing))[0] == "FAIL"
@@ -135,7 +136,7 @@ def test_the_level_comes_from_the_branch_not_from_the_wording() -> None:
 
 def test_two_providers_report_nothing() -> None:
     config = make_config()
-    config["agents"]["comparator"]["independence_group"] = "openai/gpt"  # type: ignore[index]
+    config["agents"]["comparator"] = {"adapter": "codex", "model": "gpt"}  # type: ignore[index]
     assert agent_cli.independence_report(models.Config(config)) == []
 
 
@@ -170,14 +171,15 @@ def test_setting_an_adapter_rewrites_the_config(tmp_path: Path) -> None:
 
 def test_the_rewrite_is_still_schema_valid(tmp_path: Path) -> None:
     seed_repo(tmp_path)
-    agent_cli.main(["codex", "--role", "comparator", "--group", "codex/o1", "--repo", str(tmp_path)])
+    agent_cli.main(["codex", "--role", "comparator", "--model", "o1", "--repo", str(tmp_path)])
     config = parsed(tmp_path)  # would raise DocumentError if the surgery broke the shape
-    assert config.independence_group("comparator") == "codex/o1"
+    assert config.model("comparator") == "o1"
+    assert config.independence_group("comparator") == "codex/o1", "the group is derived, never authored"
 
 
 def test_a_switch_that_collapses_the_pair_warns(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     seed_repo(tmp_path)
-    agent_cli.main(["claude", "--role", "comparator", "--group", "claude/opus", "--repo", str(tmp_path)])
+    agent_cli.main(["claude", "--role", "comparator", "--model", "opus", "--repo", str(tmp_path)])
     assert "share the independence group" in capsys.readouterr().err
 
 
@@ -186,10 +188,10 @@ def test_an_unknown_role_is_refused(tmp_path: Path) -> None:
     assert agent_cli.main(["codex", "--role", "nonexistent", "--repo", str(tmp_path)]) == 2
 
 
-def test_a_group_without_a_role_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Setting one group for every role would collapse the pair the check exists to keep apart."""
+def test_a_model_without_a_role_is_refused(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Setting one model for every role would collapse the pair the check exists to keep apart."""
     seed_repo(tmp_path)
-    assert agent_cli.main(["codex", "--group", "codex/o1", "--repo", str(tmp_path)]) == 2
+    assert agent_cli.main(["codex", "--model", "o1", "--repo", str(tmp_path)]) == 2
     assert "pass --role too" in capsys.readouterr().err
 
 

@@ -318,11 +318,21 @@ def reject_blocking_removal(subject_id: str, reviewer_blocking: object, policy_b
 
 
 def independence_ok(independence: Mapping[str, Any], effective: str) -> tuple[bool, str]:
-    """A critical review needs the Actual Extractor and Comparator in distinct groups.
+    """A critical review needs the Actual Extractor and Comparator on distinct models.
 
-    Reusing one model session's output for both halves is not a second opinion (plan §12.4).
-    Distinctness is enforced on the declared group string *and*, when present, the prompt
-    digest — identical prompts to two named groups are still one observation (plan §12.4).
+    Checked **before** the comparator launches, which is the only moment a misconfiguration can be
+    refused without paying for it. The group is `<adapter>/<model>` and is derived from what the
+    role is launched with, so two distinct groups now mean two distinct launches — they used to
+    mean two distinct strings beside launches that were identical, because nothing passed a model
+    anywhere. A pair that declared `claude/opus` and `claude/sonnet` ran one model twice and passed
+    this check on the strength of the labels.
+
+    An empty group is a role with no model named, taking the CLI's default: two of those are the
+    same launch, so at critical they are refused rather than assumed to differ (plan §2.4).
+
+    What this cannot see is what actually answered — a provider that silently served a different
+    model than it was asked for. :func:`independence_observed` is that half, checked at the gate
+    against what the launches reported.
     """
     if not models.risk_at_least(effective, "critical"):
         return True, "independence is only required for a critical review"
@@ -332,16 +342,45 @@ def independence_ok(independence: Mapping[str, Any], effective: str) -> tuple[bo
         return False, "a critical review must declare both actual_extractor and comparator groups"
     e_group, c_group = str(extractor.get("group", "")), str(comparator.get("group", ""))
     if not e_group or not c_group:
-        return False, "a critical review must declare a non-empty group for each reviewer"
+        return False, (
+            "a critical review must name a model for the actual_extractor and the comparator — "
+            "without one each takes the CLI's default, which is the same launch twice"
+        )
     if e_group == c_group:
         return False, (
             f"critical review is not independent: the Actual Extractor and Comparator share the group "
             f"{e_group!r} — reusing one session for both is not a second opinion"
         )
-    e_prompt, c_prompt = str(extractor.get("prompt_digest", "")), str(comparator.get("prompt_digest", ""))
-    if e_prompt and c_prompt and e_prompt == c_prompt:
-        return False, "critical review reused one prompt for both reviewers — distinct groups, one observation"
     return True, "distinct independence groups"
+
+
+def independence_observed(review: models.Review, effective: str) -> list[str]:
+    """What the launches *reported* having used, checked against what the config asked for.
+
+    The pre-launch check reads the configuration; this reads the receipt. A provider serving a
+    different model than it was told to — a fallback under load, a deprecated alias — would leave
+    the configuration saying two opinions and one model having given both, and only the launch's
+    own report can tell. Silent on a review that recorded no observation: an adapter that does not
+    report usage cannot be held to a measurement it never took, and the declared check above has
+    already refused a critical pair that could not differ.
+    """
+    if not models.risk_at_least(effective, "critical"):
+        return []
+    seen = review.binding.get("independence")
+    if not isinstance(seen, Mapping):
+        return []
+    models_by_role = {
+        role: str(entry.get("model", ""))
+        for role, entry in seen.items()
+        if isinstance(entry, Mapping) and entry.get("model")
+    }
+    extractor, comparator = models_by_role.get("actual_extractor"), models_by_role.get("comparator")
+    if extractor and comparator and extractor == comparator:
+        return [
+            f"critical review is not independent: the Actual Extractor and Comparator were both "
+            f"answered by {extractor!r}, whatever the configuration asked for"
+        ]
+    return []
 
 
 # --- blocking (the gate-4 decision) -------------------------------------------
@@ -379,4 +418,5 @@ def blocking_reasons(review: models.Review, effective: str) -> list[str]:
             grounded = "" if extra.get("grounded") is True else ", ungrounded"
             reasons.append(f"blocking extra behavior {extra.get('id', '?')} ({extra.get('category', '?')}{grounded})")
     reasons += coverage_blocks(review, effective)
+    reasons += independence_observed(review, effective)
     return reasons

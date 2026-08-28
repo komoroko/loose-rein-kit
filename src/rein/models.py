@@ -1285,8 +1285,25 @@ class Config:
             return {}
         return {name: body for name, body in raw.items() if isinstance(body, dict)}
 
+    def model(self, role: str) -> str:
+        """Which model this role is told to run. "" means the CLI's own default."""
+        return _str(self.agents.get(role, {}), "model")
+
     def independence_group(self, role: str) -> str:
-        return _str(self.agents.get(role, {}), "independence_group")
+        """`<adapter>/<model>` — **derived**, so it cannot disagree with what is launched.
+
+        It used to be authored beside the adapter, and nothing passed a model anywhere: two roles
+        could declare `claude/opus` and `claude/sonnet`, run the same model on the same CLI, and
+        pass the critical-independence check on the strength of two different strings. A separation
+        that is written down rather than performed is exactly what §12.4 exists to refuse, so the
+        two fields are now one: you choose a model, and the group says which one you chose.
+
+        Empty when no model is named — the CLI's default cannot be named in advance. What actually
+        answered is read back from the launch (`usage.Usage.models`) and recorded on the review, and
+        that is what the gate-④ check is settled on.
+        """
+        adapter, model = self.adapter(role), self.model(role)
+        return f"{adapter}/{model}" if adapter and model else ""
 
     def adapter(self, role: str) -> str:
         return _str(self.agents.get(role, {}), "adapter")

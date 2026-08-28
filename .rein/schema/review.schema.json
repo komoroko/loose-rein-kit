@@ -1152,20 +1152,22 @@
       }
     },
     "independenceGroup": {
+      "description": "Who produced one half of the review: the model the config asked for, and the one the launch reported having used. Both optional and neither inferred from the other — `group` is a configuration and `model` is a measurement, and a provider that serves a different model than it was told to is exactly the case where they disagree. `prompt_digest` is gone: it was declared here, read by the independence check, and written by nobody, and the check is settled on the model now.",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "group"
-      ],
       "properties": {
         "group": {
+          "description": "`<adapter>/<model>` from config.yaml, derived rather than authored so it cannot name a separation the launch does not make.",
           "type": "string",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$"
         },
-        "prompt_digest": {
-          "$ref": "#/$defs/digest"
+        "model": {
+          "description": "The model id the launch reported. Absent when the adapter reports no usage — which is 'nobody measured', never 'it agreed'.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
         }
       }
     },

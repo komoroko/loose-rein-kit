@@ -622,15 +622,26 @@ def test_two_roles_on_one_launch_share_a_reading_and_two_launches_do_not() -> No
     assert review.shareable_reading(unforkable, roles) is None
 
 
-def test_a_declared_group_does_not_decide_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scaffold gives these two roles different `independence_group`s and the same CLI with no
-    `--model` anywhere, so the groups describe a separation the launcher does not make. Refusing to
-    share on them would honour a difference that does not exist at launch time."""
+def test_two_roles_on_different_models_do_not_share_a_reading() -> None:
+    """The model is in the argv now, so it is in the comparison. A cache written by one model is
+    not another's, and the reading would be paid for twice anyway."""
     raw = make_config()
-    raw["agents"]["actual_extractor"] = {"adapter": "claude", "independence_group": "claude/opus"}
-    raw["agents"]["security_reviewer"] = {"adapter": "claude", "independence_group": "claude/sonnet"}
-    config = models.Config.parse(json.dumps(raw))
-    assert review.shareable_reading(config, ("actual_extractor", "security_reviewer")) is not None
+    raw["agents"]["actual_extractor"] = {"adapter": "claude", "model": "opus"}
+    raw["agents"]["security_reviewer"] = {"adapter": "claude", "model": "sonnet"}
+    split = models.Config.parse(json.dumps(raw))
+    assert review.shareable_reading(split, ("actual_extractor", "security_reviewer")) is None
+
+
+def test_the_shipped_scaffold_lets_the_two_diff_readers_share() -> None:
+    """§12.4 constrains the extractor/comparator pair and says nothing about the security reviewer,
+    so the scaffold puts it on the extractor's model — the two stages that read the same diff read
+    it once. They still reach independent verdicts: the session is branched, never continued."""
+    from rein import data, strict_yaml
+
+    scaffold = models.Config(strict_yaml.load_mapping(data.read_text("scaffold/rein/config.yaml")))
+    assert scaffold.model("actual_extractor") == scaffold.model("security_reviewer")
+    assert scaffold.model("comparator") != scaffold.model("actual_extractor")
+    assert review.shareable_reading(scaffold, ("actual_extractor", "security_reviewer")) is not None
 
 
 def test_a_branch_carries_a_pointer_where_the_reading_was(monkeypatch: pytest.MonkeyPatch) -> None:

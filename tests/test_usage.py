@@ -99,3 +99,36 @@ def test_a_role_whose_adapter_reports_nothing_is_named_in_the_summary() -> None:
 def test_the_summary_is_empty_when_nothing_launched() -> None:
     assert usage.summarize({}, what="review") == ""
     assert usage.summarize({"comparator": usage.Usage()}, what="review") == ""
+
+
+# --- the model a role declares is the model that runs --------------------------
+#
+# `independence_group` used to be authored beside the adapter and passed to nothing: two roles
+# could declare `claude/opus` and `claude/sonnet`, run the same model on the same CLI, and pass the
+# critical-independence check on the strength of two different strings.
+
+
+def test_a_named_model_reaches_the_launch() -> None:
+    claude = build_loop.ADAPTER_TABLE["claude"]
+    assert claude.launch_argv("opus")[:4] == ("claude", "-p", "--model", "opus")
+    assert "--model" not in claude.launch_argv(), "no model named means the CLI's own default"
+
+
+def test_the_group_is_derived_from_what_launches() -> None:
+    """One field, so a separation cannot be declared without being performed."""
+    from rein import models
+
+    config = models.Config({"agents": {"comparator": {"adapter": "claude", "model": "sonnet"}}})
+    assert config.independence_group("comparator") == "claude/sonnet"
+    assert models.Config({"agents": {"comparator": {"adapter": "claude"}}}).independence_group("comparator") == ""
+
+
+def test_a_model_an_adapter_cannot_be_told_to_run_is_refused_not_dropped() -> None:
+    """Launching the CLI's default under another model's name is the exact lie the field exists to
+    stop — the independence check is derived from it."""
+    from rein import models
+
+    assert build_loop.ADAPTER_TABLE["codex"].model_flags == ()
+    config = models.Config({"agents": {"implementer": {"adapter": "codex", "model": "gpt"}}})
+    with pytest.raises(ValueError, match="cannot tell"):
+        build_loop.Config._argv_for(config, "implementer")

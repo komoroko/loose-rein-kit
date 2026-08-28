@@ -684,7 +684,13 @@ def generate(
             security = security_future.result()
 
         entered("assembly")
-        binding = {**subject, "actual_digest": extraction.actual_digest, "generated_at": event_chain.now_iso()}
+        binding: dict[str, Any] = {
+            **subject,
+            "actual_digest": extraction.actual_digest,
+            "generated_at": event_chain.now_iso(),
+        }
+        if seen_models := _independence_record(config, spend):
+            binding["independence"] = seen_models
         gaps = _coverage_gaps(comparison.actual_coverage_gaps)
         machine = assemble(
             binding=binding,
@@ -1051,14 +1057,43 @@ def _effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> st
     return review_policy.effective_risk(inputs)
 
 
+def _independence_record(config: models.Config | None, spend: Mapping[str, usage_mod.Usage] | None) -> dict[str, Any]:
+    """Which model each reviewer was *asked* for and which one *answered*, for the binding.
+
+    `binding.independence` was declared in the schema, rendered by the dashboard, and written by
+    nobody — so a gate receipt bound no record of who produced either half of the review, at the
+    one gate where the plan requires them to differ. It is written here from two sources that
+    cannot be the same mistake: `group` is what the config asked for, `model` is the id the launch
+    reported having used (`usage.Usage.models`).
+
+    A role whose adapter reports no usage carries no `model`, which is the honest record: nobody
+    measured, and `review_policy.independence_observed` stays silent rather than reading an absent
+    observation as agreement.
+    """
+    record: dict[str, Any] = {}
+    for role in ("actual_extractor", "comparator", "security_reviewer"):
+        entry: dict[str, Any] = {}
+        group = config.independence_group(role) if config is not None else ""
+        if group:
+            entry["group"] = group
+        observed = (spend or {}).get(role)
+        # One id, or nothing. Two would mean the launch itself switched models part-way, which is
+        # not a fact about this role's opinion and must not be recorded as one.
+        if observed is not None and len(observed.models) == 1:
+            entry["model"] = observed.models[0]
+        if entry:
+            record[role] = entry
+    return record
+
+
 def _independence(config: models.Config | None) -> dict[str, Any]:
     """The declared reviewer groups, read from the config that declares them.
 
-    `independence_group` is the whole substitute for buying a second AI provider, so it is read
-    from the config rather than assumed: `review_policy.independence_ok` — the Actual Extractor
-    and the Comparator must not be the same opinion — has nothing to enforce otherwise. An unset
-    group stays empty rather than being invented: the check refuses a critical review that cannot
-    name its two groups, which is the right answer.
+    The group is `<adapter>/<model>` and is derived from what the role is launched with, so it is
+    read from the config rather than assumed: `review_policy.independence_ok` — the Actual
+    Extractor and the Comparator must not be the same opinion — has nothing to enforce otherwise.
+    An unnamed model leaves the group empty rather than inventing one: two roles on the CLI's
+    default are one launch twice, and the check refuses that at critical, which is the right answer.
     """
     if config is None:
         return {"actual_extractor": {"group": ""}, "comparator": {"group": ""}}
@@ -1220,7 +1255,22 @@ def _adapter_for_role(config: models.Config | None, role: str) -> Adapter:
     record = build_loop.ADAPTER_TABLE.get(adapter)
     if record is None:
         raise ReviewError(f"agents.{role}.adapter is {adapter!r}, which this release cannot launch")
+    if _model_for_role(config, role) and not record.model_flags:
+        raise ReviewError(
+            f"agents.{role}.model names a model this release cannot tell {adapter!r} to run, so the "
+            "launch would take the CLI's default under that name — and the gate-④ independence check "
+            "is derived from the model. Drop it, or use an adapter whose model flag is known."
+        )
     return record
+
+
+def _model_for_role(config: models.Config | None, role: str) -> str:
+    return config.model(role) if config is not None else ""
+
+
+def _role_argv(config: models.Config | None, role: str) -> tuple[str, ...]:
+    """Exactly what launches `role` — the CLI, its model, and its usage flags."""
+    return _adapter_for_role(config, role).launch_argv(_model_for_role(config, role))
 
 
 def shareable_reading(config: models.Config | None, roles: Sequence[str]) -> Adapter | None:
@@ -1229,22 +1279,18 @@ def shareable_reading(config: models.Config | None, roles: Sequence[str]) -> Ada
     Two conditions:
 
     - **The same launch.** Not "the same adapter name" — the argv these roles are actually launched
-      with, which is what decides whether there is one process to have a session in. Written this
-      way so that the day anything makes a role's launch differ (a per-role `--model`, say), the
-      sharing stops on its own instead of quietly crossing a boundary somebody added elsewhere.
+      with, model included. Two roles on different models do not share: a cache written by one
+      model is not another's, and the reading would be paid for twice anyway.
     - **A CLI that can branch a session.** *Continuing* one — the second stage reading the first
       stage's answer — is exactly the correlated blindness this exists to avoid, so a CLI that can
       resume but not fork is not good enough (`Adapter.forkable`).
 
-    **`independence_group` is deliberately not consulted here**, which is worth stating because it
-    looks like it should be. Nothing in the launcher varies by it: no `--model` is passed anywhere,
-    so two roles in different groups run the same model on the same CLI today, and refusing to
-    share on that basis would be honouring a separation that does not exist at launch time. The
-    argv check above is what will catch it if one is ever implemented. (What the group *does* bind
-    is the extractor/comparator check at gate ④ — `_independence` — which this pair is not part of.)
+    The independence group is not consulted separately, because it no longer says anything the argv
+    does not: it is derived from `<adapter>/<model>`, and both are in the argv. Two roles that share
+    a launch share a group by construction.
     """
     records = [_adapter_for_role(config, role) for role in roles]
-    if len({record.launch_argv() for record in records}) != 1 or not records[0].forkable:
+    if len({_role_argv(config, role) for role in roles}) != 1 or not records[0].forkable:
         return None
     return records[0]
 
@@ -1293,11 +1339,17 @@ class SharedReading:
         repo: repo_mod.Repo,
         record: Adapter,
         *,
+        argv: Sequence[str] | None = None,
         timeout: float,
         spend: dict[str, usage_mod.Usage] | None = None,
     ) -> None:
         self._repo = repo
         self._record = record
+        #: The priming turn must run the same launch the branches do — a cache written by one
+        #: model is not another model's, so a prime on the CLI default under branches pinned to a
+        #: model pays for the reading and serves nobody. Measured: the branch that followed such a
+        #: prime wrote the whole prefix again.
+        self._argv = tuple(argv) if argv is not None else record.launch_argv()
         self._timeout = timeout
         self._spend = spend
         self._lock = threading.Lock()
@@ -1370,7 +1422,7 @@ class SharedReading:
         would hide a broken adapter behind a bill twice the size, and `--supervise` already waits
         out the failures that time alone fixes.
         """
-        argv = list(self._record.launch_argv()) + [*self._record.session_flags, session]
+        argv = list(self._argv) + [*self._record.session_flags, session]
         with tempfile.TemporaryDirectory(prefix="rein-reading-", ignore_cleanup_errors=True) as elsewhere:
             rc, out = common.run(
                 argv, cwd=elsewhere, timeout=self._timeout or None, input_text=json.dumps(payload, ensure_ascii=False)
@@ -1450,10 +1502,11 @@ def _adapter_reviewer(
     if config is None:
         config = store_mod.Store(repo).read_config()
     record = _adapter_for_role(config, role)
+    role_argv = _role_argv(config, role)
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
     def call(request: Mapping[str, Any]) -> str:
-        argv = list(record.launch_argv()) + list(reading.branch_flags(request) if reading else ())
+        argv = list(role_argv) + list(reading.branch_flags(request) if reading else ())
         payload = json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False)
         # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
         # left something undeletable behind must not turn a finished review into a traceback.
@@ -1518,6 +1571,7 @@ def _staged_reviewer(repo: repo_mod.Repo, *, spend: dict[str, usage_mod.Usage] |
         SharedReading(
             repo,
             shared,
+            argv=_role_argv(config, _READING_ROLES[0]),
             timeout=float(config.agent_timeout_sec) if config is not None else 0.0,
             spend=spend,
         )

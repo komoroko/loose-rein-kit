@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from rein import diff_facts, review_policy
+from rein import diff_facts, models, review_policy
 from rein import repo as repo_mod
 
 # --- effective risk (plan §13.5) ----------------------------------------------
@@ -131,6 +131,9 @@ def test_reviewer_cannot_clear_a_policy_blocking_flag() -> None:
     assert review_policy.reject_blocking_removal("SEC-001", reviewer_blocking=True, policy_blocking=True) == []
 
 
+def _review(machine: dict[str, Any]) -> models.Review:
+    return models.Review({"machine": {"status": "generated", **machine}, "human": {"status": "not_started"}})
+
 # --- independence (plan §12.4, E2E-26) ----------------------------------------
 
 
@@ -147,14 +150,49 @@ def test_critical_review_accepts_distinct_groups() -> None:
     assert ok
 
 
-def test_critical_review_rejects_a_shared_prompt_digest() -> None:
-    independence = {
-        "actual_extractor": {"group": "claude/opus", "prompt_digest": "sha256:" + "a" * 64},
-        "comparator": {"group": "claude/sonnet", "prompt_digest": "sha256:" + "a" * 64},
-    }
+def test_a_critical_review_with_no_model_named_cannot_show_independence() -> None:
+    """Two roles that name no model both take the CLI's default, which is one launch twice. The
+    group is derived from the model, so an empty group is exactly that case."""
+    independence: dict[str, dict[str, str]] = {"actual_extractor": {}, "comparator": {}}
     ok, message = review_policy.independence_ok(independence, "critical")
     assert not ok
-    assert "one observation" in message
+    assert "the CLI's default" in message
+
+
+def test_the_gate_checks_what_answered_not_only_what_was_configured() -> None:
+    """The pre-launch check reads the configuration; this reads the receipt. A provider serving a
+    different model than it was told to would leave the config claiming two opinions and one model
+    having given both, and only the launch's own report can say so."""
+    review = _review(
+        machine={
+            "binding": {
+                "independence": {
+                    "actual_extractor": {"group": "claude/opus", "model": "claude-sonnet-5"},
+                    "comparator": {"group": "claude/sonnet", "model": "claude-sonnet-5"},
+                }
+            }
+        }
+    )
+    blocks = review_policy.independence_observed(review, "critical")
+    assert blocks and "answered by 'claude-sonnet-5'" in blocks[0]
+    assert blocks[0] in review_policy.blocking_reasons(review, "critical")
+
+
+def test_an_unreported_model_is_not_read_as_agreement() -> None:
+    """An adapter that reports no usage cannot be held to a measurement it never took — and the
+    declared check has already refused a critical pair that could not differ."""
+    review = _review(
+        machine={
+            "binding": {
+                "independence": {
+                    "actual_extractor": {"group": "claude/opus"},
+                    "comparator": {"group": "claude/sonnet"},
+                }
+            }
+        }
+    )
+    assert review_policy.independence_observed(review, "critical") == []
+    assert review_policy.independence_observed(review, "high") == []
 
 
 def test_non_critical_review_does_not_require_independence() -> None:

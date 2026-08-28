@@ -305,8 +305,12 @@ def make_config(
         "agents": {
             "implementer": {"adapter": "claude"},
             "code_reviewer": {"adapter": "claude"},
-            "actual_extractor": {"adapter": "claude", "independence_group": "claude/opus"},
-            "comparator": {"adapter": "claude", "independence_group": "claude/sonnet"},
+            # The model is what the independence group derives from, and what actually gets passed
+            # to the CLI — the extractor and the security reviewer share one so they share a
+            # reading, the comparator differs because §12.4 requires it to.
+            "actual_extractor": {"adapter": "claude", "model": "opus"},
+            "comparator": {"adapter": "claude", "model": "sonnet"},
+            "security_reviewer": {"adapter": "claude", "model": "opus"},
         },
         "quality_gate": quality_gate
         or [

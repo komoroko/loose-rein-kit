@@ -173,6 +173,12 @@ class Adapter:
     usage_flags: tuple[str, ...] = ()
     #: Reads that CLI's envelope into `(the answer, what it cost)`. Paired with `usage_flags`.
     envelope: Callable[[str], tuple[str, usage_mod.Usage]] | None = None
+    #: How to tell this CLI which model to run. Empty for one whose flag this release has not
+    #: verified — and an unapplied model is not a small thing here: `agents.<role>.model` is what
+    #: the gate-④ independence check is derived from, so a config naming a model the launcher
+    #: cannot pass would declare a separation nothing performs. `_argv_for` refuses that
+    #: combination rather than launching the CLI's default under another model's name.
+    model_flags: tuple[str, ...] = ()
     #: What makes a resume *branch* the session instead of continuing it: the forks share
     #: everything read before the fork and none of what any of them then concludes. That is the
     #: difference between sharing the reading and sharing the readings, and it is what lets two
@@ -189,9 +195,16 @@ class Adapter:
         """Whether one reading can be handed to two launches without their answers meeting."""
         return bool(self.resumable and self.fork_flags)
 
-    def launch_argv(self) -> tuple[str, ...]:
-        """How to launch it so that it reports what the launch cost."""
-        return self.argv + self.usage_flags
+    def launch_argv(self, model: str = "") -> tuple[str, ...]:
+        """How to launch it: running `model` when one is named, and reporting what it cost.
+
+        A named model this CLI cannot be told to run is refused by the caller
+        (`Config._argv_for`, `review._adapter_for_role`), never quietly dropped — the model is
+        what the independence check is derived from, so launching the default under another
+        model's name is the exact lie this field exists to stop.
+        """
+        chosen = (*self.model_flags, model) if model and self.model_flags else ()
+        return self.argv + chosen + self.usage_flags
 
     def read_output(self, output: str) -> tuple[str, usage_mod.Usage]:
         """`(what it said, what it cost)`. An adapter with no envelope says it did not measure."""
@@ -208,6 +221,7 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         session_flags=("--session-id",),
         resume_flags=("--resume",),
         fork_flags=("--fork-session",),
+        model_flags=("--model",),
         usage_flags=usage_mod.CLAUDE_JSON_FLAGS,
         envelope=usage_mod.parse_claude_envelope,
     ),
@@ -316,13 +330,21 @@ class Config:
         it, halfway through a task.
         """
         adapter = config.adapter(role) or "claude"
-        argv = ADAPTERS.get(adapter)
-        if argv is None:
+        record = ADAPTER_TABLE.get(adapter)
+        if record is None:
             raise ValueError(
                 f"agents.{role}.adapter is {adapter!r}, which this release does not know how to launch "
-                f"(one of: {', '.join(sorted(ADAPTERS))})"
+                f"(one of: {', '.join(sorted(ADAPTER_TABLE))})"
             )
-        return argv
+        model = config.model(role)
+        if model and not record.model_flags:
+            raise ValueError(
+                f"agents.{role}.model is {model!r} and this release cannot tell {adapter!r} which model "
+                "to run, so the launch would take the CLI's default under that name. The independence "
+                "group is derived from the model, so that is a separation nothing performs — drop the "
+                "model, or point the role at an adapter whose model flag is known."
+            )
+        return record.launch_argv(model)
 
     @classmethod
     def from_models(cls, config: models.Config) -> Config:

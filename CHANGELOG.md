@@ -62,6 +62,30 @@ to re-invent `SEC-001` by coincidence to get past a check whose own instruction 
 finding and re-run". They are in the request now, and the validator reads them from there — one
 source, rather than an enforcement and a disclosure that nothing made agree.
 
+**A declared separation that nothing performed.** `agents.<role>.independence_group` was authored
+beside the adapter, described as `provider/model`, and **passed to nothing**: no `--model` reached
+any CLI, so two roles declaring `claude/opus` and `claude/sonnet` ran the same model on the same
+CLI. `review_policy.independence_ok` compared those two strings and passed — so a critical review's
+independence requirement, the one thing §12.4 exists to enforce, was satisfied by two different
+labels beside one opinion. And `binding.independence`, which the schema declares and the dashboard
+renders, was written by nobody: the gate receipt bound no record of who produced either half.
+
+The field is now `agents.<role>.model`, and the independence group is **derived** from
+`<adapter>/<model>` — one field, so a separation cannot be declared without being performed. The
+model is passed to the CLI (`Adapter.model_flags`), and an adapter this release cannot tell which
+model to run **refuses** a config that names one rather than launching the default under that
+name. `binding.independence` now records both what was asked for and, from the launch's own report,
+the model id that actually answered; a new gate check refuses a critical review whose two halves
+were answered by the same model, whatever the configuration claimed. `prompt_digest` is gone —
+declared in the schema, read by the old check, written by nobody.
+
+Two consequences to act on. **`independence_group` in a config is refused; write `model` instead**
+(`rein agent claude --role comparator --model sonnet`; `--group` is gone). And **the provider is
+now the adapter**, not the first half of a label — two roles are two providers when they are two
+CLIs. The scaffold puts the security reviewer on the *extractor's* model rather than the
+comparator's: §12.4 constrains the extractor/comparator pair and says nothing about that role, and
+matching the extractor is what lets the two stages that read the same diff share one reading of it.
+
 **One reading of the change, two verdicts.** The blind extractor and the security reviewer are
 handed the same diff — up to `max_diff_bytes`, so up to half a megabyte — and were launched
 separately, each paying to read all of it. Serialising them into one session is not the fix: the
