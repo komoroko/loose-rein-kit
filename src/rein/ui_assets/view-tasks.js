@@ -106,12 +106,14 @@ export function renderTasks(d) {
   const t = d.tasks;
   if (!t) { el.innerHTML = '<div class="empty">No tasks.yaml yet (created by /tasks).</div>'; return; }
   const byId = {}; t.rows.forEach(x => { byId[x.id] = x; });
-  // Status spellings are models.TASK_STATUS_ORDER verbatim — hyphenated, not underscored. An
-  // underscored copy here indexed `counts` with a key it does not have, so every running task
-  // rendered as a zero and the layer bar never showed a build moving.
-  const order = ["todo", "in-progress", "blocked", "needs-revision", "done"];
-  const pills = '<div class="pills">' + order.map(s => '<span class="chip ' + s + '">' + esc(s) + " " +
-    (t.counts[s] || 0) + "</span>").join("") + '<span class="pill">total ' + t.total + "</span></div>";
+  // The vocabulary is the server's: `counts` is keyed by models.TASK_STATUS_ORDER and arrives in
+  // that order. A hand-kept copy of the list here drifted twice — once spelling a running task with
+  // an underscore (Mermaid's spelling, which matches nothing in the DOM) and once omitting
+  // `awaiting-evidence` entirely, so a task parked waiting for a person to record what they saw was
+  // counted in `total` and shown in no pill. Reading the keys back cannot drift again.
+  const pills = '<div class="pills">' + Object.keys(t.counts).map(s =>
+    '<span class="chip ' + esc(s) + '">' + esc(s) + " " + (t.counts[s] || 0) + "</span>").join("") +
+    '<span class="pill">total ' + t.total + "</span></div>";
   const graph = t.rows.length
     ? layersBar(t, byId) + graphLegend() + buildDag(t, byId)
     : '<div class="empty">(no tasks)</div>';
@@ -122,8 +124,8 @@ export function renderTasks(d) {
         "</td></tr>").join("") + "</table></div>"
     : '<div class="empty">(no startable todo)</div>';
   el.innerHTML = pills + graph +
-    '<div style="margin-top:.6rem;font-size:.72rem;color:var(--muted);font-weight:700">' +
-    "FRONTIER (optimal order)</div>" + frontier;  // #taskDetail lives outside #tasks (see index.html)
+    '<div class="subhead" style="margin-top:1rem">Frontier — what can start now, best first</div>' +
+    frontier;  // #taskDetail lives outside #tasks (see index.html)
 }
 
 // The requirement → claim → task thread, drawn from the same TraceReport `rein dag --trace`
@@ -132,8 +134,8 @@ export function renderTasks(d) {
 // as an answer rather than as an absence.
 export function renderTrace(d) {
   const sec = document.getElementById("traceSection"), tr = d.trace;
-  if (!tr) { sec.style.display = "none"; return; }
-  sec.style.display = "";
+  if (!tr) { sec.hidden = true; return; }
+  sec.hidden = false;
   const rows = (tr.requirements || []).map(r => {
     const claims = r.claims.length
       ? r.claims.map(id => '<span class="mono">' + esc(id) + "</span>").join(", ")

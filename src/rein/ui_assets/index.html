@@ -3,52 +3,73 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Loose Rein dashboard</title>
+<title>Loose Rein</title>
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<header>
-  <h1>agent<b>loop</b></h1>
-  <select id="projectSelect" title="Switch target project" style="display:none"></select>
-  <span class="meta" id="meta">loading…</span>
-  <span class="spacer"></span>
-  <span class="meta"><span class="dot" id="dot"></span><span id="ago">—</span></span>
-  <button class="ghost" id="refreshBtn" title="Refresh now">⟳</button>
-  <button class="ghost" id="bellBtn" title="Toggle notifications">🔕</button>
-  <button class="ghost" id="themeBtn" title="Toggle theme">◐</button>
+<header class="topbar">
+  <span class="wordmark">loose<i>rein</i></span>
+  <select id="projectSelect" title="Switch target project" hidden></select>
+  <span class="stat" id="meta">loading…</span>
+  <span class="grow"></span>
+  <span class="stat"><span class="dot" id="dot"></span><span id="ago">—</span></span>
+  <button class="icon" id="refreshBtn" title="Read the repository again now">↻</button>
+  <button class="icon" id="bellBtn" aria-pressed="false"></button>
+  <button class="icon" id="themeBtn"></button>
 </header>
-<nav id="tabs">
-  <a href="#overview" data-view="overview">Overview</a>
-  <a href="#review" data-view="review">Review<span class="badge" id="reviewBadge" style="display:none"></span></a>
-  <a href="#tasks" data-view="tasks">Tasks</a>
-  <a href="#activity" data-view="activity">Activity</a>
+
+<div class="frame">
+<!-- The lifecycle is the navigation: the gate that waits on you is one place on
+     this page, not three. Everything else is somewhere to look, listed after. -->
+<nav class="spine" id="tabs" aria-label="Dashboard">
+  <a class="nav-item" href="#now" data-view="now">Now</a>
+  <p class="spine-label">Gates</p>
+  <div class="stations" id="stepper"></div>
+  <p class="spine-label">Inspect</p>
+  <a class="nav-item" href="#board" data-view="board">Board</a>
+  <a class="nav-item" href="#record" data-view="record">Record</a>
+  <a class="nav-item" href="#console" data-view="console">Console</a>
 </nav>
+
 <main>
-  <div class="view" id="view-overview">
-    <section class="col-full"><h2>Lifecycle</h2><div class="rail" id="stepper"></div></section>
-    <section class="next col-full"><h2>Next action</h2><div id="next"></div></section>
-    <section class="col-full"><h2>Needs attention</h2><div id="attention"></div></section>
+  <div class="view" id="view-now">
+    <div class="block"><h2>Do this next</h2><div id="next"></div></div>
+    <div class="block"><h2 id="attentionHead">In the way</h2><div id="attention"></div></div>
   </div>
-  <div class="view" id="view-review" style="display:none">
-    <!-- Split three ways on purpose: a status poll repaints only the gate bar and the approval
-         footer, so the body keeps its scroll position while a long patch is being read. -->
-    <section class="col-full"><h2>Gate review</h2>
-      <div id="rvBar"></div><div id="rvMain"></div><div id="rvFoot"></div></section>
+
+  <!-- Split three ways on purpose: a status poll repaints only the gate heading
+       and the approval footer, so the body keeps its scroll position while a
+       long patch is being read. -->
+  <div class="view" id="view-gate" hidden>
+    <div class="block"><div id="rvBar"></div><div id="rvMain"></div><div id="rvFoot"></div></div>
   </div>
-  <div class="view" id="view-tasks" style="display:none">
-    <section class="col-full"><h2>Tasks</h2><div id="tasks"></div>
+
+  <div class="view" id="view-board" hidden>
+    <div class="block"><h2>Tasks</h2><div id="tasks"></div>
       <!-- outside #tasks: a re-render of the graph must not wipe the detail the human just opened -->
-      <div id="taskDetail"></div></section>
-    <section class="col-full" id="traceSection" style="display:none"><h2>Traceability (requirements → tasks)</h2>
-      <div id="trace"></div></section>
+      <div id="taskDetail"></div></div>
+    <div class="block" id="traceSection" hidden><h2>Requirement → claim → task</h2>
+      <div id="trace"></div></div>
   </div>
-  <div class="view" id="view-activity" style="display:none">
-    <section class="col-full"><h2>Event feed</h2><div id="events"></div></section>
-    <section class="col-full"><h2>Operations</h2><div id="ops"></div>
-      <pre class="out" id="out" style="display:none"></pre></section>
+
+  <div class="view" id="view-record" hidden>
+    <div class="block"><h2>Record</h2>
+      <p class="note">Every state change, hash-chained. A deleted or reordered line breaks the
+        chain a gate receipt pins.</p>
+      <div id="events"></div></div>
+  </div>
+
+  <div class="view" id="view-console" hidden>
+    <div class="block"><h2>Console</h2>
+      <p class="note">Reads, diagnostics, and the two commands that send work backwards. Opening a
+        gate is not here: that is a human's typed confirmation at their own terminal.</p>
+      <div id="ops"></div>
+      <pre class="out" id="out" hidden></pre></div>
   </div>
 </main>
-<div id="toasts"></div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
 <script>window.TOKEN = "__TOKEN__"; window.READ_ONLY = __READ_ONLY__;</script>
 <script type="module" src="/assets/app.js"></script>
 </body>

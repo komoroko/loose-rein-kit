@@ -44,13 +44,15 @@ function notify(body) {
   catch (e) { /* headless/denied environments: the title/favicon badges still carry the signal */ }
 }
 
-// teal = quiet loop, amber = a gate waits on the human, red = something blocks the gate outright
+// grey = quiet loop, brass = a gate waits on the human, red = something blocks the gate outright.
+//
+// These three are the notifier's own, not the page's. The page signals "waiting on you" by
+// inverting the gate's row, which a 32px disc in browser chrome cannot do — and chrome is painted
+// by the browser's theme, not the dashboard's, so a colour taken from app.css would be tuned
+// against the wrong background half the time.
+const FAVICON = { quiet: "#6b7680", waiting: "#c08a1e", blocked: "#c8412e" };
 function faviconColor(s) {
-  const styles = getComputedStyle(document.documentElement);
-  const raw = s.blocking > 0 ? (styles.getPropertyValue("--bad") || "#c23b2f")
-    : s.awaiting ? (styles.getPropertyValue("--gate") || "#b3760f")
-    : (styles.getPropertyValue("--accent") || "#0c7d73");
-  return raw.trim();
+  return s.blocking > 0 ? FAVICON.blocked : (s.awaiting ? FAVICON.waiting : FAVICON.quiet);
 }
 
 // Only three distinct icons exist, and they follow the loop's mood, not its detail — so repaint only
@@ -115,13 +117,11 @@ async function toggle() {
 
 function paintBell() {
   const btn = document.getElementById("bellBtn");
-  btn.textContent = enabled ? "🔔" : "🔕";
-  btn.title = enabled ? "Notifications on (click to disable)" : "Notify me when a gate or escalation waits";
+  btn.textContent = enabled ? "notify ●" : "notify ○";
+  btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+  btn.title = enabled ? "Notifications on — click to stop" : "Notify me when a decision waits on me";
 }
 
 document.getElementById("bellBtn").onclick = toggle;
 document.addEventListener("rein:status", e => onStatus(e.detail));
-// The badge colours come from theme variables, and an idle repo can go a long time without a
-// changed status payload — so a theme switch has to invalidate the cached icon itself.
-document.addEventListener("rein:theme", () => { lastColor = null; if (prev) badges(prev); });
 paintBell();

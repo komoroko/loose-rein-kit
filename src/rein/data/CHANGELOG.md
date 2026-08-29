@@ -4,6 +4,39 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.11] - 2026-08-30
+
+**The dashboard rendered three separate answers to "which gate is waiting on you", and none of
+them was the page.** The lifecycle rail, the Review tab's badge and the gate-button row inside the
+review pane each derived the awaiting gate independently and drew it three ways, while the four
+tabs, every section and every card carried identical visual weight — on a page whose entire job is
+that one judgement. The lifecycle is now the navigation: five gates in a spine down the left,
+present on every screen, and the one under decision is the only inverted block anywhere on the
+page. The reading room is a route (`#gate/<name>`), so a gate is somewhere you can link to rather
+than a selection held in a module variable, and the review pane no longer draws a gate list at all.
+Type carries provenance: monospace for what the repository can prove, serif for deliverable prose
+and for what a screen means, and an agent's unverified account set dashed and unbolded so it cannot
+be read as the record beside it. Colour is spent on task status, where it carries information;
+brass marks only "a person has to act here". The theme is one `color-scheme` switch over
+`light-dark()` pairs, so native controls and scrollbars follow it too, and the palette is declared
+once instead of three times.
+
+**An approval printed the digests it would bind into a pane on another screen.** `showOut` wrote
+the readiness table to `#out`, which lives on the Activity tab, so approving from Review sent the
+one thing a reviewer must read somewhere they were not looking — and repeated it inside a
+`confirm()` string the page could not style or keep on screen. Both the digest table and the
+refusal (a gate that is not ready, with its blockers) are now panels in the pane that asked, and a
+status poll no longer wipes one open under the reader. `confirm()`, `prompt()` and `alert()` are
+gone: requesting changes is a form with the target prefilled from the deliverable being read
+instead of two chained `prompt()` calls, and the Console's two roll-back commands state their
+consequence above the button that runs it. A gate decision no longer echoes its payload into the
+Console's output pane, where it was read later as the output of whatever was run last.
+
+**A task parked at `awaiting-evidence` was counted in the total and shown in no pill.** The Board's
+status pills iterated a hand-kept list that had drifted from `models.TASK_STATUS_ORDER` — the same
+list that once spelled `in_progress` and styled nothing. It now reads the keys of the `counts` the
+server sends, which is that vocabulary by construction.
+
 ## [0.3.10] - 2026-08-30
 
 **A repository ran the loop and `git status` filled with the loop's own scratch.** `rein init`

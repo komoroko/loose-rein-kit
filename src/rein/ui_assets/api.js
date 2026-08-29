@@ -18,16 +18,27 @@ export function pollDelay() { return document.hidden ? POLL_HIDDEN_MS : POLL_MS;
 // human asks for it explicitly) — the caller still has to trigger the poll itself.
 export function invalidate() { state.etag = null; }
 
+// ---- routing ----
+// The hash is the router, and it carries the gate: a reading room is a place you can link to,
+// bookmark, and come back to, not a selection held in a module variable. Unknown or empty lands
+// on `now`, the screen that says what to do.
+const PLAIN_VIEWS = ["now", "board", "record", "console"];
+export function route() {
+  const h = location.hash.replace(/^#/, "");
+  if (h.startsWith("gate/")) {
+    const gate = decodeURIComponent(h.slice(5));
+    if (gate) return { view: "gate", gate };
+  }
+  return { view: PLAIN_VIEWS.includes(h) ? h : "now", gate: null };
+}
+
 export const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-// Put plain text in the output pane. Text, never markup: the strings routed here come from the
-// server (blockers, digests) and #out is the one place both writes and command output land.
-export function showOut(text) {
-  const out = document.getElementById("out");
-  out.style.display = "block";
-  out.textContent = text;
-}
+// Gate indices, in the notation the documents use (AGENTS.md, the phase commands, the review
+// pane's own prose) — so the dashboard and the docs name the same gate the same way.
+const CIRCLED = ["", "①", "②", "③", "④", "⑤"];
+export function circled(i) { return CIRCLED[i] || ("g" + i); }
 
 export function toast(msg, kind) {
   const el = document.createElement("div");
@@ -37,25 +48,31 @@ export function toast(msg, kind) {
   setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 300); }, 3200);
 }
 
-// POSTs land their outcome in #out and ask app.js for a fresh status via a DOM event
-// (no circular import between the entry module and this one).
-export async function post(path, body) {
+// POSTs ask app.js for a fresh status via a DOM event (no circular import between the entry module
+// and this one).
+//
+// `echo` is what separates the two kinds of write that come through here. A Console command's
+// output IS the result, so it goes to #out on that screen. A decision recorded at a gate is not a
+// command: its result is the repository moving, which the toast names and the next poll shows —
+// echoing it would leave a stale approval payload sitting in a pane on another screen, read later
+// as if it were the output of whatever was run last.
+export async function post(path, body, echo = true) {
   const out = document.getElementById("out");
-  out.style.display = "block";
-  out.textContent = "running…";
+  const write = text => { if (!echo) return; out.hidden = false; out.textContent = text; };
+  write("running…");
   try {
     const res = await fetch(path, { method:"POST",
       headers:{ "Content-Type":"application/json", "X-Rein-Token":TOKEN },
       body: JSON.stringify(body) });
     const data = await res.json();
-    if (data.error) { out.textContent = "ERROR: " + data.error; toast(data.error, "err"); return; }
+    if (data.error) { write("ERROR: " + data.error); toast(data.error, "err"); return; }
     if ("exit_code" in data) {
-      out.textContent = "$ " + data.argv.join(" ") + "\n(exit " + data.exit_code + ")\n\n"
-        + (data.stdout || "") + (data.stderr ? "\n[stderr]\n" + data.stderr : "");
+      write("$ " + data.argv.join(" ") + "\n(exit " + data.exit_code + ")\n\n"
+        + (data.stdout || "") + (data.stderr ? "\n[stderr]\n" + data.stderr : ""));
       toast((data.exit_code === 0 ? "✓ " : "✗ exit " + data.exit_code + " — ") + data.argv.join(" "),
         data.exit_code === 0 ? "ok" : "err");
     } else {
-      out.textContent = JSON.stringify(data, null, 2);
+      write(JSON.stringify(data, null, 2));
       // /api/gate/approve DOES open the gate: the write session a launch link minted is the
       // capability handover, so reaching the handler means the approval was recorded and an
       // `approval_id` came back. This branch used to say "is ready — run the command shown to
@@ -70,7 +87,7 @@ export async function post(path, body) {
     }
     invalidate();  // the action just moved the SSOT — take the next payload whatever the ETag says
     document.dispatchEvent(new CustomEvent("rein:refresh"));
-  } catch (e) { out.textContent = "request failed: " + e; toast("request failed", "err"); }
+  } catch (e) { write("request failed: " + e); toast("request failed", "err"); }
 }
 
 export function copyCmd(cmd, btn) {
