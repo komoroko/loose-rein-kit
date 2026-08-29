@@ -88,6 +88,17 @@ change is past `max_diff_bytes` and whether it carries files no reviewer can rea
 `rein status` and the build loop each report it. A warning, never a stop — exceeding a budget splits
 the scope, and that is a human's call.
 
+**A path git quoted was not seen at all.** `core.quotePath` defaults to true, so any name with a
+space or a non-ASCII byte arrives as `"b/na\303\257ve.py"` — and the header pattern only accepted
+`a/… b/…`. It did not fail on such a file; it did not see the header. The file vanished from
+`parse_diff`, so from the Coverage Manifest and from every scope check, and its lines were
+attributed to whichever file came before it. For a project whose deliverables are written in the
+user's language that is the ordinary case, and the consequence was the one thing the test split
+above exists to prevent: a test file's assertions handed to the blind extractor. `header_path` is
+now the single place a header is recognised — four walks over a diff were each reaching for the
+private pattern and reading it themselves, which is how they all inherited one blind spot — and it
+decodes git's octal escapes through bytes, because a non-ASCII character arrives as several of them.
+
 It also says **what the payload is made of**. Knowing a change is too big raises the next question
 immediately — what would I remove — and answering it took a hand-run script both times it mattered
 in the field; those two measurements are what the first two entries above are. The breakdown is in

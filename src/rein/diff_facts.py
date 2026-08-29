@@ -73,8 +73,63 @@ class DiffFile:
 
 # --- unified-diff parsing -----------------------------------------------------
 
-_DIFF_GIT = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+)$")
-_RENAME_FROM = re.compile(r"^rename from (?P<p>.+)$")
+#: One `diff --git` token: git's C-quoted form, or a bare run of non-space. Which one it emits is
+#: not the caller's choice — `core.quotePath` defaults to true, so *any* path with a space or a
+#: non-ASCII byte arrives quoted. A pattern that only accepted `a/… b/…` therefore did not fail on
+#: such a file, it did not see the header at all: the file vanished from `parse_diff` (so from the
+#: Coverage Manifest and from every scope check), and its lines were attributed to whichever file
+#: came before it — which is how `split_tests` handed a test file's assertions to the blind
+#: extractor, the one thing it exists to prevent. For a project whose deliverables are written in
+#: the user's language, a quoted path is the common case, not the exotic one.
+_TOKEN = r'"(?:[^"\\]|\\.)*"|\S+'
+_DIFF_GIT = re.compile(rf"^diff --git (?P<a>{_TOKEN}) (?P<b>{_TOKEN})$")
+_RENAME_FROM = re.compile(rf"^rename from (?P<p>{_TOKEN})$")
+
+#: git's C-style escapes. Octal is handled separately: it produces a byte, not a character.
+_C_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
+
+
+def _unquote(token: str) -> str:
+    r"""A `diff --git` token as a path: quotes removed, C escapes decoded, `a/`/`b/` prefix dropped.
+
+    Decoded through *bytes* rather than characters: git escapes each UTF-8 byte of a non-ASCII
+    name as its own octal `\NNN`, so `"b/na\303\257ve.py"` is two escapes that together are one
+    `ï`. Decoding them one at a time would produce two replacement characters and a path that
+    matches nothing.
+    """
+    if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
+        raw = token[1:-1]
+        out = bytearray()
+        i = 0
+        while i < len(raw):
+            if raw[i] != "\\" or i + 1 >= len(raw):
+                out.extend(raw[i].encode("utf-8"))
+                i += 1
+            elif raw[i + 1] in _C_ESCAPES:
+                out.append(_C_ESCAPES[raw[i + 1]])
+                i += 2
+            elif len(raw[i + 1 : i + 4]) == 3 and all(c in "01234567" for c in raw[i + 1 : i + 4]):
+                out.append(int(raw[i + 1 : i + 4], 8))
+                i += 4
+            else:  # an escape git does not emit: keep the character rather than dropping it
+                out.extend(raw[i + 1].encode("utf-8"))
+                i += 2
+        token = out.decode("utf-8", errors="replace")
+    return token[2:] if token[:2] in ("a/", "b/") else token
+
+
+def header_path(line: str) -> str | None:
+    """The post-image path a `diff --git` line names, or None when the line is not one.
+
+    The one place a header is recognised. Four walks over a diff need the same answer — the parser
+    here, and `review`'s three (the test split, the mechanical fold, the byte breakdown) — and the
+    three outside this module were reaching for the private pattern and reading `group("b")`
+    themselves, which is how they all inherited the same blind spot at once.
+    """
+    header = _DIFF_GIT.match(line)
+    return _unquote(header.group("b")) if header else None
+
+
 _HUNK = re.compile(r"^@@ ")
 
 
@@ -104,16 +159,17 @@ def parse_diff(diff_text: str) -> list[DiffFile]:
             files.append(DiffFile(path=path, hunks=tuple(hunks), binary=binary, old_path=old_path))
 
     for line in diff_text.splitlines():
-        header = _DIFF_GIT.match(line)
-        if header:
+        named = header_path(line)
+        if named is not None:
             flush_file()
-            path = header.group("b")
+            path = named
             old_path = ""
             binary = False
             hunks = []
             continue
-        if _RENAME_FROM.match(line):
-            old_path = _RENAME_FROM.match(line).group("p")  # type: ignore[union-attr]
+        renamed = _RENAME_FROM.match(line)
+        if renamed:
+            old_path = _unquote(renamed.group("p"))
             continue
         if line.startswith("Binary files ") or line.startswith("GIT binary patch"):
             binary = True

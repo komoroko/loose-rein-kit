@@ -184,11 +184,10 @@ def fold_mechanical(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tup
     current: str | None = None
     hunk_lines = 0
     for line in diff_text.splitlines(keepends=True):
-        header = diff_facts._DIFF_GIT.match(line.rstrip("\n"))
-        if header:
+        path = diff_facts.header_path(line.rstrip("\n"))
+        if path is not None:
             if current is not None:
                 kept.append(f"@@ {hunk_lines} line(s) of mechanical change, body withheld @@\n")
-            path = header.group("b")
             current = path if path in mechanical else None
             hunk_lines = 0
             if current is not None:
@@ -245,9 +244,9 @@ def _sections(diff_text: str) -> list[tuple[str, str]]:
     """
     sections: list[tuple[str, list[str]]] = [("", [])]
     for line in diff_text.splitlines(keepends=True):
-        header = diff_facts._DIFF_GIT.match(line.rstrip("\n"))
-        if header:
-            sections.append((header.group("b"), []))
+        named = diff_facts.header_path(line.rstrip("\n"))
+        if named is not None:
+            sections.append((named, []))
         sections[-1][1].append(line)
     return [(path, "".join(lines)) for path, lines in sections if lines]
 
@@ -622,15 +621,24 @@ class ChangeOutlook:
         return text
 
     def made_of(self) -> str:
-        """What the payload is made of, largest first. Empty when there is only one kind to name.
+        """What the payload is made of, largest first. Empty only when there is nothing to say.
 
         Kept off `line()` on purpose: the board's line answers "can this be reviewed", and this
-        answers "what would I remove". A reader who is not over budget does not need the second
-        question, and a reader who is needs it immediately.
+        answers "what would I remove".
+
+        The silent case is *one kind, and that kind is `source`* — "it is all product code" is the
+        null answer to "what would I remove". Silence on any single non-source kind was a bug with
+        the sign reversed: a change that is 900 KB of lockfile and nothing else is the case where
+        the answer is most obvious and most worth printing, and it was the one case that printed
+        nothing.
         """
-        if len(self.composition) < 2 or not self.diff_bytes:
+        if not self.composition or not self.diff_bytes:
             return ""
-        parts = [f"{kind} {size / 1000:.1f} KB ({size * 100 // self.diff_bytes}%)" for kind, size in self.composition]
+        if len(self.composition) == 1 and self.composition[0][0] == "source":
+            return ""  # "it is all product code" is the null answer: there is nothing to remove.
+        parts = [
+            f"{kind} {size / 1000:.1f} KB ({round(size * 100 / self.diff_bytes)}%)" for kind, size in self.composition
+        ]
         return "made of: " + ", ".join(parts)
 
 

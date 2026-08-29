@@ -1923,9 +1923,9 @@ def test_the_split_and_the_breakdown_read_the_diff_the_same_way() -> None:
     assert len(tests.encode("utf-8")) == made["test"]
 
 
-def test_a_single_kind_names_nothing() -> None:
-    """`made_of` answers "what would I remove". With one kind there is no such question, and a
-    board line that always ends in "made of: source 100%" is noise."""
+def test_all_product_code_names_nothing() -> None:
+    """`made_of` answers "what would I remove", and "it is all product code" is the null answer to
+    that. A board line that always ended in "made of: source 100%" would be noise."""
     one = review.ChangeOutlook(
         diff_bytes=100, ceiling=10, unreadable=(), effective_risk="low", composition=(("source", 100),)
     )
@@ -1934,3 +1934,54 @@ def test_a_single_kind_names_nothing() -> None:
         diff_bytes=100, ceiling=10, unreadable=(), effective_risk="low", composition=(("source", 75), ("test", 25))
     )
     assert two.made_of() == "made of: source 0.1 KB (75%), test 0.0 KB (25%)"
+
+
+def test_a_path_git_quoted_still_reaches_the_test_half(tmp_path: Path) -> None:
+    """Against a real `git`, because what is under test is what git actually emits.
+
+    `core.quotePath` defaults to true, so a name with a space or a non-ASCII byte arrives as
+    `"b/na\\303\\257ve.py"`. A header pattern that only accepted `a/… b/…` did not fail on such a
+    file — it did not see the header, so the file vanished from `parse_diff` (and from the Coverage
+    Manifest and every scope check), and its lines were attributed to whichever file came before
+    it. For this project that is the ordinary case: a deliverable is written in the user's
+    language. The consequence was the one thing `split_tests` exists to prevent — a test file's
+    assertions handed to the blind extractor.
+    """
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@example.com")
+    git("config", "user.name", "t")
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/app.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/naïve テスト_test.py").write_text("assert f() == 1\n" * 20, encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "add")
+
+    diff = subprocess.run(
+        ["git", "diff", "HEAD~1", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout
+    assert 'diff --git "a/' in diff, "git no longer quotes; this test's premise is gone"
+
+    files = diff_facts.parse_diff(diff)
+    assert any("_test.py" in f.path for f in files), "the quoted file must exist for the manifest"
+
+    source, tests = review.split_tests(diff, files)
+    assert "assert f() == 1" not in source, "the blind extractor was handed the assertions"
+    assert "assert f() == 1" in tests
+    assert review.bytes_by_kind(diff)["test"] == len(tests.encode("utf-8"))
+
+
+def test_a_change_that_is_all_lockfile_says_so(tmp_path: Path) -> None:
+    """Silence on a single non-source kind was the bug with its sign reversed: 900 KB of lockfile
+    and nothing else is where the answer to "what would I remove" is most obvious."""
+    lockfile = review.ChangeOutlook(900_000, 500_000, (), "low", (("dependency", 900_000),))
+    assert lockfile.made_of() == "made of: dependency 900.0 KB (100%)"
+    # "It is all product code" stays silent: there is nothing to remove.
+    assert review.ChangeOutlook(900_000, 500_000, (), "low", (("source", 900_000),)).made_of() == ""
