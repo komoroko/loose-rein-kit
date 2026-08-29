@@ -128,11 +128,13 @@ def _fold(into: dict[str, usage_mod.Usage], rows: Any) -> None:
 
 
 def costs(sources: Iterable[tuple[str, Sequence[models.Event]]]) -> list[CycleCost]:
-    """Every cycle's spend, oldest first — so a reader sees the trend, not just the latest bill.
+    """Every cycle's spend, in the order `sources` is given — so a reader sees the trend.
 
-    `sources` is `(where it was read from, its events)`: the live chain plus whatever archived
-    cycles the caller found. A cycle id appearing in two sources would be two different chains
-    saying different things, so they stay separate rows rather than being merged into one.
+    `sources` is `(where it was read from, its events)`: whatever archived cycles the caller
+    found, oldest first, and the live chain last (`events.cost_sources` orders them). Ordering is
+    the caller's because only the caller knows which chain is which; this function will not
+    re-sort by a cycle id it has no calendar for. A cycle id appearing in two sources would be two
+    different chains saying different things, so they stay separate rows rather than merged.
     """
     order: list[tuple[str, str]] = []
     runs: dict[tuple[str, str], int] = {}
@@ -174,9 +176,13 @@ def render_costs(rows: Sequence[CycleCost], *, unreadable: Sequence[str] = ()) -
     for row in rows:
         head = f"{row.cycle_id} — {row.runs} run(s)" + (f"  [{row.source}]" if row.source else "")
         lines = [head]
-        for label, measured in (("billed", row.billed), ("replayed", row.reused)):
-            if line := usage_mod.summarize(measured, what=label):
+        for label, measured, charged in (("billed", row.billed, True), ("replayed", row.reused, False)):
+            if line := usage_mod.summarize(measured, what=label, charged=charged):
                 lines.append(f"  {line}")
+        if len(lines) == 1:
+            # A run that recorded its plan and then launched nothing. A bare header under it would
+            # read as a cost of zero rather than as an absence of one.
+            lines.append("  nothing measured — these runs recorded no launch")
         blocks.append("\n".join(lines))
     if not blocks:
         blocks.append(NOTHING_RECORDED)

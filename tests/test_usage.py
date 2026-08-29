@@ -132,3 +132,37 @@ def test_a_model_an_adapter_cannot_be_told_to_run_is_refused_not_dropped() -> No
     config = models.Config({"agents": {"implementer": {"adapter": "codex", "model": "gpt"}}})
     with pytest.raises(adapters.LaunchRefused, match="cannot tell"):
         adapters.launch_argv(config, "implementer")
+
+
+def test_a_replay_is_not_priced_as_a_bill() -> None:
+    """The counts are real — they are what that answer cost when it was first taken. The price is
+    not: nobody paid it on this run. One phrasing for both facts printed a dollar figure on the
+    line whose entire reason for being separate is that it is not a bill."""
+    replayed = usage.Usage(available=True, launches=2, input_tokens=480_000, cost_usd=7.59)
+    line = usage.summarize({"comparator": replayed}, what="replayed", charged=False)
+    assert "$7.59 not charged" in line
+    assert "$7.59 not charged" not in usage.summarize({"comparator": replayed}, what="billed")
+
+
+def test_cache_creation_is_visible_beside_cache_reads() -> None:
+    """It is the expensive half and it was in neither number a reader could see: a role showing
+    `3.07M in (1.10M cached)` left 727k of premium-priced cache writes unaccounted for, in the
+    report that exists to find exactly that."""
+    row = usage.Usage(
+        available=True, launches=1, input_tokens=1_240_000, cache_read_tokens=1_100_000, cache_creation_tokens=727_272
+    )
+    line = usage.summarize({"extractor": row}, what="billed")
+    assert "(1.10M cached, 727.3k written)" in line
+    # A role that created no cache says nothing about it rather than printing a zero.
+    plain = usage.Usage(available=True, launches=1, input_tokens=50_000, cache_read_tokens=1_000)
+    assert "written" not in usage.summarize({"extractor": plain}, what="billed")
+
+
+def test_a_count_in_the_millions_is_rendered_in_millions() -> None:
+    """`3067.3k` is a number a reader has to divide before it means anything, in a report whose
+    whole job is to be read at a glance. The small end keeps its exact rendering for the reason it
+    always had: `0.0k` and "we did not measure" must not look the same."""
+    assert usage._tokens(41) == "41"
+    assert usage._tokens(34_000) == "34.0k"
+    assert usage._tokens(999_999) == "1000.0k"
+    assert usage._tokens(3_067_272) == "3.07M"

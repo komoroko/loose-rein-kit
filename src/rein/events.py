@@ -150,9 +150,12 @@ def cost_sources(
     current cycle's figures down with it, and must not be folded in as though it were readable
     either. It comes back in the second list, to be named in the report.
     """
-    sources: list[tuple[str, Sequence[models.Event]]] = [("", live)]
+    sources: list[tuple[str, Sequence[models.Event]]] = []
     unreadable: list[str] = []
     archives = repo.path(cycle.ARCHIVE_DIR)
+    # Archives first, and the live chain last, because `run_record.costs` renders in the order it
+    # is handed: an archive directory is `<YYYY-MM-DD>-<slug>`, so sorting the paths sorts the
+    # cycles, and the one still open belongs at the bottom where the trend ends.
     for path in sorted(archives.glob(f"*/rein/{repo.events.name}")):
         rel = path.relative_to(repo.root).as_posix()
         archived, defects = event_chain.scan(path)
@@ -160,6 +163,7 @@ def cost_sources(
             unreadable.append(rel)
         else:
             sources.append((rel, archived))
+    sources.append(("", live))
     return sources, unreadable
 
 

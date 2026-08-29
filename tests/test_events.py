@@ -212,6 +212,10 @@ def test_cost_counts_this_cycle_and_the_archived_ones(tmp_path: Path, capsys: py
     assert "old-cycle — 1 run(s)" in out
     assert "[docs/archive/2026-01-01-first/rein/events.ndjson]" in out
     assert "implementer" in out and "comparator" in out
+    # Oldest first: an archive directory is `<YYYY-MM-DD>-<slug>`, and the cycle still open is the
+    # end of the trend, not the start of it. Reading the newest bill first is reading a number;
+    # reading it last is reading a direction.
+    assert out.index("old-cycle") < out.index("live-cycle")
 
 
 def test_a_damaged_archive_is_named_rather_than_silently_dropped(

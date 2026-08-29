@@ -184,3 +184,15 @@ def test_two_sources_naming_one_cycle_stay_apart() -> None:
     one = event_chain.make("run_measured", "c1", detail=dict(detail))
     rows = run_record.costs([("", [one]), ("docs/archive/x/rein/events.ndjson", [one])])
     assert [r.source for r in rows] == ["", "docs/archive/x/rein/events.ndjson"]
+
+
+def test_a_cycle_whose_runs_launched_nothing_says_so() -> None:
+    """A bare header under it would read as a cost of zero rather than as an absence of one."""
+    report = run_record.render_costs([run_record.CycleCost("c1", runs=1)])
+    assert "nothing measured — these runs recorded no launch" in report
+
+
+def test_the_replayed_line_carries_no_bill() -> None:
+    free = usage_mod.Usage(available=True, launches=1, input_tokens=900, cost_usd=9.0)
+    report = run_record.render_costs([run_record.CycleCost("c1", 1, {}, {"comparator": free})])
+    assert "replayed:" in report and "$9.00 not charged" in report

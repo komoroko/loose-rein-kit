@@ -92,7 +92,16 @@ across this cycle and every archived one, with what a cache **replayed** on its 
 added to the bill — folding them in would make a well-cached cycle read as an expensive one. A role
 whose adapter reports nothing stays `measured: false` however many runs are summed, because
 "we did not measure" and "it was free" must never render the same. An archived chain that is damaged
-is named and excluded rather than skipped in silence.
+is named and excluded rather than skipped in silence, and a cycle whose runs launched nothing says
+so instead of leaving a bare header that reads as a cost of zero.
+
+The rendering had to learn two words for what it was already counting. A replayed line is not a
+bill, so its price now says `not charged` — one phrasing for both facts put a dollar figure on the
+line whose entire reason for being separate is that nobody paid it. And **cache creation** is named
+beside cache reads: it is the premium-priced half, it is where 727,272 tokens per run were going,
+and a role rendered as `3.07M in (1.10M cached)` left every one of them unaccounted for in the
+report that exists to find exactly that. Counts past a million render in millions for the same
+reason — `3067.3k` is a number the reader has to divide before it means anything.
 
 ## [0.3.8] - 2026-08-28
 
