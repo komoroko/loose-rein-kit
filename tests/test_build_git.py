@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import build_git, common
+from rein import build_git, common, models
 from rein import repo as repo_mod
 
 
@@ -128,10 +128,9 @@ def test_the_ssot_exclusion_lives_in_exactly_one_place() -> None:
     """
     import re
 
-    from rein import build_prompts, review
+    from rein import build_prompts
 
     assert build_git._EXCLUDED == (repo_mod.SSOT_DIR,)
-    assert review._CHANGE_EXCLUDE == (repo_mod.SSOT_DIR,)
     # The instruction an agent actually types renders the same pathspec the loop applies for it.
     assert build_prompts._pathspec() == ". ':(exclude).rein'"
     assert repo_mod.SSOT_PATHSPEC == (".", ":(exclude).rein")
@@ -143,3 +142,27 @@ def test_the_ssot_exclusion_lives_in_exactly_one_place() -> None:
         if path.name != "repo.py" and literal.search(path.read_text(encoding="utf-8"))
     ]
     assert offenders == [], f"{offenders} spell the exclusion themselves instead of using repo.SSOT_PATHSPEC"
+
+
+def test_the_review_excludes_more_than_the_tree_does(tmp_path: Path) -> None:
+    """What "the tree" excludes and what "the product under review" excludes are different answers.
+
+    The tree's is `.rein/` and only `.rein/` — a task legitimately writes `docs/`, and a
+    fingerprint that ignored it would credit the task with nothing. The review's is wider: the
+    plan's own prose is the answer sheet, and handing it to the blind extractor is the failure
+    `assert_blind` cannot see, because the plan arrives inside the diff rather than beside it.
+    """
+    from rein import review
+    from tests._support import make_state
+
+    (tmp_path / ".rein").mkdir()
+    repo = repo_mod.Repo(tmp_path)
+    raw = make_state()
+    raw["plan"]["sources"] = {"docs/10-requirements.md": "sha256:" + "a" * 64}
+    state = models.State(raw)
+    exclude = review.not_the_product(repo, state)
+
+    assert repo_mod.SSOT_DIR in exclude
+    assert "docs/10-requirements.md" in exclude, "the frozen prose gate ③ pinned"
+    assert "docs/tasks/" in exclude and "docs/decisions/" in exclude, "tickets and ADRs"
+    assert not any(e == "docs/" for e in exclude), "a README is a deliverable and stays reviewable"

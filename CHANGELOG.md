@@ -4,6 +4,132 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.9] - 2026-08-30
+
+Every figure quoted in this section is a measurement of **one field cycle** — a product built with
+this tool, 18 claims / 17 tasks / 234 files — not a property of every run. They are stated as
+"one field cycle" wherever a docstring repeats them.
+
+What a review is *given*, and what a run is *told it cost*. Both had the same shape of defect: a
+number or a payload that everything downstream trusted, assembled by code nobody had asked "and
+where does this come from". A blind extractor handed the answer sheet inside the diff. An axis of
+the gate-④ verdict whose one honest value no code could produce. A run that recorded its own bill
+into a log with no reader. None of these announced themselves, because each one produced output
+that looked exactly like the correct output.
+
+**The plan's own prose was inside the change the blind extractor read.** "The product under review"
+was one hardcoded prefix, `.rein/`, so `docs/10-requirements.md`, the task tickets and the ADRs —
+the Expected Model in the very words the comparator will compare against — arrived in the diff on
+any cycle that touched a requirement. `actual_extraction.assert_blind` guards the *request keys*
+and cannot see the plan arriving inside the payload, which is the one place it was arriving. So
+Expected/Actual independence, the thing gate ④ exists to establish, had not been established on
+those cycles at all. `review.not_the_product` now derives the set: `.rein/`, the prose gate ③ froze
+(`plan.sources`), `docs/tasks/` and `docs/decisions/`, every integration surface the lock records,
+and the settings file — while the rest of `docs/` deliberately stays in, because a README is a
+deliverable and reviewing it is the job. The tree's own exclusion is still `.rein/` and only
+`.rein/`: a task legitimately writes `docs/`, and a fingerprint that ignored it would credit the
+task with nothing. Two different questions, no longer one constant. It was also 31% of a measured
+2.14 MB cycle, but the cost was the smaller half of this.
+
+**`integrity: verified` was vocabulary no code could reach.** The schema offered three values, the
+Comparator's contract advertised all three, and `reject_self_attestation` refused the field
+unconditionally on arrival — so a reviewer was invited to answer a question whose every answer was
+thrown away, and the axis reported `unavailable` forever. That is not a strict validator; it is a
+contract that lies; one field cycle measured 727,272 cache-creation tokens discarded to it, per
+run. Integrity is
+the one axis that is not a model's to assert, so it is no longer asked for: the contract says not
+to send it, a volunteered value is dropped rather than refused, and `review_policy.derive_integrity`
+computes it from the committed blobs — the code anchors each cited Actual Statement carries,
+re-read against the subject commit, with the digest of what was checked. A claim citing statements
+with no anchors is `unavailable`, which is the honest answer and now an earned one. A test asserts
+that every value the contract offers survives the validator, so the two cannot drift apart again.
+
+**Tests are code an agent wrote, and they run with your credentials.** The extractor and the
+security reviewer shared one reading of the whole diff. But a test name paraphrases the requirement
+the blind extractor must not read, and the security reviewer is the one participant that must see
+test code at all. The reading is split by `diff_facts` classification: the shared, primed half is
+source only, and `tests_diff` rides inline on the security reviewer's own branch — a key
+`without_the_reading` never touches, so the fork still costs one reading. `tests_diff` joins
+`actual_extraction.FORBIDDEN_KEYS`. 25% of the payload, and a stage that stops being told things it
+was never supposed to know.
+
+**A traceback said "rein is broken" about a repository that was merely out of shape.** A malformed
+`state.yaml` reached the terminal as a stack trace from `strict_yaml`, and every module that raised
+"we stopped, and we know why" had its own unrelated base class, so `cli.main` could not catch the
+category without importing half the package — which is exactly what the lazy verb dispatcher exists
+to avoid. `common.ReinError` is that base, defined in the module the dispatcher already imports;
+`DocumentError`, `StoreError`, `StrictParseError`, `LockError`, `ReviewError`, `ComparatorError`
+and `RepoNotFoundError` keep their second base where callers already catch them that way. The verb
+now prints the reason it was given and exits `EXIT_CANNOT_PROCEED`. `rein doctor` names the repair
+per document rather than reporting the parse error and stopping there, and `rein revise` reads
+`review.yaml` only on the path that writes it.
+
+**`sync` advanced the lock past documents the schema refuses, and `upgrade` then had nothing to
+show.** The lock's `tool_version` is what `rein upgrade` prints the changelog *between*, so writing
+the new version while a document still fails validation consumed the transition that was going to
+explain the fix. `sync` now validates first and refuses the bump, printing the sections it would
+otherwise have swallowed. Its one repair is `refresh_ungenerated_review`, which replaces the review
+scaffold **only** when `machine.status` is empty or `not_generated`, read loosely on purpose: a
+generated review that fails validation is evidence, and treating it as "not generated" would
+destroy it. Unparseable YAML is left alone for doctor to name. `lock.FORMAT`'s docstring now says
+what the string is about — SSOT document *shape*, not the release — after going unchanged across
+three versions that renamed two config keys.
+
+**A rate limit was slept through at a fixed interval.** `rein review generate --supervise` re-tried
+on a clock of its own while the provider's answer said when the window resets. `faults.reset_at`
+reads it and `_supervise_delay` waits until then (plus a margin, capped at six hours, never shorter
+than the configured interval). What counts as worth waiting for is now the envelope's
+`api_error_status` — 429 or 5xx — instead of prose matching, and `faults.said` reports what the CLI
+actually said (`result` / `error` / `subtype`) rather than a byte slice of a JSON document, which is
+what an operator was reading before.
+
+**The gate-④ bill arrived after it was spent.** `review.outlook` derives, in one place, whether the
+change is past `max_diff_bytes` and whether it carries files no reviewer can read; `doctor`,
+`rein status` and the build loop each report it. A warning, never a stop — exceeding a budget splits
+the scope, and that is a human's call.
+
+**A path git quoted was not seen at all.** `core.quotePath` defaults to true, so any name with a
+space or a non-ASCII byte arrives as `"b/na\303\257ve.py"` — and the header pattern only accepted
+`a/… b/…`. It did not fail on such a file; it did not see the header. The file vanished from
+`parse_diff`, so from the Coverage Manifest and from every scope check, and its lines were
+attributed to whichever file came before it. For a project whose deliverables are written in the
+user's language that is the ordinary case, and the consequence was the one thing the test split
+above exists to prevent: a test file's assertions handed to the blind extractor. `header_path` is
+now the single place a header is recognised — four walks over a diff were each reaching for the
+private pattern and reading it themselves, which is how they all inherited one blind spot — and it
+decodes git's octal escapes through bytes, because a non-ASCII character arrives as several of them.
+
+It also says **what the payload is made of**. Knowing a change is too big raises the next question
+immediately — what would I remove — and answering it took a hand-run script both times it mattered
+in the field; those two measurements are what the first two entries above are. The breakdown is in
+`diff_facts.classify_path`'s own five kinds rather than a new taxonomy, because those are what the
+levers are denominated in: `test` is the half now withheld from the blind extractor, `dependency`
+and `generated` are the kinds whose content nobody reads, `source` is the thing under review. The
+plan's prose does not appear at all, because the first entry above already removed it. `split_tests`
+and the breakdown now take their two answers from one walk of the diff, so they cannot come to
+disagree about what a file's bytes are.
+
+**`run_measured` had one writer and no reader.** The event carries what the provider billed each
+role, and this module's own docstring said it exists so that summing it over a cycle gives the
+cycle's total. Nothing summed it, for three releases. So "where did the tokens go" had no answer
+inside the repository that had been recording it all along, and the question got answered by
+installing things on faith instead. `rein events --cost` is the reader: per cycle, oldest first,
+across this cycle and every archived one, with what a cache **replayed** on its own line rather than
+added to the bill — folding them in would make a well-cached cycle read as an expensive one. A role
+whose adapter reports nothing stays `measured: false` however many runs are summed, because
+"we did not measure" and "it was free" must never render the same. An archived chain that is damaged
+is named and excluded rather than skipped in silence, and a cycle whose runs launched nothing says
+so instead of leaving a bare header that reads as a cost of zero.
+
+The rendering had to learn two words for what it was already counting. A replayed line is not a
+bill, so its price now says `not charged` — one phrasing for both facts put a dollar figure on the
+line whose entire reason for being separate is that nobody paid it. And **cache creation** is named
+beside cache reads: it is the premium-priced half, it is where a field cycle's 727,272 tokens per
+run were going,
+and a role rendered as `3.07M in (1.10M cached)` left every one of them unaccounted for in the
+report that exists to find exactly that. Counts past a million render in millions for the same
+reason — `3067.3k` is a number the reader has to divide before it means anything.
+
 ## [0.3.8] - 2026-08-28
 
 One habit again, seen from the other side. 0.3.7 was about things this repository *declared* and

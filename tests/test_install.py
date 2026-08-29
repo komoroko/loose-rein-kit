@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import gate_guard, init_cmd, install, store
+from rein import gate_guard, init_cmd, install, models, store
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 from tests._support import make_config
@@ -375,3 +375,48 @@ def test_cmd_wrappers_parse_their_flags(repo: repo_mod.Repo) -> None:
     assert install.cmd_install(["copilot", "--dry-run", "--repo", str(repo.root)]) == 0
     assert install.cmd_uninstall(["copilot", "--dry-run", "--repo", str(repo.root)]) == 0
     assert install.cmd_upgrade(["--dry-run", "--repo", str(repo.root)]) == 0
+
+
+# --- an upgrade that breaks a repo document (issue #28) -----------------------
+
+
+def test_sync_refuses_to_advance_the_lock_past_a_document_it_cannot_read(
+    repo: repo_mod.Repo, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`sync` materialized the new schema, stamped the new version, and erased the only record of
+    where the repo came from — so `rein upgrade` then said "already current", printed no changelog,
+    and named none of the renames that had just broken the repository.
+    """
+    data = lock_mod.read(repo.lock)
+    assert data is not None
+    data["tool_version"] = "0.0.1"
+    lock_mod.write(repo.lock, data)
+    config = repo.path(".rein/config.yaml")
+    config.write_text(config.read_text(encoding="utf-8") + "\nnot_a_known_key: 1\n", encoding="utf-8")
+
+    capsys.readouterr()
+    assert install.sync(repo) == 1
+    after = lock_mod.read(repo.lock)
+    assert after is not None
+    assert after["tool_version"] == "0.0.1", "the transition a human still needs is not erased"
+
+
+def test_sync_rematerializes_the_review_stub_while_it_holds_no_review(repo: repo_mod.Repo) -> None:
+    """The scaffold is written once at `init` and never migrated, so a release that changes the
+    document's shape strands every repo that has not reached gate ④ — on a file whose entire
+    content is "nothing has happened here"."""
+    review_path = repo.path(".rein/review.yaml")
+    review_path.write_text("machine:\n  status: not_generated\n  coverage: []\n", encoding="utf-8")
+    assert install.refresh_ungenerated_review(repo) is True
+    assert install.sync(repo) == 0
+    assert models.Review.parse(review_path.read_text(encoding="utf-8")).machine_status == "not_generated"
+
+
+def test_a_generated_review_is_never_rewritten_by_sync(repo: repo_mod.Repo) -> None:
+    """It is evidence bound to a commit. `rein review generate --force` rewrites it by re-reading
+    the code; nothing else may."""
+    review_path = repo.path(".rein/review.yaml")
+    original = review_path.read_text(encoding="utf-8")
+    review_path.write_text(original.replace("not_generated", "generated"), encoding="utf-8")
+    assert install.refresh_ungenerated_review(repo) is False
+    assert "generated" in review_path.read_text(encoding="utf-8")

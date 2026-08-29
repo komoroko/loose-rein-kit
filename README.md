@@ -302,7 +302,9 @@ is decided on. What is:
   runs a deterministic Coverage Manifest, a **blind** extraction of what the code actually does —
   that extractor is never given the plan, and is launched outside the repository so it cannot go and
   read one — then the Expected/Actual comparison and the structured security and maintainability
-  review. What it reads is the product, not `.rein/`.
+  review. What it reads is the product: not `.rein/`, not the plan's own prose (`docs/tasks/`,
+  the ADRs, the documents gate ③ froze), not the surfaces `rein install` wrote, and — for the
+  blind extractor alone — not the tests, whose names paraphrase the requirements it never saw.
 - **There is no single `verified`.** Findings sit on three separate axes — integrity, semantic
   support, conformance — and "extra behaviours: 0" appears only with the Coverage Manifest that
   earned it. A blocking security finding, a diverged high/critical claim, an ungrounded
@@ -474,7 +476,7 @@ to with the gate guard flipped live. No build files, no makefile, and no agent s
 | `.rein/plan.yaml` | the frozen Expected Model: one claim per requirement, and the task DAG |
 | `.rein/state.yaml` | mutable state: phase, gate approvals, task status |
 | `.rein/review.yaml` | the machine review and the human review, digested separately |
-| `.rein/events.ndjson` | the hash-chained audit log — every state change's machine truth (`rein events`; created on the first event) |
+| `.rein/events.ndjson` | the hash-chained audit log — every state change's machine truth (`rein events`; created on the first event). Every run of launches records what the provider billed it, so `rein events --cost` answers where a cycle's tokens went, by role, across this cycle and the archived ones |
 | `.rein/config.yaml` | deterministic-execution knobs + the single DoD (`quality_gate`) |
 | `.rein/rein.lock` | the document format, tool version/source, and a content hash per installed file |
 | `.rein/schema/` | JSON Schemas for the SSOT documents (editor validation; `rein doctor`) — materialized |

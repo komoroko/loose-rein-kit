@@ -1134,3 +1134,15 @@ def test_with_no_state_at_all_the_strict_reading_wins(tmp_path: Path) -> None:
     results = doctor.check_sandbox(models.Config(make_config()), None)
 
     assert [f.level for f in results if "run repository-derived code" in f.message] == ["FAIL"]
+
+
+def test_a_schema_invalid_document_is_reported_with_the_command_that_repairs_it(tmp_path: Path) -> None:
+    """`build.md` promises exactly that, and these four were reported with none — an upgrade that
+    renamed `config.yaml` keys left a repo with FAILs, no command, and a repair (`rein revise --to
+    tasks`) that is not guessable, because the keys are frozen at gate ③."""
+    (tmp_path / ".rein").mkdir()
+    (tmp_path / ".rein" / "config.yaml").write_text("not_a_known_key: 1\n", encoding="utf-8")
+    findings, _ = doctor.check_documents(repo_mod.Repo(tmp_path))
+    failed = [f for f in findings if f.level == "FAIL" and f.message.startswith("config.yaml")]
+    assert failed, "a config the schema refuses is a FAIL"
+    assert "rein revise --to tasks" in failed[0].message

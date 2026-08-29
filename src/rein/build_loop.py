@@ -2604,6 +2604,8 @@ class Orchestrator:
                 merged,
             )
             blocked_any = True
+        if merged:
+            self._warn_on_review_outlook()
         if blocked_any:
             # A real verdict outranks a machine fault when both happened: re-running clears the
             # fault but never the blocked task, so the human has to look either way. The fault is
@@ -2613,6 +2615,39 @@ class Orchestrator:
             raise StopLoop("A blocked task occurred. Human intervention needed.", code=common.EXIT_HUMAN_NEEDED)
         if fault is not None:
             raise fault
+
+    def _warn_on_review_outlook(self) -> None:
+        """Say it at task 9 of 17, not at gate ④, when the change outgrows what a review can read.
+
+        The loop already knows the diff after each task lands, and it said nothing: a cycle that
+        crossed its own `max_diff_bytes` and a cycle carrying a committed binary both went the
+        whole way to gate ④ before anyone heard, and at gate ④ the budget's instruction ("split the
+        scope") is not a move that exists — every task is merged and `done`.
+
+        A warning, never a stop. A task that passed its gate has earned its merge; what this
+        changes is who knows what, and when.
+        """
+        if self.dry_run:
+            return
+        from rein import review as review_mod
+
+        view = review_mod.outlook(self.repo)
+        if view is None:
+            return
+        if view.over_budget:
+            print(
+                f"    [outlook] {view.line()}\n"
+                "              gate ④ refuses a change over the budget, and its answer is to split "
+                "the scope — which stops being possible once every task is merged. Now is when."
+                + (f"\n              {view.made_of()}" if view.made_of() else "")
+            )
+        if view.unreadable:
+            print(
+                f"    [outlook] {len(view.unreadable)} binary/unsupported file(s) in this change make "
+                f"coverage `insufficient`"
+                + (f", which blocks gate ④ at {view.effective_risk} risk" if view.coverage_blocks_gate else "")
+                + f": {', '.join(view.unreadable[:5])}"
+            )
 
     # -- handing over to the review pipeline -----------------------------------
 

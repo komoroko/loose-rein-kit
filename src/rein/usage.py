@@ -176,20 +176,36 @@ def parse_claude_envelope(output: str) -> tuple[str, Usage]:
 
 
 def _tokens(count: int) -> str:
-    """A token count a reader can act on: exact while it is small, thousands once it is not.
+    """A token count a reader can act on: exact while small, then thousands, then millions.
 
     `0.0k` was what 41 output tokens rendered as, which is the same thing "we did not measure"
-    should look like and must not.
+    should look like and must not. The millions tier is the other end of the same fault: a cycle
+    summed over its runs renders as `3067.3k`, which a reader has to divide before it means
+    anything, in a report whose whole job is to be read at a glance.
     """
-    return str(count) if count < 10_000 else f"{count / 1000:.1f}k"
+    if count < 10_000:
+        return str(count)
+    if count < 1_000_000:
+        return f"{count / 1000:.1f}k"
+    return f"{count / 1_000_000:.2f}M"
 
 
-def summarize(rows: dict[str, Usage], *, what: str) -> str:
+def summarize(rows: dict[str, Usage], *, what: str, charged: bool = True) -> str:
     """One line saying where this run's tokens went, worst first. Empty when nothing was launched.
 
     A role whose adapter does not report usage is listed by name with its launch count and no
     numbers, because that is the honest rendering: leaving it out would make the total read as the
     whole truth, and printing zeros would make an unmeasured role look free.
+
+    `charged=False` is for tokens that were *replayed* rather than launched — a stage served from
+    `review_cache`. The counts are real (they are what that answer cost when it was first taken),
+    the price is not: nobody paid it on this run. One phrasing for both facts printed a dollar
+    figure on the line whose entire reason for being separate is that it is not a bill.
+
+    Cache creation is named beside cache reads because it is the expensive half and was in
+    neither number a reader could see: a role showing `3.07M in (1.10M cached)` left its
+    premium-priced cache writes unaccounted for, in the report meant to find exactly that. One
+    field cycle put 727,272 of them behind that gap.
     """
     live = {role: row for role, row in rows.items() if row.launches}
     if not live:
@@ -203,15 +219,18 @@ def summarize(rows: dict[str, Usage], *, what: str) -> str:
         for row in measured.values():
             total = total + row
         for role, row in sorted(measured.items(), key=lambda item: -item[1].total_input_tokens):
+            cached = f"{_tokens(row.cache_read_tokens)} cached"
+            if row.cache_creation_tokens:
+                cached += f", {_tokens(row.cache_creation_tokens)} written"
             parts.append(
-                f"{role} {_tokens(row.total_input_tokens)} in "
-                f"({_tokens(row.cache_read_tokens)} cached) / {_tokens(row.output_tokens)} out"
+                f"{role} {_tokens(row.total_input_tokens)} in ({cached}) / {_tokens(row.output_tokens)} out"
                 + (f" / {_tokens(row.reasoning_tokens)} reasoning" if row.reasoning_tokens else "")
                 + f" over {row.launches}"
             )
+        price = f"${total.cost_usd:.2f}" + ("" if charged else " not charged")
         head = (
             f"{what}: {_tokens(total.total_input_tokens)} input + {_tokens(total.output_tokens)} output "
-            f"tokens over {total.launches} launch(es), ${total.cost_usd:.2f}"
+            f"tokens over {total.launches} launch(es), {price}"
             + (f" — {', '.join(total.models)}" if total.models else "")
         )
     else:

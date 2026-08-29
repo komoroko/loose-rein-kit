@@ -100,7 +100,7 @@ operations:
   task reset <id> --reason …   put a blocked task back on the frontier (recorded, never hand-edited)
   dag [--render|--trace|...]   derive/inspect the task DAG (read-only; /tasks & /status use it)
   doctor                       read-only diagnosis: format, integrations, sandbox, plan, review
-  events [--summary|--verify]  read the hash-chained audit log (read-only)
+  events [--summary|--cost|…]  read the hash-chained audit log (read-only; --cost sums what runs billed)
   cycle-close --name <slug>    archive the finished delta cycle and reset
   issue-sync [--dry-run]       one-way mirror of plan.yaml's tasks -> GitHub Issues (opt-in)
   pr-draft [args]              assemble a PR body from the SSOT (read-only)
@@ -205,15 +205,28 @@ def main(argv: list[str] | None = None) -> int:
         if rc != 0:
             return rc
 
-    if verb == "start":
-        return _start(args[1:])
-    if verb == "next":
-        return _resolve("status_api")(["--next", *rest])
     spec = VERBS.get(verb)
-    if spec is None:
+    if spec is None and verb not in ("start", "next"):
         logger.error(f"rein: unknown verb '{verb}' — run `rein --help` for the verb list")
         return 2
-    return _resolve(spec)(rest)
+    try:
+        if verb == "start":
+            return _start(args[1:])
+        if verb == "next":
+            return _resolve("status_api")(["--next", *rest])
+        assert spec is not None
+        return _resolve(spec)(rest)
+    except common.ReinError as exc:
+        # Every raise behind this line has already worded its own reason (`common.ReinError`), and
+        # until this clause existed none of them reached a reader as anything but a traceback: a
+        # schema-invalid `config.yaml` after an upgrade, a comparator answer the policy refused,
+        # a review whose diff blew its budget. A traceback says "rein is broken" about a
+        # repository that is merely out of shape, and it hides the sentence that says which.
+        #
+        # EXIT_CANNOT_PROCEED, not 1: the named thing has to be repaired first, and re-running
+        # before that is wasted — which is exactly what that code means.
+        logger.error(f"rein {verb}: {exc}")
+        return common.EXIT_CANNOT_PROCEED
 
 
 if __name__ == "__main__":

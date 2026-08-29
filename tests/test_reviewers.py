@@ -12,6 +12,7 @@ and the module either validates it or refuses it. The two things worth pinning:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -19,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from rein import actual_extraction, conformance, review_policy, security_review
+from rein import actual_extraction, conformance, models, review_policy, security_review
 from rein import repo as repo_mod
 
 
@@ -184,7 +185,7 @@ def test_comparator_rejects_a_same_group_critical_review() -> None:
             fake({"claims": []}),
             repo=repo_mod.Repo(Path("/x")),
             commit="HEAD",
-            actual_statement_ids=[],
+            actual_statements=[],
             known_ids=[],
             expected_claim_ids=[],
             effective_risk="critical",
@@ -199,7 +200,7 @@ def test_comparator_rejects_a_rewritten_actual() -> None:
             fake({"claims": [], "actual_statements": [{"id": "AST-009"}]}),
             repo=repo_mod.Repo(Path("/x")),
             commit="HEAD",
-            actual_statement_ids=[],
+            actual_statements=[],
             known_ids=[],
             expected_claim_ids=[],
             effective_risk="high",
@@ -215,7 +216,7 @@ def test_comparator_rejects_an_invented_actual_reference() -> None:
             fake(payload),
             repo=repo_mod.Repo(Path("/x")),
             commit="HEAD",
-            actual_statement_ids=["AST-001"],
+            actual_statements=[{"id": "AST-001"}],
             known_ids=["C-001"],
             expected_claim_ids=[],
             effective_risk="high",
@@ -230,7 +231,7 @@ def test_comparator_accepts_a_clean_comparison() -> None:
         fake(payload),
         repo=repo_mod.Repo(Path("/x")),
         commit="HEAD",
-        actual_statement_ids=[],
+        actual_statements=[],
         known_ids=["C-001", "O-001"],
         expected_claim_ids=[],
         effective_risk="high",
@@ -258,7 +259,7 @@ def test_comparator_carries_the_extra_behaviors_it_found() -> None:
         fake(payload),
         repo=repo_mod.Repo(Path("/x")),
         commit="HEAD",
-        actual_statement_ids=["AST-001"],
+        actual_statements=[{"id": "AST-001"}],
         known_ids=[],
         expected_claim_ids=[],
         effective_risk="high",
@@ -280,7 +281,7 @@ def test_an_extra_behavior_must_name_the_code_it_was_read_from() -> None:
             fake(payload),
             repo=repo_mod.Repo(Path("/x")),
             commit="HEAD",
-            actual_statement_ids=["AST-001"],
+            actual_statements=[{"id": "AST-001"}],
             known_ids=[],
             expected_claim_ids=[],
             effective_risk="high",
@@ -296,7 +297,7 @@ def test_an_extra_behavior_cannot_cite_a_statement_the_extractor_never_produced(
             fake(payload),
             repo=repo_mod.Repo(Path("/x")),
             commit="HEAD",
-            actual_statement_ids=["AST-001"],
+            actual_statements=[{"id": "AST-001"}],
             known_ids=[],
             expected_claim_ids=[],
             effective_risk="high",
@@ -313,7 +314,7 @@ def test_an_unclassified_extra_behavior_is_refused_not_defaulted() -> None:
             fake(payload),
             repo=repo_mod.Repo(Path("/x")),
             commit="HEAD",
-            actual_statement_ids=["AST-001"],
+            actual_statements=[{"id": "AST-001"}],
             known_ids=[],
             expected_claim_ids=[],
             effective_risk="high",
@@ -427,7 +428,7 @@ def test_a_claim_the_comparator_never_answered_is_recorded_as_unknown() -> None:
         fake(payload),
         repo=repo_mod.Repo(Path("/x")),
         commit="HEAD",
-        actual_statement_ids=[],
+        actual_statements=[],
         known_ids=["C-001", "C-002", "C-003"],
         expected_claim_ids=["C-001", "C-002", "C-003"],
         effective_risk="high",
@@ -453,7 +454,7 @@ def test_an_unanswered_claim_becomes_a_decision_a_human_has_to_make() -> None:
         fake({"claims": []}),
         repo=repo_mod.Repo(Path("/x")),
         commit="HEAD",
-        actual_statement_ids=[],
+        actual_statements=[],
         known_ids=["C-001"],
         expected_claim_ids=["C-001"],
         effective_risk="high",
@@ -487,7 +488,7 @@ def test_a_claim_answered_twice_is_refused_not_de_duplicated(committed_repo: rep
             fake({"claims": [row("aligned"), row("diverged")], "actual_digest": "d"}),
             repo=committed_repo,
             commit="HEAD",
-            actual_statement_ids=[],
+            actual_statements=[],
             known_ids=["C-001"],
             expected_claim_ids=["C-001"],
             effective_risk="low",
@@ -596,3 +597,112 @@ def test_an_unanchored_finding_cannot_close_itself(committed_repo: repo_mod.Repo
             repo=committed_repo,
             commit=head,
         )
+
+
+def test_every_value_the_comparator_contract_offers_survives_its_own_validator() -> None:
+    """The contract and the validator must agree about the vocabulary, and they did not.
+
+    `integrity` was advertised as `verified|failed|unavailable` — `verified` listed first — and
+    `reject_self_attestation` refused it unconditionally. A model that read the contract, kept the
+    three axes apart and found the evidence sound picked the first offered value and was refused
+    for it, on every claim, every run: sixteen of eighteen claims, three launches and 727,272
+    cache-creation tokens discarded per attempt, and gate ④ unreachable.
+
+    So the assertion is about the class of defect rather than that one field: read the enums out of
+    the contract the model is actually sent, and make the validator accept each of them.
+    """
+    text = conformance.contract()
+
+    def offered(axis: str) -> list[str]:
+        """The values the contract itself spells out for `axis` — not a list restated here.
+
+        A restated list is a third place the vocabulary lives, which is the defect this test is
+        about. A contract that stopped naming the axis at all would silently make this test
+        vacuous, so a miss is an error rather than an empty loop.
+        """
+        found = re.search(rf'"{axis}": \{{"status": "([a-z|]+)"', text)
+        assert found is not None, f"the contract no longer offers {axis} — this test cannot check it"
+        return found.group(1).split("|")
+
+    enums: dict[str, list[str]] = {
+        "verdict": sorted(models.VERDICT_VALUES),
+        "semantic_support": offered("semantic_support"),
+        "conformance": offered("conformance"),
+    }
+    assert '"integrity"' not in text, "integrity is derived, so the contract must not ask for it"
+
+    for field, values in enums.items():
+        for value in values:
+            claim: dict[str, Any] = {"claim_id": "C-001", "verdict": "aligned"}
+            if field == "verdict":
+                claim["verdict"] = value
+            elif field == "semantic_support":
+                claim["semantic_support"] = {"status": value, "assessment_basis": "machine_assessed"}
+            else:
+                claim["conformance"] = {"status": value}
+            result = conformance.run_comparator(
+                _comparator_request(),
+                fake({"claims": [claim]}),
+                repo=repo_mod.Repo(Path("/x")),
+                commit="HEAD",
+                actual_statements=[],
+                known_ids=["C-001"],
+                expected_claim_ids=["C-001"],
+                effective_risk="low",
+                independence=_DISTINCT,
+            )
+            assert result.claims[0]["claim_id"] == "C-001", f"{field}={value} was refused"
+            # Derived, never taken from the answer: this claim cites no Actual Statement.
+            assert result.claims[0]["integrity"] == {"status": "unavailable"}
+
+
+def test_integrity_is_derived_from_the_committed_blobs(committed_repo: repo_mod.Repo) -> None:
+    """`verified` is now reachable and it means something: the anchors the verdict rests on resolve.
+
+    The axis existed as a slot — no code path could produce anything but `unavailable` — so a
+    reader had three axes and two of them.
+    """
+    statements: list[dict[str, Any]] = [
+        {
+            "id": "AST-001",
+            "code_anchors": [
+                {
+                    "path": "src/app.py",
+                    "start_line": 1,
+                    "end_line": 2,
+                    "blob": f"git-blob:{_blob(committed_repo, 'src/app.py')}",
+                }
+            ],
+        }
+    ]
+    payload = {"claims": [{"claim_id": "C-001", "verdict": "aligned", "actual_statement_ids": ["AST-001"]}]}
+    result = conformance.run_comparator(
+        _comparator_request(),
+        fake(payload),
+        repo=committed_repo,
+        commit="HEAD",
+        actual_statements=statements,
+        known_ids=["C-001"],
+        expected_claim_ids=["C-001"],
+        effective_risk="low",
+        independence=_DISTINCT,
+    )
+    integrity = result.claims[0]["integrity"]
+    assert integrity["status"] == "verified"
+    assert integrity["code_anchor_digest"].startswith("sha256:")
+
+    # The tree moving underneath a pipeline whose stages run for minutes is what `failed` is for.
+    anchors: list[dict[str, Any]] = statements[0]["code_anchors"]
+    stale = [{**statements[0], "code_anchors": [{**anchors[0], "blob": "git-blob:" + "0" * 40}]}]
+    moved = conformance.run_comparator(
+        _comparator_request(),
+        fake(payload),
+        repo=committed_repo,
+        commit="HEAD",
+        actual_statements=stale,
+        known_ids=["C-001"],
+        expected_claim_ids=["C-001"],
+        effective_risk="low",
+        independence=_DISTINCT,
+    )
+    assert moved.claims[0]["integrity"]["status"] == "failed"

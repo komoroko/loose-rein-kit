@@ -187,13 +187,20 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
     # no longer stands, and the freeze it may already carry is a precondition `approve.readiness`
     # re-checks. The machine half stays as it is — regenerating is a separate act, and clearing it
     # here would destroy the reading the human answers were about.
-    review = store.read_review()
-    seen_review = store_mod.read_digest(review)
-    stale_review = (
-        {**review.raw, "human": {"status": "not_started"}}
-        if revision["invalidates_review"] and review is not None and review.human_status != "not_started"
-        else None
-    )
+    #
+    # Read only on the path that writes it. A rollback that invalidates no review has no business
+    # parsing one, and parsing one is how this crashed: an `init`-written `review.yaml` scaffold
+    # that an upgrade left schema-invalid — `status: not_generated`, carrying no review at all —
+    # made `revise` unrunnable, and `revise` was the documented repair for the *other* document
+    # the same upgrade broke. The rollback was announced to the operator and then died before the
+    # state write, which is safe and unreadable at once.
+    stale_review = None
+    seen_review = ""
+    if revision["invalidates_review"]:
+        review = store.read_review()
+        seen_review = store_mod.read_digest(review)
+        if review is not None and review.human_status != "not_started":
+            stale_review = {**review.raw, "human": {"status": "not_started"}}
 
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=seen)

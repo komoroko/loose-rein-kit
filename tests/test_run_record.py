@@ -115,3 +115,84 @@ def test_neither_producer_appends_the_event_itself() -> None:
     for module in (build_loop, review):
         source = inspect.getsource(module)
         assert 'append("run_measured"' not in source, f"{module.__name__} appends the event directly"
+
+
+# --- reading it back ----------------------------------------------------------
+#
+# The docstring's promise — "a cycle's cost is a sum over it" — had one writer and no reader for
+# three releases, so the number the repository had been recording all along was unavailable to
+# the person paying for it.
+
+
+def _cost(*runs: dict[str, object], cycle: str = "c1") -> list[run_record.CycleCost]:
+    events = [
+        event_chain.make("run_measured", cycle, detail={"kind": "build", "run_id": f"r{i}", "outcome": "done", **row})
+        for i, row in enumerate(runs)
+    ]
+    return run_record.costs([("", events)])
+
+
+def test_a_cycles_runs_are_summed_per_role() -> None:
+    paid = usage_mod.Usage(available=True, launches=1, input_tokens=100, output_tokens=10, cost_usd=1.5)
+    rows = _cost(
+        {"billed_by_role": {"implementer": paid.to_detail(), "reviewer": paid.to_detail()}},
+        {"billed_by_role": {"implementer": paid.to_detail()}},
+    )
+    assert [(r.cycle_id, r.runs) for r in rows] == [("c1", 2)]
+    assert rows[0].billed["implementer"].input_tokens == 200
+    assert rows[0].billed["implementer"].launches == 2
+    assert rows[0].billed["reviewer"].launches == 1
+
+
+def test_an_unmeasured_role_never_becomes_a_free_one() -> None:
+    """`measured: false` is a state with a name. Summing it must not price it at zero — that is
+    the same lie as a row of zeros, and it is what makes a silent adapter look like a cheap one."""
+    blind = usage_mod.Usage.unavailable()
+    rows = _cost(
+        {"billed_by_role": {"implementer": blind.to_detail()}},
+        {"billed_by_role": {"implementer": blind.to_detail()}},
+    )
+    total = rows[0].billed["implementer"]
+    assert total.available is False
+    assert total.launches == 2
+    assert "usage unavailable for implementer (2 launch(es)" in run_record.render_costs(rows)
+
+
+def test_what_a_cache_replayed_is_not_added_to_the_bill() -> None:
+    """Adding them would make a well-cached cycle read as an expensive one — the exact signal the
+    report exists to show."""
+    paid = usage_mod.Usage(available=True, launches=1, input_tokens=100, cost_usd=1.0)
+    free = usage_mod.Usage(available=True, launches=1, input_tokens=900, cost_usd=9.0)
+    rows = _cost(
+        {"billed_by_role": {"comparator": paid.to_detail()}, "reused_by_role": {"comparator": free.to_detail()}}
+    )
+    assert rows[0].billed["comparator"].input_tokens == 100
+    assert rows[0].reused["comparator"].input_tokens == 900
+    report = run_record.render_costs(rows)
+    assert "billed:" in report and "replayed:" in report
+
+
+def test_a_repository_that_has_launched_nothing_says_so() -> None:
+    """ "Nothing was measured" and "it was free" must not render the same."""
+    assert run_record.render_costs([]) == run_record.NOTHING_RECORDED
+
+
+def test_two_sources_naming_one_cycle_stay_apart() -> None:
+    """A cycle id in the live chain and in an archive is two chains, not one longer one."""
+    paid = usage_mod.Usage(available=True, launches=1, input_tokens=5).to_detail()
+    detail = {"kind": "build", "run_id": "r", "outcome": "done", "billed_by_role": {"implementer": paid}}
+    one = event_chain.make("run_measured", "c1", detail=dict(detail))
+    rows = run_record.costs([("", [one]), ("docs/archive/x/rein/events.ndjson", [one])])
+    assert [r.source for r in rows] == ["", "docs/archive/x/rein/events.ndjson"]
+
+
+def test_a_cycle_whose_runs_launched_nothing_says_so() -> None:
+    """A bare header under it would read as a cost of zero rather than as an absence of one."""
+    report = run_record.render_costs([run_record.CycleCost("c1", runs=1)])
+    assert "nothing measured — these runs recorded no launch" in report
+
+
+def test_the_replayed_line_carries_no_bill() -> None:
+    free = usage_mod.Usage(available=True, launches=1, input_tokens=900, cost_usd=9.0)
+    report = run_record.render_costs([run_record.CycleCost("c1", 1, {}, {"comparator": free})])
+    assert "replayed:" in report and "$9.00 not charged" in report

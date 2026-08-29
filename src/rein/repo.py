@@ -23,8 +23,11 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from rein import common
 
 GIT_TIMEOUT_SEC = 10
 
@@ -38,12 +41,23 @@ GIT_TIMEOUT_SEC = 10
 #: invalidate itself.
 SSOT_DIR = ".rein/"
 
-#: The same exclusion as a git pathspec, for the commands that take one. `.` is explicit because a
-#: pathspec containing only an exclusion matches nothing.
-SSOT_PATHSPEC: tuple[str, ...] = (".", f":(exclude){SSOT_DIR.rstrip('/')}")
+
+def pathspec_excluding(paths: Sequence[str]) -> tuple[str, ...]:
+    """`everything but these` as a git pathspec. `.` is explicit — only-exclusions match nothing.
+
+    The one place the `:(exclude)` spelling lives. Two callers ask different questions of it: what
+    "the tree" is (always and only :data:`SSOT_DIR`) and what the *product under review* is, which
+    is wider — the review must not be handed the plan's own prose or the surfaces `rein install`
+    wrote. Wider, and derived rather than written down: `review.not_the_product` builds the list.
+    """
+    return (".", *(f":(exclude){p.rstrip('/')}" for p in paths))
 
 
-class RepoNotFoundError(RuntimeError):
+#: The same exclusion as a git pathspec, for the commands that take one.
+SSOT_PATHSPEC: tuple[str, ...] = pathspec_excluding((SSOT_DIR,))
+
+
+class RepoNotFoundError(common.ReinError, RuntimeError):
     """No .rein/ directory was found — the command has no repository to operate on."""
 
 

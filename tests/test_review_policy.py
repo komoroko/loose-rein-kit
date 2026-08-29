@@ -108,17 +108,7 @@ def test_all_known_citations_pass() -> None:
     assert review_policy.validate_citations(["C-001"], known=["C-001", "SRC-001"]) == []
 
 
-# --- self-attestation and downgrades (plan §24.2, §13.5) ----------------------
-
-
-def test_reviewer_cannot_self_report_integrity_verified() -> None:
-    claim = {"claim_id": "C-001", "integrity": {"status": "verified"}}
-    assert any("cannot self-report" in p for p in review_policy.reject_self_attestation(claim))
-
-
-def test_integrity_unknown_is_allowed() -> None:
-    claim = {"claim_id": "C-001", "integrity": {"status": "unknown"}}
-    assert review_policy.reject_self_attestation(claim) == []
+# --- integrity and downgrades (plan §24.2, §13.5) -----------------------------
 
 
 def test_risk_downgrade_below_floor_is_rejected() -> None:

@@ -406,6 +406,25 @@ EXIT_CANNOT_PROCEED = 2
 EXIT_RETRY_LATER = 3
 
 
+class ReinError(Exception):
+    """An operation failed for a reason already worded for a human — `cli.main` prints it.
+
+    Every module here raises something well-worded when it cannot go on, and every one of those
+    types was its own island: a `DocumentError` from a schema-invalid `config.yaml`, a
+    `ComparatorError` from a rejected review, a `LockError` from an unreadable lock. Nothing at
+    the entry point could name them all without importing half the package on every invocation —
+    the dispatcher resolves a verb's module lazily on purpose — so none of them were caught, and
+    an operator repairing a repository was handed a Python traceback instead of the sentence the
+    raise site had already written.
+
+    One base, defined in the module the dispatcher already imports, is what lets `cli.main` catch
+    "we stopped, and we know why" without knowing who raised it. Subclasses keep their second
+    base (`ValueError`, `RuntimeError`) where callers already catch them that way: being a rein
+    error and being a value error are both true, and dropping the second would silently change
+    what those `except` clauses see.
+    """
+
+
 class StopLoop(Exception):
     """A cause to stop the build loop and escalate to the human. `code` is the exit code.
 

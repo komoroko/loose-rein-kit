@@ -36,9 +36,17 @@ from typing import Any
 
 from packaging.version import InvalidVersion, Version
 
+from rein import common
 from rein import repo as repo_mod
 
 #: The one document format this release reads. Not a number: there is no "close enough".
+#:
+#: **This string is about the four SSOT documents' shape, not about the release.** It went
+#: unchanged across 0.3.6–0.3.8 while `config.yaml` renamed two keys and `review.yaml` changed the
+#: type of one — so a repository crossing those releases had a format string saying it was fine
+#: and a schema refusing to read it. Change this whenever a repo-owned document's shape changes;
+#: what a repository does about the refusal is `install.sync`'s guard, which prints the renames
+#: for the versions crossed and declines to advance the lock past a document it cannot read.
 FORMAT = "rein-grounded-v1"
 LOCK_NAME = ".rein/rein.lock"
 
@@ -49,7 +57,7 @@ _HEADER = (
 )
 
 
-class LockError(RuntimeError):
+class LockError(common.ReinError, RuntimeError):
     """An unusable lock: unparseable, not a mapping, or written in a different document format."""
 
 

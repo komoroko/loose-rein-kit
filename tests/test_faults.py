@@ -11,6 +11,10 @@ are deliberate and defended here:
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from rein import common, faults
@@ -269,3 +273,51 @@ def test_a_network_unreachable_fault_points_at_the_pinned_image_not_a_re_run() -
     assert not fault.retryable
     assert "pinned image" in summary
     assert "Nothing was marked" not in summary
+
+
+# --- what the CLI actually said (issue: a byte slice of stream-JSON) ----------
+
+
+def _limit_envelope() -> str:
+    return json.dumps(
+        {
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your session limit · resets 6:50am (Asia/Tokyo)",
+            "type": "result",
+            "duration_ms": 412,
+            "uuid": "38684efe-0000-0000-0000-000000000000",
+        }
+    )
+
+
+def test_the_reason_is_read_out_of_the_envelope_not_sliced_off_the_tail() -> None:
+    """A tail slice landed mid-token and buried the reason in ~900 bytes of telemetry."""
+    assert faults.said(_limit_envelope()) == "You've hit your session limit · resets 6:50am (Asia/Tokyo)"
+    assert faults.status_code(_limit_envelope()) == 429
+
+
+def test_output_that_is_not_json_still_falls_back_to_its_tail() -> None:
+    assert faults.said("x" * 3000).endswith("x")
+    assert len(faults.said("x" * 3000)) == 1000
+    assert faults.status_code("boom") is None
+
+
+def test_the_reset_hint_no_longer_runs_into_the_trailing_json() -> None:
+    """The regex used to match past the message and carry `","type":"result","duration_ms":412`."""
+    assert faults.reset_hint(_limit_envelope()) == "resets 6:50am (Asia/Tokyo)"
+
+
+def test_a_named_reset_becomes_a_moment_to_wait_until() -> None:
+    now = datetime(2026, 8, 29, 23, 30, tzinfo=ZoneInfo("Asia/Tokyo"))
+    when = faults.reset_at(_limit_envelope(), now=now)
+    assert when == datetime(2026, 8, 30, 6, 50, tzinfo=ZoneInfo("Asia/Tokyo"))
+
+
+def test_a_reset_later_today_is_not_pushed_to_tomorrow() -> None:
+    now = datetime(2026, 8, 29, 3, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
+    assert faults.reset_at(_limit_envelope(), now=now) == datetime(2026, 8, 29, 6, 50, tzinfo=ZoneInfo("Asia/Tokyo"))
+
+
+def test_a_refusal_that_names_no_time_schedules_nothing() -> None:
+    assert faults.reset_at("429 rate limit exceeded") is None
