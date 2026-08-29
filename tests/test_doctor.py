@@ -1136,6 +1136,70 @@ def test_with_no_state_at_all_the_strict_reading_wins(tmp_path: Path) -> None:
     assert [f.level for f in results if "run repository-derived code" in f.message] == ["FAIL"]
 
 
+def _git_repo(tmp_path: Path, gitignore_text: str | None) -> repo_mod.Repo:
+    seed_repo(tmp_path, git=True, docs=True, config=make_config())
+    if gitignore_text is not None:
+        (tmp_path / ".gitignore").write_text(gitignore_text, encoding="utf-8")
+    return repo_mod.Repo(tmp_path)
+
+
+def _healthy_gitignore(tmp_path: Path) -> str:
+    from rein import gitignore
+
+    return gitignore.merge("", (tmp_path / ".rein" / "config.yaml").read_text(encoding="utf-8"))[0]
+
+
+def test_gitignore_check_is_skipped_outside_a_git_checkout(tmp_path: Path) -> None:
+    seed_repo(tmp_path, config=make_config())
+    results = doctor.check_gitignore(repo_mod.Repo(tmp_path))
+    assert [f.level for f in results] == ["INFO"]
+
+
+def test_a_healthy_gitignore_passes(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path, None)
+    (tmp_path / ".gitignore").write_text(_healthy_gitignore(tmp_path), encoding="utf-8")
+    results = doctor.check_gitignore(repo)
+    assert [f.level for f in results] == ["PASS"]
+
+
+def test_a_missing_runtime_artifact_block_warns_and_names_sync(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path, ".venv/\n")
+    results = doctor.check_gitignore(repo)
+    assert [f.level for f in results] == ["WARN"]
+    assert "rein sync" in results[0].message
+
+
+def test_a_gitignored_ssot_path_is_a_failure(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path, None)
+    (tmp_path / ".gitignore").write_text(_healthy_gitignore(tmp_path) + "\n.rein/\n", encoding="utf-8")
+    results = doctor.check_gitignore(repo)
+    fail = [f for f in results if f.level == "FAIL"]
+    assert fail, "gitignoring the SSOT is a broken invariant"
+    assert ".rein/state.yaml" in fail[0].message
+    assert "remove them from .gitignore" in fail[0].message
+
+
+def test_gitignoring_docs_is_also_a_failure(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path, None)
+    (tmp_path / ".gitignore").write_text(_healthy_gitignore(tmp_path) + "\ndocs/\n", encoding="utf-8")
+    results = doctor.check_gitignore(repo)
+    assert [f.level for f in results if f.level == "FAIL"]
+    assert "docs/" in next(f.message for f in results if f.level == "FAIL")
+
+
+def test_a_tracked_runtime_artifact_warns_that_the_ignore_rule_is_inert(tmp_path: Path) -> None:
+    repo = _git_repo(tmp_path, None)
+    (tmp_path / ".gitignore").write_text(_healthy_gitignore(tmp_path), encoding="utf-8")
+    work = tmp_path / ".rein" / "work"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "T-001.json").write_text("{}", encoding="utf-8")
+    repo._git("add", "-f", ".rein/work/T-001.json")
+    results = doctor.check_gitignore(repo)
+    warned = [f for f in results if f.level == "WARN" and "tracked by git" in f.message]
+    assert warned
+    assert ".rein/work/" in warned[0].message
+
+
 def test_a_schema_invalid_document_is_reported_with_the_command_that_repairs_it(tmp_path: Path) -> None:
     """`build.md` promises exactly that, and these four were reported with none — an upgrade that
     renamed `config.yaml` keys left a repo with FAILs, no command, and a repair (`rein revise --to

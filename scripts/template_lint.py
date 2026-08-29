@@ -30,7 +30,7 @@ import re
 from itertools import zip_longest
 from pathlib import Path
 
-from rein import common, dag, gate_guard, install, models, strict_yaml
+from rein import common, dag, gate_guard, gitignore, install, models, strict_yaml
 
 # Not `logging.getLogger(__name__)`: this script is run directly (`__name__ == "__main__"`,
 # makefile's `template-lint` target) as often as it is imported, and `common.configure_logging()`
@@ -418,29 +418,11 @@ def check_guard_defaults(config_text: str) -> list[str]:
 GITIGNORE_PATH = ".gitignore"
 #: The .gitignore section this canary owns, down to the next `# ----` header. Everything outside
 #: it (.venv/, node_modules/, the editor files) is the repository's business, not the tool's.
-IGNORE_SECTION_HEADER = "# ---- Loose Rein runtime artifacts ----"
+#: The header and the derivation both live in `rein.gitignore` now — the block products receive
+#: and the template's own section are the same text, checked the same way.
+IGNORE_SECTION_HEADER = gitignore.SECTION_HEADER
 _IGNORE_SECTION_END_RE = re.compile(r"^# ---- ")
-
-
-def runtime_artifacts(config_text: str) -> set[str]:
-    """The artifacts the tool writes *into* the repository, derived from the code that writes them.
-
-    They come from opposite places: the worktree directory is configurable
-    (`execution.worktree_dir`), the PR draft, the stacked PR bodies and the dossier directory are
-    constants (`pr_draft.OUT_PATH`, `pr_stack.OUT_DIR`, `dossier.RELATIVE_PATH`). Deriving them all
-    instead of listing them is the whole point — a hand-written ignore list outlives what it
-    describes, which is how
-    .gitignore came to name three `build-loop.*` files for releases after the loop's locks and
-    journal moved to $XDG_RUNTIME_DIR, outside the repository entirely.
-    """
-    from rein import dossier, pr_draft, pr_stack
-
-    return {
-        models.Config.parse(config_text).worktree_dir.rstrip("/") + "/",
-        pr_draft.OUT_PATH,
-        pr_stack.OUT_DIR.rstrip("/") + "/",
-        dossier.RELATIVE_PATH.rstrip("/") + "/",
-    }
+runtime_artifacts = gitignore.runtime_artifacts
 
 
 def _ignore_section(gitignore_text: str) -> list[str] | None:

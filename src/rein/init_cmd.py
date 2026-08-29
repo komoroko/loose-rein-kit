@@ -3,8 +3,10 @@
 The copy-the-template model is gone: this command writes everything a repo needs *from the
 package payload*, so the working tree gains only state — `.rein/` (SSOT + materialized
 prompts/schema/rules + scaffold snapshot + lock) and `docs/` (deliverable scaffolds) — plus a
-marker-guarded pointer block in AGENTS.md. Nothing else is touched: no pyproject rewrite, no
-makefile, no agent surfaces (those are opt-in: `rein install <agent>`).
+marker-guarded pointer block in AGENTS.md and the runtime-artifact block in `.gitignore` (the
+scratch the loop regenerates every run, kept current afterwards by `rein sync`). Nothing else
+is touched: no pyproject rewrite, no makefile, no agent surfaces (those are opt-in: `rein
+install <agent>`).
 
 Brownfield is auto-detected (any existing code layout / build manifest at the root): the
 seeded config scopes `guard.paths` to the docs deliverables only — pending gates must
@@ -423,12 +425,19 @@ def run_init(
     # 4) the pristine scaffold snapshot cycle-close restores from.
     if cycle.snapshot_scaffold(repo):
         print(f"  snapshot      pristine docs + SSOT → {cycle.SCAFFOLD_DOCS}")
-    # 5) the agent-neutral rules pointer (AGENTS.md), appended at most once.
+    # 5) the agent-neutral rules pointer (AGENTS.md), appended at most once — and never in the
+    #    template repo, whose own AGENTS.md *is* the rules body (a pointer to itself would be a
+    #    second, contradictory load, the way `rein install claude` skips the CLAUDE.md block).
     agents_md = root / "AGENTS.md"
     text = agents_md.read_text(encoding="utf-8") if agents_md.is_file() else "# Repository rules\n"
-    if install_mod.CLAUDE_IMPORT_MARKER not in text:
+    if install_mod.CLAUDE_IMPORT_MARKER in text:
+        pass
+    elif install_mod._template_mode(repo):
+        print("  skip          AGENTS.md (guard.template_mode: the repo's own AGENTS.md is the rules body)")
+    else:
         agents_md.write_text(text + install_mod.agents_pointer_block(), encoding="utf-8")
         print("  merge         AGENTS.md (Loose Rein pointer block appended)")
+    # (the runtime-artifact .gitignore block is written by the `sync` call in step 3)
     print(f"  {_switch_branch(root, branch)}")
     # 6) the sandboxes — offered here rather than left for `doctor` to find later.
     print(f"  {sandbox_step(root, offer=offer_sandbox, ask=_ask if offer_sandbox else None)}")

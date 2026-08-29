@@ -157,5 +157,8 @@ gate shut until it is answered** and survives the session.
   (phase procedures, role definitions, these rules modules), `schema/`, and
   `AGENTS.rein.md` (the core rules body)
 - `docs/` — phase deliverables; `docs/retrospective.md` holds the retrospective at `done`
+- `.gitignore` — `rein init` / `rein sync` keep a marker-guarded block here ignoring the
+  scratch the loop regenerates (`.worktrees/`, `.rein/work/`, the generated PR bodies); the
+  SSOT and `docs/**` are committed and reviewed at each gate, never ignored
 - `.claude/`, `.github/`, `.agents/` + `.codex/` — per-agent entry points and role-agent
   wrappers, thin over `.rein/prompts/`, present only where `rein install <agent>` ran
