@@ -2639,6 +2639,7 @@ class Orchestrator:
                 f"    [outlook] {view.line()}\n"
                 "              gate ④ refuses a change over the budget, and its answer is to split "
                 "the scope — which stops being possible once every task is merged. Now is when."
+                + (f"\n              {view.made_of()}" if view.made_of() else "")
             )
         if view.unreadable:
             print(

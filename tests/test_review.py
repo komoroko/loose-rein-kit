@@ -1882,3 +1882,55 @@ def test_an_over_budget_change_says_split_rather_than_raise(review_repo: Path) -
     outlook = review.ChangeOutlook(diff_bytes=2_141_194, ceiling=524_288, unreadable=(), effective_risk="high")
     assert outlook.over_budget
     assert "OVER, split the scope" in outlook.line()
+
+
+# --- what the payload is made of ----------------------------------------------
+
+
+def _diff_of(*sized: tuple[str, int]) -> str:
+    return "".join(
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n+{'x' * size}\n"
+        for path, size in sized
+    )
+
+
+def test_the_payload_is_broken_down_by_the_kinds_the_levers_are_denominated_in() -> None:
+    """The question a reader has once they know the payload is too big is *what it is made of*,
+    and answering it took a hand-run script both times it mattered in the field. The categories are
+    `classify_path`'s, not a new taxonomy: `test` is the half `split_tests` withholds from the
+    blind extractor, `dependency`/`generated` are the mechanical kinds, `source` is the thing under
+    review. A breakdown in categories nothing can act on would be trivia."""
+    made = review.bytes_by_kind(_diff_of(("src/app.py", 400), ("tests/test_app.py", 200), ("uv.lock", 100)))
+    assert list(made) == ["source", "test", "dependency"], "largest first"
+    assert made["source"] > made["test"] > made["dependency"]
+
+
+def test_no_byte_of_the_payload_escapes_the_breakdown() -> None:
+    """A total that claims to be the payload must not quietly be a subset of it — including
+    whatever git puts before the first `diff --git` header."""
+    diff = "warning: something git said\n" + _diff_of(("src/app.py", 50), ("tests/test_app.py", 50))
+    assert sum(review.bytes_by_kind(diff).values()) == len(diff.encode("utf-8"))
+
+
+def test_the_split_and_the_breakdown_read_the_diff_the_same_way() -> None:
+    """Two answers off one walk. A second copy of "find the header, attribute what follows" is how
+    the two would come to disagree about what a file's bytes are."""
+    diff = _diff_of(("src/app.py", 400), ("tests/test_app.py", 200))
+    files = diff_facts.parse_diff(diff)
+    source, tests = review.split_tests(diff, files)
+    made = review.bytes_by_kind(diff)
+    assert len(source.encode("utf-8")) == made["source"]
+    assert len(tests.encode("utf-8")) == made["test"]
+
+
+def test_a_single_kind_names_nothing() -> None:
+    """`made_of` answers "what would I remove". With one kind there is no such question, and a
+    board line that always ends in "made of: source 100%" is noise."""
+    one = review.ChangeOutlook(
+        diff_bytes=100, ceiling=10, unreadable=(), effective_risk="low", composition=(("source", 100),)
+    )
+    assert one.made_of() == ""
+    two = review.ChangeOutlook(
+        diff_bytes=100, ceiling=10, unreadable=(), effective_risk="low", composition=(("source", 75), ("test", 25))
+    )
+    assert two.made_of() == "made of: source 0.1 KB (75%), test 0.0 KB (25%)"

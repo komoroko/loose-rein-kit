@@ -6,6 +6,10 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.3.9] - 2026-08-30
 
+Every figure quoted in this section is a measurement of **one field cycle** — a product built with
+this tool, 18 claims / 17 tasks / 234 files — not a property of every run. They are stated as
+"one field cycle" wherever a docstring repeats them.
+
 What a review is *given*, and what a run is *told it cost*. Both had the same shape of defect: a
 number or a payload that everything downstream trusted, assembled by code nobody had asked "and
 where does this come from". A blind extractor handed the answer sheet inside the diff. An axis of
@@ -31,7 +35,8 @@ task with nothing. Two different questions, no longer one constant. It was also 
 Comparator's contract advertised all three, and `reject_self_attestation` refused the field
 unconditionally on arrival — so a reviewer was invited to answer a question whose every answer was
 thrown away, and the axis reported `unavailable` forever. That is not a strict validator; it is a
-contract that lies, and it discarded 727,272 cache-creation tokens per run to do it. Integrity is
+contract that lies; one field cycle measured 727,272 cache-creation tokens discarded to it, per
+run. Integrity is
 the one axis that is not a model's to assert, so it is no longer asked for: the contract says not
 to send it, a volunteered value is dropped rather than refused, and `review_policy.derive_integrity`
 computes it from the committed blobs — the code anchors each cited Actual Statement carries,
@@ -83,6 +88,16 @@ change is past `max_diff_bytes` and whether it carries files no reviewer can rea
 `rein status` and the build loop each report it. A warning, never a stop — exceeding a budget splits
 the scope, and that is a human's call.
 
+It also says **what the payload is made of**. Knowing a change is too big raises the next question
+immediately — what would I remove — and answering it took a hand-run script both times it mattered
+in the field; those two measurements are what the first two entries above are. The breakdown is in
+`diff_facts.classify_path`'s own five kinds rather than a new taxonomy, because those are what the
+levers are denominated in: `test` is the half now withheld from the blind extractor, `dependency`
+and `generated` are the kinds whose content nobody reads, `source` is the thing under review. The
+plan's prose does not appear at all, because the first entry above already removed it. `split_tests`
+and the breakdown now take their two answers from one walk of the diff, so they cannot come to
+disagree about what a file's bytes are.
+
 **`run_measured` had one writer and no reader.** The event carries what the provider billed each
 role, and this module's own docstring said it exists so that summing it over a cycle gives the
 cycle's total. Nothing summed it, for three releases. So "where did the tokens go" had no answer
@@ -98,7 +113,8 @@ so instead of leaving a bare header that reads as a cost of zero.
 The rendering had to learn two words for what it was already counting. A replayed line is not a
 bill, so its price now says `not charged` — one phrasing for both facts put a dollar figure on the
 line whose entire reason for being separate is that nobody paid it. And **cache creation** is named
-beside cache reads: it is the premium-priced half, it is where 727,272 tokens per run were going,
+beside cache reads: it is the premium-priced half, it is where a field cycle's 727,272 tokens per
+run were going,
 and a role rendered as `3.07M in (1.10M cached)` left every one of them unaccounted for in the
 report that exists to find exactly that. Counts past a million render in millions for the same
 reason — `3067.3k` is a number the reader has to divide before it means anything.

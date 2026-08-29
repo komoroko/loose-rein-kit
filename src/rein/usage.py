@@ -203,8 +203,9 @@ def summarize(rows: dict[str, Usage], *, what: str, charged: bool = True) -> str
     figure on the line whose entire reason for being separate is that it is not a bill.
 
     Cache creation is named beside cache reads because it is the expensive half and was in
-    neither number a reader could see: a role showing `3.07M in (1.10M cached)` left 727k of
-    premium-priced cache writes unaccounted for, in the report meant to find exactly that.
+    neither number a reader could see: a role showing `3.07M in (1.10M cached)` left its
+    premium-priced cache writes unaccounted for, in the report meant to find exactly that. One
+    field cycle put 727,272 of them behind that gap.
     """
     live = {role: row for role, row in rows.items() if row.launches}
     if not live:

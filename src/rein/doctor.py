@@ -1264,7 +1264,8 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
                 "review",
                 f"{view.line()} — the budget's own instruction is to split the scope, and at gate ④ "
                 "that is no longer a move that exists. Split it now, or raise "
-                "`review_policy.budgets.max_diff_bytes` as a deliberate decision.",
+                "`review_policy.budgets.max_diff_bytes` as a deliberate decision."
+                + (f"\n  {view.made_of()}" if view.made_of() else ""),
             )
         )
     else:

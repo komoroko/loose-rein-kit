@@ -229,13 +229,49 @@ def split_tests(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tuple[s
     if not tests:
         return diff_text, ""
     halves: dict[bool, list[str]] = {True: [], False: []}
-    is_test = False
+    for path, section in _sections(diff_text):
+        halves[path in tests].append(section)
+    return "".join(halves[False]), "".join(halves[True])
+
+
+def _sections(diff_text: str) -> list[tuple[str, str]]:
+    """`(path, that file's slice of the diff)` for each `diff --git` section, in order.
+
+    One walk, because two answers are taken from it — which half of the reading a file belongs to
+    (`split_tests`) and how many bytes of the payload it is (`bytes_by_kind`) — and a second copy
+    of "find the header, attribute the following lines to it" is how the two would come to disagree
+    about what a file's bytes are. Anything before the first header (there is normally nothing) is
+    attributed to `""`, so no byte is silently dropped from a total that claims to be the payload.
+    """
+    sections: list[tuple[str, list[str]]] = [("", [])]
     for line in diff_text.splitlines(keepends=True):
         header = diff_facts._DIFF_GIT.match(line.rstrip("\n"))
         if header:
-            is_test = header.group("b") in tests
-        halves[is_test].append(line)
-    return "".join(halves[False]), "".join(halves[True])
+            sections.append((header.group("b"), []))
+        sections[-1][1].append(line)
+    return [(path, "".join(lines)) for path, lines in sections if lines]
+
+
+def bytes_by_kind(diff_text: str) -> dict[str, int]:
+    """How many bytes of the payload each `diff_facts` kind is, largest first.
+
+    The question a reader has once they know the payload is too big is *what it is made of*, and
+    answering it took a hand-run script both times it mattered in the field. The diagnosis that
+    `docs/` was 31% of a 2.14 MB change, and the one that tests were another 25%, are the two
+    changes above this line — and neither was visible from anything the tool printed.
+
+    Deliberately `classify_path`'s vocabulary rather than a new one: those five kinds are what the
+    levers are denominated in. `test` is the half `split_tests` sends only to the security
+    reviewer; `dependency` and `generated` are `MECHANICAL_KINDS`, whose content nobody needs to
+    read; `source` is the thing actually under review. A breakdown in categories the tool cannot
+    act on would be trivia. The plan's own prose does not appear at all because
+    `not_the_product` has already removed it — which is the point.
+    """
+    totals: dict[str, int] = {}
+    for path, section in _sections(diff_text):
+        kind = diff_facts.classify_path(path) if path else "source"
+        totals[kind] = totals.get(kind, 0) + len(section.encode("utf-8", errors="replace"))
+    return dict(sorted(totals.items(), key=lambda item: -item[1]))
 
 
 def _exists(repo: repo_mod.Repo, ref: str) -> bool:
@@ -563,6 +599,9 @@ class ChangeOutlook:
     ceiling: int
     unreadable: tuple[str, ...]
     effective_risk: str
+    #: What the payload is made of, by `diff_facts` kind, largest first. The number alone says a
+    #: review cannot be run; this says which lever to reach for.
+    composition: tuple[tuple[str, int], ...] = ()
 
     @property
     def over_budget(self) -> bool:
@@ -581,6 +620,18 @@ class ChangeOutlook:
             verdict = "blocks gate ④" if self.coverage_blocks_gate else "recorded, not blocking below high risk"
             text += f"; {len(self.unreadable)} unreadable file(s) make coverage insufficient ({verdict})"
         return text
+
+    def made_of(self) -> str:
+        """What the payload is made of, largest first. Empty when there is only one kind to name.
+
+        Kept off `line()` on purpose: the board's line answers "can this be reviewed", and this
+        answers "what would I remove". A reader who is not over budget does not need the second
+        question, and a reader who is needs it immediately.
+        """
+        if len(self.composition) < 2 or not self.diff_bytes:
+            return ""
+        parts = [f"{kind} {size / 1000:.1f} KB ({size * 100 // self.diff_bytes}%)" for kind, size in self.composition]
+        return "made of: " + ", ".join(parts)
 
 
 def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | None:
@@ -608,6 +659,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         ceiling=int(limits["max_diff_bytes"]),
         unreadable=tuple(sorted(p for p in unreadable if p)),
         effective_risk=_effective_risk(facts, plan),
+        composition=tuple(bytes_by_kind(diff_text).items()),
     )
 
 

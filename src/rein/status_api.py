@@ -737,6 +737,8 @@ def collect_status(
                 "over_budget": view.over_budget,
                 "unreadable": list(view.unreadable),
                 "coverage_blocks_gate": view.coverage_blocks_gate,
+                "made_of": view.made_of(),
+                "composition": dict(view.composition),
             }
 
     plan_block = _plan_block(plan) if plan is not None else None
@@ -868,6 +870,8 @@ def render(status: dict[str, object]) -> str:
     outlook = status.get("review_outlook")
     if isinstance(outlook, dict):
         lines += ["", "### Review outlook", f"- {outlook.get('line')}"]
+        if outlook.get("made_of"):
+            lines.append(f"- {outlook['made_of']}")
 
     tasks = status.get("tasks")
     if isinstance(tasks, dict):
