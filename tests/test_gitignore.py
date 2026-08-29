@@ -75,10 +75,7 @@ def test_merge_replaces_a_stale_block_in_place() -> None:
 
 def test_merge_replaces_a_block_that_has_no_terminator() -> None:
     # The template repo's own section ends at the next `# ---- ` header, not an explicit marker.
-    legacy = (
-        f"{gitignore.SECTION_HEADER}\n.worktrees/\n.rein/work/\n"
-        "# ---- environment variables ----\n.env\n"
-    )
+    legacy = f"{gitignore.SECTION_HEADER}\n.worktrees/\n.rein/work/\n# ---- environment variables ----\n.env\n"
     healed, changed = gitignore.merge(legacy, _CONFIG)
     assert changed
     assert healed.count(gitignore.SECTION_HEADER) == 1

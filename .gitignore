@@ -53,3 +53,5 @@ site/
 
 # ---- Claude Code local settings ----
 .claude/settings.local.json
+# scratch git worktrees the Claude Code CLI creates for isolated/forked runs
+.claude/worktrees/

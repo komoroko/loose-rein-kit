@@ -1042,6 +1042,10 @@ def check_gitignore(repo: repo_mod.Repo) -> list[Finding]:
         )
         return findings
 
+    # A tracked path is reported once, as tracked — `git check-ignore` also calls it not-ignored
+    # (the index wins over the patterns), but "add a rule" is the wrong fix for it.
+    tracked = [a for a in artifacts if repo._git("ls-files", "--", a)]
+
     gi_path = repo.path(".gitignore")
     gi_text = gi_path.read_text(encoding="utf-8") if gi_path.is_file() else ""
     if gitignore.SECTION_HEADER not in gi_text.splitlines():
@@ -1059,19 +1063,20 @@ def check_gitignore(repo: repo_mod.Repo) -> list[Finding]:
         not_effective = [
             a
             for a in artifacts
-            if repo._git_rc("check-ignore", "-q", "--", a + "probe" if a.endswith("/") else a)[0] != 0
+            if a not in tracked
+            and repo._git_rc("check-ignore", "-q", "--", a + "probe" if a.endswith("/") else a)[0] != 0
         ]
         if not_effective:
             findings.append(
                 Finding(
                     "WARN",
                     "gitignore",
-                    "listed in the Loose Rein block but not taking effect (tracked, or overridden lower in the "
-                    "file): " + ", ".join(not_effective) + " — run `rein sync`",
+                    "listed in the Loose Rein block but overridden lower in the file: "
+                    + ", ".join(not_effective)
+                    + " — run `rein sync`",
                 )
             )
 
-    tracked = [a for a in artifacts if repo._git("ls-files", "--", a)]
     if tracked:
         findings.append(
             Finding(

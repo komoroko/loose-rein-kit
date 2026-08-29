@@ -228,6 +228,20 @@ def test_run_init_writes_the_runtime_artifact_gitignore_block(tmp_path: Path) ->
     assert "\ndocs/\n" not in text
 
 
+def test_run_init_does_not_append_the_agents_pointer_in_a_template_repo(tmp_path: Path) -> None:
+    """A repo whose own config already says `template_mode: true` (re-running init in the
+    template itself) must not get a pointer to a rules body its AGENTS.md already *is*."""
+    from rein import store
+    from tests._support import make_config
+
+    (tmp_path / ".rein").mkdir()
+    (tmp_path / ".rein" / "config.yaml").write_bytes(store.dump_yaml(make_config(template_mode=True)))
+    (tmp_path / "AGENTS.md").write_text("# Repository rules\n\nthe rules themselves.\n", encoding="utf-8")
+
+    assert init_cmd.run_init(tmp_path, "demo", "build/demo", "") == 0
+    assert "rein-rules" not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
 def test_run_init_appends_its_block_to_an_existing_gitignore_once(tmp_path: Path) -> None:
     from rein import gitignore
 
