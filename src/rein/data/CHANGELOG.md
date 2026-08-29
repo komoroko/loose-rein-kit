@@ -4,6 +4,28 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.10] - 2026-08-30
+
+**A repository ran the loop and `git status` filled with the loop's own scratch.** `rein init`
+wrote the SSOT and `docs/`, appended the rules pointer, and stopped — it never touched
+`.gitignore`. The template repository derives what belongs there from the code that writes each
+path (`.worktrees/`, the dossier directory, the generated PR bodies) and a canary keeps that list
+honest, but none of it left the template: the first parallel build or `rein pr-draft` in a product
+dropped worktree copies and per-task dossiers as untracked, and a bare `git add -A` committed them.
+The derivation now lives in `rein.gitignore`, the one place the canary and the product both read;
+`rein init` and `rein sync` keep a marker-guarded block in the product's `.gitignore` current
+(creating the file when there is none), skipped in the template repository, which curates its own
+section. `rein sync --check` reports the block as drift; `uninstall --all` retracts it. The SSOT
+and `docs/**` are never listed — a gate receipt binds them, and a clone or a PR review has to see
+them.
+
+**`rein doctor` never looked at `.gitignore`.** A product could gitignore `.rein/state.yaml` and
+every check still passed, while the audit chain the gates rest on quietly stopped reaching new
+clones. `doctor` now fails when any SSOT path (`.rein/*.yaml`, `events.ndjson`, `rein.lock`, the
+materialized trees, `docs/`) is matched by `git check-ignore`, warns when the runtime-artifact
+block is missing or a generated path is already tracked (an ignore rule over a tracked path is a
+no-op), and passes only when both hold.
+
 ## [0.3.9] - 2026-08-30
 
 Every figure quoted in this section is a measurement of **one field cycle** — a product built with

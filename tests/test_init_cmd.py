@@ -215,6 +215,32 @@ def test_run_init_seeds_a_bare_directory(tmp_path: Path, capsys: pytest.CaptureF
     assert "prompts/commands/req.md" in data["prompts"]["files"]
 
 
+def test_run_init_writes_the_runtime_artifact_gitignore_block(tmp_path: Path) -> None:
+    from rein import gitignore
+
+    assert init_cmd.run_init(tmp_path, "demo", "build/demo", "") == 0
+    text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert gitignore.SECTION_HEADER in text
+    for pattern in (".worktrees/", ".rein/work/", ".rein/pr-draft.md", ".rein/pr-stack/"):
+        assert pattern in text
+    # The SSOT and docs/** are never listed — they are committed and reviewed at each gate.
+    assert ".rein/state.yaml" not in text
+    assert "\ndocs/\n" not in text
+
+
+def test_run_init_appends_its_block_to_an_existing_gitignore_once(tmp_path: Path) -> None:
+    from rein import gitignore
+
+    (tmp_path / ".gitignore").write_text(".venv/\n__pycache__/\n", encoding="utf-8")
+    assert init_cmd.run_init(tmp_path, "demo", "build/demo", "") == 0
+    first = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert first.startswith(".venv/\n__pycache__/\n")
+    assert first.count(gitignore.SECTION_HEADER) == 1
+    # A second init (idempotent re-run) does not duplicate the block.
+    assert init_cmd.run_init(tmp_path, "demo", "build/demo", "") == 0
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8").count(gitignore.SECTION_HEADER) == 1
+
+
 def test_switch_branch_recognizes_a_repo_before_its_first_commit(tmp_path: Path) -> None:
     """A fresh `git init` has no HEAD commit to resolve yet, but it is very much a repo —
     the most common state `rein init` actually runs in (plan's own greenfield walkthrough)."""

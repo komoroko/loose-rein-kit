@@ -3,8 +3,10 @@
 The copy-the-template model is gone: this command writes everything a repo needs *from the
 package payload*, so the working tree gains only state — `.rein/` (SSOT + materialized
 prompts/schema/rules + scaffold snapshot + lock) and `docs/` (deliverable scaffolds) — plus a
-marker-guarded pointer block in AGENTS.md. Nothing else is touched: no pyproject rewrite, no
-makefile, no agent surfaces (those are opt-in: `rein install <agent>`).
+marker-guarded pointer block in AGENTS.md and the runtime-artifact block in `.gitignore` (the
+scratch the loop regenerates every run, kept current afterwards by `rein sync`). Nothing else
+is touched: no pyproject rewrite, no makefile, no agent surfaces (those are opt-in: `rein
+install <agent>`).
 
 Brownfield is auto-detected (any existing code layout / build manifest at the root): the
 seeded config scopes `guard.paths` to the docs deliverables only — pending gates must
@@ -429,6 +431,7 @@ def run_init(
     if install_mod.CLAUDE_IMPORT_MARKER not in text:
         agents_md.write_text(text + install_mod.agents_pointer_block(), encoding="utf-8")
         print("  merge         AGENTS.md (Loose Rein pointer block appended)")
+    # (the runtime-artifact .gitignore block is written by the `sync` call in step 3)
     print(f"  {_switch_branch(root, branch)}")
     # 6) the sandboxes — offered here rather than left for `doctor` to find later.
     print(f"  {sandbox_step(root, offer=offer_sandbox, ask=_ask if offer_sandbox else None)}")

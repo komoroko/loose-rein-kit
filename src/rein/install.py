@@ -41,7 +41,7 @@ from typing import Any
 from packaging.version import InvalidVersion, Version
 
 import rein
-from rein import common, strict_yaml
+from rein import common, gitignore, strict_yaml
 from rein import data as data_mod
 from rein import lock as lock_mod
 from rein import repo as repo_mod
@@ -569,7 +569,8 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
     drift = [i for i in items if i.op != "unchanged"]
     stale = stale_integrations(data, rein.__version__)
     if check:
-        if not drift and not stale:
+        gitignore_stale = _refresh_gitignore(repo, write=False)
+        if not drift and not stale and not gitignore_stale:
             print(f"sync --check: {len(items)} materialized file(s) match the packaged payload.")
             return 0
         _print_plan(drift)
@@ -578,12 +579,15 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
             print(f"sync --check: {len(drift)} file(s) differ from the packaged payload (rein {rein.__version__}).")
         if stale:
             print(f"sync --check: {len(stale)} integration surface(s) predate rein {rein.__version__}.")
+        if gitignore_stale:
+            print("sync --check: the Loose Rein runtime-artifact block in .gitignore is out of date.")
         return 1
 
     _print_plan(items)
     hashes = _apply_plan(repo, items, desired)
     if refresh_ungenerated_review(repo):
         print("  update        .rein/review.yaml (the scaffold stub — it held no review)")
+    _refresh_gitignore(repo, write=True)
     files = {_materialized_key(rel): digest for rel, digest in _record_after(recorded, items, hashes).items()}
     data["prompts"] = {"version": rein.__version__, "files": files}
 
@@ -630,6 +634,32 @@ def _template_mode(repo: repo_mod.Repo) -> bool:
         return models.Config.parse(repo.config.read_text(encoding="utf-8")).template_mode
     except (OSError, models.DocumentError, strict_yaml.StrictParseError):
         return False
+
+
+def _refresh_gitignore(repo: repo_mod.Repo, *, write: bool) -> bool:
+    """Keep the runtime-artifact block in the repo's `.gitignore` current (creating the file if
+    absent). Returns whether it was — or, with ``write=False``, would be — changed.
+
+    Skipped in the template repository: it curates its own section by hand (same header, extra
+    teaching comments), which `scripts/template_lint.py` checks against the derived set instead.
+    """
+    from rein import models
+
+    if _template_mode(repo):
+        return False
+    path = repo.path(".gitignore")
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    try:
+        config_text = repo.config.read_text(encoding="utf-8")
+        merged, changed = gitignore.merge(existing, config_text)
+    except (OSError, models.DocumentError, strict_yaml.StrictParseError):
+        # An unreadable config is reported by sync's own `_documents_invalid` check; the
+        # .gitignore block just waits for the next run.
+        return False
+    if changed and write:
+        path.write_text(merged, encoding="utf-8")
+        print("  merge         .gitignore (Loose Rein runtime-artifact block)")
+    return changed
 
 
 def _settings_template() -> dict[str, Any]:
@@ -861,6 +891,15 @@ def uninstall_all(repo: repo_mod.Repo, *, force: bool = False, dry_run: bool = F
         else:
             agents_md.unlink()
             print("  remove        AGENTS.md (held only the Loose Rein block)")
+    # Retract the runtime-artifact block from .gitignore (leaving the rest of the file alone).
+    gi = repo.path(".gitignore")
+    if gi.is_file():
+        stripped = gitignore.remove(gi.read_text(encoding="utf-8"))
+        if stripped.strip():
+            gi.write_text(stripped, encoding="utf-8")
+        else:
+            gi.unlink()
+            print("  remove        .gitignore (held only the Loose Rein block)")
     repo.lock.unlink(missing_ok=True)
     print("uninstalled: the lock is removed; repo state (.rein SSOT, docs/) is untouched.")
     return 0

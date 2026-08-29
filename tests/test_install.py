@@ -412,6 +412,36 @@ def test_sync_rematerializes_the_review_stub_while_it_holds_no_review(repo: repo
     assert models.Review.parse(review_path.read_text(encoding="utf-8")).machine_status == "not_generated"
 
 
+def test_sync_refreshes_a_stale_gitignore_block_and_check_flags_it(
+    repo: repo_mod.Repo, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from rein import gitignore
+
+    gi = repo.path(".gitignore")
+    # init wrote the block; drift it by renaming the worktree dir in config and in .gitignore.
+    config = repo.path(".rein/config.yaml")
+    config.write_text(config.read_text(encoding="utf-8").replace(".worktrees", ".wt"), encoding="utf-8")
+    capsys.readouterr()
+    assert install.sync(repo, check=True) == 1
+    assert "runtime-artifact block in .gitignore is out of date" in capsys.readouterr().out
+    assert install.sync(repo) == 0
+    healed = gi.read_text(encoding="utf-8")
+    assert ".wt/" in healed and ".worktrees/" not in healed
+    assert gitignore.SECTION_HEADER in healed
+    assert install.sync(repo, check=True) == 0
+
+
+def test_sync_leaves_the_template_repos_own_gitignore_alone(repo: repo_mod.Repo) -> None:
+    """`guard.template_mode` repos curate their own section (extra teaching comments);
+    `scripts/template_lint.py` checks it against the derived set instead."""
+    config = repo.path(".rein/config.yaml")
+    config.write_text(config.read_text(encoding="utf-8").replace("template_mode: false", "template_mode: true"))
+    curated = "# ---- Loose Rein runtime artifacts ----\n# hand-kept\n.worktrees/\n"
+    repo.path(".gitignore").write_text(curated, encoding="utf-8")
+    assert install.sync(repo) == 0
+    assert repo.path(".gitignore").read_text(encoding="utf-8") == curated
+
+
 def test_a_generated_review_is_never_rewritten_by_sync(repo: repo_mod.Repo) -> None:
     """It is evidence bound to a commit. `rein review generate --force` rewrites it by re-reading
     the code; nothing else may."""

@@ -41,6 +41,7 @@ from rein import (
     event_chain,
     executors,
     gate_guard,
+    gitignore,
     install,
     models,
     strict_yaml,
@@ -984,6 +985,109 @@ def check_ci(repo: repo_mod.Repo) -> list[Finding]:
     return findings
 
 
+#: Paths a gate receipt binds. A gitignored record is one a fresh clone and a PR review never
+#: see, so `.gitignore` matching any of these is a broken invariant, not a preference.
+_SSOT_MUST_COMMIT: tuple[str, ...] = (
+    ".rein/state.yaml",
+    ".rein/plan.yaml",
+    ".rein/review.yaml",
+    ".rein/config.yaml",
+    ".rein/events.ndjson",
+    ".rein/rein.lock",
+    ".rein/prompts/",
+    ".rein/schema/",
+    ".rein/scaffold/",
+    "docs/",
+)
+
+
+def check_gitignore(repo: repo_mod.Repo) -> list[Finding]:
+    """Two questions .gitignore must answer right: the SSOT is committed, the scratch is not.
+
+    The runtime-artifact block (`.worktrees/`, `.rein/work/`, the generated PR bodies) is
+    written by `rein init` and kept current by `rein sync`; the SSOT and `docs/**` are what
+    every gate receipt binds and must never be ignored. `git check-ignore` consults the index,
+    so a path git already tracks reads as not-ignored however the patterns are written — which
+    is the state that actually reaches a clone.
+    """
+    if repo.git_common_dir is None:
+        return [Finding("INFO", "gitignore", "not a git checkout — .gitignore cannot be checked")]
+
+    findings: list[Finding] = []
+    ignored_ssot: list[str] = []
+    for path in _SSOT_MUST_COMMIT:
+        rc, _ = repo._git_rc("check-ignore", "-q", "--", path)
+        if rc == 0:
+            ignored_ssot.append(path)
+        elif rc != 1:
+            return [
+                Finding("FAIL", "gitignore", f"`git check-ignore` failed (rc {rc}) — .gitignore could not be checked")
+            ]
+    if ignored_ssot:
+        findings.append(
+            Finding(
+                "FAIL",
+                "gitignore",
+                "gitignored, but a gate receipt binds these and a clone or PR review must see them: "
+                + ", ".join(ignored_ssot)
+                + " — remove them from .gitignore",
+            )
+        )
+
+    try:
+        artifacts = sorted(gitignore.runtime_artifacts(repo.config.read_text(encoding="utf-8")))
+    except (OSError, models.DocumentError, strict_yaml.StrictParseError):
+        findings.append(
+            Finding("WARN", "gitignore", "config.yaml is unreadable — the runtime-artifact block was not checked")
+        )
+        return findings
+
+    gi_path = repo.path(".gitignore")
+    gi_text = gi_path.read_text(encoding="utf-8") if gi_path.is_file() else ""
+    if gitignore.SECTION_HEADER not in gi_text.splitlines():
+        findings.append(
+            Finding(
+                "WARN",
+                "gitignore",
+                f"no `{gitignore.SECTION_HEADER}` block — run `rein sync` to add it; the loop writes "
+                + ", ".join(artifacts)
+                + " and a bare `git add -A` would sweep them in",
+            )
+        )
+    else:
+        # A directory pattern (`foo/`) is tested through a path inside it; a file pattern as-is.
+        not_effective = [
+            a
+            for a in artifacts
+            if repo._git_rc("check-ignore", "-q", "--", a + "probe" if a.endswith("/") else a)[0] != 0
+        ]
+        if not_effective:
+            findings.append(
+                Finding(
+                    "WARN",
+                    "gitignore",
+                    "listed in the Loose Rein block but not taking effect (tracked, or overridden lower in the "
+                    "file): " + ", ".join(not_effective) + " — run `rein sync`",
+                )
+            )
+
+    tracked = [a for a in artifacts if repo._git("ls-files", "--", a)]
+    if tracked:
+        findings.append(
+            Finding(
+                "WARN",
+                "gitignore",
+                "tracked by git though regenerated every run: "
+                + ", ".join(tracked)
+                + " — `git rm -r --cached` them so the ignore rule can take hold",
+            )
+        )
+
+    if not findings:
+        findings.append(Finding("PASS", "gitignore", "runtime artifacts ignored; SSOT and docs/** committed"))
+    return findings
+
+
 _PINNED_ACTION = re.compile(r"uses:\s*(?!\./)([^\s@]+)@([^\s#]+)")
 _SHA_REF = re.compile(r"[0-9a-f]{40}")
 
@@ -1323,6 +1427,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_hook(repo)
     findings += check_preauthorization(repo)
     findings += check_ci(repo)
+    findings += check_gitignore(repo)
     findings += check_gate_chain(state)
     findings += check_receipts(state)
     findings += check_freeze_drift(state, plan, config, repo)
