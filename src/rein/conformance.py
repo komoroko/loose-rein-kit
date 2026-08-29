@@ -23,11 +23,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from rein import models, review_policy
+from rein import common, models, review_policy
 from rein import repo as repo_mod
 
 
-class ComparatorError(RuntimeError):
+class ComparatorError(common.ReinError, RuntimeError):
     """The Comparator was not independent, or produced output that could not be trusted."""
 
 
@@ -53,7 +53,6 @@ def contract() -> str:
         '"claims": [{"claim_id": "<a claim id from the expected model>", '
         '"actual_statement_ids": ["AST-001"], '
         f'"verdict": "<one of {verdicts}>", '
-        '"integrity": {"status": "verified|failed|unavailable"}, '
         '"semantic_support": {"status": "supported|contradicted|conflicted|unknown", '
         '"assessment_basis": "machine_assessed"}, '
         '"conformance": {"status": "observed|partial|unknown"}, "unknowns": ["<optional>"]}], '
@@ -73,8 +72,10 @@ def contract() -> str:
         "one must cite the Actual Statement it was read from — that section is the only answer to "
         '"did this build something nobody asked for?", and an empty list is a finding, not a '
         "formality.\n"
-        "- There is no single `verified`. The three axes are separate on purpose: integrity is a "
-        "fact, semantic_support is your judgement, conformance is an observation.\n"
+        "- Do not send an `integrity` field. The three axes are separate on purpose and integrity "
+        "is the one that is not yours: it is derived from the anchors your citations rest on, "
+        "re-checked against the committed blobs. semantic_support is your judgement, conformance "
+        "is an observation, integrity is a fact about the tree.\n"
         "- Answer for EVERY claim in the expected model. A claim you leave out is not read as "
         "absent, it is recorded as `unknown` and put in front of a human as an unanswered "
         "decision; say `unknown` yourself, with what you were missing, rather than being silent."
@@ -136,7 +137,7 @@ def run_comparator(
     *,
     repo: repo_mod.Repo,
     commit: str,
-    actual_statement_ids: Iterable[str],
+    actual_statements: Sequence[Mapping[str, Any]],
     known_ids: Iterable[str],
     expected_claim_ids: Iterable[str],
     effective_risk: str,
@@ -171,7 +172,11 @@ def run_comparator(
     if str(document.get("actual_digest", actual_digest_of(request))) != actual_digest_of(request):
         raise ComparatorError("the Comparator's actual_digest does not match the extraction it was given")
 
-    actual_ids = set(actual_statement_ids)
+    actual_ids = {str(a.get("id")) for a in actual_statements}
+    anchors_by_statement = {
+        str(a.get("id")): [dict(anchor) for anchor in (a.get("code_anchors") or []) if isinstance(anchor, Mapping)]
+        for a in actual_statements
+    }
     known = set(known_ids)
     problems: list[str] = []
     claims: list[dict[str, Any]] = []
@@ -188,7 +193,13 @@ def run_comparator(
             known=known,
             effective_risk=effective_risk,
         )
-        claims.append(dict(claim))
+        # A volunteered `integrity` is dropped rather than refused. The contract says not to send
+        # one and this is derived below either way, so the field carries no information — and
+        # refusing an answer over a field nobody reads is how three launches used to be thrown away
+        # for a value the contract itself had offered first.
+        row = dict(claim)
+        row.pop("integrity", None)
+        claims.append(row)
 
     gaps_raw = document.get("actual_coverage_gaps")
     gaps = [dict(g) for g in gaps_raw if isinstance(g, Mapping)] if isinstance(gaps_raw, list) else []
@@ -214,6 +225,12 @@ def run_comparator(
         raise ComparatorError("conformance rejected:\n" + "\n".join(f"  - {p}" for p in problems))
 
     framed, unanswered = _frame_by_expected(claims, expected_claim_ids)
+    # The one axis that is not the Comparator's to give (`review_policy.derive_integrity`). An
+    # unanswered row already carries `unavailable` and cites nothing, so it derives to the same.
+    for row in framed:
+        row["integrity"] = review_policy.derive_integrity(
+            repo, commit, _string_list(row.get("actual_statement_ids")), anchors_by_statement
+        )
     return ComparatorResult(
         claims=tuple(framed),
         actual_coverage_gaps=tuple(gaps),
@@ -287,9 +304,6 @@ def _validate_claim(
 
     # §12.7 / §24.3: no fabricated claim citations.
     problems += [f"{cid}: {p}" for p in review_policy.validate_citations({cid}, known, what="conformance")]
-
-    # §24.2: the Comparator cannot self-report `integrity: verified`.
-    problems += review_policy.reject_self_attestation(claim)
 
     # An AI cannot lower the change's risk below its effective floor.
     if claim.get("risk") is not None:

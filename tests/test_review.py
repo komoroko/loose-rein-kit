@@ -409,14 +409,16 @@ def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "add charge")
     base = _git(review_repo, "rev-parse", "HEAD~1")
-    files = diff_facts.analyze(review._diff(repo, base, "HEAD")).files
+    files = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,))).files
 
-    widest = review._reviewable(repo, base, "HEAD", files, plain="", ceiling=10**9)
+    widest = review._reviewable(repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9)
     assert widest.context_lines == review.CONTEXT_LADDER[0]
     assert "narrowed_from" not in widest.as_facts()
 
     # One byte less than the widest rung costs: the ladder has to step down, and say that it did.
-    narrowed = review._reviewable(repo, base, "HEAD", files, plain="", ceiling=len(widest.text.encode("utf-8")) - 1)
+    narrowed = review._reviewable(
+        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=len(widest.text.encode("utf-8")) - 1
+    )
     assert narrowed.context_lines < review.CONTEXT_LADDER[0]
     assert narrowed.as_facts()["narrowed_from"] == review.CONTEXT_LADDER[0]
     assert len(narrowed.text.encode("utf-8")) < len(widest.text.encode("utf-8"))
@@ -430,9 +432,11 @@ def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: 
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "add src")
     base = _git(review_repo, "rev-parse", "HEAD~1")
-    facts = diff_facts.analyze(review._diff(repo, base, "HEAD"))
+    facts = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,)))
 
-    reviewable = review._reviewable(repo, base, "HEAD", facts.files, plain="the plain one", ceiling=1)
+    reviewable = review._reviewable(
+        repo, base, "HEAD", facts.files, (repo_mod.SSOT_DIR,), plain="the plain one", ceiling=1
+    )
     assert reviewable.context_lines == review.PLAIN_CONTEXT
     assert reviewable.text == "the plain one"
 
@@ -822,18 +826,18 @@ def test_a_product_file_called_plan_does_not_read_as_priming(review_repo: Path) 
 def test_change_digest_excludes_the_rein_dir(review_repo: Path) -> None:
     repo = repo_mod.Repo(review_repo)
     head = _git(review_repo, "rev-parse", "HEAD")
-    before = review.change_digest(repo, head)
+    before = review.change_digest(repo, head, (repo_mod.SSOT_DIR,))
     # A new file under .rein/ must not move the change digest (it is bound by its own digests).
     (review_repo / ".rein" / "scratch.txt").write_text("bound elsewhere\n", encoding="utf-8")
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "touch ssot")
-    same = review.change_digest(repo, _git(review_repo, "rev-parse", "HEAD"))
+    same = review.change_digest(repo, _git(review_repo, "rev-parse", "HEAD"), (repo_mod.SSOT_DIR,))
     assert same == before
     # A change to real source, on the other hand, does move it.
     (review_repo / "src.py").write_text("print('changed')\n", encoding="utf-8")
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "real change")
-    moved = review.change_digest(repo, _git(review_repo, "rev-parse", "HEAD"))
+    moved = review.change_digest(repo, _git(review_repo, "rev-parse", "HEAD"), (repo_mod.SSOT_DIR,))
     assert moved != before
 
 
@@ -1149,7 +1153,9 @@ def test_supervise_runs_it_again_and_returns_the_review_that_worked(review_repo:
         if len(attempts) == 1:
 
             def fail(role: str, request: Mapping[str, Any]) -> str:
-                raise _adapter_failure("You've hit your session limit · resets 3pm")
+                # Names no reset time on purpose: with one, the loop would wait until it, which is
+                # the point of `_supervise_delay` and is tested there rather than by sleeping here.
+                raise _adapter_failure("429 rate limit exceeded")
 
             return _reviewers(fail)
         return _reviewers(_fake_reviewer)
@@ -1163,6 +1169,34 @@ def test_supervise_runs_it_again_and_returns_the_review_that_worked(review_repo:
     )
     assert len(attempts) == 2
     assert machine["status"] == "generated"
+
+
+def test_supervise_waits_until_the_reset_the_cli_named() -> None:
+    """Extracting the time, printing it, and sleeping a fixed interval anyway learned nothing.
+
+    Seven attempts, 900s apart, each refused in ~0.4s against a limit that lifted at 06:50 — and
+    the host session ended before it did.
+    """
+    envelope = json.dumps(
+        {
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your session limit \u00b7 resets 6:50am (Asia/Tokyo)",
+            "type": "result",
+            "duration_ms": 412,
+        }
+    )
+    delay, hint = review._supervise_delay(_adapter_failure(envelope), interval_sec=900)
+
+    assert delay > 900, "a fifteen-minute interval against a limit that lifts hours from now"
+    assert delay <= review.MAX_SUPERVISE_SLEEP_SEC
+    # The hint is the sentence, not a slice landing mid-token in the telemetry that follows it.
+    assert hint == "resets 6:50am (Asia/Tokyo)"
+
+
+def test_supervise_falls_back_to_the_interval_when_no_time_is_named() -> None:
+    delay, hint = review._supervise_delay(_adapter_failure("429 rate limit exceeded"), interval_sec=900)
+    assert (delay, hint) == (900, "")
 
 
 def test_without_supervise_the_first_failure_is_the_answer(review_repo: Path) -> None:
@@ -1789,3 +1823,62 @@ def test_a_finding_that_stopped_blocking_is_recorded_where_it_outlives_the_docum
     assert len(closed) == 1
     assert closed[0].subject_ids == ("SEC-001",)  # the finding is the event's subject, not a detail
     assert closed[0].detail["resolved_at"] == {"subject_head_sha": "f" * 40}
+
+
+@pytest.mark.integration
+def test_the_extractor_never_reads_the_tests_and_the_security_reviewer_does(review_repo: Path) -> None:
+    """25% of the payload, and the wrong 25% for the stage whose value is that it read no plan.
+
+    `test_render_grid_matches_expected_bins` is the requirement, restated. Sending it to the blind
+    extractor is the same contamination as sending it the tickets, and it was the larger half.
+    """
+    (review_repo / "src.py").write_text("def charge(amount):\n    return amount\n", encoding="utf-8")
+    (review_repo / "tests").mkdir(exist_ok=True)
+    (review_repo / "tests" / "test_charge.py").write_text(
+        "def test_charge_rejects_a_negative_amount():\n    assert True\n", encoding="utf-8"
+    )
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add charge and its test")
+
+    seen: list[Mapping[str, Any]] = []
+    base = _git(review_repo, "rev-parse", "HEAD~1")
+    review.generate(repo_mod.Repo(review_repo), _reviewers(_capturing_reviewer(seen)), base=base)
+
+    extract = _extract_request(seen)
+    assert "def charge" in extract["diff"]
+    assert "test_charge_rejects_a_negative_amount" not in json.dumps(extract)
+
+    security = next(r for r in seen if "signals" in r.get("deterministic_facts", {}))
+    assert "def charge" in security["diff"], "the shared reading is the source half"
+    assert "test_charge_rejects_a_negative_amount" in security["tests_diff"]
+    # The halves are disjoint: the same bytes twice would undo the saving they were split for.
+    assert "test_charge_rejects_a_negative_amount" not in security["diff"]
+
+
+def test_splitting_a_diff_with_no_tests_costs_nothing() -> None:
+    files = [diff_facts.DiffFile(path="src.py", hunks=())]
+    assert review.split_tests("diff --git a/src.py b/src.py\n+x\n", files) == (
+        "diff --git a/src.py b/src.py\n+x\n",
+        "",
+    )
+
+
+def test_the_outlook_says_what_gate_4_would_be_asked_to_read(review_repo: Path) -> None:
+    """Both of gate ④'s refusals are derivable from git at any moment, and both were first heard
+    at gate ④ — where "split the scope" is not a move that exists, because everything is merged."""
+    (review_repo / "src.py").write_text("x = 1\n", encoding="utf-8")
+    (review_repo / "smoke.wav").write_bytes(b"RIFF\x00\x01\x02\x03binary")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add src and a committed binary")
+
+    view = review.outlook(repo_mod.Repo(review_repo), base=_git(review_repo, "rev-parse", "HEAD~1"))
+    assert view is not None
+    assert view.unreadable == ("smoke.wav",), "one committed binary is what makes coverage insufficient"
+    assert not view.over_budget
+    assert "change under review:" in view.line() and "coverage insufficient" in view.line()
+
+
+def test_an_over_budget_change_says_split_rather_than_raise(review_repo: Path) -> None:
+    outlook = review.ChangeOutlook(diff_bytes=2_141_194, ceiling=524_288, unreadable=(), effective_risk="high")
+    assert outlook.over_budget
+    assert "OVER, split the scope" in outlook.line()

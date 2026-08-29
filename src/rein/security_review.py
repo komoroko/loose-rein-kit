@@ -82,6 +82,10 @@ def contract() -> str:
         "has it; leave it out once the change resolves it. Which of those two you did is not taken "
         "on your word — the anchors are re-checked against the committed tree, and leaving out a "
         "finding whose code is still there is refused as you clearing your own block.\n"
+        "- `tests_diff`, when present, is the test half of the same change, sent to you and to "
+        "nobody else. Tests are code an agent wrote and they run with the operator's credentials, "
+        "so review them as code: a fixture that reaches the network, a credential in a test "
+        "constant, a helper that shells out. Anchor into them exactly as into anything else.\n"
         "- An empty `findings` list is a real answer. Say it rather than inventing something."
     )
 
@@ -89,6 +93,7 @@ def contract() -> str:
 def build_request(
     *,
     diff_text: str,
+    tests_diff: str = "",
     deterministic_facts: Mapping[str, Any],
     trusted_base_sha: str,
     subject_head_sha: str,
@@ -114,6 +119,12 @@ def build_request(
         "diff": diff_text,
         "deterministic_facts": dict(deterministic_facts),
     }
+    # The test half of the change, which only this stage is sent (`review.split_tests`). It rides
+    # in its own key rather than concatenated into `diff` because `diff` is the reading both
+    # reading stages share and prime one session with — and the blind extractor must not read a
+    # test suite that paraphrases the requirements back to it.
+    if tests_diff:
+        request["tests_diff"] = tests_diff
     prior = [dict(finding) for finding in prior_blocking if str(finding.get("id", ""))]
     if prior:
         request["prior_blocking"] = prior

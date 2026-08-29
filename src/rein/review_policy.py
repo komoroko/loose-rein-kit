@@ -9,8 +9,9 @@ mechanically, before any reviewer text reaches a human:
                    so a diff that deletes a guard is at least `high` whatever the plan says.
   code anchors     a reviewer's "this happens at file:line" is checked against the *committed*
                    blob at that path — a fabricated or stale anchor is rejected (§12.7).
-  self-attestation a reviewer may not set `integrity: verified` (that is derived from digests,
-                   not claimed) nor clear a `blocking` flag the policy set (§24.2, §24.3).
+  integrity        derived here from the anchors a claim's citations rest on, never sent by a
+                   reviewer (`derive_integrity`); nor may one clear a `blocking` flag the policy
+                   set (§24.2, §24.3).
   known ids only   every Claim/Task id a reviewer references must exist in the frozen plan —
                    an invented `C-999` is a fabricated citation, not evidence.
   independence     a critical review needs the Actual Extractor and the Comparator in distinct
@@ -23,7 +24,7 @@ against crafted-malicious reviewer payloads without running a model.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -368,19 +369,44 @@ def validate_anchor(repo: repo_mod.Repo, commit: str, anchor: Mapping[str, Any])
 # --- self-attestation the policy forbids (plan §24.2, §24.3) ------------------
 
 
-def reject_self_attestation(claim_result: Mapping[str, Any]) -> list[str]:
-    """A reviewer may not hand itself `integrity: verified` — integrity is derived, not claimed.
+def derive_integrity(
+    repo: repo_mod.Repo,
+    commit: str,
+    statement_ids: Sequence[str],
+    anchors_by_statement: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """One claim's `integrity` axis, established from the anchors its citations rest on.
 
-    `integrity.status = verified` is a fact the Policy Engine establishes from a matching code
-    anchor digest. A claim result that arrives already carrying it
-    is a reviewer grading its own homework (plan §2.3, §12.7).
+    "Integrity is derived from digests, never claimed" was the rule, and **nothing derived it**.
+    The comparator's contract offered `verified` as the first of three legal values, a validator
+    refused it unconditionally for every claim that used it, and the only status any review could
+    ever carry was `unavailable` — an axis that existed as a slot. One field report: sixteen of
+    eighteen claims refused, three launches and 727,272 cache-creation tokens discarded, gate ④
+    unreachable, per run.
+
+    What it means here:
+
+    - `verified` — the claim cites at least one Actual Statement, and every code anchor of every
+      cited statement still resolves to the committed blob at `commit`. The verdict rests on code
+      that is really in the tree the review is bound to.
+    - `failed` — some cited anchor does not. Within one generation the extractor validated those
+      same anchors against this same commit, so this means the tree moved underneath a pipeline
+      whose reading stages run for minutes at a time. Rare, and exactly the sort of thing a review
+      must not go quiet about.
+    - `unavailable` — the claim cites no Actual Statement, so there is nothing to check. That is
+      what an unanswered claim gets, and it is a fact rather than a verdict.
+
+    `code_anchor_digest` binds the answer to the anchors it was taken over, so a later reader can
+    tell which evidence this status was about.
     """
-    integrity = claim_result.get("integrity")
-    status = str(integrity.get("status")) if isinstance(integrity, Mapping) else ""
-    if status == "verified":
-        cid = claim_result.get("claim_id", "?")
-        return [f"claim {cid}: a reviewer cannot self-report `integrity: verified` — it is derived from digests"]
-    return []
+    anchors = [dict(a) for sid in statement_ids for a in anchors_by_statement.get(sid, ())]
+    if not anchors:
+        return {"status": "unavailable"}
+    failed = any(validate_anchor(repo, commit, anchor) for anchor in anchors)
+    return {
+        "status": "failed" if failed else "verified",
+        "code_anchor_digest": digests.of(anchors),
+    }
 
 
 def reject_risk_downgrade(claimed_risk: str, floor: str, *, subject: str = "change") -> list[str]:

@@ -33,6 +33,8 @@ from typing import Any
 
 import yaml
 
+from rein import common
+
 # --- limits -------------------------------------------------------------------
 #
 # Sized against the artifacts actually read, with roughly an order of magnitude of
@@ -62,7 +64,7 @@ EVENT_LIMITS = Limits(max_bytes=64 * 1024, max_depth=16, max_scalar_len=8192, ma
 UNTRUSTED_LIMITS = Limits(max_bytes=1024 * 1024, max_depth=24, max_scalar_len=64 * 1024, max_collection=4096)
 
 
-class StrictParseError(ValueError):
+class StrictParseError(common.ReinError, ValueError):
     """The document is not unambiguous (or not within limits) — never a partial read."""
 
 

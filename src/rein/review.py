@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, TypeVar
 
 from rein import (
@@ -51,6 +52,8 @@ from rein import (
     run_record,
     security_review,
 )
+from rein import install as install_mod
+from rein import lock as lock_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
@@ -60,31 +63,81 @@ logger = logging.getLogger(__name__)
 #: One stage's validated result — whatever `_cached_stage` was handed a runner for.
 T = TypeVar("T")
 
-#: The SSOT artefacts are bound by their own digests, so the change under review is the tree with
-#: them excluded — otherwise a review that writes review.yaml would invalidate itself (plan §17.3).
-_CHANGE_EXCLUDE: tuple[str, ...] = (repo_mod.SSOT_DIR,)
+#: The plan's own prose that lives outside `plan.sources`: the task tickets and the ADRs. Named as
+#: directories as well as read from the freeze because a ticket written or amended after gate ③ is
+#: still the answer sheet, and `plan.sources` only knows the ones the freeze hashed.
+_PLAN_PROSE_DIRS: tuple[str, ...] = ("docs/tasks/", "docs/decisions/")
 
 
-class ReviewError(Exception):
+def not_the_product(repo: repo_mod.Repo, state: models.State | None) -> tuple[str, ...]:
+    """Every path in this repository that is not the thing under review.
+
+    `.rein/` was the whole list, and it was the whole list because it was written down rather than
+    derived. What is actually *not the product* is larger and this repository already knows it
+    exactly:
+
+    - **`.rein/`**, which is bound by its own digests — a review that wrote `review.yaml` would
+      otherwise invalidate itself (plan §17.3).
+    - **The Expected Model's prose.** `state.plan.sources` names the documents gate ③ froze as
+      "the prose the build reads": the requirements, the design, the ADRs, every task ticket. The
+      blind extractor was being handed all of it. `actual_extraction.assert_blind` guards against
+      the plan being *given* to it and cannot notice the plan arriving inside the diff, so on any
+      cycle that touched a requirement or a ticket the Expected/Actual independence gate ④ rests on
+      was not established — and "extra behaviours: 0" means very little from a reader that has read
+      the tickets. Measured on one cycle: `docs/` was 658,850 of 2,141,194 bytes, 31%, of which
+      422 KB was the Expected side verbatim.
+    - **The surfaces `rein install <agent>` wrote.** The phase command bodies describe what each
+      gate expects; the role prompts describe how each stage is meant to answer. They are this
+      tool's own orchestration text, handed to the reviewer as if somebody had written it as code.
+      The exact paths are in `rein.lock`, because `install` recorded every one of them.
+
+    The rest of `docs/` stays in: a README and an operator guide are deliverables, and a blanket
+    `docs` exclusion would hide user-facing documentation from the only reader it gets.
+
+    A directory keeps its trailing slash and a file does not — `digests.filter_tree` and
+    `repo.pathspec_excluding` both read the difference.
+    """
+    paths: set[str] = {repo_mod.SSOT_DIR, *_PLAN_PROSE_DIRS}
+    if state is not None:
+        paths |= set(state.frozen_sources)
+    lock_data = lock_mod.read(repo.lock) or {}
+    integrations = lock_data.get("integrations")
+    if isinstance(integrations, dict):
+        for record in integrations.values():
+            if not isinstance(record, dict):
+                continue
+            paths |= {str(path) for path in (record.get("files") or {})}
+            # settings.json is recorded apart from `files` because install *merges* into it rather
+            # than owning it. It is still a surface this tool wrote, so it is still not the product.
+            if isinstance(record.get("settings"), dict):
+                paths.add(install_mod.SETTINGS_PATH)
+    return tuple(sorted(paths))
+
+
+class ReviewError(common.ReinError):
     """A review could not be generated or completed — carries a human-readable reason."""
 
 
 # -- deterministic digests over the committed tree ----------------------------
 
 
-def change_digest(repo: repo_mod.Repo, commit: str) -> str:
-    """The digest of the code under review at `commit`: the committed tree minus the SSOT dir."""
+def change_digest(repo: repo_mod.Repo, commit: str, exclude: Sequence[str]) -> str:
+    """The digest of the code under review at `commit`: the committed tree minus `exclude`.
+
+    `exclude` is `not_the_product`'s answer, passed in rather than read here so that the digest and
+    the diff below cannot be given two different ones.
+    """
     rc, out = repo._git_rc("ls-tree", "-r", "-z", commit)
     if rc != 0:
         raise ReviewError(f"cannot read the tree at {commit}: {out.strip()}")
-    entries = digests.filter_tree(digests.parse_ls_tree(out), exclude_prefixes=_CHANGE_EXCLUDE)
+    entries = digests.filter_tree(digests.parse_ls_tree(out), exclude_prefixes=exclude)
     return digests.tree_digest(entries)
 
 
-def _diff(repo: repo_mod.Repo, base: str, head: str, *, context: int | None = None) -> str:
-    """The change under review, which is the *product* — `.rein/` is not part of it.
+def _diff(repo: repo_mod.Repo, base: str, head: str, exclude: Sequence[str], *, context: int | None = None) -> str:
+    """The change under review, which is the *product* — `not_the_product` is not part of it.
 
-    The same exclusion `change_digest` above takes, through the same constant, because the two
+    The same exclusion `change_digest` above takes, through the same argument, because the two
     have to be answers about one subject. They were not: the digest a review binds itself to left
     the SSOT out, and the diff every reviewer read put it back in — schema payloads, the frozen
     plan, task state, the event log, all of it handed over as if it were code somebody wrote. A
@@ -100,7 +153,7 @@ def _diff(repo: repo_mod.Repo, base: str, head: str, *, context: int | None = No
     cannot be carried out on the orchestration state itself.
     """
     width = () if context is None else (f"-U{context}",)
-    rc, out = repo._git_rc("diff", *width, f"{base}..{head}", "--", *repo_mod.SSOT_PATHSPEC)
+    rc, out = repo._git_rc("diff", *width, f"{base}..{head}", "--", *repo_mod.pathspec_excluding(exclude))
     if rc != 0:
         raise ReviewError(f"cannot diff {base}..{head}: {out.strip()}")
     return out
@@ -149,6 +202,40 @@ def fold_mechanical(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tup
     if current is not None:
         kept.append(f"@@ {hunk_lines} line(s) of mechanical change, body withheld @@\n")
     return "".join(kept), folded
+
+
+def split_tests(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tuple[str, str]:
+    """`(the source half, the test half)` of one diff, split by file.
+
+    The two reading stages want different things and were forced to take the same bytes.
+
+    **The blind extractor should not see the tests.** Its job is what the code *does*, and a test
+    does not ship — it asserts intent. A name like `test_render_grid_matches_expected_bins` is a
+    paraphrase of the requirement, handed to the one stage whose entire value is that it has never
+    read the requirements. That is the same contamination `not_the_product` removes, weaker in
+    degree and identical in kind, and whether tests were written at all is answerable from the
+    Coverage Manifest's file list without reading a single assertion. Measured on one cycle:
+    `backend/tests/` was 544,421 bytes, 25% of the payload.
+
+    **The security reviewer should.** Tests are code an agent wrote and they run with the
+    operator's credentials, which this repository's own config comments say in as many words.
+
+    So the split is not a quality/cost trade in either direction: the extraction gets *more* blind
+    and 25% cheaper at once, and the security review loses nothing. `SharedReading` primes on the
+    source half — the part both stages read — and the test half rides inline on the security
+    reviewer's own branch, which is what keeps one reading serving two stages.
+    """
+    tests = {f.path for f in files if diff_facts.classify_path(f.path) == "test"}
+    if not tests:
+        return diff_text, ""
+    halves: dict[bool, list[str]] = {True: [], False: []}
+    is_test = False
+    for line in diff_text.splitlines(keepends=True):
+        header = diff_facts._DIFF_GIT.match(line.rstrip("\n"))
+        if header:
+            is_test = header.group("b") in tests
+        halves[is_test].append(line)
+    return "".join(halves[False]), "".join(halves[True])
 
 
 def _exists(repo: repo_mod.Repo, ref: str) -> bool:
@@ -225,6 +312,12 @@ class Reviewable:
     text: str
     context_lines: int
     folded: tuple[str, ...] = ()
+    #: The two halves of `text`, split by `split_tests`: what every reading stage gets, and what
+    #: only the security reviewer does. `text` stays whole because it is what the ceiling and the
+    #: coverage context are measured over — the split decides who is sent which part, not what the
+    #: change is.
+    source: str = ""
+    tests: str = ""
 
     def as_facts(self) -> dict[str, Any]:
         facts: dict[str, Any] = {"unit": "diff", "context_lines": self.context_lines}
@@ -306,6 +399,7 @@ def _reviewable(
     base: str,
     head: str,
     files: Sequence[diff_facts.DiffFile],
+    exclude: Sequence[str],
     *,
     plain: str,
     ceiling: int,
@@ -320,15 +414,20 @@ def _reviewable(
     Ordered widest-first so the common case costs one `git diff`; a change large enough to need the
     ladder pays a few more, which is cheap next to the model launch it is sizing.
     """
+
+    def made(text: str, folded: Sequence[str], lines: int) -> Reviewable:
+        source, tests = split_tests(text, files)
+        return Reviewable(text=text, context_lines=lines, folded=tuple(folded), source=source, tests=tests)
+
     for lines in CONTEXT_LADDER:
-        text, folded = fold_mechanical(_diff(repo, base, head, context=lines), files)
+        text, folded = fold_mechanical(_diff(repo, base, head, exclude, context=lines), files)
         if len(text.encode("utf-8")) <= ceiling:
-            return Reviewable(text=text, context_lines=lines, folded=tuple(folded))
+            return made(text, folded, lines)
     # Over the ceiling even at git's default width. Refusing here would be a second budget nobody
     # approved: `_refuse_over_budget` has already passed on this diff, and the answer to a change
     # too big to review is `/revise`, not a narrower window onto it.
     text, folded = fold_mechanical(plain, files)
-    return Reviewable(text=text, context_lines=PLAIN_CONTEXT, folded=tuple(folded))
+    return made(text, folded, PLAIN_CONTEXT)
 
 
 # -- the expected model handed to the comparator ------------------------------
@@ -438,6 +537,78 @@ def assemble(
 
 
 # -- generation ---------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ChangeOutlook:
+    """Whether this cycle's change can be reviewed at all — derivable at any moment, from git.
+
+    Two constraints refuse a review, and both were being enforced at gate ④, where the only move
+    left is to raise the number the tool's own documentation calls the wrong answer:
+
+    - **`max_diff_bytes`.** "Exceeding a budget SPLITS THE SCOPE. It never lengthens the review
+      screen" — and at gate ④ the tasks are implemented, merged and `done`, so splitting the scope
+      is not a move that exists. One field cycle met it at 2,141,194 bytes against 524,288, and
+      the operator's only option was a gate-③ rollback to raise the limit to 1,584,559.
+    - **Coverage.** A single tracked binary — smoke-test output somebody committed months ago —
+      makes the Coverage Manifest `insufficient`, which at `high` risk blocks gate ④. Nothing said
+      so: not `doctor`, not `status`, and not `build` while it landed seventeen tasks.
+
+    Neither needs a model, a launch, or a review: both are `git diff` plus the same `diff_facts`
+    the manifest uses. So they are derived here, once, and read by `doctor`, `build` and `status` —
+    three readers of one answer rather than three spellings of it.
+    """
+
+    diff_bytes: int
+    ceiling: int
+    unreadable: tuple[str, ...]
+    effective_risk: str
+
+    @property
+    def over_budget(self) -> bool:
+        return self.diff_bytes > self.ceiling
+
+    @property
+    def coverage_blocks_gate(self) -> bool:
+        """Would this coverage block gate ④? Insufficient coverage only blocks at high/critical."""
+        return bool(self.unreadable) and models.risk_at_least(self.effective_risk, "high")
+
+    def line(self) -> str:
+        """One line for a status board: what the reading stages would be asked to hold."""
+        over = " — OVER, split the scope (`/revise`)" if self.over_budget else ""
+        text = f"change under review: {self.diff_bytes / 1_000_000:.2f} MB / {self.ceiling / 1_000_000:.2f} MB{over}"
+        if self.unreadable:
+            verdict = "blocks gate ④" if self.coverage_blocks_gate else "recorded, not blocking below high risk"
+            text += f"; {len(self.unreadable)} unreadable file(s) make coverage insufficient ({verdict})"
+        return text
+
+
+def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | None:
+    """What gate ④ would be asked to read, right now. None when the repo cannot answer yet.
+
+    Cheap enough to run from `status`: one `git diff` and the deterministic analysis, no launches.
+    """
+    store = store_mod.Store(repo)
+    try:
+        state, plan, config = store.read_state(), store.read_plan(), store.read_config()
+    except common.ReinError:
+        return None
+    try:
+        trusted_base = _resolve_base(repo, plan, base)
+        diff_text = _diff(repo, trusted_base, "HEAD", not_the_product(repo, state))
+    except ReviewError:
+        return None
+    facts = diff_facts.analyze(diff_text)
+    limits = {**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})}
+    unreadable = [
+        str(entry.get("path", "")) for entry in (*facts.coverage.unsupported_files, *facts.coverage.generated_files)
+    ]
+    return ChangeOutlook(
+        diff_bytes=facts.coverage.analyzed_bytes,
+        ceiling=int(limits["max_diff_bytes"]),
+        unreadable=tuple(sorted(p for p in unreadable if p)),
+        effective_risk=_effective_risk(facts, plan),
+    )
 
 
 def _refuse_over_budget(diff_bytes: int, limits: Mapping[str, int]) -> None:
@@ -553,8 +724,9 @@ def generate(
             raise ReviewError("cannot resolve HEAD — is this a git repository with commits?")
         head = head_out.strip()
         trusted_base = _resolve_base(repo, plan, base)
-        change = change_digest(repo, head)
-        diff_text = _diff(repo, trusted_base, head)
+        exclude = not_the_product(repo, state)
+        change = change_digest(repo, head, exclude)
+        diff_text = _diff(repo, trusted_base, head, exclude)
 
         # The manifest reads the *whole* diff, always: what it measures is how much of the change
         # could be analysed, and folding a file before counting it would be measuring the fold.
@@ -587,6 +759,7 @@ def generate(
             trusted_base,
             head,
             facts.files,
+            exclude,
             plain=diff_text,
             ceiling=limits["max_diff_bytes"],
         )
@@ -603,7 +776,8 @@ def generate(
         prior_blocking = _prior_blocking(existing, trusted_base)
 
         security_request = security_review.build_request(
-            diff_text=reviewable.text,
+            diff_text=reviewable.source,
+            tests_diff=reviewable.tests,
             deterministic_facts={
                 "signals": [h.signal for h in facts.signals],
                 "context": reviewable.as_facts(),
@@ -1079,7 +1253,7 @@ def _extract_and_compare(
     extract_request = actual_extraction.build_request(
         trusted_base_sha=trusted_base,
         subject_head_sha=head,
-        diff_text=reviewable.text,
+        diff_text=reviewable.source,
         deterministic_facts={
             "coverage": coverage,
             "risk_floor": risk_floor,
@@ -1124,7 +1298,7 @@ def _extract_and_compare(
             ask,
             repo=repo,
             commit=head,
-            actual_statement_ids=[str(a.get("id")) for a in extraction.actual_statements],
+            actual_statements=extraction.actual_statements,
             known_ids=known_ids,
             expected_claim_ids=[c.id for c in plan.claims] if plan is not None else [],
             effective_risk=effective,
@@ -1381,7 +1555,37 @@ def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
     """
     if faults.is_context_overflow(failure.output):
         return False
+    # The CLI's own status code when it named one: 429 is capacity and 401/403 is a credential,
+    # and both used to be decided by matching English inside a byte slice of stream-JSON.
+    status = faults.status_code(failure.output)
+    if status is not None:
+        return status == 429 or status >= 500
     return faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT
+
+
+#: The longest `--supervise` will wait on one refusal, however far off the reset it was told about.
+#: A session limit that lifts tomorrow is not something to hold a terminal open for, and a CLI that
+#: names a time this far out is likelier to have been misread than to be right.
+MAX_SUPERVISE_SLEEP_SEC = 6 * 3600
+
+
+def _supervise_delay(failure: review_policy.AdapterFailure, interval_sec: int) -> tuple[int, str]:
+    """`(seconds to sleep, the CLI's own words)` before trying this stage again.
+
+    The reset time was being extracted, printed, and thrown away: seven attempts fifteen minutes
+    apart, each refused in under half a second against a limit that lifted at 06:50, and the host
+    session ended before it did. Nothing was learned by any of them.
+
+    So when the refusal names a time, wait until it (plus `faults.RESET_MARGIN_SEC`) instead of a
+    fixed interval — capped, and never shorter than one interval, because a reset that has already
+    passed by the time this reads it would otherwise turn the supervisor into a spin.
+    """
+    hint = faults.reset_hint(failure.output)
+    when = faults.reset_at(failure.output)
+    if when is None:
+        return interval_sec, hint
+    seconds = int((when - datetime.now(timezone.utc)).total_seconds()) + faults.RESET_MARGIN_SEC
+    return max(interval_sec, min(seconds, MAX_SUPERVISE_SLEEP_SEC)), hint
 
 
 def _generate_cli(
@@ -1417,12 +1621,12 @@ def _generate_cli(
         except review_policy.AdapterFailure as failure:
             if not supervise or not _worth_waiting_for(failure):
                 raise
-            hint = faults.reset_hint(failure.output)
+            delay, hint = _supervise_delay(failure, interval_sec)
             logger.info(
-                f"[supervise] attempt {attempt}: {failure} — sleeping {interval_sec}s"
+                f"[supervise] attempt {attempt}: {failure} — sleeping {delay}s"
                 + (f" (the CLI said: {hint})" if hint else "")
             )
-            time.sleep(interval_sec)
+            time.sleep(delay)
         finally:
             for role, row in reviewers.spend().items():
                 usage_mod.merged(spend, role, row)

@@ -489,7 +489,7 @@ def sandbox_setup_command(build_targets: Sequence[str]) -> str:
 # --- errors -------------------------------------------------------------------
 
 
-class DocumentError(ValueError):
+class DocumentError(common.ReinError, ValueError):
     """A document failed validation. `errors` lists every problem found, not just the first.
 
     Reporting all of them matters for the human loop: fixing one error, re-running, and being

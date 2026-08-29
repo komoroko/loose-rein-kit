@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import rein
-from rein import cli, init_cmd, registry, store, ui
+from rein import cli, common, init_cmd, registry, store, ui
 from tests._support import SANDBOXED_PROFILES, make_config
 
 
@@ -142,3 +142,25 @@ def test_start_uninitialized_tty_runs_the_wizard(repo: Path, monkeypatch: pytest
 def test_start_rejects_extra_arguments(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["start", "--force"]) == 2
     assert "no arguments" in capsys.readouterr().err
+
+
+def test_a_stated_failure_prints_as_an_error_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every module here words its own reason and none of them reached a reader: a schema-invalid
+    `config.yaml` after an upgrade, a comparator answer the policy refused, a review over budget —
+    all of them arrived as Python tracebacks, which say "rein is broken" about a repository that is
+    merely out of shape.
+    """
+    from rein import models
+
+    def boom(argv: list[str] | None = None) -> int:
+        raise models.DocumentError("config.yaml", ["agents/actual_extractor: unexpected 'independence_group'"])
+
+    monkeypatch.setattr(cli, "_resolve", lambda spec: boom)
+    monkeypatch.setattr(cli, "_lock_check", lambda flag: 0)
+
+    assert cli.main(["doctor"]) == common.EXIT_CANNOT_PROCEED
+    err = capsys.readouterr().err
+    assert "independence_group" in err
+    assert "Traceback" not in err

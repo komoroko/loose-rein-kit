@@ -40,13 +40,20 @@ module otherwise refuses.
 from __future__ import annotations
 
 import enum
+import json
 import re
+from datetime import datetime, timedelta, timezone, tzinfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 #: What :func:`rein.common.run` returns when the launch itself failed (OSError: no such file,
 #: not executable, missing cwd). It is the *entire* output in that case, so anchoring at the
 #: start plus the 127 rc makes a false positive from a command's own stdout implausible.
 _UNLAUNCHABLE_PREFIX = "could not run "
 _RC_UNLAUNCHABLE = 127
+
+#: How much of a non-JSON tail is worth showing. Long enough for a stack trace's last
+#: frames, short enough that nobody scrolls past it to find the sentence that matters.
+_OUTPUT_TAIL = 1000
 
 #: Signals that mean "something outside this process ended the launch": a supervisor's SIGTERM,
 #: the OOM killer's SIGKILL, a closing terminal's SIGHUP. SIGINT is deliberately absent — a
@@ -113,10 +120,19 @@ _CONTEXT_OVERFLOW_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-#: A capacity message usually carries the time it lifts ("resets 3:30am (Asia/Tokyo)"). Worth
-#: showing a human deciding when to re-run — as the CLI's own words, never parsed into a
-#: timestamp anything would act on.
+#: A capacity message usually carries the time it lifts ("resets 3:30am (Asia/Tokyo)").
 _RESET_RE = re.compile(r"\bresets?\b[^\n]{0,72}", re.IGNORECASE)
+
+#: The same message, read rather than quoted: the clock time and, when the CLI names one, the zone.
+_RESET_AT_RE = re.compile(
+    r"\bresets?\b\s*(?:at\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<meridiem>am|pm)?"
+    r"(?:\s*\((?P<zone>[A-Za-z][A-Za-z0-9_+\-/]*)\))?",
+    re.IGNORECASE,
+)
+
+#: How long past a named reset to wait before trying again. Long enough that a clock a few seconds
+#: out of step does not spend an attempt; short enough to be invisible next to a session limit.
+RESET_MARGIN_SEC = 60
 
 
 class Fault(enum.Enum):
@@ -215,10 +231,95 @@ def is_context_overflow(output: str) -> bool:
 def reset_hint(output: str) -> str:
     """The CLI's own words about when capacity returns ("" when it said nothing).
 
-    Quoted, never parsed: the console shows it to a human, and nothing schedules against it.
+    Quoted for the console. What *schedules* against it is :func:`reset_at`, which reads the same
+    sentence — the two are separate because a quote can be wrong in ways a human notices and a
+    schedule cannot.
     """
-    match = _RESET_RE.search(output)
+    match = _RESET_RE.search(said(output))
     return match.group(0).strip() if match else ""
+
+
+def reset_at(output: str, *, now: datetime | None = None) -> datetime | None:
+    """When the CLI said capacity returns, as a moment (None when it named none it could read).
+
+    "Quoted, never parsed" was the rule and it was written for the *review's evidence*, where it
+    is right: nothing about a verdict may rest on a sentence a model produced. A retry delay is not
+    evidence. `--supervise` exists precisely because nobody is at the console, and it was extracting
+    this time, printing it, and sleeping a fixed fifteen minutes anyway — one field run made seven
+    attempts, each refused in about 0.4 seconds, and the host session ended before the reset it had
+    printed seven times.
+
+    The next occurrence of the named clock time, in the named zone when it resolves and locally
+    otherwise. A zone this machine does not know is dropped rather than guessed at: the local
+    reading is wrong by whole hours at worst, and `_supervise` clamps how long it will wait either
+    way.
+    """
+    match = _RESET_AT_RE.search(said(output))
+    if not match:
+        return None
+    hour, minute = int(match.group("hour")), int(match.group("minute") or 0)
+    meridiem = (match.group("meridiem") or "").lower()
+    if meridiem == "pm" and hour != 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+    if hour > 23 or minute > 59:
+        return None
+    tz: tzinfo | None = None
+    if match.group("zone"):
+        try:
+            tz = ZoneInfo(match.group("zone"))
+        except (ZoneInfoNotFoundError, ValueError):
+            tz = None
+    current = (now or datetime.now(timezone.utc)).astimezone(tz)
+    target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    return target if target > current else target + timedelta(days=1)
+
+
+def said(output: str) -> str:
+    """What the launch reported, out of whatever the CLI wrote to its streams.
+
+    The agent CLIs are launched with a JSON output format, so the reason a run failed arrives as a
+    field — and every reader here was taking a **byte slice of the tail** instead. What an operator
+    actually saw:
+
+        [supervise] attempt 1: the comparator adapter exited 1, saying:
+        nput_tokens":0,"cache_creation_input_tokens":0,...,"api_error_status":429,"result":"You've
+        hit your session limit · resets 6:50am (Asia/Tokyo)","type":"result",...
+
+    — the reason buried in ~900 bytes of telemetry, the message starting mid-token, and
+    :func:`reset_hint`'s regex then matching *into* the trailing JSON so that the hint itself
+    carried `","type":"result","duration_ms":412`. Reading the field costs one `json.loads` and
+    gives every reader below one sentence instead of a slice.
+    """
+    envelope = _envelope(output)
+    if envelope is None:
+        return output.strip()[-_OUTPUT_TAIL:]
+    for key in ("result", "error", "message", "subtype"):
+        value = envelope.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return output.strip()[-_OUTPUT_TAIL:]
+
+
+def status_code(output: str) -> int | None:
+    """The HTTP status the CLI attributed the failure to, when it named one.
+
+    This is what "would waiting help?" is really a question about: 429 is capacity, 401 is a
+    credential, and both used to be decided by matching English in a truncated string.
+    """
+    envelope = _envelope(output)
+    value = envelope.get("api_error_status") if envelope else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _envelope(output: str) -> dict[str, object] | None:
+    """The CLI's JSON envelope, or None for output that is not one."""
+    try:
+        loaded = json.loads(output.strip())
+    except ValueError:
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 class EnvironmentFault(Exception):
@@ -234,7 +335,7 @@ class EnvironmentFault(Exception):
         self.fault = fault
         self.where = where
         self.rc = rc
-        self.output = output[-1000:]
+        self.output = said(output)
         super().__init__(self.summary())
 
     @property

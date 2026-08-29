@@ -720,6 +720,25 @@ def collect_status(
             " session so the /-commands exist in your agent.)",
         )
 
+    # What gate ④ would be asked to read, when that is a question anyone can still act on. Both of
+    # its constraints — the byte budget and coverage — used to be enforced at gate ④, where the
+    # only move left is to raise the number. Confined to the build phase and to an unapproved gate
+    # because it costs a `git diff` over the whole change, and the dashboard polls this object.
+    outlook: dict[str, object] | None = None
+    if current_phase == "build" and gates.get("build") != "approved" and not template_mode:
+        from rein import review as review_mod
+
+        view = review_mod.outlook(repo)
+        if view is not None:
+            outlook = {
+                "line": view.line(),
+                "diff_bytes": view.diff_bytes,
+                "ceiling": view.ceiling,
+                "over_budget": view.over_budget,
+                "unreadable": list(view.unreadable),
+                "coverage_blocks_gate": view.coverage_blocks_gate,
+            }
+
     plan_block = _plan_block(plan) if plan is not None else None
     task_rows = tasks_block["rows"] if tasks_block else []
     pending = pending_queue(
@@ -752,6 +771,7 @@ def collect_status(
         "plan": plan_block,
         "plan_status": state.plan_status if state else "draft",
         "review": _review_block(review),
+        "review_outlook": outlook,
         "tasks": tasks_block,
         "trace": trace_block,
         "template_mode": config.template_mode if config else False,
@@ -842,6 +862,12 @@ def render(status: dict[str, object]) -> str:
             f"- coverage: {review['coverage']}   extra behaviours: {extras_text}",
             f"- verdicts: {review.get('verdicts')}   human review: {review.get('human_status')}",
         ]
+
+    # One line, on the board, for the whole cycle — because both constraints it reports were
+    # otherwise first heard at gate ④, with nothing left to do about either.
+    outlook = status.get("review_outlook")
+    if isinstance(outlook, dict):
+        lines += ["", "### Review outlook", f"- {outlook.get('line')}"]
 
     tasks = status.get("tasks")
     if isinstance(tasks, dict):

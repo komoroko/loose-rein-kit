@@ -99,6 +99,29 @@ def check_lock(repo: repo_mod.Repo) -> list[Finding]:
     return findings
 
 
+#: What repairs a schema-invalid SSOT document, per document. `build.md` promises that every
+#: doctor finding is "reported with the command that repairs it", and these four were reported
+#: with none: an upgrade that renamed `config.yaml` keys left a repo with three FAILs, no named
+#: command, and a repair (`rein revise --to tasks`) that is not guessable — the keys are frozen at
+#: gate ③, so they cannot be edited until a human rolls the plan back.
+_DOCUMENT_REPAIR: dict[str, str] = {
+    "config": (
+        "frozen at gate ③, so it cannot be edited in place: `rein revise --to tasks` first "
+        "(a human's rollback), then fix the keys, then re-approve gate ③. "
+        "`rein upgrade` prints the renames for the versions crossed."
+    ),
+    "plan": "frozen at gate ③: `rein revise --to tasks` first, then fix it, then re-approve gate ③",
+    "state": (
+        "hand-repair is not the path — restore it from the last commit; `rein events --verify` "
+        "says what the chain expects"
+    ),
+    "review": (
+        "machine-written: while it is `not_generated` it carries nothing, so `rein sync` "
+        "re-materializes it; once generated, `rein review generate --force` rewrites it"
+    ),
+}
+
+
 def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, object]]:
     """Every SSOT document against its strict schema and cross-references."""
     store = store_mod.Store(repo)
@@ -113,7 +136,7 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
         try:
             value = reader()
         except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-            findings.append(Finding("FAIL", "format", f"{name}.yaml: {exc}"))
+            findings.append(Finding("FAIL", "format", f"{name}.yaml: {exc}\n  repair: {_DOCUMENT_REPAIR[name]}"))
             continue
         if value is None:
             findings.append(Finding("INFO", "format", f"{name}.yaml is absent"))
@@ -1217,6 +1240,51 @@ def check_review(review: models.Review | None, head: str = "") -> list[Finding]:
     return findings
 
 
+def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
+    """Can gate ④ be produced at all for the change as it stands? (`review.outlook`)
+
+    Both answers were being given at gate ④, where nothing can be done about either: a diff over
+    `max_diff_bytes` is told to "split the scope" after every task is merged and `done`, and a
+    single committed binary makes coverage `insufficient` — a gate-④ block at high risk — after
+    the whole reading pipeline has been paid for. Neither needs a model. Both are `git diff`.
+
+    Reported as WARN rather than FAIL: this is an outlook on a cycle still being built, and a
+    change that is over budget at task 9 of 17 is a thing to know, not a broken invariant.
+    """
+    from rein import review as review_mod
+
+    view = review_mod.outlook(repo)
+    if view is None:
+        return [Finding("INFO", "review", "no reviewable change yet (no base commit, or the SSOT is unreadable)")]
+    findings: list[Finding] = []
+    if view.over_budget:
+        findings.append(
+            Finding(
+                "WARN",
+                "review",
+                f"{view.line()} — the budget's own instruction is to split the scope, and at gate ④ "
+                "that is no longer a move that exists. Split it now, or raise "
+                "`review_policy.budgets.max_diff_bytes` as a deliberate decision.",
+            )
+        )
+    else:
+        findings.append(Finding("PASS", "review", view.line()))
+    if view.unreadable:
+        named = ", ".join(view.unreadable[:5]) + (" …" if len(view.unreadable) > 5 else "")
+        findings.append(
+            Finding(
+                "WARN" if not view.coverage_blocks_gate else "FAIL",
+                "review",
+                f"{len(view.unreadable)} binary/unsupported file(s) are tracked in the change under "
+                f"review, so coverage will be `insufficient`"
+                + (f" and at {view.effective_risk} risk that blocks gate ④" if view.coverage_blocks_gate else "")
+                + f": {named}. Remove them from the change (gitignore the smoke-test output) or "
+                "split them out of this scope.",
+            )
+        )
+    return findings
+
+
 # --- driver -----------------------------------------------------------------------
 
 
@@ -1262,6 +1330,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_last_run(repo)
     rc, head_out = repo._git_rc("rev-parse", "HEAD")
     findings += check_review(review, head_out.strip() if rc == 0 else "")
+    findings += check_review_outlook(repo)
     return findings
 
 

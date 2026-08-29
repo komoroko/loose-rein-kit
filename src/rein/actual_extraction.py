@@ -54,6 +54,10 @@ FORBIDDEN_KEYS = frozenset(
         "self_explanation",
         "decision_card",
         "decision_cards",
+        # The test half of the change (`review.split_tests`), which only the security reviewer is
+        # sent. A test name is a paraphrase of the requirement it was written for, so a suite in
+        # front of this stage is the Expected Model arriving in prose nobody labelled as such.
+        "tests_diff",
     }
 )
 

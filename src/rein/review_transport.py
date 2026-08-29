@@ -30,7 +30,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from rein import actual_extraction, adapters, common, digests, models, review_policy
+from rein import actual_extraction, adapters, common, digests, faults, models, review_policy
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
@@ -42,7 +42,6 @@ class TransportError(Exception):
 
 #: How much of a failed adapter's output travels with the error. Its closing words are where a
 #: CLI says what stopped it, and an error message is read on a terminal, not scrolled.
-_ADAPTER_OUTPUT_TAIL = 1000
 
 
 #: What the priming turn is told to answer. Content-free on purpose: whatever the model says in
@@ -209,7 +208,7 @@ class SharedReading:
             )
         if rc != 0:
             self._ledger.add(_SHARED_READING_ROLE, usage_mod.Usage.unavailable())
-            said = out.strip()[-_ADAPTER_OUTPUT_TAIL:]
+            said = faults.said(out)
             raise review_policy.AdapterFailure(
                 f"the shared reading could not be primed — the adapter exited {rc}"
                 + (f", saying:\n{said}" if said else " and said nothing"),
@@ -321,7 +320,7 @@ def _adapter_reviewer(
             # `out`, so the reason was in hand and thrown away: a field report of three identical
             # `exited 1` failures was diagnosable only by wrapping the CLI in a logging shim, and
             # the message behind them — "Prompt is too long" — named its own cause exactly.
-            said = out.strip()[-_ADAPTER_OUTPUT_TAIL:]
+            said = faults.said(out)
             raise review_policy.AdapterFailure(
                 f"the {role} adapter exited {rc}" + (f", saying:\n{said}" if said else " and said nothing"),
                 rc=rc,

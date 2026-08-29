@@ -213,9 +213,13 @@ is the point; never fold them into the implementer's session.
    generate` (bound to the current HEAD). It runs a deterministic Coverage Manifest, a **blind**
    actual-behaviour extraction (never given the plan), the Expected/Actual comparison, and the
    structured security and maintainability review — writing `.rein/review.yaml` and recording
-   the pipeline events. What it reads is the **product**, not `.rein/`, and the diff is measured
+   the pipeline events. What it reads is the **product**: not `.rein/`, not the plan's own prose
+   (the documents gate ③ froze, `docs/tasks/`, the ADRs), not the surfaces `rein install` wrote,
+   and — for the blind extractor alone — not the tests. The diff is measured
    against `review_policy.budgets.max_diff_bytes` *before* a model is launched — over
-   it the answer is to split the scope (`/revise`), never to grow the request.
+   it the answer is to split the scope (`/revise`), never to grow the request. **Do not wait for
+   gate ④ to find that out**: `rein status` carries the outlook, `rein doctor` names it, and
+   `rein build` says so as each task lands, which is while splitting is still possible.
    Findings sit on three separate axes (integrity / semantic support / conformance); there is no
    single `verified`, and "extra behaviours: 0" appears only with the Coverage Manifest that
    earned it. **Triage it**: a blocking security finding, a diverged high/critical claim, an ungrounded

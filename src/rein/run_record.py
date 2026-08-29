@@ -1,4 +1,4 @@
-"""The one writer of `run_measured` — what a run of launches did, and what it cost.
+"""The one writer of `run_measured` — and its one reader. What a run of launches did, and cost.
 
 Two runs in this system launch models: `rein build` and `rein review generate`. Both ended by
 appending a `run_measured` event, both said in their own docstring that the event exists so that
@@ -34,9 +34,11 @@ real result with a bookkeeping traceback.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
+from rein import models
 from rein import store as store_mod
 from rein import usage as usage_mod
 
@@ -81,3 +83,103 @@ def record(
             tx.append(EVENT, cycle_id=cycle, actor=actor, detail=detail)
     except Exception as exc:  # noqa: BLE001 — a bookkeeping write must not replace the outcome
         logger.warning(f"could not record what this {kind} run cost: {exc}")
+
+
+# --- reading it back ----------------------------------------------------------
+#
+# The docstring above has always said a cycle's total is the sum of these events. Nothing summed
+# them: one writer, no readers. So "where did the tokens go" had no answer inside the repository
+# that recorded it, and the question got answered by installing things on faith instead.
+#
+# The reader lives here rather than in `events.py` because the shape of the detail is this
+# module's own — splitting "what is written" from "what it means" across two files is how the two
+# producers drifted apart in the first place.
+
+
+@dataclass(frozen=True)
+class CycleCost:
+    """One cycle's measured spend, by role, from every `run_measured` under it.
+
+    `billed` and `reused` are kept apart because they are different facts: one is what the
+    provider charged, the other is what a cache replayed and nobody paid for a second time. Adding
+    them would make a well-cached cycle look like an expensive one.
+    """
+
+    cycle_id: str
+    runs: int = 0
+    billed: dict[str, usage_mod.Usage] = field(default_factory=dict)
+    reused: dict[str, usage_mod.Usage] = field(default_factory=dict)
+    #: Where these events were read from. Empty for the live chain, else the archive's path.
+    source: str = ""
+
+
+def _fold(into: dict[str, usage_mod.Usage], rows: Any) -> None:
+    """Add one event's per-role block into a running total. Unmeasured stays unmeasured.
+
+    `Usage.from_detail` reads `measured: false` back as an unavailable row carrying its launch
+    count, and `Usage.__add__` ORs `available` — so a role whose adapter reports nothing keeps
+    saying so however many runs are summed, instead of quietly becoming a row of zeros.
+    """
+    if not isinstance(rows, Mapping):
+        return
+    for role, detail in rows.items():
+        if isinstance(detail, Mapping):
+            usage_mod.merged(into, str(role), usage_mod.Usage.from_detail(detail))
+
+
+def costs(sources: Iterable[tuple[str, Sequence[models.Event]]]) -> list[CycleCost]:
+    """Every cycle's spend, oldest first — so a reader sees the trend, not just the latest bill.
+
+    `sources` is `(where it was read from, its events)`: the live chain plus whatever archived
+    cycles the caller found. A cycle id appearing in two sources would be two different chains
+    saying different things, so they stay separate rows rather than being merged into one.
+    """
+    order: list[tuple[str, str]] = []
+    runs: dict[tuple[str, str], int] = {}
+    billed: dict[tuple[str, str], dict[str, usage_mod.Usage]] = {}
+    reused: dict[tuple[str, str], dict[str, usage_mod.Usage]] = {}
+    for source, events in sources:
+        for event in events:
+            if event.event != EVENT:
+                continue
+            key = (source, event.cycle_id)
+            if key not in runs:
+                order.append(key)
+                runs[key], billed[key], reused[key] = 0, {}, {}
+            runs[key] += 1
+            _fold(billed[key], event.detail.get("billed_by_role"))
+            _fold(reused[key], event.detail.get("reused_by_role"))
+    return [
+        CycleCost(cycle_id=cycle, runs=runs[key], billed=billed[key], reused=reused[key], source=source)
+        for key in order
+        for source, cycle in (key,)
+    ]
+
+
+#: What `render_costs` says when there is nothing to say. Not an error: a repository that has not
+#: run a build yet has measured nothing, which is different from having measured zero.
+NOTHING_RECORDED = (
+    "no run has recorded what it cost yet — `rein build` and `rein review generate` write `run_measured` when they end."
+)
+
+
+def render_costs(rows: Sequence[CycleCost], *, unreadable: Sequence[str] = ()) -> str:
+    """The cost report, one block per cycle. `unreadable` names sources that could not be counted.
+
+    An archive whose chain is damaged is named rather than skipped in silence: leaving it out
+    quietly would make the totals read as the whole history, which is the same lie as pricing an
+    unmeasured role at zero.
+    """
+    blocks: list[str] = []
+    for row in rows:
+        head = f"{row.cycle_id} — {row.runs} run(s)" + (f"  [{row.source}]" if row.source else "")
+        lines = [head]
+        for label, measured in (("billed", row.billed), ("replayed", row.reused)):
+            if line := usage_mod.summarize(measured, what=label):
+                lines.append(f"  {line}")
+        blocks.append("\n".join(lines))
+    if not blocks:
+        blocks.append(NOTHING_RECORDED)
+    for path in unreadable:
+        blocks.append(f"! {path}: the audit chain is damaged — this cycle is NOT counted above.")
+    return "\n\n".join(blocks)

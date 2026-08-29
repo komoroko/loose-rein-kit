@@ -44,7 +44,7 @@ from typing import Any, TypeVar
 
 import yaml
 
-from rein import digests, event_chain, models, strict_yaml
+from rein import common, digests, event_chain, models, strict_yaml
 from rein import repo as repo_mod
 
 _DIR_MODE = 0o700
@@ -57,7 +57,7 @@ _REPO_FILE_MODE = 0o644
 _T = TypeVar("_T")
 
 
-class StoreError(RuntimeError):
+class StoreError(common.ReinError, RuntimeError):
     """The store cannot be used: unusable runtime directory, lock failure, damaged journal."""
 
 

@@ -16,7 +16,7 @@ import argparse
 import logging
 from collections.abc import Mapping, Sequence
 
-from rein import common, event_chain, models
+from rein import common, cycle, event_chain, models, run_record
 from rein import repo as repo_mod
 
 logger = logging.getLogger(__name__)
@@ -137,6 +137,32 @@ def render_verification(path: str, defects: list[event_chain.ChainDefect]) -> st
     )
 
 
+def cost_sources(
+    repo: repo_mod.Repo, live: Sequence[models.Event]
+) -> tuple[list[tuple[str, Sequence[models.Event]]], list[str]]:
+    """`(what to count, what could not be counted)` — this cycle's chain plus every archived one.
+
+    Cost is a question about *cycles*, and `cycle-close` moves the chain that answers it into
+    `docs/archive/<date>-<slug>/rein/`. Reading only the live chain would make the report go blank
+    the moment a cycle is closed, which is exactly when the comparison becomes interesting.
+
+    Each archive is scanned on its own (`scan`, not `load`): one damaged archive must not take the
+    current cycle's figures down with it, and must not be folded in as though it were readable
+    either. It comes back in the second list, to be named in the report.
+    """
+    sources: list[tuple[str, Sequence[models.Event]]] = [("", live)]
+    unreadable: list[str] = []
+    archives = repo.path(cycle.ARCHIVE_DIR)
+    for path in sorted(archives.glob(f"*/rein/{repo.events.name}")):
+        rel = path.relative_to(repo.root).as_posix()
+        archived, defects = event_chain.scan(path)
+        if defects:
+            unreadable.append(rel)
+        else:
+            sources.append((rel, archived))
+    return sources, unreadable
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="read the hash-chained audit log (read-only)")
     group = parser.add_mutually_exclusive_group()
@@ -144,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--summary", action="store_true", help="print aggregates and open decisions")
     group.add_argument("--verify", action="store_true", help="verify the chain and report every defect")
     group.add_argument("--root", action="store_true", help="print the chain root digest only")
+    group.add_argument("--cost", action="store_true", help="what each cycle's launches actually cost, by role")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     # A window into an append-only log that only ever grows. `rein resume` points here with the
     # reader's own watermark, so "what happened while I was gone" does not mean reading the whole log.
@@ -174,6 +201,12 @@ def main(argv: list[str] | None = None) -> int:
     # narrow them — a root computed over a window would not be the root any receipt bound.
     if args.root:
         print(event_chain.chain_root(events))
+        return 0
+    # Also whole-chain, and for the same reason: a cycle's total computed over a window is not
+    # that cycle's total. `--cost` is answered per cycle, which is the axis spending has.
+    if args.cost:
+        sources, unreadable = cost_sources(repo, events)
+        print(run_record.render_costs(run_record.costs(sources), unreadable=unreadable))
         return 0
     if args.since is not None:
         events = [e for e in events if e.seq > args.since]

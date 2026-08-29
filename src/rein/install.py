@@ -500,6 +500,63 @@ def materialized_record(repo: repo_mod.Repo) -> dict[str, str]:
     return {".rein/" + str(k): str(v) for k, v in (files or {}).items()}
 
 
+def refresh_ungenerated_review(repo: repo_mod.Repo) -> bool:
+    """Re-materialize `review.yaml` while it holds no review. True when it was rewritten.
+
+    The scaffold is written once by `init` and never again, so a release that changes the review
+    document's shape strands every repository that has not reached gate ④ yet — and strands it on
+    a file that is *machine-written and empty*: `status: not_generated`, no machine half, no human
+    answers, nothing anybody recorded. A repo was left unable to run `rein revise` by a stub whose
+    entire content was "nothing has happened here".
+
+    Refused the moment it says otherwise. A generated review is evidence bound to a commit, and
+    `rein review generate --force` is how that gets rewritten — by re-reading the code, not by
+    this.
+    """
+    path = repo.path(".rein/review.yaml")
+    packaged = data_mod.read_bytes("scaffold/rein/review.yaml")
+    try:
+        current = path.read_text(encoding="utf-8")
+    except OSError:
+        current = ""
+    if lock_mod.norm_hash(current.encode("utf-8")) == lock_mod.norm_hash(packaged):
+        return False
+    # Read loosely, not through `models.Review`: the case this exists for is a document the current
+    # schema *refuses*, so validating it first would decline to repair exactly what needs repairing.
+    # A file that will not parse as YAML at all is left alone — nothing here can tell whether it
+    # holds a review, and `doctor` names its repair.
+    try:
+        document = strict_yaml.load_mapping(current, what="review.yaml")
+    except strict_yaml.StrictParseError:
+        return False
+    machine = document.get("machine")
+    status = str(machine.get("status", "")) if isinstance(machine, dict) else ""
+    if status not in ("", "not_generated"):
+        return False
+    path.write_bytes(packaged)
+    return True
+
+
+def _documents_invalid(repo: repo_mod.Repo) -> list[str]:
+    """Which SSOT documents this release's schema refuses, worded for the console ([] = none)."""
+    from rein import models
+    from rein import store as store_mod
+
+    store = store_mod.Store(repo)
+    problems: list[str] = []
+    for name, reader in (
+        ("config.yaml", store.read_config),
+        ("state.yaml", store.read_state),
+        ("plan.yaml", store.read_plan),
+        ("review.yaml", store.read_review),
+    ):
+        try:
+            reader()
+        except (models.DocumentError, strict_yaml.StrictParseError, OSError) as exc:
+            problems.append(f"{name}: {exc}")
+    return problems
+
+
 def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> int:
     """Materialize prompts/schema/rules from the package payload (see the module docstring)."""
     desired = _dest_map(MATERIALIZED)
@@ -525,11 +582,34 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
 
     _print_plan(items)
     hashes = _apply_plan(repo, items, desired)
+    if refresh_ungenerated_review(repo):
+        print("  update        .rein/review.yaml (the scaffold stub — it held no review)")
     files = {_materialized_key(rel): digest for rel, digest in _record_after(recorded, items, hashes).items()}
     data["prompts"] = {"version": rein.__version__, "files": files}
-    # Stamp the running release into the lock. Without this the lock keeps claiming the version
-    # that wrote the repo *before* the upgrade, so the startup skew warning fires forever and
-    # `doctor` reports a repository that was just brought up to date as stale.
+
+    # The lock's `tool_version` is what `upgrade` derives its "from" version from, so advancing it
+    # over a repository this release's schema refuses erases the only record of where the repo came
+    # from — and that is exactly what happened: `sync` materialized the new schema, stamped the new
+    # version, and `rein upgrade` then reported "already current", printed no changelog, and named
+    # none of the renames that had just broken the repo. Refused instead, with the transition
+    # printed: the version this repo is on is worth more than a tidy lock.
+    invalid = _documents_invalid(repo)
+    if invalid:
+        for problem in invalid:
+            logger.error(f"sync: {problem}")
+        sections = changelog_between(
+            data_mod.read_text("CHANGELOG.md"), lock_mod.tool_version_of(data), rein.__version__
+        )
+        if sections:
+            print("\n" + sections)
+        logger.error(
+            f"sync: the materialized artifacts are up to date, but {len(invalid)} repo document(s) are "
+            f"not readable by rein {rein.__version__}. The lock still records "
+            f"{lock_mod.tool_version_of(data) or '(unrecorded)'} so the transition above stays available. "
+            "Repair them (`rein doctor` names the command per document), then run `rein sync` again."
+        )
+        return 1
+
     data["tool_version"] = rein.__version__
     lock_mod.write(repo.lock, data)
     skipped = sum(1 for i in items if i.op == "skip-modified")

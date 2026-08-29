@@ -34,7 +34,7 @@ def test_the_cli_exposes_only_read_verbs(capsys: pytest.CaptureFixture[str]) -> 
     with pytest.raises(SystemExit):
         events.main(["--help"])
     helptext = capsys.readouterr().out
-    for verb in ("--render", "--summary", "--verify", "--root"):
+    for verb in ("--render", "--summary", "--verify", "--root", "--cost"):
         assert verb in helptext
     for gone in ("--add", "--resolve", "--refresh-state"):
         assert gone not in helptext
@@ -174,3 +174,74 @@ def test_a_review_failure_is_not_retired_by_a_task_it_happened_to_name() -> None
     """`review_failed` is not a verdict about a task, so a task status is not authoritative over it."""
     chain = _chain(("review_failed", ("T-001",)))
     assert [e.event for e in events.open_attention(chain, {"T-001": "done"})] == ["review_failed"]
+
+
+# --- what a cycle cost --------------------------------------------------------
+#
+# `run_measured` carries what the provider billed each role. Nothing read it, so "where did the
+# tokens go" had no answer inside the repository that had been recording it all along.
+
+
+def _measured(cycle: str, role: str, tokens: int) -> models.Event:
+    paid = {"launches": 1, "measured": True, "input_tokens": tokens, "output_tokens": 1, "cost_usd": 1.0}
+    return event_chain.make(
+        "run_measured",
+        cycle,
+        detail={"kind": "build", "run_id": "r", "outcome": "done", "billed_by_role": {role: paid}},
+    )
+
+
+def _archive(root: Path, slug: str, *evts: models.Event) -> Path:
+    where = root / "docs/archive" / slug / "rein"
+    where.mkdir(parents=True, exist_ok=True)
+    path = where / "events.ndjson"
+    event_chain.append_lines(path, [event_chain.link(None, evts[0]), *evts[1:]])
+    return path
+
+
+def test_cost_counts_this_cycle_and_the_archived_ones(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`cycle-close` moves the chain that answers the question into `docs/archive/`, so a report
+    that read only the live chain would go blank exactly when the comparison becomes interesting.
+    """
+    seed_repo(tmp_path, events=[event_chain.link(None, _measured("live-cycle", "implementer", 1234))])
+    _archive(tmp_path, "2026-01-01-first", _measured("old-cycle", "comparator", 5678))
+
+    assert events.main(["--cost", "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "live-cycle — 1 run(s)" in out
+    assert "old-cycle — 1 run(s)" in out
+    assert "[docs/archive/2026-01-01-first/rein/events.ndjson]" in out
+    assert "implementer" in out and "comparator" in out
+
+
+def test_a_damaged_archive_is_named_rather_than_silently_dropped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Leaving it out quietly would make the totals read as the whole history — the same lie as
+    pricing an unmeasured role at zero. One bad archive must also not take the live cycle down."""
+    seed_repo(tmp_path, events=[event_chain.link(None, _measured("live-cycle", "implementer", 1234))])
+    broken = _archive(tmp_path, "2026-01-01-first", _measured("old-cycle", "comparator", 5678))
+    broken.write_text(broken.read_text(encoding="utf-8").replace("5678", "9999"), encoding="utf-8")
+
+    assert events.main(["--cost", "--repo", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "live-cycle — 1 run(s)" in out
+    assert "old-cycle" not in out
+    assert "docs/archive/2026-01-01-first/rein/events.ndjson: the audit chain is damaged" in out
+
+
+def test_cost_is_not_narrowed_by_since(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """A cycle's total computed over a window is not that cycle's total — the reason `--root`
+    already ignores `--since`. Spending's axis is the cycle, not the sequence number."""
+    first = event_chain.link(None, _measured("live-cycle", "implementer", 1000))
+    second = event_chain.link(first, _measured("live-cycle", "implementer", 1000))
+    seed_repo(tmp_path, events=[first, second])
+
+    assert events.main(["--cost", "--since", "1", "--repo", str(tmp_path)]) == 0
+    assert "live-cycle — 2 run(s)" in capsys.readouterr().out
+
+
+def test_cost_on_a_repository_that_has_launched_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _seed(tmp_path, "cycle_initialized")
+    assert events.main(["--cost", "--repo", str(tmp_path)]) == 0
+    assert "no run has recorded what it cost yet" in capsys.readouterr().out

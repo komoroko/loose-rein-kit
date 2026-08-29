@@ -304,8 +304,10 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
   束ねて実行)が実行するのは、決定論的な Coverage Manifest、コードが実際に何をしているかの
   **ブラインド抽出**(この抽出器には計画を一切渡さず、自分で読みに行けないようリポジトリの外で
   起動する)、Expected と Actual の比較、そして
-  構造化されたセキュリティ・保守性レビューである。読み取る対象はプロダクトであって `.rein/` では
-  ない。
+  構造化されたセキュリティ・保守性レビューである。読み取る対象はプロダクトに限られる —
+  `.rein/` も、計画自身の散文(`docs/tasks/`・ADR・ゲート③が凍結した文書)も、`rein install` が
+  書いた面も渡らない。テストはブラインド抽出器にだけ渡らない。テスト名は、その抽出器が読んで
+  いないはずの要件を言い換えたものだからである。
 - **単一の `verified` は存在しない。** 指摘は integrity・semantic support・conformance という
   3つの独立した軸に分かれて出力される。「extra behaviours: 0」は、それを裏づけた Coverage
   Manifest がある場合にのみ表示される。blocking なセキュリティ指摘、high/critical な claim の
@@ -482,7 +484,7 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 | `.rein/plan.yaml` | 凍結された Expected Model: 要件1件ごとの claim・タスク DAG |
 | `.rein/state.yaml` | 可変な状態: フェーズ・ゲート承認・タスク状態 |
 | `.rein/review.yaml` | マシンレビューとヒューマンレビュー(それぞれ独立に digest 化) |
-| `.rein/events.ndjson` | ハッシュ連鎖された監査ログ — あらゆる状態変更の機械可読な真実(`rein events` で操作。最初のイベント発生時に作られる) |
+| `.rein/events.ndjson` | ハッシュ連鎖された監査ログ — あらゆる状態変更の機械可読な真実(`rein events` で操作。最初のイベント発生時に作られる)。launch を伴う run は provider が課金した実測値を記録するので、`rein events --cost` が「そのサイクルのトークンがどの role に行ったか」を現サイクルとアーカイブ済みサイクルにまたがって答える |
 | `.rein/config.yaml` | 確定実行の設定と、DoD の唯一の定義(`quality_gate`) |
 | `.rein/rein.lock` | 文書フォーマット、ツールのバージョン・取得元、導入ファイルごとの内容ハッシュ |
 | `.rein/schema/` | SSOT 各文書の JSON Schema(エディタでの検証と `rein doctor` が使う)— 実体化ファイル |
