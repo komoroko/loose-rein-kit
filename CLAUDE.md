@@ -28,5 +28,5 @@ sets) — one command whose completion is the signal, so never schedule wake-ups
 `rein build --supervise` with `run_in_background: true` and get on with something else — its exit
 re-invokes you, which is waiting, not polling. **Detach instead (`nohup rein build --supervise >
 .rein/build.log 2>&1 &`, then end the turn) when the run has to outlive this session.** Either way,
-come back through `rein resume` / the log and **never re-run `rein build` to check on it**
+come back through `rein start` / the log and **never re-run `rein build` to check on it**
 (build.md, "When the run outlasts your host's command timeout").

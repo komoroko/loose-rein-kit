@@ -1,17 +1,20 @@
-"""`rein resume` — what changed since you last looked, not just where you are.
+"""`rein start` — what changed since you last looked, not just where you are.
 
-Every surface the tool had answered "where am I": `rein status` prints an absolute snapshot,
-and the SessionStart hook printed the same snapshot into every new session. Nothing anywhere
-answered "what moved while I was gone", so coming back to a repository meant re-reading the whole
-state and diffing it against memory. Interruption is not only lost minutes — resuming a task
-costs effort and carries its own time pressure, and re-deriving context you already had is exactly
-the part that is avoidable.
+Every surface the tool had answered "where am I" with an absolute snapshot, and the SessionStart
+hook printed that snapshot into every new session. Nothing anywhere answered "what moved while I
+was gone", so coming back to a repository meant re-reading the whole state and diffing it against
+memory. Interruption is not only lost minutes — resuming a task costs effort and carries its own
+time pressure, and re-deriving context you already had is exactly the part that is avoidable.
 
 So this reads a **watermark** — the last event sequence this user had seen in this repository — and
 reports the delta above it: gates that opened, tasks that moved, escalations that arrived, reviews
-that were regenerated. The reader chooses whether the delta is enough or whether they want the full
-picture; `--full` prints the snapshot as well, and `rein status` is unchanged for anyone who
-wants only that.
+that were regenerated. The reader chooses how much they want: the delta by default, `--full` for
+the absolute board as well, `--json` for the whole status object.
+
+This is the human's one reader. `rein next` prints the single recommended command for an
+integration to act on, and the dashboard renders the same object — but there is no fourth verb
+that prints the snapshot alone, because a second spelling of one answer is what made this
+module necessary in the first place.
 
 **The watermark is per-person, not per-repository.** It lives beside the project registry in the
 user's config home, never in `.rein/`: the SSOT is machine-written under a transaction that
@@ -60,7 +63,7 @@ HEADLINE_EVENTS: dict[str, str] = {
 
 #: How many queue rows the resume packet prints. It is read at the start of every session, so it
 #: has to stay a packet; the count in the heading is what tells the reader the list is partial, and
-#: `rein status` is one command away with the whole of it.
+#: `rein start --full` is one flag away with the whole of it.
 _RESUME_ROWS = 5
 
 
@@ -177,7 +180,7 @@ def render(packet: Packet, status: dict[str, Any]) -> str:
         for row in rows[:_RESUME_ROWS]:
             lines.append(f"- [{row['severity']}] {row['subject']}: {row['headline']}")
         if len(rows) > _RESUME_ROWS:
-            lines.append(f"- … {len(rows) - _RESUME_ROWS} more — `rein status`")
+            lines.append(f"- … {len(rows) - _RESUME_ROWS} more — `rein start --full`")
 
     decision = status.get("decision") or {}
     lines.append("")
@@ -188,7 +191,7 @@ def render(packet: Packet, status: dict[str, Any]) -> str:
         lines.append(status_api.render_next(status.get("next") or {}))
     if not packet.first_visit and not packet.empty:
         lines.append("")
-        lines.append(f"Full state: `rein status`  ·  this log: `rein events --since {packet.since}`")
+        lines.append(f"Full state: `rein start --full`  ·  this log: `rein events --since {packet.since}`")
     return "\n".join(lines)
 
 
@@ -209,9 +212,10 @@ def run(root: Path | None = None, *, full: bool = False, mark: bool = True) -> s
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="rein resume", description="what changed since you last looked")
+    parser = argparse.ArgumentParser(prog="rein start", description="what changed since you last looked")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
-    parser.add_argument("--full", action="store_true", help="also print the whole status snapshot")
+    parser.add_argument("--full", action="store_true", help="also print the whole status board")
+    parser.add_argument("--json", action="store_true", help="print the whole status object as JSON")
     parser.add_argument(
         "--no-mark",
         action="store_true",
@@ -220,6 +224,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     common.configure_logging()
     try:
+        if args.json:
+            status = status_api.collect_status(repo_mod.get(args.repo))
+            print(json.dumps(status, indent=2, ensure_ascii=False, default=str))
+            return 0
         print(run(Path(args.repo) if args.repo else None, full=args.full, mark=not args.no_mark))
     except repo_mod.RepoNotFoundError as exc:
         logger.error(str(exc))

@@ -361,7 +361,7 @@ def check_documented_invocations(root: Path, texts: dict[str, str]) -> list[str]
     """
     from rein import cli
 
-    known_verbs = set(cli.VERBS) | {"start", "next", "version"}
+    known_verbs = set(cli.VERBS) | {"help"}
     sources: dict[str, str] = {}
     failures: list[str] = []
     for path, text in sorted(texts.items()):
@@ -375,8 +375,9 @@ def check_documented_invocations(root: Path, texts: dict[str, str]) -> list[str]
             if verb not in known_verbs:
                 failures.append(f"{path}: `rein {verb}` is not a verb — see cli.VERBS")
                 continue
-            spec = cli.VERBS.get(verb, "")
-            module = spec.partition(":")[0] or verb
+            entry = cli.VERBS.get(verb)
+            # `help` is not a module: cli.py answers it (and `--all`) before dispatch.
+            module = entry.spec.partition(":")[0] if entry else "cli"
             if module not in sources:
                 module_path = root / "src" / "rein" / f"{module}.py"
                 sources[module] = module_path.read_text(encoding="utf-8") if module_path.is_file() else ""

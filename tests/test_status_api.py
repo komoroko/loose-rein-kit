@@ -325,7 +325,7 @@ def _chain_with_subjects(*specs: tuple[str, tuple[str, ...]]) -> list[models.Eve
 
 def test_a_task_failed_for_a_now_done_task_is_not_pending_attention(tmp_path: Path) -> None:
     """T-020 in the wild: three `task_failed` events from earlier attempts, the task later
-    reaches `done` — `rein status` must stop asking a human to look at it."""
+    reaches `done` — the status board must stop asking a human to look at it."""
     seed_repo(
         tmp_path,
         events=_chain_with_subjects(("task_failed", ("T-001",)), ("knowledge_gap", ("T-001",))),
@@ -521,13 +521,14 @@ def test_render_names_the_three_review_axes_and_never_a_bare_verified(tmp_path: 
     assert "verified" not in rendered.lower()
 
 
-def test_cli_json_is_parseable(
+def test_cli_json_is_one_recommendation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seed_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     assert status_api.main(["--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["project"] == "demo"
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["command"] and parsed["kind"]  # `rein next --json` is one recommendation
 
 
 def test_cli_next_prints_only_the_recommendation(
@@ -535,7 +536,7 @@ def test_cli_next_prints_only_the_recommendation(
 ) -> None:
     seed_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
-    assert status_api.main(["--next"]) == 0
+    assert status_api.main([]) == 0
     out = capsys.readouterr().out
     assert out.startswith("next: ")
     assert "### Gates" not in out

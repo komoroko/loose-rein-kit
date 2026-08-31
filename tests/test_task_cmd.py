@@ -145,5 +145,5 @@ def test_a_fresh_reset_promises_nothing_about_a_record_it_discarded(
 def test_the_verb_is_reachable_from_the_dispatcher() -> None:
     from rein import cli
 
-    assert cli.VERBS["task"] == "task_cmd"
-    assert "task reset" in cli.HELP
+    assert cli.VERBS["task"].spec == "task_cmd"
+    assert "task reset" in cli._build_parser(show_all=True).format_help()

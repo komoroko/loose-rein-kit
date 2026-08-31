@@ -122,7 +122,7 @@ done
 
 A run stopped that way leaves each unfinished task `todo` with its worktree in place; the next
 run finalizes and salvages that work onto the leaf's branch and the implementer **continues**
-rather than restarting. `rein resume` and `rein doctor` both say so when you come back.
+rather than restarting. `rein start` and `rein doctor` both say so when you come back.
 
 ### When the run outlasts your host's command timeout
 
@@ -145,8 +145,8 @@ nohup rein build --supervise > .rein/build.log 2>&1 &   # returns immediately; t
 Then **end your turn** and let the human bring you back. Either way, when you come back read the
 run's own record — never re-invoke the build to find out how it is going:
 
-- `rein resume` — what changed since you last looked, and what is waiting on a human
-- `rein status` / `rein ui` — the board
+- `rein start` — what changed since you last looked, and what is waiting on a human
+  (`--full` adds the whole board; `rein ui` serves the same thing in a browser)
 - `tail -n 40 .rein/build.log` — the run's console output
 
 **Do not re-run `rein build` to check on it.** A second run cannot start while the first holds the
@@ -218,7 +218,7 @@ is the point; never fold them into the implementer's session.
    and — for the blind extractor alone — not the tests. The diff is measured
    against `review_policy.budgets.max_diff_bytes` *before* a model is launched — over
    it the answer is to split the scope (`/revise`), never to grow the request. **Do not wait for
-   gate ④ to find that out**: `rein status` carries the outlook, `rein doctor` names it, and
+   gate ④ to find that out**: `rein start --full` carries the outlook, `rein doctor` names it, and
    `rein build` says so as each task lands, which is while splitting is still possible.
    Findings sit on three separate axes (integrity / semantic support / conformance); there is no
    single `verified`, and "extra behaviours: 0" appears only with the Coverage Manifest that

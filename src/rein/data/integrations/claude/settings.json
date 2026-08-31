@@ -18,8 +18,7 @@
       "Bash(git merge --no-ff:*)",
       "Bash(git worktree:*)",
       "Bash(ls:*)",
-      "Bash(rein status:*)",
-      "Bash(rein resume:*)",
+      "Bash(rein start:*)",
       "Bash(rein next:*)",
       "Bash(rein dag:*)",
       "Bash(rein build:*)",
@@ -41,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "test -f .rein/state.yaml && echo '--- Loose Rein: what changed since you last looked ---' && rein resume || true"
+            "command": "test -f .rein/state.yaml && echo '--- Loose Rein: what changed since you last looked ---' && rein start || true"
           }
         ]
       }

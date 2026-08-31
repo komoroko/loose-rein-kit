@@ -150,6 +150,9 @@ findings; the implementer resolves them and the reviewer looks again.
 - **Promote durable lessons** from `docs/retrospective.md` into the always-loaded files at
   gate ⑤, not archived away.
 - If anything behaves oddly, run `rein doctor` first.
+- **The verb list is in the CLI, not in this file.** `rein help --all` names every verb (the
+  default listing carries only the ones a human types) and `rein <verb> --help` gives its
+  arguments — read those rather than guessing a spelling out of prose.
 
 ## Security gate
 

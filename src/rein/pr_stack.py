@@ -1196,7 +1196,7 @@ def _run_restack(repo: repo_mod.Repo, docs: Documents, slices: Sequence[Slice]) 
     logger.error(f"propagation stopped at {result.stopped_at}: {resolution.escalation}")
     marked = conflict.escalate(repo, resolution)
     if marked:
-        logger.error(f"marked needs-revision: {', '.join(marked)} — `rein status` shows them")
+        logger.error(f"marked needs-revision: {', '.join(marked)} — `rein start --full` shows them")
     return 2
 
 

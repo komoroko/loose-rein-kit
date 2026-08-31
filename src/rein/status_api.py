@@ -621,7 +621,7 @@ def collect_status(
     Without the seam that reparse happens every few seconds for a file that rarely changes.
 
     `readiness_probe` is the same seam for the queue's blocking rows. Gate readiness costs git
-    subprocesses and snapshot digests, which is fine once per `rein status` and wasteful
+    subprocesses and snapshot digests, which is fine once per `rein start` and wasteful
     several times a minute — so the dashboard passes a memoized probe, and a caller that passes
     one returning nothing gets `pending_deep: false` rather than a queue that quietly understates
     itself.
@@ -828,7 +828,7 @@ def render_pending(status: dict[str, object], *, limit: int = 12) -> list[str]:
         action = f"  → {item['action']}" if item.get("action") else ""
         lines.append(f"- [{item['severity']}] {item['subject']}: {item['headline']}{action}")
     if len(pending) > limit:
-        lines.append(f"- … {len(pending) - limit} more (`rein status --json`)")
+        lines.append(f"- … {len(pending) - limit} more (`rein start --json`)")
     return lines
 
 
@@ -896,9 +896,14 @@ def render(status: dict[str, object]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="the deterministic status object and next action")
-    parser.add_argument("--json", action="store_true", help="print the whole status object as JSON")
-    parser.add_argument("--next", action="store_true", help="print only the next recommended command")
+    """`rein next` — the one recommended command, and nothing else.
+
+    The board and the whole object are `rein start` / `rein start --full` / `rein start --json`.
+    This verb exists because an integration wants one machine-readable recommendation without
+    parsing a packet, which is why `--json` is the only thing it takes besides `--repo`.
+    """
+    parser = argparse.ArgumentParser(prog="rein next", description="the next recommended command")
+    parser.add_argument("--json", action="store_true", help="print the recommendation as JSON")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -909,18 +914,9 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
-    status = collect_status(repo)
-    if args.next:
-        # --next is the narrower request, so it wins when both are given: `rein next
-        # --json` is what an integration calls for one machine-readable recommendation.
-        next_obj = status.get("next")
-        next_obj = next_obj if isinstance(next_obj, dict) else {}
-        print(json.dumps(next_obj, ensure_ascii=False, default=str) if args.json else render_next(next_obj))
-        return 0
-    if args.json:
-        print(json.dumps(status, indent=2, ensure_ascii=False, default=str))
-        return 0
-    print(render(status))
+    next_obj = collect_status(repo).get("next")
+    next_obj = next_obj if isinstance(next_obj, dict) else {}
+    print(json.dumps(next_obj, ensure_ascii=False, default=str) if args.json else render_next(next_obj))
     return 0
 
 

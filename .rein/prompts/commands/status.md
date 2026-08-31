@@ -2,7 +2,9 @@
 
 Show the Human-on-the-Loop monitoring view. **Do not change state (read-only).**
 
-1. Run **`rein status`** and present its board in the user's language. It is the deterministic
+1. Run **`rein start --full --no-mark`** and present its board in the user's language. `--no-mark`
+   because this is a look, not a return: advancing the watermark here would empty the delta the
+   next session opens with. It is the deterministic
    answer — `/status`, `rein next` and the dashboard all read the same object, so do **not**
    re-derive phase, gates or counts from `.rein/state.yaml` / `.rein/plan.yaml` by hand.
 2. Lead with **"Waiting on you"**: the count, then each item with its severity

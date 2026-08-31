@@ -4,6 +4,44 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.12] - 2026-08-31
+
+**Four verbs answered "where am I", and the help listed every verb the loop had.** `start`,
+`next`, `status` and `resume` were four renderings of one `collect_status()` call — `next` was
+literally `status --next` with the flag injected by the dispatcher, `resume --full` concatenated
+`status`'s own output, and `start` was `next` plus a header line. `resume.py` said why out loud:
+"`rein status` is unchanged for anyone who wants only that" — a backward-compatibility retention
+in a project whose rules forbid them. The read surface is now **`rein start`** (the delta since
+your last visit; `--full` adds the whole board, `--json` the status object, `--no-mark` looks
+without advancing your place) and **`rein next`** (one recommended command, `--json` for
+integrations). `rein status` and `rein resume` are gone; the SessionStart hooks and the
+pre-authorization lists in all three integrations now name `rein start`.
+
+**The help is generated from the verb table instead of being a second copy of it.** `cli.HELP`
+was a hand-written string listing 32 verbs, and `tests/test_cli.py` carried a test whose only job
+was to catch it drifting from `VERBS` — a test that has to exist is the symptom. `VERBS` now
+carries each verb's summary and whether a human ever types it, and argparse renders the listing,
+the usage line and the `invalid choice` error from that one table. The eleven verbs a person never
+types (`report`, `decision`, `knowledge-gap`, `evidence`, `dag`, `events`, `task`, `guard`,
+`policy-check`, `issue-sync`, `project`) drop out of the default listing — but their **names stay
+in the epilog**, because the agents that call them read `rein --help` too, and a verb whose name
+appears nowhere is discoverable only through prompt prose. `rein help --all` gives them their
+descriptions; `rein <verb> --help` gives their arguments.
+
+**The wizard installs the agent surface, because its own closing line depends on one.** It
+offered to build the sandboxes but only *printed* "Add an agent surface when you want one" — and
+then told you to start with `/req`, a command that does not exist until an integration is written.
+An opt-in step that every documented path requires is not opt-in, and the tool was already paying
+for the gap at runtime: every `/`-recommendation had to carry a "no agent surface is installed"
+sentence, computed by walking the packaged payload (the 385ms this release's predecessor spent
+0.3.11 fixing). `rein start` on a fresh repo now asks which surface to install, defaulting to the
+host it can detect, and the first run is `rein start` → new session → `/req`. `rein install` stays
+for a second host and for repos seeded off a TTY.
+
+**`rein oci verify` left the setup instructions.** Running it immediately after `oci build
+--write-config` can only fail when the build failed, which the build already reports, and
+`rein doctor` checks the same pins. The verb remains for CI and for re-checking later.
+
 ## [0.3.11] - 2026-08-31
 
 **An idle dashboard burned an eighth of a core, forever.** The page polled `/api/status` every

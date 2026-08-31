@@ -748,8 +748,8 @@ def run_cli(bundle: dict[str, Any], *args: str) -> tuple[int, str]:
 def test_the_verb_is_registered() -> None:
     from rein import cli
 
-    assert cli.VERBS["pr-stack"] == "pr_stack"
-    assert "pr-stack" in cli.HELP
+    assert cli.VERBS["pr-stack"].spec == "pr_stack"
+    assert "pr-stack" in cli._build_parser().format_help()
 
 
 def test_the_default_run_writes_bodies_and_prints_draft_commands(cycle: Callable[..., dict[str, Any]]) -> None:

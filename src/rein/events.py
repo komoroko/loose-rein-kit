@@ -112,7 +112,7 @@ def render(events: list[models.Event]) -> str:
 def render_summary(events: list[models.Event], task_status: Mapping[str, str] | None = None) -> str:
     """Counts per kind plus the events still awaiting a human decision.
 
-    `task_status` is passed so this and `rein status` narrow the same list by the same rule; without
+    `task_status` is passed so this and the status board narrow the same list by the same rule; without
     it a task's later success retires its `task_failed` on one screen and not the other.
     """
     counts = event_chain.summarize(events)
@@ -176,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--root", action="store_true", help="print the chain root digest only")
     group.add_argument("--cost", action="store_true", help="what each cycle's launches actually cost, by role")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
-    # A window into an append-only log that only ever grows. `rein resume` points here with the
+    # A window into an append-only log that only ever grows. `rein start` points here with the
     # reader's own watermark, so "what happened while I was gone" does not mean reading the whole log.
     parser.add_argument("--since", type=int, default=None, metavar="SEQ", help="only events after this seq")
     args = parser.parse_args(argv)

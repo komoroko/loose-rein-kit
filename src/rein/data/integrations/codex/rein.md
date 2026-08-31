@@ -31,7 +31,7 @@ Notes:
   signal, never polled.
 - **Codex's `exec` caps how long one command may run**, and a real build outlasts that cap. With no
   `background-wait`, take its degradation: start the run detached with its output in a file
-  (`nohup rein build --supervise > .rein/build.log 2>&1 &`), end the turn, and read `rein resume` /
+  (`nohup rein build --supervise > .rein/build.log 2>&1 &`), end the turn, and read `rein start` /
   the log when you come back — **never re-run `rein build` to check on it** (build.md, "When the run
   outlasts your host's command timeout").
 - The security review before gate ④ / at `/verify`: perform a security-focused review pass; it is

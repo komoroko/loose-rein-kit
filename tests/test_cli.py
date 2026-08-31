@@ -73,9 +73,35 @@ def test_project_passes_through_to_registry(repo: Path, monkeypatch: pytest.Monk
 
 
 def test_verb_table_resolves_and_is_documented() -> None:
-    for verb, spec in cli.VERBS.items():
-        assert callable(cli._resolve(spec)), spec
-        assert verb in cli.HELP, verb
+    """The listing is generated from the table, so no verb can be missing from `help --all`."""
+    listing = cli._build_parser(show_all=True).format_help()
+    for verb, entry in cli.VERBS.items():
+        assert callable(cli._resolve(entry.spec)), entry.spec
+        assert verb in listing, verb
+        assert entry.summary.split(" (")[0][:30] in listing, verb
+
+
+def test_the_default_help_drops_agent_verb_descriptions_but_never_their_names(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The perceived surface is the default listing; the epilog keeps discovery open.
+
+    Agents call these verbs and agents read `rein --help` too, so hiding the *names* would leave
+    prompt prose as the only way to learn a verb exists.
+    """
+    assert cli.main(["--help"]) == 0
+    default = capsys.readouterr().out
+    hidden = [name for name, entry in cli.VERBS.items() if not entry.human]
+    assert hidden, "the split is pointless if nothing is hidden"
+    for name in hidden:
+        assert name in default, name
+        assert cli.VERBS[name].summary not in default, name
+    assert "rein help --all" in default
+
+    assert cli.main(["help", "--all"]) == 0
+    everything = capsys.readouterr().out
+    for name in hidden:
+        assert cli.VERBS[name].summary.split(" (")[0][:30] in everything, name
 
 
 def test_repo_flag_may_precede_the_verb(
@@ -91,7 +117,7 @@ def test_version_short_circuits_the_lock_check(chdir_tmp: Path, capsys: pytest.C
     (chdir_tmp / ".rein" / "rein.lock").write_text("version: 99\n", encoding="utf-8")
     assert cli.main(["version"]) == 0  # identity must stay answerable under any lock
     capsys.readouterr()
-    assert cli.main(["status"]) == 1  # every other verb hard-stops on a newer lock format
+    assert cli.main(["next"]) == 1  # every other verb hard-stops on a newer lock format
     assert "is in format" in capsys.readouterr().err
 
 
@@ -109,20 +135,35 @@ def test_the_conventional_version_spellings_all_answer(spelling: str, capsys: py
 # --- start: wizard on a fresh copy, orientation afterwards -------------------------
 
 
-def test_start_initialized_prints_where_you_are_and_next(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_start_initialized_prints_the_delta_and_next(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["start"]) == 0
     out = capsys.readouterr().out
-    assert "project: demo" in out and "gates: 3/5 approved" in out
+    assert "Since last time" in out
     assert "next: /build" in out
 
 
-def test_start_uninitialized_non_tty_refuses_with_the_make_alternative(
+def test_start_full_adds_the_board_and_json_gives_the_object(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`--full` and `--json` are why there is no second verb for the snapshot."""
+    assert cli.main(["start", "--full", "--no-mark"]) == 0
+    board = capsys.readouterr().out
+    assert "project: demo" in board and "### Gates" in board
+
+    assert cli.main(["start", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["project"] == "demo"
+
+
+def test_start_off_a_tty_reports_instead_of_refusing(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """The SessionStart hook runs this: refusing here is what kept the hook on a second verb.
+
+    The packet already leads with `rein init --name <product>`, which is the answer a template
+    checkout needs — so print it and exit 0 rather than erroring.
+    """
     (repo / ".rein" / "config.yaml").write_bytes(store.dump_yaml(make_config(template_mode=True)))
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-    assert cli.main(["start"]) == 2
-    assert "rein init --name" in capsys.readouterr().err
+    assert cli.main(["start"]) == 0
+    assert "rein init --name" in capsys.readouterr().out
 
 
 def test_start_uninitialized_tty_runs_the_wizard(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,11 +178,6 @@ def test_start_uninitialized_tty_runs_the_wizard(repo: Path, monkeypatch: pytest
     monkeypatch.setattr(init_cmd, "wizard", fake_wizard)
     assert cli.main(["start"]) == 0
     assert called == [True]
-
-
-def test_start_rejects_extra_arguments(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli.main(["start", "--force"]) == 2
-    assert "no arguments" in capsys.readouterr().err
 
 
 def test_a_stated_failure_prints_as_an_error_not_a_traceback(
