@@ -38,14 +38,33 @@ def test_source_from_direct_url_returns_empty_without_vcs_coordinates() -> None:
 def test_dist_name_resolves_the_real_distribution() -> None:
     """The import name is `rein`; the distribution is `loose-rein-kit`, and only one of them resolves.
 
-    This is the assertion whose absence let `detect_source` return "" forever. It asserts against
-    the live interpreter's metadata, so a rename that breaks the lookup fails here.
+    This assertion's absence is what let `detect_source` return "" on every real install. It runs
+    against the live interpreter's metadata, so a rename that breaks the lookup fails here rather
+    than in a user's `rein init`.
     """
     import importlib.metadata as md
 
     assert md.distribution(upstream.DIST_NAME).metadata["Name"].lower().replace("_", "-") == upstream.DIST_NAME
-    with pytest.raises(md.PackageNotFoundError):
-        md.distribution("rein")
+
+
+def test_detect_source_asks_for_the_distribution_not_the_import_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exact defect: `distribution("rein")` raises PackageNotFoundError and the source is lost."""
+    import importlib.metadata as md
+
+    asked: list[str] = []
+
+    class _Dist:
+        @staticmethod
+        def read_text(_name: str) -> str:
+            return '{"url": "https://github.com/o/r", "vcs_info": {"vcs": "git", "requested_revision": "v1.0"}}'
+
+    def _distribution(name: str) -> _Dist:
+        asked.append(name)
+        return _Dist()
+
+    monkeypatch.setattr(md, "distribution", _distribution)
+    assert upstream.detect_source() == "git+https://github.com/o/r@v1.0"
+    assert asked == [upstream.DIST_NAME]
 
 
 def test_parse_source_separates_a_rev_from_a_scp_style_url() -> None:
@@ -109,6 +128,7 @@ def test_newer_available_compares_versions_and_tolerates_junk() -> None:
 
 
 def test_latest_release_returns_the_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(upstream.NO_CHECK_ENV, raising=False)  # the suite is offline by default
     calls: list[list[str]] = []
 
     def _run(cmd: list[str], *args: object, **kwargs: object) -> tuple[int, str]:
@@ -126,6 +146,7 @@ def test_latest_release_is_none_when_the_question_could_not_be_answered(
     monkeypatch: pytest.MonkeyPatch, result: tuple[int, str]
 ) -> None:
     """Every failure is None, and the caller must not read None as "current"."""
+    monkeypatch.delenv(upstream.NO_CHECK_ENV, raising=False)
     monkeypatch.setattr("rein.common.run", lambda *a, **k: result)
     assert upstream.latest_release(upstream.parse_source("git+https://github.com/o/r@v1.0")) is None
 

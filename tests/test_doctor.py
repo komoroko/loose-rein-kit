@@ -1247,6 +1247,7 @@ def test_a_newer_release_is_a_warn_naming_the_command_that_actually_upgrades(
 ) -> None:
     """`uv tool upgrade` leaves a tag-pinned install where it was, so the WARN must not print it."""
     repo = make_repo_obj()  # type: ignore[operator]
+    monkeypatch.delenv(upstream.NO_CHECK_ENV, raising=False)
     monkeypatch.setattr(upstream, "detect_source", lambda: "git+https://github.com/o/r@v0.0.1")
     monkeypatch.setattr(upstream, "latest_release", lambda *a, **k: "v999.0.0")
     finding = _upstream(repo)
@@ -1262,6 +1263,7 @@ def test_being_current_is_a_pass(make_repo_obj: object, monkeypatch: pytest.Monk
     import rein
 
     repo = make_repo_obj()  # type: ignore[operator]
+    monkeypatch.delenv(upstream.NO_CHECK_ENV, raising=False)
     monkeypatch.setattr(upstream, "detect_source", lambda: "git+https://github.com/o/r@v0.0.1")
     monkeypatch.setattr(upstream, "latest_release", lambda *a, **k: f"v{rein.__version__}")
     assert _upstream(repo).level == "PASS"
@@ -1273,6 +1275,7 @@ def test_an_unanswerable_release_check_is_info_never_pass(
     """No gh, no network, no VCS origin: doctor never reports an unasked question as healthy."""
     repo = make_repo_obj()  # type: ignore[operator]
     monkeypatch.setattr(upstream, "latest_release", lambda *a, **k: None)
+    monkeypatch.delenv(upstream.NO_CHECK_ENV, raising=False)
     finding = _upstream(repo)
     assert finding.level == "INFO"
     assert "could not check" in finding.message

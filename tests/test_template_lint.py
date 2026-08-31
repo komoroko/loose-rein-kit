@@ -626,3 +626,10 @@ def test_the_upgrade_canary_catches_a_reintroduced_literal(tmp_path: Path) -> No
     with patch.object(template_lint, "_tracked_texts", lambda _root: texts):
         failures = template_lint.check_upgrade_command(tmp_path)
     assert len(failures) == 1 and "docs/x.md" in failures[0]
+
+
+def test_the_upgrade_canary_refuses_to_pass_when_it_could_not_look(tmp_path: Path) -> None:
+    """`Repo._git` returns "" for every failure, and an empty listing would be a silent pass."""
+    template_lint._tracked_texts.cache_clear()
+    with pytest.raises(OSError, match="could not list git-tracked files"):
+        template_lint._tracked_texts(tmp_path)  # not a git checkout

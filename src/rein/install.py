@@ -778,7 +778,6 @@ def install_integration(
             )
 
     integrations[name] = record
-    data.setdefault("rein", {}).setdefault("version", rein.__version__)
     lock_mod.write(repo.lock, data)
     print(f"installed integration: {name} (recorded in {lock_mod.LOCK_NAME})")
     if announce_next:

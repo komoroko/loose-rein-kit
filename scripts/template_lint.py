@@ -806,6 +806,11 @@ def _tracked_texts(root: Path) -> dict[str, str]:
     from rein import repo as repo_mod
 
     listing = repo_mod.Repo(root)._git("ls-files", "-z")
+    if not listing:
+        # `_git` returns "" for every failure — git absent, not a checkout, a broken index. An
+        # empty listing would make every canary built on it report "no drift" without having
+        # looked at a single file, which is the one thing these checks may never do.
+        raise OSError(f"could not list git-tracked files under {root} — the canaries cannot look")
     texts: dict[str, str] = {}
     for rel in filter(None, listing.split("\0")):
         if Path(rel).suffix not in _TEXT_SUFFIXES:
