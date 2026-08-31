@@ -77,8 +77,9 @@ jobs:
           \`--force\` (\`uv tool install --force git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}@vX.Y.Z\`),
           since \`uv tool upgrade loose-rein-kit\` keeps a tag-pinned install on its pinned version. (If
           you installed from the default branch instead, \`uv tool upgrade loose-rein-kit\` moves you
-          forward.) Then run \`rein upgrade\` in each adopted repo to refresh the materialized
-          artifacts.
+          forward.) \`rein doctor\` derives whichever of the two applies to your install and prints it
+          when a newer release exists. Then run \`rein upgrade\` in each adopted repo to refresh the
+          materialized artifacts.
           EOF
 
       - name: Create and push the tag

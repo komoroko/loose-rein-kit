@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import common, dag_trace, doctor, models
+from rein import common, dag_trace, doctor, models, upstream
 from rein import repo as repo_mod
 from tests._support import (
     DEMO_CYCLE,
@@ -1231,3 +1231,59 @@ def test_the_stack_extension_is_reported_when_gh_is_there(monkeypatch: pytest.Mo
 def test_no_second_line_about_an_extension_when_gh_itself_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("rein.doctor.shutil.which", lambda _name: None)
     assert doctor.check_stack_extension() == []
+
+
+# --- the release check -----------------------------------------------------------
+
+
+def _upstream(repo: repo_mod.Repo) -> doctor.Finding:
+    found = doctor.check_upstream(repo)
+    assert len(found) == 1
+    return found[0]
+
+
+def test_a_newer_release_is_a_warn_naming_the_command_that_actually_upgrades(
+    make_repo_obj: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`uv tool upgrade` leaves a tag-pinned install where it was, so the WARN must not print it."""
+    repo = make_repo_obj()  # type: ignore[operator]
+    monkeypatch.setattr(upstream, "detect_source", lambda: "git+https://github.com/o/r@v0.0.1")
+    monkeypatch.setattr(upstream, "latest_release", lambda *a, **k: "v999.0.0")
+    finding = _upstream(repo)
+    assert finding.level == "WARN"
+    assert "uv tool install --force 'git+https://github.com/o/r@v999.0.0'" in finding.message
+    assert "uv tool upgrade" not in finding.message
+    # What it saw is left in the cache, which is the only thing `rein start` ever reads.
+    cached = upstream.read_cache()
+    assert cached is not None and cached["tag"] == "v999.0.0"
+
+
+def test_being_current_is_a_pass(make_repo_obj: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    import rein
+
+    repo = make_repo_obj()  # type: ignore[operator]
+    monkeypatch.setattr(upstream, "detect_source", lambda: "git+https://github.com/o/r@v0.0.1")
+    monkeypatch.setattr(upstream, "latest_release", lambda *a, **k: f"v{rein.__version__}")
+    assert _upstream(repo).level == "PASS"
+
+
+def test_an_unanswerable_release_check_is_info_never_pass(
+    make_repo_obj: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No gh, no network, no VCS origin: doctor never reports an unasked question as healthy."""
+    repo = make_repo_obj()  # type: ignore[operator]
+    monkeypatch.setattr(upstream, "latest_release", lambda *a, **k: None)
+    finding = _upstream(repo)
+    assert finding.level == "INFO"
+    assert "could not check" in finding.message
+    assert upstream.read_cache() is None  # nothing seen, nothing recorded
+
+
+def test_the_opt_out_is_reported_as_the_reason(make_repo_obj: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = make_repo_obj()  # type: ignore[operator]
+    monkeypatch.setenv(upstream.NO_CHECK_ENV, "1")
+    monkeypatch.setattr(
+        common, "run", lambda *a, **k: pytest.fail(f"{upstream.NO_CHECK_ENV} must keep doctor off the network")
+    )
+    finding = _upstream(repo)
+    assert finding.level == "INFO" and upstream.NO_CHECK_ENV in finding.message

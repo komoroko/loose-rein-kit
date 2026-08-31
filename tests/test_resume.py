@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import event_chain, models, resume
+from rein import common, event_chain, models, resume, upstream
 from tests._support import SANDBOXED_PROFILES, chain, make_config, make_state, seed_repo
 
 
@@ -142,3 +142,31 @@ def test_a_run_the_machine_stopped_gets_a_headline() -> None:
     for the machine's reasons and left every task where it was — the board looks unchanged, so
     nothing else in the packet would say so."""
     assert "re-runnable" in resume.HEADLINE_EVENTS["run_aborted"]
+
+
+# --- the release note, read from doctor's cache and never fetched ------------------
+
+
+def test_a_newer_release_is_reported_from_the_cache(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upstream, "detect_source", lambda: "git+https://github.com/o/r@v0.0.1")
+    upstream.write_cache("o/r", "v999.0.0")
+    _log(repo, "task_completed")
+    assert "v999.0.0" in resume.run(repo)
+
+
+def test_nothing_is_said_without_a_cache_or_when_current(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upstream, "detect_source", lambda: "git+https://github.com/o/r@v0.0.1")
+    _log(repo, "task_completed")
+    assert "available" not in resume.run(repo, mark=False)
+    upstream.write_cache("o/r", "v0.0.1")
+    assert "available" not in resume.run(repo, mark=False)
+
+
+def test_start_never_reaches_the_network(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """It runs from the SessionStart hook, which 0.3.11 was spent making cheap."""
+    monkeypatch.setattr(
+        common, "run", lambda *a, **k: pytest.fail("`rein start` must not run a subprocess for a version check")
+    )
+    upstream.write_cache("o/r", "v999.0.0")
+    _log(repo, "task_completed")
+    resume.run(repo)

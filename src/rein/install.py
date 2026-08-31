@@ -18,8 +18,10 @@ The harness ships everything non-code inside the wheel (see data.py); a reposito
                entry-by-entry), or `--all` to remove every installed artifact and the lock.
   upgrade    — the version-transition report (CHANGELOG sections between the lock's recorded
                version and the running tool) + sync + refresh of the installed integrations.
-               Upgrading the *code* is `uv tool upgrade loose-rein-kit`; this refreshes what the
-               code materialized.
+               This refreshes what the code materialized, never the code: upgrading the *code*
+               depends on how it was installed, which is what `upstream.upgrade_command` derives
+               (a tag-pinned uv tool does not move under `uv tool upgrade`) and what `rein doctor`
+               prints when a newer release exists.
 
 The settings.json merge/unmerge and the CLAUDE.md/AGENTS.md marker blocks reuse the pure
 settings-merge and marker-block functions (the copy-distribution model that first used them
@@ -42,7 +44,7 @@ from typing import Any
 from packaging.version import InvalidVersion, Version
 
 import rein
-from rein import common, gitignore, strict_yaml
+from rein import common, gitignore, strict_yaml, upstream
 from rein import data as data_mod
 from rein import lock as lock_mod
 from rein import repo as repo_mod
@@ -940,6 +942,7 @@ def upgrade(repo: repo_mod.Repo, *, dry_run: bool = False, force: bool = False) 
         logger.error(f"no {lock_mod.LOCK_NAME} — run `rein init` (new repo) or `rein sync` first.")
         return 1
     installed = lock_mod.tool_version_of(data)
+    source = lock_mod.source_of(data)
     running = rein.__version__
     print(f"rein: {installed or '(unrecorded)'} → {running}")
     if installed == running:
@@ -966,7 +969,9 @@ def upgrade(repo: repo_mod.Repo, *, dry_run: bool = False, force: bool = False) 
         rc = install_integration(repo, name, force=force)
         if rc != 0:
             return rc
-    print("upgrade complete. (Upgrading the tool itself is `uv tool upgrade loose-rein-kit`.)")
+    # Which command upgrades the tool itself depends on how it was installed, so it is derived
+    # rather than quoted — `uv tool upgrade` never moves a tag-pinned install.
+    print(f"upgrade complete. (Upgrading the tool itself is `{upstream.upgrade_command(upstream.origin(source))}`.)")
     return 0
 
 

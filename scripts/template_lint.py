@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import re
+from functools import cache
 from itertools import zip_longest
 from pathlib import Path
 
@@ -789,6 +790,86 @@ def check_version_lock(version: str, lock_text: str) -> list[str]:
     return []
 
 
+#: Extensions worth scanning for a literal command: prose, code, and CI definitions. A canary
+#: that skipped one of these would let the literal survive in exactly the place it did most
+#: recently (a module docstring).
+_TEXT_SUFFIXES = frozenset({".md", ".py", ".yml", ".yaml", ".json", ".toml", ".sh"})
+
+
+@cache
+def _tracked_texts(root: Path) -> dict[str, str]:
+    """Every git-tracked text file, repo-relative path → content.
+
+    Git-tracked rather than a directory walk: `.venv/`, `node_modules/` and the build caches are
+    not this repository's prose, and scanning them would make the canary both slow and wrong.
+    """
+    from rein import repo as repo_mod
+
+    listing = repo_mod.Repo(root)._git("ls-files", "-z")
+    texts: dict[str, str] = {}
+    for rel in filter(None, listing.split("\0")):
+        if Path(rel).suffix not in _TEXT_SUFFIXES:
+            continue
+        try:
+            texts[rel] = (root / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return texts
+
+
+#: The command that does NOT upgrade a tag-pinned `uv tool install`. It spent five places in this
+#: repository telling people to run it, and `upstream.upgrade_command` now derives the right one
+#: from the install's own PEP 610 metadata. Only `upstream.py` may spell it, as the branch-tracking
+#: case's answer.
+_DEAD_UPGRADE_COMMAND = "uv tool upgrade loose-rein-kit"
+_UPGRADE_COMMAND_OWNER = "src/rein/upstream.py"
+#: Two files may still name it: the release notes, whose whole point is explaining both install
+#: shapes to a reader who has neither installed yet, and this canary — a register of what may not
+#: come back has to be able to spell what it forbids.
+_UPGRADE_COMMAND_EXEMPT = (".github/workflows/release.yml", "scripts/template_lint.py")
+
+
+def check_upgrade_command(root: Path) -> list[str]:
+    """No file but `upstream.py` may spell an upgrade command.
+
+    A tag-pinned uv tool re-resolves to its pinned rev, so `uv tool upgrade` moves it nowhere —
+    and every message that printed it was telling a reader to run a no-op. The command now comes
+    from `upstream.upgrade_command`, derived from how the install was actually made; this canary
+    is what stops the literal from creeping back into a docstring or a README.
+    """
+    failures = []
+    texts = _tracked_texts(root)
+    for path in sorted(texts):
+        if path == _UPGRADE_COMMAND_OWNER or path in _UPGRADE_COMMAND_EXEMPT:
+            continue
+        if _DEAD_UPGRADE_COMMAND in texts[path]:
+            failures.append(
+                f"{path}: `{_DEAD_UPGRADE_COMMAND}` is a no-op for a tag-pinned install — "
+                f"print `upstream.upgrade_command()` instead"
+            )
+    return failures
+
+
+def check_distribution_name(root: Path) -> list[str]:
+    """`upstream.DIST_NAME` must equal `pyproject.toml [project] name`.
+
+    They differ from the import name, and `detect_source` asked `importlib.metadata` for the
+    *import* name for its whole life — so it returned "" on every real install and no test caught
+    it, because the tests monkeypatched the one function that touched reality.
+    """
+    from rein import upstream
+
+    m = re.search(r'^name\s*=\s*"([^"]+)"', (root / "pyproject.toml").read_text(encoding="utf-8"), re.MULTILINE)
+    if not m:
+        return ["pyproject.toml has no [project] name"]
+    if upstream.DIST_NAME != m.group(1):
+        return [
+            f"upstream.DIST_NAME is {upstream.DIST_NAME!r} but pyproject.toml says {m.group(1)!r} — "
+            "importlib.metadata resolves the distribution name, not the import name"
+        ]
+    return []
+
+
 def check_rein_lock_version(version: str, lock_text: str) -> list[str]:
     """`.rein/rein.lock` records the release that wrote this repository's materialized artifacts.
 
@@ -875,6 +956,8 @@ def main(argv: list[str] | None = None) -> int:
         if lock.is_file():  # a product repository has no uv.lock of its own to keep in step
             failures += check_version_lock(version, lock.read_text(encoding="utf-8"))
         failures += check_rein_lock_version(version, (root / ".rein" / "rein.lock").read_text(encoding="utf-8"))
+        failures += check_upgrade_command(root)
+        failures += check_distribution_name(root)
     except OSError as exc:
         logger.error(f"template-lint failed: {exc}")
         return 1

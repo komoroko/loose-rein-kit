@@ -87,9 +87,9 @@ def test_norm_hash_ignores_line_endings() -> None:
 # --- the startup version-skew check -------------------------------------------
 
 
-def _repo_with(tmp_path: Path, version: str) -> repo_mod.Repo:
+def _repo_with(tmp_path: Path, version: str, source: str = "") -> repo_mod.Repo:
     (tmp_path / ".rein").mkdir(parents=True, exist_ok=True)
-    lock.write(tmp_path / ".rein" / "rein.lock", lock.new(version, ""))
+    lock.write(tmp_path / ".rein" / "rein.lock", lock.new(version, source))
     return repo_mod.Repo(tmp_path)
 
 
@@ -103,8 +103,14 @@ def test_no_warning_for_a_missing_lock(tmp_path: Path) -> None:
 
 
 def test_an_older_tool_is_told_to_upgrade(tmp_path: Path) -> None:
-    warning = lock.startup_warning(_repo_with(tmp_path, "0.1.5"), "0.1.0")
-    assert warning is not None and "uv tool upgrade loose-rein-kit" in warning
+    """The command is derived from how this install was made, not quoted.
+
+    `uv tool upgrade` is a no-op for the tag-pinned install the README prescribes, so the warning
+    used to point at something that would not move the reader at all.
+    """
+    repo = _repo_with(tmp_path, "0.1.5", source="git+https://github.com/o/r@v0.1.5")
+    warning = lock.startup_warning(repo, "0.1.0")
+    assert warning is not None and "uv tool install --force 'git+https://github.com/o/r@vX.Y.Z'" in warning
 
 
 def test_a_newer_tool_is_told_to_sync(tmp_path: Path) -> None:
@@ -125,3 +131,29 @@ def test_an_unparseable_version_is_reported_not_swallowed(tmp_path: Path) -> Non
     )
     warning = lock.startup_warning(repo_mod.Repo(tmp_path), "0.1.0")
     assert warning is not None and "damaged" in warning
+
+
+def test_write_drops_keys_the_format_has_no_place_for(tmp_path: Path) -> None:
+    """A retired key must not be carried forever.
+
+    This repository's own lock held `rein: {version: 0.1.0}` from a layout that no longer exists,
+    beside a `tool_version` of 0.3.12 — a machine-written file disagreeing with itself. The lock is
+    derived from the installed package, so dropping the key is the whole migration.
+    """
+    path = tmp_path / "rein.lock"
+    data = lock.new("0.4.0", "git+https://github.com/o/r@v0.4.0")
+    data["rein"] = {"version": "0.1.0"}  # the retired spelling
+    lock.write(path, data)
+
+    written = lock.read(path)
+    assert written is not None
+    assert "rein" not in written
+    assert set(written) <= set(lock.KEYS)
+    assert lock.tool_version_of(written) == "0.4.0"
+    assert lock.source_of(written) == "git+https://github.com/o/r@v0.4.0"
+
+
+def test_source_of_reads_the_top_level_field(tmp_path: Path) -> None:
+    assert lock.source_of({"source": "git+https://x/y"}) == "git+https://x/y"
+    assert lock.source_of({}) == ""
+    assert lock.source_of({"source": 3}) == ""
