@@ -3,52 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Loose Rein dashboard</title>
+<title>Loose Rein</title>
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<header>
-  <h1>agent<b>loop</b></h1>
-  <select id="projectSelect" title="Switch target project" style="display:none"></select>
-  <span class="meta" id="meta">loading…</span>
-  <span class="spacer"></span>
-  <span class="meta"><span class="dot" id="dot"></span><span id="ago">—</span></span>
-  <button class="ghost" id="refreshBtn" title="Refresh now">⟳</button>
-  <button class="ghost" id="bellBtn" title="Toggle notifications">🔕</button>
-  <button class="ghost" id="themeBtn" title="Toggle theme">◐</button>
-</header>
-<nav id="tabs">
-  <a href="#overview" data-view="overview">Overview</a>
-  <a href="#review" data-view="review">Review<span class="badge" id="reviewBadge" style="display:none"></span></a>
-  <a href="#tasks" data-view="tasks">Tasks</a>
-  <a href="#activity" data-view="activity">Activity</a>
-</nav>
-<main>
-  <div class="view" id="view-overview">
-    <section class="col-full"><h2>Lifecycle</h2><div class="rail" id="stepper"></div></section>
-    <section class="next col-full"><h2>Next action</h2><div id="next"></div></section>
-    <section class="col-full"><h2>Needs attention</h2><div id="attention"></div></section>
-  </div>
-  <div class="view" id="view-review" style="display:none">
-    <!-- Split three ways on purpose: a status poll repaints only the gate bar and the approval
-         footer, so the body keeps its scroll position while a long patch is being read. -->
-    <section class="col-full"><h2>Gate review</h2>
-      <div id="rvBar"></div><div id="rvMain"></div><div id="rvFoot"></div></section>
-  </div>
-  <div class="view" id="view-tasks" style="display:none">
-    <section class="col-full"><h2>Tasks</h2><div id="tasks"></div>
-      <!-- outside #tasks: a re-render of the graph must not wipe the detail the human just opened -->
-      <div id="taskDetail"></div></section>
-    <section class="col-full" id="traceSection" style="display:none"><h2>Traceability (requirements → tasks)</h2>
-      <div id="trace"></div></section>
-  </div>
-  <div class="view" id="view-activity" style="display:none">
-    <section class="col-full"><h2>Event feed</h2><div id="events"></div></section>
-    <section class="col-full"><h2>Operations</h2><div id="ops"></div>
-      <pre class="out" id="out" style="display:none"></pre></section>
-  </div>
-</main>
-<div id="toasts"></div>
+<div id="root"></div>
 <script>window.TOKEN = "__TOKEN__"; window.READ_ONLY = __READ_ONLY__;</script>
 <script type="module" src="/assets/app.js"></script>
 </body>

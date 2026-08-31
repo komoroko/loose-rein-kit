@@ -34,9 +34,29 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
 
+      # node is a development dependency of this repository and of nothing it ships: `rein` is a
+      # Python package, and `rein ui` serves a pre-built bundle over the standard library. It is
+      # installed here so `make check`'s frontend step cannot silently skip in CI, which is exactly
+      # what it does on a machine without it — and that step is what proves the committed bundle is
+      # a rebuild of ui/ rather than something stale that was never regenerated.
+      # pnpm first: setup-node's `cache: pnpm` needs the store path, which only pnpm can report.
+      # The version comes from package.json's `packageManager`, so it is written in one place.
+      - name: Install pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Install node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install frontend dev tooling
+        run: pnpm install --frozen-lockfile
+
       # `make check` == pre-commit (commit stage) + pre-push stage + template-lint (drift canaries)
-      # + sync-check (materialized artifacts match the packaged payload) — the full gate.
-      - name: Run pre-commit, template-lint and sync-check
+      # + sync-check (materialized artifacts match the packaged payload) + frontend (eslint, the
+      # rebuild check over the committed bundle, and the jsdom suite) — the full gate.
+      - name: Run pre-commit, template-lint, sync-check and the frontend suite
         run: make check
 
   unit:

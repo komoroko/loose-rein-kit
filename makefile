@@ -6,7 +6,7 @@
 # wraps the package's own dev workflow (macOS / Linux; use WSL on Windows).
 # =========================================================
 
-.PHONY: install setup pre-commit pre-push check test template-lint sync-check audit clean
+.PHONY: install setup pre-commit pre-push check test frontend template-lint sync-check audit clean
 
 # Install the uv binary (the one bootstrap prerequisite)
 install:
@@ -33,7 +33,24 @@ pre-push:
 
 # The full quality gate: both hook stages plus the template drift canaries and the
 # materialized-artifact check. CI runs this same target.
-check: pre-commit pre-push template-lint sync-check
+check: pre-commit pre-push template-lint sync-check frontend
+
+# The dashboard's frontend: eslint, the jsdom suite under tests/ui/, and the check that the
+# committed bundle is a rebuild of ui/.
+#
+# node is a *development* dependency and nothing else — `rein` is a Python package, `rein ui` serves
+# the pre-built bundle over the standard library, and no user of the CLI ever needs node. So this
+# skips loudly rather than failing when pnpm is absent, and CI installs it so it can never skip
+# there. The build check is why a skip here is survivable: the shipped bytes are in the tree either
+# way, and CI proves they match the source.
+frontend:
+	@if ! command -v pnpm >/dev/null 2>&1; then \
+		echo "frontend: SKIPPED — pnpm is not installed (dev-only; CI runs this)"; \
+	elif [ ! -d node_modules ]; then \
+		echo "frontend: SKIPPED — run 'pnpm install' first (dev-only; CI runs this)"; \
+	else \
+		pnpm run --silent lint && pnpm run --silent build:check && pnpm run --silent test; \
+	fi
 
 # The package's test suite (the same suite CI's matrix runs), with coverage measured.
 #

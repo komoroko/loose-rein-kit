@@ -4,6 +4,129 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.11] - 2026-08-31
+
+**An idle dashboard burned an eighth of a core, forever.** The page polled `/api/status` every
+three seconds for the whole life of a supervised run, and the endpoint's `ETag`/`304` — added to
+make that cheap — saved the *network* and nothing else: `collect_status` still ran in full on every
+tick, of every open tab, over a repository where nothing was happening. It cost **385ms a call**,
+and 81% of that was `_no_agent_surface` answering "is any agent surface installed?" by walking the
+entire packaged payload and reading every file in it, three times over (once per integration), to
+decide whether to append one hint sentence to the recommended command. `install._dest_map` loaded
+`destination -> bytes` and `present_surfaces` threw the bytes away to keep the keys. Enumeration is
+now separate from loading (`data.iter_names`, `install._dest_sources`) and cached for the life of
+the process, because the payload lives inside the installed wheel and no verb writes it: **385ms →
+25ms**, and the test suite got 20 seconds faster with it.
+
+**The poll is gone; the server speaks instead.** One `/api/stream` (server-sent events) for the
+life of the page. The loop behind it is two-stage: every tick it stats a fixed handful of SSOT
+documents plus `.git/HEAD`, and only a moved fingerprint buys a status read; a payload whose
+identity is unchanged is not sent at all, so the page re-renders nothing and a half-typed field, an
+open task detail or the scroll inside a long patch survives until the repository actually moves. A
+20-second sweep re-reads regardless — bounding anything a stat cannot see — and doubles as the
+keep-alive that makes a dead socket detectable. The audit log gets its own `record` event, because
+an appended event need not change any field of the status payload and the Record screen still has
+to know. **The watch list is named file by file and there is no directory walk in it**: the first
+version globbed `.rein/**` and `.git/refs/**`, which is ~100 paths and cost 271ms a tick on a WSL
+mount — more than the read it existed to avoid. A canary now fails on a glob there.
+
+On the page this deleted three separate timing mechanisms and everything that propped them up: the
+poll interval and its lazy backgrounded-tab variant, the client-side ETag and its invalidation, the
+`rein:refresh` event, the Record feed's own timer and the response-body comparison that made blind
+polling survivable, the "updated Ns ago" clock, and the refresh button — there is nothing left to
+ask for. `post(path, body, echo)` split into `runCommand` (a Console command, whose output *is* the
+result) and `record` (a decision, whose result is the repository moving); a boolean parameter
+selecting between two unrelated behaviours was the shape of the bug it had already caused. The
+project switcher now needs no client coordination at all: the stream re-reads the active project
+every tick, so the next push is already the other repository's.
+
+**1,800 lines of frontend had no test and no linter.** They were guarded only by Python canaries
+that grep the source text, and the gap was not hypothetical: a dead `RISKY` set shipped in 0.3.10,
+declared and never read. `package.json` adds two **development** dependencies — eslint and jsdom,
+run by `make check` and by CI, in no wheel and on no user's machine. `rein` remains a Python
+package with three runtime dependencies, and **nobody running the CLI needs node**; the make target
+says so and skips loudly when pnpm is absent, while CI installs it so it can never skip there. Each
+version is written once and read from there: `.nvmrc` pins node 26, `packageManager` pins pnpm,
+`pnpm-lock.yaml` is committed and CI installs from it frozen. pnpm's strict tree immediately caught
+an **undeclared dependency**: `eslint.config.mjs` imports `@eslint/js`, which npm's flat hoisting
+happened to provide and nobody had listed. `tests/ui/` boots the shipped bundle against a jsdom
+document and a scripted server: every screen and route, both gate kinds, all five gate-④ stages,
+each decision panel, the read-only page, a link to a gate the server refuses, and a dropped
+connection. A canary keeps the status fixture those tests render from from drifting out of the
+payload's real shape. `audit.yml` claimed a `pnpm audit` step ran "when a frontend exists"; no such
+step was ever in the make target, and the comment now says what is true.
+
+**The page is React, and the escaping is now a property of the renderer.** The dashboard holds the
+approval token, so an XSS on it is a self-approval — and it was built by concatenating HTML strings,
+guarded by **103 hand-written `esc()` calls** across 22 `innerHTML` assignments, every one of which
+had to be remembered. Task ids, claim ids and gap ids are agent-written and none is pattern-validated
+on load. JSX escapes every interpolation by construction, so the failure direction is inverted:
+what is left to police is the deliberate opt-out, and there are exactly **two**
+`dangerouslySetInnerHTML` sites, both rendering mdlite output, which escapes at the source. A canary
+asserts that list by name. The workarounds that existed only because generated markup could not
+carry a closure went with it: `window.copyCmd`, the `data-task` / `data-act` / `data-scope`
+attributes and their delegated listeners, and `CSS.escape` on a server-supplied id.
+
+The gate room lost its scaffolding rather than gaining any. `paintChrome` / `paintFooter` / `paint`
+existed as three grains because rebuilding the body would wipe a form the reviewer was half way
+through; React reconciles, so there is one render from state and a push can no longer take anything
+out from under a human. `<Gate>` is keyed on the gate and the project, which makes *"is this payload
+mine?"* structural — the question that, answered from the echoed `review.gate`, made a link to a
+refused gate refetch on every push forever. Ten module-level `let`s, the `fetchSeq` newest-wins
+counter, the `loaded` tracker and the `field(scope, name)` DOM read-back at submit time are all
+gone; each card owns its own answer, so a radio group can no longer report its first option as a
+judgement nobody made. Only the routed view is mounted, so four screens are no longer rendering into
+nodes nobody is looking at.
+
+The bundle is built by esbuild from `ui/` and **committed** — the wheel ships it, and no user of the
+CLI has node. `pnpm run build:check` rebuilds and compares, so a source edit that was never rebuilt
+fails the quality gate instead of shipping the previous page; that is the same bargain `rein sync
+--check` makes for the materialized prompts. The allowlist of servable assets is down to three
+entries from eight. The offline canary now names the five absolute URLs React's own code contains —
+four XML namespace URIs and a link inside a minified error message, none of them a request — as an
+exact set, so a sixth fails rather than being waved through by a prefix rule.
+
+Committing a generated artifact has three consequences, and each is handled where it arises. The
+wheel now **redistributes React**, whose MIT licence requires the permission notice to travel with
+the copy; esbuild preserves the `@license` comments, but they point at a LICENSE file in React's own
+tree and not in this one, so `ui_assets/LICENSE.third-party.txt` ships beside the bundle and is
+servable. `trailing-whitespace` and `end-of-file-fixer` no longer touch `app.js`: a hook that
+rewrites a generated file puts the tree and a rebuild permanently out of step, and the loop of
+`build:check` failing, rebuilding, and being stripped again never converges. And `.gitattributes`
+marks the bundle `linguist-generated`, so a one-line UI change does not open review with 246KB of
+minified diff in front of the change actually made, under `ui/`.
+
+**The dashboard rendered three separate answers to "which gate is waiting on you", and none of
+them was the page.** The lifecycle rail, the Review tab's badge and the gate-button row inside the
+review pane each derived the awaiting gate independently and drew it three ways, while the four
+tabs, every section and every card carried identical visual weight — on a page whose entire job is
+that one judgement. The lifecycle is now the navigation: five gates in a spine down the left,
+present on every screen, and the one under decision is the only inverted block anywhere on the
+page. The reading room is a route (`#gate/<name>`), so a gate is somewhere you can link to rather
+than a selection held in a module variable, and the review pane no longer draws a gate list at all.
+Type carries provenance: monospace for what the repository can prove, serif for deliverable prose
+and for what a screen means, and an agent's unverified account set dashed and unbolded so it cannot
+be read as the record beside it. Colour is spent on task status, where it carries information;
+brass marks only "a person has to act here". The theme is one `color-scheme` switch over
+`light-dark()` pairs, so native controls and scrollbars follow it too, and the palette is declared
+once instead of three times.
+
+**An approval printed the digests it would bind into a pane on another screen.** `showOut` wrote
+the readiness table to `#out`, which lives on the Activity tab, so approving from Review sent the
+one thing a reviewer must read somewhere they were not looking — and repeated it inside a
+`confirm()` string the page could not style or keep on screen. Both the digest table and the
+refusal (a gate that is not ready, with its blockers) are now panels in the pane that asked, and a
+status poll no longer wipes one open under the reader. `confirm()`, `prompt()` and `alert()` are
+gone: requesting changes is a form with the target prefilled from the deliverable being read
+instead of two chained `prompt()` calls, and the Console's two roll-back commands state their
+consequence above the button that runs it. A gate decision no longer echoes its payload into the
+Console's output pane, where it was read later as the output of whatever was run last.
+
+**A task parked at `awaiting-evidence` was counted in the total and shown in no pill.** The Board's
+status pills iterated a hand-kept list that had drifted from `models.TASK_STATUS_ORDER` — the same
+list that once spelled `in_progress` and styled nothing. It now reads the keys of the `counts` the
+server sends, which is that vocabulary by construction.
+
 ## [0.3.10] - 2026-08-30
 
 **A repository ran the loop and `git status` filled with the loop's own scratch.** `rein init`

@@ -1,318 +1,537 @@
-  /* "Control console" identity: teal + amber signal palette (not blue/cream/acid), machine values in
-     mono, human prose in sans; hairline instrument framing over friendly cards. */
-  :root {
-    --mono:ui-monospace,"Cascadia Code","JetBrains Mono",SFMono-Regular,Menlo,Consolas,monospace;
-    --sans:system-ui,-apple-system,"Segoe UI",sans-serif;
-    --bg:#e6ecea; --panel:#fbfdfc; --panel2:#eef3f1; --ink:#12201e; --muted:#556b67; --border:#c6d2cf;
-    --accent:#0c7d73; --accent-ink:#ffffff; --gate:#b3760f; --grid:rgba(18,32,30,.045);
-    --code-bg:#0e1a18; --code-ink:#d7ece7; --ok:#0c7d73; --bad:#c23b2f;
-    --todo-bg:#e3e9e7; --todo-bd:#9db0ac; --todo-ink:#3a4746;
-    --prog-bg:#cfe4ff; --prog-bd:#2f7fd6; --prog-ink:#0a3358;
-    --blk-bg:#ffdad3; --blk-bd:#d84a34; --blk-ink:#7a1c10;
-    --rev-bg:#ffe6bf; --rev-bd:#b3760f; --rev-ink:#6c4906;
-    /* awaiting-evidence: not a failure and not a completion, so deliberately outside the
-       red/amber family — nothing here went wrong, something is simply not established yet. */
-    --wait-bg:#e4dcf7; --wait-bd:#7057c4; --wait-ink:#332364;
-    --done-bg:#c9efd6; --done-bd:#1f9d69; --done-ink:#0a3d27;
-    --shadow:0 1px 0 rgba(18,32,30,.04);
-  }
-  /* dark palette (duplicated for the two triggers): OS auto-dark unless the toggle forced light,
-     and the explicit [data-theme="dark"] toggle which wins over the media query */
-  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-    --bg:#0a1211; --panel:#0f1a18; --panel2:#0c1514; --ink:#d6e4e0; --muted:#88a09b; --border:#213230;
-    --accent:#39d3c2; --accent-ink:#04100e; --gate:#e7a53a; --grid:rgba(255,255,255,.028);
-    --code-bg:#06100f; --code-ink:#cfe7e2; --ok:#39d3c2; --bad:#ff6f5e;
-    --todo-bg:#22302d; --todo-bd:#4a5f5a; --todo-ink:#bccbc7;
-    --prog-bg:#123353; --prog-bd:#3b82f6; --prog-ink:#bcd9ff;
-    --blk-bg:#48170f; --blk-bd:#e0503a; --blk-ink:#ffb9ad;
-    --rev-bg:#3f2c07; --rev-bd:#e7a53a; --rev-ink:#ffd894;
-    --wait-bg:#2b2350; --wait-bd:#9b85e8; --wait-ink:#ded3ff;
-    /* done sits *above* the rest of the family in luminance, not below it: at #0d3324 it was
-       darker than --todo-bg and barely separable from --panel, so a finished task read as an
-       empty slot — the one status a glance at the board is most often looking for. */
-    --done-bg:#125437; --done-bd:#1f9d69; --done-ink:#a6f0c9; --shadow:0 1px 0 rgba(0,0,0,.5);
-  } }
-  :root[data-theme="dark"] {
-    --bg:#0a1211; --panel:#0f1a18; --panel2:#0c1514; --ink:#d6e4e0; --muted:#88a09b; --border:#213230;
-    --accent:#39d3c2; --accent-ink:#04100e; --gate:#e7a53a; --grid:rgba(255,255,255,.028);
-    --code-bg:#06100f; --code-ink:#cfe7e2; --ok:#39d3c2; --bad:#ff6f5e;
-    --todo-bg:#22302d; --todo-bd:#4a5f5a; --todo-ink:#bccbc7;
-    --prog-bg:#123353; --prog-bd:#3b82f6; --prog-ink:#bcd9ff;
-    --blk-bg:#48170f; --blk-bd:#e0503a; --blk-ink:#ffb9ad;
-    --rev-bg:#3f2c07; --rev-bd:#e7a53a; --rev-ink:#ffd894;
-    --wait-bg:#2b2350; --wait-bd:#9b85e8; --wait-ink:#ded3ff;
-    --done-bg:#125437; --done-bd:#1f9d69; --done-ink:#a6f0c9; --shadow:0 1px 0 rgba(0,0,0,.5);
-  }
-  * { box-sizing:border-box; }
-  body { font-family:var(--sans); margin:0; color:var(--ink); line-height:1.45; background-color:var(--bg);
-         background-image:linear-gradient(var(--grid) 1px,transparent 1px),
-           linear-gradient(90deg,var(--grid) 1px,transparent 1px); background-size:26px 26px; }
-  header { position:sticky; top:0; z-index:5; background:var(--panel); border-bottom:1px solid var(--border);
-           padding:.6rem 1.2rem; display:flex; gap:1rem; align-items:center; flex-wrap:wrap; box-shadow:var(--shadow); }
-  header h1 { font-family:var(--mono); font-size:1rem; margin:0; font-weight:700; letter-spacing:-.02em; }
-  header h1 b { color:var(--accent); font-weight:700; }
-  header h1::before { content:"◇ "; color:var(--gate); }
-  header .meta { color:var(--muted); font-size:.85rem; font-family:var(--mono); }
-  header #projectSelect { font-family:var(--mono); font-size:.85rem; color:var(--ink);
-    background:var(--panel2); border:1px solid var(--border); border-radius:6px; padding:2px 6px; cursor:pointer; }
-  header #projectSelect:disabled { cursor:default; opacity:.6; }
-  header .spacer { flex:1; }
-  .dot { display:inline-block; width:.5rem; height:.5rem; border-radius:50%; background:var(--ok);
-         margin-right:.3rem; vertical-align:middle; }
-  .dot.off { background:var(--bad); }
-  /* tab rail: hash-routed views; the Review tab carries the awaiting-gate badge */
-  nav#tabs { display:flex; gap:.2rem; background:var(--panel); border-bottom:1px solid var(--border);
-             padding:0 1.2rem; overflow-x:auto; }
-  nav#tabs a { font-family:var(--mono); font-size:.8rem; color:var(--muted); text-decoration:none;
-               padding:.55rem .85rem; border-bottom:2px solid transparent; white-space:nowrap; }
-  nav#tabs a:hover { color:var(--accent); }
-  nav#tabs a.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:700; }
-  .badge { display:inline-block; margin-left:.4rem; font-size:.68rem; color:var(--gate); font-weight:700; }
-  /* a view wraps its sections but must not break the main grid */
-  .view { display:contents; }
-  .subhead { font-size:.72rem; color:var(--muted); font-weight:700; font-family:var(--mono);
-             letter-spacing:.06em; margin:.1rem 0 .3rem; }
-  main { max-width:1160px; margin:1.1rem auto; padding:0 1rem; display:grid; gap:.9rem;
-         grid-template-columns:repeat(2,minmax(0,1fr)); }
-  section { background:var(--panel); border:1px solid var(--border); border-radius:5px; padding:.9rem 1.1rem;
-            box-shadow:var(--shadow); }
-  .col-full { grid-column:1 / -1; }
-  @media (max-width:820px){ main { grid-template-columns:1fr; } }
-  h2 { font-family:var(--mono); font-size:.66rem; text-transform:uppercase; letter-spacing:.16em;
-       color:var(--muted); margin:0 0 .8rem; font-weight:600; }
-  h2::before { content:"▍"; color:var(--accent); margin-right:.4rem; }
-  /* signature: the lifecycle as an illuminated loop rail with gate locks */
-  .rail { display:flex; align-items:flex-start; position:relative; padding:.2rem 0 .1rem; }
-  .rphase { flex:1; min-width:0; text-align:center; position:relative; padding-top:1.15rem; }
-  .rphase::before { content:""; position:absolute; top:.5rem; left:0; right:0; height:2px; background:var(--border); }
-  .rphase.past::before, .rphase.live::before { background:var(--accent); }
-  .rphase:first-child::before { left:50%; } .rphase:last-child::before { right:50%; }
-  .rnode { position:absolute; top:.16rem; left:50%; transform:translateX(-50%); width:.72rem; height:.72rem;
-           border-radius:50%; background:var(--panel); border:2px solid var(--border); z-index:1; }
-  .rphase.past .rnode { background:var(--accent); border-color:var(--accent); }
-  .rphase.live .rnode { background:var(--gate); border-color:var(--gate); }
-  .rname { display:block; font-family:var(--mono); font-size:.76rem; color:var(--muted); }
-  .rphase.past .rname { color:var(--ink); }
-  .rphase.live .rname { color:var(--ink); font-weight:700; }
-  .rgate { display:block; font-family:var(--mono); font-size:.64rem; margin-top:.15rem; color:var(--muted);
-           text-decoration:none; }
-  .rgate.approved { color:var(--accent); } .rgate.await { color:var(--gate); font-weight:700; }
-  a.rgate.await:hover { text-decoration:underline; }
-  .rloop { align-self:center; margin-left:.3rem; color:var(--muted); font-size:1rem; }
-  @media (prefers-reduced-motion: no-preference) {
-    .rphase.live .rnode { animation:ping 2.4s ease-out infinite; }
-    @keyframes ping { 0%{ box-shadow:0 0 0 0 rgba(224,160,45,.5); }
-      70%{ box-shadow:0 0 0 7px rgba(224,160,45,0); } 100%{ box-shadow:0 0 0 0 rgba(224,160,45,0); } }
-  }
-  /* next-action: a console command line */
-  .next { border-left:3px solid var(--accent); }
-  .console { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:.1rem 0 .55rem; }
-  .prompt { font-family:var(--mono); color:var(--accent); font-weight:700; font-size:1.1rem; }
-  code.cmd { background:var(--code-bg); color:var(--code-ink); padding:.5rem .85rem; border-radius:4px;
-             font-size:1rem; font-family:var(--mono); }
-  button { border:1px solid var(--border); background:var(--panel2); color:var(--ink); border-radius:4px;
-           padding:.35rem .7rem; cursor:pointer; font-size:.85rem; font-family:var(--mono);
-           transition:border-color .12s,color .12s; }
-  button:hover { border-color:var(--accent); color:var(--accent); }
-  button.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-ink); }
-  button.primary:hover { color:var(--accent-ink); filter:brightness(1.08); }
-  button.danger:hover { border-color:var(--bad); color:var(--bad); }
-  button.ghost { background:transparent; }
-  .reason { color:var(--muted); font-size:.9rem; }
-  .chip { display:inline-block; padding:.14rem .5rem; border-radius:3px; border:1px solid var(--todo-bd);
-          background:var(--todo-bg); color:var(--todo-ink); font-size:.78rem; margin:.12rem; font-family:var(--mono);
-          text-decoration:none; }
-  .chip.clk { cursor:pointer; }
-  .chip.clk:hover { filter:brightness(.96); }
-  .chip.in-progress { background:var(--prog-bg); border-color:var(--prog-bd); color:var(--prog-ink); }
-  .chip.blocked { background:var(--blk-bg); border-color:var(--blk-bd); color:var(--blk-ink); }
-  .chip.needs-revision { background:var(--rev-bg); border-color:var(--rev-bd); color:var(--rev-ink); }
-  .chip.awaiting-evidence { background:var(--wait-bg); border-color:var(--wait-bd); color:var(--wait-ink); }
-  .chip.done { background:var(--done-bg); border-color:var(--done-bd); color:var(--done-ink); }
-  .chip.critical { border-width:2px; font-weight:700; box-shadow:inset 0 0 0 1px var(--accent); }
-  /* Queue severities (status_api.PENDING_SEVERITY_ORDER). `blocking` borrows the blocked palette
-     because it means the same thing here: nothing moves until it is gone. */
-  .chip.blocking { background:var(--blk-bg); border-color:var(--blk-bd); color:var(--blk-ink); font-weight:700; }
-  .chip.attention { background:var(--rev-bg); border-color:var(--rev-bd); color:var(--rev-ink); }
-  .chip.info { color:var(--muted); }
-  .pills { display:flex; gap:.35rem; flex-wrap:wrap; margin-bottom:.7rem; }
-  .pill { font-size:.76rem; padding:.2rem .5rem; border-radius:3px; border:1px solid var(--border);
-          font-family:var(--mono); font-variant-numeric:tabular-nums; }
-  .scroll { overflow-x:auto; }
-  table { border-collapse:collapse; width:100%; font-size:.85rem; }
-  th, td { border-bottom:1px solid var(--border); text-align:left; padding:.35rem .5rem; }
-  th { color:var(--muted); font-weight:600; font-family:var(--mono); font-size:.7rem; text-transform:uppercase;
-       letter-spacing:.06em; }
-  tr.clk { cursor:pointer; }
-  tr.clk:hover td { background:var(--panel2); }
-  .mono { font-family:var(--mono); }
-  .warn { color:var(--rev-ink); background:var(--rev-bg); border:1px solid var(--rev-bd); border-radius:4px;
-          padding:.4rem .6rem; font-size:.85rem; margin:.25rem 0; }
-  .bad { color:var(--blk-ink); background:var(--blk-bg); border:1px solid var(--blk-bd); border-radius:4px;
-         padding:.35rem .6rem; font-size:.85rem; margin:.2rem 0; font-family:var(--mono); }
-  .ops { display:flex; gap:.6rem; flex-wrap:wrap; align-items:center; }
-  .ops input, .ops select { border:1px solid var(--border); background:var(--panel2); color:var(--ink);
-                            border-radius:4px; padding:.3rem .5rem; font-size:.85rem; font-family:var(--mono); }
-  pre.out { background:var(--code-bg); color:var(--code-ink); border-radius:4px; padding:.7rem; font-size:.78rem;
-            overflow:auto; white-space:pre-wrap; max-height:20rem; margin-top:.7rem; font-family:var(--mono); }
-  .detail { margin-top:.6rem; padding:.6rem .75rem; background:var(--panel2); border:1px solid var(--border);
-            border-radius:4px; font-size:.85rem; }
-  .detail dt { color:var(--muted); font-family:var(--mono); font-size:.66rem; text-transform:uppercase;
-               letter-spacing:.08em; margin-top:.4rem; }
-  .empty { color:var(--muted); font-size:.85rem; }
-  /* dependency graph (inline SVG) */
-  svg.dag { display:block; min-width:100%; }
-  svg.dag .edge { stroke:var(--border); stroke-width:1.5; fill:none; }
-  svg.dag .edge.crit { stroke:var(--accent); stroke-width:2.5; }
-  /* A marker does not inherit the path's stroke, so the two arrowheads are filled here and follow
-     the theme with everything else. */
-  svg.dag #dagarw path { fill:var(--border); }
-  svg.dag #dagarwc path { fill:var(--accent); }
-  svg.dag .nd { stroke:var(--todo-bd); stroke-width:1.5; cursor:pointer; }
-  svg.dag text { font-size:12px; fill:var(--ink); pointer-events:none; font-family:var(--mono); }
-  /* The class is the status string verbatim (models.TASK_STATUS_ORDER) — hyphenated. An
-     underscored copy of `in-progress` here matched nothing, so a running node fell through to the
-     SVG default fill (black) and never pulsed. Status also drives the *stroke*, not only the fill:
-     a fill alone is too small a luminance step to read at node size in the dark palette. */
-  svg.dag .nd.todo { fill:var(--todo-bg); stroke:var(--todo-bd); }
-  svg.dag .nd.in-progress { fill:var(--prog-bg); stroke:var(--prog-bd); }
-  svg.dag .nd.blocked { fill:var(--blk-bg); stroke:var(--blk-bd); }
-  svg.dag .nd.needs-revision { fill:var(--rev-bg); stroke:var(--rev-bd); }
-  svg.dag .nd.awaiting-evidence { fill:var(--wait-bg); stroke:var(--wait-bd); }
-  svg.dag .nd.done { fill:var(--done-bg); stroke:var(--done-bd); }
-  /* Last, so it outranks the status strokes above: the critical path is a property of the graph,
-     and losing it to whatever status a node happens to be in would make it unreadable. */
-  svg.dag .nd.crit { stroke:var(--accent); stroke-width:2.5; }
-  @media (prefers-reduced-motion: no-preference) {
-    svg.dag .nd.in-progress { animation:ndpulse 1.6s ease-in-out infinite; }
-    @keyframes ndpulse { 50% { stroke-width:3.5; opacity:.72; } }
-  }
-  /* per-layer build progress (one row per execution layer, one segment per task) */
-  .layers { display:flex; flex-direction:column; gap:.28rem; margin-bottom:.7rem; }
-  .lrow { display:flex; align-items:center; gap:.55rem; }
-  .lname { font-family:var(--mono); font-size:.68rem; color:var(--muted); width:1.6rem; text-align:right; }
-  .lbar { display:flex; gap:2px; flex:0 1 auto; }
-  .seg.clk { cursor:pointer; }
-  /* A segment is 18×8px, too small for the `-bg` fills to separate from the panel in the dark
-     palette — so every status fills with its saturated `-bd`, one rule for all five (`done` was
-     already the odd one out doing exactly this, which is why it never matched its own chip). */
-  .seg { display:inline-block; width:1.15rem; height:.5rem; border-radius:2px; background:var(--todo-bd);
-         border:1px solid var(--todo-bd); }
-  .seg.in-progress { background:var(--prog-bd); border-color:var(--prog-bd); }
-  .seg.blocked { background:var(--blk-bd); border-color:var(--blk-bd); }
-  .seg.needs-revision { background:var(--rev-bd); border-color:var(--rev-bd); }
-  .seg.awaiting-evidence { background:var(--wait-bd); border-color:var(--wait-bd); }
-  .seg.done { background:var(--done-bd); border-color:var(--done-bd); }
-  @media (prefers-reduced-motion: no-preference) {
-    .seg.in-progress { animation:segpulse 1.6s ease-in-out infinite; }
-    @keyframes segpulse { 50% { opacity:.55; } }
-  }
-  .lcount { font-family:var(--mono); font-size:.7rem; color:var(--muted); white-space:nowrap; }
-  /* graph key: what a column, an arrow and a teal line mean. The status pills above the graph
-     already carry the colours, so this says only what nothing else in the view says. */
-  .legend { display:flex; flex-wrap:wrap; align-items:center; gap:.3rem 1.1rem; margin:.1rem 0 .55rem;
-            font-size:.7rem; color:var(--muted); }
-  .legend .li { display:inline-flex; align-items:center; gap:.35rem; }
-  .legend svg { display:block; overflow:visible; }
-  .legend .lgline { stroke:var(--border); stroke-width:1.5; fill:none; }
-  .legend .lgline.crit { stroke:var(--accent); stroke-width:2.5; }
-  .legend .lghead { fill:var(--border); }
-  .legend .lghead.crit { fill:var(--accent); }
-  /* event feed rows */
-  table.events td { font-size:.8rem; }
-  tr.ev-ok td { color:var(--ink); }
-  tr.ev-ok td:nth-child(3) { color:var(--ok); }
-  tr.ev-bad td { background:var(--blk-bg); color:var(--blk-ink); }
-  tr.ev-closed td:nth-child(-n+6) { color:var(--muted); }
-  /* gate review pane: selector bar → list + reading body → sticky approval footer */
-  .gatebar { display:flex; gap:.35rem; flex-wrap:wrap; margin-bottom:.8rem; }
-  .gatebtn { font-size:.78rem; }
-  .gatebtn.active { border-color:var(--accent); color:var(--accent); font-weight:700; }
-  .rv-grid { display:grid; grid-template-columns:230px minmax(0,1fr); gap:.9rem; align-items:start; }
-  @media (max-width:820px){ .rv-grid { grid-template-columns:1fr; } }
-  .rv-list { position:sticky; top:4.4rem; }
-  .rv-item { padding:.35rem .5rem; border-radius:4px; font-size:.82rem; cursor:pointer;
-             font-family:var(--mono); border:1px solid transparent; overflow-wrap:anywhere; }
-  .rv-item:hover { background:var(--panel2); }
-  .rv-item.active { background:var(--panel2); border-color:var(--accent); }
-  .rv-item.missing { color:var(--muted); font-style:italic; }
-  .rv-read { display:inline-block; width:1.1rem; color:var(--ok); }
-  .rv-body { min-width:0; border-left:1px solid var(--border); padding-left:.9rem; }
-  @media (max-width:820px){ .rv-body { border-left:none; padding-left:0; } }
-  /* the pinned self-assessment: the system's own uncertainty, ahead of the prose */
-  .sa { border:1px solid var(--gate); border-left-width:3px; border-radius:4px; background:var(--panel2);
-        padding:.6rem .8rem; margin-bottom:.8rem; font-size:.88rem; }
-  .sa h1, .sa h2, .sa h3 { display:none; }  /* the pane's own SELF-ASSESSMENT label already names it */
-  .sa ul, .sa ol { margin:.2rem 0; padding-left:1.3rem; }
-  .conf { display:inline-block; padding:.05rem .45rem; border-radius:3px; font-size:.68rem;
-          font-family:var(--mono); font-weight:700; margin-left:.4rem; text-transform:uppercase; }
-  .conf.high { background:var(--done-bg); color:var(--done-ink); border:1px solid var(--done-bd); }
-  .conf.medium { background:var(--rev-bg); color:var(--rev-ink); border:1px solid var(--rev-bd); }
-  .conf.low, .conf.unset { background:var(--blk-bg); color:var(--blk-ink); border:1px solid var(--blk-bd); }
-  .approvebar { position:sticky; bottom:0; margin-top:.9rem; padding:.6rem 0 .2rem; background:var(--panel);
-                border-top:1px solid var(--border); display:flex; align-items:center; gap:.6rem;
-                flex-wrap:wrap; }
-  .okline { color:var(--ok); font-size:.85rem; font-family:var(--mono); }
-  /* rendered deliverable markdown */
-  .md { font-size:.92rem; }
-  .md h1, .md h2, .md h3, .md h4 { font-family:var(--sans); text-transform:none; letter-spacing:0; }
-  .md h1 { font-size:1.15rem; border-bottom:1px solid var(--border); padding-bottom:.3rem; }
-  .md h2 { font-size:1rem; color:var(--ink); margin:1.1rem 0 .5rem; font-weight:700; }
-  .md h2::before { content:"▍"; color:var(--accent); margin-right:.35rem; }
-  .md h3 { font-size:.92rem; margin:.9rem 0 .4rem; }
-  .md code { background:var(--panel2); border:1px solid var(--border); border-radius:3px;
-             padding:.05rem .3rem; font-size:.85em; font-family:var(--mono); }
-  .md pre { background:var(--code-bg); color:var(--code-ink); border-radius:4px; padding:.7rem;
-            overflow:auto; font-size:.8rem; }
-  .md pre code { background:none; border:none; color:inherit; padding:0; }
-  .md blockquote { border-left:3px solid var(--border); margin:.6rem 0; padding:.2rem .8rem;
-                   color:var(--muted); }
-  .md table { margin:.5rem 0; }
-  .md a { color:var(--accent); }
-  .md .cb { color:var(--muted); } .md .cb.done { color:var(--ok); }
-  .md ul, .md ol { padding-left:1.4rem; }
-  /* the gate-④ patch, colorized per line */
-  pre.patch { background:var(--code-bg); color:var(--code-ink); border-radius:4px; padding:.7rem;
-              font-size:.76rem; overflow:auto; max-height:34rem; font-family:var(--mono); line-height:1.5; }
-  .dl { display:block; white-space:pre; }
-  .dl.add { color:#7ee2a8; } .dl.del { color:#ff9d8f; }
-  .dl.hunk { color:#8ab8ff; } .dl.file { color:var(--gate); font-weight:700; }
-  /* toast */
-  #toasts { position:fixed; right:1rem; bottom:1rem; z-index:20; display:flex; flex-direction:column; gap:.4rem; }
-  .toast { background:var(--panel); border:1px solid var(--border); border-left:3px solid var(--accent);
-           border-radius:4px; padding:.5rem .8rem; font-size:.85rem; box-shadow:var(--shadow); max-width:22rem;
-           font-family:var(--mono); animation:fade .25s ease; }
-  .toast.ok { border-left-color:var(--ok); } .toast.err { border-left-color:var(--bad); }
-  @keyframes fade { from { opacity:0; transform:translateY(6px); } }
+/* Loose Rein dashboard — the visual system.
+   ============================================================================
+   The page has one job: make the human's next judgement unavoidable, and give
+   them what they need to make it. Three rules carry the whole design.
 
-/* --- gate 4 decision surface -------------------------------------------------- */
-/* A card is one thing to decide. The three axes are laid out side by side and never merged:
-   integrity is a fact, semantic support is somebody's judgement, conformance is an observation. */
-.card { border:1px solid var(--border); border-radius:5px; background:var(--panel2);
-        padding:.7rem .8rem; margin-bottom:.7rem; }
-.card p { margin:.35rem 0 .55rem; font-size:.9rem; }
-.opts { display:flex; flex-direction:column; gap:.3rem; margin:.4rem 0 .6rem; }
-.opt { display:flex; gap:.45rem; align-items:flex-start; font-size:.88rem; cursor:pointer;
-       padding:.3rem .4rem; border-radius:4px; border:1px solid transparent; }
-.opt:hover { background:var(--panel); border-color:var(--border); }
-.fld { display:flex; flex-direction:column; gap:.2rem; margin:.4rem 0; font-size:.72rem;
-       color:var(--muted); font-family:var(--mono); text-transform:uppercase; letter-spacing:.03em; }
-.fld select, .fld input, .fld textarea { border:1px solid var(--border); background:var(--panel);
-       color:var(--ink); border-radius:4px; padding:.32rem .45rem; font:inherit; font-size:.88rem;
-       text-transform:none; letter-spacing:0; font-family:var(--sans); }
-.fld textarea { resize:vertical; font-family:var(--sans); }
+   1. PROVENANCE IS THE TYPE SYSTEM. Two faces, and which one a sentence is set
+      in says where it came from. Monospace is the machine's register — ids,
+      digests, commands, statuses, counts, anything the repository can prove.
+      Serif is the human's register — deliverable prose, the questions a review
+      asks, and the notes explaining what a screen means. An agent's unverified
+      claim (`.claim`) is set in the human register but dashed and unbolded, so
+      it can never be mistaken for the record beside it.
 
-.axes { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.5rem; margin:.5rem 0; }
-.axis { border:1px solid var(--border); border-radius:4px; padding:.4rem .5rem; background:var(--panel); }
-.axlabel { font-size:.63rem; color:var(--muted); font-family:var(--mono); text-transform:uppercase; }
-.axval { font-size:.9rem; font-weight:700; margin-top:.15rem; }
-.axnote { font-size:.7rem; color:var(--muted); font-family:var(--mono); margin-top:.1rem; }
-/* An AI's assessment must not read like the observation beside it (models.py ASSESSMENT_BASIS_ORDER). */
-.axis.opinion { border-style:dashed; background:transparent; }
-.axis.opinion .axval { font-weight:400; font-style:italic; color:var(--muted); }
+   2. THE ONE THING WAITING ON YOU IS THE ONE INVERTED BLOCK. The gate under
+      decision is the only element on the page painted in solid ink on paper
+      (or paper on ink). No hue competes with it: colour is spent on task
+      status, where it carries information, and brass marks the small
+      attention-here signals. Links are underlined rather than coloured.
 
-.epi { display:inline-block; padding:.03rem .4rem; border-radius:3px; font-size:.64rem;
-       font-family:var(--mono); border:1px solid var(--done-bd); background:var(--done-bg);
-       color:var(--done-ink); }
-.epi.weak { border-style:dashed; background:transparent; color:var(--muted); }
-.stmt { font-size:.86rem; margin:.25rem 0; display:flex; gap:.4rem; align-items:baseline; }
+   3. NO CARDS, NO SHADOWS, NO ROUNDING. Structure comes from rules and space.
+      A bordered box appears only where a box is true: a decision card is one
+      thing to decide, so it gets an edge; a section is not.
+
+   Colour is declared once with light-dark(); `color-scheme` is the only thing
+   the theme toggle switches, so native controls and scrollbars follow too.
+   ========================================================================= */
+
+:root {
+  color-scheme: light dark;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", "Cascadia Mono", "Segoe UI Mono",
+          "Roboto Mono", Menlo, Consolas, monospace;
+  --doc: ui-serif, Charter, "Bitstream Charter", "Iowan Old Style", Georgia,
+         "Nimbus Roman", "Times New Roman", serif;
+
+  /* ground and ink — cool graphite, deliberately not cream and not blue-black */
+  --paper:   light-dark(#e9ecef, #0b0e11);
+  --sheet:   light-dark(#f9fafb, #12171b);
+  --sheet-2: light-dark(#eef1f4, #0e1317);
+  --ink:     light-dark(#11161b, #dbe2e8);
+  --ink-2:   light-dark(#59636d, #8d99a3);
+  --ink-3:   light-dark(#8a939c, #5f6b75);
+  --rule:    light-dark(#ccd3d9, #242c33);
+  --rule-2:  light-dark(#9aa4ad, #3c464f);
+
+  /* the inverted block: reserved for the gate under decision, nothing else */
+  --inv-bg:  light-dark(#11161b, #e6ebef);
+  --inv-ink: light-dark(#f9fafb, #0b0e11);
+
+  /* brass: "a person has to act here". Small marks only — never a fill. */
+  --brass:      light-dark(#8a5f10, #dda63f);
+  --brass-soft: light-dark(#f2e6cb, #33280f);
+
+  --code-bg:  light-dark(#151b21, #070a0c);
+  --code-ink: light-dark(#d5dde4, #ccd6de);
+
+  /* task status (models.TASK_STATUS_ORDER). Six hues, each meaning one thing.
+     `needs-revision` is plum rather than amber so nothing but brass says
+     "a person must act"; `awaiting-evidence` stays outside the red/amber
+     family because nothing there went wrong — something is not established. */
+  --todo-bg: light-dark(#e2e6ea, #1c2329);
+  --todo-bd: light-dark(#a3adb6, #47525b);
+  --todo-ink: light-dark(#3b444c, #b6c0c8);
+  --prog-bg: light-dark(#d9e6f7, #10283f);
+  --prog-bd: light-dark(#3b6ea5, #4a8ad0);
+  --prog-ink: light-dark(#123a63, #b9d6f5);
+  --blk-bg: light-dark(#f9dbd5, #3d1610);
+  --blk-bd: light-dark(#b3402f, #e0604a);
+  --blk-ink: light-dark(#6e1a10, #ffb3a4);
+  --rev-bg: light-dark(#f4dcee, #3a1730);
+  --rev-bd: light-dark(#9b3d7a, #d477b0);
+  --rev-ink: light-dark(#5c1c45, #f4c7e4);
+  --wait-bg: light-dark(#e2ddf6, #241f4a);
+  --wait-bd: light-dark(#5a4bb5, #9c8de8);
+  --wait-ink: light-dark(#2c2270, #d9d2ff);
+  --done-bg: light-dark(#cfe9d8, #123a27);
+  --done-bd: light-dark(#2f7a52, #3fa06d);
+  --done-ink: light-dark(#0f3a24, #a9e8c4);
+
+  --ok: var(--done-bd);
+  --bad: var(--blk-bd);
+  --top: 2.9rem;
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 .875rem/1.5 var(--mono);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Every interactive thing gets the same ring. Brass, because a focus ring is
+   the page saying "you are here" — the one meaning brass carries. */
+:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+
+/* ---- topbar -------------------------------------------------------------- */
+
+.topbar {
+  position: sticky; top: 0; z-index: 6;
+  height: var(--top);
+  display: flex; align-items: center; gap: .9rem;
+  padding: 0 1rem;
+  background: var(--sheet);
+  border-bottom: 1px solid var(--rule);
+}
+.wordmark {
+  font-weight: 700; font-size: .82rem; letter-spacing: .18em; text-transform: uppercase;
+  white-space: nowrap;
+}
+.wordmark i { font-style: normal; color: var(--ink-3); }
+.grow { flex: 1; }
+.stat { color: var(--ink-2); font-size: .74rem; white-space: nowrap; }
+/* the only topbar item allowed to shrink: the freshness stat and the controls beside it stay
+   readable, and a long project/branch name truncates instead of pushing them off the edge */
+#meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.dot {
+  display: inline-block; width: .45rem; height: .45rem; border-radius: 50%;
+  background: var(--ok); margin-right: .35rem; vertical-align: baseline;
+}
+.dot.off { background: var(--bad); }
+#projectSelect {
+  font: inherit; font-size: .74rem; color: var(--ink);
+  background: var(--sheet-2); border: 1px solid var(--rule); border-radius: 2px; padding: .1rem .3rem;
+}
+#projectSelect:disabled { opacity: .55; }
+
+/* ---- the spine: gates first, everything else after ----------------------- */
+/* The lifecycle is the navigation. There is exactly one rendering of "which
+   gate waits on you" on this page, and this is it. */
+
+.frame { display: grid; grid-template-columns: 13.5rem minmax(0, 1fr); align-items: start; }
+.spine {
+  position: sticky; top: var(--top);
+  height: calc(100dvh - var(--top));
+  overflow-y: auto;
+  padding: 1.2rem .85rem 2rem;
+  border-right: 1px solid var(--rule);
+}
+.spine-label {
+  margin: 1.3rem 0 .5rem; font-size: .62rem; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+.nav-item {
+  display: block; padding: .3rem .45rem; margin-bottom: .1rem;
+  color: var(--ink-2); text-decoration: none; font-size: .85rem; border-left: 2px solid transparent;
+}
+.nav-item:hover { color: var(--ink); background: var(--sheet-2); }
+.nav-item.active { color: var(--ink); font-weight: 700; border-left-color: var(--ink); background: var(--sheet-2); }
+
+/* A station is a gate. Three states and no fourth: opened, waiting on you,
+   not yet reached. The waiting one is the inverted block — the single place on
+   this page painted that way, so it is never in question which gate is yours.
+   There is no drawn rail behind the marks: an ordered list under one label is
+   already a sequence, and a hairline through a `·` reads as a mistake. */
+.stations { display: flex; flex-direction: column; }
+.station {
+  display: grid; grid-template-columns: 1.3rem minmax(0, 1fr); align-items: baseline;
+  padding: .34rem .45rem; text-decoration: none; color: var(--ink-2); font-size: .85rem;
+}
+.station .mark { color: var(--ink-3); }
+.station .gname { overflow-wrap: anywhere; }
+.station .gidx { color: var(--ink-3); }
+.station:hover { background: var(--sheet-2); color: var(--ink); }
+.station.future { color: var(--ink-3); }
+.station.approved { color: var(--ink); }
+.station.approved .mark { color: var(--ok); }
+.station.awaiting { background: var(--inv-bg); color: var(--inv-ink); font-weight: 700; }
+.station.awaiting .mark, .station.awaiting .gidx { color: var(--inv-ink); }
+.station.live:not(.awaiting) .mark { color: var(--brass); }
+.station.active { box-shadow: inset 2px 0 0 var(--brass); }
+
+@media (max-width: 860px) {
+  .frame { display: block; }
+  .spine {
+    position: static; height: auto; overflow: visible;
+    display: flex; align-items: center; gap: .25rem; flex-wrap: nowrap; overflow-x: auto;
+    padding: .4rem .6rem; border-right: none; border-bottom: 1px solid var(--rule);
+  }
+  .spine-label { display: none; }
+  .stations { flex-direction: row; }
+  .nav-item, .station { border-left: none; white-space: nowrap; }
+  .station { grid-template-columns: auto auto; gap: .3rem; }
+}
+
+/* ---- main: blocks, not cards -------------------------------------------- */
+
+main { min-width: 0; padding: 1.5rem 1.6rem 5rem; }
+.view { display: block; }
+.block { margin: 0 0 2rem; }
+.block > h2 {
+  display: flex; align-items: center; gap: .7rem;
+  margin: 0 0 .9rem;
+  font: 600 .66rem/1 var(--mono); letter-spacing: .16em; text-transform: uppercase;
+  color: var(--ink-3);
+}
+.block > h2::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+.subhead {
+  margin: .1rem 0 .4rem;
+  font-size: .64rem; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3);
+}
+
+/* Reading measure is capped on the prose registers only; tables, patches and
+   the graph keep the full width they need. */
+.md, .lede, .note, .claim { max-width: 72ch; }
+
+/* ---- the two registers --------------------------------------------------- */
+
+.mono { font-family: var(--mono); }
+/* interface prose: what a screen means, in the human register */
+.note, .lede { font-family: var(--doc); font-size: .95rem; line-height: 1.6; color: var(--ink-2); }
+.lede { color: var(--ink); font-size: 1rem; margin: .2rem 0 .8rem; }
+/* an agent's account, unverified: never bold, never solid-ruled, never green */
+.claim {
+  font-family: var(--doc); font-size: .95rem; line-height: 1.6; color: var(--ink-2);
+  border-left: 2px dashed var(--rule-2); padding: .1rem 0 .1rem .8rem; margin: .5rem 0;
+}
+.empty { color: var(--ink-3); font-size: .82rem; }
+.okline { color: var(--ok); font-size: .82rem; }
+.warn {
+  border-left: 2px solid var(--brass); background: var(--brass-soft);
+  padding: .5rem .7rem; margin: .5rem 0; font-family: var(--doc); font-size: .95rem; line-height: 1.55;
+}
+.bad {
+  border-left: 2px solid var(--blk-bd); background: var(--blk-bg); color: var(--blk-ink);
+  padding: .45rem .7rem; margin: .4rem 0; font-size: .82rem;
+}
+
+/* ---- controls ------------------------------------------------------------ */
+
+button {
+  font: inherit; font-size: .78rem;
+  color: var(--ink); background: var(--sheet); border: 1px solid var(--rule-2); border-radius: 2px;
+  padding: .3rem .7rem; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--ink); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--inv-bg); color: var(--inv-ink); border-color: var(--inv-bg); font-weight: 700; }
+button.danger:hover:not(:disabled) { border-color: var(--blk-bd); color: var(--blk-ink); background: var(--blk-bg); }
+button.icon { border-color: transparent; background: transparent; color: var(--ink-2); padding: .25rem .4rem; }
+button.icon:hover { color: var(--ink); border-color: var(--rule-2); }
+button.link {
+  border: none; background: none; padding: 0; color: inherit; font-size: inherit;
+  text-decoration: underline; text-underline-offset: 2px;
+}
+code { font-family: var(--mono); font-size: .88em; }
+summary { cursor: pointer; color: var(--ink-2); font-size: .78rem; }
+a { color: inherit; text-decoration: underline; text-underline-offset: 2px; text-decoration-color: var(--rule-2); }
+a:hover { text-decoration-color: currentColor; }
+
+/* Radios and checkboxes are deliberately outside this: giving them a background, a border and
+   padding does not restyle a native control, it draws a box around one. They take the signal hue
+   through accent-color instead. */
+input:not([type="radio"]):not([type="checkbox"]), select, textarea {
+  font: inherit; font-size: .82rem; color: var(--ink);
+  background: var(--sheet); border: 1px solid var(--rule-2); border-radius: 2px; padding: .28rem .45rem;
+}
+input[type="radio"], input[type="checkbox"] { accent-color: var(--brass); }
+textarea { resize: vertical; font-family: var(--doc); font-size: .95rem; }
+.fld { display: flex; flex-direction: column; gap: .25rem; margin: .5rem 0; }
+.fld > span {
+  font-size: .62rem; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3);
+}
+.row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+
+/* ---- status vocabulary --------------------------------------------------- */
+
+.chip {
+  display: inline-block; padding: .1rem .45rem; margin: .1rem .05rem; border-radius: 2px;
+  font-size: .72rem; text-decoration: none;
+  border: 1px solid var(--todo-bd); background: var(--todo-bg); color: var(--todo-ink);
+}
+.chip.clk { cursor: pointer; }
+.chip.clk:hover { border-color: var(--ink); }
+.chip.in-progress { background: var(--prog-bg); border-color: var(--prog-bd); color: var(--prog-ink); }
+.chip.blocked { background: var(--blk-bg); border-color: var(--blk-bd); color: var(--blk-ink); }
+.chip.needs-revision { background: var(--rev-bg); border-color: var(--rev-bd); color: var(--rev-ink); }
+.chip.awaiting-evidence { background: var(--wait-bg); border-color: var(--wait-bd); color: var(--wait-ink); }
+.chip.done { background: var(--done-bg); border-color: var(--done-bd); color: var(--done-ink); }
+/* critical path is a property of the graph, not a status — so it is weight, not hue */
+.chip.critical { font-weight: 700; box-shadow: inset 0 0 0 1px currentColor; }
+/* queue severities (status_api.PENDING_SEVERITY_ORDER): `blocking` is the failure
+   family because nothing moves until it is gone; `attention` is brass, because
+   brass means exactly "a person has to act here". */
+.chip.blocking { background: var(--blk-bg); border-color: var(--blk-bd); color: var(--blk-ink); font-weight: 700; }
+.chip.attention { background: var(--brass-soft); border-color: var(--brass); color: var(--brass); }
+.chip.info { background: none; border-color: var(--rule); color: var(--ink-3); }
+.pills { display: flex; gap: .3rem; flex-wrap: wrap; margin-bottom: .8rem; }
+.pill {
+  font-size: .72rem; padding: .1rem .45rem; border: 1px solid var(--rule); border-radius: 2px;
+  font-variant-numeric: tabular-nums; color: var(--ink-2);
+}
+/* confidence / risk / severity, borrowed by the review pane */
+.conf {
+  display: inline-block; padding: 0 .4rem; border-radius: 2px; font-size: .66rem;
+  text-transform: uppercase; letter-spacing: .06em; border: 1px solid var(--rule-2); color: var(--ink-2);
+}
+.conf.high { background: var(--done-bg); border-color: var(--done-bd); color: var(--done-ink); }
+.conf.medium { background: var(--brass-soft); border-color: var(--brass); color: var(--brass); }
+.conf.low, .conf.unset { background: var(--blk-bg); border-color: var(--blk-bd); color: var(--blk-ink); }
+/* epistemic status: `machine_inferred` is an AI talking and must not be drawn
+   with the weight of an observation (models.py) */
+.epi {
+  display: inline-block; padding: 0 .35rem; border-radius: 2px; font-size: .64rem;
+  border: 1px solid var(--done-bd); background: var(--done-bg); color: var(--done-ink);
+}
+.epi.weak { border-style: dashed; border-color: var(--rule-2); background: none; color: var(--ink-3); }
+.stmt { display: flex; gap: .5rem; align-items: baseline; margin: .3rem 0; font-family: var(--doc); font-size: .95rem; }
+
+/* ---- tables -------------------------------------------------------------- */
+
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .8rem; }
+th, td { text-align: left; padding: .35rem .55rem .35rem 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th {
+  font-size: .62rem; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3);
+  border-bottom-color: var(--rule-2);
+}
+tr.clk { cursor: pointer; }
+tr.clk:hover td { background: var(--sheet-2); }
+
+pre.out {
+  background: var(--code-bg); color: var(--code-ink); padding: .7rem; margin-top: .8rem;
+  font-size: .76rem; white-space: pre-wrap; overflow: auto; max-height: 22rem; border-radius: 2px;
+}
+/* a file as it ends up, not a diff: it must not be re-wrapped */
+pre.blob {
+  background: var(--code-bg); color: var(--code-ink); padding: .8rem; border-radius: 2px;
+  font-size: .78rem; line-height: 1.5; overflow: auto; max-height: 32rem;
+}
+/* a measured value past its limit — inline, so it cannot use the .warn block */
+td.over { color: var(--blk-ink); background: var(--blk-bg); font-weight: 700; }
+
+/* ---- Now: the command, then what stands in its way ----------------------- */
+
+.console { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin-bottom: .6rem; }
+.prompt { color: var(--brass); font-weight: 700; font-size: 1.1rem; }
+code.cmd {
+  background: var(--code-bg); color: var(--code-ink); border-radius: 2px;
+  padding: .5rem .9rem; font-size: 1rem; letter-spacing: -.01em;
+}
+.detail { margin-top: .8rem; padding: .7rem .85rem; background: var(--sheet-2); border-left: 2px solid var(--rule-2); }
+.detail b { font-size: .9rem; }
+.detail dt {
+  margin-top: .5rem; font-size: .62rem; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3);
+}
+
+/* ---- Board: layers, key, graph ------------------------------------------- */
+
+.layers { display: flex; flex-direction: column; gap: .3rem; margin-bottom: .9rem; }
+.lrow { display: flex; align-items: center; gap: .6rem; }
+.lname { width: 1.8rem; text-align: right; font-size: .68rem; color: var(--ink-3); }
+.lbar { display: flex; gap: 2px; }
+/* A segment is 18x8px — too small for the tinted `-bg` fills to separate from
+   the page, so every status fills with its saturated `-bd`. */
+.seg {
+  display: inline-block; width: 1.15rem; height: .5rem; border-radius: 1px;
+  background: var(--todo-bd); border: 1px solid var(--todo-bd);
+}
+.seg.clk { cursor: pointer; }
+.seg.in-progress { background: var(--prog-bd); border-color: var(--prog-bd); }
+.seg.blocked { background: var(--blk-bd); border-color: var(--blk-bd); }
+.seg.needs-revision { background: var(--rev-bd); border-color: var(--rev-bd); }
+.seg.awaiting-evidence { background: var(--wait-bd); border-color: var(--wait-bd); }
+.seg.done { background: var(--done-bd); border-color: var(--done-bd); }
+.lcount { font-size: .7rem; color: var(--ink-3); white-space: nowrap; }
+
+.legend {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .3rem 1.2rem;
+  margin: .2rem 0 .7rem; font-size: .7rem; color: var(--ink-3);
+}
+.legend .li { display: inline-flex; align-items: center; gap: .4rem; }
+.legend svg { display: block; overflow: visible; }
+.legend .lgline { stroke: var(--rule-2); stroke-width: 1.5; fill: none; }
+.legend .lgline.crit { stroke: var(--ink); stroke-width: 2.5; }
+.legend .lghead { fill: var(--rule-2); }
+.legend .lghead.crit { fill: var(--ink); }
+
+svg.dag { display: block; min-width: 100%; }
+svg.dag .edge { stroke: var(--rule-2); stroke-width: 1.5; fill: none; }
+svg.dag .edge.crit { stroke: var(--ink); stroke-width: 2.5; }
+/* A marker does not inherit the path's stroke, so the two arrowheads are
+   filled here and follow the theme with everything else. */
+svg.dag #dagarw path { fill: var(--rule-2); }
+svg.dag #dagarwc path { fill: var(--ink); }
+svg.dag text { font-size: 12px; fill: var(--ink); pointer-events: none; font-family: var(--mono); }
+/* The class is the status string verbatim (models.TASK_STATUS_ORDER) —
+   hyphenated. Status drives the stroke as well as the fill: a fill alone is
+   too small a luminance step to read at node size in the dark palette. */
+svg.dag .nd { fill: var(--todo-bg); stroke: var(--todo-bd); stroke-width: 1.5; cursor: pointer; }
+svg.dag .nd.in-progress { fill: var(--prog-bg); stroke: var(--prog-bd); }
+svg.dag .nd.blocked { fill: var(--blk-bg); stroke: var(--blk-bd); }
+svg.dag .nd.needs-revision { fill: var(--rev-bg); stroke: var(--rev-bd); }
+svg.dag .nd.awaiting-evidence { fill: var(--wait-bg); stroke: var(--wait-bd); }
+svg.dag .nd.done { fill: var(--done-bg); stroke: var(--done-bd); }
+/* Last, so it outranks the status strokes: the critical path is a property of
+   the graph, and losing it to whatever status a node is in makes it unreadable. */
+svg.dag .nd.crit { stroke: var(--ink); stroke-width: 2.5; }
+
+/* ---- Record: the hash-chained log ---------------------------------------- */
+
+table.events td { font-size: .76rem; }
+tr.ev-ok td:nth-child(3) { color: var(--ok); }
+tr.ev-bad td { background: var(--blk-bg); color: var(--blk-ink); }
+tr.ev-closed td { color: var(--ink-3); }
+
+/* ---- the gate reading room ----------------------------------------------- */
+
+.gatehead { display: flex; align-items: baseline; gap: .7rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.gatehead .gtitle { font-size: 1.05rem; font-weight: 700; letter-spacing: -.01em; }
+.gatehead .gstate { font-size: .72rem; color: var(--ink-3); }
+
+.rv-grid { display: grid; grid-template-columns: 14rem minmax(0, 1fr); gap: 1.4rem; align-items: start; }
+@media (max-width: 980px) { .rv-grid { grid-template-columns: 1fr; } }
+.rv-list { position: sticky; top: calc(var(--top) + 1rem); }
+.rv-item {
+  display: block; width: 100%; text-align: left;
+  padding: .3rem .45rem; border: none; border-left: 2px solid transparent; background: none;
+  font: inherit; font-size: .8rem; color: var(--ink-2); cursor: pointer; overflow-wrap: anywhere;
+}
+.rv-item:hover { background: var(--sheet-2); color: var(--ink); }
+.rv-item.active { background: var(--sheet-2); color: var(--ink); font-weight: 700; border-left-color: var(--ink); }
+.rv-item.missing { color: var(--ink-3); font-style: italic; }
+.rv-read { display: inline-block; width: 1.1rem; color: var(--ink-3); }
+.rv-item.active .rv-read, .rv-item .rv-read.settled { color: var(--ok); }
+.rv-item .rv-read.open { color: var(--brass); }
+.rv-body { min-width: 0; }
+@media (min-width: 981px) { .rv-body { border-left: 1px solid var(--rule); padding-left: 1.4rem; } }
+
+/* the pinned self-assessment: the system's own account of its confidence,
+   which is a claim and is drawn as one */
+.sa { margin-bottom: 1.1rem; }
+.sa h1, .sa h2, .sa h3 { display: none; }  /* the SELF-ASSESSMENT label already names it */
+.sa ul, .sa ol { margin: .2rem 0; padding-left: 1.3rem; }
+
+/* A card is one thing to decide — the one place a box is true. */
+.card { border: 1px solid var(--rule); border-radius: 2px; background: var(--sheet); padding: .8rem .9rem; margin-bottom: .9rem; }
+.card.asks { border-left: 2px solid var(--brass); }
+.card > p { font-family: var(--doc); font-size: 1rem; line-height: 1.55; margin: .4rem 0 .7rem; max-width: 72ch; }
+.opts { display: flex; flex-direction: column; gap: .2rem; margin: .5rem 0 .7rem; }
+.opt {
+  display: flex; gap: .5rem; align-items: flex-start; cursor: pointer;
+  padding: .35rem .45rem; border: 1px solid transparent; border-radius: 2px;
+  font-family: var(--doc); font-size: .97rem; line-height: 1.5;
+}
+.opt:hover { background: var(--sheet-2); border-color: var(--rule); }
+.opt b { font-family: var(--mono); font-size: .8rem; }
+
+/* the three axes, side by side and never merged: integrity is a fact,
+   semantic support is somebody's judgement, conformance is an observation */
+.axes { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: .5rem; margin: .6rem 0; }
+.axis { border: 1px solid var(--rule); border-radius: 2px; padding: .45rem .55rem; background: var(--sheet-2); }
+.axlabel { font-size: .6rem; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); }
+.axval { font-size: .88rem; font-weight: 700; margin-top: .2rem; overflow-wrap: anywhere; }
+.axnote { font-size: .68rem; color: var(--ink-3); margin-top: .15rem; overflow-wrap: anywhere; }
+/* an AI's assessment must not read like the observation beside it */
+.axis.opinion { border-style: dashed; background: none; }
+.axis.opinion .axval { font-weight: 400; font-family: var(--doc); font-style: italic; color: var(--ink-2); }
+
+/* rendered deliverable markdown — the human register, at reading size */
+.md { font-family: var(--doc); font-size: 1rem; line-height: 1.65; }
+.md h1, .md h2, .md h3, .md h4 { font-family: var(--mono); letter-spacing: -.01em; line-height: 1.3; }
+.md h1 { font-size: 1.3rem; margin: 0 0 .8rem; padding-bottom: .4rem; border-bottom: 1px solid var(--rule-2); }
+/* A section rule rather than uppercase: these headings are the author's own prose, sometimes long,
+   and forcing them to caps costs legibility to buy structure a hairline already gives. */
+.md h2 { font-size: 1.02rem; margin: 1.9rem 0 .6rem; padding-top: .7rem; border-top: 1px solid var(--rule); }
+.md h3 { font-size: .92rem; margin: 1.1rem 0 .35rem; }
+.md p, .md li { max-width: 72ch; }
+.md code { font-family: var(--mono); font-size: .82em; background: var(--sheet-2); border: 1px solid var(--rule); border-radius: 2px; padding: 0 .25rem; }
+.md pre { background: var(--code-bg); color: var(--code-ink); border-radius: 2px; padding: .8rem; overflow: auto; font-size: .8rem; }
+.md pre code { background: none; border: none; padding: 0; color: inherit; }
+.md blockquote { border-left: 2px solid var(--rule-2); margin: .8rem 0; padding: .1rem .9rem; color: var(--ink-2); }
+.md table { margin: .7rem 0; font-family: var(--mono); }
+.md ul, .md ol { padding-left: 1.4rem; }
+.md .cb { font-family: var(--mono); color: var(--ink-3); }
+.md .cb.done { color: var(--ok); }
+
+/* the patch, colourised per line */
+pre.patch {
+  background: var(--code-bg); color: var(--code-ink); border-radius: 2px; padding: .8rem;
+  font-size: .76rem; line-height: 1.5; overflow: auto; max-height: 38rem;
+}
+/* Fixed, not theme-paired: --code-bg is dark in both themes, so these are read on one ground. */
+.dl { display: block; white-space: pre; }
+.dl.add { color: #7ee2a8; }
+.dl.del { color: #ff9d8f; }
+.dl.hunk { color: #8ab8ff; }
+.dl.file { color: #dda63f; font-weight: 700; }
+
+/* the approval footer: the page's last word, and it sticks */
+.approvebar {
+  position: sticky; bottom: 0; z-index: 4;
+  display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
+  margin-top: 1.2rem; padding: .7rem 0;
+  background: var(--paper); border-top: 1px solid var(--rule-2);
+}
+/* what an approval would bind, shown in the pane that asked for it — not in
+   an OS dialog and not on another tab */
+.confirm { border: 1px solid var(--ink); border-radius: 2px; padding: .8rem .9rem; margin-top: 1rem; background: var(--sheet); }
+.confirm table { font-size: .76rem; }
+.confirm td:first-child { color: var(--ink-3); white-space: nowrap; padding-right: 1rem; }
+
+/* ---- toasts -------------------------------------------------------------- */
+
+#toasts { position: fixed; right: 1rem; bottom: 1rem; z-index: 20; display: flex; flex-direction: column; gap: .4rem; }
+/* Not inverted: inversion means "this gate waits on you", and a transient confirmation is not
+   that. A sheet with a semantic left rule reads over any background without borrowing the signal. */
+.toast {
+  background: var(--sheet); color: var(--ink); border: 1px solid var(--rule-2); border-radius: 2px;
+  border-left: 3px solid var(--rule-2);
+  padding: .5rem .8rem; font-size: .8rem; max-width: 24rem; animation: rise .2s ease;
+}
+.toast.ok { border-left-color: var(--done-bd); }
+.toast.err { border-left-color: var(--blk-bd); }
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+
+/* ---- motion: two things move, and both mean something -------------------- */
+/* The spine settles once on load, so the eye lands on the lifecycle before the
+   content. A running task pulses, because a build moving is information. */
+
+@media (prefers-reduced-motion: no-preference) {
+  .stations .station { animation: settle .4s cubic-bezier(.2, .7, .3, 1) backwards; }
+  .stations .station:nth-child(2) { animation-delay: .05s; }
+  .stations .station:nth-child(3) { animation-delay: .1s; }
+  .stations .station:nth-child(4) { animation-delay: .15s; }
+  .stations .station:nth-child(5) { animation-delay: .2s; }
+  @keyframes settle { from { opacity: 0; transform: translateY(-.3rem); } }
+
+  .seg.in-progress { animation: breathe 1.8s ease-in-out infinite; }
+  svg.dag .nd.in-progress { animation: breathe 1.8s ease-in-out infinite; }
+  @keyframes breathe { 50% { opacity: .5; } }
+}

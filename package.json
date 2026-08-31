@@ -1,0 +1,28 @@
+{
+  "name": "loose-rein-kit-frontend",
+  "private": true,
+  "type": "module",
+  "description": "Build and test tooling for the rein dashboard's frontend. Nothing here is installed by a user of the CLI: `rein` is a Python package with three runtime dependencies, and `rein ui` serves the pre-built bundle in src/rein/ui_assets/ over the standard library. react and react-dom are `dependencies` because they end up inside that bundle; everything under devDependencies exists only to build, lint and test it.",
+  "scripts": {
+    "build": "node scripts/build_ui.mjs",
+    "build:check": "node scripts/build_ui.mjs --check",
+    "test": "node --test \"tests/ui/*.test.mjs\"",
+    "lint": "eslint ui scripts/build_ui.mjs tests/ui"
+  },
+  "packageManager": "pnpm@11.8.0",
+  "engines": {
+    "node": ">=26"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^28.0.0"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  }
+}

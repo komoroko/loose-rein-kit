@@ -49,21 +49,33 @@ def read_bytes(rel: str) -> bytes:
     return path(rel).read_bytes()
 
 
-def iter_files(prefix: str = "") -> Iterator[tuple[str, bytes]]:
-    """Every payload file under `prefix`, as (data-relative posix path, bytes), sorted.
+def iter_names(prefix: str = "") -> Iterator[str]:
+    """Every payload file under `prefix`, as data-relative posix paths, sorted.
 
     The deterministic ordering is what makes the consumers' plans (init's seed list,
     sync's refresh report, the lock's file map) reproducible run over run.
+
+    Names without bytes, because some callers only need to know *where* the payload lands:
+    `install.present_surfaces` asks which of an integration's destinations exist on disk, and
+    reading the whole tree to answer it cost the dashboard 300+ms on every status read.
     """
     base = path(prefix) if prefix else root()
 
-    def _walk(entry: Traversable, rel: str) -> Iterator[tuple[str, bytes]]:
-        entries = sorted(entry.iterdir(), key=lambda e: e.name)
-        for child in entries:
+    def _walk(entry: Traversable, rel: str) -> Iterator[str]:
+        for child in sorted(entry.iterdir(), key=lambda e: e.name):
             child_rel = f"{rel}/{child.name}" if rel else child.name
             if child.is_dir():
                 yield from _walk(child, child_rel)
             else:
-                yield child_rel, child.read_bytes()
+                yield child_rel
 
     yield from _walk(base, prefix)
+
+
+def iter_files(prefix: str = "") -> Iterator[tuple[str, bytes]]:
+    """Every payload file under `prefix`, as (data-relative posix path, bytes), sorted.
+
+    Built on :func:`iter_names` so that "which files the payload ships" has one answer.
+    """
+    for rel in iter_names(prefix):
+        yield rel, read_bytes(rel)

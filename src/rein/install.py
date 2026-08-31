@@ -35,6 +35,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from datetime import date
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -318,18 +319,33 @@ def changelog_between(text: str, installed: str, new: str) -> str:
 # --- the file-map plumbing shared by sync and install ---------------------------
 
 
-def _dest_map(pairs: tuple[tuple[str, str], ...]) -> dict[str, bytes]:
-    """repo-relative destination -> payload bytes, for a (data prefix, repo prefix) pair set."""
-    out: dict[str, bytes] = {}
+@cache
+def _dest_sources(pairs: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str], ...]:
+    """(repo-relative destination, data-relative source) for a (data prefix, repo prefix) pair set.
+
+    The single enumeration of where a pair set lands. Everything that needs the bytes reads them
+    from the source path; everything that only needs the destinations — `present_surfaces`, which
+    the dashboard reaches on every status read — never opens a payload file at all.
+
+    Cached for the life of the process, because the payload lives inside the installed package and
+    no `rein` verb writes it: `install`/`sync` read it and write the *repository*, and they are
+    one-shot runs anyway. Only the long-lived process, `rein ui`, holds this across time, and it
+    was walking the whole tree three times per status read to answer "is any agent surface here".
+    """
+    out: list[tuple[str, str]] = []
     for data_prefix, repo_prefix in pairs:
         entry = data_mod.path(data_prefix.rstrip("/"))
         if entry.is_file():
-            out[repo_prefix] = data_mod.read_bytes(data_prefix)
+            out.append((repo_prefix, data_prefix))
             continue
         strip = len(data_prefix)
-        for rel, blob in data_mod.iter_files(data_prefix.rstrip("/")):
-            out[repo_prefix + rel[strip:]] = blob
-    return out
+        out.extend((repo_prefix + rel[strip:], rel) for rel in data_mod.iter_names(data_prefix.rstrip("/")))
+    return tuple(out)
+
+
+def _dest_map(pairs: tuple[tuple[str, str], ...]) -> dict[str, bytes]:
+    """repo-relative destination -> payload bytes, for a (data prefix, repo prefix) pair set."""
+    return {dest: data_mod.read_bytes(src) for dest, src in _dest_sources(pairs)}
 
 
 def _plan(repo: repo_mod.Repo, desired: dict[str, bytes], recorded: dict[str, str], force: bool) -> list[PlanItem]:
@@ -380,9 +396,10 @@ def present_surfaces(repo: repo_mod.Repo, name: str) -> list[str]:
     """The integration's destination files that exist on disk, whatever the lock records.
 
     Defined here so "where install writes" and "where anything else looks for what install wrote"
-    cannot answer differently — the same reason check_materialized reuses _dest_map.
+    cannot answer differently — both enumerate `_dest_sources`, the same reason check_materialized
+    reuses _dest_map.
     """
-    return [rel for rel in sorted(_dest_map(INTEGRATIONS[name])) if repo.path(rel).is_file()]
+    return sorted(dest for dest, _ in _dest_sources(INTEGRATIONS[name]) if repo.path(dest).is_file())
 
 
 def _apply_plan(repo: repo_mod.Repo, items: list[PlanItem], desired: dict[str, bytes]) -> dict[str, str]:

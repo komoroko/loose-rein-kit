@@ -210,7 +210,7 @@ def _diff_block(root: Path) -> dict[str, object]:
         "base_ref": base_ref,
         "stat": stat.rstrip(),
         "name_status": [ln.split("\t", 1) for ln in names.strip().splitlines() if "\t" in ln],
-        "patch": patch,  # raw text — the client renders it per line via textContent, never innerHTML
+        "patch": patch,  # raw text — the client renders each line as a JSX text child, never as HTML
         "truncated": truncated,
     }
 

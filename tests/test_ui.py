@@ -19,6 +19,21 @@ import pytest
 from rein import models, registry, store, ui
 from tests._support import SANDBOXED_PROFILES, chain, make_config, make_state, seed_repo
 
+# The frontend's source. `ui_assets/app.js` is a built bundle — minified React plus this code — so a
+# canary about what the page *says* reads the sources it was built from, and only the canaries about
+# what the server *serves* read the bundle. `make check` rebuilds and compares the two, so a source
+# these canaries pass over is the source the shipped bundle came from.
+UI_SRC = Path(__file__).resolve().parents[1] / "ui"
+
+
+def ui_sources() -> dict[str, str]:
+    return {
+        str(p.relative_to(UI_SRC)): p.read_text(encoding="utf-8")
+        for p in sorted(UI_SRC.rglob("*"))
+        if p.suffix in (".js", ".jsx")
+    }
+
+
 # --- action_argv: the fixed whitelist ------------------------------------------
 
 
@@ -135,21 +150,54 @@ def _request(
     return res.status, data
 
 
-def _get_conditional(srv: ui.DashboardServer, path: str, etag: str | None = None) -> tuple[int, str | None, bytes]:
-    """GET `path`, optionally with If-None-Match, returning (status, ETag, body)."""
-    conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
-    headers = {"If-None-Match": etag} if etag is not None else {}
-    conn.request("GET", path, None, headers)
-    res = conn.getresponse()
-    data = res.read()
-    conn.close()
-    return res.status, res.getheader("ETag"), data
+class _Stream:
+    """An open `/api/stream`, read one event at a time.
+
+    SSE has no request/response pairing to assert on: what a test needs is "the next thing the
+    server said", under a deadline, so a stream that correctly says nothing fails as a timeout
+    instead of hanging the suite. `timeout` is the socket's, so it is also how long silence is
+    allowed to last before :meth:`next_event` gives up.
+    """
+
+    def __init__(self, srv: ui.DashboardServer, timeout: float = 20.0) -> None:
+        self.conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=timeout)
+        self.conn.request("GET", "/api/stream")
+        self.res = self.conn.getresponse()
+        assert self.res.status == 200
+        assert (self.res.getheader("Content-Type") or "").startswith("text/event-stream")
+
+    def next_event(self, name: str | None = None) -> tuple[str, dict[str, Any]]:
+        """The next event, or the next one called `name`. Comments and `retry:` are not events."""
+        current: str | None = None
+        while True:
+            raw = self.res.readline()
+            if not raw:
+                raise AssertionError(f"the stream ended before a {name or 'named'} event arrived")
+            line = raw.decode("utf-8").rstrip("\r\n")
+            if line.startswith("event: "):
+                current = line[len("event: ") :]
+            elif line.startswith("data: ") and current is not None:
+                got, current = (current, json.loads(line[len("data: ") :])), None
+                if name is None or got[0] == name:
+                    return got
+
+    def opening(self) -> dict[str, Any]:
+        """The `status` the server sends on connect, skipping the `record` that accompanies it."""
+        return self.next_event("status")[1]
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def __enter__(self) -> _Stream:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
 
-def test_get_status_returns_next_command(server: ui.DashboardServer) -> None:
-    status, data = _request(server, "GET", "/api/status")
-    assert status == 200
-    payload = json.loads(data)
+def test_the_stream_opens_by_saying_what_is_true_now(server: ui.DashboardServer) -> None:
+    with _Stream(server) as stream:
+        payload = stream.opening()
     # This fixture stands at gate ① with nothing mechanical in the way, so the recommendation is
     # the human's decision — not "/req" again. The dashboard's waiting-state signals key off it.
     assert payload["next"]["command"] == "rein approve requirements"
@@ -162,42 +210,68 @@ def test_get_page_is_offline_self_contained(server: ui.DashboardServer) -> None:
     page = data.decode("utf-8")
     assert status == 200 and "Loose Rein" in page
     assert server.token in page  # the POST token reaches a page that holds a write session
-    # Offline canary across the page AND every allowlisted asset: no external reference anywhere.
     assets = {name: _request(server, "GET", f"/assets/{name}")[1].decode("utf-8") for name in ui._ASSET_TYPES}
-    for name, text in {"index.html": page, **assets}.items():
+
+    # Nothing this repository writes may name an absolute URL at all.
+    for name, text in {"index.html": page, **ui_sources()}.items():
         assert "http://" not in text and "https://" not in text, name
         assert "//cdn" not in text and "@import" not in text, name
-    # every URL the page or a module references is same-origin: an /assets/ file or a #tab hash
-    for name, text in {"index.html": page, **assets}.items():
-        for url in re.findall(r'(?:src|href|from)\s*=?\s*"([^"]+)"', text):
-            assert url.startswith(("/assets/", "#")), f"{name} references {url}"
-    # the sections live in the page; their renderers and the theme machinery in the modules
-    for marker in ('id="stepper"', 'id="trace"', 'id="rvMain"', 'id="tabs"', 'id="toasts"'):
-        assert marker in page, marker
-    bundle = "".join(assets.values())
-    for marker in ("buildDag", "showTaskDetail", "data-theme", "renderReview"):
-        assert marker in bundle, marker
+
+    # The bundle carries React's own strings, and this is the exact set of absolute URLs in it —
+    # an exact set, so a sixth one fails here rather than being waved through by a prefix rule.
+    # None is a request: an XML namespace URI is an identifier that is never dereferenced, and the
+    # react.dev link is text inside a minified error message.
+    INERT = {
+        "http://www.w3.org/1998/Math/MathML",
+        "http://www.w3.org/1999/xlink",
+        "http://www.w3.org/2000/svg",
+        "http://www.w3.org/XML/1998/namespace",
+        "https://react.dev/errors/",
+    }
+    assert set(re.findall(r"https?://[^\"' )]*", assets["app.js"])) == INERT
+    assert "http" not in assets["app.css"]
+
+    # Every URL the page names is same-origin: an attribute in the page, a literal in the sources.
+    # The sources are where this is asked rather than the bundle, because minification leaves
+    # fragments of React's own regexes looking like paths, and a canary that has to allow "/$" is
+    # not checking anything. What the bundle answers for is the exact set above.
+    for url in re.findall(r'(?:src|href)\s*=\s*"([^"]+)"', page):
+        assert url.startswith(("/assets/", "#")), f"index.html references {url}"
+    for name, text in ui_sources().items():
+        for url in re.findall(r'"(/[^"\s]*)"', text):
+            assert url.startswith(("/assets/", "/api/")), f"{name} names {url}"
+
+    # The page is an empty root: everything below is rendered by the bundle, so the markers that
+    # prove the screens exist belong to the sources it was built from.
+    assert '<div id="root"></div>' in page
+    sources = "".join(ui_sources().values())
+    for marker in ('id="stepper"', 'id="trace"', 'id="rvMain"', 'id="tabs"', 'id="toasts"', "data-theme"):
+        assert marker in sources, marker
 
 
-def test_no_asset_builds_a_click_handler_out_of_a_task_id() -> None:
-    """Task ids are agent-written and not pattern-validated on load (dag.py takes them as-is).
+def test_the_page_puts_no_repository_string_in_the_dom_as_html() -> None:
+    """The page holds the approval token, so an XSS here is a self-approval.
 
-    Interpolating one into an inline `onclick="f('<id>')"` lets a quote in the id close the JS
-    string and run script on the page that holds the approval token — the XSS→self-approval path
-    mdlite.py exists to close. Ids must travel as escaped attribute values read back by a delegated
-    listener, so no generated handler may name a task-detail call at all.
+    Task ids, claim ids, gap ids and reviewer prose are all agent-written and none is pattern-
+    validated on load (dag.py takes `str(raw["id"])` as-is). The old page built HTML by string
+    concatenation and escaped each interpolation by hand — 103 calls, any one of which could be
+    forgotten. JSX escapes every interpolation by construction, so what is left to police is the
+    deliberate opt-out, and there are exactly two: the deliverable body and the phase agent's
+    self-assessment, both rendered server-side by mdlite, which escapes at the source.
     """
-    sources = {p.name: p.read_text(encoding="utf-8") for p in ui.ASSETS_DIR.iterdir() if p.suffix == ".js"}
-    for name, text in sources.items():
-        assert 'onclick="showTaskDetail' not in text, name
-        assert "showTaskDetail('" not in text.replace("onTaskClick(showTaskDetail)", ""), name
-    bundle = "".join(sources.values())
-    assert 'data-task="' in bundle and 'getAttribute("data-task")' in bundle
+    raw = [
+        (name, line.strip())
+        for name, text in ui_sources().items()
+        for line in text.splitlines()
+        if ("dangerouslySetInnerHTML" in line or ".innerHTML" in line) and not line.lstrip().startswith("//")
+    ]
+    assert [name for name, _ in raw] == ["gate/Deliverables.jsx", "gate/Deliverables.jsx"], raw
+    assert all("__html: sa.html" in line or "__html: entry.html" in line for _, line in raw), raw
 
 
 def test_every_task_status_is_styled_by_the_name_the_page_emits() -> None:
-    """The status string reaches the DOM verbatim (`esc(tk.status)`), so a stylesheet spelling it
-    any other way styles nothing.
+    """The status string reaches the DOM verbatim (`<Chip status={tk.status}>` puts it in the class
+    list), so a stylesheet spelling it any other way styles nothing.
 
     This happened: the DAG rules said `.nd.in_progress` — Mermaid's spelling, where `-` cannot
     appear in an identifier (`dag_render._node_key`) — while the class emitted was `in-progress`.
@@ -216,8 +290,8 @@ def test_every_task_status_is_styled_by_the_name_the_page_emits() -> None:
 def test_the_graph_says_what_its_lines_mean() -> None:
     """An edge drawn without a head or a key is a line between two boxes: the reader cannot tell
     which end must finish first, nor that a column is an execution layer."""
-    js = (ui.ASSETS_DIR / "view-tasks.js").read_text(encoding="utf-8")
-    assert "marker-end" in js and "<marker" in js
+    js = (UI_SRC / "Board.jsx").read_text(encoding="utf-8")
+    assert "markerEnd" in js and "<marker" in js
     assert "blocked_by" in js and "execution layers" in js and "critical path" in js
 
 
@@ -244,7 +318,7 @@ def test_the_as_built_route_reaches_review_api_rather_than_the_gate_list(server:
 # --- the payload contract between the modules and the server --------------------
 #
 # The drift this catches actually happened: `_tasks_block` renamed its task list to `rows` and
-# `trace` collapsed to a verdict, while view-tasks.js kept reading `tasks.tasks` and
+# `trace` collapsed to a verdict, while the Board kept reading `tasks.tasks` and
 # `trace.requirements`. Nothing failed — no test asserted that a field a module reads exists — so
 # the Tasks tab threw a TypeError inside `refresh()`, whose catch reports "disconnected". A pane
 # that silently stops rendering is worse than one that 500s, because the dashboard still looks alive.
@@ -281,7 +355,7 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
 
     tasks = payload["tasks"]
     assert isinstance(tasks, dict)
-    # view-tasks.js: buildDag/layersBar/renderTasks; view-overview.js: renderAttention
+    # Board.jsx: Dag/Layers/pills; Now.jsx: InTheWay
     for key in ("rows", "counts", "total", "layers", "critical_path", "frontier"):
         assert key in tasks, f"status.tasks.{key}"
     for key in ("id", "title", "kind", "status", "risk", "blocked_by", "claim_ids", "handoff", "commit"):
@@ -296,7 +370,7 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
     for key in ("id", "nfr", "claims", "tasks"):
         assert key in trace["requirements"][0], f"status.trace.requirements[].{key}"
 
-    # view-overview.js renderAttention / notify.js snapshot
+    # Now.jsx InTheWay / notify.js snapshot
     assert isinstance(payload["attention"], list)
     for key in ("gates", "warnings", "next", "project", "current_phase", "phase_order", "decision"):
         assert key in payload, f"status.{key}"
@@ -307,7 +381,7 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
 
 
 def test_the_pending_decision_is_one_identity_not_a_stream_of_events() -> None:
-    """notify.js interrupts on `decision.id` changing; a decision the loop re-derives is silent."""
+    """The notifier interrupts on `decision.id` changing; a decision the loop re-derives is silent."""
     from rein import status_api
 
     approve = status_api.Recommendation(command="rein approve build", kind="approve_gate", reason="ready")
@@ -364,7 +438,7 @@ def test_event_feed_payload_carries_every_field_the_feed_reads(server: ui.Dashbo
 
 def test_no_module_reads_a_field_the_payload_stopped_carrying() -> None:
     """Spelling canaries for the renames that already bit, so they cannot come back quietly."""
-    sources = {p.name: p.read_text(encoding="utf-8") for p in ui.ASSETS_DIR.iterdir() if p.suffix == ".js"}
+    sources = ui_sources()
     forbidden = {
         "tasks.tasks": "the task list is `tasks.rows`",
         "in_progress": "the status is spelled `in-progress` (models.TASK_STATUS_ORDER)",
@@ -390,7 +464,7 @@ def test_the_page_does_not_tell_the_human_to_go_and_do_what_it_just_did() -> Non
     carrying `error`. So `approval_id` in the body means it happened, and the only honest toast
     names it.
     """
-    api = (ui.ASSETS_DIR / "api.js").read_text(encoding="utf-8")
+    api = (UI_SRC / "api.js").read_text(encoding="utf-8")
     assert "run the command shown to approve" not in api
     assert "approval_id" in api, "the toast has to read the field that proves the approval was recorded"
     assert "(data.blockers" not in api, "a POST never carries blockers — an unready gate is a 409"
@@ -405,9 +479,7 @@ def test_every_api_route_the_server_dispatches_is_reached_from_the_page() -> Non
     source = Path(ui.__file__).read_text(encoding="utf-8")
     routes = {m.rstrip("?") for m in re.findall(r'self\.path(?:\s*==\s*|\.startswith\()\s*"(/api/[^"]*)"', source)}
     assert routes, "no /api/ route literals found — this canary would pass on anything"
-    bundle = "".join(
-        p.read_text(encoding="utf-8") for p in sorted(ui.ASSETS_DIR.iterdir()) if p.suffix in (".js", ".html")
-    )
+    bundle = "".join(ui_sources().values()) + (ui.ASSETS_DIR / "index.html").read_text(encoding="utf-8")
     for route in sorted(routes):
         assert route in bundle, f"{route} is dispatched by ui.py but nothing on the page calls it"
     for called in sorted(set(re.findall(r'"(/api/[^"?]*)"', bundle))):
@@ -591,7 +663,8 @@ def test_read_only_server_refuses_posts(repo: Path) -> None:
     try:
         status, _ = write(srv, "/api/gate/approve", {"gate": "requirements"})
         assert status == 405
-        assert _request(srv, "GET", "/api/status")[0] == 200  # reads still work
+        with _Stream(srv) as stream:
+            assert stream.opening()["project"] == "demo"  # reads still work
     finally:
         srv.shutdown()
         srv.server_close()
@@ -667,37 +740,10 @@ def test_events_are_parsed_once_per_version_of_the_log(server: ui.DashboardServe
     assert ui._load_events_cached(missing) == []  # an absent log is empty
 
 
-# --- /api/status conditional requests --------------------------------------------
+# --- /api/stream ------------------------------------------------------------------
 
 
-def test_status_etag_ignores_when_the_payload_was_generated(server: ui.DashboardServer) -> None:
-    # generated_at is a fresh wall-clock stamp on every call. If it counted towards the ETag, an
-    # idle repo would look like it changed on every poll — which is exactly the bug this closes.
-    status_a, etag_a, body_a = _get_conditional(server, "/api/status")
-    status_b, etag_b, body_b = _get_conditional(server, "/api/status")
-    assert status_a == status_b == 200
-    assert etag_a is not None and etag_a == etag_b
-    assert json.loads(body_a)["generated_at"] is not None  # still in the body: the page shows it
-    assert {k: v for k, v in json.loads(body_a).items() if k != "generated_at"} == {
-        k: v for k, v in json.loads(body_b).items() if k != "generated_at"
-    }
-
-
-def test_status_answers_304_for_a_matching_etag(server: ui.DashboardServer) -> None:
-    _, etag, _ = _get_conditional(server, "/api/status")
-    status, echoed, body = _get_conditional(server, "/api/status", etag)
-    assert status == 304
-    assert body == b""  # a 304 carries no body — that is the whole point of the round trip
-    assert echoed == etag
-
-
-def test_status_without_if_none_match_is_always_200(server: ui.DashboardServer) -> None:
-    assert _get_conditional(server, "/api/status")[0] == 200
-    assert _get_conditional(server, "/api/status", '"not-the-current-one"')[0] == 200
-
-
-def test_status_etag_changes_when_the_ssot_moves(server: ui.DashboardServer, repo: Path) -> None:
-    _, etag, _ = _get_conditional(server, "/api/status")
+def _advance_to_design(repo: Path) -> None:
     (repo / ".rein" / "state.yaml").write_bytes(
         store.dump_yaml(
             make_state(
@@ -713,18 +759,121 @@ def test_status_etag_changes_when_the_ssot_moves(server: ui.DashboardServer, rep
             )
         )
     )
-    status, new_etag, body = _get_conditional(server, "/api/status", etag)
-    assert status == 200 and new_etag != etag
-    assert json.loads(body)["gates"][0]["status"] == "approved"
 
 
-def test_status_reads_the_event_log_through_the_cache(server: ui.DashboardServer, repo: Path) -> None:
-    # /api/status is the always-on poll; it used to re-parse the whole events.ndjson every few
-    # seconds while the cache served only the Activity feed. Same file version → same parsed list.
+def test_the_stream_says_nothing_while_the_repository_does_not_move(server: ui.DashboardServer) -> None:
+    """The property the whole design rests on.
+
+    `generated_at` is a fresh wall-clock stamp on every read, so if it counted towards the payload's
+    identity an idle repository would look like it changed on every tick, and the page would
+    re-render over state that did not move — losing a half-typed field, a task's open detail, the
+    scroll inside a long patch. Silence here is the assertion.
+    """
+    with _Stream(server, timeout=3.0) as stream:
+        payload = stream.opening()
+        assert payload["generated_at"] is not None  # still in the body: it is a fact about the read
+        with pytest.raises(TimeoutError):
+            stream.next_event("status")
+
+
+def test_the_stream_pushes_a_status_when_the_ssot_moves(server: ui.DashboardServer, repo: Path) -> None:
+    with _Stream(server) as stream:
+        assert stream.opening()["gates"][0]["status"] == "pending"
+        _advance_to_design(repo)
+        assert stream.next_event("status")[1]["gates"][0]["status"] == "approved"
+
+
+def test_the_stream_pushes_a_record_event_when_the_log_grows(server: ui.DashboardServer, repo: Path) -> None:
+    """The audit log gets its own signal because an appended event need not move the status payload
+    at all — and the Record feed still has to know it happened."""
+    with _Stream(server) as stream:
+        first = stream.next_event("record")[1]
+        _seed_events(repo, count=5)
+        assert stream.next_event("record")[1]["revision"] != first["revision"]
+
+
+def test_the_stream_follows_a_project_switch_with_no_client_coordination(
+    multi_server: tuple[ui.DashboardServer, dict[str, Path]],
+) -> None:
+    """The active project is re-read every tick rather than captured at connect, so switching
+    targets needs nothing from the page: the next push is already the other repository's."""
+    srv, _ = multi_server
+    with _Stream(srv) as stream:
+        assert stream.opening()["project"] == "alpha"
+        assert write(srv, "/api/project/select", {"name": "beta"})[0] == 200
+        assert stream.next_event("status")[1]["project"] == "beta"
+
+
+def test_the_stream_ends_when_the_server_closes(repo: Path) -> None:
+    """A stream thread holds a socket for the life of a run; it must not outlive the server."""
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=repo, read_only=False)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    stream = _Stream(srv)
+    stream.opening()
+    srv.shutdown()
+    srv.server_close()
+    assert srv.closing.is_set()
+    stream.close()
+
+
+def test_status_identity_ignores_when_the_payload_was_generated(repo: Path) -> None:
+    a, b = ui._collect_status(repo), ui._collect_status(repo)
+    assert a["generated_at"] != b["generated_at"] or a["generated_at"] is not None
+    assert ui._status_identity(a) == ui._status_identity(b)
+    _advance_to_design(repo)
+    assert ui._status_identity(ui._collect_status(repo)) != ui._status_identity(a)
+
+
+def test_the_fingerprint_moves_when_the_ssot_does_and_costs_no_parse(repo: Path) -> None:
+    """The two-stage check: a tick stats, and only a moved fingerprint buys a status read."""
+    before = ui._ssot_fingerprint(repo)
+    assert before, "the fingerprint must actually watch something"
+    assert ui._ssot_fingerprint(repo) == before  # stable while nothing moves
+    _advance_to_design(repo)
+    assert ui._ssot_fingerprint(repo) != before
+
+
+def test_the_fingerprint_is_a_fixed_handful_of_stats_and_never_a_walk() -> None:
+    """The property that makes the two-stage check worth having, and it was got wrong once.
+
+    The first version globbed `.rein/**` and `.git/refs/**`. That is ~100 paths in this repository
+    and cost 271ms per tick on a WSL mount — more than the status read it exists to avoid, turning
+    the optimisation into the slowest thing in the loop. A fingerprint has to be cheap on the worst
+    filesystem a dashboard runs on, so it is a fixed list and there is no directory walk in it.
+    """
+    assert len(ui._WATCHED) <= 10, "a fingerprint this long is no longer obviously cheaper than a read"
+    assert not any("*" in rel for rel in ui._WATCHED), "a glob here is a directory walk on every tick"
+    assert ".rein/state.yaml" in ui._WATCHED and ".git/HEAD" in ui._WATCHED
+
+
+def test_the_frontend_fixture_still_looks_like_a_real_status_payload(repo: Path) -> None:
+    """`tests/ui/fixtures/status.json` is what the dashboard's own suite renders against.
+
+    It is a snapshot, so it can drift from what the server sends — and a frontend suite that is
+    green against a payload shape the server retired is worse than no suite, because it reports
+    confidence about a page that would break. This is the seam: the keys the fixture carries must
+    still be the keys a live read produces.
+    """
+    fixture: dict[str, Any] = json.loads(
+        (Path(__file__).parent / "ui" / "fixtures" / "status.json").read_text(encoding="utf-8")
+    )
+    live: dict[str, Any] = ui._collect_status(repo)
+    assert set(fixture) == set(live), "the fixture's top-level keys are not the payload's any more"
+    # The `repo` fixture has no plan, so its `tasks` is None; the frontend fixture's has one, and
+    # the block's own shape is pinned by test_status_payload_carries_every_field_the_modules_read.
+    assert set(fixture["tasks"]["counts"]) == set(models.TASK_STATUS_ORDER)
+    for gate in fixture["gates"]:
+        assert set(gate) == {"name", "status", "index", "phase", "approval_id"}
+
+
+def test_status_reads_the_event_log_through_the_cache(repo: Path) -> None:
+    # The stream reads status on every fingerprint move; it used to re-parse the whole
+    # events.ndjson each time while the cache served only the feed. Same file version → same list.
     _seed_events(repo, count=5)
     log = repo / ".rein" / "events.ndjson"
-    ui._events_cache = None  # empty the one slot, so what fills it can only be the request below
-    assert len(json.loads(_get_conditional(server, "/api/status")[2])["attention"]) == 1
+    ui._events_cache = None  # empty the one slot, so what fills it can only be the read below
+    status: dict[str, Any] = ui._collect_status(repo)
+    assert len(status["attention"]) == 1
     assert ui._events_cache is not None and ui._events_cache[0][0] == str(log)
 
 
@@ -1007,13 +1156,12 @@ def test_get_projects_lists_registry_with_active(multi_server: tuple[ui.Dashboar
     assert by_name["alpha"]["active"] is True and by_name["alpha"]["exists"] is True
 
 
-def test_status_follows_the_active_project(multi_server: tuple[ui.DashboardServer, dict[str, Path]]) -> None:
+def test_a_project_switch_persists(multi_server: tuple[ui.DashboardServer, dict[str, Path]]) -> None:
     srv, _ = multi_server
-    assert json.loads(_request(srv, "GET", "/api/status")[1])["project"] == "alpha"
+    assert srv.active_root().name == "alpha"
     status, _ = write(srv, "/api/project/select", {"name": "beta"})
     assert status == 200
-    # the switch persisted, so /api/status now reports the beta repo
-    assert json.loads(_request(srv, "GET", "/api/status")[1])["project"] == "beta"
+    assert srv.active_root().name == "beta"
     assert json.loads(_request(srv, "GET", "/api/projects")[1])["active"] == "beta"
 
 

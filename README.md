@@ -213,14 +213,19 @@ Then, per cycle:
      rows are the same list `rein approve <gate> --check` refuses on, so the board can never
      say "nothing needs attention" about a gate that will not open.
    - `/status` — the same board in chat, plus the task DAG
-   - `rein ui` — the dashboard: an Overview board with that queue; a **Review tab** for reading
-     and approving the gate under decision in one pane (scope → what changed and how it was
-     reviewed → what the change now requires of a person → Decision Cards for every unsettled
-     claim, gap, or finding, each with its evidence, blocking the freeze until answered); a Tasks
-     tab (DAG, layer progress); an Activity tab (live event feed). Optional bell notifies on a
-     waiting gate/escalation. Actions are a fixed whitelist — reads, diagnostics, and decision
-     recording (approve / resolve / revise / cycle-close); phase execution and push/PR/merge are
-     not available here.
+   - `rein ui` — the dashboard. The lifecycle is the navigation: the five gates stand in a spine
+     down the left, and the one waiting on you is the only inverted block on the page. **Now**
+     carries that queue and the next command. Opening a gate opens its reading room
+     (`#gate/<name>`) — for gate ④, scope → what changed and how it was reviewed → what the change
+     now requires of a person → Decision Cards for every unsettled claim, gap, or finding, each
+     with its evidence, blocking the freeze until answered — with the approval footer, and the
+     digests an approval would bind, on that same screen. **Board** (DAG, layer progress),
+     **Record** (the hash-chained event log, live), **Console** (diagnostics and roll-back).
+     The page holds one `/api/stream` connection and never polls: the server watches the SSOT and
+     speaks only when it moves, so an idle dashboard costs a handful of `stat` calls a second.
+     Optional notifications fire on a waiting decision. Actions are a fixed whitelist — reads,
+     diagnostics, and decision recording (approve / resolve / revise / cycle-close); phase
+     execution and push/PR/merge are not available here.
    - `rein dag --mermaid` — render the task dependency diagram
 
 7. **Ship as a PR** — `rein pr-draft` assembles the PR body from the SSOT into
