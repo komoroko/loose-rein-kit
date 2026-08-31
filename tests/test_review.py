@@ -411,13 +411,20 @@ def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None
     base = _git(review_repo, "rev-parse", "HEAD~1")
     files = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,))).files
 
-    widest = review._reviewable(repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9)
+    widest = review._reviewable(repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9, signalled=())
     assert widest.context_lines == review.CONTEXT_LADDER[0]
     assert "narrowed_from" not in widest.as_facts()
 
     # One byte less than the widest rung costs: the ladder has to step down, and say that it did.
     narrowed = review._reviewable(
-        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=len(widest.text.encode("utf-8")) - 1
+        repo,
+        base,
+        "HEAD",
+        files,
+        (repo_mod.SSOT_DIR,),
+        plain="",
+        ceiling=len(widest.text.encode("utf-8")) - 1,
+        signalled=(),
     )
     assert narrowed.context_lines < review.CONTEXT_LADDER[0]
     assert narrowed.as_facts()["narrowed_from"] == review.CONTEXT_LADDER[0]
@@ -435,7 +442,14 @@ def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: 
     facts = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,)))
 
     reviewable = review._reviewable(
-        repo, base, "HEAD", facts.files, (repo_mod.SSOT_DIR,), plain="the plain one", ceiling=1
+        repo,
+        base,
+        "HEAD",
+        facts.files,
+        (repo_mod.SSOT_DIR,),
+        plain="the plain one",
+        ceiling=1,
+        signalled=frozenset(h.path for h in facts.signals),
     )
     assert reviewable.context_lines == review.PLAIN_CONTEXT
     assert reviewable.text == "the plain one"
@@ -1657,6 +1671,49 @@ def test_a_deleted_files_body_is_withheld_and_named_as_a_deletion() -> None:
     assert "scripts/agentloop/run.sh" in folded, "the reader still has to be told the file is gone"
     assert "@@ 3 line(s) removed with the file, body withheld @@" in folded, "the count is the removal"
     assert "mechanical" not in folded, "a deletion is not a mechanical change"
+
+
+def test_a_deletion_the_detector_found_a_signal_in_is_sent_whole() -> None:
+    """The one deletion whose body a reviewer can still act on, so the one that is not withheld.
+
+    A security finding may stand without an anchor (`security_review._validate_finding`), unlike an
+    extracted statement — so the security reviewer *can* report "the deleted module held the only
+    permission check and nothing replaces it", and folding every deletion blind would have taken
+    exactly the quietly-removed-safety case `deleted_guard` exists to catch. What it is told about
+    signals is a bare list of names (`review.generate`): no path, no sample, nothing to reason from
+    if the body is gone too.
+    """
+    diff = (
+        "diff --git a/src/auth/verify.py b/src/auth/verify.py\n"
+        "deleted file mode 100644\nindex 111..000\n--- a/src/auth/verify.py\n+++ /dev/null\n"
+        "@@ -1,3 +0,0 @@\n"
+        "-def check(user):\n"
+        "-    if not user.has_permission('admin'): raise Forbidden\n"
+        "-    return True\n"
+    )
+    facts = diff_facts.analyze(diff)
+    assert {h.signal for h in facts.signals} >= {"deleted_guard", "security_boundary"}
+
+    signalled = frozenset(h.path for h in facts.signals)
+    assert review.fold_bodies(diff, facts.files, signalled=signalled) == (diff, [])
+    assert review.fold_bodies(diff, facts.files, signalled=())[1] == ["src/auth/verify.py"], (
+        "and it is the signal that spares it, not the path"
+    )
+
+
+def test_a_deleted_lockfile_is_folded_even_though_a_signal_fired_in_it() -> None:
+    """`dependency` fires on every lockfile, so a signal-aware fold that did not order the two
+    checks would have stopped folding the case the fold was written for."""
+    diff = (
+        "diff --git a/uv.lock b/uv.lock\n"
+        "deleted file mode 100644\n--- a/uv.lock\n+++ /dev/null\n"
+        '@@ -1 +0,0 @@\n-version = "1"\n'
+    )
+    facts = diff_facts.analyze(diff)
+    assert [h.signal for h in facts.signals] == ["dependency"]
+    folded, paths = review.fold_bodies(diff, facts.files, signalled=frozenset(h.path for h in facts.signals))
+    assert paths == ["uv.lock"]
+    assert "line(s) of mechanical change, body withheld" in folded
 
 
 def test_a_removed_binary_keeps_the_one_line_that_says_it_was_binary() -> None:

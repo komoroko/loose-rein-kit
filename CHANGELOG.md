@@ -28,7 +28,11 @@ cycle whose 106 commits sent 582 KB to the blind extractor and 1,106 KB to the s
 - **A deletion's body was sent to two opus stages in full.** `fold_mechanical` folded lockfiles and
   generated files; a pure deletion was not folded, so 5,483 lines of removed scaffolding travelled
   verbatim. Reading a deleted function's body yields nothing that "it is gone, it was N lines, here
-  is the path" does not already say — the argument the binary exemption was already making. It is
+  is the path" does not already say — the argument the binary exemption was already making, and a
+  stronger one holds: the pipeline already refuses to act on a deleted body. `_file_facts` omits a
+  path with no blob at head, `validate_anchor` rejects any anchor to one as fabricated or stale,
+  and the extractor's contract refuses a statement with no anchor, so the blind extractor could
+  never have said a word about one however many bytes of it were sent. It is
   `fold_bodies` now, and it withholds a deleted file's body under its own wording, with the exact
   removal count rather than the lines between two headers. Measured on that cycle: the extractor
   reads 396,756 bytes instead of 582,009 (−31.8%), the security reviewer 812,254 instead of
@@ -37,7 +41,16 @@ cycle whose 106 commits sent 582 KB to the blind extractor and 1,106 KB to the s
   not sent is never one the manifest calls analyzed. A deleted *binary* is left alone — it has no
   body to withhold, and folding it would trade no bytes for the one line saying it was binary.
   There is no `fold_deletions` switch: a redaction that is honest needs no opt-out, and one that is
-  not should not ship.
+  not should not ship. **A deletion the detector matched a signal inside is sent whole**, which is
+  what makes withholding the rest of them safe. A security finding may stand without an anchor
+  (`_validate_finding` requires none), unlike an extracted statement, so the security reviewer is
+  the one participant that *can* report "the deleted module held the only permission check and
+  nothing replaces it" — and what it is told about signals is a bare list of names, no path and no
+  sample, so folding every deletion blind would have taken exactly the quietly-removed-safety case
+  `deleted_guard` was added to catch. This is the rule `coverage_gap_risk` already applies to
+  unread content — the gap is worth what the line-by-line scan found in it — used to decide what
+  may go unread in the first place. A lockfile is folded either way: it is mechanical by
+  classification, and `dependency` fires on every one of them.
 - **`subject_head_sha` sat immediately in front of the diff, so every commit threw away the
   provider's prompt cache for the whole reading.** A cache matches on an exact prefix, and JSON
   keeps insertion order; a 40-character field that changes on every commit, placed before 400–800

@@ -27,7 +27,7 @@ import argparse
 import logging
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -167,7 +167,9 @@ _WITHHELD: Mapping[str, str] = {
 }
 
 
-def fold_bodies(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tuple[str, list[str]]:
+def fold_bodies(
+    diff_text: str, files: Sequence[diff_facts.DiffFile], *, signalled: Collection[str] = ()
+) -> tuple[str, list[str]]:
     """The diff with lockfile, generated-file and deleted-file *bodies* replaced by one line each.
 
     A lockfile's eight hundred changed lines say one thing — the dependencies moved — and they say
@@ -175,11 +177,24 @@ def fold_bodies(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tuple[s
     handed the raw whole, twice over (the extractor and the security reviewer each get their own
     copy), and the meaningful change was somewhere in the middle of it.
 
-    A whole-file deletion is the same shape with a different reason. Reading the body of a deleted
-    function yields nothing a reviewer can say that "it is gone, it was N lines, here is the path"
-    does not already say, and it is not a small share: one measured cycle sent 294 KB of a
-    predecessor tool's deleted scaffolding to two opus stages, 26.6% of the payload, for a reading
-    with no possible conclusion.
+    A whole-file deletion is the same shape with a different reason, and one measured cycle spent
+    294 KB on it — a predecessor tool's deleted scaffolding, 26.6% of what two opus stages read.
+    What makes withholding it *allowed* is not that a deletion feels uninteresting: it is that the
+    pipeline already refuses to act on it. `_file_facts` omits a path with no blob at head ("there
+    is nothing to anchor in"), `review_policy.validate_anchor` rejects any anchor to one as
+    fabricated or stale, and the extractor's contract refuses a statement with no anchor and fails
+    the whole extraction if any part of it fails. So the blind extractor could never have said one
+    word about a deleted body, however many bytes of it were sent.
+
+    **The security reviewer is the exception, and it is why `signalled` exists.** Its findings may
+    stand without an anchor (`security_review._validate_finding`), so it *can* report "the deleted
+    module held the only permission check and nothing replaces it" — and folding the body blind
+    would have taken exactly the quietly-removed-safety case the `deleted_guard` signal was added
+    to catch. `signalled` is the set of paths the deterministic detector matched a signal inside,
+    and a deletion in it is sent whole. That is the rule `review_policy.coverage_gap_risk` already
+    applies to unread content — the gap is worth what the line-by-line scan found in it — used
+    here to decide what may go unread in the first place. A lockfile is folded either way: it is
+    mechanical by classification, and `dependency` fires on every one of them.
 
     This is redaction, not summarisation and not priming: nothing is described, interpreted, or
     added. What replaces the hunks is the fact that they were there and how many lines they were,
@@ -193,16 +208,16 @@ def fold_bodies(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tuple[s
     """
     withheld: dict[str, tuple[str, int | None]] = {}
     for f in files:
+        if diff_facts.classify_path(f.path) in diff_facts.MECHANICAL_KINDS:
+            withheld[f.path] = ("mechanical", None)
         # `f.removed_lines` and not `f.deleted` alone: a deleted *binary* has no body to withhold,
         # and folding it would trade nothing for the one line that says it was binary.
-        if f.deleted and f.removed_lines:
+        elif f.deleted and f.removed_lines and f.path not in signalled:
             # The exact removal count, not the lines between two headers: a deletion's block also
             # carries `deleted file mode`, `index`, `---` and `+++`, and a replacement that says
             # "N line(s) removed" while counting four lines of git metadata is a stated number
             # that is wrong. The mechanical wording claims no such count.
             withheld[f.path] = ("deleted", len(f.removed_lines))
-        elif diff_facts.classify_path(f.path) in diff_facts.MECHANICAL_KINDS:
-            withheld[f.path] = ("mechanical", None)
     if not withheld:
         return diff_text, []
     kept: list[str] = []
@@ -469,6 +484,7 @@ def _reviewable(
     *,
     plain: str,
     ceiling: int,
+    signalled: Collection[str],
 ) -> Reviewable:
     """The widest context that fits `ceiling`, falling back to the plain diff already in hand.
 
@@ -486,13 +502,13 @@ def _reviewable(
         return Reviewable(text=text, context_lines=lines, folded=tuple(folded), source=source, tests=tests)
 
     for lines in CONTEXT_LADDER:
-        text, folded = fold_bodies(_diff(repo, base, head, exclude, context=lines), files)
+        text, folded = fold_bodies(_diff(repo, base, head, exclude, context=lines), files, signalled=signalled)
         if len(text.encode("utf-8")) <= ceiling:
             return made(text, folded, lines)
     # Over the ceiling even at git's default width. Refusing here would be a second budget nobody
     # approved: `_refuse_over_budget` has already passed on this diff, and the answer to a change
     # too big to review is `/revise`, not a narrower window onto it.
-    text, folded = fold_bodies(plain, files)
+    text, folded = fold_bodies(plain, files, signalled=signalled)
     return made(text, folded, PLAIN_CONTEXT)
 
 
@@ -853,6 +869,8 @@ def generate(
             exclude,
             plain=diff_text,
             ceiling=limits["max_diff_bytes"],
+            # A deletion the detector matched a signal inside is sent whole (`fold_bodies`).
+            signalled=frozenset(hit.path for hit in facts.signals),
         )
 
         # What a reviewer needs to anchor a statement, since it is launched with nothing to read
