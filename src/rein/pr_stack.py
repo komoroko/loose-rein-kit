@@ -24,10 +24,13 @@ already the record, it works offline, and it needs no schema change.
 `git branch -f` per slice. Pushing, opening, lifting and merging pull requests are outward-facing,
 and live in the CLI half behind an interactive confirmation.
 
-**The merge order runs in code.** A stack lands bottom first, as merge commits, deleting each
-branch — get that wrong once and every pull request above shows a diff the base already has. That
-was a human's job to repeat N times without slipping; `--merge` is the same list this module
-already derives, walked in order.
+**The stack lands whole, or not at all.** The pull requests are registered as a GitHub stack
+(`gh stack link`), and `--merge` hands the *top* one to `gh stack merge`, which merges every member
+below it in a single all-or-nothing operation. This is not a convenience. Merging a subset makes
+GitHub rebase the branches above onto the new base with new commit ids, and the recorded
+`completed_commit` of every task above the cut would then name a commit in no branch's history.
+Merged atomically, nothing is rebased and the commits the build produced are the commits that land
+— measured against a real repository, not inferred.
 """
 
 from __future__ import annotations
@@ -749,10 +752,10 @@ def slice_body(
     lines += _stack_table(slices, current, base=base)
     lines += [
         "",
-        "Merged bottom first by `rein pr-stack --merge`, as merge commits with the branch deleted. "
-        "Never squash and never rebase-merge: either puts content into the base under a different "
-        "commit, and every pull request above this one would then show this diff again. Deleting "
-        "the branch is what retargets the next one.",
+        "This stack is merged whole by `rein pr-stack --merge`, in one atomic `gh stack merge`, as "
+        "merge commits. Do not merge part of it: GitHub rebases the pull requests above the cut "
+        "with new commit ids, and the commit recorded for every task above it then exists in no "
+        "branch's history. Squash and rebase merges strand them the same way.",
     ]
 
     if approved:
@@ -876,10 +879,10 @@ NETWORK_TIMEOUT_SEC = 300
 
 MERGE_NOTE = (
     "Merge the stack with `rein pr-stack --merge` (confirms at a terminal).\n"
-    "The order is the correctness condition, so it runs in code rather than in N typed commands:\n"
-    "bottom first, `--merge` (never squash, never rebase — either lands the content in the base as\n"
-    "a different commit and every pull request above shows this diff again), `--delete-branch`\n"
-    "each time, because deleting the base branch is what retargets the next pull request at main."
+    "It lands the whole stack in one atomic `gh stack merge`, as merge commits. Merging part of a\n"
+    "stack is what you must not do: GitHub rebases the branches above the cut onto the new base\n"
+    "with new commit ids, and every recorded `completed_commit` above it then names a commit in no\n"
+    "branch's history. Squash and rebase merges strand them the same way."
 )
 
 
@@ -975,7 +978,49 @@ def publish(
         record(repo, docs, slice_, url, LEDGER_OPENED)
         urls.append(url)
         print(f"  {slice_.index:02d} {slice_.label}: {url or '(gh printed no url)'}")
+    link_stack(repo, urls, run=run)
     return urls
+
+
+def link_command(urls: Sequence[str]) -> list[str]:
+    """The `gh` invocation that registers these pull requests as one stack on GitHub, bottom first.
+
+    `link` rather than `gh stack init`/`submit` because it is the one entry point that "does not
+    rely on gh-stack local tracking state … designed for users who manage branches with external
+    tools": this module already derives the slices, names the branches and writes the bodies, and a
+    second source of truth for what the stack *is* would be a thing to keep in sync.
+    """
+    return ["gh", "stack", "link", *urls]
+
+
+def link_stack(
+    repo: repo_mod.Repo,
+    urls: Sequence[str],
+    *,
+    run: Callable[..., tuple[int, str]] = common.run,
+) -> None:
+    """Register the published pull requests as a GitHub stack. Idempotent; never fatal.
+
+    What this buys is not cosmetic: GitHub then enforces bottom-up merging server-side, and
+    :func:`merge_stack` can land the whole thing in one atomic operation — the only shape that
+    leaves the recorded commits intact (see that function).
+
+    A failure here is reported and swallowed on purpose. The pull requests are already open and
+    correct — each based on the one below it, which is what a stack *is* — so an unavailable
+    extension or a repository without the preview must not turn a completed publish into an error.
+    """
+    if len(urls) < 2 or not all(urls):
+        return  # one slice is not a stack, and a url gh did not print cannot be linked
+    rc, out = run(link_command(urls), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
+    if rc != 0:
+        logger.warning(
+            f"the pull requests are open but could not be linked into a GitHub stack: {out}\n"
+            "  Install the extension (`gh extension install github/gh-stack`) and re-run "
+            "`rein pr-stack --push`, or link them from the pull request page. Until they are "
+            "linked, `--merge` cannot land them atomically."
+        )
+        return
+    print(f"  linked {len(urls)} pull request(s) into a GitHub stack")
 
 
 def _confirm_ready(docs: Documents, slices: Sequence[Slice], records: Sequence[LedgerRecord]) -> None:
@@ -1049,13 +1094,21 @@ def merge_command(url: str) -> list[str]:
     """The `gh` invocation that lands one slice — **always a merge commit, always deleting the branch**.
 
     One function for the same reason :func:`create_command` is one: the printed line and the
-    executed argv cannot diverge. Neither flag is a preference. `--squash` and `--rebase` put this
-    content into the base as a *different* commit, so every pull request above this one would show
-    the diff again — and they would strand the `completed_commit` and gate receipt that name the
-    real commit, which is the same reason this module never rebases. `--delete-branch` is what
-    makes GitHub retarget the next pull request at the base.
+    executed argv cannot diverge.
+
+    **The whole stack, in one call.** `gh stack merge <top>` merges every member up to and
+    including that pull request as a single all-or-nothing operation, and that shape is what keeps
+    the record true. Measured against a real repository: merging the *bottom only* leaves the
+    branches above it rebased onto the new base with **new commit ids** — GitHub says so ("after
+    the merge, the next unmerged pull request is automatically rebased to target the stack base
+    directly") — which strands every `completed_commit` and gate receipt that names the original.
+    Merging the stack atomically rebases nothing: the commits the build produced are the commits
+    that land. So this never takes a slice; it takes the top, which means all of them.
+
+    `--merge` is not a preference either. `--squash` and `--rebase` put the content into the base
+    as a *different* commit, which is the same stranding by another route.
     """
-    return ["gh", "pr", "merge", url, "--merge", "--delete-branch"]
+    return ["gh", "stack", "merge", url, "--merge", "--yes"]
 
 
 def _confirm_merge(records: Sequence[LedgerRecord]) -> None:
@@ -1070,12 +1123,12 @@ def _confirm_merge(records: Sequence[LedgerRecord]) -> None:
             "merging the stack needs a confirmation typed at a terminal, and stdin is not one. "
             "Run this in your shell — there is deliberately no flag that skips it."
         )
-    print(f"This will merge {len(records)} pull request(s) into the base, bottom first:\n")
+    print(f"This will merge all {len(records)} pull request(s) of the stack into the base:\n")
     for record_ in records:
         print(f"  {record_.index:02d} {record_.task_id or models.STACK_TAIL_SUFFIX}: {record_.url or record_.branch}")
     print(
-        "\nEach lands as a merge commit and its branch is deleted, which is what retargets the next "
-        "one. Nothing here can be squashed or rebased."
+        "\nThey land together, as merge commits, in one all-or-nothing operation: if any of them "
+        "cannot be merged, none are. Nothing here can be squashed, rebased, or merged in part."
     )
     if not common.ask_yes_no(f"Merge {len(records)} pull request(s) into the base?"):
         raise PublishError("nothing was merged.")
@@ -1088,31 +1141,35 @@ def merge_stack(
     *,
     run: Callable[..., tuple[int, str]] = common.run,
 ) -> list[str]:
-    """Merge every slice into the base, bottom first. Returns the URLs that landed.
+    """Land the whole stack in one atomic merge. Returns the URLs that landed.
 
-    **Order is the whole point.** Merging out of order lands a slice's content in the base while the
-    pull requests below it are still open against branches that do not contain it, and every one of
-    them then shows that diff again. It was a human's job to get right N times in a row; here it is
-    a loop over a list this module already derives.
+    **All of it, or none of it.** Passing the *top* pull request to `gh stack merge` merges every
+    member below it too, in one operation GitHub either completes or refuses whole. Merging a
+    subset instead would leave the branches above rebased with new commit ids, and the recorded
+    `completed_commit` of every task above the cut would name a commit in no branch's history —
+    the failure :func:`merge_command` documents. So there is no per-slice loop here to get wrong,
+    and no partial state to recover from.
 
-    **Stops at the first failure**, for the reason :func:`publish` does, and more sharply: a stack
-    half-merged in order is a stack that can be finished by re-running this, while carrying on past
-    a refusal would merge slice 3 onto a base that never got slice 2. An already-merged slice is
-    skipped rather than retried, so re-running after a fixed conflict is the recovery path.
+    Every slice is recorded as merged once the operation succeeds; a refusal records nothing,
+    because nothing moved.
     """
-    landed: list[str] = []
     records = {r.index: r for r in ledger(docs.events)}
+    missing = [s.label for s in slices if not (rec := records.get(s.index)) or not rec.url]
+    if missing:
+        raise PublishError(
+            f"slice(s) {', '.join(missing)} have no recorded pull request — run `rein pr-stack --push` "
+            "first; a stack can only be merged whole, so a slice with no pull request stops all of it"
+        )
+    top = records[slices[-1].index]
+    rc, out = run(merge_command(top.url), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
+    if rc != 0:
+        raise PublishError(
+            f"merging the stack failed: {out}\n  nothing was merged — the operation is all-or-nothing, "
+            "so the pull requests are exactly as they were"
+        )
+    landed: list[str] = []
     for slice_ in slices:
-        record_ = records.get(slice_.index)
-        if record_ is None or not record_.url:
-            raise PublishError(
-                _stopped_at(slice_, landed, f"slice {slice_.index:02d} has no recorded pull request", state="merged")
-            )
-        if record_.merged:
-            continue
-        rc, out = run(merge_command(record_.url), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
-        if rc != 0:
-            raise PublishError(_stopped_at(slice_, landed, f"merging {record_.url} failed: {out}", state="merged"))
+        record_ = records[slice_.index]
         record(repo, docs, slice_, record_.url, LEDGER_MERGED)
         landed.append(record_.url)
         print(f"  {slice_.index:02d} {slice_.label}: merged — {record_.url}")
@@ -1187,8 +1244,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--merge",
         action="store_true",
-        help="once the stack is ready: merge every pull request into the base, bottom first "
-        "(confirms at a terminal; always --merge --delete-branch, never squash or rebase)",
+        help="once the stack is ready: land the whole stack in one atomic `gh stack merge` "
+        "(confirms at a terminal; merge commits only, and never a subset)",
     )
     parser.add_argument("--dry-run", action="store_true", help="derive and report; touch neither refs nor files")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
@@ -1249,8 +1306,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.merge:
         # No bodies are written: merging changes nothing a reader of the pull request would see,
         # and rewriting a body at the moment it lands would be noise in the record.
-        # Only what is still open: a re-run after a fixed conflict must not ask a human to approve
-        # merging pull requests that already landed, nor count them in what it says it will do.
+        # The merge is all-or-nothing, so the only way back here is a stack that already landed
+        # whole. Say so rather than asking a human to approve merging what is no longer open.
         pending = [record_ for record_ in ledger(docs.events) if not record_.merged]
         if not pending:
             print("\nevery pull request in the stack has already been merged")

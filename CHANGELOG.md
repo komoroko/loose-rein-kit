@@ -22,6 +22,22 @@ not CI, not the makefile — so every branch that ran the tests carried a binary
 which is `rein doctor`'s "binary file in the change under review" FAIL and a `coverage:
 insufficient` at gate ④.
 
+**The stack is a GitHub stack now, and it lands whole.** GitHub shipped native stacked pull
+requests on 2026-07-30, and the base-branch chain this module already built is the primitive they
+are made of — so `--push` now also runs `gh stack link`, which registers the slices as a stack
+"without adopting local stack tracking" (its documented purpose, for exactly this case: branches
+managed by another tool). What that buys is the merge. Measured against a real repository rather
+than inferred from the docs: **merging the bottom pull request alone rebases every branch above it
+onto the new base with new commit ids** — `838a222` became `57bcc43` — which is how every
+`completed_commit` and gate receipt above the cut ends up naming a commit in no branch's history.
+**Merging the stack atomically rebases nothing**: all three original commits landed in the base
+untouched. So `--merge` no longer walks the slices with one `gh pr merge` each; it hands the *top*
+pull request to `gh stack merge --merge --yes`, which takes everything below it in one
+all-or-nothing operation. There is no partial state to recover from, and no per-slice loop to get
+wrong. `rein doctor` reports whether the `gh-stack` extension is installed (INFO — only `--merge`
+needs it), and a `link` that fails leaves the published pull requests alone: they are already open
+and correctly based, which is what a stack is.
+
 **A stack's merge order was a human's job to repeat without slipping.** `rein pr-stack` cut the
 cycle into one pull request per task, opened them as drafts and lifted them — and then handed the
 last step back: *merge bottom first with `gh pr merge --merge --delete-branch`*, typed once per

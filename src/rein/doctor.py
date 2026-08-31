@@ -760,7 +760,33 @@ def check_binaries() -> list[Finding]:
             findings.append(Finding("PASS", "env", f"{name} found on PATH"))
         else:
             findings.append(Finding(level, "env", f"{name} not found on PATH — {why}"))
+    findings.extend(check_stack_extension())
     return findings
+
+
+def check_stack_extension() -> list[Finding]:
+    """Is `gh stack` available? Only `rein pr-stack` needs it, and only to ship a stack.
+
+    INFO rather than WARN when it is missing: a cycle that ships as one pull request never touches
+    it. What it is *for* is the merge — `--merge` lands the stack in one atomic operation, and
+    without the extension the alternative is merging the pull requests by hand, where merging a
+    subset silently rebases everything above the cut off its recorded commits.
+    """
+    if shutil.which("gh") is None:
+        return []  # already reported by the `gh` row above; a second line about its extension helps nobody
+    rc, out = common.run(["gh", "extension", "list"], timeout=30)
+    if rc != 0:
+        return [Finding("INFO", "env", "could not list gh extensions — `rein pr-stack --merge` may be unavailable")]
+    if "gh-stack" in out:
+        return [Finding("PASS", "env", "gh-stack extension installed (`rein pr-stack --merge` can land a stack)")]
+    return [
+        Finding(
+            "INFO",
+            "env",
+            "gh-stack extension not installed — `rein pr-stack` still opens the stack, but `--merge` "
+            "cannot land it atomically. Install it with `gh extension install github/gh-stack`.",
+        )
+    ]
 
 
 #: Hook host → how it is named to a human.

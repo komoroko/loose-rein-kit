@@ -7,7 +7,7 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.3.12
   files:
-    AGENTS.rein.md: sha256:529c67bff8846b82a66094920d0b7a38bfe5c29b114af4370c0310c0b0cfb06f
+    AGENTS.rein.md: sha256:b2a9cb71c3d192fad345c541f89bfa5bce0de27fe2ca7e8a3cc2930721690c25
     oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
     oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
     oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
@@ -22,7 +22,7 @@ prompts:
     prompts/commands/revise.md: sha256:7585403488b36fb67395a21a634a889c4f58f2eb69ef53012f7a9b3fac904ff5
     prompts/commands/status.md: sha256:989c5bc65ae297332b350295aa98aa9eab3fc1d8c8d664765d5bb2fa8ede8159
     prompts/commands/tasks.md: sha256:ef26fa578b566ffc00d40f5cdebeccc394cd2144a357052cdf3561d16b2e9c8e
-    prompts/commands/verify.md: sha256:1429e5801092490a389ba36e2166e03eb87c6bc435dbd08398aae516b3905e12
+    prompts/commands/verify.md: sha256:e14ae224fae71ae7d72bf355ff407cf292206fcff9d1fc1ed2fd92ee950b54a9
     prompts/rules/gate-workflow.md: sha256:3c3217b88e8f6a336bb825c171f57595411ba1c2c3cbf93de7c997adfbcde1ba
     schema/config.schema.json: sha256:e4a2f34dbd7bf0110579a1ba6da5cdda7b57cbb8985c17511999b36a779c93cf
     schema/event.schema.json: sha256:e2929100d79882f4929382ad688ad16b8d865588939d632be9e70e711fb49c21
