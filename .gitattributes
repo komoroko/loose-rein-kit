@@ -7,6 +7,11 @@
 makefile text eol=lf
 Makefile text eol=lf
 
+# The dashboard bundle is generated (scripts/build_ui.mjs from ui/), committed because the wheel
+# ships it, and minified — so a one-line UI change rewrites the whole file. Marking it generated
+# collapses it in review, where the diff to read is the one under ui/.
+src/rein/ui_assets/app.js linguist-generated=true
+
 # Do not convert binaries.
 *.png   binary
 *.jpg   binary

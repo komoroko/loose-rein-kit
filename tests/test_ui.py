@@ -270,8 +270,8 @@ def test_the_page_puts_no_repository_string_in_the_dom_as_html() -> None:
 
 
 def test_every_task_status_is_styled_by_the_name_the_page_emits() -> None:
-    """The status string reaches the DOM verbatim (`esc(tk.status)`), so a stylesheet spelling it
-    any other way styles nothing.
+    """The status string reaches the DOM verbatim (`<Chip status={tk.status}>` puts it in the class
+    list), so a stylesheet spelling it any other way styles nothing.
 
     This happened: the DAG rules said `.nd.in_progress` — Mermaid's spelling, where `-` cannot
     appear in an identifier (`dag_render._node_key`) — while the class emitted was `in-progress`.

@@ -81,10 +81,20 @@ nodes nobody is looking at.
 The bundle is built by esbuild from `ui/` and **committed** — the wheel ships it, and no user of the
 CLI has node. `pnpm run build:check` rebuilds and compares, so a source edit that was never rebuilt
 fails the quality gate instead of shipping the previous page; that is the same bargain `rein sync
---check` makes for the materialized prompts. The allowlist of servable assets is down to two entries
-from eight. The offline canary now names the five absolute URLs React's own code contains — four XML
-namespace URIs and a link inside a minified error message, none of them a request — as an exact set,
-so a sixth fails rather than being waved through by a prefix rule.
+--check` makes for the materialized prompts. The allowlist of servable assets is down to three
+entries from eight. The offline canary now names the five absolute URLs React's own code contains —
+four XML namespace URIs and a link inside a minified error message, none of them a request — as an
+exact set, so a sixth fails rather than being waved through by a prefix rule.
+
+Committing a generated artifact has three consequences, and each is handled where it arises. The
+wheel now **redistributes React**, whose MIT licence requires the permission notice to travel with
+the copy; esbuild preserves the `@license` comments, but they point at a LICENSE file in React's own
+tree and not in this one, so `ui_assets/LICENSE.third-party.txt` ships beside the bundle and is
+servable. `trailing-whitespace` and `end-of-file-fixer` no longer touch `app.js`: a hook that
+rewrites a generated file puts the tree and a rebuild permanently out of step, and the loop of
+`build:check` failing, rebuilding, and being stripped again never converges. And `.gitattributes`
+marks the bundle `linguist-generated`, so a one-line UI change does not open review with 246KB of
+minified diff in front of the change actually made, under `ui/`.
 
 **The dashboard rendered three separate answers to "which gate is waiting on you", and none of
 them was the page.** The lifecycle rail, the Review tab's badge and the gate-button row inside the

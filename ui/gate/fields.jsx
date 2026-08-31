@@ -34,12 +34,3 @@ export function TextField({ label, value, placeholder, onChange }) {
     </label>
   );
 }
-
-export function TextArea({ label, value, rows, onChange }) {
-  return (
-    <label className="fld">
-      <span>{label}</span>
-      <textarea rows={rows || 3} value={value} onChange={(e) => onChange(e.target.value)} />
-    </label>
-  );
-}

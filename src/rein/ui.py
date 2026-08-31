@@ -45,11 +45,12 @@ Safety layers: binds 127.0.0.1 by default, and a non-loopback bind with the writ
 requires an explicit `--allow-remote`; every POST requires **both** the session cookie above (the
 authority) and the `X-Rein-Token` header (a CSRF guard — a cross-origin page cannot set a custom
 header without a preflight, and no CORS headers are ever sent); `--read-only` disables POST
-entirely — reviewing stays fully readable. Because this page holds that token, *everything*
-agent-written that reaches it is constructed, never sanitized: deliverable markdown goes through
-mdlite's escape-first renderer (see its threat model), and agent-written identifiers — task ids
-above all, which tasks.yaml is free to spell any way it likes — reach the DOM only as escaped
-attribute values read back by a delegated listener, never interpolated into a handler.
+entirely — reviewing stays fully readable. Because this page holds that token, an XSS on it is a
+self-approval, so escaping is a property of the renderer rather than of remembering: agent-written
+identifiers — task ids above all, which tasks.yaml is free to spell any way it likes — reach the
+DOM as JSX interpolations, which escape by construction. The opt-out is deliberate and there are
+exactly two of it, both rendering markdown that mdlite's escape-first renderer already escaped at
+the source (see its threat model); a test names that pair.
 
 Usage:
   rein ui                 # serve on 127.0.0.1:8765 and open the browser
@@ -109,6 +110,10 @@ ASSETS_DIR = Path(__file__).resolve().parent / "ui_assets"
 _ASSET_TYPES = {
     "app.css": "text/css; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
+    # app.js is a bundle: React ships inside it, under MIT. esbuild keeps the `@license` comments,
+    # but they point at a LICENSE file in React's tree, not in this wheel — so the permission notice
+    # travels beside the bundle, and is servable so the running page can show what it is made of.
+    "LICENSE.third-party.txt": "text/plain; charset=utf-8",
 }
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 #: Session-scoped (no Max-Age): closing the browser ends the capability, and the next `rein ui`

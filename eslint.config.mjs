@@ -27,7 +27,6 @@ const BROWSER = {
 
 export default [
   {
-    ...js.configs.recommended,
     files: ["ui/**/*.{js,jsx}"],
     plugins: { "react-hooks": reactHooks, react },
     languageOptions: {
@@ -47,7 +46,6 @@ export default [
     },
   },
   {
-    ...js.configs.recommended,
     files: ["tests/ui/*.mjs", "scripts/*.mjs", "eslint.config.mjs"],
     languageOptions: {
       ecmaVersion: 2023,

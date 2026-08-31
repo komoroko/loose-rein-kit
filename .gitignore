@@ -15,12 +15,10 @@ __pycache__/
 # Commit uv.lock for reproducibility (do not ignore it)
 
 # ---- frontend / pnpm ----
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
 # This repository's own dev-only frontend tooling (see package.json): node is needed to *build* and
 # test the dashboard, never to run it. pnpm-lock.yaml is committed — CI installs from it, frozen —
-# and so is the built bundle (src/rein/ui_assets/app.js), because the wheel ships it.
+# and so is the built bundle (src/rein/ui_assets/app.js), because the wheel ships it. The install
+# tree is the only thing here that is not: the sources live in ui/ and the output in src/rein/.
 /node_modules/
 
 # ---- mkdocs ----
