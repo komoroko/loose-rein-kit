@@ -44,18 +44,47 @@ every tick, so the next push is already the other repository's.
 that grep the source text, and the gap was not hypothetical: a dead `RISKY` set shipped in 0.3.10,
 declared and never read. `package.json` adds two **development** dependencies — eslint and jsdom,
 run by `make check` and by CI, in no wheel and on no user's machine. `rein` remains a Python
-package with three runtime dependencies, `rein ui` serves plain ES modules over the standard
-library, and **nobody running the CLI needs node**; the make target says so and skips loudly when
-pnpm is absent, while CI installs it so it can never skip there. Each version is written once and
-read from there: `.nvmrc` pins node 26, `packageManager` pins pnpm, `pnpm-lock.yaml` is committed
-and CI installs from it frozen. pnpm's strict tree immediately caught an **undeclared dependency**:
-`eslint.config.mjs` imports `@eslint/js`, which npm's flat hoisting happened to provide and nobody
-had listed. `tests/ui/` boots the shipped
-modules against a jsdom document and a scripted server: every screen and route, both gate kinds,
-all five gate-④ stages, each decision panel, the read-only page, a link to a gate the server
-refuses, and a dropped connection. A canary keeps the status fixture those tests render from from
-drifting out of the payload's real shape. `audit.yml` claimed a `pnpm audit` step ran "when a
-frontend exists"; no such step was ever in the make target, and the comment now says what is true.
+package with three runtime dependencies, and **nobody running the CLI needs node**; the make target
+says so and skips loudly when pnpm is absent, while CI installs it so it can never skip there. Each
+version is written once and read from there: `.nvmrc` pins node 26, `packageManager` pins pnpm,
+`pnpm-lock.yaml` is committed and CI installs from it frozen. pnpm's strict tree immediately caught
+an **undeclared dependency**: `eslint.config.mjs` imports `@eslint/js`, which npm's flat hoisting
+happened to provide and nobody had listed. `tests/ui/` boots the shipped bundle against a jsdom
+document and a scripted server: every screen and route, both gate kinds, all five gate-④ stages,
+each decision panel, the read-only page, a link to a gate the server refuses, and a dropped
+connection. A canary keeps the status fixture those tests render from from drifting out of the
+payload's real shape. `audit.yml` claimed a `pnpm audit` step ran "when a frontend exists"; no such
+step was ever in the make target, and the comment now says what is true.
+
+**The page is React, and the escaping is now a property of the renderer.** The dashboard holds the
+approval token, so an XSS on it is a self-approval — and it was built by concatenating HTML strings,
+guarded by **103 hand-written `esc()` calls** across 22 `innerHTML` assignments, every one of which
+had to be remembered. Task ids, claim ids and gap ids are agent-written and none is pattern-validated
+on load. JSX escapes every interpolation by construction, so the failure direction is inverted:
+what is left to police is the deliberate opt-out, and there are exactly **two**
+`dangerouslySetInnerHTML` sites, both rendering mdlite output, which escapes at the source. A canary
+asserts that list by name. The workarounds that existed only because generated markup could not
+carry a closure went with it: `window.copyCmd`, the `data-task` / `data-act` / `data-scope`
+attributes and their delegated listeners, and `CSS.escape` on a server-supplied id.
+
+The gate room lost its scaffolding rather than gaining any. `paintChrome` / `paintFooter` / `paint`
+existed as three grains because rebuilding the body would wipe a form the reviewer was half way
+through; React reconciles, so there is one render from state and a push can no longer take anything
+out from under a human. `<Gate>` is keyed on the gate and the project, which makes *"is this payload
+mine?"* structural — the question that, answered from the echoed `review.gate`, made a link to a
+refused gate refetch on every push forever. Ten module-level `let`s, the `fetchSeq` newest-wins
+counter, the `loaded` tracker and the `field(scope, name)` DOM read-back at submit time are all
+gone; each card owns its own answer, so a radio group can no longer report its first option as a
+judgement nobody made. Only the routed view is mounted, so four screens are no longer rendering into
+nodes nobody is looking at.
+
+The bundle is built by esbuild from `ui/` and **committed** — the wheel ships it, and no user of the
+CLI has node. `pnpm run build:check` rebuilds and compares, so a source edit that was never rebuilt
+fails the quality gate instead of shipping the previous page; that is the same bargain `rein sync
+--check` makes for the materialized prompts. The allowlist of servable assets is down to two entries
+from eight. The offline canary now names the five absolute URLs React's own code contains — four XML
+namespace URIs and a link inside a minified error message, none of them a request — as an exact set,
+so a sixth fails rather than being waved through by a prefix rule.
 
 **The dashboard rendered three separate answers to "which gate is waiting on you", and none of
 them was the page.** The lifecycle rail, the Review tab's badge and the gate-button row inside the

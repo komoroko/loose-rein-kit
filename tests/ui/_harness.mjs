@@ -1,17 +1,16 @@
-// Boot the dashboard's real modules against a jsdom document and a scripted server.
+// Boot the dashboard against a jsdom document and a scripted server.
 //
-// The page is ES modules served from `/assets/`, which nothing outside a browser resolves — so the
-// modules are copied to a temp directory with that prefix rewritten to a relative one and imported
-// from there. Nothing else about them is altered: these tests run the shipped code.
+// What is imported is the SHIPPED BUNDLE — `src/rein/ui_assets/app.js`, the file `rein ui` serves —
+// not the sources beside it. A test over sources that the build could mangle is a test of something
+// nobody runs; `make check` separately proves the bundle is a rebuild of `ui/`, so this covers both.
 //
-// The server is scripted rather than started. What these tests are about is the page — which
-// screen renders, which panel opens, which request goes out — and the Python suite already owns
-// whether `/api/stream` says the right things. Splitting it that way keeps a frontend test from
-// needing a repository, a git history and a working tree to assert that a button opens a form.
+// The server is scripted rather than started. What these tests are about is the page — which screen
+// renders, which panel opens, which request goes out — and the Python suite already owns whether
+// `/api/stream` says the right things. Splitting it that way keeps a frontend test from needing a
+// repository, a git history and a working tree to assert that a button opens a form.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { JSDOM } from "jsdom";
@@ -24,22 +23,11 @@ export const withStatus = (status, body) => ({ __status: status, __body: body })
 
 export const STATUS = JSON.parse(fs.readFileSync(path.join(HERE, "fixtures/status.json"), "utf8"));
 
-/** The shipped modules, with `/assets/x.js` rewritten to `./x.js` so node can import them. */
-function stageModules() {
-  const out = fs.mkdtempSync(path.join(os.tmpdir(), "rein-ui-"));
-  for (const name of fs.readdirSync(ASSETS)) {
-    if (!name.endsWith(".js")) continue;
-    const src = fs.readFileSync(path.join(ASSETS, name), "utf8");
-    fs.writeFileSync(path.join(out, name), src.replaceAll('"/assets/', '"./'));
-  }
-  return out;
-}
-
 /**
- * Load the page and its modules.
+ * Load the page and its bundle.
  *
  * `routes(url, options)` returns the JSON body for a request, or a {status, body} pair.
- * `stream` receives a `push(event, data)` function, so a test can make the server speak.
+ * `push(event, data)` is the server speaking on the stream.
  */
 export async function boot({ hash = "#now", readOnly = false, routes = () => ({}) } = {}) {
   const calls = [];
@@ -54,21 +42,23 @@ export async function boot({ hash = "#now", readOnly = false, routes = () => ({}
 
   const dom = new JSDOM(html, { url: "http://localhost/" + hash, pretendToBeVisual: true });
   const w = dom.window;
-  // jsdom has no canvas without a native package, and notify.js already handles a null context
+  // jsdom has no canvas without a native package, and the notifier already handles a null context
   // (the tab title still carries the state). Returning null is that path, without the noise.
   w.HTMLCanvasElement.prototype.getContext = () => null;
-  for (const key of ["window", "document", "location", "localStorage", "CustomEvent", "Event", "CSS"]) {
+  for (const key of ["window", "document", "location", "localStorage", "CustomEvent", "Event", "navigator"]) {
     if (w[key] === undefined) continue;
     try {
       globalThis[key] = w[key];
     } catch {
-      /* a few of these are read-only node globals; the modules reach them through window anyway */
+      /* a few of these are read-only node globals; the bundle reaches them through window anyway */
     }
   }
-  globalThis.CSS = globalThis.CSS || {};
-  if (!globalThis.CSS.escape) globalThis.CSS.escape = (s) => String(s).replace(/[^\w-]/g, (c) => "\\" + c);
   w.TOKEN = readOnly ? "" : "tok";
   w.READ_ONLY = readOnly;
+  // React schedules with these; jsdom has them, node's globals may not be the same objects.
+  globalThis.requestAnimationFrame = w.requestAnimationFrame = (fn) => setTimeout(() => fn(Date.now()), 0);
+  globalThis.cancelAnimationFrame = w.cancelAnimationFrame = (id) => clearTimeout(id);
+  globalThis.IS_REACT_ACT_ENVIRONMENT = false;
 
   // A scripted EventSource: `push` is the server speaking. The real one reconnects on its own,
   // which is why the page has no retry logic of its own to fake here.
@@ -81,6 +71,7 @@ export async function boot({ hash = "#now", readOnly = false, routes = () => ({}
     addEventListener(name, fn) {
       (listeners[name] = listeners[name] || []).push(fn);
     }
+    close() {}
   }
   globalThis.EventSource = w.EventSource = FakeEventSource;
 
@@ -101,33 +92,55 @@ export async function boot({ hash = "#now", readOnly = false, routes = () => ({}
   process.on("uncaughtException", onError);
   process.on("unhandledRejection", onError);
 
-  await import(pathToFileURL(path.join(stageModules(), "app.js")).href);
+  await import(pathToFileURL(path.join(ASSETS, "app.js")).href + "?t=" + Math.random());
 
-  const push = (name, data) => {
-    for (const fn of listeners[name] || []) fn({ data: JSON.stringify(data) });
-  };
-  const open = () => {
-    const es = FakeEventSource.last;
-    if (es?.onopen) es.onopen();
-  };
+  const settle = (ms = 40) => new Promise((r) => setTimeout(r, ms));
+  await settle();
 
   return {
     window: w,
     calls,
     errors,
-    push,
-    open,
-    /** Let queued microtasks and any awaited fetch settle. */
-    settle: (ms = 40) => new Promise((r) => setTimeout(r, ms)),
+    settle,
+    push: async (name, data) => {
+      for (const fn of listeners[name] || []) fn({ data: JSON.stringify(data) });
+      await settle();
+    },
+    open: async () => {
+      const es = FakeEventSource.last;
+      if (es?.onopen) es.onopen();
+      await settle();
+    },
     /** Navigate the hash router the way a click on the spine does. */
-    go(nextHash) {
+    async go(nextHash) {
       w.location.hash = nextHash;
       w.dispatchEvent(new w.Event("hashchange"));
+      await settle();
     },
-    click(selector) {
+    /** Click the first element matching `selector`, or the first whose text is `selector.text`. */
+    async click(selector) {
+      const el = typeof selector === "string" ? w.document.querySelector(selector) : byText(w, selector);
+      assert.ok(el, "no such element: " + JSON.stringify(selector));
+      el.dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
+      await settle();
+      return el;
+    },
+    /** Type into an input or textarea the way React's onChange sees it. */
+    async type(selector, value) {
       const el = w.document.querySelector(selector);
       assert.ok(el, "no such element: " + selector);
-      el.dispatchEvent(new w.Event("click", { bubbles: true }));
+      const proto = el.tagName === "TEXTAREA" ? w.HTMLTextAreaElement : w.HTMLInputElement;
+      Object.getOwnPropertyDescriptor(proto.prototype, "value").set.call(el, value);
+      el.dispatchEvent(new w.Event("input", { bubbles: true }));
+      await settle();
+      return el;
+    },
+    async select(selector, value) {
+      const el = w.document.querySelector(selector);
+      assert.ok(el, "no such element: " + selector);
+      Object.getOwnPropertyDescriptor(w.HTMLSelectElement.prototype, "value").set.call(el, value);
+      el.dispatchEvent(new w.Event("change", { bubbles: true }));
+      await settle();
       return el;
     },
     html(id) {
@@ -136,9 +149,19 @@ export async function boot({ hash = "#now", readOnly = false, routes = () => ({}
       return el.innerHTML;
     },
     text(id) {
-      return w.document.getElementById(id).textContent;
+      const el = w.document.getElementById(id);
+      assert.ok(el, "no such element: #" + id);
+      return el.textContent;
+    },
+    body() {
+      return w.document.body.textContent;
     },
   };
+}
+
+/** `{text: "Approve gate ④"}` — the way a person finds a button. */
+function byText(w, { text, tag = "button" }) {
+  return [...w.document.querySelectorAll(tag)].find((el) => el.textContent.includes(text)) || null;
 }
 
 /** The routes almost every test needs: projects, events, and nothing else claimed. */

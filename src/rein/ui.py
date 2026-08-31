@@ -1,8 +1,8 @@
 """Local web dashboard for the Loose Rein SSOT — the human's cockpit for a Human-on-the-Loop run.
 
-Serves the ES-module page in `ui_assets/` (real files so the frontend is lintable and diffable, not
-strings inside Python) over stdlib `http.server`, same-origin with zero external references so the
-dashboard stays offline-safe. The lifecycle is the page's navigation: five gates in a spine, and
+Serves the page in `ui_assets/` — a React bundle built from `ui/` and committed, plus its
+stylesheet — over stdlib `http.server`, same-origin with zero external references so the dashboard
+stays offline-safe. The lifecycle is the page's navigation: five gates in a spine, and
 the one awaiting a decision is the only inverted block on the screen. **Now** (next recommended
 command and the pending queue — from status_api.collect_status()); a gate's **reading room**
 (`#gate/<name>`: its deliverables rendered server-side by mdlite with the self-assessment pinned,
@@ -98,20 +98,17 @@ _STREAM_RETRY_SEC = 2.0
 _OUTPUT_LIMIT = 8000  # tail shown per stream (failures are summarized, not dumped)
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 # The frontend, shipped beside this module. Served by exact name only (no traversal surface);
-# read per request so an edit shows up on reload during development. The dict stays explicit —
+# read per request so a rebuild shows up on reload during development. The dict stays explicit —
 # no directory scan — so what the server can hand out is reviewable here; a test asserts it
 # matches the files actually shipped in ui_assets/.
+#
+# `app.js` is built from `ui/` by `pnpm run build` and committed; nothing here builds anything, and
+# no user of the CLI has node. `make check` rebuilds and compares, so a source edit that was never
+# rebuilt fails the gate rather than shipping the previous page.
 ASSETS_DIR = Path(__file__).resolve().parent / "ui_assets"
-_JS = "text/javascript; charset=utf-8"
 _ASSET_TYPES = {
     "app.css": "text/css; charset=utf-8",
-    "app.js": _JS,
-    "api.js": _JS,
-    "view-overview.js": _JS,
-    "view-review.js": _JS,
-    "view-tasks.js": _JS,
-    "view-activity.js": _JS,
-    "notify.js": _JS,
+    "app.js": "text/javascript; charset=utf-8",
 }
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 #: Session-scoped (no Max-Age): closing the browser ends the capability, and the next `rein ui`

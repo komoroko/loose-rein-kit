@@ -16,25 +16,22 @@ const REVIEW = {
 
 async function dashboard(hash = "#now") {
   const app = await boot({ hash, routes: baseRoutes((url) => (url.startsWith("/api/review/") ? REVIEW : undefined)) });
-  app.open();
-  app.push("status", STATUS);
-  await app.settle();
+  await app.open();
+  await app.push("status", STATUS);
   return app;
 }
 
 test("the page holds one stream and asks for nothing on a timer", async () => {
   const app = await dashboard();
   assert.ok(app.calls.includes("/api/stream"), "the page must open the status stream");
-  const polls = app.calls.filter((c) => c === "/api/status");
-  assert.equal(polls.length, 0, "there is no status endpoint to poll any more");
+  assert.equal(app.calls.filter((c) => c === "/api/status").length, 0, "there is no status endpoint to poll");
   assert.equal(app.errors.length, 0, app.errors.join("\n"));
 });
 
 test("the spine marks exactly one gate as the one waiting on you", async () => {
   const app = await dashboard();
   const spine = app.html("stepper");
-  const awaiting = spine.match(/class="station awaiting/g) || [];
-  assert.equal(awaiting.length, 1, "one inverted block, never two");
+  assert.equal((spine.match(/station awaiting/g) || []).length, 1, "one inverted block, never two");
   assert.match(spine, /href="#gate\/build"/);
   assert.match(spine, /station approved[^>]*href="#gate\/requirements"/);
   assert.equal((spine.match(/class="station /g) || []).length, STATUS.gates.length);
@@ -69,8 +66,9 @@ test("the graph draws direction and says what its lines mean", async () => {
   assert.match(board, /critical path/);
 });
 
-test("each route shows one view and the others stay hidden", async () => {
+test("each route mounts one view and no other", async () => {
   const app = await dashboard();
+  const views = ["now", "gate", "board", "record", "console"];
   for (const [hash, shown] of [
     ["#now", "now"],
     ["#board", "board"],
@@ -78,31 +76,34 @@ test("each route shows one view and the others stay hidden", async () => {
     ["#console", "console"],
     ["#gate/build", "gate"],
   ]) {
-    app.go(hash);
-    await app.settle();
-    for (const view of ["now", "gate", "board", "record", "console"]) {
-      assert.equal(
-        app.window.document.getElementById("view-" + view).hidden,
-        view !== shown,
-        `${hash} should show only ${shown}`,
-      );
+    await app.go(hash);
+    for (const view of views) {
+      const present = Boolean(app.window.document.getElementById("view-" + view));
+      assert.equal(present, view === shown, `${hash} should mount only ${shown}`);
     }
   }
   assert.equal(app.errors.length, 0, app.errors.join("\n"));
 });
 
+test("an unknown hash lands on the screen that says what to do", async () => {
+  const app = await dashboard();
+  await app.go("#nonsense");
+  assert.ok(app.window.document.getElementById("view-now"), "an unroutable hash falls back to Now");
+});
+
 test("the Record screen fetches only when the log moved and someone is looking", async () => {
   const app = await dashboard();
   const feeds = () => app.calls.filter((c) => c.startsWith("/api/events")).length;
-  app.push("record", { revision: "1-1" });
-  await app.settle();
+  await app.push("record", { revision: "1-1" });
   assert.equal(feeds(), 0, "nobody is on the Record screen yet");
 
-  app.go("#record");
-  await app.settle();
+  await app.go("#record");
   assert.equal(feeds(), 1, "opening it catches up on what was missed");
 
-  app.push("record", { revision: "2-2" });
-  await app.settle();
+  await app.push("record", { revision: "2-2" });
   assert.equal(feeds(), 2, "a log that moved while it is open refetches");
+
+  await app.go("#now");
+  await app.push("record", { revision: "3-3" });
+  assert.equal(feeds(), 2, "a log that moves while nobody is looking asks for nothing");
 });

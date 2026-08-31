@@ -36,19 +36,19 @@ async function readingRoom({ readiness = { ok: true, covers: { plan: "sha256:aa"
       return undefined;
     }),
   });
-  app.open();
-  app.push("status", AWAITING);
-  await app.settle();
+  await app.open();
+  await app.push("status", AWAITING);
   return { app, posts };
 }
 
+const APPROVE = { text: "Approve gate ①" };
+
 test("the footer offers the decision, and the panel says what it would bind", async () => {
   const { app } = await readingRoom();
-  assert.match(app.html("rvFoot"), /data-act="approve"/);
+  assert.match(app.text("rvFoot"), /Approve gate ①/);
 
-  app.click('[data-act="approve"]');
-  await app.settle();
-  const panel = app.html("rvFoot");
+  await app.click(APPROVE);
+  const panel = app.text("rvFoot");
   assert.match(panel, /sha256:aa/);
   assert.match(panel, /sha256:bb/);
   assert.match(panel, /Not opened in this pane yet/);
@@ -57,18 +57,15 @@ test("the footer offers the decision, and the panel says what it would bind", as
 
 test("a status push does not wipe an open panel", async () => {
   const { app } = await readingRoom();
-  app.click('[data-act="approve"]');
-  await app.settle();
+  await app.click(APPROVE);
 
-  app.push("status", { ...AWAITING, generated_at: "2026-08-30T12:00:00" });
-  await app.settle();
+  await app.push("status", { ...AWAITING, generated_at: "2026-08-30T12:00:00" });
   assert.ok(
     app.window.document.querySelector("#rvFoot .confirm"),
     "the digests must survive the server speaking while they are being read",
   );
 
-  app.click('[data-act="cancel"]');
-  await app.settle();
+  await app.click({ text: "Cancel" });
   assert.equal(app.window.document.querySelector("#rvFoot .confirm"), null);
 });
 
@@ -76,9 +73,8 @@ test("an unready gate is refused in the pane that asked, with its blockers", asy
   const { app, posts } = await readingRoom({
     readiness: { ok: false, blockers: ["tasks not done: T-002", "no machine review"] },
   });
-  app.click('[data-act="approve"]');
-  await app.settle();
-  const panel = app.html("rvFoot");
+  await app.click(APPROVE);
+  const panel = app.text("rvFoot");
   assert.match(panel, /will not open yet/);
   assert.match(panel, /tasks not done: T-002/);
   assert.equal(posts.length, 0, "a refusal must not have recorded anything");
@@ -86,31 +82,26 @@ test("an unready gate is refused in the pane that asked, with its blockers", asy
 
 test("approving posts the digests that were on screen, and echoes nothing to the console", async () => {
   const { app, posts } = await readingRoom();
-  app.click('[data-act="approve"]');
-  await app.settle();
-  app.click('[data-act="approve-go"]');
-  await app.settle();
+  await app.click(APPROVE); // the footer's button opens the panel
+  await app.click("#rvFoot .confirm button.primary"); // the panel's confirms in it
 
   assert.deepEqual(posts.map((p) => p.url), ["/api/gate/approve"]);
   assert.deepEqual(posts[0].body, { gate: "requirements", covers: { plan: "sha256:aa", tasks: "sha256:bb" } });
-  assert.equal(app.window.document.getElementById("out").hidden, true, "a decision is not a command's output");
+  await app.go("#console");
+  assert.equal(app.window.document.getElementById("out"), null, "a decision is not a command's output");
 });
 
 test("requesting changes is a form, prefilled with what is being read", async () => {
   const { app, posts } = await readingRoom();
-  app.click('[data-act="changes"]');
-  await app.settle();
-  const target = app.window.document.querySelector('[data-field="target"]');
-  assert.equal(target.value, "docs/10-requirements.md");
+  await app.click({ text: "Request changes" });
+  assert.equal(app.window.document.querySelector("#rvFoot .confirm input").value, "docs/10-requirements.md");
 
-  app.click('[data-act="changes-go"]');
-  await app.settle();
+  await app.click({ text: "Request the change" });
   assert.equal(posts.length, 0, "an empty reason must not be sent");
 
-  target.value = "docs/10-requirements.md#R-3";
-  app.window.document.querySelector('[data-field="reason"]').value = "R-3 has no acceptance criterion.";
-  app.click('[data-act="changes-go"]');
-  await app.settle();
+  await app.type("#rvFoot .confirm input", "docs/10-requirements.md#R-3");
+  await app.type("#rvFoot .confirm textarea", "R-3 has no acceptance criterion.");
+  await app.click({ text: "Request the change" });
   assert.deepEqual(posts[0], {
     url: "/api/changes",
     body: { gate: "requirements", target: "docs/10-requirements.md#R-3", reason: "R-3 has no acceptance criterion." },
@@ -129,25 +120,31 @@ test("the console states a roll-back's consequence above the button that runs it
       return undefined;
     }),
   });
-  app.open();
-  app.push("status", STATUS);
-  await app.settle();
+  await app.open();
+  await app.push("status", STATUS);
 
-  app.click('[data-ops="revise"]');
-  await app.settle();
-  assert.equal(app.window.document.getElementById("opsConfirm").hidden, true, "no reason, no dialog");
+  await app.click({ text: "rein revise" });
+  assert.equal(app.window.document.getElementById("opsConfirm"), null, "no reason, no dialog");
 
-  app.window.document.getElementById("revReason").value = "the auth model is wrong";
-  app.click('[data-ops="revise"]');
-  await app.settle();
-  const confirm = app.html("opsConfirm");
+  await app.type("#revReason", "the auth model is wrong");
+  await app.click({ text: "rein revise" });
+  const confirm = app.text("opsConfirm");
   assert.match(confirm, /Gates reset in a chain/);
   assert.match(confirm, /the auth model is wrong/);
 
-  app.click('[data-confirm="go"]');
-  await app.settle();
+  await app.click({ text: "Yes, do it" });
   assert.deepEqual(posts, [
     { action: "revise", params: { phase: "requirements", reason: "the auth model is wrong" } },
   ]);
-  assert.equal(app.window.document.getElementById("out").hidden, false, "a command's output is the result");
+  assert.match(app.text("out"), /exit 0/, "a command's output is the result");
+});
+
+test("a half-typed reason survives the server speaking", async () => {
+  const app = await boot({ hash: "#console", routes: baseRoutes() });
+  await app.open();
+  await app.push("status", STATUS);
+
+  await app.type("#revReason", "half a thou");
+  await app.push("status", { ...STATUS, generated_at: "2026-08-31T09:00:00" });
+  assert.equal(app.window.document.getElementById("revReason").value, "half a thou");
 });

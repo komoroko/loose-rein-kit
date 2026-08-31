@@ -19,6 +19,21 @@ import pytest
 from rein import models, registry, store, ui
 from tests._support import SANDBOXED_PROFILES, chain, make_config, make_state, seed_repo
 
+# The frontend's source. `ui_assets/app.js` is a built bundle — minified React plus this code — so a
+# canary about what the page *says* reads the sources it was built from, and only the canaries about
+# what the server *serves* read the bundle. `make check` rebuilds and compares the two, so a source
+# these canaries pass over is the source the shipped bundle came from.
+UI_SRC = Path(__file__).resolve().parents[1] / "ui"
+
+
+def ui_sources() -> dict[str, str]:
+    return {
+        str(p.relative_to(UI_SRC)): p.read_text(encoding="utf-8")
+        for p in sorted(UI_SRC.rglob("*"))
+        if p.suffix in (".js", ".jsx")
+    }
+
+
 # --- action_argv: the fixed whitelist ------------------------------------------
 
 
@@ -195,37 +210,63 @@ def test_get_page_is_offline_self_contained(server: ui.DashboardServer) -> None:
     page = data.decode("utf-8")
     assert status == 200 and "Loose Rein" in page
     assert server.token in page  # the POST token reaches a page that holds a write session
-    # Offline canary across the page AND every allowlisted asset: no external reference anywhere.
     assets = {name: _request(server, "GET", f"/assets/{name}")[1].decode("utf-8") for name in ui._ASSET_TYPES}
-    for name, text in {"index.html": page, **assets}.items():
+
+    # Nothing this repository writes may name an absolute URL at all.
+    for name, text in {"index.html": page, **ui_sources()}.items():
         assert "http://" not in text and "https://" not in text, name
         assert "//cdn" not in text and "@import" not in text, name
-    # every URL the page or a module references is same-origin: an /assets/ file or a #tab hash
-    for name, text in {"index.html": page, **assets}.items():
-        for url in re.findall(r'(?:src|href|from)\s*=?\s*"([^"]+)"', text):
-            assert url.startswith(("/assets/", "#")), f"{name} references {url}"
-    # the sections live in the page; their renderers and the theme machinery in the modules
-    for marker in ('id="stepper"', 'id="trace"', 'id="rvMain"', 'id="tabs"', 'id="toasts"'):
-        assert marker in page, marker
-    bundle = "".join(assets.values())
-    for marker in ("buildDag", "showTaskDetail", "data-theme", "renderReview"):
-        assert marker in bundle, marker
+
+    # The bundle carries React's own strings, and this is the exact set of absolute URLs in it —
+    # an exact set, so a sixth one fails here rather than being waved through by a prefix rule.
+    # None is a request: an XML namespace URI is an identifier that is never dereferenced, and the
+    # react.dev link is text inside a minified error message.
+    INERT = {
+        "http://www.w3.org/1998/Math/MathML",
+        "http://www.w3.org/1999/xlink",
+        "http://www.w3.org/2000/svg",
+        "http://www.w3.org/XML/1998/namespace",
+        "https://react.dev/errors/",
+    }
+    assert set(re.findall(r"https?://[^\"' )]*", assets["app.js"])) == INERT
+    assert "http" not in assets["app.css"]
+
+    # Every URL the page names is same-origin: an attribute in the page, a literal in the sources.
+    # The sources are where this is asked rather than the bundle, because minification leaves
+    # fragments of React's own regexes looking like paths, and a canary that has to allow "/$" is
+    # not checking anything. What the bundle answers for is the exact set above.
+    for url in re.findall(r'(?:src|href)\s*=\s*"([^"]+)"', page):
+        assert url.startswith(("/assets/", "#")), f"index.html references {url}"
+    for name, text in ui_sources().items():
+        for url in re.findall(r'"(/[^"\s]*)"', text):
+            assert url.startswith(("/assets/", "/api/")), f"{name} names {url}"
+
+    # The page is an empty root: everything below is rendered by the bundle, so the markers that
+    # prove the screens exist belong to the sources it was built from.
+    assert '<div id="root"></div>' in page
+    sources = "".join(ui_sources().values())
+    for marker in ('id="stepper"', 'id="trace"', 'id="rvMain"', 'id="tabs"', 'id="toasts"', "data-theme"):
+        assert marker in sources, marker
 
 
-def test_no_asset_builds_a_click_handler_out_of_a_task_id() -> None:
-    """Task ids are agent-written and not pattern-validated on load (dag.py takes them as-is).
+def test_the_page_puts_no_repository_string_in_the_dom_as_html() -> None:
+    """The page holds the approval token, so an XSS here is a self-approval.
 
-    Interpolating one into an inline `onclick="f('<id>')"` lets a quote in the id close the JS
-    string and run script on the page that holds the approval token — the XSS→self-approval path
-    mdlite.py exists to close. Ids must travel as escaped attribute values read back by a delegated
-    listener, so no generated handler may name a task-detail call at all.
+    Task ids, claim ids, gap ids and reviewer prose are all agent-written and none is pattern-
+    validated on load (dag.py takes `str(raw["id"])` as-is). The old page built HTML by string
+    concatenation and escaped each interpolation by hand — 103 calls, any one of which could be
+    forgotten. JSX escapes every interpolation by construction, so what is left to police is the
+    deliberate opt-out, and there are exactly two: the deliverable body and the phase agent's
+    self-assessment, both rendered server-side by mdlite, which escapes at the source.
     """
-    sources = {p.name: p.read_text(encoding="utf-8") for p in ui.ASSETS_DIR.iterdir() if p.suffix == ".js"}
-    for name, text in sources.items():
-        assert 'onclick="showTaskDetail' not in text, name
-        assert "showTaskDetail('" not in text.replace("onTaskClick(showTaskDetail)", ""), name
-    bundle = "".join(sources.values())
-    assert 'data-task="' in bundle and 'getAttribute("data-task")' in bundle
+    raw = [
+        (name, line.strip())
+        for name, text in ui_sources().items()
+        for line in text.splitlines()
+        if ("dangerouslySetInnerHTML" in line or ".innerHTML" in line) and not line.lstrip().startswith("//")
+    ]
+    assert [name for name, _ in raw] == ["gate/Deliverables.jsx", "gate/Deliverables.jsx"], raw
+    assert all("__html: sa.html" in line or "__html: entry.html" in line for _, line in raw), raw
 
 
 def test_every_task_status_is_styled_by_the_name_the_page_emits() -> None:
@@ -249,8 +290,8 @@ def test_every_task_status_is_styled_by_the_name_the_page_emits() -> None:
 def test_the_graph_says_what_its_lines_mean() -> None:
     """An edge drawn without a head or a key is a line between two boxes: the reader cannot tell
     which end must finish first, nor that a column is an execution layer."""
-    js = (ui.ASSETS_DIR / "view-tasks.js").read_text(encoding="utf-8")
-    assert "marker-end" in js and "<marker" in js
+    js = (UI_SRC / "Board.jsx").read_text(encoding="utf-8")
+    assert "markerEnd" in js and "<marker" in js
     assert "blocked_by" in js and "execution layers" in js and "critical path" in js
 
 
@@ -277,7 +318,7 @@ def test_the_as_built_route_reaches_review_api_rather_than_the_gate_list(server:
 # --- the payload contract between the modules and the server --------------------
 #
 # The drift this catches actually happened: `_tasks_block` renamed its task list to `rows` and
-# `trace` collapsed to a verdict, while view-tasks.js kept reading `tasks.tasks` and
+# `trace` collapsed to a verdict, while the Board kept reading `tasks.tasks` and
 # `trace.requirements`. Nothing failed — no test asserted that a field a module reads exists — so
 # the Tasks tab threw a TypeError inside `refresh()`, whose catch reports "disconnected". A pane
 # that silently stops rendering is worse than one that 500s, because the dashboard still looks alive.
@@ -314,7 +355,7 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
 
     tasks = payload["tasks"]
     assert isinstance(tasks, dict)
-    # view-tasks.js: buildDag/layersBar/renderTasks; view-overview.js: renderAttention
+    # Board.jsx: Dag/Layers/pills; Now.jsx: InTheWay
     for key in ("rows", "counts", "total", "layers", "critical_path", "frontier"):
         assert key in tasks, f"status.tasks.{key}"
     for key in ("id", "title", "kind", "status", "risk", "blocked_by", "claim_ids", "handoff", "commit"):
@@ -329,7 +370,7 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
     for key in ("id", "nfr", "claims", "tasks"):
         assert key in trace["requirements"][0], f"status.trace.requirements[].{key}"
 
-    # view-overview.js renderAttention / notify.js snapshot
+    # Now.jsx InTheWay / notify.js snapshot
     assert isinstance(payload["attention"], list)
     for key in ("gates", "warnings", "next", "project", "current_phase", "phase_order", "decision"):
         assert key in payload, f"status.{key}"
@@ -340,7 +381,7 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
 
 
 def test_the_pending_decision_is_one_identity_not_a_stream_of_events() -> None:
-    """notify.js interrupts on `decision.id` changing; a decision the loop re-derives is silent."""
+    """The notifier interrupts on `decision.id` changing; a decision the loop re-derives is silent."""
     from rein import status_api
 
     approve = status_api.Recommendation(command="rein approve build", kind="approve_gate", reason="ready")
@@ -397,7 +438,7 @@ def test_event_feed_payload_carries_every_field_the_feed_reads(server: ui.Dashbo
 
 def test_no_module_reads_a_field_the_payload_stopped_carrying() -> None:
     """Spelling canaries for the renames that already bit, so they cannot come back quietly."""
-    sources = {p.name: p.read_text(encoding="utf-8") for p in ui.ASSETS_DIR.iterdir() if p.suffix == ".js"}
+    sources = ui_sources()
     forbidden = {
         "tasks.tasks": "the task list is `tasks.rows`",
         "in_progress": "the status is spelled `in-progress` (models.TASK_STATUS_ORDER)",
@@ -423,7 +464,7 @@ def test_the_page_does_not_tell_the_human_to_go_and_do_what_it_just_did() -> Non
     carrying `error`. So `approval_id` in the body means it happened, and the only honest toast
     names it.
     """
-    api = (ui.ASSETS_DIR / "api.js").read_text(encoding="utf-8")
+    api = (UI_SRC / "api.js").read_text(encoding="utf-8")
     assert "run the command shown to approve" not in api
     assert "approval_id" in api, "the toast has to read the field that proves the approval was recorded"
     assert "(data.blockers" not in api, "a POST never carries blockers — an unready gate is a 409"
@@ -438,9 +479,7 @@ def test_every_api_route_the_server_dispatches_is_reached_from_the_page() -> Non
     source = Path(ui.__file__).read_text(encoding="utf-8")
     routes = {m.rstrip("?") for m in re.findall(r'self\.path(?:\s*==\s*|\.startswith\()\s*"(/api/[^"]*)"', source)}
     assert routes, "no /api/ route literals found — this canary would pass on anything"
-    bundle = "".join(
-        p.read_text(encoding="utf-8") for p in sorted(ui.ASSETS_DIR.iterdir()) if p.suffix in (".js", ".html")
-    )
+    bundle = "".join(ui_sources().values()) + (ui.ASSETS_DIR / "index.html").read_text(encoding="utf-8")
     for route in sorted(routes):
         assert route in bundle, f"{route} is dispatched by ui.py but nothing on the page calls it"
     for called in sorted(set(re.findall(r'"(/api/[^"?]*)"', bundle))):

@@ -7,70 +7,7 @@
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<header class="topbar">
-  <span class="wordmark">loose<i>rein</i></span>
-  <select id="projectSelect" title="Switch target project" hidden></select>
-  <span class="stat" id="meta">loading…</span>
-  <span class="grow"></span>
-  <!-- No refresh button: the server pushes when the repository moves, so there is nothing to ask
-       for. This says whether the page is still being told. -->
-  <span class="stat"><span class="dot" id="dot"></span><span id="live">connecting…</span></span>
-  <button class="icon" id="bellBtn" aria-pressed="false"></button>
-  <button class="icon" id="themeBtn"></button>
-</header>
-
-<div class="frame">
-<!-- The lifecycle is the navigation: the gate that waits on you is one place on
-     this page, not three. Everything else is somewhere to look, listed after. -->
-<nav class="spine" id="tabs" aria-label="Dashboard">
-  <a class="nav-item" href="#now" data-view="now">Now</a>
-  <p class="spine-label">Gates</p>
-  <div class="stations" id="stepper"></div>
-  <p class="spine-label">Inspect</p>
-  <a class="nav-item" href="#board" data-view="board">Board</a>
-  <a class="nav-item" href="#record" data-view="record">Record</a>
-  <a class="nav-item" href="#console" data-view="console">Console</a>
-</nav>
-
-<main>
-  <div class="view" id="view-now">
-    <div class="block"><h2>Do this next</h2><div id="next"></div></div>
-    <div class="block"><h2 id="attentionHead">In the way</h2><div id="attention"></div></div>
-  </div>
-
-  <!-- Split three ways on purpose: a status poll repaints only the gate heading
-       and the approval footer, so the body keeps its scroll position while a
-       long patch is being read. -->
-  <div class="view" id="view-gate" hidden>
-    <div class="block"><div id="rvBar"></div><div id="rvMain"></div><div id="rvFoot"></div></div>
-  </div>
-
-  <div class="view" id="view-board" hidden>
-    <div class="block"><h2>Tasks</h2><div id="tasks"></div>
-      <!-- outside #tasks: a re-render of the graph must not wipe the detail the human just opened -->
-      <div id="taskDetail"></div></div>
-    <div class="block" id="traceSection" hidden><h2>Requirement → claim → task</h2>
-      <div id="trace"></div></div>
-  </div>
-
-  <div class="view" id="view-record" hidden>
-    <div class="block"><h2>Record</h2>
-      <p class="note">Every state change, hash-chained. A deleted or reordered line breaks the
-        chain a gate receipt pins.</p>
-      <div id="events"></div></div>
-  </div>
-
-  <div class="view" id="view-console" hidden>
-    <div class="block"><h2>Console</h2>
-      <p class="note">Reads, diagnostics, and the two commands that send work backwards. Opening a
-        gate is not here: that is a human's typed confirmation at their own terminal.</p>
-      <div id="ops"></div>
-      <pre class="out" id="out" hidden></pre></div>
-  </div>
-</main>
-</div>
-
-<div id="toasts" aria-live="polite"></div>
+<div id="root"></div>
 <script>window.TOKEN = "__TOKEN__"; window.READ_ONLY = __READ_ONLY__;</script>
 <script type="module" src="/assets/app.js"></script>
 </body>
