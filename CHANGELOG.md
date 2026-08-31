@@ -6,6 +6,21 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.3.12] - 2026-08-31
 
+**A stack's merge order was a human's job to repeat without slipping.** `rein pr-stack` cut the
+cycle into one pull request per task, opened them as drafts and lifted them — and then handed the
+last step back: *merge bottom first with `gh pr merge --merge --delete-branch`*, typed once per
+slice, in the right order, with the right two flags. The order is not a preference. A slice landed
+out of sequence puts content into the base that every pull request below it is still open against,
+and squash or rebase lands it as a *different* commit — every pull request above then shows the
+diff again, and the `completed_commit` and gate receipt that name the real commit are stranded.
+AGENTS.md already says merge order runs in code, and this one did not. **`rein pr-stack --merge`**
+walks the list this module already derives: bottom first, skipping what already landed, stopping
+at the first refusal rather than merging slice 3 onto a base that never got slice 2. It confirms at
+a terminal like `--push` and `--ready`, cannot be pre-authorized, refuses before gate ④, refuses
+while any slice is still a draft, and refuses when a review fix has not been carried upward by
+`--restack`. Each landing is recorded in the audit log, so re-running after a fixed conflict is the
+recovery path rather than a second merge.
+
 **Four verbs answered "where am I", and the help listed every verb the loop had.** `start`,
 `next`, `status` and `resume` were four renderings of one `collect_status()` call — `next` was
 literally `status --next` with the flag injected by the dispatcher, `resume --full` concatenated

@@ -242,9 +242,11 @@ Then, per cycle:
    `--ready` lifts them once gate ④ is approved. A review fix is committed onto the slice that
    introduced the code and carried upward by `--restack`, which merges — **a stack is never
    rebased**, because rewriting history strands every `completed_commit` and gate receipt on
-   commits that no longer exist. Merge bottom first with `gh pr merge --merge --delete-branch`:
-   squash or rebase would land the content in the base as a different commit and make every pull
-   request above it show the diff again.
+   commits that no longer exist. `--merge` then lands the whole stack, bottom first, as merge
+   commits with each branch deleted — the order is the correctness condition, so it runs in code
+   rather than in one typed `gh pr merge` per slice: squash, rebase, or one step out of sequence
+   lands the content in the base as a different commit and makes every pull request above it show
+   the diff again.
 
 8. **Close the cycle** — after gate ⑤, `rein cycle-close --name <slug>` archives to
    `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human

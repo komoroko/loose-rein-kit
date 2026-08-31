@@ -169,10 +169,11 @@ audit** at `/verify` (detail: build.md, verify.md).
 - **Push / PR / merge to main are outward-facing** — human approval only, same for GitHub Issues.
 - A cycle may ship as **one pull request** (`rein pr-draft` assembles the body) or as a **stack of
   them, one per task** (`rein pr-stack`). A stack opens as **drafts** before gate ④ and is lifted
-  by `rein pr-stack --ready` once a human approves it; both steps confirm at a terminal first, and
-  neither may be pre-authorized. Merge a stack **bottom first with `--merge --delete-branch`** —
-  never squash or rebase, which puts the content into the base as a different commit and makes
-  every pull request above it show the diff again.
+  by `rein pr-stack --ready` once a human approves it, and landed by `rein pr-stack --merge`. All
+  three confirm at a terminal first and none may be pre-authorized. **The merge order runs in
+  code** — bottom first, `--merge --delete-branch` each time — because squash or rebase puts the
+  content into the base as a different commit and makes every pull request above it show the diff
+  again, and one slip in a hand-typed sequence does that to the whole stack.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
   `completed_commit` and gate receipt on commits that no longer exist.
