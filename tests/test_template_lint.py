@@ -608,3 +608,28 @@ def test_the_packaged_scaffold_is_scanned(tmp_path: Path) -> None:
     scanned = template_lint.neutral_texts(root)
     assert any(p.startswith("src/rein/data/scaffold/") for p in scanned)
     assert any(p.startswith("src/rein/data/integrations/") for p in scanned)
+
+
+def test_no_file_but_upstream_spells_an_upgrade_command() -> None:
+    """`uv tool upgrade` is a no-op for a tag-pinned install, and five places used to print it."""
+    assert template_lint.check_upgrade_command(_REPO_ROOT) == []
+
+
+def test_the_distribution_name_matches_pyproject() -> None:
+    assert template_lint.check_distribution_name(_REPO_ROOT) == []
+
+
+def test_the_upgrade_canary_catches_a_reintroduced_literal(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    texts = {"docs/x.md": f"run `{template_lint._DEAD_UPGRADE_COMMAND}`"}
+    with patch.object(template_lint, "_tracked_texts", lambda _root: texts):
+        failures = template_lint.check_upgrade_command(tmp_path)
+    assert len(failures) == 1 and "docs/x.md" in failures[0]
+
+
+def test_the_upgrade_canary_refuses_to_pass_when_it_could_not_look(tmp_path: Path) -> None:
+    """`Repo._git` returns "" for every failure, and an empty listing would be a silent pass."""
+    template_lint._tracked_texts.cache_clear()
+    with pytest.raises(OSError, match="could not list git-tracked files"):
+        template_lint._tracked_texts(tmp_path)  # not a git checkout

@@ -39,7 +39,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import rein
-from rein import common, cycle
+from rein import common, cycle, upstream
 from rein import data as data_mod
 from rein import install as install_mod
 from rein import lock as lock_mod
@@ -229,41 +229,10 @@ def is_brownfield(root: Path) -> bool:
     return any((root / marker).exists() for marker in _CODE_MARKERS)
 
 
-def source_from_direct_url(raw: str) -> str:
-    """Reconstruct a `git+<url>[@rev]` source from a PEP 610 direct_url.json body (pure).
-
-    A VCS install records `url` + `vcs_info`; a plain file/dir/editable install (`dir_info`) or
-    an archive has no VCS coordinates, so there is nothing to record and we return "". Anything
-    malformed also yields "" — a missing source is a benign gap, never a failure.
-    """
-    import json as json_mod
-
-    try:
-        data = json_mod.loads(raw)
-    except ValueError:
-        return ""
-    vcs = data.get("vcs_info") if isinstance(data, dict) else None
-    url = data.get("url") if isinstance(data, dict) else None
-    if not isinstance(vcs, dict) or not isinstance(url, str) or not url:
-        return ""
-    base = url if url.startswith(("git+", "hg+", "bzr+", "svn+")) else f"{vcs.get('vcs', 'git')}+{url}"
-    rev = vcs.get("requested_revision") or vcs.get("commit_id")
-    return f"{base}@{rev}" if isinstance(rev, str) and rev else base
-
-
-def detect_source() -> str:
-    """Best-effort recovery of the rein source URL from this install's PEP 610 metadata.
-
-    Returns "" when the metadata is absent (e.g. a source tree run) or the install is not from a
-    VCS — the same silent skip the wizard's old free-text source question produced on Enter.
-    """
-    import importlib.metadata as md
-
-    try:
-        raw = md.distribution("rein").read_text("direct_url.json")
-    except (md.PackageNotFoundError, OSError):
-        return ""
-    return source_from_direct_url(raw) if raw else ""
+#: Re-exported so `init` keeps one spelling of "where did this install come from" — the answer
+#: itself lives in `upstream`, beside the upgrade command it is used to derive.
+source_from_direct_url = upstream.source_from_direct_url
+detect_source = upstream.detect_source
 
 
 # --- application ------------------------------------------------------------------
@@ -491,8 +460,11 @@ def run_init(
     repo = repo_mod.Repo(root)
     # 3) the materialized artifacts (prompts/schema/rules) + the lock skeleton they update.
     lock_data = lock_mod.read(repo.lock) or lock_mod.new(rein.__version__, source)
+    # Top-level `source` is the field `lock.new` writes and `upstream.origin` reads. An earlier
+    # spelling put it under a `rein:` sub-mapping instead, where nothing ever read it — so
+    # re-running `init` over an existing lock recorded the source into a hole.
     if source:
-        lock_data.setdefault("rein", {})["source"] = source
+        lock_data["source"] = source
     existing_seeded = lock_data.get("seeded") if isinstance(lock_data.get("seeded"), dict) else {}
     lock_data["seeded"] = {**(existing_seeded or {}), **seeded}
     lock_mod.write(repo.lock, lock_data)

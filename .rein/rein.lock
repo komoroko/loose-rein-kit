@@ -88,6 +88,4 @@ integrations:
       .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-08-31'
-rein:
-  version: 0.1.0
+updated_at: '2026-09-01'

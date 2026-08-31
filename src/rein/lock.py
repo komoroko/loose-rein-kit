@@ -105,21 +105,55 @@ def read(path: Path) -> dict[str, Any] | None:
     if found != FORMAT:
         raise LockError(
             f"{path} is in format {found!r}, but this rein reads {FORMAT!r} only — "
-            "upgrade the tool (`uv tool upgrade loose-rein-kit`) or re-initialize the repository"
+            f"upgrade the tool ({_upgrade_hint()}) or re-initialize the repository"
         )
     return data
 
 
+#: Every key this format has. `write` drops anything else, so a key an older spelling wrote is
+#: gone on the next `sync` rather than carried forever: this repository's own lock still held a
+#: `rein: {version: 0.1.0}` from a retired layout while `tool_version` said 0.3.12, which is a
+#: machine-written file disagreeing with itself in front of anyone who opens it. There is no
+#: migration to write — the lock is derived from the installed package and reconverges.
+KEYS: tuple[str, ...] = (
+    "format",
+    "tool_version",
+    "source",
+    "prompts",
+    "integrations",
+    "seeded",
+    "created_at",
+    "updated_at",
+)
+
+
 def write(path: Path, data: dict[str, Any]) -> None:
-    """Write the lock (stamping updated_at), with the do-not-edit header."""
+    """Write the lock (stamping updated_at, dropping keys the format has no place for)."""
     import yaml  # lazy (see read)
 
-    data = dict(data)
+    data = {k: v for k, v in data.items() if k in KEYS}
     data["format"] = FORMAT  # never take the caller's word for the format it just wrote
     data["updated_at"] = date.today().isoformat()
     data.setdefault("created_at", data["updated_at"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(_HEADER + yaml.safe_dump(data, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def source_of(data: dict[str, Any]) -> str:
+    """The install source recorded in a lock mapping ("" when unrecorded)."""
+    value = data.get("source")
+    return str(value) if isinstance(value, str) else ""
+
+
+def _upgrade_hint(recorded_source: str = "") -> str:
+    """The command that actually upgrades *this* install, in backticks.
+
+    Lazy on purpose: `rein guard` imports this module on every edit, and the answer needs the
+    install's PEP 610 metadata — a cost worth paying only on the rare path that prints it.
+    """
+    from rein import upstream
+
+    return f"`{upstream.upgrade_command(upstream.origin(recorded_source))}`"
 
 
 def tool_version_of(data: dict[str, Any]) -> str:
@@ -156,7 +190,7 @@ def startup_warning(repo: repo_mod.Repo, running_version: str) -> str | None:
     if recorded_v > running_v:
         return (
             f"rein {running_version} is older than the {recorded} that wrote {LOCK_NAME} — "
-            "upgrade the tool (`uv tool upgrade loose-rein-kit`)"
+            f"upgrade the tool ({_upgrade_hint(source_of(data))})"
         )
     return (
         f"rein {running_version} is newer than the {recorded} recorded in {LOCK_NAME} — "

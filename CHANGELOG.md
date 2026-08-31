@@ -148,6 +148,33 @@ for a second host and for repos seeded off a TTY.
 --write-config` can only fail when the build failed, which the build already reports, and
 `rein doctor` checks the same pins. The verb remains for CI and for re-checking later.
 
+**The upgrade the tool kept recommending was a no-op, so the version check now derives the real
+one.** `uv tool install git+<repo>@vX.Y.Z` is what the README prescribes, and a tag-pinned uv tool
+re-resolves to its own pinned rev — so the plain `uv tool upgrade`, printed by both READMEs, both
+of `lock.py`'s skew messages and `install.py`'s upgrade output, moved nobody anywhere. The
+command depends on how the install was made, and PEP 610's `direct_url.json` says which: the new
+`upstream` module derives it (a forced re-install at the new tag when pinned, `uv tool upgrade`
+when tracking a branch, and an honest pointer to the releases page when the origin is unknown),
+every message calls it, and a canary in `scripts/template_lint.py` keeps the literal from coming
+back.
+
+On top of that, `rein doctor` now asks GitHub — via `gh`, the client it already checks for — whether
+a newer release exists, and prints that derived command when there is one. It is the only place
+that reaches the network: `rein start` reads the cache doctor writes and never fetches, because it
+runs from the SessionStart hook 0.3.11 was spent making cheap. No `gh`, no network, or an install
+with no VCS origin reports **INFO "could not check"**, never PASS — an unasked question is not a
+healthy answer. `REIN_NO_UPDATE_CHECK` turns the fetch off entirely.
+
+Two defects underneath it, both of which had made the source unknowable. `detect_source()` asked
+`importlib.metadata` for the *import* name (`rein`) rather than the distribution (`loose-rein-kit`),
+so it raised `PackageNotFoundError` and returned `""` on every real install — and passed its whole
+test suite, because every test either exercised the pure parser or monkeypatched the one function
+that touched reality. And `init` wrote the source into a `rein:` sub-mapping that nothing read,
+while the field `lock.new` creates and `upstream` reads is the top-level `source`; re-running
+`init` over an existing lock therefore recorded it into a hole. `lock.write` now drops keys outside
+the format, which is also what finally removed the `rein: {version: 0.1.0}` this repository's own
+lock had been carrying beside a `tool_version` of 0.3.12.
+
 ## [0.3.11] - 2026-08-31
 
 **An idle dashboard burned an eighth of a core, forever.** The page polled `/api/status` every

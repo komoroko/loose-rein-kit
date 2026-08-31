@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ from rein import (
     install,
     models,
     strict_yaml,
+    upstream,
 )
 from rein import lock as lock_mod
 from rein import repo as repo_mod
@@ -808,6 +810,52 @@ def _reads_guard(path: Path) -> bool:
         return False
 
 
+def check_upstream(repo: repo_mod.Repo) -> list[Finding]:
+    """Is a newer rein released, and what command would actually install it here?
+
+    **This is the only place that reaches the network**, and it is here because `doctor` is a
+    command a human types. `rein start` runs from the SessionStart hook and must stay free of
+    network latency, so it reads the cache this writes and never fetches.
+
+    Writing that cache is not the repair `doctor` refuses to do: it is a disposable file in the
+    user's cache home recording what a fetch saw, not a change to anything being diagnosed.
+
+    Three outcomes, and the third is the one worth being strict about: no `gh`, no network, an
+    install with no VCS coordinates — all report **INFO "could not check"**, never PASS. An
+    unasked question is not a healthy answer.
+    """
+    running = rein.__version__
+    recorded = ""
+    try:
+        data = lock_mod.read(repo.lock)
+    except lock_mod.LockError:
+        data = None  # already reported by check_lock; not this check's question
+    if data is not None:
+        recorded = lock_mod.source_of(data)
+
+    org = upstream.origin(recorded)
+    tag = upstream.latest_release(org)
+    if tag is None:
+        why = (
+            f"{upstream.NO_CHECK_ENV} is set"
+            if os.environ.get(upstream.NO_CHECK_ENV, "")
+            else "no `gh`, no network, or this install carries no GitHub origin"
+        )
+        return [Finding("INFO", "env", f"could not check for a newer rein ({why}) — running {running}")]
+
+    upstream.write_cache(org.slug if org else "", tag)
+    if not upstream.newer_available(running, tag):
+        return [Finding("PASS", "env", f"rein {running} is the newest release ({tag})")]
+    return [
+        Finding(
+            "WARN",
+            "env",
+            f"rein {running} is behind the {tag} release — {upstream.upgrade_command(org, tag)}, "
+            "then `rein upgrade` in each adopted repository",
+        )
+    ]
+
+
 def check_hook(repo: repo_mod.Repo) -> list[Finding]:
     """The gate guard is only real if a PreToolUse hook actually invokes it.
 
@@ -1458,6 +1506,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_independence(config, plan)
     findings += check_adapters(config, state)
     findings += check_retry_continuity(config)
+    findings += check_upstream(repo)
     findings += check_hook(repo)
     findings += check_preauthorization(repo)
     findings += check_ci(repo)

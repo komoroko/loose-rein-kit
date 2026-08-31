@@ -34,7 +34,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rein import common, event_chain, models, registry, status_api
+import rein
+from rein import common, event_chain, models, registry, status_api, upstream
+from rein import lock as lock_mod
 from rein import repo as repo_mod
 
 logger = logging.getLogger(__name__)
@@ -144,8 +146,13 @@ def build(events: Sequence[models.Event], since: int) -> Packet:
     )
 
 
-def render(packet: Packet, status: dict[str, Any]) -> str:
-    """The packet as text. Short by construction — it is read at the start of every session."""
+def render(packet: Packet, status: dict[str, Any], upstream_note: str = "") -> str:
+    """The packet as text. Short by construction — it is read at the start of every session.
+
+    `upstream_note` is passed in rather than fetched: this function runs from the SessionStart
+    hook, and a network call there is latency on every session. `rein doctor` does the fetching
+    and caches it; this only ever repeats what the cache already says (see `upstream`).
+    """
     lines: list[str] = []
     if packet.first_visit:
         lines.append("## Since last time — first visit (no watermark yet)")
@@ -192,6 +199,9 @@ def render(packet: Packet, status: dict[str, Any]) -> str:
     if not packet.first_visit and not packet.empty:
         lines.append("")
         lines.append(f"Full state: `rein start --full`  ·  this log: `rein events --since {packet.since}`")
+    if upstream_note:
+        lines.append("")
+        lines.append(upstream_note)
     return "\n".join(lines)
 
 
@@ -201,7 +211,7 @@ def run(root: Path | None = None, *, full: bool = False, mark: bool = True) -> s
     events, defects = event_chain.scan(repo.events)
     packet = build(events, read_mark(repo.root))
     status = status_api.collect_status(repo)
-    text = render(packet, status)
+    text = render(packet, status, _upstream_note(repo))
     if defects:
         text = f"⚠ the audit chain has {len(defects)} defect(s) — `rein events --verify`\n\n{text}"
     if full:
@@ -209,6 +219,15 @@ def run(root: Path | None = None, *, full: bool = False, mark: bool = True) -> s
     if mark and packet.latest:
         write_mark(repo.root, packet.latest)
     return text
+
+
+def _upstream_note(repo: repo_mod.Repo) -> str:
+    """What `rein doctor`'s last release check saw, or "" — read from cache, never fetched here."""
+    try:
+        data = lock_mod.read(repo.lock)
+    except lock_mod.LockError:
+        data = None  # a lock this command cannot read is `doctor`'s finding, not a reason to fail
+    return upstream.cached_note(rein.__version__, lock_mod.source_of(data) if data else "")
 
 
 def main(argv: list[str] | None = None) -> int:

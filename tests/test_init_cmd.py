@@ -146,34 +146,12 @@ def test_detect_commands_recognizes_the_common_stacks() -> None:
     assert init_cmd.detect_commands({}) == {"test": [], "check": []}
 
 
-def test_source_from_direct_url_reconstructs_git_source() -> None:
-    vcs = '{"url": "https://example.com/rein", "vcs_info": {"vcs": "git", "commit_id": "abc123"}}'
-    assert init_cmd.source_from_direct_url(vcs) == "git+https://example.com/rein@abc123"
-    # requested_revision wins over commit_id; an already-prefixed url is kept as-is.
-    rev = (
-        '{"url": "git+ssh://git@host/rein",'
-        ' "vcs_info": {"vcs": "git", "commit_id": "abc", "requested_revision": "v1.0"}}'
-    )
-    assert init_cmd.source_from_direct_url(rev) == "git+ssh://git@host/rein@v1.0"
-    bare = '{"url": "https://example.com/rein", "vcs_info": {"vcs": "git"}}'
-    assert init_cmd.source_from_direct_url(bare) == "git+https://example.com/rein"
+def test_source_detection_is_the_upstream_module_s_answer() -> None:
+    """One spelling of "where did this install come from" — the parsing itself is tested there."""
+    from rein import upstream
 
-
-def test_source_from_direct_url_returns_empty_without_vcs_coordinates() -> None:
-    # An editable / local install (dir_info) has no VCS coordinates → nothing to record.
-    assert init_cmd.source_from_direct_url('{"url": "file:///repo", "dir_info": {"editable": true}}') == ""
-    assert init_cmd.source_from_direct_url("not json") == ""
-    assert init_cmd.source_from_direct_url('{"vcs_info": {"vcs": "git"}}') == ""  # no url
-
-
-def test_detect_source_returns_empty_when_metadata_absent(monkeypatch: pytest.MonkeyPatch) -> None:
-    import importlib.metadata as md
-
-    def _raise(_name: str) -> object:
-        raise md.PackageNotFoundError("rein")
-
-    monkeypatch.setattr(md, "distribution", _raise)
-    assert init_cmd.detect_source() == ""
+    assert init_cmd.source_from_direct_url is upstream.source_from_direct_url
+    assert init_cmd.detect_source is upstream.detect_source
 
 
 def test_is_brownfield_detects_code_markers(tmp_path: Path) -> None:
@@ -212,7 +190,7 @@ def test_run_init_seeds_a_bare_directory(tmp_path: Path, capsys: pytest.CaptureF
     # The lock records the source, the seeds, and the materialized files.
     data = lock_mod.read(tmp_path / ".rein" / "rein.lock")
     assert data is not None
-    assert data["rein"]["source"] == "git+https://example.com/rein"
+    assert lock_mod.source_of(data) == "git+https://example.com/rein"
     assert ".rein/state.yaml" in data["seeded"]
     assert "prompts/commands/req.md" in data["prompts"]["files"]
 
@@ -274,7 +252,7 @@ def test_run_init_falls_back_to_detected_source(
     assert "detected      source: git+https://example.com/rein@v9" in capsys.readouterr().out
     data = lock_mod.read(tmp_path / ".rein" / "rein.lock")
     assert data is not None
-    assert data["rein"]["source"] == "git+https://example.com/rein@v9"
+    assert lock_mod.source_of(data) == "git+https://example.com/rein@v9"
 
 
 def test_run_init_explicit_source_is_not_overridden_by_detection(
@@ -284,7 +262,7 @@ def test_run_init_explicit_source_is_not_overridden_by_detection(
     assert init_cmd.run_init(tmp_path, "demo", "build/demo", "git+https://explicit/rein") == 0
     data = lock_mod.read(tmp_path / ".rein" / "rein.lock")
     assert data is not None
-    assert data["rein"]["source"] == "git+https://explicit/rein"
+    assert lock_mod.source_of(data) == "git+https://explicit/rein"
 
 
 def test_run_init_rerun_never_overwrites(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -365,7 +343,7 @@ def test_wizard_asks_only_name_and_brief(
     state = (proj / ".rein" / "state.yaml").read_text(encoding="utf-8")
     assert 'project: "myproduct"' in state
     data = lock_mod.read(proj / ".rein" / "rein.lock")
-    assert data is not None and data["rein"]["source"] == "git+https://example.com/rein@vX"
+    assert data is not None and lock_mod.source_of(data) == "git+https://example.com/rein@vX"
 
 
 # --- sandboxing is part of initialization -----------------------------------------
@@ -552,3 +530,24 @@ def test_the_detected_default_comes_from_the_environment(tmp_path: Path, monkeyp
     assert init_cmd.detect_agent(tmp_path) == "codex"
     (tmp_path / "CLAUDE.md").write_text("x", encoding="utf-8")
     assert init_cmd.detect_agent(tmp_path) == "claude"  # the more specific signal wins
+
+
+def test_init_records_the_source_where_something_reads_it(chdir_tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The source must land on the top-level `source` field, on a fresh lock and on an existing one.
+
+    An earlier spelling wrote it under a `rein:` sub-mapping that nothing ever read, so re-running
+    `init` over an existing lock recorded the source into a hole — and `upstream.origin`'s fallback
+    had nothing to fall back to.
+    """
+    from rein import lock as lock_mod
+
+    monkeypatch.setattr(init_cmd, "detect_source", lambda: "")
+    assert init_cmd.run_init(chdir_tmp, name="p", branch="build/p", source="git+https://github.com/o/r@v1.0") == 0
+    data = lock_mod.read(chdir_tmp / ".rein" / "rein.lock")
+    assert data is not None and lock_mod.source_of(data) == "git+https://github.com/o/r@v1.0"
+
+    # Re-run over the lock that now exists: the field still moves.
+    assert init_cmd.run_init(chdir_tmp, name="p", branch="build/p", source="git+https://github.com/o/r@v2.0") == 0
+    again = lock_mod.read(chdir_tmp / ".rein" / "rein.lock")
+    assert again is not None and lock_mod.source_of(again) == "git+https://github.com/o/r@v2.0"
+    assert "rein" not in again

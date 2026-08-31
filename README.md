@@ -259,7 +259,15 @@ Keeping the installation current:
   are refreshed; locally modified ones are kept and listed; `--force` overrides; `--check` reports
   drift without writing)
 - `rein upgrade` — shows the changelog transition, then refreshes everything the tool materialized
-- `uv tool upgrade loose-rein-kit` — upgrades the CLI *code* itself
+- `rein doctor` — the only command that reaches the network: it asks GitHub (via `gh`) whether a
+  newer release exists and prints **the command that actually upgrades this install**. That command
+  depends on how the CLI was installed, which is why it is derived rather than quoted: a
+  tag-pinned `uv tool install …@vX.Y.Z` stays on its pinned tag under `uv tool upgrade`, so it takes
+  `uv tool install --force 'git+…@<new tag>'`; an install that tracks a branch is the case
+  `uv tool upgrade` was for. No `gh`, no network, or an install with no VCS origin: doctor says it
+  could not check, never that you are current. Set `REIN_NO_UPDATE_CHECK` to skip it entirely.
+- `rein start` prints that result from doctor's cache when a newer release was seen. It runs from
+  the SessionStart hook, so it never fetches anything itself.
 
 ## Authority to open a gate
 

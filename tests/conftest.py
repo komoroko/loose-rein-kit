@@ -56,6 +56,12 @@ def _isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _agen
         directory.mkdir(parents=True, exist_ok=True)
         monkeypatch.setenv(var, str(directory))
     monkeypatch.setenv("PATH", f"{_agent_cli_stub}{os.pathsep}{os.environ.get('PATH', '')}")
+    # `doctor` asks GitHub whether a newer rein exists, and `run_checks` is called all over this
+    # suite. Today it happens to short-circuit — the editable install these tests run under has no
+    # VCS origin — but that is a fact about this checkout, not a guarantee: run the same suite
+    # against a `uv tool install git+…` and the tests start making network calls. Off by
+    # construction, and the checks that exercise the fetch path delete it.
+    monkeypatch.setenv("REIN_NO_UPDATE_CHECK", "1")
     monkeypatch.delenv("REIN_ROOT", raising=False)
     monkeypatch.delenv("REIN_TRUST_MANIFEST", raising=False)
 
