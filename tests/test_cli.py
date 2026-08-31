@@ -104,6 +104,55 @@ def test_the_default_help_drops_agent_verb_descriptions_but_never_their_names(
         assert cli.VERBS[name].summary.split(" (")[0][:30] in everything, name
 
 
+@pytest.mark.parametrize("spelling", ["--version", "-V", "--help", "-h", "help"])
+def test_the_identity_spellings_survive_a_leading_repo_flag(
+    repo: Path, capsys: pytest.CaptureFixture[str], spelling: str
+) -> None:
+    """`--repo` comes off before anything else is read.
+
+    Reading these at argv[0] made `rein --repo X --version` answer `unknown verb '--version'`
+    with exit 2 — a version or help check that fails reads as a broken install.
+    """
+    assert cli.main(["--repo", str(repo), spelling]) == 0
+    assert capsys.readouterr().out.strip()  # something was answered, not an error
+
+
+def test_start_honours_a_repo_flag_typed_after_the_verb(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--repo` is accepted on either side of every verb, and `start` is not an exception.
+
+    It used to be: `start` was the one verb the dispatcher did not hand the flag to, so a trailing
+    `--repo` reached `resume` but not the wizard check, and the two looked at different
+    repositories.
+    """
+    monkeypatch.chdir(repo.parent)  # cwd is not a repo
+    assert cli.main(["start", "--repo", str(repo)]) == 0
+    assert "Since last time" in capsys.readouterr().out
+
+
+def test_start_off_a_tty_collects_the_status_once(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The SessionStart hook runs this at every session start, and `resume` collects for itself.
+
+    Asking "does this repo still need init?" first would double the one call 0.3.11 was spent
+    making cheap — and off a TTY nobody could act on the answer anyway.
+    """
+    from rein import status_api
+
+    calls: list[object] = []
+    real = status_api.collect_status
+
+    def counting(*args: object, **kwargs: object) -> dict[str, object]:
+        calls.append(1)
+        return real(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(status_api, "collect_status", counting)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    assert cli.main(["start"]) == 0
+    assert len(calls) == 1
+
+
 def test_repo_flag_may_precede_the_verb(
     repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

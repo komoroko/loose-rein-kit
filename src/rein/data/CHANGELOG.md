@@ -6,6 +6,22 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.3.12] - 2026-08-31
 
+**Four fixes to what shipped above.** `rein --repo X --version` (and `--help`, `-h`, `help`)
+answered `unknown verb '--version'` with exit 2: the identity spellings were read at argv[0],
+before the global `--repo` came off — the same failure a comment and a test already existed to
+prevent, reintroduced for the prefixed form. `--repo` now comes off first, and one resolved value
+is handed to both the lock check and the verb, so `rein start --repo X` no longer reads the flag in
+`resume` and the current directory in the wizard check. `rein start` off a TTY collects the status
+**once**: it used to ask "does this repo still need init?" before delegating, which put a second
+full `collect_status` on the SessionStart hook — the one path that runs at every session start, and
+the one 0.3.11 was spent making cheap. And `rein pr-stack --merge` re-run after a fixed conflict
+now asks only about the pull requests still open, instead of counting the ones that already landed.
+
+**`.coverage` stopped being tracked.** `make test` rewrote it on every run and nothing read it —
+not CI, not the makefile — so every branch that ran the tests carried a binary blob in its diff,
+which is `rein doctor`'s "binary file in the change under review" FAIL and a `coverage:
+insufficient` at gate ④.
+
 **A stack's merge order was a human's job to repeat without slipping.** `rein pr-stack` cut the
 cycle into one pull request per task, opened them as drafts and lifted them — and then handed the
 last step back: *merge bottom first with `gh pr merge --merge --delete-branch`*, typed once per

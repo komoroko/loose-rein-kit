@@ -6,6 +6,12 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+# `make test` measures coverage, and the database it writes was committed by accident. Nothing
+# reads it — not CI, not the makefile — so every branch that ran the tests carried a binary blob
+# in its diff, which is `rein doctor`'s "binary file in the change under review" FAIL and a
+# `coverage: insufficient` at gate ④.
+.coverage
+.coverage.*
 # Anchored to the repository root on purpose. A bare `build/` matches at every depth, and this
 # repository ships a phase named build: it silently swallowed the Codex skill
 # `.agents/skills/build/SKILL.md` and its payload twin, so `git add -A` staged seven of the eight

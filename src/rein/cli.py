@@ -159,12 +159,25 @@ def _lock_check(repo_flag: str | None) -> int:
     return 0
 
 
-def _start(rest: list[str], repo_flag: str | None) -> int:
+def _flag_value(args: list[str], flag: str) -> str | None:
+    """The value following `flag` in `args`, or None.
+
+    One reader, because `--repo` may be typed on either side of the verb and the dispatcher and
+    the verb must not end up pointed at two different repositories.
+    """
+    if flag in args:
+        index = args.index(flag)
+        if index + 1 < len(args):
+            return args[index + 1]
+    return None
+
+
+def _start(rest: list[str]) -> int:
     """First run → the init wizard; an initialized repo → what moved since you last looked."""
     from rein import init_cmd, resume, status_api
 
     try:
-        root = repo_mod.get(repo_flag).root
+        root = repo_mod.get(_flag_value(rest, "--repo")).root
     except repo_mod.RepoNotFoundError:
         # No repository at all: the wizard is the only thing that can help, and only on a TTY.
         # Off a TTY there is nothing to report either, so say what to run and stop.
@@ -175,39 +188,44 @@ def _start(rest: list[str], repo_flag: str | None) -> int:
             )
             return 2
         return init_cmd.wizard()
-    rec = status_api.collect_status(root)["next"]
-    assert isinstance(rec, dict)  # asdict(Recommendation)
-    if rec.get("kind") == "setup" and sys.stdin.isatty():
-        return init_cmd.wizard(Path(root))
-    # Off a TTY (the SessionStart hook is the case that matters) a repo still waiting for `init`
-    # gets the packet anyway: it already leads with `rein init --name <product>`, which is the
-    # answer. Refusing there is what kept the hook on a second verb.
-    return resume.main([*rest, *(["--repo", repo_flag] if repo_flag else [])])
+    # Only a TTY can act on "this repo still needs init", so only a TTY pays for asking. The
+    # SessionStart hook is the caller that matters here and is never one: collecting the status
+    # to answer a question nobody can act on would put a second full `collect_status` on the one
+    # path that runs at every session start.
+    if sys.stdin.isatty():
+        rec = status_api.collect_status(root)["next"]
+        assert isinstance(rec, dict)  # asdict(Recommendation)
+        if rec.get("kind") == "setup":
+            return init_cmd.wizard(Path(root))
+    # Off a TTY a repo still waiting for `init` gets the packet anyway: it already leads with
+    # `rein init --name <product>`, which is the answer. Refusing there is what kept the hook on
+    # a second verb.
+    return resume.main(rest)
 
 
 def main(argv: list[str] | None = None) -> int:
     common.configure_logging()
     args = sys.argv[1:] if argv is None else list(argv)
 
+    # The global --repo (also accepted by every verb) may precede the verb, so it comes off first:
+    # everything below is about what was actually asked for. `rein --repo X --version` answering
+    # `unknown verb '--version'` is what happens when the identity spellings are read at argv[0].
+    #
+    # The split is done here rather than by parse_args because a verb's own flags must reach that
+    # verb untouched: argparse would refuse `rein next --json` as an unrecognized top-level
+    # argument.
+    repo_flag: str | None = None
+    if args[:1] == ["--repo"] and len(args) >= 2:
+        repo_flag, args = args[1], args[2:]
+
     # `help` as a verb, alongside argparse's -h/--help, and `--all` on either spelling.
     if not args or args[0] in ("help", "-h", "--help"):
         _build_parser(show_all="--all" in args[1:]).print_help()
         return 0
-    # Three spellings, like `help`: `rein --version` is what everyone types first, and it once
-    # answered `unknown verb '--version'` with exit 2 — a version check that fails is read as a
-    # broken install, which is the opposite of what it was asked.
+    # `--version`/`-V` alongside the `version` verb, which dispatches below. A version check that
+    # fails is read as a broken install, which is the opposite of what it was asked.
     if args[0] in ("--version", "-V"):
         return _print_version()
-
-    # The global --repo (also accepted by every verb) may precede the verb. The split is done
-    # here rather than by parse_args because a verb's own flags must reach that verb untouched:
-    # argparse would refuse `rein next --json` as an unrecognized argument of the top parser.
-    repo_flag: str | None = None
-    if args[:1] == ["--repo"] and len(args) >= 2:
-        repo_flag, args = args[1], args[2:]
-    if not args:
-        _build_parser().print_help()
-        return 0
 
     verb, rest = args[0], args[1:]
     if verb not in VERBS:
@@ -215,7 +233,11 @@ def main(argv: list[str] | None = None) -> int:
             _build_parser().error(f"unknown verb '{verb}' — run `rein --help` for the verb list")
         except SystemExit as exc:
             return int(exc.code or 2)
-    if repo_flag is not None and verb != "start":
+    # `--repo` may have been typed on either side of the verb. Resolve one value and hand the verb
+    # exactly one, so the lock check below and the verb itself cannot read different repositories.
+    if repo_flag is None:
+        repo_flag = _flag_value(rest, "--repo")
+    elif "--repo" not in rest:
         rest = [*rest, "--repo", repo_flag]
 
     # `guard`, `doctor` and `version` are exempt from the startup lock check on purpose.
@@ -236,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if verb == "start":
-            return _start(rest, repo_flag)
+            return _start(rest)
         return _resolve(VERBS[verb].spec)(rest)
     except common.ReinError as exc:
         # Every raise behind this line has already worded its own reason (`common.ReinError`), and

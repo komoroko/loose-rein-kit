@@ -1249,8 +1249,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.merge:
         # No bodies are written: merging changes nothing a reader of the pull request would see,
         # and rewriting a body at the moment it lands would be noise in the record.
+        # Only what is still open: a re-run after a fixed conflict must not ask a human to approve
+        # merging pull requests that already landed, nor count them in what it says it will do.
+        pending = [record_ for record_ in ledger(docs.events) if not record_.merged]
+        if not pending:
+            print("\nevery pull request in the stack has already been merged")
+            return 0
         try:
-            _confirm_merge(ledger(docs.events))
+            _confirm_merge(pending)
             landed = merge_stack(repo, docs, slices)
         except (PublishError, store_mod.StoreError) as exc:
             logger.error(str(exc))

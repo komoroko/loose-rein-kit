@@ -1607,3 +1607,22 @@ def test_merge_and_ready_are_separate_steps(
 
     assert rc == 2
     assert "separate steps with a human between them" in capsys.readouterr().err
+
+
+def test_a_re_run_asks_only_about_what_is_still_open(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Confirming a re-run must not count pull requests that already landed."""
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: True)
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+    pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+
+    pending = [r for r in pr_stack.ledger(documents(bundle).events) if not r.merged]
+
+    assert pending == []
+    rc, out = run_cli(bundle, "--merge")
+    assert rc == 0
+    assert "already been merged" in out
