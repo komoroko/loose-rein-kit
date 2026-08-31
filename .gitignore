@@ -19,7 +19,7 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 # This repository's own dev-only frontend tooling (see package.json): node is needed to *test* the
-# dashboard, never to run it. package-lock.json is committed — CI installs from it.
+# dashboard, never to run it. pnpm-lock.yaml is committed — CI installs from it, frozen.
 /node_modules/
 
 # ---- mkdocs ----

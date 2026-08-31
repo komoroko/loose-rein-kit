@@ -27,7 +27,6 @@ jobs:
       # Those are the only dependencies that ship. `package.json` here is development tooling for
       # the dashboard's frontend — eslint and jsdom, run by CI and by a contributor, never by a
       # user of `rein` and never inside the wheel — so it is deliberately not audited as a
-      # supply-chain surface of the product. (This comment used to claim a `pnpm audit` step ran
-      # "when a frontend exists". No such step was ever in the make target.)
+      # supply-chain surface of the product, and `make audit` runs pip-audit and nothing else.
       - name: Run make audit
         run: make audit

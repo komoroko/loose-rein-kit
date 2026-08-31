@@ -7,10 +7,12 @@
     "test": "node --test \"tests/ui/*.test.mjs\"",
     "lint": "eslint src/rein/ui_assets tests/ui"
   },
+  "packageManager": "pnpm@11.8.0",
   "engines": {
     "node": ">=26"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "eslint": "^9.39.0",
     "jsdom": "^28.0.0"
   }

@@ -42,12 +42,12 @@ check: pre-commit pre-push template-lint sync-check frontend
 # this skips loudly rather than failing when node is absent, and CI installs node so it can never
 # skip there.
 frontend:
-	@if ! command -v node >/dev/null 2>&1; then \
-		echo "frontend: SKIPPED — node is not installed (dev-only; CI runs this)"; \
+	@if ! command -v pnpm >/dev/null 2>&1; then \
+		echo "frontend: SKIPPED — pnpm is not installed (dev-only; CI runs this)"; \
 	elif [ ! -d node_modules ]; then \
-		echo "frontend: SKIPPED — run 'npm ci' first (dev-only; CI runs this)"; \
+		echo "frontend: SKIPPED — run 'pnpm install' first (dev-only; CI runs this)"; \
 	else \
-		npm run --silent lint && npm test --silent; \
+		pnpm run --silent lint && pnpm run --silent test; \
 	fi
 
 # The package's test suite (the same suite CI's matrix runs), with coverage measured.

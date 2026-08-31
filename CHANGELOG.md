@@ -46,8 +46,11 @@ declared and never read. `package.json` adds two **development** dependencies �
 run by `make check` and by CI, in no wheel and on no user's machine. `rein` remains a Python
 package with three runtime dependencies, `rein ui` serves plain ES modules over the standard
 library, and **nobody running the CLI needs node**; the make target says so and skips loudly when
-node is absent, while CI installs it so it can never skip there. `.nvmrc` pins node 26 and is the
-single place that version is written — CI reads it rather than repeating it. `tests/ui/` boots the shipped
+pnpm is absent, while CI installs it so it can never skip there. Each version is written once and
+read from there: `.nvmrc` pins node 26, `packageManager` pins pnpm, `pnpm-lock.yaml` is committed
+and CI installs from it frozen. pnpm's strict tree immediately caught an **undeclared dependency**:
+`eslint.config.mjs` imports `@eslint/js`, which npm's flat hoisting happened to provide and nobody
+had listed. `tests/ui/` boots the shipped
 modules against a jsdom document and a scripted server: every screen and route, both gate kinds,
 all five gate-④ stages, each decision panel, the read-only page, a link to a gate the server
 refuses, and a dropped connection. A canary keeps the status fixture those tests render from from
