@@ -17,6 +17,40 @@ full `collect_status` on the SessionStart hook — the one path that runs at eve
 the one 0.3.11 was spent making cheap. And `rein pr-stack --merge` re-run after a fixed conflict
 now asks only about the pull requests still open, instead of counting the ones that already landed.
 
+**An adversarial pass over everything above, and six things it broke.**
+
+- **`rein start` refused the person who could act and reported to the hook that could not.** It
+  read `config.yaml` and `state.yaml` directly, without the tolerance `collect_status` has for a
+  schema-invalid one — so at a terminal a damaged SSOT exited 2 with a schema dump, and off one
+  (the SessionStart hook) the same repository printed its board. Now the read is guarded and falls
+  through to the board either way, which is the state a human needs *described*.
+- **`rein start --json` printed the setup wizard's first question and exited 130.** The wizard is
+  what a *bare* `rein start` does; `--json`, `--full` and `--no-mark` each name an output, and
+  answering one of those with an interactive prompt is not a slower answer but a different one.
+- **`--repo=X` was not read anywhere.** Before the verb it was `unknown verb '--repo=X'`; after it,
+  `rein start` ran its wizard check against the current directory while `resume` resolved the flag
+  — the two-repositories split that had just been fixed for the space-separated spelling. One
+  reader now takes both, on both sides.
+- **Ctrl+C at the wizard's agent-surface question was a traceback over a repository that had in
+  fact been initialized.** That question and the sandbox one are asked after the write and cannot
+  be asked before — both are about the config just seeded — so the wizard's "ask everything first"
+  contract stops at the brief, and interrupting an add-on now skips it. An answer the surface
+  question does not recognise is re-asked rather than filed as a decline, and the prompts dropped
+  their `1/2` counters, which counted two of the four questions actually put.
+- **`pr-stack --merge` showed one list and merged another.** The confirmation was built from the
+  unmerged ledger records and the merge from the slices, so after a write failure left part of a
+  landing unrecorded, a re-run showed two pull requests and handed `gh stack merge` the top of
+  three. Both come from the slices now, with already-landed members marked rather than hidden.
+- **`--merge` warned past a failed `gh stack link` and called `gh stack merge` anyway.** The stack
+  existing is that operation's precondition, and it was in the docstring rather than the code;
+  `publish` still carries on without one, because its work is already done. A single slice is not a
+  stack and is refused by name instead of failing inside gh.
+
+Also: a removed binary is no longer counted in `analyzed_files` (that counts files whose *content*
+was read, and it printed `analyzed_files: 1` beside `languages: {}`); `rein doctor` matches
+`github/gh-stack` rather than any extension whose name contains it; and the dispatcher's subparsers
+dropped a `REMAINDER` positional that nothing parsed — the help renders byte-identically without it.
+
 **A deleted binary is no longer counted as a binary nobody could read.** The Coverage Manifest
 records what it *could not read of the change*, and `parse_diff` did not record whether a file was
 removed — so `Binary files a/x and /dev/null differ` was filed as `unsupported: binary` exactly

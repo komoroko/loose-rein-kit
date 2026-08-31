@@ -777,7 +777,10 @@ def check_stack_extension() -> list[Finding]:
     rc, out = common.run(["gh", "extension", "list"], timeout=30)
     if rc != 0:
         return [Finding("INFO", "env", "could not list gh extensions — `rein pr-stack --merge` may be unavailable")]
-    if "gh-stack" in out:
+    # The owner too, not just the name: `gh extension list` prints `owner/repo`, and a bare
+    # `gh-stack` also matches a fork or a same-named extension from anybody else — which would
+    # report a `gh stack merge` this module has never been measured against as installed.
+    if "github/gh-stack" in out:
         return [Finding("PASS", "env", "gh-stack extension installed (`rein pr-stack --merge` can land a stack)")]
     return [
         Finding(

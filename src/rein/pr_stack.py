@@ -978,7 +978,12 @@ def publish(
         record(repo, docs, slice_, url, LEDGER_OPENED)
         urls.append(url)
         print(f"  {slice_.index:02d} {slice_.label}: {url or '(gh printed no url)'}")
-    link_stack(repo, urls, run=run)
+    # Not fatal here: everything this function was asked to do has already happened.
+    if problem := link_stack(repo, urls, run=run):
+        logger.warning(
+            f"the pull requests are open but could not be linked into a GitHub stack. {problem}\n"
+            "  Until they are linked, `--merge` cannot land them atomically."
+        )
     return urls
 
 
@@ -998,29 +1003,30 @@ def link_stack(
     urls: Sequence[str],
     *,
     run: Callable[..., tuple[int, str]] = common.run,
-) -> None:
-    """Register the published pull requests as a GitHub stack. Idempotent; never fatal.
+) -> str:
+    """Register the published pull requests as a GitHub stack. Idempotent. Returns "" or the reason.
 
     What this buys is not cosmetic: GitHub then enforces bottom-up merging server-side, and
     :func:`merge_stack` can land the whole thing in one atomic operation — the only shape that
     leaves the recorded commits intact (see that function).
 
-    A failure here is reported and swallowed on purpose. The pull requests are already open and
-    correct — each based on the one below it, which is what a stack *is* — so an unavailable
-    extension or a repository without the preview must not turn a completed publish into an error.
+    **Whether a failure is fatal is the caller's to decide, and the two callers differ.** For
+    :func:`publish` it is not: the pull requests are already open and correct — each based on the
+    one below it, which is what a stack *is* — so a missing extension must not turn a completed
+    publish into an error. For :func:`merge_stack` it is, because the stack existing is what that
+    operation acts on. Reporting the reason instead of raising is what lets both be true.
     """
     if len(urls) < 2 or not all(urls):
-        return  # one slice is not a stack, and a url gh did not print cannot be linked
+        return ""  # one slice is not a stack, and a url gh did not print cannot be linked
     rc, out = run(link_command(urls), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
     if rc != 0:
-        logger.warning(
-            f"the pull requests are open but could not be linked into a GitHub stack: {out}\n"
-            "  Install the extension (`gh extension install github/gh-stack`) and re-run "
-            "`rein pr-stack --push`, or link them from the pull request page. Until they are "
-            "linked, `--merge` cannot land them atomically."
+        return (
+            f"`gh stack link` failed: {out}\n"
+            "  Install the extension (`gh extension install github/gh-stack`), then re-run — or "
+            "link them from the pull request page."
         )
-        return
     print(f"  linked {len(urls)} pull request(s) into a GitHub stack")
+    return ""
 
 
 def _confirm_ready(docs: Documents, slices: Sequence[Slice], records: Sequence[LedgerRecord]) -> None:
@@ -1117,6 +1123,12 @@ def _confirm_merge(records: Sequence[LedgerRecord]) -> None:
     Merging into the default branch is the most outward-facing thing this module does and the least
     reversible, so it gets the same rule as a gate approval: a terminal, no flag that skips it, and
     the whole ordered list on screen before the answer.
+
+    ``records`` is what :func:`merge_stack` will act on — one list, derived once by the caller. It
+    used to be derived twice, from two different sources: the screen listed every record in the
+    ledger and the merge covered the *slices*, so a ledger entry the plan no longer produces was
+    shown to a human and then not merged. The one rule this module has about its own output is that
+    the printed line and the executed argv cannot diverge (:func:`merge_command`).
     """
     if not common.stdin_is_terminal():
         raise PublishError(
@@ -1125,7 +1137,9 @@ def _confirm_merge(records: Sequence[LedgerRecord]) -> None:
         )
     print(f"This will merge all {len(records)} pull request(s) of the stack into the base:\n")
     for record_ in records:
-        print(f"  {record_.index:02d} {record_.task_id or models.STACK_TAIL_SUFFIX}: {record_.url or record_.branch}")
+        already = "  (already merged)" if record_.merged else ""
+        name = record_.task_id or models.STACK_TAIL_SUFFIX
+        print(f"  {record_.index:02d} {name}: {record_.url or record_.branch}{already}")
     print(
         "\nThey land together, as merge commits, in one all-or-nothing operation: if any of them "
         "cannot be merged, none are. Nothing here can be squashed, rebased, or merged in part."
@@ -1153,6 +1167,11 @@ def merge_stack(
     Every slice is recorded as merged once the operation succeeds; a refusal records nothing,
     because nothing moved.
     """
+    if len(slices) < 2:
+        raise PublishError(
+            "there is only one slice, which is not a stack — `gh stack merge` has nothing to land. "
+            "Merge that single pull request yourself; with nothing above it there is no order to get wrong."
+        )
     records = {r.index: r for r in ledger(docs.events)}
     missing = [s.label for s in slices if not (rec := records.get(s.index)) or not rec.url]
     if missing:
@@ -1163,9 +1182,16 @@ def merge_stack(
     # Link here rather than trusting `--push` to have done it. Linking is idempotent by design
     # ("if some of the PRs are already in a stack, the existing stack is updated"), and the stack
     # existing is this function's own precondition: `--push` may have run before the extension was
-    # installed, or on a machine that never had it. Hoping an earlier command left the right state
-    # is what turns a missing stack into a refusal a reader has to decode.
-    link_stack(repo, [records[s.index].url for s in slices], run=run)
+    # installed, or on a machine that never had it.
+    #
+    # Refused, not warned about. `publish` can carry on without a stack because its work is already
+    # done; this operation *is* the stack, and continuing to `gh stack merge` against an unlinked
+    # one only swaps this sentence for gh's, which does not say what to do.
+    if problem := link_stack(repo, [records[s.index].url for s in slices], run=run):
+        raise PublishError(
+            f"the pull requests are not registered as a GitHub stack, so `gh stack merge` has "
+            f"nothing to land. {problem}\n  nothing was merged."
+        )
     top = records[slices[-1].index]
     rc, out = run(merge_command(top.url), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
     if rc != 0:
@@ -1312,14 +1338,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.merge:
         # No bodies are written: merging changes nothing a reader of the pull request would see,
         # and rewriting a body at the moment it lands would be noise in the record.
-        # The merge is all-or-nothing, so the only way back here is a stack that already landed
-        # whole. Say so rather than asking a human to approve merging what is no longer open.
-        pending = [record_ for record_ in ledger(docs.events) if not record_.merged]
-        if not pending:
+        #
+        # `covered` is the slices, which is what `merge_stack` acts on — the same list the human is
+        # about to see. Listing the *ledger* instead showed records for slices the plan no longer
+        # produces, so the screen named pull requests the merge would not touch. A record with no
+        # slice is `merge_stack`'s to refuse, not this screen's to promise.
+        records = {r.index: r for r in ledger(docs.events)}
+        covered = [records[s.index] for s in slices if s.index in records]
+        if covered and all(record_.merged for record_ in covered):
+            # The merge is all-or-nothing, so the only way back here is a stack that already landed
+            # whole. Say so rather than asking a human to approve merging what is no longer open.
             print("\nevery pull request in the stack has already been merged")
             return 0
         try:
-            _confirm_merge(pending)
+            _confirm_merge(covered)
             landed = merge_stack(repo, docs, slices)
         except (PublishError, store_mod.StoreError) as exc:
             logger.error(str(exc))

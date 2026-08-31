@@ -128,18 +128,20 @@ def _build_parser(*, show_all: bool = False) -> argparse.ArgumentParser:
     )
     parser.add_argument("--repo", metavar="PATH", default=None, help="repository root (default: discovered from cwd)")
     parser.add_argument("--version", "-V", action="version", version=rein.__version__)
+    # This parser renders — the usage line, the verb listing, the `invalid choice` error — and
+    # never parses: `main` splits the verb off itself, because argparse would refuse a verb's own
+    # flags (`rein next --json`) as unrecognized top-level arguments. So each verb needs nothing
+    # but its name registered as a choice.
+    #
+    # A subparser is listed only when `help` is passed at all (argparse appends the pseudo-action
+    # from that keyword), so an omitted `help` is how a verb stays a valid choice and unlisted.
+    # `help=argparse.SUPPRESS` does not hide it — it prints "==SUPPRESS==".
     sub = parser.add_subparsers(dest="verb", metavar="<verb>")
     for name, verb in VERBS.items():
-        # add_help=False so `rein build --help` is not answered here: REMAINDER carries it down to
-        # the module's own parser, which is the one that knows the flags.
-        # A subparser is listed only when `help` is passed at all (argparse appends the pseudo-
-        # action from that keyword), so an omitted `help` is how a verb stays dispatchable and
-        # unlisted. `help=argparse.SUPPRESS` does not hide it — it prints "==SUPPRESS==".
         if show_all or verb.human:
-            child = sub.add_parser(name, add_help=False, help=verb.summary)
+            sub.add_parser(name, help=verb.summary)
         else:
-            child = sub.add_parser(name, add_help=False)
-        child.add_argument("rest", nargs=argparse.REMAINDER)
+            sub.add_parser(name)
     return parser
 
 
@@ -159,17 +161,31 @@ def _lock_check(repo_flag: str | None) -> int:
     return 0
 
 
-def _flag_value(args: list[str], flag: str) -> str | None:
-    """The value following `flag` in `args`, or None.
+_REPO_EQ = "--repo="
 
-    One reader, because `--repo` may be typed on either side of the verb and the dispatcher and
-    the verb must not end up pointed at two different repositories.
+
+def _split_repo(args: list[str]) -> tuple[str | None, list[str]]:
+    """`(the --repo value, everything else)`, accepting both `--repo X` and `--repo=X`.
+
+    One reader for both spellings, because `--repo` may be typed on either side of the verb and
+    the dispatcher and the verb must not end up pointed at two different repositories. Reading
+    only the space-separated form left exactly that split open for `--repo=X`: the wizard check
+    resolved the current directory while the verb below it resolved the flag.
     """
-    if flag in args:
-        index = args.index(flag)
-        if index + 1 < len(args):
-            return args[index + 1]
-    return None
+    value: str | None = None
+    rest: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--repo" and index + 1 < len(args):
+            value, index = args[index + 1], index + 2
+            continue
+        if arg.startswith(_REPO_EQ):
+            value, index = arg[len(_REPO_EQ) :], index + 1
+            continue
+        rest.append(arg)
+        index += 1
+    return value, rest
 
 
 def _start(rest: list[str]) -> int:
@@ -177,8 +193,9 @@ def _start(rest: list[str]) -> int:
     from rein import init_cmd, resume, status_api
     from rein import store as store_mod
 
+    repo_flag, asked_for = _split_repo(rest)
     try:
-        repo = repo_mod.get(_flag_value(rest, "--repo"))
+        repo = repo_mod.get(repo_flag)
         root = repo.root
     except repo_mod.RepoNotFoundError:
         # No repository at all: the wizard is the only thing that can help, and only on a TTY.
@@ -190,13 +207,29 @@ def _start(rest: list[str]) -> int:
             )
             return 2
         return init_cmd.wizard()
-    # Two document reads, not a status collection: `resume` below runs the one `collect_status`
-    # this verb should cost, and asking the whole object whether the repo is still a template
-    # would run its git subprocesses, digests and readiness probes for a boolean the config and
-    # the state already carry. Only a TTY can act on the answer, so only a TTY pays even that.
-    if sys.stdin.isatty():
-        store = store_mod.Store(repo)
-        if status_api.is_uninitialized(store.read_config(), store.read_state()):
+    # The wizard is what a bare `rein start` does when there is nothing to report and somebody is
+    # there to answer. Any other argument names an output — `--json` is a machine-readable
+    # request, `--full` a board, `--no-mark` a look — and answering one of those with an
+    # interactive prompt is not a slower answer, it is a different one: `rein start --json` on a
+    # fresh checkout printed the setup wizard's first question and exited 130.
+    #
+    # Two document reads decide it, not a status collection: `resume` below runs the one
+    # `collect_status` this verb should cost, and asking the whole object whether the repo is
+    # still a template would run its git subprocesses, digests and readiness probes for a boolean
+    # the config and the state already carry.
+    if sys.stdin.isatty() and not asked_for:
+        try:
+            store = store_mod.Store(repo)
+            uninitialized = status_api.is_uninitialized(store.read_config(), store.read_state())
+        except common.ReinError as exc:
+            # An unreadable or schema-invalid SSOT is a state a human needs *described*, and
+            # `collect_status` describes it (it catches the same errors and degrades to a
+            # warning). Reading the documents here without that tolerance made `rein start` refuse
+            # at a terminal and report off one — the person who can act on it got the traceback's
+            # worth, and the hook that cannot got the board.
+            logger.warning(f"rein start: {exc}")
+            uninitialized = False
+        if uninitialized:
             return init_cmd.wizard(Path(root))
     # Off a TTY a repo still waiting for `init` gets the packet anyway: it already leads with
     # `rein init --name <product>`, which is the answer. Refusing there is what kept the hook on
@@ -218,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
     repo_flag: str | None = None
     if args[:1] == ["--repo"] and len(args) >= 2:
         repo_flag, args = args[1], args[2:]
+    elif args[:1] and args[0].startswith(_REPO_EQ):
+        repo_flag, args = args[0][len(_REPO_EQ) :], args[1:]
 
     # `help` as a verb, alongside argparse's -h/--help, and `--all` on either spelling.
     if not args or args[0] in ("help", "-h", "--help"):
@@ -236,9 +271,10 @@ def main(argv: list[str] | None = None) -> int:
             return int(exc.code or 2)
     # `--repo` may have been typed on either side of the verb. Resolve one value and hand the verb
     # exactly one, so the lock check below and the verb itself cannot read different repositories.
+    typed_after, _ = _split_repo(rest)
     if repo_flag is None:
-        repo_flag = _flag_value(rest, "--repo")
-    elif "--repo" not in rest:
+        repo_flag = typed_after
+    elif typed_after is None:
         rest = [*rest, "--repo", repo_flag]
 
     # `guard`, `doctor` and `version` are exempt from the startup lock check on purpose.

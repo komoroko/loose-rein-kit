@@ -578,7 +578,12 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
                 # so deleting a committed artifact shut the gate on a change that had removed the
                 # very thing nobody could read. The remedy the block names ("split the unreadable
                 # part out of this scope") does not exist for a deletion.
-                analyzed += 1
+                #
+                # Not counted in `analyzed_files` either: that is a count of files whose *content*
+                # was read, and this one has none. Counting it produced `analyzed_files: 1` beside
+                # `languages: {}` — one file read, in no language — which is the sort of pair a
+                # reader has to stop and decode. There is simply nothing here for the manifest to
+                # be a statement about; the deletion is in the diff, where every reviewer sees it.
                 continue
             has_binary = True
             unsupported.append({"path": file.path, "reason": "binary"})

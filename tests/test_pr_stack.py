@@ -1670,6 +1670,70 @@ def test_a_failed_link_leaves_the_published_stack_alone(
     assert "gh extension install github/gh-stack" in caplog.text
 
 
+def test_a_failed_link_refuses_the_merge_instead_of_warning_past_it(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    """What `publish` may carry on without, this operation *is*.
+
+    Linking was swallowed with a warning on both paths, so `--merge` went on to `gh stack merge`
+    against an unlinked stack and the reader got gh's error instead of the one that says what to
+    install. The precondition was in the docstring and not in the code.
+    """
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+    failing, calls = recorder({("gh", "stack", "link"): (1, 'unknown command "stack" for "gh"')})
+
+    with pytest.raises(pr_stack.PublishError, match="nothing was merged"):
+        pr_stack.merge_stack(bundle["repo"], docs, slices, run=failing)
+
+    assert not [cmd for cmd in calls if cmd[:3] == ["gh", "stack", "merge"]]
+    records = pr_stack.ledger(event_chain.load(bundle["root"] / ".rein/events.ndjson"))
+    assert not any(r.merged for r in records)
+
+
+def test_the_merge_screen_lists_every_slice_the_operation_covers(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One list, derived once — and it is the slices, because that is what the merge acts on.
+
+    The screen was built from the *unmerged* ledger records and the merge from `slices`, so after a
+    write failure left part of a landing unrecorded, a re-run showed a human two pull requests and
+    then handed `gh stack merge` the top of three. `gh stack merge <top>` always covers everything
+    below it; the ones that already landed belong on the screen, marked, not hidden from it.
+    """
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: True)
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+
+    # The write that records the landing fails on the last slice: the stack merged, the log does
+    # not say so for all of it.
+    real_record = pr_stack.record
+    calls: list[str] = []
+
+    def flaky(repo: Any, documents_: Any, slice_: Any, url: str, action: str) -> None:
+        calls.append(slice_.label)
+        if action == pr_stack.LEDGER_MERGED and len(calls) == len(slices):
+            raise store_mod.StoreError("disk full")
+        real_record(repo, documents_, slice_, url, action)
+
+    monkeypatch.setattr(pr_stack, "record", flaky)
+    with pytest.raises(store_mod.StoreError):
+        pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+    monkeypatch.setattr(pr_stack, "record", real_record)
+
+    records = {r.index: r for r in pr_stack.ledger(documents(bundle).events)}
+    assert [r.merged for r in records.values()] == [True] * (len(slices) - 1) + [False]
+
+    # What the human is shown, before anything is handed to gh — which is what this test is about.
+    _rc, out = run_cli(bundle, "--merge")
+
+    assert f"merge all {len(slices)} pull request(s)" in out
+    assert out.count("(already merged)") == len(slices) - 1
+
+
 def test_merge_links_the_stack_rather_than_trusting_push_to_have_done_it(
     cycle: Callable[..., dict[str, Any]],
 ) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -352,11 +353,14 @@ def test_wizard_asks_only_name_and_brief(
     proj.mkdir()
     assert init_cmd.wizard(proj) == 0
     # Only two questions are posed up front: the product name (defaulting to the folder) and the
-    # brief. The surface and the sandbox are asked during the run, each with a default.
-    assert any("1/2 product name" in p for p in prompts)
+    # brief. The surface and the sandbox are asked during the run, each with a default — which is
+    # why neither prompt carries an "n of N": whether those two are asked at all depends on what
+    # the seeded config turns out to say, so any count printed here would be a guess.
+    assert any("product name" in p for p in prompts)
     assert not any("work branch" in p or "source URL" in p or "headless" in p for p in prompts)
+    assert not any(re.search(r"\d/\d", p) for p in prompts)
     out = capsys.readouterr().out
-    assert "2/2 What do you want to build?" in out
+    assert "What do you want to build?" in out
     # Name defaults to the folder, branch to build/<name>, source is the detected one.
     state = (proj / ".rein" / "state.yaml").read_text(encoding="utf-8")
     assert 'project: "myproduct"' in state
@@ -508,6 +512,35 @@ def test_a_repo_that_already_has_a_surface_is_not_asked_again(tmp_path: Path) ->
 
     line = init_cmd.surface_step(tmp_path, offer=True, ask=refuse)
     assert "already present (claude)" in line
+
+
+def test_an_unrecognised_answer_is_asked_again_not_read_as_a_decline(tmp_path: Path) -> None:
+    """`cluade` is a typo. Filing it as "no thanks" answers the question on the human's behalf."""
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    answers = iter(["cluade", "claude"])
+
+    def ask(_prompt: str, _default: str = "") -> str:
+        return next(answers)
+
+    assert "installed claude" in init_cmd.surface_step(tmp_path, offer=True, ask=ask)
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, EOFError])
+def test_interrupting_an_add_on_skips_it_rather_than_crashing(tmp_path: Path, interrupt: type[BaseException]) -> None:
+    """These two questions are asked *after* the repository is written, and cannot be asked before.
+
+    The surface question is about the config that was just seeded and the sandbox question about
+    the profiles in it, so the wizard's "ask everything first, then write" contract stops at the
+    brief. Ctrl+C here used to come out as a traceback over a repository that had in fact been
+    initialized — a completed setup reported as a crash.
+    """
+
+    def interrupted(*_args: str) -> str:
+        raise interrupt()
+
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    assert "skipped" in init_cmd.surface_step(tmp_path, offer=True, ask=interrupted)
+    assert "skipped" in init_cmd.sandbox_step(tmp_path, offer=True, ask=interrupted)
 
 
 def test_the_detected_default_comes_from_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

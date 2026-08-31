@@ -131,6 +131,62 @@ def test_start_honours_a_repo_flag_typed_after_the_verb(
     assert "Since last time" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("spelling", ["--repo={path}", "--repo {path}"])
+def test_the_repo_flag_is_read_in_both_spellings_on_both_sides(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], spelling: str
+) -> None:
+    """`--repo=X` is what argparse's own `--repo PATH` help promises, and it was not read.
+
+    Before the verb it was `unknown verb '--repo=X'` with exit 2. After it, `_flag_value` saw
+    nothing, so `rein start` ran its wizard check against the current directory while `resume`
+    resolved the flag — the two-repositories split the space-separated form had already been fixed
+    for.
+    """
+    monkeypatch.chdir(repo.parent)  # cwd is not a repo; only the flag points at one
+    typed = spelling.format(path=repo).split(" ")
+    assert cli.main([*typed, "next"]) == 0
+    assert capsys.readouterr().out.startswith("next: /build")
+    assert cli.main(["start", *typed]) == 0
+    assert "Since last time" in capsys.readouterr().out
+
+
+def test_start_only_runs_the_wizard_for_a_bare_invocation(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--json` asks for an object; answering it with a setup prompt is a different answer.
+
+    On a TTY in a template checkout `rein start --json` printed the wizard's first question and
+    exited 130, so nothing calling it for JSON could rely on getting any.
+    """
+    (repo / ".rein" / "config.yaml").write_bytes(store.dump_yaml(make_config(template_mode=True)))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+    def fail(root: Path | None = None) -> int:
+        raise AssertionError("the wizard ran for an invocation that asked for output")
+
+    monkeypatch.setattr(init_cmd, "wizard", fail)
+    assert cli.main(["start", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["project"] == "demo"
+    assert cli.main(["start", "--full", "--no-mark"]) == 0
+    assert "### Gates" in capsys.readouterr().out
+
+
+def test_start_describes_an_unreadable_ssot_instead_of_refusing(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A schema-invalid state.yaml is exactly what a human needs `rein start` to describe.
+
+    Reading the two documents without `collect_status`'s tolerance inverted who got helped: at a
+    terminal the verb exited 2 with a schema dump, and off one — the SessionStart hook, which can
+    act on nothing — it printed the board.
+    """
+    (repo / ".rein" / "state.yaml").write_text("project: demo\nbogus: 1\n", encoding="utf-8")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(init_cmd, "wizard", lambda root=None: 0)
+    assert cli.main(["start"]) == 0
+    assert "Since last time" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("tty", [False, True])
 def test_start_collects_the_status_exactly_once(repo: Path, monkeypatch: pytest.MonkeyPatch, tty: bool) -> None:
     """`resume` collects; the wizard decision reads two documents instead of asking again.

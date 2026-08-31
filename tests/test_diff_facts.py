@@ -158,6 +158,10 @@ def test_a_removed_binary_is_not_an_unread_one() -> None:
     assert facts.coverage.unsupported_files == ()
     assert facts.coverage.binary_semantics_analyzed is True
     assert facts.coverage.coverage_status == "sufficient"
+    # Nor counted as read: `analyzed_files` counts files whose content was analyzed, and there is
+    # none. Counting it printed `analyzed_files: 1` beside `languages: {}` — read, in no language.
+    assert facts.coverage.analyzed_files == 0
+    assert facts.coverage.languages == {}
 
 
 def test_an_added_binary_is_still_unread() -> None:

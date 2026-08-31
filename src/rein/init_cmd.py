@@ -325,8 +325,16 @@ def sandbox_step(root: Path, *, offer: bool, ask: Callable[[str], str] | None = 
 
     print(f"\nSandbox: {', '.join(config.unsandboxed_code_profiles())} would run repository code on this host.")
     print(f"  Building the packaged images fixes it: `{command}`. It takes a few minutes.")
-    if (ask("  build them now? [y/N]") or "n").strip().lower() not in ("y", "yes"):
-        return f"sandbox: skipped — run `{command}` when you are ready"
+    skipped = f"sandbox: skipped — run `{command}` when you are ready"
+    try:
+        answer = (ask("  build them now? [y/N]") or "n").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        # Same rule as `surface_step`: the repository is already initialized when this is asked, so
+        # an interrupt declines the add-on rather than aborting anything.
+        print()
+        return skipped
+    if answer not in ("y", "yes"):
+        return skipped
     rc = oci_cli.main(["build", "--all", "--write-config", "--repo", str(root)])
     return "sandbox: built and pinned" if rc == 0 else f"sandbox: build failed (rc={rc}) — re-run `{command}`"
 
@@ -346,8 +354,8 @@ def detect_agent(root: Path) -> str | None:
         return "codex"
     if (root / ".github" / "prompts").is_dir():
         return "copilot"
-    for cli, name in (("claude", "claude"), ("codex", "codex")):
-        if shutil.which(cli):
+    for name in ("claude", "codex"):
+        if shutil.which(name):
             return name
     return None
 
@@ -360,6 +368,10 @@ def surface_step(root: Path, *, offer: bool, ask: Callable[[str, str], str] | No
     "opt-in" step mandatory in practice, and the tool paid for it at runtime — every recommendation
     starting with `/` had to carry a "no agent surface is installed" sentence, computed on the fly.
     Asking here is the same bargain `sandbox_step` already takes: a question with a default.
+
+    Interrupting the question skips the step: by the time it is asked the repository is already
+    initialized and usable, so Ctrl+C here means "not this", not "undo that" — and a traceback out
+    of an add-on would report a completed initialization as a crash.
     """
     repo = repo_mod.Repo(root)
     installed = [name for name in install_mod.INTEGRATIONS if install_mod.present_surfaces(repo, name)]
@@ -368,12 +380,23 @@ def surface_step(root: Path, *, offer: bool, ask: Callable[[str, str], str] | No
     choices = ", ".join(sorted(install_mod.INTEGRATIONS))
     if not offer or ask is None:
         return f"agent surface: none yet — run `rein install <agent>` ({choices})"
+    skipped = f"agent surface: skipped — run `rein install <agent>` ({choices}) when you want one"
 
     default = detect_agent(root) or "none"
     print("\nAgent surface: the phase commands (/req, /design, …) exist only once one is installed.")
-    answer = (ask(f"  install which? ({choices}, or none)", default) or "none").strip().lower()
-    if answer not in install_mod.INTEGRATIONS:
-        return f"agent surface: skipped — run `rein install <agent>` ({choices}) when you want one"
+    try:
+        # Re-asked rather than read as a decline: `cluade` is a typo, and treating an answer nobody
+        # recognises as "no thanks" answers the question on the human's behalf.
+        while True:
+            answer = (ask(f"  install which? ({choices}, or none)", default) or "none").strip().lower()
+            if answer in install_mod.INTEGRATIONS or answer == "none":
+                break
+            print(f"  '{answer}' is not one of: {choices}, none")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return skipped
+    if answer == "none":
+        return skipped
     rc = install_mod.install_integration(repo, answer, announce_next=False)
     return (
         f"agent surface: installed {answer}"
@@ -523,7 +546,7 @@ def _ask(prompt: str, default: str = "") -> str:
 
 
 def _ask_brief() -> str:
-    print("2/2 What do you want to build? (1-3 lines for docs/00-product-brief.md;")
+    print("What do you want to build? (1-3 lines for docs/00-product-brief.md;")
     lines: list[str] = []
     while len(lines) < 3:
         line = input("  empty line to finish, Enter now to skip: " if not lines else "  ").strip()
@@ -534,12 +557,20 @@ def _ask_brief() -> str:
 
 
 def wizard(root: Path | None = None) -> int:
-    """Interactive first-run setup: ask everything first, then write (Ctrl+C mid-question loses nothing)."""
+    """Interactive first-run setup, in two halves.
+
+    **Nothing is written until both questions below are answered**, so Ctrl+C during either loses
+    nothing. What `run_init` asks *after* that — the agent surface, the sandboxes — are add-ons to a
+    repository that is already initialized: they cannot be asked earlier, because both questions are
+    about the config that was just written, and interrupting one skips that step rather than
+    aborting anything. There is no question count in the prompts for the same reason: whether the
+    later two are asked at all depends on what the seeded config turns out to say.
+    """
     common.configure_logging()
     root = (root or Path.cwd()).resolve()
-    print("Loose Rein setup — Enter accepts the [default]; Ctrl+C aborts without writing.")
+    print("Loose Rein setup — Enter accepts the [default]; Ctrl+C now aborts without writing.")
     try:
-        name = _ask("1/2 product name", root.name)
+        name = _ask("product name", root.name)
         summary = _ask_brief()
     except (KeyboardInterrupt, EOFError):
         logger.error("\naborted — nothing was written.")
