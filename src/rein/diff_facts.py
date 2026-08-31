@@ -57,6 +57,10 @@ class DiffFile:
     binary: bool = False
     #: A path that git reports renamed-from, so a reviewer can tell a move from a rewrite.
     old_path: str = ""
+    #: The change removes the file, from git's `deleted file mode` header. Without it the
+    #: manifest could not tell content it failed to read from content the change takes away —
+    #: see `build_coverage`, where the two answers differ for a binary.
+    deleted: bool = False
 
     @property
     def added_lines(self) -> list[str]:
@@ -84,6 +88,10 @@ class DiffFile:
 _TOKEN = r'"(?:[^"\\]|\\.)*"|\S+'
 _DIFF_GIT = re.compile(rf"^diff --git (?P<a>{_TOKEN}) (?P<b>{_TOKEN})$")
 _RENAME_FROM = re.compile(rf"^rename from (?P<p>{_TOKEN})$")
+#: git's extended header for a removal. It is the only marker a *binary* deletion carries: the
+#: `+++ /dev/null` line text deletions get is not emitted for one, so a parser that reads only
+#: hunk headers cannot tell `Binary files a/x and /dev/null differ` from a modification.
+_DELETED_FILE = re.compile(r"^deleted file mode [0-7]+$")
 
 #: git's C-style escapes. Octal is handled separately: it produces a byte, not a character.
 _C_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
@@ -137,12 +145,15 @@ def parse_diff(diff_text: str) -> list[DiffFile]:
     """Parse a `git diff` (unified format) into per-file added/removed lines.
 
     A binary file shows as `Binary files … differ` or a `GIT binary patch`; it carries no
-    text hunks and is flagged so the coverage manifest can record it as unanalyzable.
+    text hunks and is flagged so the coverage manifest can record it as unanalyzable. Whether
+    the change *removes* the file is read from the same header block, because for a binary that
+    is the difference between content nothing here could read and content that is no longer there.
     """
     files: list[DiffFile] = []
     path = ""
     old_path = ""
     binary = False
+    deleted = False
     hunks: list[Hunk] = []
     added: list[str] = []
     removed: list[str] = []
@@ -156,7 +167,7 @@ def parse_diff(diff_text: str) -> list[DiffFile]:
     def flush_file() -> None:
         flush_hunk()
         if path:
-            files.append(DiffFile(path=path, hunks=tuple(hunks), binary=binary, old_path=old_path))
+            files.append(DiffFile(path=path, hunks=tuple(hunks), binary=binary, old_path=old_path, deleted=deleted))
 
     for line in diff_text.splitlines():
         named = header_path(line)
@@ -165,11 +176,15 @@ def parse_diff(diff_text: str) -> list[DiffFile]:
             path = named
             old_path = ""
             binary = False
+            deleted = False
             hunks = []
             continue
         renamed = _RENAME_FROM.match(line)
         if renamed:
             old_path = _unquote(renamed.group("p"))
+            continue
+        if _DELETED_FILE.match(line):
+            deleted = True
             continue
         if line.startswith("Binary files ") or line.startswith("GIT binary patch"):
             binary = True
@@ -555,6 +570,16 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
             generated.append({"path": file.path, "source_locator": ""})
             continue
         if file.binary:
+            if file.deleted:
+                # Nothing went unread: the change is that the bytes are gone, and that is stated
+                # in full by the path. Calling it "binary, unanalyzable" conflated *could not
+                # read* with *is not there*, and the price was not a wording — `coverage_gap_risk`
+                # floors an unread binary at `high`, and `coverage_blocks` blocks gate ④ at high,
+                # so deleting a committed artifact shut the gate on a change that had removed the
+                # very thing nobody could read. The remedy the block names ("split the unreadable
+                # part out of this scope") does not exist for a deletion.
+                analyzed += 1
+                continue
             has_binary = True
             unsupported.append({"path": file.path, "reason": "binary"})
             continue

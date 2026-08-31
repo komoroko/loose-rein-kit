@@ -139,6 +139,58 @@ def test_binary_file_is_unsupported_and_insufficient() -> None:
     assert facts.coverage.unsupported_files[0]["reason"] == "binary"
 
 
+def test_a_removed_binary_is_not_an_unread_one() -> None:
+    """Deleting a blob leaves no bytes to read, so it is not a coverage gap.
+
+    The manifest says what it could not read *of the change*. For a removal there is nothing:
+    the path is the whole fact, and it was read. Recording it as `binary`/`unsupported` floored
+    `coverage_gap_risk` at high and shut gate ④ on changes whose only unreadable file had been
+    deleted — with no remedy, since splitting the scope never removes a file from a diff.
+    """
+    diff = (
+        "diff --git a/fixtures/blob.bin b/fixtures/blob.bin\n"
+        "deleted file mode 100644\n"
+        "index 0f49c4a..0000000\n"
+        "Binary files a/fixtures/blob.bin and /dev/null differ\n"
+    )
+    facts = diff_facts.analyze(diff)
+    assert facts.files[0].deleted is True
+    assert facts.coverage.unsupported_files == ()
+    assert facts.coverage.binary_semantics_analyzed is True
+    assert facts.coverage.coverage_status == "sufficient"
+
+
+def test_an_added_binary_is_still_unread() -> None:
+    """The `new file mode` twin of the case above: these bytes are in the tree and unread."""
+    diff = (
+        "diff --git a/fixtures/blob.bin b/fixtures/blob.bin\n"
+        "new file mode 100644\n"
+        "Binary files /dev/null and b/fixtures/blob.bin differ\n"
+    )
+    facts = diff_facts.analyze(diff)
+    assert facts.files[0].deleted is False
+    assert facts.coverage.unsupported_files[0]["reason"] == "binary"
+    assert facts.coverage.coverage_status == "insufficient"
+
+
+def test_deletion_is_read_per_file_not_carried_across_the_diff() -> None:
+    """A `deleted file mode` belongs to its own header block and resets at the next one."""
+    diff = (
+        "diff --git a/a.bin b/a.bin\ndeleted file mode 100644\nBinary files a/a.bin and /dev/null differ\n"
+        "diff --git a/b.bin b/b.bin\nBinary files a/b.bin and b/b.bin differ\n"
+    )
+    facts = diff_facts.analyze(diff)
+    assert [f.deleted for f in facts.files] == [True, False]
+    assert [entry["path"] for entry in facts.coverage.unsupported_files] == ["b.bin"]
+
+
+def test_a_removed_lockfile_is_still_a_dependency_change() -> None:
+    """Not a gap to read, but still a signal: the dependency is gone, which is a change."""
+    diff = "diff --git a/uv.lock b/uv.lock\ndeleted file mode 100644\nBinary files a/uv.lock and /dev/null differ\n"
+    facts = diff_facts.analyze(diff)
+    assert [hit.signal for hit in facts.signals] == ["dependency"]
+
+
 def test_generated_file_is_recorded_not_analyzed() -> None:
     facts = diff_facts.analyze(_diff("src/generated/client.py", added=["def call(): ..."]))
     assert facts.coverage.generated_files[0]["path"] == "src/generated/client.py"

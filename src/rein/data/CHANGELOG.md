@@ -17,10 +17,24 @@ full `collect_status` on the SessionStart hook — the one path that runs at eve
 the one 0.3.11 was spent making cheap. And `rein pr-stack --merge` re-run after a fixed conflict
 now asks only about the pull requests still open, instead of counting the ones that already landed.
 
+**A deleted binary is no longer counted as a binary nobody could read.** The Coverage Manifest
+records what it *could not read of the change*, and `parse_diff` did not record whether a file was
+removed — so `Binary files a/x and /dev/null differ` was filed as `unsupported: binary` exactly
+like an added blob. That is not a wording: `coverage_gap_risk` floors an unread binary at `high`
+and `coverage_blocks` blocks gate ④ at high, so **deleting a committed artifact shut the gate on
+the change that removed the very thing nobody could read** — with no way out, since the block's own
+remedy ("split the unreadable part out of this scope") cannot remove a file from a diff. `DiffFile`
+now carries `deleted`, read from git's `deleted file mode` header (the only marker a binary
+deletion has — the `+++ /dev/null` line text deletions get is not emitted for one), and a removed
+binary is neither unread nor a gap: the path is the whole fact and it was read. An **added or
+modified** binary is unchanged — those bytes are in the tree and nothing here parsed them. A
+removed lockfile still fires the `dependency` signal; a deletion is still a change.
+
 **`.coverage` stopped being tracked.** `make test` rewrote it on every run and nothing read it —
 not CI, not the makefile — so every branch that ran the tests carried a binary blob in its diff,
 which is `rein doctor`'s "binary file in the change under review" FAIL and a `coverage:
-insufficient` at gate ④.
+insufficient` at gate ④. It was tracked by a `git add -A` in the first place, so `.coverage` and
+`.coverage.*` are now ignored.
 
 **Two of the fixes above were routing around the cause, not removing it.** `rein start` asked
 `collect_status` whether the repository was still a template — the git subprocesses, digests and
