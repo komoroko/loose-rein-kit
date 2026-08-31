@@ -16,6 +16,7 @@ import pytest
 
 from rein import models, status_api
 from rein import repo as repo_mod
+from rein import store as store_mod
 from tests._support import (
     SANDBOXED_PROFILES,
     chain,
@@ -36,8 +37,7 @@ BASE: dict[str, Any] = dict(
     counts=None,
     attention_count=0,
     chain_defects=0,
-    template_mode=False,
-    placeholders=False,
+    uninitialized=False,
     gate_chain_broken=False,
     plan_missing=False,
     unsandboxed_profiles=[],
@@ -54,14 +54,13 @@ def decide(**overrides: object) -> status_api.Recommendation:
 
 def test_a_damaged_chain_outranks_everything() -> None:
     """Every receipt binds a chain root; nothing else matters until the log is intact."""
-    rec = decide(chain_defects=3, template_mode=True, gate_chain_broken=True)
+    rec = decide(chain_defects=3, uninitialized=True, gate_chain_broken=True)
     assert rec.command == "rein events --verify"
     assert rec.kind == "fix"
 
 
 def test_the_raw_template_is_pointed_at_init() -> None:
-    assert decide(template_mode=True).command.startswith("rein init")
-    assert decide(placeholders=True).kind == "setup"
+    assert decide(uninitialized=True).command.startswith("rein init")
 
 
 def test_a_broken_gate_ladder_is_a_repair_not_a_phase() -> None:
@@ -586,8 +585,7 @@ def test_a_blocking_finding_the_plan_owns_is_recommended_before_the_phase_comman
         counts={"todo": 0, "in-progress": 0, "done": 2, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
         attention_count=0,
         chain_defects=0,
-        template_mode=False,
-        placeholders=False,
+        uninitialized=False,
         gate_chain_broken=False,
         plan_missing=False,
         unsandboxed_profiles=[],
@@ -611,8 +609,7 @@ def test_no_finding_leaves_the_build_recommendation_alone() -> None:
         counts={"todo": 1, "in-progress": 0, "done": 0, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
         attention_count=0,
         chain_defects=0,
-        template_mode=False,
-        placeholders=False,
+        uninitialized=False,
         gate_chain_broken=False,
         plan_missing=False,
         unsandboxed_profiles=[],
@@ -620,3 +617,30 @@ def test_no_finding_leaves_the_build_recommendation_alone() -> None:
     )
 
     assert "--from-review" not in rec.command
+
+
+@pytest.mark.parametrize(
+    ("template_mode", "project", "expected"),
+    [
+        (True, "demo", True),  # template_mode alone is enough
+        (False, "<product-name>", True),  # so is an unfilled placeholder
+        (False, "demo", False),
+    ],
+)
+def test_uninitialized_is_decided_by_two_documents(
+    tmp_path: Path, template_mode: bool, project: str, expected: bool
+) -> None:
+    """One definition of "not a product yet", so `rein start` and the recommendation agree.
+
+    `rein start` calls this directly rather than collecting the whole status object, which would
+    run git subprocesses and readiness probes for a boolean these two documents already carry.
+    """
+    seed_repo(tmp_path, config=make_config(template_mode=template_mode), state=make_state(project=project))
+    store = store_mod.Store(repo_mod.Repo(tmp_path))
+
+    assert status_api.is_uninitialized(store.read_config(), store.read_state()) is expected
+
+
+def test_nothing_read_yet_is_treated_as_uninitialized(tmp_path: Path) -> None:
+    """Fail closed: a repository whose documents cannot be read is not a product to work in."""
+    assert status_api.is_uninitialized(None, None) is True

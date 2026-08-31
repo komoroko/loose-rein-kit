@@ -1668,3 +1668,24 @@ def test_a_failed_link_leaves_the_published_stack_alone(
     assert len(urls) == 3
     assert "could not be linked into a GitHub stack" in caplog.text
     assert "gh extension install github/gh-stack" in caplog.text
+
+
+def test_merge_links_the_stack_rather_than_trusting_push_to_have_done_it(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    """The stack existing is this function's own precondition, not an earlier command's promise.
+
+    `--push` may have run before the gh-stack extension was installed, or on another machine.
+    Linking is idempotent, so ensuring it here costs nothing and removes the failure mode.
+    """
+    bundle = cycle()
+    run, calls = recorder()
+    docs, slices = merged_stack(bundle, run)
+    calls.clear()
+
+    pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+
+    links = [cmd for cmd in calls if cmd[:3] == ["gh", "stack", "link"]]
+    merges = [cmd for cmd in calls if cmd[:3] == ["gh", "stack", "merge"]]
+    assert len(links) == 1 and len(merges) == 1
+    assert calls.index(links[0]) < calls.index(merges[0])  # linked before merged

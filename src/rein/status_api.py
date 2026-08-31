@@ -79,6 +79,17 @@ def _is_placeholder(value: object) -> bool:
     return isinstance(value, str) and any(hint in value for hint in _PLACEHOLDER_HINTS)
 
 
+def is_uninitialized(config: models.Config | None, state: models.State | None) -> bool:
+    """Is this still the raw template rather than a product? Two document reads, no more.
+
+    The one definition of "not a product yet": `next_action` takes its answer, and `rein start`
+    calls it directly to choose between the wizard and the board. Answering that from the whole
+    status object would run the git subprocesses, digests and readiness probes `collect_status`
+    runs — to learn a boolean the config and the state already carry.
+    """
+    return (config.template_mode if config else False) or (_is_placeholder(state.project) if state else True)
+
+
 def _no_agent_surface(repo: repo_mod.Repo) -> bool:
     """True when no agent surface is usable — neither recorded in the lock nor present on disk.
 
@@ -105,8 +116,7 @@ def next_action(
     counts: dict[str, int] | None,
     attention_count: int,
     chain_defects: int,
-    template_mode: bool,
-    placeholders: bool,
+    uninitialized: bool,
     gate_chain_broken: bool,
     plan_missing: bool,
     unsandboxed_profiles: list[str],
@@ -130,7 +140,7 @@ def next_action(
             "damaged log — restore events.ndjson from git rather than rewriting it to agree.",
         )
     # 2. Not a product yet: the template must be initialized.
-    if template_mode or placeholders:
+    if uninitialized:
         return Recommendation(
             command="rein init --name <product>",
             kind="setup",
@@ -678,7 +688,7 @@ def collect_status(
     attention = events_mod.open_attention(events, task_status)
 
     template_mode = config.template_mode if config else False
-    placeholders = _is_placeholder(state.project) if state else True
+    uninitialized = is_uninitialized(config, state)
     unsandboxed_profiles = config.unsandboxed_code_profiles() if config else []
     unsandboxed_build_targets = config.unsandboxed_build_targets() if config else []
 
@@ -687,7 +697,7 @@ def collect_status(
     # every gate is blocked by the initialization itself, which the recommendation already says.
     probe_gate = PHASE_GATE.get(current_phase)
     gate_blockers: list[str] | None = None
-    if probe_gate is not None and state is not None and not template_mode and not placeholders:
+    if probe_gate is not None and state is not None and not uninitialized:
         try:
             gate_blockers = list((readiness_probe or _default_readiness)(repo, probe_gate))
         except (OSError, models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
@@ -699,8 +709,7 @@ def collect_status(
         counts=counts,
         attention_count=len(attention),
         chain_defects=len(defects),
-        template_mode=template_mode,
-        placeholders=placeholders,
+        uninitialized=uninitialized,
         gate_chain_broken=bool(state.gate_chain_violations()) if state else False,
         plan_missing=plan is None,
         unsandboxed_profiles=unsandboxed_profiles,

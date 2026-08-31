@@ -175,9 +175,11 @@ def _flag_value(args: list[str], flag: str) -> str | None:
 def _start(rest: list[str]) -> int:
     """First run → the init wizard; an initialized repo → what moved since you last looked."""
     from rein import init_cmd, resume, status_api
+    from rein import store as store_mod
 
     try:
-        root = repo_mod.get(_flag_value(rest, "--repo")).root
+        repo = repo_mod.get(_flag_value(rest, "--repo"))
+        root = repo.root
     except repo_mod.RepoNotFoundError:
         # No repository at all: the wizard is the only thing that can help, and only on a TTY.
         # Off a TTY there is nothing to report either, so say what to run and stop.
@@ -188,14 +190,13 @@ def _start(rest: list[str]) -> int:
             )
             return 2
         return init_cmd.wizard()
-    # Only a TTY can act on "this repo still needs init", so only a TTY pays for asking. The
-    # SessionStart hook is the caller that matters here and is never one: collecting the status
-    # to answer a question nobody can act on would put a second full `collect_status` on the one
-    # path that runs at every session start.
+    # Two document reads, not a status collection: `resume` below runs the one `collect_status`
+    # this verb should cost, and asking the whole object whether the repo is still a template
+    # would run its git subprocesses, digests and readiness probes for a boolean the config and
+    # the state already carry. Only a TTY can act on the answer, so only a TTY pays even that.
     if sys.stdin.isatty():
-        rec = status_api.collect_status(root)["next"]
-        assert isinstance(rec, dict)  # asdict(Recommendation)
-        if rec.get("kind") == "setup":
+        store = store_mod.Store(repo)
+        if status_api.is_uninitialized(store.read_config(), store.read_state()):
             return init_cmd.wizard(Path(root))
     # Off a TTY a repo still waiting for `init` gets the packet anyway: it already leads with
     # `rein init --name <product>`, which is the answer. Refusing there is what kept the hook on

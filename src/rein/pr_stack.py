@@ -1160,6 +1160,12 @@ def merge_stack(
             f"slice(s) {', '.join(missing)} have no recorded pull request — run `rein pr-stack --push` "
             "first; a stack can only be merged whole, so a slice with no pull request stops all of it"
         )
+    # Link here rather than trusting `--push` to have done it. Linking is idempotent by design
+    # ("if some of the PRs are already in a stack, the existing stack is updated"), and the stack
+    # existing is this function's own precondition: `--push` may have run before the extension was
+    # installed, or on a machine that never had it. Hoping an earlier command left the right state
+    # is what turns a missing stack into a refusal a reader has to decode.
+    link_stack(repo, [records[s.index].url for s in slices], run=run)
     top = records[slices[-1].index]
     rc, out = run(merge_command(top.url), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
     if rc != 0:

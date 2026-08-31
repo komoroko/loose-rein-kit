@@ -22,6 +22,17 @@ not CI, not the makefile — so every branch that ran the tests carried a binary
 which is `rein doctor`'s "binary file in the change under review" FAIL and a `coverage:
 insufficient` at gate ④.
 
+**Two of the fixes above were routing around the cause, not removing it.** `rein start` asked
+`collect_status` whether the repository was still a template — the git subprocesses, digests and
+readiness probes, run to learn a boolean the config and the state carry in two fields — and then
+delegated to `resume`, which collects for itself. The first attempt hid the cost behind a TTY check
+instead of removing it. `status_api.is_uninitialized(config, state)` is now the one definition of
+"not a product yet": `next_action` takes its answer (its `template_mode`/`placeholders` pair
+collapses into one `uninitialized`) and `rein start` calls it directly, so the verb collects the
+status exactly once on every path. And `pr-stack --merge` assumed `--push` had registered the
+GitHub stack; it now links first, which is idempotent by design and turns "the stack must exist"
+from a hope about an earlier command into this function's own precondition.
+
 **The stack is a GitHub stack now, and it lands whole.** GitHub shipped native stacked pull
 requests on 2026-07-30, and the base-branch chain this module already built is the primitive they
 are made of — so `--push` now also runs `gh stack link`, which registers the slices as a stack

@@ -131,11 +131,13 @@ def test_start_honours_a_repo_flag_typed_after_the_verb(
     assert "Since last time" in capsys.readouterr().out
 
 
-def test_start_off_a_tty_collects_the_status_once(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The SessionStart hook runs this at every session start, and `resume` collects for itself.
+@pytest.mark.parametrize("tty", [False, True])
+def test_start_collects_the_status_exactly_once(repo: Path, monkeypatch: pytest.MonkeyPatch, tty: bool) -> None:
+    """`resume` collects; the wizard decision reads two documents instead of asking again.
 
-    Asking "does this repo still need init?" first would double the one call 0.3.11 was spent
-    making cheap — and off a TTY nobody could act on the answer anyway.
+    Asking the whole status object "is this still a template?" would run the git subprocesses,
+    digests and readiness probes 0.3.11 was spent making cheap, for a boolean the config and the
+    state carry — and `rein start` is what the SessionStart hook runs at every session start.
     """
     from rein import status_api
 
@@ -147,7 +149,7 @@ def test_start_off_a_tty_collects_the_status_once(repo: Path, monkeypatch: pytes
         return real(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(status_api, "collect_status", counting)
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: tty)
 
     assert cli.main(["start"]) == 0
     assert len(calls) == 1
