@@ -229,7 +229,7 @@ def test_a_surface_an_older_release_wrote_is_not_reported_as_healthy(tmp_path: P
         # The neighbouring verb that only assembles a body and never reaches the network.
         ("Bash(rein pr-draft:*)", []),
         # Neighbours that must not be mistaken for it.
-        ("Bash(rein status:*)", []),
+        ("Bash(rein start:*)", []),
         ("Bash(echo rein approve)", []),
         ("Read", []),
     ],
@@ -239,7 +239,7 @@ def test_which_permission_entries_reach_a_gate_opening_verb(entry: str, expected
 
 
 def test_a_settings_file_with_no_gate_verb_passes(tmp_path: Path) -> None:
-    seed_repo(tmp_path, settings='{"permissions": {"allow": ["Bash(rein status:*)"]}}')
+    seed_repo(tmp_path, settings='{"permissions": {"allow": ["Bash(rein start:*)"]}}')
     results = doctor.check_preauthorization(repo_mod.Repo(tmp_path))
     assert [f.level for f in results] == ["PASS"]
 
@@ -1210,3 +1210,24 @@ def test_a_schema_invalid_document_is_reported_with_the_command_that_repairs_it(
     failed = [f for f in findings if f.level == "FAIL" and f.message.startswith("config.yaml")]
     assert failed, "a config the schema refuses is a FAIL"
     assert "rein revise --to tasks" in failed[0].message
+
+
+def test_the_stack_extension_is_reported_when_gh_is_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--merge` is the only thing that needs it, so its absence is INFO — but it must be said.
+
+    Merging a stack by hand is where the damage is: merge a subset and GitHub rebases everything
+    above the cut off the commits the record names.
+    """
+    monkeypatch.setattr("rein.doctor.shutil.which", lambda _name: "/usr/bin/gh")
+    monkeypatch.setattr("rein.doctor.common.run", lambda *a, **k: (0, "gh stack\tgithub/gh-stack\tv0.1.0"))
+    assert [f.level for f in doctor.check_stack_extension()] == ["PASS"]
+
+    monkeypatch.setattr("rein.doctor.common.run", lambda *a, **k: (0, ""))
+    missing = doctor.check_stack_extension()
+    assert [f.level for f in missing] == ["INFO"]
+    assert "gh extension install github/gh-stack" in missing[0].message
+
+
+def test_no_second_line_about_an_extension_when_gh_itself_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("rein.doctor.shutil.which", lambda _name: None)
+    assert doctor.check_stack_extension() == []

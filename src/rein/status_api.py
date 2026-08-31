@@ -79,6 +79,17 @@ def _is_placeholder(value: object) -> bool:
     return isinstance(value, str) and any(hint in value for hint in _PLACEHOLDER_HINTS)
 
 
+def is_uninitialized(config: models.Config | None, state: models.State | None) -> bool:
+    """Is this still the raw template rather than a product? Two document reads, no more.
+
+    The one definition of "not a product yet": `next_action` takes its answer, and `rein start`
+    calls it directly to choose between the wizard and the board. Answering that from the whole
+    status object would run the git subprocesses, digests and readiness probes `collect_status`
+    runs — to learn a boolean the config and the state already carry.
+    """
+    return (config.template_mode if config else False) or (_is_placeholder(state.project) if state else True)
+
+
 def _no_agent_surface(repo: repo_mod.Repo) -> bool:
     """True when no agent surface is usable — neither recorded in the lock nor present on disk.
 
@@ -105,8 +116,7 @@ def next_action(
     counts: dict[str, int] | None,
     attention_count: int,
     chain_defects: int,
-    template_mode: bool,
-    placeholders: bool,
+    uninitialized: bool,
     gate_chain_broken: bool,
     plan_missing: bool,
     unsandboxed_profiles: list[str],
@@ -130,7 +140,7 @@ def next_action(
             "damaged log — restore events.ndjson from git rather than rewriting it to agree.",
         )
     # 2. Not a product yet: the template must be initialized.
-    if template_mode or placeholders:
+    if uninitialized:
         return Recommendation(
             command="rein init --name <product>",
             kind="setup",
@@ -621,7 +631,7 @@ def collect_status(
     Without the seam that reparse happens every few seconds for a file that rarely changes.
 
     `readiness_probe` is the same seam for the queue's blocking rows. Gate readiness costs git
-    subprocesses and snapshot digests, which is fine once per `rein status` and wasteful
+    subprocesses and snapshot digests, which is fine once per `rein start` and wasteful
     several times a minute — so the dashboard passes a memoized probe, and a caller that passes
     one returning nothing gets `pending_deep: false` rather than a queue that quietly understates
     itself.
@@ -678,7 +688,7 @@ def collect_status(
     attention = events_mod.open_attention(events, task_status)
 
     template_mode = config.template_mode if config else False
-    placeholders = _is_placeholder(state.project) if state else True
+    uninitialized = is_uninitialized(config, state)
     unsandboxed_profiles = config.unsandboxed_code_profiles() if config else []
     unsandboxed_build_targets = config.unsandboxed_build_targets() if config else []
 
@@ -687,7 +697,7 @@ def collect_status(
     # every gate is blocked by the initialization itself, which the recommendation already says.
     probe_gate = PHASE_GATE.get(current_phase)
     gate_blockers: list[str] | None = None
-    if probe_gate is not None and state is not None and not template_mode and not placeholders:
+    if probe_gate is not None and state is not None and not uninitialized:
         try:
             gate_blockers = list((readiness_probe or _default_readiness)(repo, probe_gate))
         except (OSError, models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
@@ -699,8 +709,7 @@ def collect_status(
         counts=counts,
         attention_count=len(attention),
         chain_defects=len(defects),
-        template_mode=template_mode,
-        placeholders=placeholders,
+        uninitialized=uninitialized,
         gate_chain_broken=bool(state.gate_chain_violations()) if state else False,
         plan_missing=plan is None,
         unsandboxed_profiles=unsandboxed_profiles,
@@ -828,7 +837,7 @@ def render_pending(status: dict[str, object], *, limit: int = 12) -> list[str]:
         action = f"  → {item['action']}" if item.get("action") else ""
         lines.append(f"- [{item['severity']}] {item['subject']}: {item['headline']}{action}")
     if len(pending) > limit:
-        lines.append(f"- … {len(pending) - limit} more (`rein status --json`)")
+        lines.append(f"- … {len(pending) - limit} more (`rein start --json`)")
     return lines
 
 
@@ -896,9 +905,14 @@ def render(status: dict[str, object]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="the deterministic status object and next action")
-    parser.add_argument("--json", action="store_true", help="print the whole status object as JSON")
-    parser.add_argument("--next", action="store_true", help="print only the next recommended command")
+    """`rein next` — the one recommended command, and nothing else.
+
+    The board and the whole object are `rein start` / `rein start --full` / `rein start --json`.
+    This verb exists because an integration wants one machine-readable recommendation without
+    parsing a packet, which is why `--json` is the only thing it takes besides `--repo`.
+    """
+    parser = argparse.ArgumentParser(prog="rein next", description="the next recommended command")
+    parser.add_argument("--json", action="store_true", help="print the recommendation as JSON")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -909,18 +923,9 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
-    status = collect_status(repo)
-    if args.next:
-        # --next is the narrower request, so it wins when both are given: `rein next
-        # --json` is what an integration calls for one machine-readable recommendation.
-        next_obj = status.get("next")
-        next_obj = next_obj if isinstance(next_obj, dict) else {}
-        print(json.dumps(next_obj, ensure_ascii=False, default=str) if args.json else render_next(next_obj))
-        return 0
-    if args.json:
-        print(json.dumps(status, indent=2, ensure_ascii=False, default=str))
-        return 0
-    print(render(status))
+    next_obj = collect_status(repo).get("next")
+    next_obj = next_obj if isinstance(next_obj, dict) else {}
+    print(json.dumps(next_obj, ensure_ascii=False, default=str) if args.json else render_next(next_obj))
     return 0
 
 

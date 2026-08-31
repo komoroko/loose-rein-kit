@@ -150,6 +150,9 @@ findings; the implementer resolves them and the reviewer looks again.
 - **Promote durable lessons** from `docs/retrospective.md` into the always-loaded files at
   gate ⑤, not archived away.
 - If anything behaves oddly, run `rein doctor` first.
+- **The verb list is in the CLI, not in this file.** `rein help --all` names every verb (the
+  default listing carries only the ones a human types) and `rein <verb> --help` gives its
+  arguments — read those rather than guessing a spelling out of prose.
 
 ## Security gate
 
@@ -166,10 +169,13 @@ audit** at `/verify` (detail: build.md, verify.md).
 - **Push / PR / merge to main are outward-facing** — human approval only, same for GitHub Issues.
 - A cycle may ship as **one pull request** (`rein pr-draft` assembles the body) or as a **stack of
   them, one per task** (`rein pr-stack`). A stack opens as **drafts** before gate ④ and is lifted
-  by `rein pr-stack --ready` once a human approves it; both steps confirm at a terminal first, and
-  neither may be pre-authorized. Merge a stack **bottom first with `--merge --delete-branch`** —
-  never squash or rebase, which puts the content into the base as a different commit and makes
-  every pull request above it show the diff again.
+  by `rein pr-stack --ready` once a human approves it, and landed by `rein pr-stack --merge`. All
+  three confirm at a terminal first and none may be pre-authorized. The slices are registered as a
+  **GitHub stack**, and `--merge` lands the whole of it in one atomic `gh stack merge`.
+- **A stack is merged whole, never in part.** Merging a subset makes GitHub rebase the pull
+  requests above the cut onto the new base with new commit ids, so every `completed_commit` above
+  it names a commit in no branch's history. Squash and rebase merges strand them the same way.
+  Merged atomically, nothing is rebased and the commits the build produced are the ones that land.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
   `completed_commit` and gate receipt on commits that no longer exist.

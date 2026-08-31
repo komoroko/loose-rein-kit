@@ -1,4 +1,4 @@
-"""`rein resume` — the delta a returning reader gets instead of a fresh absolute snapshot.
+"""`rein start` — the delta a returning reader gets instead of a fresh absolute snapshot.
 
 The watermark is the whole mechanism, so what these pin down is where it lives (never in the SSOT),
 what it does on a first visit, and that it degrades honestly when the log is shorter than the mark.

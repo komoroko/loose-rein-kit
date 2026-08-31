@@ -62,6 +62,14 @@ def test_a_binary_is_a_high_gap_because_nothing_was_read() -> None:
     assert review_policy.coverage_gap_risk(facts) == "high"
 
 
+def test_a_removed_binary_prices_no_gap_at_all() -> None:
+    """`high` was the price of *unread bytes*; a deletion leaves none, so there is nothing to price."""
+    diff = "diff --git a/logo.png b/logo.png\ndeleted file mode 100644\nBinary files a/logo.png and /dev/null differ\n"
+    facts = diff_facts.analyze(diff)
+    assert review_policy.coverage_gap_risk(facts) == "low"
+    assert review_policy.effective_risk(review_policy.risk_inputs_from_facts(facts)) == "low"
+
+
 def test_a_dependency_change_prices_the_gap_medium() -> None:
     """No lexical scan says what the new versions do — but that is a `medium` unknown, not a wall."""
     facts = diff_facts.analyze(_one_file("uv.lock", added=['name = "requests"']))

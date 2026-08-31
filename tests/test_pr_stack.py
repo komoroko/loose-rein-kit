@@ -610,12 +610,14 @@ def test_the_stack_table_marks_the_current_slice(cycle: Callable[..., dict[str, 
         assert text.count("← **this one**") == 1
 
 
-def test_the_body_forbids_squash_and_says_why(cycle: Callable[..., dict[str, Any]]) -> None:
+def test_the_body_forbids_squash_and_partial_merges_and_says_why(cycle: Callable[..., dict[str, Any]]) -> None:
+    """A reader on GitHub has the merge button; the body has to tell them what it costs."""
     text = body(cycle())
 
-    assert "Never squash" in text
-    assert "show this diff again" in text
-    assert "--delete-branch" in text
+    assert "Squash and rebase merges strand them" in text
+    assert "Do not merge part of it" in text
+    assert "in no branch's history" in text
+    assert "rein pr-stack --merge" in text  # pointed at the thing that lands it whole
 
 
 def test_a_tail_slice_has_no_claim_to_answer(cycle: Callable[..., dict[str, Any]]) -> None:
@@ -748,8 +750,8 @@ def run_cli(bundle: dict[str, Any], *args: str) -> tuple[int, str]:
 def test_the_verb_is_registered() -> None:
     from rein import cli
 
-    assert cli.VERBS["pr-stack"] == "pr_stack"
-    assert "pr-stack" in cli.HELP
+    assert cli.VERBS["pr-stack"].spec == "pr_stack"
+    assert "pr-stack" in cli._build_parser().format_help()
 
 
 def test_the_default_run_writes_bodies_and_prints_draft_commands(cycle: Callable[..., dict[str, Any]]) -> None:
@@ -797,8 +799,19 @@ def test_every_created_pull_request_is_a_draft(cycle: Callable[..., dict[str, An
 def test_the_run_says_how_to_merge_and_forbids_squash(cycle: Callable[..., dict[str, Any]]) -> None:
     _, out = run_cli(cycle())
 
-    assert "--merge --delete-branch" in out
-    assert "Never --squash" in out
+    assert "rein pr-stack --merge" in out
+    assert "Merging part of a" in out
+    assert "atomic" in out
+
+
+def test_the_merge_command_lands_the_whole_stack_as_merge_commits() -> None:
+    """Measured, not inferred: merging the bottom only leaves the branches above rebased with new
+    commit ids, so the recorded `completed_commit` of every task above the cut names a commit in no
+    branch's history. Merged atomically nothing is rebased — hence the top PR and `--yes`."""
+    argv = pr_stack.merge_command("https://github.com/o/r/pull/7")
+
+    assert argv == ["gh", "stack", "merge", "https://github.com/o/r/pull/7", "--merge", "--yes"]
+    assert "--squash" not in argv and "--rebase" not in argv
 
 
 def test_a_dry_run_touches_neither_refs_nor_files(cycle: Callable[..., dict[str, Any]]) -> None:
@@ -854,7 +867,9 @@ def test_publish_pushes_then_opens_each_pull_request_bottom_first(cycle: Callabl
     urls, slices = published(bundle, run)
 
     assert len(urls) == 3
-    verbs = [(cmd[0], cmd[-1] if cmd[0] == "git" else cmd[cmd.index("--head") + 1]) for cmd in calls]
+    link = calls[-1]
+    assert link[:3] == ["gh", "stack", "link"] and link[3:] == urls  # bottom to top
+    verbs = [(cmd[0], cmd[-1] if cmd[0] == "git" else cmd[cmd.index("--head") + 1]) for cmd in calls[:-1]]
     assert verbs == [
         ("git", slices[0].branch),
         ("gh", slices[0].branch),
@@ -1462,3 +1477,279 @@ def test_a_stopped_propagation_escalates_and_returns_two(
     assert state.task_status["T-002"] == "needs-revision"
     events = event_chain.load(bundle["root"] / ".rein/events.ndjson")
     assert any(e.event == "knowledge_gap" for e in events)
+
+
+# --- merging: the order is the correctness condition ----------------------------
+#
+# Bottom first, as merge commits, deleting each branch. Getting it wrong once lands content in the
+# base that every pull request above then shows again — which is exactly the kind of ordering
+# AGENTS.md says runs in code rather than being repeated N times by a person.
+
+
+def merged_stack(bundle: dict[str, Any], run: Any) -> tuple[pr_stack.Documents, list[pr_stack.Slice]]:
+    """An approved stack whose pull requests have been lifted out of draft — ready to merge."""
+    docs, slices, bodies = approved_stack(bundle, run)
+    pr_stack.lift(bundle["repo"], docs, slices, bodies, run=run)
+    return documents(bundle), slices
+
+
+def test_the_stack_lands_in_one_atomic_merge_of_the_top(cycle: Callable[..., dict[str, Any]]) -> None:
+    """One call, naming the top: `gh stack merge <top>` takes everything below it with it.
+
+    A per-slice loop is what must not happen — merging a subset rebases the branches above the cut
+    onto the new base with new commit ids.
+    """
+    bundle = cycle()
+    run, calls = recorder()
+    docs, slices = merged_stack(bundle, run)
+    calls.clear()
+
+    landed = pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+
+    merges = [cmd for cmd in calls if cmd[:3] == ["gh", "stack", "merge"]]
+    assert len(merges) == 1  # not one per slice
+    top = {r.index: r for r in pr_stack.ledger(docs.events)}[slices[-1].index]
+    assert merges[0] == ["gh", "stack", "merge", top.url, "--merge", "--yes"]
+    assert len(landed) == len(slices)  # every slice is recorded as merged by that one operation
+
+
+def test_merge_records_each_pull_request_as_merged(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+
+    pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+
+    records = pr_stack.ledger(event_chain.load(bundle["root"] / ".rein/events.ndjson"))
+    assert records and all(r.merged and r.ready for r in records)
+
+
+def test_a_refused_merge_moves_nothing(cycle: Callable[..., dict[str, Any]]) -> None:
+    """All-or-nothing: a refusal leaves the pull requests exactly as they were, and records nothing."""
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+    failing, _ = recorder({("gh", "stack", "merge"): (1, "not mergeable")})
+
+    with pytest.raises(pr_stack.PublishError, match="nothing was merged"):
+        pr_stack.merge_stack(bundle["repo"], docs, slices, run=failing)
+
+    records = pr_stack.ledger(event_chain.load(bundle["root"] / ".rein/events.ndjson"))
+    assert not any(r.merged for r in records)
+
+
+def test_merge_refuses_when_a_slice_has_no_pull_request(cycle: Callable[..., dict[str, Any]]) -> None:
+    """A stack can only be merged whole, so one unopened slice stops all of it."""
+    bundle = cycle(gates={"build": "approved"})
+    docs = documents(bundle)
+    slices = pr_stack.derive(bundle["repo"], docs, base="main")
+    run, _ = recorder()
+
+    with pytest.raises(pr_stack.PublishError, match="no recorded pull request"):
+        pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+
+
+def test_merging_without_a_terminal_is_refused(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: False)
+    bundle = cycle()
+    run, _ = recorder()
+    docs, _ = merged_stack(bundle, run)
+
+    with pytest.raises(pr_stack.PublishError, match="typed at a terminal"):
+        pr_stack._confirm_merge(pr_stack.ledger(docs.events))
+
+
+def test_answering_no_merges_nothing(cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: False)
+    bundle = cycle()
+    run, _ = recorder()
+    docs, _ = merged_stack(bundle, run)
+
+    with pytest.raises(pr_stack.PublishError, match="nothing was merged"):
+        pr_stack._confirm_merge(pr_stack.ledger(docs.events))
+
+
+def test_merge_refuses_before_gate_four(cycle: Callable[..., dict[str, Any]]) -> None:
+    bundle = cycle()
+    docs = documents(bundle)
+
+    result = pr_stack.preconditions(bundle["repo"], docs, derive(bundle), mode="merge", base="main")
+
+    assert not result.ok
+    assert any("gate ④ (build) is not approved" in problem for problem in result.errors)
+
+
+def test_merge_refuses_while_a_slice_is_still_a_draft(cycle: Callable[..., dict[str, Any]]) -> None:
+    """A draft is a pull request no human lifted; merging it skips the act that says they approved."""
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices, _ = approved_stack(bundle, run)  # opened, never lifted
+
+    result = pr_stack.preconditions(bundle["repo"], documents(bundle), slices, mode="merge", base="main")
+
+    assert not result.ok
+    assert any("still drafts" in problem and "--ready" in problem for problem in result.errors)
+
+
+def test_merge_refuses_when_a_fix_has_not_been_carried_upward(cycle: Callable[..., dict[str, Any]]) -> None:
+    """An un-restacked fix means the base would get content the slices above it still hold."""
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+    commit_on(bundle["root"], slices[0].branch, "a review fix", path="src/one.py")
+
+    result = pr_stack.preconditions(bundle["repo"], documents(bundle), slices, mode="merge", base="main")
+
+    assert not result.ok
+    assert any("--restack" in problem for problem in result.errors)
+
+
+def test_merge_and_ready_are_separate_steps(
+    cycle: Callable[..., dict[str, Any]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    rc, _ = run_cli(cycle(), "--ready", "--merge")
+
+    assert rc == 2
+    assert "separate steps with a human between them" in capsys.readouterr().err
+
+
+def test_a_re_run_asks_only_about_what_is_still_open(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Confirming a re-run must not count pull requests that already landed."""
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: True)
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+    pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+
+    pending = [r for r in pr_stack.ledger(documents(bundle).events) if not r.merged]
+
+    assert pending == []
+    rc, out = run_cli(bundle, "--merge")
+    assert rc == 0
+    assert "already been merged" in out
+
+
+def test_a_publish_links_the_pull_requests_into_a_github_stack(cycle: Callable[..., dict[str, Any]]) -> None:
+    """Linking is what makes `--merge` atomic, and GitHub enforce bottom-up order server-side."""
+    bundle = cycle()
+    run, calls = recorder()
+
+    urls, _ = published(bundle, run)
+
+    assert pr_stack.link_command(urls) in calls
+
+
+def test_a_single_slice_is_not_linked(cycle: Callable[..., dict[str, Any]]) -> None:
+    """One pull request is not a stack; `gh stack link` requires at least two arguments."""
+    bundle = cycle()
+    run, calls = recorder()
+
+    pr_stack.link_stack(bundle["repo"], ["https://example.invalid/pr/1"], run=run)
+
+    assert calls == []
+
+
+def test_a_failed_link_leaves_the_published_stack_alone(
+    cycle: Callable[..., dict[str, Any]], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The pull requests are already open and correctly based; a missing extension is not a failure
+    of the publish that just finished."""
+    bundle = cycle()
+    run, _ = recorder({("gh", "stack", "link"): (1, 'unknown command "stack" for "gh"')})
+
+    urls, _ = published(bundle, run)
+
+    assert len(urls) == 3
+    assert "could not be linked into a GitHub stack" in caplog.text
+    assert "gh extension install github/gh-stack" in caplog.text
+
+
+def test_a_failed_link_refuses_the_merge_instead_of_warning_past_it(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    """What `publish` may carry on without, this operation *is*.
+
+    Linking was swallowed with a warning on both paths, so `--merge` went on to `gh stack merge`
+    against an unlinked stack and the reader got gh's error instead of the one that says what to
+    install. The precondition was in the docstring and not in the code.
+    """
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+    failing, calls = recorder({("gh", "stack", "link"): (1, 'unknown command "stack" for "gh"')})
+
+    with pytest.raises(pr_stack.PublishError, match="nothing was merged"):
+        pr_stack.merge_stack(bundle["repo"], docs, slices, run=failing)
+
+    assert not [cmd for cmd in calls if cmd[:3] == ["gh", "stack", "merge"]]
+    records = pr_stack.ledger(event_chain.load(bundle["root"] / ".rein/events.ndjson"))
+    assert not any(r.merged for r in records)
+
+
+def test_the_merge_screen_lists_every_slice_the_operation_covers(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One list, derived once — and it is the slices, because that is what the merge acts on.
+
+    The screen was built from the *unmerged* ledger records and the merge from `slices`, so after a
+    write failure left part of a landing unrecorded, a re-run showed a human two pull requests and
+    then handed `gh stack merge` the top of three. `gh stack merge <top>` always covers everything
+    below it; the ones that already landed belong on the screen, marked, not hidden from it.
+    """
+    monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
+    monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: True)
+    bundle = cycle()
+    run, _ = recorder()
+    docs, slices = merged_stack(bundle, run)
+
+    # The write that records the landing fails on the last slice: the stack merged, the log does
+    # not say so for all of it.
+    real_record = pr_stack.record
+    calls: list[str] = []
+
+    def flaky(repo: Any, documents_: Any, slice_: Any, url: str, action: str) -> None:
+        calls.append(slice_.label)
+        if action == pr_stack.LEDGER_MERGED and len(calls) == len(slices):
+            raise store_mod.StoreError("disk full")
+        real_record(repo, documents_, slice_, url, action)
+
+    monkeypatch.setattr(pr_stack, "record", flaky)
+    with pytest.raises(store_mod.StoreError):
+        pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+    monkeypatch.setattr(pr_stack, "record", real_record)
+
+    records = {r.index: r for r in pr_stack.ledger(documents(bundle).events)}
+    assert [r.merged for r in records.values()] == [True] * (len(slices) - 1) + [False]
+
+    # What the human is shown, before anything is handed to gh — which is what this test is about.
+    _rc, out = run_cli(bundle, "--merge")
+
+    assert f"merge all {len(slices)} pull request(s)" in out
+    assert out.count("(already merged)") == len(slices) - 1
+
+
+def test_merge_links_the_stack_rather_than_trusting_push_to_have_done_it(
+    cycle: Callable[..., dict[str, Any]],
+) -> None:
+    """The stack existing is this function's own precondition, not an earlier command's promise.
+
+    `--push` may have run before the gh-stack extension was installed, or on another machine.
+    Linking is idempotent, so ensuring it here costs nothing and removes the failure mode.
+    """
+    bundle = cycle()
+    run, calls = recorder()
+    docs, slices = merged_stack(bundle, run)
+    calls.clear()
+
+    pr_stack.merge_stack(bundle["repo"], docs, slices, run=run)
+
+    links = [cmd for cmd in calls if cmd[:3] == ["gh", "stack", "link"]]
+    merges = [cmd for cmd in calls if cmd[:3] == ["gh", "stack", "merge"]]
+    assert len(links) == 1 and len(merges) == 1
+    assert calls.index(links[0]) < calls.index(merges[0])  # linked before merged

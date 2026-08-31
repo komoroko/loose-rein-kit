@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -346,14 +348,19 @@ def test_wizard_asks_only_name_and_brief(
 
     monkeypatch.setattr("builtins.input", fake_input)
     monkeypatch.setattr(init_cmd, "detect_source", lambda: "git+https://example.com/rein@vX")
+    monkeypatch.setattr(init_cmd, "detect_agent", lambda _root: None)  # no ambient host to default to
     proj = tmp_path / "myproduct"
     proj.mkdir()
     assert init_cmd.wizard(proj) == 0
-    # Only two questions are posed: the product name (defaulting to the folder) and the brief.
-    assert any("1/2 product name" in p for p in prompts)
+    # Only two questions are posed up front: the product name (defaulting to the folder) and the
+    # brief. The surface and the sandbox are asked during the run, each with a default — which is
+    # why neither prompt carries an "n of N": whether those two are asked at all depends on what
+    # the seeded config turns out to say, so any count printed here would be a guess.
+    assert any("product name" in p for p in prompts)
     assert not any("work branch" in p or "source URL" in p or "headless" in p for p in prompts)
+    assert not any(re.search(r"\d/\d", p) for p in prompts)
     out = capsys.readouterr().out
-    assert "2/2 What do you want to build?" in out
+    assert "What do you want to build?" in out
     # Name defaults to the folder, branch to build/<name>, source is the detected one.
     state = (proj / ".rein" / "state.yaml").read_text(encoding="utf-8")
     assert 'project: "myproduct"' in state
@@ -440,3 +447,108 @@ def test_the_step_command_substitution_is_anchored_on_the_step_name() -> None:
 def test_a_scaffold_whose_shape_moved_fails_instead_of_doing_nothing() -> None:
     with pytest.raises(ValueError, match="no quality-gate step named"):
         init_cmd.brownfield_config("quality_gate: []\n", "npm test", "npm run lint")
+
+
+def _answer(reply: str) -> Callable[[str, str], str]:
+    """An `ask` stub that always gives `reply`, ignoring the prompt and its default."""
+
+    def ask(_prompt: str, _default: str = "") -> str:
+        return reply
+
+    return ask
+
+
+def _refuse(why: str) -> Callable[..., int]:
+    """A stub that fails the test if it is ever called."""
+
+    def never(*_a: object, **_k: object) -> int:
+        pytest.fail(why)
+
+    return never
+
+
+# --- the agent surface is part of initialization ------------------------------------
+#
+# The wizard's own closing line says "start with /req" — a command that does not exist until an
+# integration is installed. Printing a suggestion instead of asking made an "opt-in" step
+# mandatory in practice, and the tool paid for it at runtime: every `/`-recommendation had to
+# carry a "no agent surface is installed" sentence, computed on the fly.
+
+
+def test_a_fresh_repo_is_told_the_surface_is_still_owed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert init_cmd.run_init(tmp_path, "demo", "build/demo", "") == 0
+    out = capsys.readouterr().out
+    assert "agent surface: none yet" in out
+    assert "rein install <agent>" in out
+
+
+def test_the_wizard_offers_the_surface_and_takes_none_for_an_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rein import install as install_mod
+
+    monkeypatch.setattr(
+        install_mod,
+        "install_integration",
+        _refuse("must not install on 'none'"),
+    )
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    line = init_cmd.surface_step(tmp_path, offer=True, ask=_answer("none"))
+    assert "skipped" in line and "rein install <agent>" in line
+
+
+def test_the_wizard_installs_the_surface_when_asked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    assert "installed claude" in init_cmd.surface_step(tmp_path, offer=True, ask=_answer("claude"))
+    assert (tmp_path / ".claude" / "commands" / "req.md").is_file()
+
+
+def test_a_repo_that_already_has_a_surface_is_not_asked_again(tmp_path: Path) -> None:
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    init_cmd.surface_step(tmp_path, offer=True, ask=_answer("claude"))
+
+    def refuse(_prompt: str, _default: str = "") -> str:
+        pytest.fail("an installed surface must not be asked about again")
+
+    line = init_cmd.surface_step(tmp_path, offer=True, ask=refuse)
+    assert "already present (claude)" in line
+
+
+def test_an_unrecognised_answer_is_asked_again_not_read_as_a_decline(tmp_path: Path) -> None:
+    """`cluade` is a typo. Filing it as "no thanks" answers the question on the human's behalf."""
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    answers = iter(["cluade", "claude"])
+
+    def ask(_prompt: str, _default: str = "") -> str:
+        return next(answers)
+
+    assert "installed claude" in init_cmd.surface_step(tmp_path, offer=True, ask=ask)
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, EOFError])
+def test_interrupting_an_add_on_skips_it_rather_than_crashing(tmp_path: Path, interrupt: type[BaseException]) -> None:
+    """These two questions are asked *after* the repository is written, and cannot be asked before.
+
+    The surface question is about the config that was just seeded and the sandbox question about
+    the profiles in it, so the wizard's "ask everything first, then write" contract stops at the
+    brief. Ctrl+C here used to come out as a traceback over a repository that had in fact been
+    initialized — a completed setup reported as a crash.
+    """
+
+    def interrupted(*_args: str) -> str:
+        raise interrupt()
+
+    init_cmd.run_init(tmp_path, "demo", "build/demo", "")
+    assert "skipped" in init_cmd.surface_step(tmp_path, offer=True, ask=interrupted)
+    assert "skipped" in init_cmd.sandbox_step(tmp_path, offer=True, ask=interrupted)
+
+
+def test_the_detected_default_comes_from_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+    monkeypatch.setattr("rein.init_cmd.shutil.which", lambda _cmd: None)
+    assert init_cmd.detect_agent(tmp_path) is None
+    (tmp_path / ".codex").mkdir()
+    assert init_cmd.detect_agent(tmp_path) == "codex"
+    (tmp_path / "CLAUDE.md").write_text("x", encoding="utf-8")
+    assert init_cmd.detect_agent(tmp_path) == "claude"  # the more specific signal wins

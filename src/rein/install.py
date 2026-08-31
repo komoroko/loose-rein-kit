@@ -701,8 +701,15 @@ def _write_settings(repo: repo_mod.Repo, settings: dict[str, Any]) -> None:
     path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def install_integration(repo: repo_mod.Repo, name: str, *, force: bool = False, dry_run: bool = False) -> int:
-    """Write one agent's surfaces and record them in the lock (see the module docstring)."""
+def install_integration(
+    repo: repo_mod.Repo, name: str, *, force: bool = False, dry_run: bool = False, announce_next: bool = True
+) -> int:
+    """Write one agent's surfaces and record them in the lock (see the module docstring).
+
+    ``announce_next`` is off when the caller has its own closing instruction to give — the init
+    wizard does, and two "here is what to do next" blocks in one run contradict each other about
+    which one is the last word.
+    """
     if name not in INTEGRATIONS:
         logger.error(f"unknown integration '{name}' (one of: {', '.join(sorted(INTEGRATIONS))})")
         return 2
@@ -772,13 +779,14 @@ def install_integration(repo: repo_mod.Repo, name: str, *, force: bool = False, 
     data.setdefault("rein", {}).setdefault("version", rein.__version__)
     lock_mod.write(repo.lock, data)
     print(f"installed integration: {name} (recorded in {lock_mod.LOCK_NAME})")
-    print("  note          open a new session (or restart the editor) to pick up the new commands —")
-    print("                an already-running session won't see files added mid-session.")
-    # Codex invokes its skills with `$`, not `/` — telling someone to type a command their host
-    # does not have is how a working install gets reported as broken.
-    entry = "$req" if name == "codex" else "/req"
-    print(f"  next          in that new session the phase commands ({entry} …) work; `rein next`")
-    print("                shows where you are and what to run.")
+    if announce_next:
+        print("  note          open a new session (or restart the editor) to pick up the new commands —")
+        print("                an already-running session won't see files added mid-session.")
+        # Codex invokes its skills with `$`, not `/` — telling someone to type a command their host
+        # does not have is how a working install gets reported as broken.
+        entry = "$req" if name == "codex" else "/req"
+        print(f"  next          in that new session the phase commands ({entry} …) work; `rein next`")
+        print("                shows where you are and what to run.")
     return 0
 
 

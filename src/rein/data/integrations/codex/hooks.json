@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "test -f .rein/state.yaml && echo '--- Loose Rein: what changed since you last looked ---' && rein resume || true",
+            "command": "test -f .rein/state.yaml && echo '--- Loose Rein: what changed since you last looked ---' && rein start || true",
             "timeout": 10
           }
         ]

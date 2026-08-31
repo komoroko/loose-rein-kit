@@ -6,6 +6,11 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+# coverage.py's data file. `make test` and CI rewrite it on every run, its rows hold absolute
+# paths from the machine that measured, and nothing reads it back — it was tracked by a `git
+# add -A`, and thereafter every branch carried a binary diff nobody wrote on purpose.
+.coverage
+.coverage.*
 # Anchored to the repository root on purpose. A bare `build/` matches at every depth, and this
 # repository ships a phase named build: it silently swallowed the Codex skill
 # `.agents/skills/build/SKILL.md` and its payload twin, so `git add -A` staged seven of the eight

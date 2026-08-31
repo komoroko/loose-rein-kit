@@ -110,12 +110,14 @@ auto-detected and changes what `init` writes (see "Adopting into an existing rep
 ```bash
 cd myrepo && git init
 
-rein start   # interactive wizard; it asks only for the product name and a one-line brief
+rein start   # interactive wizard: product name, a one-line brief, the agent surface, the sandbox
 # or non-interactively (idempotent):
 #   rein init --name <product> [--branch build/<product>] [--source git+https://github.com/komoroko/loose-rein-kit]
 ```
 
-**5. Add your agent's surfaces** — opt-in, whenever you need them:
+**5. Add your agent's surfaces** — the wizard asks for this and installs it, because the phase
+commands (`/req`, `/design`, …) exist only once one is written. Add a second host later, or install
+one into a repo seeded non-interactively:
 
 ```bash
 rein install claude         # writes .claude/ wrappers + merges settings.json
@@ -132,10 +134,10 @@ images are pinned:
 
 ```bash
 rein oci build --all --write-config # build and pin the three packaged images (needs docker/podman)
-rein oci verify                     # confirm the pins are present
 ```
 
-`rein init` and the wizard prompt for this at the right time and can run it for you.
+The wizard asks this at the right time and can run it for you; `rein doctor` is what tells you
+afterwards whether the pins are in place.
 
 The packaged images carry python, uv and pytest and run with no network — enough for the shipped
 default gate and nothing more. **A gate that needs a linter, a type checker, or a dependency
@@ -147,20 +149,22 @@ and `rein oci build --profile <that profile> --write-config` builds and pins it.
 
 ## Daily use
 
-The daily human surface is a handful of verbs (everything else stays behind the dashboard's
-buttons — `rein --help` lists them all):
+The daily human surface is three verbs (everything else stays behind the dashboard's buttons —
+`rein --help` lists what a person types, `rein help --all` adds the ones the loop, the hooks and
+CI call):
 
 ```bash
-rein start        # first run: interactive setup wizard; afterwards: where you are + what's next
+rein start        # first run: the setup wizard; afterwards: what moved since you last looked
+                  #   --full adds the whole board, --json the status object
 rein next         # only the next recommended command (--json for integrations)
 rein ui           # local dashboard — read the gate's deliverables and approve from the page
-rein agent codex  # switch the headless agent CLI (claude | codex | gemini | a custom command)
-rein project add  # register a repo the dashboard's project switcher can target
 ```
 
-With several repos registered via `project add`, the dashboard grows a **project switcher** (a
-dropdown in its header) that retargets the whole board without restarting the server; `rein ui`
-always adds the repo you launched it from. For a single command, `rein --repo <path> <verb>`
+`rein agent codex` switches the headless agent CLI (claude | codex | gemini | a custom command),
+and `rein project add` registers a repo the dashboard's switcher can target — both are set once,
+not daily. With several repos registered, the dashboard grows a **project switcher** (a dropdown
+in its header) that retargets the whole board without restarting the server; `rein ui` always adds
+the repo you launched it from. For a single command, `rein --repo <path> <verb>`
 (or `REIN_ROOT=<path>`) targets another repo without changing directory.
 
 Then, per cycle:
@@ -208,10 +212,11 @@ Then, per cycle:
 6. **Check progress** — at any time, from any of these.
 
    - `rein next` — just the next recommended command (`--json` for integrations)
-   - `rein status` — leads with **Waiting on you**: everything standing between the repo and
-     its next gate, worst first, each with a severity and the command that clears it. The blocking
-     rows are the same list `rein approve <gate> --check` refuses on, so the board can never
-     say "nothing needs attention" about a gate that will not open.
+   - `rein start` — the delta since your last visit, led by **Waiting on you**: everything
+     standing between the repo and its next gate, worst first, each with a severity and the
+     command that clears it. The blocking rows are the same list `rein approve <gate> --check`
+     refuses on, so the board can never say "nothing needs attention" about a gate that will not
+     open. `--full` adds the whole board; `--no-mark` looks without advancing your place.
    - `/status` — the same board in chat, plus the task DAG
    - `rein ui` — the dashboard. The lifecycle is the navigation: the five gates stand in a spine
      down the left, and the one waiting on you is the only inverted block on the page. **Now**
@@ -237,9 +242,12 @@ Then, per cycle:
    `--ready` lifts them once gate ④ is approved. A review fix is committed onto the slice that
    introduced the code and carried upward by `--restack`, which merges — **a stack is never
    rebased**, because rewriting history strands every `completed_commit` and gate receipt on
-   commits that no longer exist. Merge bottom first with `gh pr merge --merge --delete-branch`:
-   squash or rebase would land the content in the base as a different commit and make every pull
-   request above it show the diff again.
+   commits that no longer exist. The slices are registered as a **GitHub stack** when they are
+   pushed, and `--merge` lands the whole of it in one atomic `gh stack merge` (needs
+   `gh extension install github/gh-stack`; `rein doctor` says whether you have it). **Never merge
+   part of a stack**: GitHub rebases the pull requests above the cut onto the new base with new
+   commit ids, and every `completed_commit` above it then names a commit in no branch's history.
+   Squash and rebase merges strand them the same way. Merged whole, nothing is rebased.
 
 8. **Close the cycle** — after gate ⑤, `rein cycle-close --name <slug>` archives to
    `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human
@@ -448,7 +456,7 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
   instead.
 - **The run stopped and nothing looks wrong** — no task blocked, no escalation, the board
   unchanged. That is a machine failure, not a task's: an agent capacity limit, a killed process,
-  a missing CLI. `rein doctor` and `rein resume` name it. If it exited `3`, just re-run
+  a missing CLI. `rein doctor` and `rein start` name it. If it exited `3`, just re-run
   `rein build` when capacity is back — every task kept its status and retry budget, and the
   preserved work is picked up automatically.
 - **Loop interrupted** (Ctrl-C, crash) — just re-run `rein build`, in this terminal or another; it
@@ -464,8 +472,8 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
 - **"template placeholders"** — run `rein start` (or `rein init --name <product>`) first.
 - **`rein: command not found` in a hook** — install the CLI on PATH (see "Setup"); `rein doctor`
   FAILs when the hook binary is unresolvable.
-- **`/req` (or other phase commands) don't show up in your agent** — the agent surface is opt-in
-  and not run automatically by `rein start`/`init`: run `rein install claude|copilot|codex` for
+- **`/req` (or other phase commands) don't show up in your agent** — no surface is installed
+  (the wizard asks; `rein init` off a TTY does not): run `rein install claude|copilot|codex` for
   whichever agent you use, then open a new session (Setup, step 5).
 
 ## Repository layout

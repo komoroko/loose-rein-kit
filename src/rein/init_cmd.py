@@ -5,8 +5,8 @@ package payload*, so the working tree gains only state — `.rein/` (SSOT + mate
 prompts/schema/rules + scaffold snapshot + lock) and `docs/` (deliverable scaffolds) — plus a
 marker-guarded pointer block in AGENTS.md and the runtime-artifact block in `.gitignore` (the
 scratch the loop regenerates every run, kept current afterwards by `rein sync`). Nothing else
-is touched: no pyproject rewrite, no makefile, no agent surfaces (those are opt-in: `rein
-install <agent>`).
+is touched: no pyproject rewrite, no makefile. The agent surface is asked for on a TTY (it is
+what makes /req exist) and otherwise left to `rein install <agent>`.
 
 Brownfield is auto-detected (any existing code layout / build manifest at the root): the
 seeded config scopes `guard.paths` to the docs deliverables only — pending gates must
@@ -18,7 +18,7 @@ detection. Existing files are never overwritten (idempotent re-runs).
 Usage:
   uvx --from git+<rein repo> rein init --name myproduct   # first contact
   rein init --name myproduct [--branch build/myproduct] [--source <url>]
-  rein init                  # interactive wizard on a TTY (asks only name + brief)
+  rein init                  # interactive wizard on a TTY (name, brief, agent surface, sandbox)
 
 The source URL (for `rein upgrade`) is auto-detected from this install's PEP 610 metadata
 when --source is omitted; the work branch defaults to build/<name>, and the headless agent CLI
@@ -30,8 +30,10 @@ from __future__ import annotations
 import argparse
 import datetime
 import logging
+import os
 import re
 import shlex
+import shutil
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -323,10 +325,84 @@ def sandbox_step(root: Path, *, offer: bool, ask: Callable[[str], str] | None = 
 
     print(f"\nSandbox: {', '.join(config.unsandboxed_code_profiles())} would run repository code on this host.")
     print(f"  Building the packaged images fixes it: `{command}`. It takes a few minutes.")
-    if (ask("  build them now? [y/N]") or "n").strip().lower() not in ("y", "yes"):
-        return f"sandbox: skipped — run `{command}` when you are ready"
+    skipped = f"sandbox: skipped — run `{command}` when you are ready"
+    try:
+        answer = (ask("  build them now? [y/N]") or "n").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        # Same rule as `surface_step`: the repository is already initialized when this is asked, so
+        # an interrupt declines the add-on rather than aborting anything.
+        print()
+        return skipped
+    if answer not in ("y", "yes"):
+        return skipped
     rc = oci_cli.main(["build", "--all", "--write-config", "--repo", str(root)])
     return "sandbox: built and pinned" if rc == 0 else f"sandbox: build failed (rc={rc}) — re-run `{command}`"
+
+
+def detect_agent(root: Path) -> str | None:
+    """Which agent this environment looks like, for the surface question's default.
+
+    Cheap signals only, most specific first: a host that announces itself in the environment, a
+    surface directory the user already keeps, then the CLI on PATH. `None` means "we cannot tell",
+    which is a fine answer — the question is still asked, just without a default.
+    """
+    if os.environ.get("CLAUDECODE") or os.environ.get("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude"
+    if (root / ".claude").is_dir() or (root / "CLAUDE.md").is_file():
+        return "claude"
+    if (root / ".codex").is_dir() or (root / ".agents").is_dir():
+        return "codex"
+    if (root / ".github" / "prompts").is_dir():
+        return "copilot"
+    for name in ("claude", "codex"):
+        if shutil.which(name):
+            return name
+    return None
+
+
+def surface_step(root: Path, *, offer: bool, ask: Callable[[str, str], str] | None = None) -> str:
+    """Install an agent's surfaces, or say exactly what is owed. Returns a line for the summary.
+
+    The surface is what makes the very next instruction runnable: `run /req` names a command that
+    does not exist until an integration is installed. Leaving it to a printed suggestion made an
+    "opt-in" step mandatory in practice, and the tool paid for it at runtime — every recommendation
+    starting with `/` had to carry a "no agent surface is installed" sentence, computed on the fly.
+    Asking here is the same bargain `sandbox_step` already takes: a question with a default.
+
+    Interrupting the question skips the step: by the time it is asked the repository is already
+    initialized and usable, so Ctrl+C here means "not this", not "undo that" — and a traceback out
+    of an add-on would report a completed initialization as a crash.
+    """
+    repo = repo_mod.Repo(root)
+    installed = [name for name in install_mod.INTEGRATIONS if install_mod.present_surfaces(repo, name)]
+    if installed:
+        return f"agent surface: already present ({', '.join(sorted(installed))})"
+    choices = ", ".join(sorted(install_mod.INTEGRATIONS))
+    if not offer or ask is None:
+        return f"agent surface: none yet — run `rein install <agent>` ({choices})"
+    skipped = f"agent surface: skipped — run `rein install <agent>` ({choices}) when you want one"
+
+    default = detect_agent(root) or "none"
+    print("\nAgent surface: the phase commands (/req, /design, …) exist only once one is installed.")
+    try:
+        # Re-asked rather than read as a decline: `cluade` is a typo, and treating an answer nobody
+        # recognises as "no thanks" answers the question on the human's behalf.
+        while True:
+            answer = (ask(f"  install which? ({choices}, or none)", default) or "none").strip().lower()
+            if answer in install_mod.INTEGRATIONS or answer == "none":
+                break
+            print(f"  '{answer}' is not one of: {choices}, none")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return skipped
+    if answer == "none":
+        return skipped
+    rc = install_mod.install_integration(repo, answer, announce_next=False)
+    return (
+        f"agent surface: installed {answer}"
+        if rc == 0
+        else f"agent surface: install failed (rc={rc}) — re-run `rein install {answer}`"
+    )
 
 
 def _switch_branch(root: Path, branch: str) -> str:
@@ -358,6 +434,7 @@ def run_init(
     check_cmd: str = "",
     mode: str = "auto",
     offer_sandbox: bool = False,
+    offer_surface: bool = False,
 ) -> int:
     """Seed the repo (SSOT + docs scaffolds + materialized artifacts + pointer block + lock)."""
     today = datetime.date.today().isoformat()
@@ -439,18 +516,24 @@ def run_init(
         print("  merge         AGENTS.md (Loose Rein pointer block appended)")
     # (the runtime-artifact .gitignore block is written by the `sync` call in step 3)
     print(f"  {_switch_branch(root, branch)}")
-    # 6) the sandboxes — offered here rather than left for `doctor` to find later.
+    # 6) the agent surface and the sandboxes — offered here rather than left for a printed
+    #    suggestion (the surface) or a later `doctor` FAIL (the sandbox) to raise. Both are
+    #    preconditions for the "Next:" line below: /req is a command the surface installs, and
+    #    /build runs repository code. The surface goes first because it is the cheap one and the
+    #    one the very next instruction needs; the sandbox question is a multi-minute build.
+    surface = surface_step(root, offer=offer_surface, ask=_ask if offer_surface else None)
+    print(f"  {surface}")
     print(f"  {sandbox_step(root, offer=offer_sandbox, ask=_ask if offer_sandbox else None)}")
 
     next_step = (
-        "Next: run /onboard to map the existing code into docs/05-current-state.md, then start with /req."
+        "run /onboard to map the existing code into docs/05-current-state.md, then start with /req."
         if brownfield
-        else "Next: write a few lines into docs/00-product-brief.md and start with /req."
+        else "write a few lines into docs/00-product-brief.md and start with /req."
     )
-    print(
-        f'\nInitialized "{name}" (work branch: {branch}; the gate guard is live).\n'
-        "Add an agent surface when you want one: `rein install claude` / `rein install copilot`.\n" + next_step
-    )
+    if surface.startswith("agent surface: installed"):
+        # A host reads its commands at session start-up, so the one running now cannot see them.
+        next_step = "open a new session (or restart the editor), then " + next_step
+    print(f'\nInitialized "{name}" (work branch: {branch}; the gate guard is live).\nNext: {next_step}')
     return 0
 
 
@@ -463,7 +546,7 @@ def _ask(prompt: str, default: str = "") -> str:
 
 
 def _ask_brief() -> str:
-    print("2/2 What do you want to build? (1-3 lines for docs/00-product-brief.md;")
+    print("What do you want to build? (1-3 lines for docs/00-product-brief.md;")
     lines: list[str] = []
     while len(lines) < 3:
         line = input("  empty line to finish, Enter now to skip: " if not lines else "  ").strip()
@@ -474,19 +557,27 @@ def _ask_brief() -> str:
 
 
 def wizard(root: Path | None = None) -> int:
-    """Interactive first-run setup: ask everything first, then write (Ctrl+C mid-question loses nothing)."""
+    """Interactive first-run setup, in two halves.
+
+    **Nothing is written until both questions below are answered**, so Ctrl+C during either loses
+    nothing. What `run_init` asks *after* that — the agent surface, the sandboxes — are add-ons to a
+    repository that is already initialized: they cannot be asked earlier, because both questions are
+    about the config that was just written, and interrupting one skips that step rather than
+    aborting anything. There is no question count in the prompts for the same reason: whether the
+    later two are asked at all depends on what the seeded config turns out to say.
+    """
     common.configure_logging()
     root = (root or Path.cwd()).resolve()
-    print("Loose Rein setup — Enter accepts the [default]; Ctrl+C aborts without writing.")
+    print("Loose Rein setup — Enter accepts the [default]; Ctrl+C now aborts without writing.")
     try:
-        name = _ask("1/2 product name", root.name)
+        name = _ask("product name", root.name)
         summary = _ask_brief()
     except (KeyboardInterrupt, EOFError):
         logger.error("\naborted — nothing was written.")
         return 130
     # branch defaults to build/<name>; source is auto-detected in run_init; the headless CLI keeps
     # its scaffold default (claude -p) — all three are overridable later (flags / `rein agent`).
-    rc = run_init(root, name, f"build/{name}", "", offer_sandbox=True)
+    rc = run_init(root, name, f"build/{name}", "", offer_sandbox=True, offer_surface=True)
     if rc != 0:
         return rc
     if summary:

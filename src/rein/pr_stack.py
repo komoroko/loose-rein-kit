@@ -21,8 +21,16 @@ Which slices are open is read back out of the audit log rather than from GitHub 
 already the record, it works offline, and it needs no schema change.
 
 **Nothing here talks to the network.** Deriving and materialising are local git reads and one
-`git branch -f` per slice. Pushing and opening pull requests are outward-facing, and live in the
-CLI half behind an interactive confirmation.
+`git branch -f` per slice. Pushing, opening, lifting and merging pull requests are outward-facing,
+and live in the CLI half behind an interactive confirmation.
+
+**The stack lands whole, or not at all.** The pull requests are registered as a GitHub stack
+(`gh stack link`), and `--merge` hands the *top* one to `gh stack merge`, which merges every member
+below it in a single all-or-nothing operation. This is not a convenience. Merging a subset makes
+GitHub rebase the branches above onto the new base with new commit ids, and the recorded
+`completed_commit` of every task above the cut would then name a commit in no branch's history.
+Merged atomically, nothing is rebased and the commits the build produced are the commits that land
+— measured against a real repository, not inferred.
 """
 
 from __future__ import annotations
@@ -48,6 +56,7 @@ LEDGER_EVENT = "decision_declared"
 LEDGER_KEY = "pr_stack"
 LEDGER_OPENED = "opened"
 LEDGER_READY = "ready"
+LEDGER_MERGED = "merged"
 
 #: Slice branches live in their own namespace so they never collide with the per-task leaf
 #: branches `build_git` creates (`<work_branch>-T-NNN`), which outlive a blocked or salvaged task.
@@ -99,6 +108,7 @@ class LedgerRecord:
     head: str
     url: str = ""
     ready: bool = False
+    merged: bool = False
 
 
 @dataclass(frozen=True)
@@ -234,7 +244,7 @@ def ledger(events: Iterable[models.Event]) -> list[LedgerRecord]:
             continue
         detail = event.detail
         action = detail.get(LEDGER_KEY)
-        if action not in (LEDGER_OPENED, LEDGER_READY):
+        if action not in (LEDGER_OPENED, LEDGER_READY, LEDGER_MERGED):
             continue
         index = detail.get("index")
         if not isinstance(index, int):
@@ -247,7 +257,8 @@ def ledger(events: Iterable[models.Event]) -> list[LedgerRecord]:
             base_ref=str(detail.get("base_ref", "") or (previous.base_ref if previous else "")),
             head=str(detail.get("head", "") or (previous.head if previous else "")),
             url=str(detail.get("url", "") or (previous.url if previous else "")),
-            ready=action == LEDGER_READY or bool(previous and previous.ready),
+            ready=action in (LEDGER_READY, LEDGER_MERGED) or bool(previous and previous.ready),
+            merged=action == LEDGER_MERGED or bool(previous and previous.merged),
         )
     return [found[i] for i in sorted(found)]
 
@@ -429,7 +440,7 @@ def derive(repo: repo_mod.Repo, docs: Documents, *, base: str = "main") -> list[
 
 # --- preconditions ------------------------------------------------------------
 
-MODES = ("push", "restack", "ready")
+MODES = ("push", "restack", "ready", "merge")
 
 
 def preconditions(
@@ -438,10 +449,10 @@ def preconditions(
     """What has to hold before `mode` may run. Errors stop the run; warnings are printed and passed.
 
     The gate-④ split is the load-bearing one. `--push` and `--restack` are how a change gets *to*
-    a reviewer, so they belong to the window before the gate opens; `--ready` is what says a human
-    approved, so it may not run before one has. Changing code after gate ④ is approved is rewinding
-    an approval, which is a human's privilege (AGENTS.md) — hence `--restack` refuses there rather
-    than quietly moving approved commits around.
+    a reviewer, so they belong to the window before the gate opens; `--ready` and `--merge` are what
+    say a human approved, so they may not run before one has. Changing code after gate ④ is approved
+    is rewinding an approval, which is a human's privilege (AGENTS.md) — hence `--restack` refuses
+    there rather than quietly moving approved commits around.
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r} — one of {', '.join(MODES)}")
@@ -456,10 +467,11 @@ def preconditions(
         )
 
     approved = state.gate_status("build") == "approved"
-    if mode == "ready" and not approved:
+    if mode in ("ready", "merge") and not approved:
         errors.append(
-            "gate ④ (build) is not approved — a slice may not leave draft before the grounded review "
-            "a human signed off on. Present it with `rein review` and let a human run `rein approve build`."
+            "gate ④ (build) is not approved — a slice may not leave draft or land on the base before the "
+            "grounded review a human signed off on. Present it with `rein review` and let a human run "
+            "`rein approve build`."
         )
     if mode == "restack" and approved:
         errors.append(
@@ -472,7 +484,7 @@ def preconditions(
             "Run `rein pr-stack --ready` straight after to lift them."
         )
 
-    if mode in ("push", "ready") and not any(s.task_id for s in slices):
+    if mode in ("push", "ready", "merge") and not any(s.task_id for s in slices):
         errors.append("no task has landed on the work branch yet — there is nothing to slice")
 
     if mode == "ready":
@@ -504,6 +516,24 @@ def preconditions(
             errors.append(
                 f"{gap} — a stacked pull request's base is one you created, so without those the "
                 "base-side policy check would measure it against itself"
+            )
+
+    if mode == "merge":
+        # Everything below is about *order*, which is the whole reason this mode exists: merging a
+        # slice whose fix has not been carried upward, or one still in draft, lands content in the
+        # base that the pull requests above it then show again.
+        records = {r.index: r for r in ledger(docs.events)}
+        drafts = [s.label for s in slices if not (rec := records.get(s.index)) or not rec.ready]
+        if drafts:
+            errors.append(
+                f"slice(s) {', '.join(drafts)} are still drafts (or were never opened) — run "
+                "`rein pr-stack --ready` first; merging a draft is merging something no human lifted"
+            )
+        gaps = propagation_gaps(repo, docs, slices)
+        if gaps:
+            errors.append(
+                f"slice(s) {', '.join(gaps)} are not contained in {config.work_branch} — run "
+                "`rein pr-stack --restack` first, or the base will get content the slices above still hold"
             )
 
     base_sha = _rev_parse(repo, base)
@@ -722,10 +752,10 @@ def slice_body(
     lines += _stack_table(slices, current, base=base)
     lines += [
         "",
-        "Merge bottom first with `gh pr merge --merge --delete-branch`. Never squash and never "
-        "rebase-merge: either puts content into the base under a different commit, and every "
-        "pull request above this one would then show this diff again. Deleting the branch is what "
-        "retargets the next one.",
+        "This stack is merged whole by `rein pr-stack --merge`, in one atomic `gh stack merge`, as "
+        "merge commits. Do not merge part of it: GitHub rebases the pull requests above the cut "
+        "with new commit ids, and the commit recorded for every task above it then exists in no "
+        "branch's history. Squash and rebase merges strand them the same way.",
     ]
 
     if approved:
@@ -848,11 +878,11 @@ OUT_DIR = ".rein/pr-stack"
 NETWORK_TIMEOUT_SEC = 300
 
 MERGE_NOTE = (
-    "Merge bottom first:\n"
-    "  gh pr merge <url> --merge --delete-branch\n"
-    "Never --squash and never --rebase: either lands this content in the base as a different\n"
-    "commit, and every pull request above it then shows this diff again. --delete-branch is not\n"
-    "optional either — deleting the base branch is what retargets the next pull request at main."
+    "Merge the stack with `rein pr-stack --merge` (confirms at a terminal).\n"
+    "It lands the whole stack in one atomic `gh stack merge`, as merge commits. Merging part of a\n"
+    "stack is what you must not do: GitHub rebases the branches above the cut onto the new base\n"
+    "with new commit ids, and every recorded `completed_commit` above it then names a commit in no\n"
+    "branch's history. Squash and rebase merges strand them the same way."
 )
 
 
@@ -948,7 +978,55 @@ def publish(
         record(repo, docs, slice_, url, LEDGER_OPENED)
         urls.append(url)
         print(f"  {slice_.index:02d} {slice_.label}: {url or '(gh printed no url)'}")
+    # Not fatal here: everything this function was asked to do has already happened.
+    if problem := link_stack(repo, urls, run=run):
+        logger.warning(
+            f"the pull requests are open but could not be linked into a GitHub stack. {problem}\n"
+            "  Until they are linked, `--merge` cannot land them atomically."
+        )
     return urls
+
+
+def link_command(urls: Sequence[str]) -> list[str]:
+    """The `gh` invocation that registers these pull requests as one stack on GitHub, bottom first.
+
+    `link` rather than `gh stack init`/`submit` because it is the one entry point that "does not
+    rely on gh-stack local tracking state … designed for users who manage branches with external
+    tools": this module already derives the slices, names the branches and writes the bodies, and a
+    second source of truth for what the stack *is* would be a thing to keep in sync.
+    """
+    return ["gh", "stack", "link", *urls]
+
+
+def link_stack(
+    repo: repo_mod.Repo,
+    urls: Sequence[str],
+    *,
+    run: Callable[..., tuple[int, str]] = common.run,
+) -> str:
+    """Register the published pull requests as a GitHub stack. Idempotent. Returns "" or the reason.
+
+    What this buys is not cosmetic: GitHub then enforces bottom-up merging server-side, and
+    :func:`merge_stack` can land the whole thing in one atomic operation — the only shape that
+    leaves the recorded commits intact (see that function).
+
+    **Whether a failure is fatal is the caller's to decide, and the two callers differ.** For
+    :func:`publish` it is not: the pull requests are already open and correct — each based on the
+    one below it, which is what a stack *is* — so a missing extension must not turn a completed
+    publish into an error. For :func:`merge_stack` it is, because the stack existing is what that
+    operation acts on. Reporting the reason instead of raising is what lets both be true.
+    """
+    if len(urls) < 2 or not all(urls):
+        return ""  # one slice is not a stack, and a url gh did not print cannot be linked
+    rc, out = run(link_command(urls), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
+    if rc != 0:
+        return (
+            f"`gh stack link` failed: {out}\n"
+            "  Install the extension (`gh extension install github/gh-stack`), then re-run — or "
+            "link them from the pull request page."
+        )
+    print(f"  linked {len(urls)} pull request(s) into a GitHub stack")
+    return ""
 
 
 def _confirm_ready(docs: Documents, slices: Sequence[Slice], records: Sequence[LedgerRecord]) -> None:
@@ -1018,6 +1096,118 @@ def lift(
     return lifted
 
 
+def merge_command(url: str) -> list[str]:
+    """The `gh` invocation that lands one slice — **always a merge commit, always deleting the branch**.
+
+    One function for the same reason :func:`create_command` is one: the printed line and the
+    executed argv cannot diverge.
+
+    **The whole stack, in one call.** `gh stack merge <top>` merges every member up to and
+    including that pull request as a single all-or-nothing operation, and that shape is what keeps
+    the record true. Measured against a real repository: merging the *bottom only* leaves the
+    branches above it rebased onto the new base with **new commit ids** — GitHub says so ("after
+    the merge, the next unmerged pull request is automatically rebased to target the stack base
+    directly") — which strands every `completed_commit` and gate receipt that names the original.
+    Merging the stack atomically rebases nothing: the commits the build produced are the commits
+    that land. So this never takes a slice; it takes the top, which means all of them.
+
+    `--merge` is not a preference either. `--squash` and `--rebase` put the content into the base
+    as a *different* commit, which is the same stranding by another route.
+    """
+    return ["gh", "stack", "merge", url, "--merge", "--yes"]
+
+
+def _confirm_merge(records: Sequence[LedgerRecord]) -> None:
+    """The pause before the stack lands on the base. Same discipline as :func:`_confirm_push`.
+
+    Merging into the default branch is the most outward-facing thing this module does and the least
+    reversible, so it gets the same rule as a gate approval: a terminal, no flag that skips it, and
+    the whole ordered list on screen before the answer.
+
+    ``records`` is what :func:`merge_stack` will act on — one list, derived once by the caller. It
+    used to be derived twice, from two different sources: the screen listed every record in the
+    ledger and the merge covered the *slices*, so a ledger entry the plan no longer produces was
+    shown to a human and then not merged. The one rule this module has about its own output is that
+    the printed line and the executed argv cannot diverge (:func:`merge_command`).
+    """
+    if not common.stdin_is_terminal():
+        raise PublishError(
+            "merging the stack needs a confirmation typed at a terminal, and stdin is not one. "
+            "Run this in your shell — there is deliberately no flag that skips it."
+        )
+    print(f"This will merge all {len(records)} pull request(s) of the stack into the base:\n")
+    for record_ in records:
+        already = "  (already merged)" if record_.merged else ""
+        name = record_.task_id or models.STACK_TAIL_SUFFIX
+        print(f"  {record_.index:02d} {name}: {record_.url or record_.branch}{already}")
+    print(
+        "\nThey land together, as merge commits, in one all-or-nothing operation: if any of them "
+        "cannot be merged, none are. Nothing here can be squashed, rebased, or merged in part."
+    )
+    if not common.ask_yes_no(f"Merge {len(records)} pull request(s) into the base?"):
+        raise PublishError("nothing was merged.")
+
+
+def merge_stack(
+    repo: repo_mod.Repo,
+    docs: Documents,
+    slices: Sequence[Slice],
+    *,
+    run: Callable[..., tuple[int, str]] = common.run,
+) -> list[str]:
+    """Land the whole stack in one atomic merge. Returns the URLs that landed.
+
+    **All of it, or none of it.** Passing the *top* pull request to `gh stack merge` merges every
+    member below it too, in one operation GitHub either completes or refuses whole. Merging a
+    subset instead would leave the branches above rebased with new commit ids, and the recorded
+    `completed_commit` of every task above the cut would name a commit in no branch's history —
+    the failure :func:`merge_command` documents. So there is no per-slice loop here to get wrong,
+    and no partial state to recover from.
+
+    Every slice is recorded as merged once the operation succeeds; a refusal records nothing,
+    because nothing moved.
+    """
+    if len(slices) < 2:
+        raise PublishError(
+            "there is only one slice, which is not a stack — `gh stack merge` has nothing to land. "
+            "Merge that single pull request yourself; with nothing above it there is no order to get wrong."
+        )
+    records = {r.index: r for r in ledger(docs.events)}
+    missing = [s.label for s in slices if not (rec := records.get(s.index)) or not rec.url]
+    if missing:
+        raise PublishError(
+            f"slice(s) {', '.join(missing)} have no recorded pull request — run `rein pr-stack --push` "
+            "first; a stack can only be merged whole, so a slice with no pull request stops all of it"
+        )
+    # Link here rather than trusting `--push` to have done it. Linking is idempotent by design
+    # ("if some of the PRs are already in a stack, the existing stack is updated"), and the stack
+    # existing is this function's own precondition: `--push` may have run before the extension was
+    # installed, or on a machine that never had it.
+    #
+    # Refused, not warned about. `publish` can carry on without a stack because its work is already
+    # done; this operation *is* the stack, and continuing to `gh stack merge` against an unlinked
+    # one only swaps this sentence for gh's, which does not say what to do.
+    if problem := link_stack(repo, [records[s.index].url for s in slices], run=run):
+        raise PublishError(
+            f"the pull requests are not registered as a GitHub stack, so `gh stack merge` has "
+            f"nothing to land. {problem}\n  nothing was merged."
+        )
+    top = records[slices[-1].index]
+    rc, out = run(merge_command(top.url), cwd=str(repo.root), timeout=NETWORK_TIMEOUT_SEC)
+    if rc != 0:
+        raise PublishError(
+            f"merging the stack failed: {out}\n  nothing was merged — the operation is all-or-nothing, "
+            "so the pull requests are exactly as they were"
+        )
+    landed: list[str] = []
+    for slice_ in slices:
+        record_ = records[slice_.index]
+        record(repo, docs, slice_, record_.url, LEDGER_MERGED)
+        landed.append(record_.url)
+        print(f"  {slice_.index:02d} {slice_.label}: merged — {record_.url}")
+    return landed
+
+
 def _stopped_at(slice_: Slice, done: Sequence[str], why: str, *, state: str = "open") -> str:
     already = f"{len(done)} pull request(s) are already {state} and stay {state}" if done else "nothing changed"
     return f"{why}\n  stopped at slice {slice_.index:02d} ({slice_.label}); {already}"
@@ -1064,7 +1254,7 @@ def _report(result: Preconditions) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="cut the work branch into one draft pull request per task (stacked)",
-        epilog="Push and pull-request creation are outward-facing: --push confirms at a terminal first.",
+        epilog="--push, --ready and --merge are outward-facing: each confirms at a terminal first.",
     )
     parser.add_argument("--base", default="main", help="the branch the bottom of the stack targets (default: main)")
     parser.add_argument("--remote", default="origin", help="the remote to push to (default: origin)")
@@ -1083,6 +1273,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="carry each slice's review fixes up into the slices above it and into the work branch (by merge)",
     )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="once the stack is ready: land the whole stack in one atomic `gh stack merge` "
+        "(confirms at a terminal; merge commits only, and never a subset)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="derive and report; touch neither refs nor files")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
@@ -1094,21 +1290,30 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
-    chosen = [name for name, on in (("--push", args.push), ("--ready", args.ready), ("--restack", args.restack)) if on]
+    chosen = [
+        name
+        for name, on in (
+            ("--push", args.push),
+            ("--ready", args.ready),
+            ("--restack", args.restack),
+            ("--merge", args.merge),
+        )
+        if on
+    ]
     if len(chosen) > 1:
         logger.error(f"{' and '.join(chosen)} are separate steps with a human between them, not one flag")
         return 2
-    mode = "ready" if args.ready else "restack" if args.restack else "push"
+    mode = "ready" if args.ready else "restack" if args.restack else "merge" if args.merge else "push"
 
     try:
         docs = Documents.read(repo)
         slices = derive(repo, docs, base=args.base)
         if not _report(preconditions(repo, docs, slices, mode=mode, base=args.base)):
             return 2
-        # Neither `--ready` nor `--restack` repoints a ref. The pull requests they touch are open
-        # on the branches as they stand, and moving one now would be a force-push under a reviewer;
-        # `--restack` moves them forward by merging, which is a commit, not a repoint.
-        skip = args.ready or args.restack
+        # None of `--ready`, `--restack` or `--merge` repoints a ref. The pull requests they touch
+        # are open on the branches as they stand, and moving one now would be a force-push under a
+        # reviewer; `--restack` moves them forward by merging, which is a commit, not a repoint.
+        skip = args.ready or args.restack or args.merge
         outcome = Materialized() if skip else materialize(repo, slices, dry_run=args.dry_run)
     except (StackError, dag.DagError, models.DocumentError, store_mod.StoreError) as exc:
         logger.error(str(exc))
@@ -1129,6 +1334,30 @@ def main(argv: list[str] | None = None) -> int:
         except (StackError, store_mod.StoreError) as exc:
             logger.error(str(exc))
             return 2
+
+    if args.merge:
+        # No bodies are written: merging changes nothing a reader of the pull request would see,
+        # and rewriting a body at the moment it lands would be noise in the record.
+        #
+        # `covered` is the slices, which is what `merge_stack` acts on — the same list the human is
+        # about to see. Listing the *ledger* instead showed records for slices the plan no longer
+        # produces, so the screen named pull requests the merge would not touch. A record with no
+        # slice is `merge_stack`'s to refuse, not this screen's to promise.
+        records = {r.index: r for r in ledger(docs.events)}
+        covered = [records[s.index] for s in slices if s.index in records]
+        if covered and all(record_.merged for record_ in covered):
+            # The merge is all-or-nothing, so the only way back here is a stack that already landed
+            # whole. Say so rather than asking a human to approve merging what is no longer open.
+            print("\nevery pull request in the stack has already been merged")
+            return 0
+        try:
+            _confirm_merge(covered)
+            landed = merge_stack(repo, docs, slices)
+        except (PublishError, store_mod.StoreError) as exc:
+            logger.error(str(exc))
+            return 2
+        print(f"\n{len(landed)} pull request(s) merged into the base.")
+        return 0
 
     try:
         bodies = write_bodies(repo, docs, slices, base=args.base)
@@ -1196,7 +1425,7 @@ def _run_restack(repo: repo_mod.Repo, docs: Documents, slices: Sequence[Slice]) 
     logger.error(f"propagation stopped at {result.stopped_at}: {resolution.escalation}")
     marked = conflict.escalate(repo, resolution)
     if marked:
-        logger.error(f"marked needs-revision: {', '.join(marked)} — `rein status` shows them")
+        logger.error(f"marked needs-revision: {', '.join(marked)} — `rein start --full` shows them")
     return 2
 
 

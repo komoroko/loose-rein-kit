@@ -4,6 +4,150 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.12] - 2026-08-31
+
+**Four fixes to what shipped above.** `rein --repo X --version` (and `--help`, `-h`, `help`)
+answered `unknown verb '--version'` with exit 2: the identity spellings were read at argv[0],
+before the global `--repo` came off — the same failure a comment and a test already existed to
+prevent, reintroduced for the prefixed form. `--repo` now comes off first, and one resolved value
+is handed to both the lock check and the verb, so `rein start --repo X` no longer reads the flag in
+`resume` and the current directory in the wizard check. `rein start` off a TTY collects the status
+**once**: it used to ask "does this repo still need init?" before delegating, which put a second
+full `collect_status` on the SessionStart hook — the one path that runs at every session start, and
+the one 0.3.11 was spent making cheap. And `rein pr-stack --merge` re-run after a fixed conflict
+now asks only about the pull requests still open, instead of counting the ones that already landed.
+
+**An adversarial pass over everything above, and six things it broke.**
+
+- **`rein start` refused the person who could act and reported to the hook that could not.** It
+  read `config.yaml` and `state.yaml` directly, without the tolerance `collect_status` has for a
+  schema-invalid one — so at a terminal a damaged SSOT exited 2 with a schema dump, and off one
+  (the SessionStart hook) the same repository printed its board. Now the read is guarded and falls
+  through to the board either way, which is the state a human needs *described*.
+- **`rein start --json` printed the setup wizard's first question and exited 130.** The wizard is
+  what a *bare* `rein start` does; `--json`, `--full` and `--no-mark` each name an output, and
+  answering one of those with an interactive prompt is not a slower answer but a different one.
+- **`--repo=X` was not read anywhere.** Before the verb it was `unknown verb '--repo=X'`; after it,
+  `rein start` ran its wizard check against the current directory while `resume` resolved the flag
+  — the two-repositories split that had just been fixed for the space-separated spelling. One
+  reader now takes both, on both sides.
+- **Ctrl+C at the wizard's agent-surface question was a traceback over a repository that had in
+  fact been initialized.** That question and the sandbox one are asked after the write and cannot
+  be asked before — both are about the config just seeded — so the wizard's "ask everything first"
+  contract stops at the brief, and interrupting an add-on now skips it. An answer the surface
+  question does not recognise is re-asked rather than filed as a decline, and the prompts dropped
+  their `1/2` counters, which counted two of the four questions actually put.
+- **`pr-stack --merge` showed one list and merged another.** The confirmation was built from the
+  unmerged ledger records and the merge from the slices, so after a write failure left part of a
+  landing unrecorded, a re-run showed two pull requests and handed `gh stack merge` the top of
+  three. Both come from the slices now, with already-landed members marked rather than hidden.
+- **`--merge` warned past a failed `gh stack link` and called `gh stack merge` anyway.** The stack
+  existing is that operation's precondition, and it was in the docstring rather than the code;
+  `publish` still carries on without one, because its work is already done. A single slice is not a
+  stack and is refused by name instead of failing inside gh.
+
+Also: a removed binary is no longer counted in `analyzed_files` (that counts files whose *content*
+was read, and it printed `analyzed_files: 1` beside `languages: {}`); `rein doctor` matches
+`github/gh-stack` rather than any extension whose name contains it; and the dispatcher's subparsers
+dropped a `REMAINDER` positional that nothing parsed — the help renders byte-identically without it.
+
+**A deleted binary is no longer counted as a binary nobody could read.** The Coverage Manifest
+records what it *could not read of the change*, and `parse_diff` did not record whether a file was
+removed — so `Binary files a/x and /dev/null differ` was filed as `unsupported: binary` exactly
+like an added blob. That is not a wording: `coverage_gap_risk` floors an unread binary at `high`
+and `coverage_blocks` blocks gate ④ at high, so **deleting a committed artifact shut the gate on
+the change that removed the very thing nobody could read** — with no way out, since the block's own
+remedy ("split the unreadable part out of this scope") cannot remove a file from a diff. `DiffFile`
+now carries `deleted`, read from git's `deleted file mode` header (the only marker a binary
+deletion has — the `+++ /dev/null` line text deletions get is not emitted for one), and a removed
+binary is neither unread nor a gap: the path is the whole fact and it was read. An **added or
+modified** binary is unchanged — those bytes are in the tree and nothing here parsed them. A
+removed lockfile still fires the `dependency` signal; a deletion is still a change.
+
+**`.coverage` stopped being tracked.** `make test` rewrote it on every run and nothing read it —
+not CI, not the makefile — so every branch that ran the tests carried a binary blob in its diff,
+which is `rein doctor`'s "binary file in the change under review" FAIL and a `coverage:
+insufficient` at gate ④. It was tracked by a `git add -A` in the first place, so `.coverage` and
+`.coverage.*` are now ignored.
+
+**Two of the fixes above were routing around the cause, not removing it.** `rein start` asked
+`collect_status` whether the repository was still a template — the git subprocesses, digests and
+readiness probes, run to learn a boolean the config and the state carry in two fields — and then
+delegated to `resume`, which collects for itself. The first attempt hid the cost behind a TTY check
+instead of removing it. `status_api.is_uninitialized(config, state)` is now the one definition of
+"not a product yet": `next_action` takes its answer (its `template_mode`/`placeholders` pair
+collapses into one `uninitialized`) and `rein start` calls it directly, so the verb collects the
+status exactly once on every path. And `pr-stack --merge` assumed `--push` had registered the
+GitHub stack; it now links first, which is idempotent by design and turns "the stack must exist"
+from a hope about an earlier command into this function's own precondition.
+
+**The stack is a GitHub stack now, and it lands whole.** GitHub shipped native stacked pull
+requests on 2026-07-30, and the base-branch chain this module already built is the primitive they
+are made of — so `--push` now also runs `gh stack link`, which registers the slices as a stack
+"without adopting local stack tracking" (its documented purpose, for exactly this case: branches
+managed by another tool). What that buys is the merge. Measured against a real repository rather
+than inferred from the docs: **merging the bottom pull request alone rebases every branch above it
+onto the new base with new commit ids** — `838a222` became `57bcc43` — which is how every
+`completed_commit` and gate receipt above the cut ends up naming a commit in no branch's history.
+**Merging the stack atomically rebases nothing**: all three original commits landed in the base
+untouched. So `--merge` no longer walks the slices with one `gh pr merge` each; it hands the *top*
+pull request to `gh stack merge --merge --yes`, which takes everything below it in one
+all-or-nothing operation. There is no partial state to recover from, and no per-slice loop to get
+wrong. `rein doctor` reports whether the `gh-stack` extension is installed (INFO — only `--merge`
+needs it), and a `link` that fails leaves the published pull requests alone: they are already open
+and correctly based, which is what a stack is.
+
+**A stack's merge order was a human's job to repeat without slipping.** `rein pr-stack` cut the
+cycle into one pull request per task, opened them as drafts and lifted them — and then handed the
+last step back: *merge bottom first with `gh pr merge --merge --delete-branch`*, typed once per
+slice, in the right order, with the right two flags. The order is not a preference. A slice landed
+out of sequence puts content into the base that every pull request below it is still open against,
+and squash or rebase lands it as a *different* commit — every pull request above then shows the
+diff again, and the `completed_commit` and gate receipt that name the real commit are stranded.
+AGENTS.md already says merge order runs in code, and this one did not. **`rein pr-stack --merge`**
+walks the list this module already derives: bottom first, skipping what already landed, stopping
+at the first refusal rather than merging slice 3 onto a base that never got slice 2. It confirms at
+a terminal like `--push` and `--ready`, cannot be pre-authorized, refuses before gate ④, refuses
+while any slice is still a draft, and refuses when a review fix has not been carried upward by
+`--restack`. Each landing is recorded in the audit log, so re-running after a fixed conflict is the
+recovery path rather than a second merge.
+
+**Four verbs answered "where am I", and the help listed every verb the loop had.** `start`,
+`next`, `status` and `resume` were four renderings of one `collect_status()` call — `next` was
+literally `status --next` with the flag injected by the dispatcher, `resume --full` concatenated
+`status`'s own output, and `start` was `next` plus a header line. `resume.py` said why out loud:
+"`rein status` is unchanged for anyone who wants only that" — a backward-compatibility retention
+in a project whose rules forbid them. The read surface is now **`rein start`** (the delta since
+your last visit; `--full` adds the whole board, `--json` the status object, `--no-mark` looks
+without advancing your place) and **`rein next`** (one recommended command, `--json` for
+integrations). `rein status` and `rein resume` are gone; the SessionStart hooks and the
+pre-authorization lists in all three integrations now name `rein start`.
+
+**The help is generated from the verb table instead of being a second copy of it.** `cli.HELP`
+was a hand-written string listing 32 verbs, and `tests/test_cli.py` carried a test whose only job
+was to catch it drifting from `VERBS` — a test that has to exist is the symptom. `VERBS` now
+carries each verb's summary and whether a human ever types it, and argparse renders the listing,
+the usage line and the `invalid choice` error from that one table. The eleven verbs a person never
+types (`report`, `decision`, `knowledge-gap`, `evidence`, `dag`, `events`, `task`, `guard`,
+`policy-check`, `issue-sync`, `project`) drop out of the default listing — but their **names stay
+in the epilog**, because the agents that call them read `rein --help` too, and a verb whose name
+appears nowhere is discoverable only through prompt prose. `rein help --all` gives them their
+descriptions; `rein <verb> --help` gives their arguments.
+
+**The wizard installs the agent surface, because its own closing line depends on one.** It
+offered to build the sandboxes but only *printed* "Add an agent surface when you want one" — and
+then told you to start with `/req`, a command that does not exist until an integration is written.
+An opt-in step that every documented path requires is not opt-in, and the tool was already paying
+for the gap at runtime: every `/`-recommendation had to carry a "no agent surface is installed"
+sentence, computed by walking the packaged payload (the 385ms this release's predecessor spent
+0.3.11 fixing). `rein start` on a fresh repo now asks which surface to install, defaulting to the
+host it can detect, and the first run is `rein start` → new session → `/req`. `rein install` stays
+for a second host and for repos seeded off a TTY.
+
+**`rein oci verify` left the setup instructions.** Running it immediately after `oci build
+--write-config` can only fail when the build failed, which the build already reports, and
+`rein doctor` checks the same pins. The verb remains for CI and for re-checking later.
+
 ## [0.3.11] - 2026-08-31
 
 **An idle dashboard burned an eighth of a core, forever.** The page polled `/api/status` every
