@@ -164,6 +164,43 @@ def test_a_removed_binary_is_not_an_unread_one() -> None:
     assert facts.coverage.languages == {}
 
 
+def test_a_removed_unsupported_file_is_not_an_unread_one() -> None:
+    """The `unsupported_language` twin of the case above, and the one that actually shut a gate.
+
+    0.3.12 exempted a deleted *binary* and stopped one branch short. Deleting a `.mk` and an
+    `.ndjson` still filed them as unread, which makes coverage `insufficient`, and `coverage_blocks`
+    shuts gate ④ at high effective risk — on a 17-task cycle whose only offence was removing a
+    predecessor tool's scaffolding. There is no operator move: `dispute_finding` is for security
+    findings, and splitting the scope never removes a file from a diff. The repair on the day was
+    to restore both files and defer the deletion, which is a gate deciding what may be deleted.
+    """
+    diff = _diff("agentloop.mk", removed=["all: build", "\tsh ./run.sh"])
+    diff = diff.replace("--- a/agentloop.mk", "deleted file mode 100644\n--- a/agentloop.mk")
+    facts = diff_facts.analyze(diff)
+
+    assert facts.files[0].deleted is True
+    assert facts.coverage.unsupported_files == ()
+    assert facts.coverage.analyzed_files == 0
+    assert facts.coverage.coverage_status == "sufficient"
+
+
+def test_a_removed_source_file_is_not_counted_as_read() -> None:
+    """Analyzable, deleted, and still not `analyzed`: `review.fold_bodies` withholds its body.
+
+    The manifest and the fold are one statement in two places. A body no reviewer is sent may not
+    be counted as one a reviewer read, and the exemption applies by *deletion*, not by whether the
+    extension happens to have an analyzer.
+    """
+    diff = _diff("src/legacy.py", removed=["def gone(): ...", "x = 1"])
+    diff = diff.replace("--- a/src/legacy.py", "deleted file mode 100644\n--- a/src/legacy.py")
+    facts = diff_facts.analyze(diff)
+
+    assert facts.files[0].deleted is True
+    assert facts.coverage.analyzed_files == 0
+    assert facts.coverage.languages == {}
+    assert facts.coverage.coverage_status == "sufficient", "a pure deletion is not an unread change"
+
+
 def test_an_added_binary_is_still_unread() -> None:
     """The `new file mode` twin of the case above: these bytes are in the tree and unread."""
     diff = (

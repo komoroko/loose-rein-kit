@@ -136,11 +136,17 @@ def build_request(
     where an *observation* (what happened) is allowed but an *expectation* (what should have
     happened) is not.
     """
+    # Key order is the provider's prompt cache. A cache matches on an exact prefix, so a
+    # 40-character `subject_head_sha` placed in front of half a megabyte of diff invalidated the
+    # whole reading on every commit — including commits that provably cannot change it, since
+    # `not_the_product` keeps `.rein/` out of the diff entirely. The diff is the large stable
+    # thing and goes first; the volatile scalars go behind it, where changing them costs the
+    # bytes after them and nothing before.
     request: dict[str, Any] = {
         "contract": contract(),
+        "diff": diff_text,
         "trusted_base_sha": trusted_base_sha,
         "subject_head_sha": subject_head_sha,
-        "diff": diff_text,
         "deterministic_facts": dict(deterministic_facts),
     }
     if runtime_observations:

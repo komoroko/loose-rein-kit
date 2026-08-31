@@ -178,13 +178,16 @@ class SharedReading:
                     )
                 return self._session
             session = str(uuid.uuid4())
+            # The instruction and the reading, and deliberately nothing else. The two shas used
+            # to sit here, between them: duplicated out of a request that keeps them anyway
+            # (`without_the_reading` moves only the reading), and volatile — a 40-character field
+            # that changes on every commit, in front of the largest thing in the payload, in the
+            # one turn whose entire purpose is to be a cache prefix the branches hit.
             payload = {
                 "instruction": (
                     "Read the change below. Do not analyse it yet and do not describe it: a "
                     f"question about it follows in the next message. Reply with exactly {_PRIME_ACK}."
                 ),
-                "trusted_base_sha": str(request.get("trusted_base_sha", "")),
-                "subject_head_sha": str(request.get("subject_head_sha", "")),
                 _READING_KEY: request.get(_READING_KEY, ""),
             }
             # The same guard the extractor's own request gets. This is a new path into the
