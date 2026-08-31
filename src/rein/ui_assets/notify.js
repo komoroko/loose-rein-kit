@@ -41,7 +41,7 @@ function snapshot(d) {
 function notify(body) {
   if (!enabled || typeof Notification === "undefined" || Notification.permission !== "granted") return;
   try { new Notification("Loose Rein — " + ((state.data || {}).project || "dashboard"), { body }); }
-  catch (e) { /* headless/denied environments: the title/favicon badges still carry the signal */ }
+  catch { /* headless/denied environments: the title/favicon badges still carry the signal */ }
 }
 
 // grey = quiet loop, brass = a gate waits on the human, red = something blocks the gate outright.

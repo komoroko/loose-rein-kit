@@ -6,7 +6,7 @@
 # wraps the package's own dev workflow (macOS / Linux; use WSL on Windows).
 # =========================================================
 
-.PHONY: install setup pre-commit pre-push check test template-lint sync-check audit clean
+.PHONY: install setup pre-commit pre-push check test frontend template-lint sync-check audit clean
 
 # Install the uv binary (the one bootstrap prerequisite)
 install:
@@ -33,7 +33,22 @@ pre-push:
 
 # The full quality gate: both hook stages plus the template drift canaries and the
 # materialized-artifact check. CI runs this same target.
-check: pre-commit pre-push template-lint sync-check
+check: pre-commit pre-push template-lint sync-check frontend
+
+# The dashboard's frontend: eslint + the jsdom suite under tests/ui/.
+#
+# node is a *development* dependency and nothing else — `rein` is a Python package, `rein ui`
+# serves plain ES modules over the standard library, and no user of the CLI ever needs node. So
+# this skips loudly rather than failing when node is absent, and CI installs node so it can never
+# skip there.
+frontend:
+	@if ! command -v node >/dev/null 2>&1; then \
+		echo "frontend: SKIPPED — node is not installed (dev-only; CI runs this)"; \
+	elif [ ! -d node_modules ]; then \
+		echo "frontend: SKIPPED — run 'npm ci' first (dev-only; CI runs this)"; \
+	else \
+		npm run --silent lint && npm test --silent; \
+	fi
 
 # The package's test suite (the same suite CI's matrix runs), with coverage measured.
 #

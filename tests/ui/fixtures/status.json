@@ -1,0 +1,296 @@
+{
+  "project": "demo",
+  "cycle_id": "demo-cycle",
+  "branch": "build/demo",
+  "current_phase": "build",
+  "updated_at": "2026-07-23T10:00:00+09:00",
+  "phase_order": [
+    "brief",
+    "requirements",
+    "design",
+    "tasks",
+    "build",
+    "verify",
+    "done"
+  ],
+  "gates": [
+    {
+      "name": "requirements",
+      "status": "approved",
+      "index": 1,
+      "phase": "requirements",
+      "approval_id": "GA-REQUIREMENTS-0001"
+    },
+    {
+      "name": "design",
+      "status": "approved",
+      "index": 2,
+      "phase": "design",
+      "approval_id": "GA-DESIGN-0001"
+    },
+    {
+      "name": "tasks",
+      "status": "approved",
+      "index": 3,
+      "phase": "tasks",
+      "approval_id": "GA-TASKS-0001"
+    },
+    {
+      "name": "build",
+      "status": "pending",
+      "index": 4,
+      "phase": "build",
+      "approval_id": null
+    },
+    {
+      "name": "release",
+      "status": "pending",
+      "index": 5,
+      "phase": "verify",
+      "approval_id": null
+    }
+  ],
+  "plan": {
+    "cycle_id": "demo-cycle",
+    "digest": "sha256:cbcb6b0bdfd4dc4d37f4f6d4ba1510295ce9390fd89eec4aac09d8ae3bb2c731",
+    "claims": 2,
+    "tasks": 6,
+    "max_claim_risk": "low"
+  },
+  "plan_status": "frozen",
+  "review": {
+    "status": "not_generated"
+  },
+  "review_outlook": null,
+  "tasks": {
+    "counts": {
+      "todo": 1,
+      "in-progress": 1,
+      "blocked": 1,
+      "needs-revision": 1,
+      "awaiting-evidence": 1,
+      "done": 1
+    },
+    "total": 6,
+    "layers": [
+      [
+        "T-001",
+        "T-005"
+      ],
+      [
+        "T-002",
+        "T-003"
+      ],
+      [
+        "T-004"
+      ],
+      [
+        "T-006"
+      ]
+    ],
+    "critical_path": [
+      "T-001",
+      "T-002",
+      "T-004",
+      "T-006"
+    ],
+    "frontier": [],
+    "rows": [
+      {
+        "id": "T-001",
+        "title": "task T-001",
+        "kind": "foundation",
+        "status": "done",
+        "risk": "low",
+        "blocked_by": [],
+        "claim_ids": [
+          "C-001"
+        ],
+        "fan_out": 2,
+        "handoff": {},
+        "commit": ""
+      },
+      {
+        "id": "T-002",
+        "title": "task T-002",
+        "kind": "foundation",
+        "status": "in-progress",
+        "risk": "low",
+        "blocked_by": [
+          "T-001"
+        ],
+        "claim_ids": [
+          "C-001"
+        ],
+        "fan_out": 1,
+        "handoff": {},
+        "commit": ""
+      },
+      {
+        "id": "T-003",
+        "title": "task T-003",
+        "kind": "foundation",
+        "status": "blocked",
+        "risk": "low",
+        "blocked_by": [
+          "T-001"
+        ],
+        "claim_ids": [
+          "C-002"
+        ],
+        "fan_out": 0,
+        "handoff": {},
+        "commit": ""
+      },
+      {
+        "id": "T-004",
+        "title": "task T-004",
+        "kind": "foundation",
+        "status": "awaiting-evidence",
+        "risk": "low",
+        "blocked_by": [
+          "T-002"
+        ],
+        "claim_ids": [
+          "C-002"
+        ],
+        "fan_out": 1,
+        "handoff": {},
+        "commit": ""
+      },
+      {
+        "id": "T-005",
+        "title": "task T-005",
+        "kind": "foundation",
+        "status": "needs-revision",
+        "risk": "low",
+        "blocked_by": [],
+        "claim_ids": [
+          "C-002"
+        ],
+        "fan_out": 0,
+        "handoff": {},
+        "commit": ""
+      },
+      {
+        "id": "T-006",
+        "title": "task T-006",
+        "kind": "foundation",
+        "status": "todo",
+        "risk": "low",
+        "blocked_by": [
+          "T-004"
+        ],
+        "claim_ids": [
+          "C-001"
+        ],
+        "fan_out": 0,
+        "handoff": {},
+        "commit": ""
+      }
+    ]
+  },
+  "trace": {
+    "ok": true,
+    "errors": [],
+    "warnings": [
+      "docs/20-design.md is absent — the design dimension was not checked"
+    ],
+    "requirements": [
+      {
+        "id": "R-1",
+        "nfr": false,
+        "claims": [
+          "C-001"
+        ],
+        "tasks": [
+          "T-001",
+          "T-002",
+          "T-006"
+        ]
+      },
+      {
+        "id": "R-2",
+        "nfr": false,
+        "claims": [
+          "C-002"
+        ],
+        "tasks": [
+          "T-003",
+          "T-004",
+          "T-005"
+        ]
+      }
+    ]
+  },
+  "template_mode": false,
+  "github_enabled": false,
+  "chain": {
+    "root": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "events": 0,
+    "defects": []
+  },
+  "attention": [],
+  "next": {
+    "command": "/tasks",
+    "kind": "reconcile",
+    "reason": "needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve gate 3. (No agent surface is installed — run `rein install <agent>`, then open a new session so the /-commands exist in your agent.)",
+    "also": [
+      "rein dag --render"
+    ]
+  },
+  "decision": {
+    "id": "reconcile:reconcile:/tasks",
+    "waiting_on_human": true,
+    "kind": "reconcile",
+    "headline": "needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve gate 3. (No agent surface is installed — run `rein install <agent>`, then open a new session so the /-commands exist in your agent.)",
+    "action": "/tasks",
+    "blocking": 2,
+    "open": 5
+  },
+  "pending": [
+    {
+      "id": "gate_blocker:build:83b02f9c",
+      "severity": "blocking",
+      "kind": "gate_blocker",
+      "subject": "build",
+      "headline": "tasks not done: T-002, T-003, T-004, T-005, T-006",
+      "action": "rein approve build --check"
+    },
+    {
+      "id": "gate_blocker:build:b35360b1",
+      "severity": "blocking",
+      "kind": "gate_blocker",
+      "subject": "build",
+      "headline": "no machine review has been generated — run `rein review generate`. Gate 4 approves a grounded review, not a green test run.",
+      "action": "rein approve build --check"
+    },
+    {
+      "id": "task_blocked:T-003:4982d675",
+      "severity": "attention",
+      "kind": "task_blocked",
+      "subject": "T-003",
+      "headline": "T-003 is blocked: task T-003",
+      "action": "rein dag --render"
+    },
+    {
+      "id": "task_awaiting_evidence:T-004:b3884f46",
+      "severity": "attention",
+      "kind": "task_awaiting_evidence",
+      "subject": "T-004",
+      "headline": "T-004 is awaiting-evidence: task T-004",
+      "action": "rein evidence show"
+    },
+    {
+      "id": "task_revision:T-005:4ccb21b7",
+      "severity": "attention",
+      "kind": "task_revision",
+      "subject": "T-005",
+      "headline": "T-005 is needs-revision: task T-005",
+      "action": "/tasks"
+    }
+  ],
+  "pending_deep": true,
+  "warnings": [],
+  "generated_at": "2026-08-30T06:00:17+09:00"
+}

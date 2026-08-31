@@ -18,6 +18,9 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+# This repository's own dev-only frontend tooling (see package.json): node is needed to *test* the
+# dashboard, never to run it. package-lock.json is committed — CI installs from it.
+/node_modules/
 
 # ---- mkdocs ----
 site/

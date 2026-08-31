@@ -16,7 +16,7 @@
 // DOM, and no server-supplied id is ever interpolated into a generated event handler — ids travel
 // as escaped data attributes read back by delegated listeners, the same rule as task ids in api.js.
 
-import { READ_ONLY, TOKEN, circled, esc, post, route, state, toast } from "/assets/api.js";
+import { READ_ONLY, circled, esc, postJson, record, route, state, toast } from "/assets/api.js";
 
 const DIFF_ID = "__diff__";  // the synthetic "change set" entry on a non-build gate's list
 let review = null;     // last /api/review payload for the routed gate
@@ -119,13 +119,9 @@ function firstUnsettledStage() {
 async function postReview(action, body) {
   if (!session || !session.machine_digest) return;
   try {
-    const res = await fetch("/api/review/" + action, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Rein-Token": TOKEN },
-      body: JSON.stringify({ ...body, machine_digest: session.machine_digest }),
-    });
-    if (res.status === 409) { toast("the machine review changed — reloading", "err"); fetchReview(); return; }
-    const data = await res.json();
+    const { status, data } = await postJson("/api/review/" + action,
+      { ...body, machine_digest: session.machine_digest });
+    if (status === 409) { toast("the machine review changed — reloading", "err"); fetchReview(); return; }
     if (data.error) { toast(data.error, "err"); return; }
     toast("recorded", "ok");
     fetchReview();  // the session, the stage content and the blockers all move together
@@ -214,12 +210,14 @@ async function openApproval() {
   paintFooter();
 }
 
-function confirmApproval() {
+async function confirmApproval() {
   const gate = currentGate();
   if (!panel || panel.kind !== "approve" || !review || review.gate !== gate) return;
   const covers = panel.covers;
   panel = null;
-  post("/api/gate/approve", { gate, covers }, false);
+  // The stream reports the opened gate to the spine by itself; only this pane's own payload —
+  // the deliverables and the footer — has to be asked for again.
+  if (await record("/api/gate/approve", { gate, covers })) fetchReview(); else paintFooter();
 }
 
 function openChanges() {
@@ -230,13 +228,13 @@ function openChanges() {
   if (el) el.focus();
 }
 
-function submitChanges() {
+async function submitChanges() {
   const target = field("changes", "target").trim();
   const reason = field("changes", "reason").trim();
   if (!target) { toast("name the place that has to change", "err"); return; }
   if (!reason) { toast("say what is wrong with it", "err"); return; }
   panel = null;
-  post("/api/changes", { gate: currentGate(), target, reason }, false);
+  if (await record("/api/changes", { gate: currentGate(), target, reason })) fetchReview(); else paintFooter();
 }
 
 function openFreeze() { panel = { kind: "freeze" }; paintFooter(); }
@@ -990,7 +988,6 @@ document.addEventListener("rein:view", e => {
   tabVisible = e.detail.view === "gate";
   if (tabVisible) fetchReview();
 });
-document.addEventListener("rein:refresh", () => { if (tabVisible) fetchReview(); });
 
 // One delegated listener for the whole pane. Every id travels as an escaped data attribute and is
 // read back with getAttribute — no server-supplied string ever becomes code on the page that holds

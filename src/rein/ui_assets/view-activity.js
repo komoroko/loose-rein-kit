@@ -6,13 +6,13 @@
 // deliverables under docs/, never in the status payload, so the pane that read `status.logs` could
 // only ever hide itself.
 
-import { READ_ONLY, esc, pollDelay, post, toast } from "/assets/api.js";
+import { READ_ONLY, esc, runCommand, toast } from "/assets/api.js";
 
-// ---- the record: polled only while it is on screen ----
+// ---- the record ----
 const ESCALATION_KINDS = new Set(["blocked", "merge_conflict", "integration_red", "no_runnable", "gate_violation"]);
 const OK_KINDS = new Set(["gate_approved", "task_done", "resolve", "security_review"]);
 let recordVisible = false;
-let lastEvents = "";
+let stale = true;  // the log moved while nobody was looking; fetch when someone is
 
 // `needs_decision` is the server's word for "this event is still waiting on a human" — it is
 // computed in ui.py from events.ATTENTION_EVENTS, so the feed and the Now screen agree by
@@ -39,12 +39,10 @@ function detailText(detail) {
 
 async function fetchEvents() {
   const el = document.getElementById("events");
+  stale = false;
   try {
     const res = await fetch("/api/events?limit=50");
-    const text = await res.text();
-    if (text === lastEvents) return;  // unchanged tail: keep the DOM (and any hover) alive
-    lastEvents = text;
-    const d = JSON.parse(text);
+    const d = await res.json();
     if (d.error) { el.innerHTML = '<div class="warn">' + esc(d.error) + "</div>"; return; }
     if (!d.events.length) { el.innerHTML = '<div class="empty">No events yet (written on the first one).</div>'; return; }
     el.innerHTML = '<div class="scroll"><table class="events">' +
@@ -54,19 +52,20 @@ async function fetchEvents() {
         esc(e.actor || "-") + '</td><td class="mono">' + esc((e.subject_ids || []).join(", ") || "-") +
         "</td><td>" + esc(detailText(e.detail)) + "</td></tr>").join("") + "</table></div>" +
       '<div class="empty" style="margin-top:.4rem">latest ' + d.events.length + " of " + d.total + "</div>";
-  } catch (err) { el.innerHTML = '<div class="empty">event feed unavailable</div>'; }
+  } catch { el.innerHTML = '<div class="empty">event feed unavailable</div>'; }
 }
 
+// The feed refetches when the log actually changed — the server says so — and only for someone
+// who is looking. There is no timer and no response-body comparison: both existed to make blind
+// polling survivable, and there is no longer any blind polling.
 document.addEventListener("rein:view", e => {
   recordVisible = e.detail.view === "record";
+  if (recordVisible && stale) fetchEvents();
+});
+document.addEventListener("rein:record", () => {
+  stale = true;
   if (recordVisible) fetchEvents();
 });
-document.addEventListener("rein:refresh", () => { lastEvents = ""; if (recordVisible) fetchEvents(); });
-// Same visibility-aware pacing as the status poll (api.js pollDelay), so a backgrounded dashboard
-// does not keep two 3-second loops running against a repo nobody is looking at.
-(function pollEvents() {
-  setTimeout(() => { if (recordVisible) fetchEvents(); pollEvents(); }, pollDelay());
-})();
 
 // ---- console ----
 // An OS confirm() dialog puts the consequence in a box the page cannot style, cannot keep on
@@ -89,8 +88,8 @@ function clearConfirm() {
   el.innerHTML = "";
 }
 
-function runDoctor() { post("/api/run", { action:"doctor", params:{} }); }
-function runTests() { post("/api/run", { action:"tests", params:{} }); }
+function runDoctor() { runCommand("doctor", {}); }
+function runTests() { runCommand("tests", {}); }
 
 function runRevise() {
   const phase = document.getElementById("revPhase").value;
@@ -100,7 +99,7 @@ function runRevise() {
     "Roll back to " + esc(phase) + "?",
     "Gates reset in a chain starting at " + esc(phase) + ": each one goes back to pending, and the " +
     "receipts and reviews built on top of them stop counting. Reason on the record: " + esc(reason),
-    () => post("/api/run", { action:"revise", params:{ phase:phase, reason:reason } }));
+    () => runCommand("revise", { phase: phase, reason: reason }));
 }
 
 function runCycleClose() {
@@ -109,7 +108,7 @@ function runCycleClose() {
   askConfirm(
     "Close this cycle as " + esc(slug) + "?",
     "The phase deliverables are archived under that name and every gate resets for the next cycle.",
-    () => post("/api/run", { action:"cycle_close", params:{ slug:slug } }));
+    () => runCommand("cycle_close", { slug: slug }));
 }
 
 // Static markup with no data behind it — app.js draws it once at load. It used to be rebuilt on

@@ -4,19 +4,10 @@
 export const TOKEN = window.TOKEN;
 export const READ_ONLY = window.READ_ONLY;
 
-// The single mutable snapshot the views render from (app.js writes it when the poll brings a change).
-// `etag` is the server's identity for `data` — sent back as If-None-Match so an unchanged SSOT costs
-// a 304 and nothing else; clearing it forces the next poll to fetch a full payload.
-export const state = { data: null, etag: null, lastGen: null };
-
-// A supervised build is mostly waiting, and a backgrounded tab is nobody watching — poll it lazily.
-export const POLL_MS = 3000;
-export const POLL_HIDDEN_MS = 15000;
-export function pollDelay() { return document.hidden ? POLL_HIDDEN_MS : POLL_MS; }
-
-// Re-poll on the next tick regardless of what the server's ETag says (after a write, or when the
-// human asks for it explicitly) — the caller still has to trigger the poll itself.
-export function invalidate() { state.etag = null; }
+// The single mutable snapshot the views render from. app.js writes it when the stream pushes a new
+// one — and the server only pushes when the repository actually moved, so there is nothing here to
+// invalidate, dedupe or schedule.
+export const state = { data: null };
 
 // ---- routing ----
 // The hash is the router, and it carries the gate: a reading room is a place you can link to,
@@ -48,46 +39,53 @@ export function toast(msg, kind) {
   setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 300); }, 3200);
 }
 
-// POSTs ask app.js for a fresh status via a DOM event (no circular import between the entry module
-// and this one).
-//
-// `echo` is what separates the two kinds of write that come through here. A Console command's
-// output IS the result, so it goes to #out on that screen. A decision recorded at a gate is not a
-// command: its result is the repository moving, which the toast names and the next poll shows —
-// echoing it would leave a stale approval payload sitting in a pane on another screen, read later
-// as if it were the output of whatever was run last.
-export async function post(path, body, echo = true) {
+// The authorized POST: the write session (the cookie, sent automatically) plus the CSRF token.
+// Callers get the status back too, because 409 is a real answer here — a machine review that moved
+// under a human-review write is not an error to report, it is a reload to do.
+export async function postJson(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Rein-Token": TOKEN },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, data: await res.json() };
+}
+
+// A Console command. Its output IS the result, so it goes to #out, on the screen that ran it.
+export async function runCommand(action, params) {
   const out = document.getElementById("out");
-  const write = text => { if (!echo) return; out.hidden = false; out.textContent = text; };
-  write("running…");
+  out.hidden = false;
+  out.textContent = "running…";
   try {
-    const res = await fetch(path, { method:"POST",
-      headers:{ "Content-Type":"application/json", "X-Rein-Token":TOKEN },
-      body: JSON.stringify(body) });
-    const data = await res.json();
-    if (data.error) { write("ERROR: " + data.error); toast(data.error, "err"); return; }
-    if ("exit_code" in data) {
-      write("$ " + data.argv.join(" ") + "\n(exit " + data.exit_code + ")\n\n"
-        + (data.stdout || "") + (data.stderr ? "\n[stderr]\n" + data.stderr : ""));
-      toast((data.exit_code === 0 ? "✓ " : "✗ exit " + data.exit_code + " — ") + data.argv.join(" "),
-        data.exit_code === 0 ? "ok" : "err");
-    } else {
-      write(JSON.stringify(data, null, 2));
-      // /api/gate/approve DOES open the gate: the write session a launch link minted is the
-      // capability handover, so reaching the handler means the approval was recorded and an
-      // `approval_id` came back. This branch used to say "is ready — run the command shown to
-      // approve", written when the endpoint only reported readiness. It kept saying it after the
-      // endpoint started recording, so the one judgement in this product that widens what happens
-      // next was announced to the human as not having happened. A refusal never arrives here —
-      // an unready gate is a 409 and a moved repository a 409, both carrying `error`, which the
-      // branch above owns.
-      toast(data.approval_id
-        ? "✓ gate " + data.gate + " approved (" + data.approval_id + ")"
-        : "done", "ok");
-    }
-    invalidate();  // the action just moved the SSOT — take the next payload whatever the ETag says
-    document.dispatchEvent(new CustomEvent("rein:refresh"));
-  } catch (e) { write("request failed: " + e); toast("request failed", "err"); }
+    const { data } = await postJson("/api/run", { action, params });
+    if (data.error) { out.textContent = "ERROR: " + data.error; toast(data.error, "err"); return; }
+    out.textContent = "$ " + data.argv.join(" ") + "\n(exit " + data.exit_code + ")\n\n"
+      + (data.stdout || "") + (data.stderr ? "\n[stderr]\n" + data.stderr : "");
+    toast((data.exit_code === 0 ? "✓ " : "✗ exit " + data.exit_code + " — ") + data.argv.join(" "),
+      data.exit_code === 0 ? "ok" : "err");
+  } catch (e) { out.textContent = "request failed: " + e; toast("request failed", "err"); }
+}
+
+// A decision recorded at a gate. Nothing is echoed anywhere: the result of a decision is the
+// repository moving, and the stream reports that by itself within a tick. Resolves true when the
+// write landed, so a caller can refetch the one thing the stream does not carry — its own pane.
+//
+// /api/gate/approve DOES open the gate: the write session a launch link minted is the capability
+// handover, so reaching the handler means the approval was recorded and an `approval_id` came back.
+// The toast here once told the human the gate was merely ready and to go and run the approval
+// themselves — wording from when the endpoint only reported readiness, kept after it started
+// recording. So the one judgement in this product that widens what happens next was announced as
+// not having happened. A refusal never arrives here: an unready gate is a 409 and a moved
+// repository a 409, both carrying `error`, which the branch above owns.
+export async function record(path, body) {
+  try {
+    const { data } = await postJson(path, body);
+    if (data.error) { toast(data.error, "err"); return false; }
+    toast(data.approval_id
+      ? "✓ gate " + data.gate + " approved (" + data.approval_id + ")"
+      : "done", "ok");
+    return true;
+  } catch (e) { toast("request failed: " + e, "err"); return false; }
 }
 
 export function copyCmd(cmd, btn) {

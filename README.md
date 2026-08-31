@@ -221,6 +221,8 @@ Then, per cycle:
      with its evidence, blocking the freeze until answered — with the approval footer, and the
      digests an approval would bind, on that same screen. **Board** (DAG, layer progress),
      **Record** (the hash-chained event log, live), **Console** (diagnostics and roll-back).
+     The page holds one `/api/stream` connection and never polls: the server watches the SSOT and
+     speaks only when it moves, so an idle dashboard costs a handful of `stat` calls a second.
      Optional notifications fire on a waiting decision. Actions are a fixed whitelist — reads,
      diagnostics, and decision recording (approve / resolve / revise / cycle-close); phase
      execution and push/PR/merge are not available here.

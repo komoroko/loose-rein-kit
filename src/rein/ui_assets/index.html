@@ -12,8 +12,9 @@
   <select id="projectSelect" title="Switch target project" hidden></select>
   <span class="stat" id="meta">loading…</span>
   <span class="grow"></span>
-  <span class="stat"><span class="dot" id="dot"></span><span id="ago">—</span></span>
-  <button class="icon" id="refreshBtn" title="Read the repository again now">↻</button>
+  <!-- No refresh button: the server pushes when the repository moves, so there is nothing to ask
+       for. This says whether the page is still being told. -->
+  <span class="stat"><span class="dot" id="dot"></span><span id="live">connecting…</span></span>
   <button class="icon" id="bellBtn" aria-pressed="false"></button>
   <button class="icon" id="themeBtn"></button>
 </header>

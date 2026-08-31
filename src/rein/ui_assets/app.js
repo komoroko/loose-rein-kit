@@ -1,7 +1,7 @@
-// Entry module: the hash router, the status poll, theme, and the project switcher.
+// Entry module: the hash router, the status stream, theme, and the project switcher.
 // Rendering lives in the view-* modules; shared plumbing and the route table in api.js.
 
-import { READ_ONLY, TOKEN, esc, invalidate, pollDelay, route, state, toast } from "/assets/api.js";
+import { READ_ONLY, esc, postJson, route, state, toast } from "/assets/api.js";
 import { renderAttention, renderNext, renderStepper } from "/assets/view-overview.js";
 import { renderReview } from "/assets/view-review.js";
 import { renderTasks, renderTrace } from "/assets/view-tasks.js";
@@ -10,9 +10,8 @@ import "/assets/notify.js";  // side-effect module: badges + opt-in notification
 
 const VIEW_IDS = ["now", "gate", "board", "record", "console"];
 
-// Only the visible view is rendered. A poll used to rebuild all four (the DAG's SVG included)
-// whether or not anyone could see them; a hidden view is caught up when it is opened, from the
-// same snapshot. The spine is the exception — it is on every screen, so it always repaints.
+// Only the visible view is rendered: a hidden one is caught up when it is opened, from the same
+// snapshot. The spine is the exception — it is on every screen, so it always repaints.
 function paintViews(includeGate) {
   const d = state.data;
   if (!d || d.error) return;
@@ -21,7 +20,7 @@ function paintViews(includeGate) {
   if (v === "now") { renderNext(d); renderAttention(d); }
   else if (v === "board") { renderTasks(d); renderTrace(d); }
   else if (v === "gate" && includeGate) renderReview();
-  // record and console poll themselves off `rein:view`; nothing here reads the snapshot for them
+  // record and console react to `rein:view` and `rein:record`; neither reads the snapshot
 }
 
 function showView() {
@@ -33,6 +32,34 @@ function showView() {
   // The gate pane fetches its own deliverables off that event; painting it here as well would
   // put a second request in flight for the same gate.
   paintViews(false);
+}
+
+// ---- the status stream ----
+// One EventSource for the life of the page. The server speaks only when the repository moves, so
+// there is no interval here, no ETag, no lazy delay for a backgrounded tab and no "refresh now" —
+// nothing to schedule, because nothing is being asked. EventSource reconnects on its own using the
+// `retry:` the server sends, which is also the whole of the offline story.
+function connect() {
+  const dot = document.getElementById("dot");
+  const live = document.getElementById("live");
+  const es = new EventSource("/api/stream");
+
+  es.addEventListener("status", e => {
+    const d = JSON.parse(e.data);
+    state.data = d;
+    if (d.error) { document.getElementById("meta").textContent = "status error: " + d.error; return; }
+    document.getElementById("meta").textContent =
+      (d.project || "(no project)") + " · " + (d.branch || "-") + " · phase " + (d.current_phase || "-");
+    document.dispatchEvent(new CustomEvent("rein:status", { detail: d }));
+    paintViews(true);
+  });
+
+  // The audit log grew. It need not have changed a single field of the status payload, so it is
+  // its own event; the Record screen refetches, and only when someone is looking at it.
+  es.addEventListener("record", () => document.dispatchEvent(new CustomEvent("rein:record")));
+
+  es.onopen = () => { dot.classList.remove("off"); live.textContent = "live"; };
+  es.onerror = () => { dot.classList.add("off"); live.textContent = "reconnecting…"; };
 }
 
 // ---- project switcher (populated from /api/projects; switching persists the active target) ----
@@ -51,18 +78,18 @@ async function loadProjects() {
     sel.disabled = READ_ONLY;
     sel.title = READ_ONLY ? "Target project (read-only: cannot switch)" : "Switch target project";
     sel.hidden = false;
-  } catch (e) { sel.hidden = true; }
+  } catch { sel.hidden = true; }
 }
+
+// The stream re-reads the active project every tick, so switching needs no follow-up here: the
+// next push is already the new repository's.
 async function selectProject(name) {
   try {
-    const res = await fetch("/api/project/select", { method:"POST",
-      headers:{ "Content-Type":"application/json", "X-Rein-Token":TOKEN },
-      body: JSON.stringify({ name }) });
-    const d = await res.json();
-    if (d.error) { toast(d.error, "err"); loadProjects(); return; }
+    const { data } = await postJson("/api/project/select", { name });
+    if (data.error) { toast(data.error, "err"); loadProjects(); return; }
     toast("→ " + name, "ok");
-    invalidate(); await refresh(); loadProjects();
-  } catch (e) { toast("switch failed", "err"); }
+    loadProjects();
+  } catch { toast("switch failed", "err"); }
 }
 
 // ---- theme (auto → dark → light → auto), persisted in localStorage ----
@@ -82,61 +109,11 @@ function toggleTheme() {
   applyTheme(val);
 }
 
-// ---- the status poll ----
-function tickAgo() {
-  const el = document.getElementById("ago");
-  if (!state.lastGen) { el.textContent = "—"; return; }
-  const secs = Math.max(0, Math.round((Date.now() - new Date(state.lastGen).getTime()) / 1000));
-  el.textContent = secs < 60 ? ("read " + secs + "s ago") : ("read " + Math.round(secs / 60) + "m ago");
-}
-
-// The server's ETag identifies the *state*, not the moment it was read, so an idle repo answers
-// 304 with an empty body: no transfer, no parse, and — crucially — no re-render. Every DOM node the
-// human is using (a selected task's detail, a half-typed ops field, the scroll inside a long patch)
-// survives for as long as the SSOT does not actually move.
-async function refresh() {
-  const dot = document.getElementById("dot");
-  try {
-    const res = await fetch("/api/status", state.etag ? { headers: { "If-None-Match": state.etag } } : undefined);
-    dot.classList.remove("off");
-    if (res.status === 304) {
-      state.lastGen = new Date().toISOString();  // the server just confirmed this snapshot is current
-      tickAgo();
-      return;
-    }
-    const d = await res.json();
-    state.etag = res.headers.get("ETag");
-    state.data = d; state.lastGen = d.generated_at;
-    if (d.error) { document.getElementById("meta").textContent = "status error: " + d.error; return; }
-    document.getElementById("meta").textContent =
-      (d.project || "(no project)") + " · " + (d.branch || "-") + " · phase " + (d.current_phase || "-");
-    document.dispatchEvent(new CustomEvent("rein:status", { detail: d }));
-    paintViews(true);
-    tickAgo();
-  } catch (e) {
-    dot.classList.add("off");
-    document.getElementById("ago").textContent = "disconnected";
-  }
-}
-
-// Self-rescheduling rather than setInterval, so the delay can follow tab visibility.
-let pollTimer = null;
-function schedulePoll() {
-  clearTimeout(pollTimer);
-  pollTimer = setTimeout(async () => { await refresh(); schedulePoll(); }, pollDelay());
-}
-
 applyTheme(localStorage.getItem("rein-theme") || "");
 document.getElementById("themeBtn").onclick = toggleTheme;
-document.getElementById("refreshBtn").onclick = () => { invalidate(); refresh(); };
 document.getElementById("projectSelect").onchange = (e) => selectProject(e.target.value);
-document.addEventListener("rein:refresh", () => refresh());
 window.addEventListener("hashchange", showView);
-// Coming back to the tab should show current state at once, not after the lazy delay it was on.
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); schedulePoll(); });
 renderOps();  // static markup, no data of its own — drawn once, never rebuilt under the human
 showView();
-refresh();
+connect();
 loadProjects();
-schedulePoll();
-setInterval(tickAgo, 1000);

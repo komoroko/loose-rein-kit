@@ -2,13 +2,14 @@
 
 Serves the ES-module page in `ui_assets/` (real files so the frontend is lintable and diffable, not
 strings inside Python) over stdlib `http.server`, same-origin with zero external references so the
-dashboard stays offline-safe. Four hash-routed tabs: **Overview** (lifecycle rail, next recommended
-command, needs-attention — from status_api.collect_status()), **Review** (the gate under decision:
-its deliverables rendered server-side by mdlite with the self-assessment pinned, gate ④'s diff and
-security-review freshness — from review_api.collect_review() — ending in the approval footer),
-**Tasks** (DAG, layer progress, frontier, traceability), and **Activity** (the events.ndjson feed
-plus the operations console). The page also notifies the approval-wait: browser notifications are
-opt-in behind the bell; the tab title and favicon always carry the waiting state.
+dashboard stays offline-safe. The lifecycle is the page's navigation: five gates in a spine, and
+the one awaiting a decision is the only inverted block on the screen. **Now** (next recommended
+command and the pending queue — from status_api.collect_status()); a gate's **reading room**
+(`#gate/<name>`: its deliverables rendered server-side by mdlite with the self-assessment pinned,
+gate ④'s stages, diff and security-review freshness — from review_api.collect_review() — ending in
+the approval footer); **Board** (DAG, layer progress, frontier, traceability); **Record** (the
+events.ndjson feed); **Console** (the whitelisted operations). The page also notifies the
+approval-wait: browser notifications are opt-in; the tab title and favicon always carry the state.
 
 What the page may do is bounded by principle, not habit: (a) **read** inside the target repository
 — every GET resolves paths server-side from fixed specs, never from the client; (b) run **local,
@@ -26,12 +27,19 @@ in-page CSRF token is not authority — anything able to `curl` the page can rea
 line rests on is the channel, not the click, and not a proof of a human that no repository can
 give (AGENTS.md "Gate rules" 2 states the ceiling).
 
-The page polls `/api/status` for the whole life of a supervised run, and a run is mostly waiting —
-so the endpoint answers `304 Not Modified` against an `ETag` taken over the payload *minus* its
-`generated_at` stamp. An unchanged SSOT therefore costs one empty round trip: nothing is
-transferred, nothing re-parsed, and the client re-renders nothing, so whatever the human has open
-(a task's detail, a half-typed field, the scroll inside a long patch) survives until the state
-actually moves. A backgrounded tab polls lazily.
+The page holds one **`/api/stream`** connection for the whole life of a supervised run, and the
+server speaks only when the repository moves. A run is mostly waiting, so the loop behind that
+stream is two-stage: every tick it stats the SSOT and the git refs — a handful of `stat()` calls —
+and only when that fingerprint moves does it read a status payload at all. A payload whose identity
+(everything but the `generated_at` stamp) is unchanged is not sent, so the client re-renders
+nothing and whatever the human has open — a task's detail, a half-typed field, the scroll inside a
+long patch — survives until the state actually does move. A periodic sweep re-reads regardless, so
+anything the fingerprint cannot see is bounded rather than missed, and doubles as the keep-alive
+that makes a dead socket detectable.
+
+This replaced a 3-second client poll. The poll's `ETag`/`304` saved the *network* and nothing else:
+`collect_status` still ran in full on every tick, of every open tab, forever. An idle dashboard now
+costs stat calls instead of status reads.
 
 Safety layers: binds 127.0.0.1 by default, and a non-loopback bind with the write endpoints enabled
 requires an explicit `--allow-remote`; every POST requires **both** the session cookie above (the
@@ -79,6 +87,14 @@ from rein import store as store_mod
 logger = logging.getLogger(__name__)
 
 ACTION_TIMEOUT_SEC = 900
+#: How often `/api/stream` stats the SSOT for movement — the latency between a change landing and
+#: the page showing it. A tick is a handful of stat() calls, so this can be short.
+_STREAM_TICK_SEC = 1.0
+#: How often the stream reads a full status payload whatever the fingerprint says, and writes the
+#: comment that proves the socket is still there. Bounds anything a stat cannot see.
+_STREAM_SWEEP_SEC = 20.0
+#: Handed to the client as SSE `retry:` — how long EventSource waits before reconnecting.
+_STREAM_RETRY_SEC = 2.0
 _OUTPUT_LIMIT = 8000  # tail shown per stream (failures are summarized, not dumped)
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 # The frontend, shipped beside this module. Served by exact name only (no traversal surface);
@@ -165,11 +181,73 @@ def _readiness_cached(repo: repo_mod.Repo, gate: str) -> list[str]:
     return blockers
 
 
-def _status_etag(status: dict[str, object]) -> str:
-    """A quoted ETag identifying the *state* a status payload describes, ignoring when it was read."""
+def _status_identity(status: dict[str, object]) -> str:
+    """A digest of the *state* a status payload describes, ignoring when it was read.
+
+    `generated_at` is a fresh wall-clock stamp on every read, so it must stay out of the identity —
+    otherwise every tick looks like a change and the page re-renders over state that did not move.
+    It stays *in* the payload; only the comparison drops it.
+    """
     identity = {k: v for k, v in status.items() if k != "generated_at"}
-    digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8"))
-    return '"' + digest.hexdigest()[:16] + '"'
+    return hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _collect_status(root: Path) -> dict[str, object]:
+    """The status payload, or an `error` one — the dashboard must stay up over a broken SSOT."""
+    try:
+        return status_api.collect_status(root, events_scanner=_scan_cached, readiness_probe=_readiness_cached)
+    except Exception as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _stat_key(path: Path) -> tuple[str, int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
+#: The documents a status payload is derived from, relative to the repository root. Named one by
+#: one rather than walked: the first version of this globbed `.rein/**` and `.git/refs/**`, which
+#: is ~100 paths in this repository and cost 271ms a tick on a WSL mount — more than the status
+#: read it exists to avoid. A fingerprint has to be cheap on the *worst* filesystem a dashboard
+#: runs on, not the fastest, and that means a fixed handful of stats and no directory walk.
+#:
+#: `.git/HEAD` and `.git/index` are here because gate readiness depends on where HEAD points and
+#: nothing under `.rein/` moves when a commit lands — during a build that is most of the movement
+#: there is. `index` is the hint that a commit happened; it is not exact, and it does not need to
+#: be. Anything this list cannot see is bounded by the stream's periodic sweep, so the fingerprint
+#: only ever decides *how promptly* a change is noticed, never *whether* it is.
+_WATCHED = (
+    ".rein/state.yaml",
+    ".rein/plan.yaml",
+    ".rein/review.yaml",
+    ".rein/config.yaml",
+    ".rein/events.ndjson",
+    ".rein/rein.lock",
+    ".git/HEAD",
+    ".git/index",
+)
+
+
+def _ssot_fingerprint(root: Path) -> tuple[tuple[str, int, int], ...]:
+    """A cheap identity for what a status payload is derived from. Stat only, no walk, no parse.
+
+    The keys carry the root, so switching the active project moves the fingerprint by itself.
+    """
+    return tuple(key for key in (_stat_key(root / rel) for rel in _WATCHED) if key is not None)
+
+
+def _log_identity(root: Path) -> tuple[str, int, int] | None:
+    """The audit log's current bytes. Its own signal: an appended event need not change any
+    field of the status payload, and the Record feed still has to know it happened."""
+    return _stat_key(root / ".rein" / "events.ndjson")
+
+
+def _revision(log_id: tuple[str, int, int] | None) -> dict[str, object]:
+    """The `record` event's body: what the log looks like now, so a reader can tell two apart."""
+    return {"revision": f"{log_id[1]}-{log_id[2]}" if log_id else ""}
 
 
 class UiActionError(Exception):
@@ -238,6 +316,13 @@ class DashboardServer(ThreadingHTTPServer):
         self._sessions: set[str] = set()
         self._secret_spent = False
         self._session_lock = threading.Lock()
+        #: Set when the server is closing, so an open `/api/stream` ends at its next tick instead
+        #: of holding a thread against a socket nobody is on the other end of.
+        self.closing = threading.Event()
+
+    def server_close(self) -> None:
+        self.closing.set()
+        super().server_close()
 
     def redeem(self, offered: str) -> str | None:
         """Trade the launch secret for a session id, once. None = not the secret, or already spent.
@@ -294,13 +379,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib signature
         pass  # keep the terminal quiet; the page itself is the monitor
 
-    def _send(self, code: HTTPStatus, body: bytes, ctype: str, *, etag: str | None = None) -> None:
+    def _send(self, code: HTTPStatus, body: bytes, ctype: str) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        if etag is not None:
-            self.send_header("ETag", etag)
         self.end_headers()
         self.wfile.write(body)
 
@@ -336,8 +419,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"cannot read ui_assets/{name}: {exc}"})
                 return
             self._send(HTTPStatus.OK, body, ctype)
-        elif self.path == "/api/status":
-            self._send_status()
+        elif self.path == "/api/stream":
+            self._send_stream()
         elif self.path == "/api/projects":
             reg = self.server.registry()
             self._send_json(HTTPStatus.OK, {"projects": reg.entries(), "active": reg.active})
@@ -416,34 +499,60 @@ class DashboardHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _send_status(self) -> None:
-        """The status payload, with an ETag over everything *except* `generated_at`.
+    def _sse(self, name: str, payload: dict[str, object]) -> None:
+        """One server-sent event. `json.dumps` escapes newlines, so a payload is always one line."""
+        data = json.dumps(payload, ensure_ascii=False)
+        self.wfile.write(f"event: {name}\ndata: {data}\n\n".encode())
 
-        The dashboard polls this endpoint for the whole life of a supervised build, and a run is
-        mostly waiting: the SSOT is unchanged on the overwhelming majority of polls. `generated_at`
-        is a fresh wall-clock stamp every time, so it must stay out of the identity of the payload —
-        otherwise every poll looks like a change and the client re-renders the whole page over
-        state that did not move. It stays *in* the body (the page shows "updated Ns ago").
+    def _send_stream(self) -> None:
+        """Push `status` when the SSOT moves and `record` when the audit log grows. Never polls back.
 
-        No browser cache is involved (`Cache-Control: no-store` stands): the client keeps the ETag
-        itself and sends it back as `If-None-Match`, which is why this works at all.
+        One connection, one thread, one repository — the dashboard is one human at one terminal, so
+        there is no broadcaster here and no subscriber registry. A second tab opens a second stream
+        and pays for its own reads; that is cheaper than the machinery that would avoid it.
+
+        The active project is re-read every tick rather than captured, so switching targets needs no
+        client-side coordination at all: the fingerprint moves with the root and the next tick sends
+        the new repository's state.
         """
-        status: dict[str, object]
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
         try:
-            status = status_api.collect_status(
-                self.server.active_root(), events_scanner=_scan_cached, readiness_probe=_readiness_cached
-            )
-        except Exception as exc:  # the dashboard must stay up even over a broken SSOT
-            status = {"error": f"{type(exc).__name__}: {exc}"}
-        etag = _status_etag(status)
-        if self.headers.get("If-None-Match") == etag:
-            self.send_response(HTTPStatus.NOT_MODIFIED)
-            self.send_header("ETag", etag)
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()  # a 304 carries no body, and therefore no Content-Length
-            return
-        body = json.dumps(status, ensure_ascii=False).encode("utf-8")
-        self._send(HTTPStatus.OK, body, "application/json; charset=utf-8", etag=etag)
+            # Connect: say what is true now. Then loop, and speak only when it stops being true.
+            self.wfile.write(f"retry: {int(_STREAM_RETRY_SEC * 1000)}\n\n".encode())
+            root = self.server.active_root()
+            fingerprint = _ssot_fingerprint(root)
+            log_id = _log_identity(root)
+            status = _collect_status(root)
+            digest = _status_identity(status)
+            self._sse("status", status)
+            self._sse("record", _revision(log_id))
+            last_sweep = time.monotonic()
+
+            while not self.server.closing.is_set():
+                time.sleep(_STREAM_TICK_SEC)
+                root = self.server.active_root()
+                sweep = time.monotonic() - last_sweep >= _STREAM_SWEEP_SEC
+                current = _ssot_fingerprint(root)
+                if current != fingerprint or sweep:
+                    fingerprint = current
+                    status = _collect_status(root)
+                    identity = _status_identity(status)
+                    if identity != digest:
+                        digest = identity
+                        self._sse("status", status)
+                current_log = _log_identity(root)
+                if current_log != log_id:
+                    log_id = current_log
+                    self._sse("record", _revision(log_id))
+                if sweep:
+                    last_sweep = time.monotonic()
+                    self.wfile.write(b": alive\n\n")  # a quiet stream still has to prove it is one
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # the reader closed the tab; EventSource reconnects on its own if it comes back
 
     def _send_events(self) -> None:
         """The tail of events.ndjson, newest first — the Activity feed watching a headless build.

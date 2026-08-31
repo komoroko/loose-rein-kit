@@ -4,7 +4,54 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
-## [0.3.11] - 2026-08-30
+## [0.3.11] - 2026-08-31
+
+**An idle dashboard burned an eighth of a core, forever.** The page polled `/api/status` every
+three seconds for the whole life of a supervised run, and the endpoint's `ETag`/`304` — added to
+make that cheap — saved the *network* and nothing else: `collect_status` still ran in full on every
+tick, of every open tab, over a repository where nothing was happening. It cost **385ms a call**,
+and 81% of that was `_no_agent_surface` answering "is any agent surface installed?" by walking the
+entire packaged payload and reading every file in it, three times over (once per integration), to
+decide whether to append one hint sentence to the recommended command. `install._dest_map` loaded
+`destination -> bytes` and `present_surfaces` threw the bytes away to keep the keys. Enumeration is
+now separate from loading (`data.iter_names`, `install._dest_sources`) and cached for the life of
+the process, because the payload lives inside the installed wheel and no verb writes it: **385ms →
+25ms**, and the test suite got 20 seconds faster with it.
+
+**The poll is gone; the server speaks instead.** One `/api/stream` (server-sent events) for the
+life of the page. The loop behind it is two-stage: every tick it stats a fixed handful of SSOT
+documents plus `.git/HEAD`, and only a moved fingerprint buys a status read; a payload whose
+identity is unchanged is not sent at all, so the page re-renders nothing and a half-typed field, an
+open task detail or the scroll inside a long patch survives until the repository actually moves. A
+20-second sweep re-reads regardless — bounding anything a stat cannot see — and doubles as the
+keep-alive that makes a dead socket detectable. The audit log gets its own `record` event, because
+an appended event need not change any field of the status payload and the Record screen still has
+to know. **The watch list is named file by file and there is no directory walk in it**: the first
+version globbed `.rein/**` and `.git/refs/**`, which is ~100 paths and cost 271ms a tick on a WSL
+mount — more than the read it existed to avoid. A canary now fails on a glob there.
+
+On the page this deleted three separate timing mechanisms and everything that propped them up: the
+poll interval and its lazy backgrounded-tab variant, the client-side ETag and its invalidation, the
+`rein:refresh` event, the Record feed's own timer and the response-body comparison that made blind
+polling survivable, the "updated Ns ago" clock, and the refresh button — there is nothing left to
+ask for. `post(path, body, echo)` split into `runCommand` (a Console command, whose output *is* the
+result) and `record` (a decision, whose result is the repository moving); a boolean parameter
+selecting between two unrelated behaviours was the shape of the bug it had already caused. The
+project switcher now needs no client coordination at all: the stream re-reads the active project
+every tick, so the next push is already the other repository's.
+
+**1,800 lines of frontend had no test and no linter.** They were guarded only by Python canaries
+that grep the source text, and the gap was not hypothetical: a dead `RISKY` set shipped in 0.3.10,
+declared and never read. `package.json` adds two **development** dependencies — eslint and jsdom,
+run by `make check` and by CI, in no wheel and on no user's machine. `rein` remains a Python
+package with three runtime dependencies, `rein ui` serves plain ES modules over the standard
+library, and **nobody running the CLI needs node**; the make target says so and skips loudly when
+node is absent, while CI installs it so it can never skip there. `tests/ui/` boots the shipped
+modules against a jsdom document and a scripted server: every screen and route, both gate kinds,
+all five gate-④ stages, each decision panel, the read-only page, a link to a gate the server
+refuses, and a dropped connection. A canary keeps the status fixture those tests render from from
+drifting out of the payload's real shape. `audit.yml` claimed a `pnpm audit` step ran "when a
+frontend exists"; no such step was ever in the make target, and the comment now says what is true.
 
 **The dashboard rendered three separate answers to "which gate is waiting on you", and none of
 them was the page.** The lifecycle rail, the Review tab's badge and the gate-button row inside the

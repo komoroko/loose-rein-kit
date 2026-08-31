@@ -1,0 +1,14 @@
+{
+  "name": "loose-rein-kit-frontend",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only tooling for the rein dashboard's frontend. Nothing here ships: `rein` is a Python package with three runtime dependencies, `rein ui` serves src/rein/ui_assets/ as plain ES modules over the standard library, and no user of the CLI needs node installed. This exists so 1,800 lines of frontend are tested and linted instead of guarded only by canaries that grep the source text.",
+  "scripts": {
+    "test": "node --test \"tests/ui/*.test.mjs\"",
+    "lint": "eslint src/rein/ui_assets tests/ui"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.0",
+    "jsdom": "^28.0.0"
+  }
+}

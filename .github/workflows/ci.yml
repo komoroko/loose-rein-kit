@@ -34,9 +34,23 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
 
+      # node is a development dependency of this repository and of nothing it ships: `rein` is a
+      # Python package and `rein ui` serves plain ES modules over the standard library. It is
+      # installed here so `make check`'s frontend step cannot silently skip in CI, which is exactly
+      # what it does on a machine without it.
+      - name: Install node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install frontend dev tooling
+        run: npm ci
+
       # `make check` == pre-commit (commit stage) + pre-push stage + template-lint (drift canaries)
-      # + sync-check (materialized artifacts match the packaged payload) — the full gate.
-      - name: Run pre-commit, template-lint and sync-check
+      # + sync-check (materialized artifacts match the packaged payload) + frontend (eslint and the
+      # jsdom suite over the dashboard) — the full gate.
+      - name: Run pre-commit, template-lint, sync-check and the frontend suite
         run: make check
 
   unit:
