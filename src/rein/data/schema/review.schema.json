@@ -426,6 +426,10 @@
                 "items": {
                   "$ref": "#/$defs/text"
                 }
+              },
+              "reading": {
+                "description": "The unit of the change this statement was read out of \u2014 `whole`, a task id, or `seam`. Carried so a composed review can never present a statement about one slice as a reading of the whole tree.",
+                "$ref": "#/$defs/text"
               }
             }
           }
@@ -543,6 +547,51 @@
                 "sufficient",
                 "insufficient"
               ]
+            },
+            "composition": {
+              "description": "How this coverage was actually taken. `whole` is one reading of the whole change; `composed` is several \u2014 one per task that landed, plus the seam between them. `unread_paths` names every changed path no reading covered, and its presence makes `coverage_status` insufficient: a seam nobody read may not be reported as zero extra behaviour (plan 13.4).",
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "readings"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "whole",
+                    "composed"
+                  ]
+                },
+                "readings": {
+                  "type": "array",
+                  "maxItems": 512,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "unit",
+                      "diff_digest",
+                      "analyzed_bytes"
+                    ],
+                    "properties": {
+                      "unit": {
+                        "$ref": "#/$defs/text"
+                      },
+                      "diff_digest": {
+                        "$ref": "#/$defs/digest"
+                      },
+                      "analyzed_bytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  }
+                },
+                "unread_paths": {
+                  "$ref": "#/$defs/pathList"
+                }
+              }
             }
           }
         },
@@ -823,6 +872,10 @@
                     ]
                   },
                   "attack_scenario": {
+                    "$ref": "#/$defs/text"
+                  },
+                  "reading": {
+                    "description": "The unit of the change this finding was read out of \u2014 `whole`, a task id, or `seam`. Carried for the same reason a statement carries it: a composed review must never present a finding about one slice as a reading of the whole tree.",
                     "$ref": "#/$defs/text"
                   },
                   "code_anchors": {

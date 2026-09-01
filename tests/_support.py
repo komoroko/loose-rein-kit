@@ -130,6 +130,7 @@ def make_task(
     title: str = "",
     acceptance: list[dict[str, Any]] | None = None,
     operator_surface: list[dict[str, Any]] | None = None,
+    scope_include: list[str] | None = None,
 ) -> dict[str, Any]:
     task: dict[str, Any] = {
         "id": task_id,
@@ -145,6 +146,8 @@ def make_task(
         task["acceptance"] = acceptance
     if operator_surface is not None:
         task["operator_surface"] = operator_surface
+    if scope_include is not None:
+        task["scope"] = {"include": scope_include}
     return task
 
 

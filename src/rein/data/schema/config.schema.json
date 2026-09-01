@@ -232,6 +232,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "composition": {
+          "description": "How gate 4 takes its reading. `auto` composes it from the plan's task scopes \u2014 one reading per task plus the seam between them \u2014 so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
+          "enum": [
+            "auto",
+            "whole"
+          ]
+        },
         "budgets": {
           "type": "object",
           "additionalProperties": false,

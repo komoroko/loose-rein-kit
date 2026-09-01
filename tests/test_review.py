@@ -773,14 +773,26 @@ def test_one_priming_turn_serves_both_stages(monkeypatch: pytest.MonkeyPatch) ->
     assert first[0] == "--resume" and first[-1] == "--fork-session"
 
 
-def test_branching_one_session_about_two_different_changes_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A mismatch is the pipeline moving underneath the review, not something to paper over by
-    sending the diff again."""
-    monkeypatch.setattr(common, "run", _capturing_run([]))
+def test_two_readings_are_two_sessions_and_never_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A composed review reads several slices, and two slices are two different changes.
+
+    Sharing is per *reading*: both stages of one reading branch one session (the saving), and a
+    second reading primes its own. The identity used to be positional — the first request primed
+    *the* session and any later one was refused as "the pipeline moved underneath the review" —
+    which made a composed review impossible to launch rather than making it careful.
+    """
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
     reading = _reading()
-    reading.branch_flags(_a_reading_request("one change"))
-    with pytest.raises(review_transport.TransportError, match="different changes"):
-        reading.branch_flags(_a_security_request("another change"))
+
+    first = reading.branch_flags(_a_reading_request("one change"))
+    second = reading.branch_flags(_a_security_request("another change"))
+
+    assert len(sent) == 2, "each reading is primed on its own"
+    assert first != second, "two readings must never share a context"
+    # The same reading, asked for again, is still the session it already primed.
+    assert reading.branch_flags(_a_security_request("one change")) == first
+    assert len(sent) == 2
 
 
 def test_the_priming_turn_is_held_to_the_same_blindness_as_the_extractor(monkeypatch: pytest.MonkeyPatch) -> None:

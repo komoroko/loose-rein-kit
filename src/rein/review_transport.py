@@ -52,6 +52,15 @@ _PRIME_ACK = "READY"
 _READING_KEY = "diff"
 
 
+def _reading_digest(request: Mapping[str, Any]) -> str:
+    """Which reading this request is about — the identity a primed session is keyed by.
+
+    The bytes themselves, not the unit name: a session holds a *reading*, and two requests that
+    carry the same reading may branch it whatever either of them is called.
+    """
+    return digests.of_bytes(str(request.get(_READING_KEY, "")).encode("utf-8"))
+
+
 def shareable_reading(config: models.Config | None, roles: Sequence[str]) -> adapters.Adapter | None:
     """The adapter `roles` can share one reading through, or None when they cannot.
 
@@ -132,8 +141,12 @@ class SharedReading:
         self._timeout = timeout
         self._ledger = ledger
         self._lock = threading.Lock()
-        self._session = ""
-        self._digest = ""
+        #: One session per reading, keyed by the digest of the bytes it was primed with. A review
+        #: composed out of several readings primes several sessions — the two stages of *one*
+        #: reading branch one session, which is the whole saving, and two readings are two
+        #: different changes that must never share a context. Keyed by the reading itself rather
+        #: than counted, so the pipeline cannot accidentally hand one reading's session to another.
+        self._sessions: dict[str, str] = {}
 
     def branch_flags(self, request: Mapping[str, Any]) -> tuple[str, ...]:
         """The flags that put this request on its own branch of the shared reading.
@@ -158,25 +171,23 @@ class SharedReading:
         self._prime(request)
         return {
             **request,
-            _READING_KEY: {"in_previous_message": True, "digest": self._digest},
+            _READING_KEY: {"in_previous_message": True, "digest": _reading_digest(request)},
         }
 
     def _prime(self, request: Mapping[str, Any]) -> str:
-        """Create the shared session, once, and return its id.
+        """Create the session for this reading, once per reading, and return its id.
 
-        The reading is checked against the primed one rather than assumed to match: two stages
-        branching one session must be branching it about the same bytes, and a mismatch is a bug in
-        the pipeline above rather than something to paper over by sending the diff again.
+        Keyed by the reading's own bytes, so the two stages of one reading branch one session and
+        two readings of a composed review never share one. That identity used to be positional —
+        the first request to arrive primed *the* session and every later one had to match it — so a
+        review composed out of more than one reading could not be launched at all: the second
+        reading was refused as "the pipeline moved underneath the review", which is what a
+        mismatch means when there is only ever meant to be one.
         """
-        digest = digests.of_bytes(str(request.get(_READING_KEY, "")).encode("utf-8"))
+        digest = _reading_digest(request)
         with self._lock:
-            if self._session:
-                if digest != self._digest:
-                    raise TransportError(
-                        "two stages were about to branch one reading of different changes "
-                        f"({self._digest} vs {digest}) — the pipeline moved underneath the review"
-                    )
-                return self._session
+            if primed := self._sessions.get(digest):
+                return primed
             session = str(uuid.uuid4())
             # The instruction and the reading, and deliberately nothing else. The two shas used
             # to sit here, between them: duplicated out of a request that keeps them anyway
@@ -194,7 +205,7 @@ class SharedReading:
             # extractor's context, and a new path without the guard is how priming comes back.
             actual_extraction.assert_blind(payload)
             self._launch(session, payload)
-            self._session, self._digest = session, digest
+            self._sessions[digest] = session
             return session
 
     def _launch(self, session: str, payload: Mapping[str, Any]) -> None:

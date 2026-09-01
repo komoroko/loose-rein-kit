@@ -500,10 +500,24 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
 
     At high/critical, a gap means "Extra Behavior: undeterminable", which cannot be waved
     through as zero (plan §2.4). Below that, the gap is recorded but does not block the gate.
+
+    **A composed reading is refused outright at `critical`.** Composition reads each task's slice
+    on its own and the seam between them, which is enough to say what each slice does and not
+    enough to rule out behaviour that only exists once two of them are in the same tree. That is a
+    stated limit rather than a hidden one — the seam is measured and `coverage.composition` names
+    every reading — and at critical the honest answer is to read the change whole, or to make it
+    small enough that reading it whole is possible.
     """
+    manifest = review.coverage
+    composed = str((manifest.get("composition") or {}).get("mode", "")) == "composed" if manifest else False
+    if composed and models.risk_at_least(effective, "critical"):
+        return [
+            "this review was composed out of separate readings and the change is critical — "
+            "behaviour that only appears once two readings are in one tree was never read. "
+            "Re-read the change whole, or reduce the scope until reading it whole fits the budget"
+        ]
     if not models.risk_at_least(effective, "high"):
         return []
-    manifest = review.coverage
     if not manifest:
         return ["no coverage manifest — Extra Behavior is undeterminable, not zero, on a high/critical change"]
     if str(manifest.get("coverage_status")) == "sufficient":
