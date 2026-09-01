@@ -112,19 +112,21 @@ def build_request(
     resolution or an omission (:func:`resolution_of`) — and because a reviewer told only "SEC-001
     was blocking" cannot re-state a finding it has no description of.
     """
-    request: dict[str, Any] = {
-        "contract": contract(),
-        "trusted_base_sha": trusted_base_sha,
-        "subject_head_sha": subject_head_sha,
-        "diff": diff_text,
-        "deterministic_facts": dict(deterministic_facts),
-    }
+    # Diff first, volatile scalars after it: the prompt cache matches on an exact prefix, and a
+    # sha that changes every commit in front of the diff throws the reading away with it
+    # (`actual_extraction.build_request` carries the argument in full).
+    request: dict[str, Any] = {"contract": contract(), "diff": diff_text}
     # The test half of the change, which only this stage is sent (`review.split_tests`). It rides
     # in its own key rather than concatenated into `diff` because `diff` is the reading both
     # reading stages share and prime one session with — and the blind extractor must not read a
-    # test suite that paraphrases the requirements back to it.
+    # test suite that paraphrases the requirements back to it. It sits beside `diff` and not at
+    # the end: on an adapter that cannot branch a session it is the other half of this stage's
+    # reading, and the same prefix argument applies to it.
     if tests_diff:
         request["tests_diff"] = tests_diff
+    request["trusted_base_sha"] = trusted_base_sha
+    request["subject_head_sha"] = subject_head_sha
+    request["deterministic_facts"] = dict(deterministic_facts)
     prior = [dict(finding) for finding in prior_blocking if str(finding.get("id", ""))]
     if prior:
         request["prior_blocking"] = prior

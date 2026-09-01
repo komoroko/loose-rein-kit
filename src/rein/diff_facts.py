@@ -559,32 +559,35 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
     used_analyzers: dict[str, str] = {}
     has_dependency_change = False
     has_binary = False
-    deleted_lines_present = False
 
     for file in files:
         if _DEPENDENCY_FILES.search(file.path):
             has_dependency_change = True
-        if file.removed_lines:
-            deleted_lines_present = True
+        if file.deleted:
+            # A deletion is not content. The change is that the bytes are gone, and that is stated
+            # in full by the path, so there is nothing here for the manifest to be a statement
+            # about — neither read nor unread. Calling it "unanalyzable" conflated *could not
+            # read* with *is not there*, and the price was not a wording: `coverage_gap_risk`
+            # floors an unread binary at `high`, an unsupported extension makes the status
+            # `insufficient`, and `coverage_blocks` shuts gate ④ on either — so removing a
+            # committed artifact blocked the gate on a change that had deleted the very thing
+            # nobody could read. The remedy the block names ("split the unreadable part out of
+            # this scope") does not exist for a deletion: splitting never removes a file.
+            #
+            # Not counted in `analyzed_files` either: that is a count of files whose *content* was
+            # read, and this one has none. Counting it produced `analyzed_files: 1` beside
+            # `languages: {}` — one file read, in no language — which is the sort of pair a
+            # reader has to stop and decode. `review.fold_bodies` withholds these bodies for
+            # the same reason, and the two have to agree: a body the reviewers are not sent is not
+            # one the manifest may call analyzed.
+            #
+            # `has_dependency_change` above is deliberately not skipped: deleting a lockfile is a
+            # dependency change whose semantics no lexical reader accounts for.
+            continue
         if _is_generated(file):
             generated.append({"path": file.path, "source_locator": ""})
             continue
         if file.binary:
-            if file.deleted:
-                # Nothing went unread: the change is that the bytes are gone, and that is stated
-                # in full by the path. Calling it "binary, unanalyzable" conflated *could not
-                # read* with *is not there*, and the price was not a wording — `coverage_gap_risk`
-                # floors an unread binary at `high`, and `coverage_blocks` blocks gate ④ at high,
-                # so deleting a committed artifact shut the gate on a change that had removed the
-                # very thing nobody could read. The remedy the block names ("split the unreadable
-                # part out of this scope") does not exist for a deletion.
-                #
-                # Not counted in `analyzed_files` either: that is a count of files whose *content*
-                # was read, and this one has none. Counting it produced `analyzed_files: 1` beside
-                # `languages: {}` — one file read, in no language — which is the sort of pair a
-                # reader has to stop and decode. There is simply nothing here for the manifest to
-                # be a statement about; the deletion is in the diff, where every reviewer sees it.
-                continue
             has_binary = True
             unsupported.append({"path": file.path, "reason": "binary"})
             continue
@@ -611,7 +614,8 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
         unsupported_files=tuple(unsupported),
         generated_files=tuple(generated),
         languages=languages,
-        # Every removed line is inside a parsed hunk, so deletions are analyzed whenever hunks are.
+        # Every removed line the manifest covers is inside a parsed hunk, so removals are analyzed
+        # whenever hunks are. A whole-file deletion is not covered here at all (above).
         deleted_lines_analyzed=True,
         # Detecting a dependency *file* changed is not understanding what the new versions do.
         dependency_semantics_analyzed=not has_dependency_change,
@@ -620,11 +624,11 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
     )
     # Status is decided against the effective risk by review_policy; a manifest on its own
     # reports the raw facts and a conservative default.
-    status = _default_status(manifest, deleted_lines_present)
+    status = _default_status(manifest)
     return CoverageManifest(**{**manifest.__dict__, "coverage_status": status})
 
 
-def _default_status(manifest: CoverageManifest, deleted_lines_present: bool) -> str:
+def _default_status(manifest: CoverageManifest) -> str:
     """`sufficient` only when none of the things below went unread — risk-blind by design.
 
     This records *what was read*, and nothing here weighs how much the unread part matters:
@@ -637,12 +641,16 @@ def _default_status(manifest: CoverageManifest, deleted_lines_present: bool) -> 
     read by nobody — a third measure this function appeared to take and did not. It is gone rather
     than implemented: `DiffFile.renamed_from` already reaches the reviewer, so a move is
     distinguishable from a rewrite by the participant that can actually judge it.
+
+    A fourth check went the same way: `analyzed_files == 0 and deleted_lines_present`. Every file
+    holding a removed line is either analyzed (so the count is not zero) or unsupported, generated
+    or a dependency (so a check above has already fired), which left it unable to fire — and once
+    a whole-file deletion stopped being a file the manifest speaks about, the only thing it could
+    still have caught was a pure deletion, which is exactly the change it must not call unread.
     """
     if manifest.unsupported_files or manifest.generated_files:
         return "insufficient"
     if not manifest.dependency_semantics_analyzed or not manifest.binary_semantics_analyzed:
-        return "insufficient"
-    if manifest.analyzed_files == 0 and deleted_lines_present:
         return "insufficient"
     return "sufficient"
 

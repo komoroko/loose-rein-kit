@@ -27,7 +27,7 @@ import argparse
 import logging
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -159,36 +159,82 @@ def _diff(repo: repo_mod.Repo, base: str, head: str, exclude: Sequence[str], *, 
     return out
 
 
-def fold_mechanical(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tuple[str, list[str]]:
-    """The diff with lockfile and generated-file *bodies* replaced by one line each.
+#: What a withheld body is replaced by, per reason. The wording is the whole content of the
+#: replacement, so it says which fact the reader is being handed and nothing beyond it.
+_WITHHELD: Mapping[str, str] = {
+    "mechanical": "@@ {n} line(s) of mechanical change, body withheld @@\n",
+    "deleted": "@@ {n} line(s) removed with the file, body withheld @@\n",
+}
+
+
+def fold_bodies(
+    diff_text: str, files: Sequence[diff_facts.DiffFile], *, signalled: Collection[str] = ()
+) -> tuple[str, list[str]]:
+    """The diff with lockfile, generated-file and deleted-file *bodies* replaced by one line each.
 
     A lockfile's eight hundred changed lines say one thing — the dependencies moved — and they say
     it by burying the twelve lines of hand-written code in the same diff. Every reviewer here was
     handed the raw whole, twice over (the extractor and the security reviewer each get their own
     copy), and the meaningful change was somewhere in the middle of it.
 
+    A whole-file deletion is the same shape with a different reason, and one measured cycle spent
+    294 KB on it — a predecessor tool's deleted scaffolding, 26.6% of what two opus stages read.
+    What makes withholding it *allowed* is not that a deletion feels uninteresting: it is that the
+    pipeline already refuses to act on it. `_file_facts` omits a path with no blob at head ("there
+    is nothing to anchor in"), `review_policy.validate_anchor` rejects any anchor to one as
+    fabricated or stale, and the extractor's contract refuses a statement with no anchor and fails
+    the whole extraction if any part of it fails. So the blind extractor could never have said one
+    word about a deleted body, however many bytes of it were sent.
+
+    **The security reviewer is the exception, and it is why `signalled` exists.** Its findings may
+    stand without an anchor (`security_review._validate_finding`), so it *can* report "the deleted
+    module held the only permission check and nothing replaces it" — and folding the body blind
+    would have taken exactly the quietly-removed-safety case the `deleted_guard` signal was added
+    to catch. `signalled` is the set of paths the deterministic detector matched a signal inside,
+    and a deletion in it is sent whole. That is the rule `review_policy.coverage_gap_risk` already
+    applies to unread content — the gap is worth what the line-by-line scan found in it — used
+    here to decide what may go unread in the first place. A lockfile is folded either way: it is
+    mechanical by classification, and `dependency` fires on every one of them.
+
     This is redaction, not summarisation and not priming: nothing is described, interpreted, or
     added. What replaces the hunks is the fact that they were there and how many lines they were,
-    which is exactly what `diff_facts` already tells the Coverage Manifest — and the manifest goes
-    on reporting these files as *not semantically analysed*, so the review stays `insufficient`
-    for the same reason it always was. The honesty property is untouched; only the token cost of
-    printing the bytes is gone.
+    which is exactly what `diff_facts` already tells the Coverage Manifest. The honesty property
+    holds because the manifest and this function agree about both kinds — a mechanical file is
+    reported *not semantically analysed*, and a deleted one is not a file the manifest speaks
+    about at all (`diff_facts.build_coverage`). A body the reviewers are not sent is never one the
+    manifest calls analyzed; only the token cost of printing the bytes is gone.
 
     Returns `(text, folded_paths)`.
     """
-    mechanical = {f.path for f in files if diff_facts.classify_path(f.path) in diff_facts.MECHANICAL_KINDS}
-    if not mechanical:
+    withheld: dict[str, tuple[str, int | None]] = {}
+    for f in files:
+        if diff_facts.classify_path(f.path) in diff_facts.MECHANICAL_KINDS:
+            withheld[f.path] = ("mechanical", None)
+        # `f.removed_lines` and not `f.deleted` alone: a deleted *binary* has no body to withhold,
+        # and folding it would trade nothing for the one line that says it was binary.
+        elif f.deleted and f.removed_lines and f.path not in signalled:
+            # The exact removal count, not the lines between two headers: a deletion's block also
+            # carries `deleted file mode`, `index`, `---` and `+++`, and a replacement that says
+            # "N line(s) removed" while counting four lines of git metadata is a stated number
+            # that is wrong. The mechanical wording claims no such count.
+            withheld[f.path] = ("deleted", len(f.removed_lines))
+    if not withheld:
         return diff_text, []
     kept: list[str] = []
     folded: list[str] = []
     current: str | None = None
     hunk_lines = 0
+
+    def replacement(path: str, counted: int) -> str:
+        reason, exact = withheld[path]
+        return _WITHHELD[reason].format(n=counted if exact is None else exact)
+
     for line in diff_text.splitlines(keepends=True):
         path = diff_facts.header_path(line.rstrip("\n"))
         if path is not None:
             if current is not None:
-                kept.append(f"@@ {hunk_lines} line(s) of mechanical change, body withheld @@\n")
-            current = path if path in mechanical else None
+                kept.append(replacement(current, hunk_lines))
+            current = path if path in withheld else None
             hunk_lines = 0
             if current is not None:
                 folded.append(current)
@@ -199,7 +245,7 @@ def fold_mechanical(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tup
         else:
             hunk_lines += 1
     if current is not None:
-        kept.append(f"@@ {hunk_lines} line(s) of mechanical change, body withheld @@\n")
+        kept.append(replacement(current, hunk_lines))
     return "".join(kept), folded
 
 
@@ -359,7 +405,7 @@ class Reviewable:
         if self.context_lines < CONTEXT_LADDER[0]:
             facts["narrowed_from"] = CONTEXT_LADDER[0]
         if self.folded:
-            facts["mechanical_bodies_withheld"] = list(self.folded)
+            facts["bodies_withheld"] = list(self.folded)
         return facts
 
 
@@ -438,6 +484,7 @@ def _reviewable(
     *,
     plain: str,
     ceiling: int,
+    signalled: Collection[str],
 ) -> Reviewable:
     """The widest context that fits `ceiling`, falling back to the plain diff already in hand.
 
@@ -455,13 +502,13 @@ def _reviewable(
         return Reviewable(text=text, context_lines=lines, folded=tuple(folded), source=source, tests=tests)
 
     for lines in CONTEXT_LADDER:
-        text, folded = fold_mechanical(_diff(repo, base, head, exclude, context=lines), files)
+        text, folded = fold_bodies(_diff(repo, base, head, exclude, context=lines), files, signalled=signalled)
         if len(text.encode("utf-8")) <= ceiling:
             return made(text, folded, lines)
     # Over the ceiling even at git's default width. Refusing here would be a second budget nobody
     # approved: `_refuse_over_budget` has already passed on this diff, and the answer to a change
     # too big to review is `/revise`, not a narrower window onto it.
-    text, folded = fold_mechanical(plain, files)
+    text, folded = fold_bodies(plain, files, signalled=signalled)
     return made(text, folded, PLAIN_CONTEXT)
 
 
@@ -822,6 +869,8 @@ def generate(
             exclude,
             plain=diff_text,
             ceiling=limits["max_diff_bytes"],
+            # A deletion the detector matched a signal inside is sent whole (`fold_bodies`).
+            signalled=frozenset(hit.path for hit in facts.signals),
         )
 
         # What a reviewer needs to anchor a statement, since it is launched with nothing to read
@@ -871,7 +920,6 @@ def generate(
             change=change,
             coverage_digest=subject["coverage_digest"],
             trusted_base=trusted_base,
-            head=head,
             ceiling=limits["max_diff_bytes"],
             risk_floor=risk_floor,
             prior_blocking=[str(f.get("id", "")) for f in prior_blocking],
@@ -1062,7 +1110,6 @@ def _stage_keys(
     change: str,
     coverage_digest: str,
     trusted_base: str,
-    head: str,
     ceiling: int,
     risk_floor: str,
     prior_blocking: Sequence[str],
@@ -1075,16 +1122,25 @@ def _stage_keys(
     it. `comparison` is missing from here because it takes the Actual as an input and the Actual
     does not exist yet; `_comparison_key` mints it once the extractor has answered.
 
-    Two digests that *are* in the binding are deliberately not in any key. `config_digest` covers
+    Three digests that *are* in the binding are deliberately not in any key. `config_digest` covers
     the whole frozen config — the quality gate, the guard paths, limits no reviewer reads — so
     keying on it would re-run three models over a changed test command; the parts a stage really
     depends on (its adapter, its group, the byte ceiling that decides how wide a diff it is sent)
     are named instead. `environment_digest` describes the OCI sandbox, and a reviewer stage does
     not run in one: `review_transport` launches the CLI on the host, in an empty directory.
+
+    And `subject_head_sha`, by the same reasoning one step further: a stage is not a function of
+    HEAD's name. `change_digest` is taken over the committed tree with `not_the_product` already
+    applied, so it identifies the reviewed content exactly, and the diff, the file facts and the
+    anchorable blobs all derive from it and `trusted_base_sha`. Keying on the sha meant a commit
+    that provably could not change the payload — anything under `.rein/`, `docs/tasks/`,
+    `docs/decisions/`, a `.gitignore` edit — threw away a half-megabyte extraction anyway. Not
+    "one changed line invalidates the lot" but zero changed lines invalidating it, which is what
+    a `--supervise` retry after a session limit walks into. The sha stays in `subject`, where the
+    review binds itself to the commit it was made about.
     """
     diff_inputs = {
         "trusted_base_sha": trusted_base,
-        "subject_head_sha": head,
         "change_digest": change,
         # The ceiling picks the rung of the context ladder, so it decides the exact bytes sent.
         "max_diff_bytes": ceiling,

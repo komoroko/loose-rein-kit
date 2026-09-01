@@ -411,13 +411,20 @@ def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None
     base = _git(review_repo, "rev-parse", "HEAD~1")
     files = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,))).files
 
-    widest = review._reviewable(repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9)
+    widest = review._reviewable(repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9, signalled=())
     assert widest.context_lines == review.CONTEXT_LADDER[0]
     assert "narrowed_from" not in widest.as_facts()
 
     # One byte less than the widest rung costs: the ladder has to step down, and say that it did.
     narrowed = review._reviewable(
-        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=len(widest.text.encode("utf-8")) - 1
+        repo,
+        base,
+        "HEAD",
+        files,
+        (repo_mod.SSOT_DIR,),
+        plain="",
+        ceiling=len(widest.text.encode("utf-8")) - 1,
+        signalled=(),
     )
     assert narrowed.context_lines < review.CONTEXT_LADDER[0]
     assert narrowed.as_facts()["narrowed_from"] == review.CONTEXT_LADDER[0]
@@ -435,7 +442,14 @@ def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: 
     facts = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,)))
 
     reviewable = review._reviewable(
-        repo, base, "HEAD", facts.files, (repo_mod.SSOT_DIR,), plain="the plain one", ceiling=1
+        repo,
+        base,
+        "HEAD",
+        facts.files,
+        (repo_mod.SSOT_DIR,),
+        plain="the plain one",
+        ceiling=1,
+        signalled=frozenset(h.path for h in facts.signals),
     )
     assert reviewable.context_lines == review.PLAIN_CONTEXT
     assert reviewable.text == "the plain one"
@@ -688,6 +702,49 @@ def test_a_branch_carries_a_pointer_where_the_reading_was(monkeypatch: pytest.Mo
     assert branched["diff"] == {"in_previous_message": True, "digest": digests.of_bytes(b"A" * 500)}
     assert branched["contract"] == _a_reading_request()["contract"]
     assert len(sent) == 1 and sent[0]["diff"] == "A" * 500, "the priming turn carries the real reading"
+
+
+def test_the_reading_precedes_every_volatile_field_in_a_request() -> None:
+    """A prompt cache matches on an exact *prefix*, and JSON preserves insertion order.
+
+    `subject_head_sha` sat immediately in front of 400–800 KB of diff, so a commit — any commit,
+    including one that cannot touch the diff — invalidated the cache for the whole reading, in the
+    two stages whose entire cost is that reading. The shared session's own docstring rests on the
+    cache being hit; this is the ordering that lets it be.
+    """
+    for request in (_a_reading_request(), _a_security_request()):
+        keys = list(request)
+        assert keys.index("diff") < keys.index("subject_head_sha")
+        assert keys.index("diff") < keys.index("trusted_base_sha")
+        assert keys.index("diff") < keys.index("deterministic_facts")
+        assert keys[0] == "contract", "the one field that never moves goes first"
+
+    with_tests = security_review.build_request(
+        diff_text="the diff",
+        tests_diff="the tests",
+        deterministic_facts={"signals": [], "files": []},
+        trusted_base_sha="a" * 40,
+        subject_head_sha="b" * 40,
+    )
+    keys = list(with_tests)
+    assert keys.index("tests_diff") < keys.index("subject_head_sha"), "the other half of one reading"
+
+
+def test_the_priming_turn_carries_nothing_volatile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The prefix two branches share must be the same bytes on a re-run whose diff has not moved.
+
+    The two shas were duplicated into it out of a request that keeps them anyway — a 40-character
+    field changing on every commit, in the one turn whose whole purpose is to be a cache prefix.
+    """
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    _reading().branch_flags(_a_reading_request("A" * 500))
+    moved = dict(_a_reading_request("A" * 500), subject_head_sha="c" * 40)
+    _reading().branch_flags(moved)
+
+    assert len(sent) == 2
+    assert sent[0] == sent[1], "a commit that did not touch the diff rewrote the shared prefix"
+    assert set(sent[0]) == {"instruction", "diff"}
 
 
 def test_the_comparator_has_no_reading_to_share(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1589,7 +1646,7 @@ def test_a_lockfiles_body_is_withheld_and_the_code_is_not() -> None:
     is the fact that it was there and how big it was.
     """
     files = diff_facts.parse_diff(_LOCKFILE_DIFF)
-    folded, paths = review.fold_mechanical(_LOCKFILE_DIFF, files)
+    folded, paths = review.fold_bodies(_LOCKFILE_DIFF, files)
 
     assert paths == ["uv.lock"]
     assert "validate(request)" in folded, "the hand-written change must survive intact"
@@ -1598,9 +1655,116 @@ def test_a_lockfiles_body_is_withheld_and_the_code_is_not() -> None:
     assert "line(s) of mechanical change, body withheld" in folded
 
 
-def test_a_change_with_nothing_mechanical_is_passed_through_untouched() -> None:
+def test_a_deleted_files_body_is_withheld_and_named_as_a_deletion() -> None:
+    """Reading a deleted function's body yields nothing "it is gone, it was N lines" does not say.
+
+    One measured cycle sent 294 KB of a predecessor tool's deleted scaffolding to two opus stages,
+    26.6% of the payload. The replacement says which fact it is standing for: a *deletion*, not a
+    lockfile, because the two are withheld for different reasons and a reader is owed which.
+    """
+    files = diff_facts.parse_diff(_DELETION_DIFF)
+    folded, paths = review.fold_bodies(_DELETION_DIFF, files)
+
+    assert paths == ["scripts/agentloop/run.sh"]
+    assert "validate(request)" in folded, "the hand-written change must survive intact"
+    assert "legacy_entrypoint" not in folded, "the deleted body was not withheld"
+    assert "scripts/agentloop/run.sh" in folded, "the reader still has to be told the file is gone"
+    assert "@@ 3 line(s) removed with the file, body withheld @@" in folded, "the count is the removal"
+    assert "mechanical" not in folded, "a deletion is not a mechanical change"
+
+
+def test_a_deletion_the_detector_found_a_signal_in_is_sent_whole() -> None:
+    """The one deletion whose body a reviewer can still act on, so the one that is not withheld.
+
+    A security finding may stand without an anchor (`security_review._validate_finding`), unlike an
+    extracted statement — so the security reviewer *can* report "the deleted module held the only
+    permission check and nothing replaces it", and folding every deletion blind would have taken
+    exactly the quietly-removed-safety case `deleted_guard` exists to catch. What it is told about
+    signals is a bare list of names (`review.generate`): no path, no sample, nothing to reason from
+    if the body is gone too.
+    """
+    diff = (
+        "diff --git a/src/auth/verify.py b/src/auth/verify.py\n"
+        "deleted file mode 100644\nindex 111..000\n--- a/src/auth/verify.py\n+++ /dev/null\n"
+        "@@ -1,3 +0,0 @@\n"
+        "-def check(user):\n"
+        "-    if not user.has_permission('admin'): raise Forbidden\n"
+        "-    return True\n"
+    )
+    facts = diff_facts.analyze(diff)
+    assert {h.signal for h in facts.signals} >= {"deleted_guard", "security_boundary"}
+
+    signalled = frozenset(h.path for h in facts.signals)
+    assert review.fold_bodies(diff, facts.files, signalled=signalled) == (diff, [])
+    assert review.fold_bodies(diff, facts.files, signalled=())[1] == ["src/auth/verify.py"], (
+        "and it is the signal that spares it, not the path"
+    )
+
+
+def test_a_deleted_lockfile_is_folded_even_though_a_signal_fired_in_it() -> None:
+    """`dependency` fires on every lockfile, so a signal-aware fold that did not order the two
+    checks would have stopped folding the case the fold was written for."""
+    diff = (
+        "diff --git a/uv.lock b/uv.lock\n"
+        "deleted file mode 100644\n--- a/uv.lock\n+++ /dev/null\n"
+        '@@ -1 +0,0 @@\n-version = "1"\n'
+    )
+    facts = diff_facts.analyze(diff)
+    assert [h.signal for h in facts.signals] == ["dependency"]
+    folded, paths = review.fold_bodies(diff, facts.files, signalled=frozenset(h.path for h in facts.signals))
+    assert paths == ["uv.lock"]
+    assert "line(s) of mechanical change, body withheld" in folded
+
+
+def test_a_removed_binary_keeps_the_one_line_that_says_it_was_binary() -> None:
+    """Nothing to withhold, so nothing is: folding it would trade no bytes for that fact."""
+    diff = (
+        "diff --git a/fixtures/blob.bin b/fixtures/blob.bin\n"
+        "deleted file mode 100644\n"
+        "Binary files a/fixtures/blob.bin and /dev/null differ\n"
+    )
+    assert review.fold_bodies(diff, diff_facts.parse_diff(diff)) == (diff, [])
+
+
+def test_a_change_with_nothing_to_withhold_is_passed_through_untouched() -> None:
     plain = "diff --git a/src/api.py b/src/api.py\n@@ -1 +1 @@\n-a\n+b\n"
-    assert review.fold_mechanical(plain, diff_facts.parse_diff(plain)) == (plain, [])
+    assert review.fold_bodies(plain, diff_facts.parse_diff(plain)) == (plain, [])
+
+
+def test_a_deletion_is_not_a_coverage_gap_and_not_a_read_file() -> None:
+    """The manifest and the fold have to agree, or one of them is lying.
+
+    `fold_bodies` withholds a deleted body, so the manifest may not call it analyzed; and a
+    deletion is not unread either, since the path states the change in full. Recording it as
+    unsupported shut gate ④ on a cycle whose only unreadable files had been *removed* — a block
+    whose stated remedy ("split the unreadable part out of this scope") does not exist for a
+    deletion.
+    """
+    facts = diff_facts.analyze(_DELETION_DIFF)
+    manifest = facts.coverage.to_manifest()
+    assert "unsupported_files" not in manifest, "a file that is gone is not a file that went unread"
+    assert manifest["coverage_status"] == "sufficient"
+    assert facts.coverage.analyzed_files == 1, "src/api.py, and not the file that is gone"
+
+
+_DELETION_DIFF = """diff --git a/src/api.py b/src/api.py
+index 1111111..2222222 100644
+--- a/src/api.py
++++ b/src/api.py
+@@ -1,2 +1,3 @@
+ def handle():
++    validate(request)
+     return ok()
+diff --git a/scripts/agentloop/run.sh b/scripts/agentloop/run.sh
+deleted file mode 100755
+index 3333333..0000000
+--- a/scripts/agentloop/run.sh
++++ /dev/null
+@@ -1,3 +0,0 @@
+-#!/bin/sh
+-legacy_entrypoint "$@"
+-exit 0
+"""
 
 
 def test_the_coverage_manifest_still_reads_the_whole_diff() -> None:
@@ -1657,6 +1821,32 @@ def test_a_reused_stage_keeps_the_model_that_answered_it(review_repo: Path) -> N
     stored = store_mod.Store(repo).read_review()
     assert stored is not None
     assert stored.binding["independence"]["actual_extractor"]["model"] == "claude-x"
+
+
+def test_a_commit_that_cannot_change_the_payload_keeps_the_stage_keys() -> None:
+    """A reviewer stage is not a function of HEAD's name.
+
+    `change_digest` is taken over the committed tree with `not_the_product` applied, so it
+    identifies the reviewed content exactly — and the diff, the file facts and the anchorable
+    blobs all derive from it and the base. Keying on the sha as well meant a `.rein/`-only commit,
+    a `docs/tasks/` edit or a `.gitignore` line threw away a half-megabyte opus extraction that
+    could not have changed by a byte. Clearing one field report's first item took three such
+    commits and paid for the extraction three times.
+    """
+
+    def keys(change: str = "sha256:" + "1" * 64) -> dict[str, str]:
+        return review._stage_keys(
+            config=None,
+            change=change,
+            coverage_digest="sha256:" + "2" * 64,
+            trusted_base="b" * 40,
+            ceiling=400_000,
+            risk_floor="low",
+            prior_blocking=[],
+        )
+
+    assert keys() == keys()
+    assert keys(change="sha256:" + "3" * 64) != keys(), "changed content must still miss"
 
 
 def test_a_cache_entry_written_before_provenance_was_recorded_is_a_miss(tmp_path: Path) -> None:
