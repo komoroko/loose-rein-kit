@@ -28,13 +28,11 @@ import logging
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from rein import (
-    actual_extraction,
     adapters,
     brief,
     common,
@@ -51,7 +49,6 @@ from rein import (
     review_reading,
     review_transport,
     run_record,
-    security_review,
 )
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -78,36 +75,8 @@ _refuse_over_budget = review_reading.refuse_over_budget
 _cached_stage = review_reading.cached_stage
 _reviewer_identity = review_reading.reviewer_identity
 _stage_keys = review_reading.reading_keys
-
-
-def _exists(repo: repo_mod.Repo, ref: str) -> bool:
-    return bool(ref) and repo._git_rc("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")[0] == 0
-
-
-def _resolve_base(repo: repo_mod.Repo, plan: models.Plan | None, base: str | None) -> str:
-    """The trusted base a review is taken against: an explicit arg, the plan's base, else a fallback.
-
-    Each candidate is verified to exist in *this* repository before it is used — a plan carrying a
-    base commit that is not present here (a fork, a shallow clone) falls back rather than failing the
-    whole review on a `git diff` against a missing object.
-
-    There is deliberately no last-resort fallback to HEAD. That used to be the final branch, and
-    it is the one answer that is never right: `git diff HEAD..HEAD` is empty, so every reviewer
-    would be handed a change of nothing and would report, honestly and uselessly, that they found
-    nothing wrong with it. A base that cannot be resolved is a review that cannot be taken.
-    """
-    if _exists(repo, base or ""):
-        return base or ""
-    if plan is not None and _exists(repo, plan.base_commit):
-        return plan.base_commit
-    for candidate in ("main", "master"):
-        if _exists(repo, candidate):
-            return repo._git_rc("rev-parse", candidate)[1].strip()
-    raise ReviewError(
-        "cannot resolve a base commit to review against: the plan's `cycle.base_commit` is not in "
-        "this repository and neither `main` nor `master` exists here. Set `cycle.base_commit` to a "
-        "commit this checkout has — reviewing HEAD against itself would report an empty change."
-    )
+_exists = review_reading.commit_exists
+_resolve_base = review_reading.resolve_base
 
 
 def _blob_facts(repo: repo_mod.Repo, head: str) -> brief.BlobFacts:
@@ -494,15 +463,12 @@ def generate(
         # Keyed on the reading, not on the review: `content_digest` narrows to the paths that
         # reading covers, which for the whole-change reading is the whole change.
         keys_by_unit = {
-            m.reading.unit: review_reading.reading_keys(
+            m.reading.unit: review_reading.keys_for(
+                m,
                 config=config,
-                change=m.content_digest,
-                coverage_digest=digests.of(m.coverage),
                 trusted_base=trusted_base,
                 ceiling=limits["max_diff_bytes"],
-                risk_floor=m.risk_floor,
-                prior_blocking=[str(f.get("id", "")) for f in prior_by_unit[m.reading.unit]],
-                unit=m.reading.unit,
+                prior_blocking=prior_by_unit[m.reading.unit],
             )
             for m in measures
         }
@@ -511,7 +477,7 @@ def generate(
         print(_render_execution_plan(plan_of_run))
 
         readouts = [
-            _read_one(
+            review_reading.read_one(
                 repo,
                 reviewers,
                 measured=m,
@@ -782,96 +748,6 @@ def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: st
             tx.append("review_failed", cycle_id=cycle, actor=actor, detail=detail)
     except Exception as exc:  # the original failure must reach the reader, not this one
         logger.warning(f"could not record the review failure in the audit log: {exc}")
-
-
-def _read_one(
-    repo: repo_mod.Repo,
-    reviewers: review_policy.Reviewers,
-    *,
-    measured: review_reading.ReadingFacts,
-    trusted_base: str,
-    head: str,
-    prior_blocking: Sequence[Mapping[str, Any]],
-    on_stage: Callable[[str], None] = lambda _name: None,
-    cache: review_cache.StageCache,
-    keys: Mapping[str, str],
-    ran: set[str],
-    reused: usage_mod.Ledger,
-    cancel: common.Cancellation,
-) -> review_reading.ReadOut:
-    """The two stages that read code, run over one reading of the change.
-
-    The security review reads the same bytes the extractor does and consumes nothing the extractor
-    produces, so it does not wait behind it — and when both are configured on one adapter they
-    branch a single priming turn of those bytes (`review_transport.SharedReading`), which is why
-    they belong to the same reading rather than to the pipeline at large.
-
-    `cancel` is what makes the failure path honest. `Future.cancel()` cannot stop a task that has
-    started — with one worker and nothing competing for it, this one always has — and
-    `ThreadPoolExecutor.__exit__` then blocks in `shutdown(wait=True)` until the adapter call it
-    failed to cancel finishes. So a failure would be reported when the *discarded* call ends rather
-    than when it happens: measured across two runs of one cycle, the extraction failure surfaced
-    1m36s and 3m54s late, each run having paid in full for a security review nobody would read.
-    `shutdown(wait=False, cancel_futures=True)` does not fix it either —
-    `concurrent.futures.thread` registers an atexit hook that joins every worker, so the wait moves
-    to interpreter exit and the process returns no sooner. The only thing that ends a launch early
-    is killing the process it started.
-
-    The extractor's failure is the one reported when both fail: it comes first in the pipeline's
-    order, and reporting whichever thread lost a race would make the error a reader sees depend on
-    timing.
-    """
-    security_req = review_reading.security_request(
-        measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking
-    )
-
-    def run_security() -> security_review.SecurityResult:
-        # Bound on this thread — the worker's — because the transport is reached through the
-        # injected reviewers, whose signature is not ours to change.
-        with common.cancelling(cancel):
-            return _cached_stage(
-                cache,
-                "security_review",
-                keys["security_review"],
-                ran,
-                lambda ask: security_review.run_security_review(security_req, ask, repo=repo, commit=head),
-                reviewers,
-                reused=reused,
-            )
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        security_future = pool.submit(run_security)
-        try:
-            # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
-            on_stage("actual_extraction")
-            extraction = _cached_stage(
-                cache,
-                "actual_extraction",
-                keys["actual_extraction"],
-                ran,
-                lambda ask: actual_extraction.run_extractor(
-                    review_reading.extraction_request(
-                        measured, trusted_base=trusted_base, head=head, risk_floor=measured.risk_floor
-                    ),
-                    ask,
-                    repo=repo,
-                    commit=head,
-                    risk_floor=measured.risk_floor,
-                ),
-                reviewers,
-                reused=reused,
-            )
-        except BaseException:
-            cancel.cancel()
-            raise
-        on_stage("security_review")
-        security = security_future.result()
-    return review_reading.ReadOut(
-        reading=measured.reading,
-        extraction=extraction,
-        security=security,
-        carried_ids=tuple(str(f.get("id", "")) for f in prior_blocking),
-    )
 
 
 def _compare(

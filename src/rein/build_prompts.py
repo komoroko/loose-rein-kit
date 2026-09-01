@@ -260,3 +260,47 @@ def _side(label: str, task: dag.Task | None) -> str:
         f"  declared scope:    {scope}\n"
         f"  acceptance:\n{criteria}\n"
     )
+
+
+def integration_review_prompt(
+    ids: str,
+    *,
+    gate_cmds: Sequence[str],
+    diff_cmd: str,
+    findings_path: str,
+) -> str:
+    """Review the tree the merge produced, which no per-task reviewer ever saw.
+
+    Each leaf was reviewed in its own worktree, against its own ticket, and the reviewers were
+    right to stay there — a reviewer that wanders outside its task's scope reviews somebody else's
+    work. What none of them could see is the thing the merge makes: two tasks that each added a
+    helper, a responsibility that ended up in two places, an abstraction one task introduced and
+    the next one worked around. Until this existed the merged tree faced only the command steps,
+    so "is it green" was asked of the join and "is it well made" was not.
+
+    Deliberately the `/simplify` discipline rather than the correctness one: the command steps have
+    just run over this exact tree, and asking a model to look for bugs a test suite already
+    answered spends a launch on the half of the question that is already settled.
+    """
+    cmds = ", ".join(f"`{c}`" for c in gate_cmds)
+    return (
+        f"You are the reviewer for the merged state of {ids} (the quality gate's integration step).\n"
+        f"Each of these tasks was reviewed on its own branch; this is the first time anyone has read "
+        f"them as one tree. The combined change is `{diff_cmd}`.\n"
+        "\n"
+        "Review it for what only the join can show: duplication between what two tasks added, one "
+        "responsibility now living in two places, an abstraction one task introduced that the next "
+        "worked around, a contract two tasks now disagree about. Reuse, simplification, and anything "
+        "no ticket's acceptance criteria require (the /simplify discipline). Do not re-review either "
+        f"task against its own ticket, and do not run {cmds} — the caller has just run them over this "
+        "exact tree and decides by their exit status.\n"
+        "\n"
+        "**You do not change the code.** You have no write access to it; an implementer resolves what "
+        "you find and you look again.\n"
+        "\n"
+        f"Write your findings to `{findings_path}` and nothing else:\n"
+        '  {"findings": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}\n'
+        "`must_fix` is a defect the merged tree cannot land with. `consider` is everything else worth "
+        "saying; it stops nothing and is carried to the human at gate ④. An empty list is a real "
+        "answer, and the right one when the join is sound."
+    )

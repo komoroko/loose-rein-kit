@@ -32,6 +32,8 @@ from rein import (
     faults,
     models,
     pr_stack,
+    review_policy,
+    review_reading,
 )
 from rein import events as events_mod
 from rein import repo as repo_mod
@@ -2134,3 +2136,83 @@ def test_the_task_gate_reports_the_step_that_failed(tmp_path: Path, monkeypatch:
     status, log = loop.task_gate(str(tmp_path))
 
     assert status == 1 and "2 tests failed" in log
+
+
+# --- the merged tree is read too ----------------------------------------------
+
+
+def test_an_agent_step_declared_at_the_integration_stage_runs_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stage:` moves *when* a step runs, never whether. An agent step at the integration stage was
+    skipped outright, which made the join the one tree no reviewer ever read."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    step = build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer", stage="integration")
+    monkeypatch.setattr(loop, "_steps_at", lambda stage: (step,) if stage == "integration" else ())
+
+    seen: list[str] = []
+    monkeypatch.setattr(loop, "_run_integration_agent_step", lambda s, tasks: seen.append(s.name))
+    ok, _ = loop._integration_gate([dag.Task(id="T-001", title="t", kind="parallel")])
+    assert ok and seen == ["review"], "the agent step declared at this stage has to run at it"
+
+
+def test_the_integration_reviewers_findings_go_to_the_task_whose_scope_owns_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finding about the join is carried to gate ④ beside the task that owns the code it names —
+    the same derivation gate ④ uses — and one nobody owns is said out loud rather than filed
+    against a task that does not own it."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    tasks = [
+        dag.Task(id="T-001", title="a", kind="parallel", scope_include=("alpha/",)),
+        dag.Task(id="T-002", title="b", kind="parallel", scope_include=("beta/",)),
+    ]
+    loop._file_integration_findings(
+        [
+            {"severity": "consider", "statement": "duplicated helper", "anchor": "beta/mod.py:4"},
+            {"severity": "consider", "statement": "about the join itself"},
+        ],
+        tasks,
+    )
+    assert loop._take_diagnostics("T-002")["review"]["findings"][0]["statement"] == "duplicated helper"
+    assert loop._take_diagnostics("T-001") == {}, "a finding nobody owns is not filed against a task"
+
+
+def test_a_second_review_of_a_task_does_not_discard_the_first(tmp_path: Path) -> None:
+    """A task can be read twice — in its worktree and again after it merges — and the two are
+    different observations. Replacing the key dropped whichever arrived first."""
+    loop = orchestrator(tmp_path)
+    loop._add_review_findings("T-001", [{"severity": "consider", "statement": "from its own reviewer"}])
+    loop._add_review_findings("T-001", [{"severity": "consider", "statement": "from the join"}])
+    kept = loop._take_diagnostics("T-001")["review"]["findings"]
+    assert [f["statement"] for f in kept] == ["from its own reviewer", "from the join"]
+
+
+def test_a_task_with_no_declared_scope_is_not_warmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An undeclared scope means unbounded, so its reading would be the whole change — neither one
+    task wide nor the question gate ④ will ask."""
+    loop = orchestrator(tmp_path)
+    warmed: list[str] = []
+    monkeypatch.setattr(review_reading, "warm", lambda *a, **k: warmed.append("yes"))
+    loop._warm_reading(dag.Task(id="T-001", title="t", kind="foundation"))
+    assert warmed == []
+
+
+def test_a_warm_up_that_cannot_be_taken_does_not_fail_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate takes the reading either way; retrying it once per task would spend a session limit
+    on an optimization."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+
+    def refuse(*_a: object, **_k: object) -> None:
+        raise review_policy.AdapterFailure("the provider said no", rc=429, output="")
+
+    monkeypatch.setattr(review_reading, "warm", refuse)
+    task = dag.Task(id="T-001", title="t", kind="foundation", scope_include=("alpha/",))
+    loop._warm_reading(task)
+    assert loop._warming_off, "one refusal stops the warming rather than being retried per task"
+    loop._warm_reading(task)  # and the second one does not even try

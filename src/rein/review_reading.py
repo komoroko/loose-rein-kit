@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
@@ -120,6 +121,36 @@ def change_digest(repo: repo_mod.Repo, commit: str, exclude: Sequence[str], *, i
         raise ReviewError(f"cannot read the tree at {commit}: {out.strip()}")
     entries = digests.filter_tree(digests.parse_ls_tree(out), exclude_prefixes=exclude, include_prefixes=include)
     return digests.tree_digest(entries)
+
+
+def commit_exists(repo: repo_mod.Repo, ref: str) -> bool:
+    return bool(ref) and repo._git_rc("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")[0] == 0
+
+
+def resolve_base(repo: repo_mod.Repo, plan: models.Plan | None, base: str | None) -> str:
+    """The trusted base a review is taken against: an explicit arg, the plan's base, else a fallback.
+
+    Each candidate is verified to exist in *this* repository before it is used — a plan carrying a
+    base commit that is not present here (a fork, a shallow clone) falls back rather than failing the
+    whole review on a `git diff` against a missing object.
+
+    There is deliberately no last-resort fallback to HEAD. That used to be the final branch, and
+    it is the one answer that is never right: `git diff HEAD..HEAD` is empty, so every reviewer
+    would be handed a change of nothing and would report, honestly and uselessly, that they found
+    nothing wrong with it. A base that cannot be resolved is a review that cannot be taken.
+    """
+    if commit_exists(repo, base or ""):
+        return base or ""
+    if plan is not None and commit_exists(repo, plan.base_commit):
+        return plan.base_commit
+    for candidate in ("main", "master"):
+        if commit_exists(repo, candidate):
+            return repo._git_rc("rev-parse", candidate)[1].strip()
+    raise ReviewError(
+        "cannot resolve a base commit to review against: the plan's `cycle.base_commit` is not in "
+        "this repository and neither `main` nor `master` exists here. Set `cycle.base_commit` to a "
+        "commit this checkout has — reviewing HEAD against itself would report an empty change."
+    )
 
 
 def diff_of(
@@ -1007,8 +1038,160 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
     )
 
 
+def keys_for(
+    measured: ReadingFacts,
+    *,
+    config: models.Config | None,
+    trusted_base: str,
+    ceiling: int,
+    prior_blocking: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, str]:
+    """This reading's stage keys, from what the reading measured about itself.
+
+    The one place the mapping from a reading to its keys lives, because two callers make it and
+    they have to agree exactly: `review.generate` at the gate, and `build_loop` when a task lands.
+    A build that warms a key the gate then misses would pay for both readings and save nothing.
+    """
+    return reading_keys(
+        config=config,
+        change=measured.content_digest,
+        coverage_digest=digests.of(measured.coverage),
+        trusted_base=trusted_base,
+        ceiling=ceiling,
+        risk_floor=measured.risk_floor,
+        prior_blocking=[str(f.get("id", "")) for f in prior_blocking],
+        unit=measured.reading.unit,
+    )
+
+
+def warm(
+    repo: repo_mod.Repo,
+    reviewers: review_policy.Reviewers,
+    *,
+    reading: Reading,
+    base: str,
+    head: str,
+    exclude: Sequence[str],
+    limits: Mapping[str, int],
+    config: models.Config | None,
+    cache: review_cache.StageCache,
+) -> ReadOut:
+    """Take one reading now, so gate ④ finds it already answered.
+
+    Called when a task lands, where the reading is one task wide and the tree that produced it is
+    the one in front of the caller. It answers the *same question* the gate will ask — same
+    measure, same keys (`keys_for`), same validation — so the gate reuses it rather than reading
+    the change again from a session that has a whole cycle to hold.
+
+    Nothing is carried forward here: `prior_blocking` belongs to a generated review, and during a
+    build there is not one yet about this head. A blocking finding the last review recorded is
+    handled where it is read, at the gate, which is also the only place that can resolve it.
+    """
+    measured = read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits)
+    keys = keys_for(measured, config=config, trusted_base=base, ceiling=limits["max_diff_bytes"])
+    return read_one(
+        repo,
+        reviewers,
+        measured=measured,
+        trusted_base=base,
+        head=head,
+        prior_blocking=(),
+        cache=cache,
+        keys=keys,
+        ran=set(),
+        reused=usage_mod.Ledger(),
+        cancel=common.Cancellation(),
+    )
+
+
 def _next_free(pattern: str, taken: Collection[str]) -> str:
     number = 1
     while pattern.format(number) in taken:
         number += 1
     return pattern.format(number)
+
+
+def read_one(
+    repo: repo_mod.Repo,
+    reviewers: review_policy.Reviewers,
+    *,
+    measured: ReadingFacts,
+    trusted_base: str,
+    head: str,
+    prior_blocking: Sequence[Mapping[str, Any]],
+    on_stage: Callable[[str], None] = lambda _name: None,
+    cache: review_cache.StageCache,
+    keys: Mapping[str, str],
+    ran: set[str],
+    reused: usage_mod.Ledger,
+    cancel: common.Cancellation,
+) -> ReadOut:
+    """The two stages that read code, run over one reading of the change.
+
+    The security review reads the same bytes the extractor does and consumes nothing the extractor
+    produces, so it does not wait behind it — and when both are configured on one adapter they
+    branch a single priming turn of those bytes (`review_transport.SharedReading`), which is why
+    they belong to the same reading rather than to the pipeline at large.
+
+    `cancel` is what makes the failure path honest. `Future.cancel()` cannot stop a task that has
+    started — with one worker and nothing competing for it, this one always has — and
+    `ThreadPoolExecutor.__exit__` then blocks in `shutdown(wait=True)` until the adapter call it
+    failed to cancel finishes. So a failure would be reported when the *discarded* call ends rather
+    than when it happens: measured across two runs of one cycle, the extraction failure surfaced
+    1m36s and 3m54s late, each run having paid in full for a security review nobody would read.
+    `shutdown(wait=False, cancel_futures=True)` does not fix it either —
+    `concurrent.futures.thread` registers an atexit hook that joins every worker, so the wait moves
+    to interpreter exit and the process returns no sooner. The only thing that ends a launch early
+    is killing the process it started.
+
+    The extractor's failure is the one reported when both fail: it comes first in the pipeline's
+    order, and reporting whichever thread lost a race would make the error a reader sees depend on
+    timing.
+    """
+    security_req = security_request(measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking)
+
+    def run_security() -> security_review.SecurityResult:
+        # Bound on this thread — the worker's — because the transport is reached through the
+        # injected reviewers, whose signature is not ours to change.
+        with common.cancelling(cancel):
+            return cached_stage(
+                cache,
+                "security_review",
+                keys["security_review"],
+                ran,
+                lambda ask: security_review.run_security_review(security_req, ask, repo=repo, commit=head),
+                reviewers,
+                reused=reused,
+            )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        security_future = pool.submit(run_security)
+        try:
+            # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
+            on_stage("actual_extraction")
+            extraction = cached_stage(
+                cache,
+                "actual_extraction",
+                keys["actual_extraction"],
+                ran,
+                lambda ask: actual_extraction.run_extractor(
+                    extraction_request(measured, trusted_base=trusted_base, head=head, risk_floor=measured.risk_floor),
+                    ask,
+                    repo=repo,
+                    commit=head,
+                    risk_floor=measured.risk_floor,
+                ),
+                reviewers,
+                reused=reused,
+            )
+        except BaseException:
+            cancel.cancel()
+            raise
+        on_stage("security_review")
+        security = security_future.result()
+    return ReadOut(
+        reading=measured.reading,
+        extraction=extraction,
+        security=security,
+        carried_ids=tuple(str(f.get("id", "")) for f in prior_blocking),
+    )

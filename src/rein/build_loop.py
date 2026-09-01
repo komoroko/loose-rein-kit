@@ -78,8 +78,13 @@ from rein import (
     executors,
     faults,
     gate_guard,
+    human_review,
     models,
     preflight,
+    review_cache,
+    review_policy,
+    review_reading,
+    review_transport,
     run_record,
     strict_yaml,
 )
@@ -88,6 +93,10 @@ from rein import store as store_mod
 from rein import usage as usage_mod
 
 logger = logging.getLogger(__name__)
+
+#: What the integration reviewer's findings file is named after. Not a task id — the subject is the
+#: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
+_INTEGRATION_SUBJECT = "integration"
 
 StopLoop = common.StopLoop
 EnvironmentFault = faults.EnvironmentFault
@@ -730,6 +739,9 @@ class Orchestrator:
         # established, outside the working tree. Off in a dry run (nothing is established) and
         # off when the operator says so. A miss only ever costs a re-run.
         self.ledger = evidence.Ledger.for_repo(self.repo, enabled=not dry_run and evidence.cache_enabled_by_env())
+        #: Set once a gate-④ warm-up could not be taken. Retrying it per task would spend a session
+        #: limit on an optimization, and the gate takes the reading either way (`_warm_reading`).
+        self._warming_off = False
         # What each task's gate steps were established green against, keyed by task id. Written
         # into `state.yaml` beside the `done` it justifies — this is the auditable half.
         self._evidence: dict[str, dict[str, Any]] = {}
@@ -876,6 +888,22 @@ class Orchestrator:
             return
         with self._evidence_lock:
             self._pending_diagnostics.setdefault(task_id, {}).update(patch)
+
+    def _add_review_findings(self, task_id: str, findings: Sequence[Mapping[str, Any]]) -> None:
+        """Add review findings to what this task will carry, without discarding what it already has.
+
+        A task can be read twice — by its own reviewer in its worktree, and by the integration
+        reviewer once it has merged — and the two are different observations of different trees.
+        Replacing the key would silently drop whichever arrived first, which for the per-task
+        reviewer is the one whose findings `brief.residual_findings` carries to gate ④.
+        """
+        if self.dry_run or not task_id:
+            return
+        with self._evidence_lock:
+            review = self._pending_diagnostics.setdefault(task_id, {}).setdefault("review", {})
+            kept = list(review.get("findings") or [])
+            kept += [dict(f) for f in findings]
+            review["findings"] = kept
 
     def _take_diagnostics(self, task_id: str) -> dict[str, Any]:
         with self._evidence_lock:
@@ -1301,7 +1329,7 @@ class Orchestrator:
         rounds = max(0, step.retries)
         for attempt in range(rounds + 1):
             findings = self._collect_findings(step, task, cwd, base, role)
-            self._note_diagnostic(task.id, {"review": {"findings": list(findings)}})
+            self._add_review_findings(task.id, findings)
             outstanding = dossier.must_fix(findings)
             if not outstanding:
                 if findings:
@@ -1614,6 +1642,54 @@ class Orchestrator:
 
     def _note_acceptance(self, ac_id: str, kind: str, *, reused: bool) -> None:
         self._current_acceptance.append({"id": ac_id, "kind": kind, "reused": reused})
+
+    def _warm_reading(self, task: dag.Task) -> None:
+        """Take gate ④'s reading of this task now, while its diff is one task wide.
+
+        The gate reads the change in the readings the plan's task scopes describe
+        (`review_reading.plan_readings`), and it asks each one the same question this does — same
+        measure, same key. Answering it here means the gate finds it answered: the peak of one
+        launch stays the size of one task, and a review regenerated after a fix re-reads only the
+        task whose code moved.
+
+        **A warm-up never fails a build.** It is an optimization over a cache the gate does not
+        depend on: if it does not happen, `rein review generate` takes the reading itself, at the
+        cost this exists to avoid and with nothing else different. So an adapter that will not
+        answer stops the warming for the rest of the run — retrying it once per task would spend a
+        session limit on it — and says so once, rather than stopping the build.
+
+        Skipped for a task with no declared scope: an undeclared scope means *unbounded*, so its
+        reading would be the whole change, which is neither one task wide nor what the gate will
+        ask for.
+        """
+        if self.dry_run or self._warming_off or self.config.raw.composition == review_reading.WHOLE:
+            return
+        if not task.scope_include:
+            return
+        try:
+            # The same base the gate will resolve, not the plan's field: they differ whenever the
+            # plan names a commit this checkout does not have, and a warm-up taken against a
+            # different base answers a question nobody asks.
+            base = review_reading.resolve_base(self.repo, self._plan, None)
+            head = self.repo._git_rc("rev-parse", "HEAD")[1].strip()
+            if not base or not head:
+                return
+            exclude = review_reading.not_the_product(self.repo, self.state)
+            limits = {**human_review.DEFAULT_BUDGET, **self.config.raw.budgets}
+            review_reading.warm(
+                self.repo,
+                review_transport.StagedReviewers(self.repo, config=self.config.raw),
+                reading=review_reading.Reading(unit=task.id, include=tuple(task.scope_include)),
+                base=base,
+                head=head,
+                exclude=exclude,
+                limits=limits,
+                config=self.config.raw,
+                cache=review_cache.StageCache(self.repo.root),
+            )
+        except (review_policy.ReviewPolicyError, common.ReinError, OSError) as exc:
+            self._warming_off = True
+            print(f"    [review] {task.id}: the gate-④ reading was not taken here ({exc}); the gate will take it")
 
     def _completion_status(self, task: dag.Task) -> str:
         """`done`, or `awaiting-evidence` when a criterion nobody here can establish is still open.
@@ -1967,7 +2043,14 @@ class Orchestrator:
         while True:
             failed, failure_log = None, ""
             for step in self._steps_at("integration"):
-                if step.kind != "command" or not step.command:
+                if step.kind == "agent":
+                    # `stage:` moves *when* a step runs, never whether — and an agent step declared
+                    # at the integration stage was being skipped, which made the join the one tree
+                    # no reviewer ever read. The command steps have just run over it; this is the
+                    # half of the question they cannot answer.
+                    self._run_integration_agent_step(step, tasks)
+                    continue
+                if not step.command:
                     continue
                 failure = self._run_cmd_step(step, cwd=self.root)
                 if failure:
@@ -1993,6 +2076,79 @@ class Orchestrator:
                 return False, failure_log
             budgets[failed] = left - 1
             self._invoke_integration_fixer(ids, failure_log)
+
+    def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task]) -> None:
+        """Read the tree the merge produced, which no per-task reviewer ever saw.
+
+        Its `must_fix` findings go back to the integration fixer within this step's own retries,
+        the same shape a red command step takes; unresolved ones stop the batch rather than being
+        reported as passed. Its `consider` findings are attributed to the merged task whose
+        declared scope owns the anchor — the same derivation gate ④ uses to decide which task
+        answers a finding (`findings.owner_of_path`) — so they reach the human through
+        `brief.residual_findings` beside that task's own review, stamped with the tree they were
+        made against. A finding no task's scope owns is printed rather than filed against a task
+        that does not own it: gate ④'s seam reading covers exactly that region, and inventing an
+        owner here is the guess `findings` refuses to make.
+        """
+        ids = ",".join(t.id for t in tasks)
+        target = dossier.findings_path(self.root, _INTEGRATION_SUBJECT)
+        rounds = max(0, step.retries)
+        for attempt in range(rounds + 1):
+            target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
+            self._launch(
+                [
+                    *(step.agent_argv or self.config.adapter_argv),
+                    build_prompts.integration_review_prompt(
+                        ids,
+                        gate_cmds=self.config.gate_cmds,
+                        diff_cmd=f"git diff {self._plan.base_commit if self._plan else 'HEAD~1'}..HEAD",
+                        findings_path=f"{dossier.RELATIVE_PATH}/{target.name}",
+                    ),
+                ],
+                cwd=self.root,
+                where=f"{ids}: the '{step.name}' agent step over the merged tree",
+                role=step.agent_role or "code_reviewer",
+            )
+            if not target.exists():
+                raise StopLoop(
+                    f"{ids}: the integration reviewer wrote no findings file "
+                    f"({dossier.RELATIVE_PATH}/{target.name}). A review that produced nothing "
+                    "readable is not a review that found nothing."
+                )
+            try:
+                findings = dossier.parse_findings(target.read_text(encoding="utf-8"))
+            except (dossier.FindingsError, OSError) as exc:
+                raise StopLoop(f"{ids}: the integration reviewer's findings could not be read — {exc}") from None
+            outstanding = dossier.must_fix(findings)
+            if not outstanding:
+                self._file_integration_findings(findings, tasks)
+                if findings:
+                    print(f"    [review] {ids}: {len(findings)} finding(s) about the join, none blocking")
+                return
+            if attempt == rounds:
+                raise StopLoop(
+                    f"{ids}: the integration reviewer's findings were not resolved within "
+                    f"{rounds} round(s):\n{dossier.render_findings(outstanding)}"
+                )
+            print(f"    [review] {ids}: {len(outstanding)} must-fix finding(s) about the join → back to an implementer")
+            self._invoke_integration_fixer(ids, dossier.render_findings(outstanding))
+
+    def _file_integration_findings(self, findings: Sequence[Mapping[str, Any]], tasks: Sequence[dag.Task]) -> None:
+        """Attribute each non-blocking finding to the merged task whose scope owns its anchor."""
+        owners = {t.id: t.scope_include for t in tasks}
+        for finding in findings:
+            path = str(finding.get("anchor", "")).split(":", 1)[0]
+            owner = ""
+            if path:
+                best = -1
+                for task_id, scope in owners.items():
+                    covered = common.longest_cover(path, scope)
+                    if covered is not None and len(covered.rstrip("/")) > best:
+                        owner, best = task_id, len(covered.rstrip("/"))
+            if owner:
+                self._add_review_findings(owner, [finding])
+            else:
+                print(f"    [review] a finding about the join no task's scope owns: {finding.get('statement', '')}")
 
     # -- worktree / merge --
 
@@ -2481,6 +2637,7 @@ class Orchestrator:
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
             self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
+            self._warm_reading(task)
 
     def _consume_parallel(self, tasks: list[dag.Task]) -> None:
         """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
@@ -2594,6 +2751,7 @@ class Orchestrator:
         if ok:
             for task in merged:
                 self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
+                self._warm_reading(task)
         else:
             for task in merged:
                 self._set_status(task.id, "blocked")
