@@ -4,6 +4,73 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.3.13] - 2026-09-01
+
+**A deletion is not content, and a commit is not a reading** (#44, measured on 0.3.12: a 17-task
+cycle whose 106 commits sent 582 KB to the blind extractor and 1,106 KB to the security reviewer,
+294 KB of it the deletion of a predecessor tool's scaffolding).
+
+- **Deleting a file could shut gate ④, with no move the operator could make.** 0.3.12 exempted a
+  deleted *binary* from the Coverage Manifest and stopped one branch short: removing a `.mk` and an
+  `.ndjson` still filed them under `unsupported_language`, which makes coverage `insufficient`, and
+  `coverage_blocks` shuts the gate at high effective risk. There was nothing to do about it —
+  `dispute_finding` is for security findings, and the block's own instruction ("split the
+  unreadable part out of this scope") does not exist for a deletion, since splitting never removes
+  a file from a diff. The repair on the day was to restore both files and defer the deletion, which
+  is a gate deciding what may be deleted. The exemption is now taken by *deletion* rather than by
+  binary-ness, one branch above where the extension is looked at: a file that is gone is neither
+  read nor unread, and the manifest says nothing about it either way. `_default_status` loses its
+  `analyzed_files == 0 and deleted_lines_present` check with it — unable to fire (every file
+  holding a removed line is analyzed, or unsupported, or generated, or a dependency, and each of
+  those is already decided above), and once a deletion stopped being a file the manifest speaks
+  about, the only change it could still have caught was a pure deletion, which is exactly the one
+  it must not call unread.
+- **A deletion's body was sent to two opus stages in full.** `fold_mechanical` folded lockfiles and
+  generated files; a pure deletion was not folded, so 5,483 lines of removed scaffolding travelled
+  verbatim. Reading a deleted function's body yields nothing that "it is gone, it was N lines, here
+  is the path" does not already say — the argument the binary exemption was already making, and a
+  stronger one holds: the pipeline already refuses to act on a deleted body. `_file_facts` omits a
+  path with no blob at head, `validate_anchor` rejects any anchor to one as fabricated or stale,
+  and the extractor's contract refuses a statement with no anchor, so the blind extractor could
+  never have said a word about one however many bytes of it were sent. It is
+  `fold_bodies` now, and it withholds a deleted file's body under its own wording, with the exact
+  removal count rather than the lines between two headers. Measured on that cycle: the extractor
+  reads 396,756 bytes instead of 582,009 (−31.8%), the security reviewer 812,254 instead of
+  1,106,377 (−26.6%). The honesty property is what makes this allowed rather than a saving taken
+  against it: the manifest and the fold are one statement in two places, so a body the reviewers are
+  not sent is never one the manifest calls analyzed. A deleted *binary* is left alone — it has no
+  body to withhold, and folding it would trade no bytes for the one line saying it was binary.
+  There is no `fold_deletions` switch: a redaction that is honest needs no opt-out, and one that is
+  not should not ship. **A deletion the detector matched a signal inside is sent whole**, which is
+  what makes withholding the rest of them safe. A security finding may stand without an anchor
+  (`_validate_finding` requires none), unlike an extracted statement, so the security reviewer is
+  the one participant that *can* report "the deleted module held the only permission check and
+  nothing replaces it" — and what it is told about signals is a bare list of names, no path and no
+  sample, so folding every deletion blind would have taken exactly the quietly-removed-safety case
+  `deleted_guard` was added to catch. This is the rule `coverage_gap_risk` already applies to
+  unread content — the gap is worth what the line-by-line scan found in it — used to decide what
+  may go unread in the first place. A lockfile is folded either way: it is mechanical by
+  classification, and `dependency` fires on every one of them.
+- **`subject_head_sha` sat immediately in front of the diff, so every commit threw away the
+  provider's prompt cache for the whole reading.** A cache matches on an exact prefix, and JSON
+  keeps insertion order; a 40-character field that changes on every commit, placed before 400–800
+  KB, invalidates all of it. `SharedReading`'s design rests on that cache by its own docstring. The
+  diff now comes first in both `build_request`s with the volatile scalars behind it — the security
+  reviewer's test half beside it, since on an adapter that cannot branch a session it is the other
+  half of the same reading — and the priming turn carries the instruction and the reading and
+  nothing else — the two shas were
+  duplicated into it out of a request that keeps them anyway.
+- **The stage cache keyed on HEAD's sha, which no stage is a function of.** `change_digest` is taken
+  over the committed tree with `not_the_product` applied, so it identifies the reviewed content
+  exactly, and the diff, the file facts and the anchorable blobs all derive from it and the base.
+  Keying on the sha as well meant a commit that provably could not change the payload — anything
+  under `.rein/`, `docs/tasks/`, `docs/decisions/`, a `.gitignore` edit — threw the extraction away
+  anyway: not "one changed line invalidates the lot" but zero changed lines invalidating it.
+  Clearing the first item above took three such commits and paid for a 582 KB reading three times.
+  It stays in `binding`, where the review binds itself to the commit it was made about. With the
+  ordering above, an unchanged-diff regeneration is close to free, which is what a `--supervise`
+  retry after a session limit needs.
+
 ## [0.3.12] - 2026-08-31
 
 **Four fixes to what shipped above.** `rein --repo X --version` (and `--help`, `-h`, `help`)
