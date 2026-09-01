@@ -1833,18 +1833,20 @@ def test_a_commit_that_cannot_change_the_payload_keeps_the_stage_keys() -> None:
     could not have changed by a byte. Clearing one field report's first item took three such
     commits and paid for the extraction three times.
     """
-    fixed = {
-        "config": None,
-        "change": "sha256:" + "1" * 64,
-        "coverage_digest": "sha256:" + "2" * 64,
-        "trusted_base": "b" * 40,
-        "ceiling": 400_000,
-        "risk_floor": "low",
-        "prior_blocking": [],
-    }
-    assert review._stage_keys(**fixed) == review._stage_keys(**fixed)
-    moved_content = review._stage_keys(**{**fixed, "change": "sha256:" + "3" * 64})
-    assert moved_content != review._stage_keys(**fixed), "changed content must still miss"
+
+    def keys(change: str = "sha256:" + "1" * 64) -> dict[str, str]:
+        return review._stage_keys(
+            config=None,
+            change=change,
+            coverage_digest="sha256:" + "2" * 64,
+            trusted_base="b" * 40,
+            ceiling=400_000,
+            risk_floor="low",
+            prior_blocking=[],
+        )
+
+    assert keys() == keys()
+    assert keys(change="sha256:" + "3" * 64) != keys(), "changed content must still miss"
 
 
 def test_a_cache_entry_written_before_provenance_was_recorded_is_a_miss(tmp_path: Path) -> None:
