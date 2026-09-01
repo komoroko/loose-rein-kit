@@ -166,6 +166,18 @@ quality_gate:
     required: false
 
 review_policy:
+  # How gate 4 takes its reading. `auto` composes it from the plan's task scopes — one reading
+  # per scoped task, plus the seam over what two scopes share or none covers — so one launch
+  # holds one task's slice rather than a whole cycle, and a review regenerated after a fix
+  # re-reads only the task whose code moved. `whole` never composes and pays for one reading of
+  # everything. At critical risk the change is read whole whatever this says: composition reads
+  # each slice and the seam, which cannot rule out behaviour that exists only once two slices are
+  # in one tree, and `coverage.composition` says so rather than hiding it.
+  #
+  # A plan whose tasks declare no `scope` has nothing to compose along and is read whole either
+  # way. `rein dag --render` says which of the two this plan will get, at gate 3, while it can
+  # still be changed.
+  composition: auto
   # Exceeding a budget SPLITS THE SCOPE. It never lengthens the review screen: a reviewer
   # asked to hold 80 statements in their head is not reviewing, they are skimming.
   budgets:

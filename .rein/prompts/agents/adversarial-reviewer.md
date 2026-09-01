@@ -71,6 +71,11 @@ Attack only what `rein dag --validate/--trace` cannot check mechanically (the th
 5. **Cutover attack**: a plan that splits the removal of shared infrastructure across
    intermediate tasks (the tasks.md "cutover decomposition" rule) — show the task that would
    fail its own DoD mid-sequence.
+6. **Unreadable-plan attack**: gate ④ reads the change along the scopes this plan freezes, so a
+   task with no `scope` puts its work where no reading owns it, and a plan where no task declares
+   one is read in a single launch holding the whole cycle. Name the tasks whose scope is missing or
+   so wide that it covers most of the repository — the finding is not "it is untidy", it is that
+   the review of this cycle cannot be taken in slices.
 
 ## Output
 A findings table, then the per-lens attack notes:

@@ -322,10 +322,22 @@ is decided on. What is:
 - **Gate ④ compares Expected against Actual.** `rein review generate` (bound to the reviewed HEAD)
   runs a deterministic Coverage Manifest, a **blind** extraction of what the code actually does —
   that extractor is never given the plan, and is launched outside the repository so it cannot go and
-  read one — then the Expected/Actual comparison and the structured security and maintainability
-  review. What it reads is the product: not `.rein/`, not the plan's own prose (`docs/tasks/`,
-  the ADRs, the documents gate ③ froze), not the surfaces `rein install` wrote, and — for the
-  blind extractor alone — not the tests, whose names paraphrase the requirements it never saw.
+  read one — the structured security review, and the Expected/Actual comparison. What it reads is
+  the product: not `.rein/`, not the plan's own prose (`docs/tasks/`, the ADRs, the documents
+  gate ③ froze), not the surfaces `rein install` wrote, and — for the blind extractor alone — not
+  the tests, whose names paraphrase the requirements it never saw.
+- **The change is read in readings, not in one sitting.** One per task the plan scopes, plus the
+  seam over what two scopes share and what none covers, each launched on its own — so one launch
+  holds one task's slice rather than a whole cycle, and `rein build` takes most of them as each
+  task lands. A review regenerated after a fix re-reads only the task whose code moved. Composition
+  is recorded rather than assumed: `coverage.composition` names every reading, every statement and
+  finding carries the one it came out of, a changed path no reading covered makes the manifest
+  `insufficient`, and at `critical` risk a composed reading is refused — behaviour that exists only
+  once two readings are in one tree was never read, and that is said rather than hidden.
+- **The merged tree is read too.** Each leaf was reviewed inside its own task's scope, so what the
+  join makes — duplication between two tasks, one responsibility in two places, an abstraction the
+  next task worked around — was nobody's to see. A `review` step declared `stage: integration`
+  reads exactly that, after the command steps have settled the correctness half over the same tree.
 - **There is no single `verified`.** Findings sit on three separate axes — integrity, semantic
   support, conformance — and "extra behaviours: 0" appears only with the Coverage Manifest that
   earned it. A blocking security finding, a diverged high/critical claim, an ungrounded

@@ -53,7 +53,41 @@ def render(graph: Graph) -> str:
             lines.append(f"- {t.id} [{t.kind}, risk={t.risk}, fan-out={fan[t.id]}] {t.title}")
     else:
         lines.append("- (no startable todo)")
+    lines.append("")
+    lines += _how_gate_four_will_read(graph)
     return "\n".join(lines)
+
+
+def _how_gate_four_will_read(graph: Graph) -> list[str]:
+    """How many readings gate ④ will take of this plan, decided by the scopes it freezes.
+
+    Said at gate ③ because that is where it can still be changed. Gate ④ reads the change in the
+    readings the task scopes describe (`review_reading.plan_readings`), so a plan whose tasks
+    declare their scope is read one task at a time and one whose tasks do not is read in a single
+    launch holding the whole cycle — which is the shape that runs into a session limit, and by the
+    time the review is being generated the only remedy left is to split the scope and re-approve.
+
+    Deliberately a count of readings and not an estimate of bytes: the code does not exist yet, and
+    a number invented for it would be the kind of confident guess this tool exists to refuse.
+    """
+    lines = ["### How gate ④ will read this"]
+    if not graph.tasks:
+        return [*lines, "- (no tasks)"]
+    scoped = [t for t in graph.tasks if t.scope_include]
+    unscoped = [t.id for t in graph.tasks if not t.scope_include]
+    if not scoped:
+        return [
+            *lines,
+            "- **one reading of the whole cycle** — no task declares a `scope`, so gate ④ has "
+            "nothing to read the change along. One launch holds every task's diff at once.",
+        ]
+    lines.append(f"- {len(scoped)} task reading(s) plus the seam between them, one launch each")
+    if unscoped:
+        lines.append(
+            f"- **{len(unscoped)} task(s) declare no `scope`** ({', '.join(unscoped)}): their work "
+            "belongs to no reading, so it lands in the seam and is read as part of what nobody owns"
+        )
+    return lines
 
 
 # status -> Mermaid classDef (fill=status color, critical=bold border). The class name replaces `-` in status with `_`.

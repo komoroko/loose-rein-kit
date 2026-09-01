@@ -4,6 +4,62 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.0] - 2026-09-02
+
+**Gate ④ reads the change one task at a time.** The grounded review read the whole cycle's diff in
+one generation, twice over — the blind extractor and the security reviewer are each sent the source
+half — so the peak of one launch was the size of a cycle, and every stage key was taken over the
+whole change, which meant fixing one review finding threw both readings away and paid for them
+again. On a real cycle that is where the session limit was hit, and the only remedy the tool
+offered was to split the scope and re-approve at gate ③.
+
+- **A review is now taken in *readings*.** `plan_readings` derives them from the scopes gate ③
+  froze: one per scoped task, plus the seam over what two scopes share and what none covers. Each
+  is measured, budget-checked and widened on its own, and keyed on **its own content** — the tree
+  digest narrowed to its paths — so a reading taken while one task landed is still the answer to
+  the same question after every later task has landed. A plan whose tasks declare no `scope` has
+  nothing to compose along and is read whole, exactly as before; `review_policy.composition: whole`
+  asks for that deliberately.
+- **Composition cannot hide the seam**, because hiding the seam is what would let "extra
+  behaviours: 0" be said about bytes nobody read. `coverage.composition` records every reading by
+  name, `unread_paths` names each changed path no reading covered and prices the manifest
+  `insufficient`, every Actual Statement and security finding carries the reading it came out of,
+  and a composed reading is **refused outright at critical risk** — behaviour that exists only once
+  two readings are in one tree was never read, and at critical the honest answer is to read the
+  change whole or make it small enough that reading it whole fits. This is the same objection that
+  deleted 0.3.7's `partitioned`/`truncated` vocabulary unimplemented, answered rather than avoided:
+  the split is along a seam a human froze, not along a byte count, and the seam is measured.
+- **The build takes the reading, so the gate finds it answered.** `rein build` warms each task's
+  reading as the task lands, asking the same question with the same key (`keys_for` is the one
+  place that mapping lives). The peak of one launch stays the size of one task, and a regeneration
+  after a review fix re-reads only the task whose code moved. A warm-up never fails a build: it is
+  an optimization over a cache the gate does not depend on, so an adapter that will not answer
+  stops the warming for the rest of the run and says so once.
+- **`SharedReading` primes one session per reading**, not one per generation. The two stages of one
+  reading still branch a single priming turn — the whole saving — and two readings never share a
+  context. The identity used to be positional, so the second reading was refused as "the pipeline
+  moved underneath the review", which is what a mismatch means when there is only ever meant to be
+  one; a composed review could not have been launched at all.
+
+**The merged tree is read too.** `stage:` was documented as moving *when* a step runs and never
+whether, and `_integration_gate` skipped every non-command step — so a join of two leaves faced the
+command steps alone, and "is it green" was asked of the merged tree while "is it well made" was
+not. An agent step declared `stage: integration` now runs there, with the `/simplify` discipline
+(the command steps have just settled the correctness half over that exact tree), reading what only
+the join can show: duplication between what two tasks added, one responsibility now in two places,
+an abstraction one task introduced that the next worked around. Its `must_fix` findings go to the
+integration fixer within the step's own budget; its `consider` findings are filed against the
+merged task whose scope owns the anchor — the same derivation gate ④ uses — and one nobody owns is
+said out loud rather than filed against a task that does not own it. This is also what makes the
+documented "security and maintainability review" true: the maintainability half existed only per
+task, where it could not see the join.
+
+**`rein dag --render` says how gate ④ will read the plan**, at gate ③, while it can still be
+changed — how many readings, and which tasks declare no `scope` and therefore land in the seam. A
+count of readings and not an estimate of bytes: the code does not exist yet, and a number invented
+for it would be the confident guess this tool exists to refuse. The `adversarial-reviewer` gains
+the matching gate-③ lens.
+
 ## [0.3.13] - 2026-09-01
 
 **A deletion is not content, and a commit is not a reading** (#44, measured on 0.3.12: a 17-task

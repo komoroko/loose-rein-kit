@@ -178,6 +178,12 @@ is the point; never fold them into the implementer's session.
   `.rein/work/T-NNN.findings.json`; the implementer resolves the `must_fix` ones within the
   step's own `retries` budget and the reviewer looks again. A review whose findings cannot be read
   stops the step: an unreadable answer is not an answer that found nothing.
+  **Declared `stage: integration`, it reads the tree the merge produced instead** — the thing no
+  per-task reviewer can see, because each was right to stay inside its own task's scope:
+  duplication between what two tasks added, one responsibility now in two places, an abstraction
+  one task introduced that the next worked around. Its `must_fix` findings go to the integration
+  fixer within the step's own budget; its `consider` findings are filed against the merged task
+  whose scope owns the anchor and reach the human at gate ④.
 - **`stage:`** on any step says where it runs — `task`, `integration`, or `both` (the default).
   It moves *when* a step runs, never whether: a fast focused suite can guard each task while the
   whole one runs once over the join.
@@ -211,9 +217,16 @@ is the point; never fold them into the implementer's session.
 1. **Answer any open change requests first.** Run `rein changes list --gate build --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds gate ④ shut, and approving is what closes the addressed ones.
 2. **Generate the grounded review — the artefact gate ④ approves.** Run `rein review
    generate` (bound to the current HEAD). It runs a deterministic Coverage Manifest, a **blind**
-   actual-behaviour extraction (never given the plan), the Expected/Actual comparison, and the
-   structured security and maintainability review — writing `.rein/review.yaml` and recording
-   the pipeline events. What it reads is the **product**: not `.rein/`, not the plan's own prose
+   actual-behaviour extraction (never given the plan), the structured security review, and the
+   Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
+   **The change is read in *readings*, not in one sitting**: one per task the plan scopes, plus the
+   seam over what two scopes share and what none covers, each launched on its own so one launch
+   holds one task's slice. Most of them are already answered — `rein build` takes each task's
+   reading as it lands — so a regeneration after a review fix re-reads only the task whose code
+   moved. `coverage.composition` records every reading by name and `unread_paths` names any changed
+   path none of them covered, which makes the manifest `insufficient`; a composed reading is
+   refused outright at critical risk. Set `review_policy.composition: whole` to pay for one reading
+   of everything instead. What it reads is the **product**: not `.rein/`, not the plan's own prose
    (the documents gate ③ froze, `docs/tasks/`, the ADRs), not the surfaces `rein install` wrote,
    and — for the blind extractor alone — not the tests. The diff is measured
    against `review_policy.budgets.max_diff_bytes` *before* a model is launched — over
