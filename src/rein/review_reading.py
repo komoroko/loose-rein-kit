@@ -956,6 +956,13 @@ def prior_for(reading: Reading, prior_blocking: Sequence[Mapping[str, Any]]) -> 
 _AST = "AST-{:03d}"
 _SEC = "SEC-{:03d}"
 
+#: What one review may carry, read from the schema that enforces it. A composition can reach these
+#: where a single reading never did, and the answer is to refuse rather than to truncate: a list
+#: silently cut is a review that says less than it read, which is the failure "extra behaviours: 0"
+#: exists to prevent. 0.3.7 deleted a `truncated` field for exactly this reason.
+MAX_STATEMENTS = review_policy.review_schema_max_items("actual_extraction")
+MAX_FINDINGS = review_policy.review_schema_max_items("security", "properties", "findings")
+
 
 @dataclass(frozen=True)
 class ReadOut:
@@ -1028,6 +1035,14 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
                 fid = _next_free(_SEC, taken)
             taken.add(fid)
             findings.append({**dict(finding), "id": fid, "reading": readout.reading.unit})
+    if len(statements) > MAX_STATEMENTS or len(findings) > MAX_FINDINGS:
+        raise ReviewError(
+            f"this cycle's readings produced {len(statements)} actual statement(s) and "
+            f"{len(findings)} security finding(s), past what one review may carry "
+            f"({MAX_STATEMENTS} and {MAX_FINDINGS}). Reduce what this cycle claims through "
+            "`/revise` and review the remainder in its own gate ④ round — a list cut to fit is a "
+            "review that says less than it read."
+        )
     return Composition(
         statements=tuple(statements),
         # The same shape `actual_extraction.run_extractor` mints, over the merged set: the digest

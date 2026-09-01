@@ -293,3 +293,39 @@ def test_the_operator_can_ask_for_one_reading_of_everything(tmp_path: Path) -> N
     machine = review.generate(repo_mod.Repo(root), _reviewers(_reviewer_seeing(seen)))
     assert machine["coverage"]["composition"]["mode"] == "whole"
     assert len([diff for role, diff in seen if role == "actual_extractor"]) == 1
+
+
+def test_a_composition_past_what_one_review_may_carry_is_refused_not_cut() -> None:
+    """A list silently cut is a review that says less than it read, which is the failure
+    "extra behaviours: 0" exists to prevent. 0.3.7 deleted a `truncated` field for this reason."""
+    from rein import actual_extraction, security_review
+
+    def readout(unit: str, count: int) -> review_reading.ReadOut:
+        statements = [{"id": f"AST-{i + 1:03d}", "statement": "x"} for i in range(count)]
+        return review_reading.ReadOut(
+            reading=review_reading.Reading(unit=unit, include=(f"{unit}/",)),
+            extraction=actual_extraction.ExtractionResult(
+                actual_statements=tuple(statements), coverage={}, actual_digest="sha256:" + "0" * 64
+            ),
+            security=security_review.SecurityResult(findings=()),
+        )
+
+    half = review_reading.MAX_STATEMENTS // 2 + 1
+    with pytest.raises(review_reading.ReviewError, match="past what one review may carry"):
+        review_reading.merge([readout("a", half), readout("b", half)], coverage={})
+
+
+@pytest.mark.integration
+def test_every_reading_is_held_to_the_extractors_blindness(tmp_path: Path) -> None:
+    """`assert_blind` walks each request's whole tree, and a composed review builds one per
+    reading — a new path into the extractor's context is how priming comes back."""
+    from rein import review
+    from tests.test_review import _reviewers
+
+    root = _composed_repo(tmp_path)
+    seen: list[tuple[str, str]] = []
+    review.generate(repo_mod.Repo(root), _reviewers(_reviewer_seeing(seen)))
+    extractions = [diff for role, diff in seen if role == "actual_extractor"]
+    assert len(extractions) == 3
+    for diff in extractions:
+        assert "C-001" not in diff and "claim" not in diff.lower()
