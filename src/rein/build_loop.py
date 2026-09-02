@@ -100,6 +100,30 @@ logger = logging.getLogger(__name__)
 #: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
 _INTEGRATION_SUBJECT = "integration"
 
+#: What a failed negative control is reported as. Not a step in `quality_gate` — it is a verdict on
+#: what those steps *together* claimed — but it comes back through the same channel a red step
+#: does, so the retry loop has to know the name.
+NEGATIVE_CONTROL = "negative-control"
+
+#: What a failed acceptance criterion is reported as, followed by the criterion's own id. Written
+#: down here because the retry loop has to seed a budget under the same name `_run_acceptance`
+#: returns, and a prefix spelled twice is a budget nobody finds.
+_ACCEPTANCE_PREFIX = "acceptance:"
+
+#: The send-back allowance for a gate verdict that is **not** a configured command step: the
+#: negative control, and each of the task's own acceptance criteria. Both come back through the
+#: channel a red step uses and neither has a `retries` of its own to inherit, so `budgets` had no
+#: entry for either and `.get(name, 0)` answered zero — the task ended on the first occurrence,
+#: having never told the implementer what was missing, while the docstring of each said it
+#: "inherits the send-back budget and the retry machinery whole".
+#:
+#: Not derived from `quality_gate`: no step there is either of these, and any step's number would
+#: be a guess wearing a derivation. One, because both failures name exactly what is missing — a
+#: test that fails against the old code, or the criterion the ticket asked for — and an implementer
+#: that cannot answer that in one more launch is telling you the ticket needs a human, which is
+#: what `rein report --outcome needs-revision` is for rather than a budget to keep spending.
+SEND_BACK_RETRIES = 1
+
 StopLoop = common.StopLoop
 EnvironmentFault = faults.EnvironmentFault
 
@@ -1618,9 +1642,19 @@ class Orchestrator:
 
         The control is the experiment that closes it, and it is mechanical rather than a reading:
         take the base commit this change is a change to, apply **only the task's test half** onto
-        it, and re-establish the steps that just passed. A test that discriminates the change fails
-        there. If every step is still green, nothing in the change is under test, and the green
-        that would have closed the task is a fact about code that was already there.
+        it, and re-establish the steps that just passed. If every step is still green, nothing in
+        the change is under test, and the green that would have closed the task is a fact about
+        code that was already there.
+
+        **Read the two outcomes for what each is worth — they are not symmetric.** A green control
+        is the strong one: it is a fact about every test in the change at once, and no reading of
+        the test files could establish it more cheaply or more surely. A red one says only that
+        the test half is *not inert* against the old code — the step that went red may have gone
+        red because a test asserted something false there, or because the test imports a symbol
+        the base does not have and never got as far as asserting anything. This experiment cannot
+        separate those without parsing a test runner's output, which is a thing this loop does not
+        do. So `discriminating` is the absence of the failure, not the presence of a good test;
+        what asks whether the tests are *any good* is the per-task reviewer, which reads them.
 
         Three answers are not passes, and each says so rather than being folded into one:
 
@@ -1684,14 +1718,17 @@ class Orchestrator:
                         self._note_control("discriminating", base=control_base, step=step.name)
                         print(
                             f"    [control] {task.id}: '{step.name}' goes red without the change "
-                            "— the tests discriminate it"
+                            "— the test half is not inert"
                         )
                         return None, ""
         finally:
             Path(patch_file).unlink(missing_ok=True)
-        self._note_control("not_discriminating", base=control_base)
+        # Deliberately not noted: `evidence.negative_control` justifies a `done`, and this verdict
+        # is the one that stops there being one. It travels as a task failure instead — the same
+        # channel a red step uses, under the step name `NEGATIVE_CONTROL` — so the event chain
+        # carries it and the next attempt inherits the summary.
         names = ", ".join(step.name for step in commands)
-        return "negative-control", (
+        return NEGATIVE_CONTROL, (
             f"The quality gate is green, and it is green without your change. Re-running "
             f"{names} over {control_base[:12]} with only this task's test files applied passed "
             "every step, which means no test in this change exercises it: whatever the code now "
@@ -1744,7 +1781,7 @@ class Orchestrator:
             failure = self._establish_acceptance(task, ac_id, kind, evidence_spec, cwd)
             if failure:
                 statement = str(entry.get("statement", ""))
-                return f"acceptance:{ac_id}", f"{ac_id} ({statement}) is not satisfied.\n{failure}"
+                return f"{_ACCEPTANCE_PREFIX}{ac_id}", f"{ac_id} ({statement}) is not satisfied.\n{failure}"
         return None, ""
 
     def _establish_acceptance(self, task: dag.Task, ac_id: str, kind: str, spec: Mapping[str, Any], cwd: str) -> str:
@@ -2059,6 +2096,12 @@ class Orchestrator:
         attempt that already said "I am blocked" spends a model on a question nobody asked.
         """
         budgets = {s.name: s.retries for s in self._steps_for(task, cwd, base) if s.kind == "command"}
+        # Every other verdict `_run_pipeline` can return. Neither the negative control nor an
+        # acceptance criterion is a configured step, and both come back through this channel, so
+        # without an entry here each one got the silent zero `.get(name, 0)` produced.
+        budgets[NEGATIVE_CONTROL] = SEND_BACK_RETRIES
+        for entry in task.acceptance:
+            budgets[f"{_ACCEPTANCE_PREFIX}{entry.get('id', '?')}"] = SEND_BACK_RETRIES
         # What an earlier, interrupted attempt left behind. Restoring the budgets is the load-
         # bearing half: a run killed mid-task and restarted otherwise came back with a full
         # allowance every time, so a task that can never pass could burn retries forever.
@@ -2114,7 +2157,13 @@ class Orchestrator:
                 return True, ""
             futile = self._futile(task, failed, failure_log, after_implementer, seen)
             seen = (failed, digests.of_bytes(failure_log.encode("utf-8")), after_implementer)
-            left = 0 if futile else budgets.get(failed, 0)
+            if failed not in budgets:
+                # Every name `_run_pipeline` can return is seeded above. One that is not is a
+                # verdict this loop has no send-back rule for, and the old `.get(failed, 0)` gave
+                # it a silent zero — ending the task on its first occurrence, with the log saying
+                # "retries left: 0" for a budget nobody had ever set.
+                raise common.ReinError(f"internal: no retry budget is registered for the gate verdict {failed!r}")
+            left = 0 if futile else budgets[failed]
             if futile:
                 print(f"    quality gate fail at step '{failed}', not retried — {futile}")
             else:

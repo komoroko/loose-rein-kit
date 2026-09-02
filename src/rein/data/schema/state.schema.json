@@ -272,7 +272,7 @@
                 }
               },
               "negative_control": {
-                "description": "Whether the DoD that went green over this tree would have gone green WITHOUT the task's source change. The steps are re-established over the base commit with only this task's test half applied: if they are still green, no test in the change discriminates it, and the green that closed the task is a fact about code that was already there. `discriminating` is the pass. `not_discriminating` blocks the task. `no_tests_changed` and `undetermined` are not passes — they say the control could not be taken, and they say why.",
+                "description": "Whether the DoD that went green over this tree would have gone green WITHOUT the task's source change. The steps are re-established over the base commit with only this task's test half applied: if they are still green, nothing in the change is under test, and the green that closed the task is a fact about code that was already there. Only the outcomes a `done` can rest on are here. `discriminating` says a step went red without the change, so the test half is not inert — it is the absence of that failure and not a judgement that the tests are good, which is the per-task reviewer's question. `no_tests_changed` and `undetermined` are not passes: they say the control could not be taken, and they say why. The blocking outcome is not an evidence value at all — a control that stays green sends the task back and, if that does not fix it, blocks it, and a blocked task has no `done` for evidence to justify; it is recorded as a task failure under the step name `negative-control`, in the event chain.",
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
@@ -282,7 +282,6 @@
                   "result": {
                     "enum": [
                       "discriminating",
-                      "not_discriminating",
                       "no_tests_changed",
                       "undetermined"
                     ]

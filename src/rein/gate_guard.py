@@ -27,7 +27,9 @@ A guard with an off switch an agent can reach is a convention, not a mechanism �
 that hits this guard has found a gate boundary, not an obstacle to route around (AGENTS.md
 "Gate rules").
 
-Unreadable state **fails closed**. A guard that cannot determine its gates must not open them.
+Unreadable state **fails closed**, and so does an unreadable config: the rule map is as much a
+thing this guard has to determine as the gates are (:func:`guard_settings`). What it does *not*
+read is the config schema — a key a newer release added is not a config this guard may not read.
 `guard.template_mode` relaxes only rule 3, and only because the template repository's scaffold
 originals share paths with product deliverables; it never relaxes rules 1, 2, or 4.
 
@@ -46,6 +48,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -82,10 +85,14 @@ HOOK_REGISTRATION: tuple[str, ...] = (
     ".github/hooks/",
 )
 
+#: The document this guard reads its own rules out of, and therefore the one path an unreadable
+#: config may not deny (:func:`_rule_three`).
+CONFIG_PATH = ".rein/config.yaml"
+
 #: Pinned by the gate ③ receipt. Rule 2 — denied once `plan.status` is frozen.
 FROZEN_AFTER_GATE_THREE: tuple[str, ...] = (
     ".rein/plan.yaml",
-    ".rein/config.yaml",
+    CONFIG_PATH,
     ".rein/prompts/",
     ".rein/schema/",
     ".rein/oci/",
@@ -132,37 +139,91 @@ def _matches(rel: str, patterns: tuple[str, ...]) -> str | None:
     return common.longest_cover(rel, patterns)
 
 
-def _config(repo: repo_mod.Repo) -> models.Config | None:
-    """The validated config, or None when absent/unreadable (the caller keeps the strict default)."""
+@dataclass(frozen=True)
+class GuardSettings:
+    """Everything rule 3 reads out of `config.yaml`, and whether it could be read at all.
+
+    `unreadable` carries the reason when the document is there and did not yield settings. It is
+    a *deny*, never a default: the two fields below decide what this guard enforces, so guessing
+    at them is the guard deciding it does not apply.
+    """
+
+    template_mode: bool = False
+    paths: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_GUARD_PATHS))
+    unreadable: str = ""
+
+
+def guard_settings(repo: repo_mod.Repo) -> GuardSettings:
+    """Rule 3's two settings, read from the config **document** and never through its schema.
+
+    This used to go through `models.Config.parse`, which validates the whole file against
+    `config.schema.json` and raises on the first key it does not know. Those are two different
+    questions, and answering the second one here cost the guard its answer to the first: a
+    repository written by a *newer* rein carries keys this release's schema has never heard of —
+    `review_policy.composition` was the one that surfaced it — so the parse failed, the config
+    came back `None`, and `template_mode` silently became `False`. A repository that had switched
+    rule 3 off then blocked every edit under `src/`, with a message telling the human to complete
+    `/tasks` and get a gate approved. The document was intact; the reader was old; and the repair
+    the human was handed was the most expensive move in the workflow, aimed at nothing.
+
+    `guard.template_mode` and `guard.paths` are what this guard needs, they are shaped here, and
+    a release that widens some unrelated part of the schema cannot move them. So the document is
+    parsed as YAML, those two are read and type-checked on their own, and anything else in the
+    file is none of the guard's business.
+
+    What is still fatal is the guard's own inputs being unreadable — YAML that does not parse, a
+    `guard` block that is not a mapping, a `paths` list that is not a list of entries. That
+    returns `unreadable` and rule 3 denies: "a guard that cannot determine its gates must not open
+    them" applies to the map as much as to the gates, and the previous behaviour — substituting
+    `DEFAULT_GUARD_PATHS` for a rule map it could not read — dropped every path a repository had
+    added to its own guard, which is a *fail-open* in the one function that must not have one.
+
+    An absent config.yaml is not unreadable: there is nothing to read and the built-in defaults
+    are the whole rule map, which is the posture outside a Loose Rein repository too.
+    """
     try:
-        return models.Config.parse(repo.config.read_text(encoding="utf-8"))
-    except (OSError, models.DocumentError, strict_yaml.StrictParseError):
-        return None
+        text = repo.config.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return GuardSettings()
+    except OSError as exc:
+        return GuardSettings(unreadable=f"config.yaml could not be read ({exc})")
+    try:
+        document = strict_yaml.load_mapping(text, what="config.yaml")
+    except strict_yaml.StrictParseError as exc:
+        return GuardSettings(unreadable=str(exc))
+    guard = document.get("guard", {})
+    if not isinstance(guard, Mapping):
+        return GuardSettings(unreadable="config.yaml's `guard` is not a mapping")
+    template_mode = guard.get("template_mode", False)
+    if not isinstance(template_mode, bool):
+        return GuardSettings(unreadable="config.yaml's `guard.template_mode` is not true or false")
+    entries = guard.get("paths")
+    if entries is None:
+        return GuardSettings(template_mode=template_mode)
+    if not isinstance(entries, list) or not all(isinstance(entry, Mapping) for entry in entries):
+        return GuardSettings(unreadable="config.yaml's `guard.paths` is not a list of {path, requires_gate} entries")
+    rules = {str(e.get("path", "")): str(e.get("requires_gate", "")) for e in entries if e.get("path")}
+    if not all(rules.values()):
+        return GuardSettings(unreadable="config.yaml has a `guard.paths` entry with no `requires_gate`")
+    # An empty list is not "guard nothing": the defaults stand, exactly as they do for a config
+    # that names no paths at all. Disarming rule 3 is what `template_mode` is for, and it says so.
+    return GuardSettings(template_mode=template_mode, paths=rules or dict(DEFAULT_GUARD_PATHS))
 
 
-def _template_mode(config: models.Config | None) -> bool:
-    return config.template_mode if config is not None else False
-
-
-def guard_paths(config: models.Config | None) -> dict[str, str]:
-    """The active rule-3 map: `guard.paths` from config, or the built-in defaults."""
-    configured = config.guard_paths if config is not None else {}
-    return configured or DEFAULT_GUARD_PATHS
-
-
-def required_gate(file_path: str, rules: dict[str, str] | None = None, repo: repo_mod.Repo | None = None) -> str | None:
+def required_gate(file_path: str, rules: dict[str, str], repo: repo_mod.Repo | None = None) -> str | None:
     """The gate this edit requires under rule 3. None when the path is not guarded.
 
     The most specific entry wins, so the decision does not depend on the config's key order. An
     exact entry still beats every prefix — a prefix that covers a path can only be shorter than it
     — which is why that case no longer needs a branch of its own.
+
+    `rules` is required rather than defaulted from the config: the caller has to have decided what
+    to do about a config it could not read before it gets to ask this question.
     """
     repo = repo or _repo_or_cwd()
     rel = repo.rel(file_path)
     if rel is None:
         return None
-    if rules is None:
-        rules = guard_paths(_config(repo))
     key = common.longest_cover(rel, rules)
     return rules[key] if key is not None else None
 
@@ -244,10 +305,27 @@ def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = 
 
 def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
     """Rule 3 alone: a deliverable waits for its prerequisite gate."""
-    gate = required_gate(file_path, repo=repo)
+    settings = guard_settings(repo)
+    rel = repo.rel(file_path)
+    if settings.unreadable and rel != CONFIG_PATH:
+        # The one exemption, and it is not a hole: a guard that denies every path because it could
+        # not read config.yaml would be denying the repair it just asked for — including the
+        # human's own `git commit` of the fix, since rule 3 runs at commit stage over every changed
+        # path. Nothing else about this file loosens: rule 2 still refuses it once the plan is
+        # frozen, and the commit-stage frozen-artifact check still compares it against the digest
+        # gate ③ bound.
+        return False, (
+            "Blocked: the guard reads `guard.paths` and `guard.template_mode` from"
+            f" .rein/config.yaml, and it could not: {settings.unreadable}. It does not know which"
+            " paths this repository guards, so it fails closed on all of them rather than"
+            " enforcing a rule map nobody wrote. Repair .rein/config.yaml (restore it from git);"
+            " `rein doctor` reports what is wrong with it. There is deliberately no flag that"
+            " turns this guard off."
+        )
+    gate = required_gate(file_path, settings.paths, repo)
     if gate is None:
         return True, ""
-    if _template_mode(_config(repo)):
+    if settings.template_mode:
         return True, ""
     state = _read_state(repo)
     if state is None:

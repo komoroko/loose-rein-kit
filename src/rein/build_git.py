@@ -419,11 +419,50 @@ class GitWorkspace:
         when the gate runs (`finalize_commit` is what puts it on the branch, and it runs later), so
         a diff that stops at HEAD would describe a tree nobody is about to gate. This one describes
         what is actually there.
+
+        **An untracked file is part of that tree and `git diff` cannot see one**, which is what the
+        `--intent-to-add` below is for. The path lists this takes come from `dirty_paths`, which
+        reads `git status -uall` and therefore *does* name untracked files — so a brand-new test
+        file the implementer had not staged was listed as changed and then silently absent from the
+        diff, with rc 0 and nothing anywhere saying a file had been dropped. The negative control is
+        built on this diff: without the new test it re-established the base's own suite, found it
+        green, and reported that no test in the change exercised it. A verdict about a file the
+        experiment never contained.
+
+        `--intent-to-add` is how git is told a new file exists without staging its content: the
+        diff then carries it as `new file mode`.
+
+        **And it is taken back before returning.** `fingerprint` hashes the committed blobs, the
+        diff against HEAD, and the ids of whatever `git ls-files -o` still calls untracked — so
+        promoting a file out of that third list changes the digest of a tree whose *content* nobody
+        touched. That digest is what the evidence ledger keys every gate step on and what the
+        futility probe compares one attempt against the next, so a reading of the tree must not be
+        a write to it. Only the paths git itself reported as untracked a moment ago are un-staged
+        again, which is why they are collected rather than inferred: `git rm --cached` on a path
+        that was genuinely tracked would untrack it for real.
         """
         if not base or not paths:
             return ""
-        rc, out = self._run(["git", "diff", base, "--", *paths], cwd=cwd)
+        added = self._intent_to_add(cwd, paths)
+        try:
+            rc, out = self._run(["git", "diff", base, "--", *paths], cwd=cwd)
+        finally:
+            if added:
+                self._run(["git", "rm", "--cached", "--force", "--quiet", "--", *added], cwd=cwd)
         return out if rc == 0 else ""
+
+    def _intent_to_add(self, cwd: str, paths: Sequence[str]) -> list[str]:
+        """Record the untracked members of `paths` in the index as empty, and say which those were.
+
+        `--exclude-standard` so an ignored file stays ignored: git does not consider it part of the
+        change and neither does anything upstream of here.
+        """
+        rc, out = self._run(["git", "ls-files", "-o", "--exclude-standard", "--", *paths], cwd=cwd)
+        untracked = [line for line in out.splitlines() if line.strip()] if rc == 0 else []
+        if not untracked:
+            return []
+        rc, _ = self._run(["git", "add", "--intent-to-add", "--", *untracked], cwd=cwd)
+        return untracked if rc == 0 else []
 
     def finalize_commit(self, cwd: str, message: str) -> bool:
         """Commit any outstanding diff in `cwd` (excluding .rein/) — a no-op on a clean tree.

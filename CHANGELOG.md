@@ -4,6 +4,74 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.1] - 2026-09-02
+
+**The gate guard stopped being blinded by a config it was never meant to validate.** It reads two
+settings out of `config.yaml` — `guard.template_mode` and `guard.paths` — and it was getting them
+through `models.Config.parse`, which validates the *whole* document against this release's schema.
+Those are different questions, and answering the second one there cost the guard its answer to the
+first. A repository written by a **newer** rein carries keys an older schema has never heard of, so
+the parse failed, the config came back as `None`, and two silent substitutions followed: the rule
+map fell back to `DEFAULT_GUARD_PATHS`, and `template_mode` became `False`.
+
+- **The template's own repository blocked every edit under `src/`**, with the message "gate 'tasks'
+  is not approved … complete /tasks first and get the human's signed approval" — the same wrong
+  repair 0.4.0 removed from `doctor` for exactly this skew, now in the one place that stops work.
+  `guard.template_mode: true` was set, and the guard could not read it.
+- **A repository's own guarded paths silently disappeared.** Substituting the built-in defaults for
+  a rule map it could not read drops every path a product added to `guard.paths` — a *fail-open* in
+  the function whose module docstring says unreadable state fails closed.
+- Both are gone. `guard_settings` parses the document as YAML, reads those two keys, type-checks
+  them on their own, and ignores everything else in the file: a release that widens some unrelated
+  part of the schema cannot move them. What is still fatal is the guard's *own* inputs being
+  unreadable — YAML that does not parse, a `guard` block that is not a mapping, a `paths` list that
+  is not a list — and that now denies every guarded path with a message naming `config.yaml`
+  instead of naming a gate.
+
+**A verdict with no send-back budget ended the task instead of sending it back.** `budgets` is
+built from the configured `quality_gate` steps, and two verdicts that come back through the same
+channel are not steps: the negative control, and each acceptance criterion. `budgets.get(name, 0)`
+answered zero for both, so the task ended on the first occurrence with the implementer never told
+what was missing — while the docstring of each said it "inherits the send-back budget and the retry
+machinery whole". Both now carry `SEND_BACK_RETRIES`, and a verdict this loop has no send-back rule
+for **raises** rather than collecting a silent zero that reads like an exhausted budget.
+
+**The negative control's patch was missing the files it was about.** It is built from
+`git diff <base> -- <paths>`, and the path list comes from `git status -uall`, which names
+untracked files — which `git diff` cannot show. So a brand-new test file the implementer had not
+staged was listed as changed and then silently absent from the patch, rc 0, no error: the control
+re-established the base's own suite, found it green, and reported that no test in the change
+exercised it. `diff_from` now marks those paths `--intent-to-add` first, so the diff carries them
+as `new file mode`.
+
+**And the control says what it actually establishes.** A *green* control is the strong outcome — a
+fact about every test in the change at once. A *red* one says the test half is not inert against
+the old code, and cannot separate a failed assertion from an import the base never had; reading it
+as "the tests discriminate the change" claimed more than the experiment supports. Whether the tests
+are any good is the per-task reviewer's question, and the reviewer reads them. The blocking outcome
+also stops being a value in `evidence.negative_control`: that record justifies a `done`, and this is
+the verdict that stops there being one, so it travels as a task failure under `negative-control`.
+
+**A slice holding no signal is no longer where the risk floor drops.** `extraction_request` takes
+`risk_floor` as an argument precisely because the floor is a property of the whole change and not
+of one reading of it — and the only caller passed the reading's own. So a task whose diff matched
+no detector signal instructed the extractor at `low` while the change was `high`. The whole-change
+floor is passed now, at the gate and in `build_loop`'s warm-up (`whole_change_risk_floor`), so both
+look the question up under one key. It couples a reading's key to a four-value ladder that only
+rises as a cycle lands: at worst the readings taken before a rise are re-read once.
+
+**A whole-change reading keeps the `actual_digest` its extractor minted.** Stamping `reading:
+whole` onto its statements left the digest describing different bytes from the ones the comparator
+was handed — and `whole` is what `coverage.composition.mode` already says. Composed readings are
+stamped and re-minted together, as before.
+
+**0.4.0's own `make check` was red, in two places nobody ran it.** `tests/test_build_loop.py`
+carried an untyped helper that mypy rejects — the same hook that stopped CI one release earlier —
+and `src/rein/data/rules/AGENTS.md`, the rules body `rein install` writes into a product
+repository, was two commits behind the repository's own `AGENTS.md`: it shipped without the
+negative-control rule and without the gate-⑤ security-review paragraph, both of which describe
+behaviour 0.4.0 has. Propagated, and the check is green from `pre-commit` through `sync --check`.
+
 ## [0.4.0] - 2026-09-02
 
 **A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is

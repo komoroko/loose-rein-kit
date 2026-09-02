@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -2249,7 +2250,7 @@ def _controlled(
     monkeypatch.setattr(build_loop, "_run", lambda cmd, cwd=None, timeout=None: (apply_rc, "does not apply"))
 
     @_contextlib.contextmanager
-    def _scratch(repo, worktree_dir, name, branch, run):  # noqa: ANN001, ARG001
+    def _scratch(*_args: object, **_kw: object) -> Iterator[str]:
         yield str(loop.root)
 
     monkeypatch.setattr(_build_git, "scratch_worktree", _scratch)
@@ -2282,10 +2283,12 @@ def test_a_dod_that_is_green_without_the_change_does_not_let_the_task_land(
     # A leaf worktree, so the base is the commit it forked off rather than the caller's.
     failed, message = loop._negative_control(_task(), str(tmp_path / "wt"), "", _cmd_steps())
 
-    assert failed == "negative-control"
+    assert failed == build_loop.NEGATIVE_CONTROL
     assert "green without your change" in message
     assert ran == ["test", "check"]
-    assert loop._current_control == {"result": "not_discriminating", "base": "b" * 40}
+    # Deliberately not recorded as evidence: `evidence.negative_control` justifies a `done`, and
+    # this is the verdict that stops there being one. It travels as a task failure instead.
+    assert loop._current_control == {}
 
 
 def test_a_step_that_goes_red_without_the_change_is_what_makes_the_control_a_pass(
@@ -2326,6 +2329,46 @@ def test_a_control_that_could_not_be_set_up_is_undetermined_and_never_a_pass(
     assert ran == []
     assert loop._current_control["result"] == "undetermined"
     assert "did not apply" in loop._current_control["detail"]
+
+
+def test_a_control_failure_spends_a_send_back_rather_than_ending_the_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It comes back through the channel a red step uses, and until this test it did not get the
+    thing that channel is made of. `negative-control` is not a configured step, so
+    `budgets.get(name, 0)` answered zero: the task ended on the first control failure with the
+    implementer never told what was missing, while every line describing the mechanism said it
+    spends an attempt like a red step does."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
+    monkeypatch.setattr(loop, "_check_implementer_output", lambda *a, **k: ("", ""))
+    launched: list[str] = []
+    monkeypatch.setattr(loop, "_invoke_implementer", lambda task, cwd, failure_log, **k: launched.append(failure_log))
+    monkeypatch.setattr(
+        loop, "_run_pipeline", lambda task, cwd, base="": (build_loop.NEGATIVE_CONTROL, "green without your change")
+    )
+
+    ok, _ = loop._run_task_to_done(_task(), str(tmp_path))
+
+    assert ok is False
+    assert len(launched) == 1 + build_loop.SEND_BACK_RETRIES, launched
+    assert "green without your change" in launched[-1], "the send-back carries what is missing"
+
+
+def test_a_verdict_with_no_send_back_budget_is_a_failure_and_not_a_silent_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shape both bugs came out of: `.get(name, 0)` turned "this loop has no send-back rule for
+    that verdict" into "this verdict has no retries left", which reads identically in the log and
+    ends the task either way."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
+    monkeypatch.setattr(loop, "_check_implementer_output", lambda *a, **k: ("", ""))
+    monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: None)
+    monkeypatch.setattr(loop, "_run_pipeline", lambda task, cwd, base="": ("a-verdict-nobody-seeded", "x"))
+
+    with pytest.raises(common.ReinError, match="no retry budget is registered"):
+        loop._run_task_to_done(_task(), str(tmp_path))
 
 
 def test_the_control_runs_only_the_command_steps_that_actually_passed(

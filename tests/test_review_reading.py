@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from rein import diff_facts, models, review_policy, review_reading
+from rein import diff_facts, digests, models, review_policy, review_reading
 from rein import repo as repo_mod
 
 
@@ -163,8 +163,46 @@ def test_a_composed_review_is_refused_at_critical() -> None:
 
 
 def test_a_statement_carries_the_reading_it_came_out_of() -> None:
-    stamped = review_reading.stamped([{"id": "AST-001", "statement": "x"}], "T-003")
-    assert stamped == [{"id": "AST-001", "statement": "x", "reading": "T-003"}]
+    """A composed review must never present a statement about one slice as a reading of the tree,
+    and the digest it hands the comparator has to be over the statements it hands the comparator."""
+    from rein import actual_extraction, security_review
+
+    def readout(unit: str) -> review_reading.ReadOut:
+        return review_reading.ReadOut(
+            reading=review_reading.Reading(unit=unit, include=(f"{unit}/",)),
+            extraction=actual_extraction.ExtractionResult(
+                actual_statements=({"id": "AST-001", "statement": unit},),
+                coverage={},
+                actual_digest="sha256:" + "0" * 64,
+            ),
+            security=security_review.SecurityResult(findings=()),
+        )
+
+    composed = review_reading.merge([readout("T-001"), readout("T-002")], coverage={})
+    assert [s["reading"] for s in composed.statements] == ["T-001", "T-002"]
+    assert [s["id"] for s in composed.statements] == ["AST-001", "AST-002"]
+    assert composed.actual_digest == digests.of({"actual_statements": list(composed.statements), "coverage": {}})
+
+
+def test_a_whole_change_reading_keeps_the_digest_the_extractor_minted() -> None:
+    """The stamp is not added there, and the reason is the digest: it binds the statements the
+    comparator is handed, and the extractor minted it over the statements it produced. `whole` is
+    what `coverage.composition.mode` already says, so the field would cost that binding to repeat
+    what the manifest states."""
+    from rein import actual_extraction, security_review
+
+    minted = "sha256:" + "a" * 64
+    only = review_reading.ReadOut(
+        reading=review_reading.WHOLE_READING,
+        extraction=actual_extraction.ExtractionResult(
+            actual_statements=({"id": "AST-001", "statement": "x"},), coverage={}, actual_digest=minted
+        ),
+        security=security_review.SecurityResult(findings=()),
+    )
+
+    composed = review_reading.merge([only], coverage={"anything": 1})
+    assert composed.actual_digest == minted
+    assert "reading" not in composed.statements[0]
 
 
 def test_a_reading_over_budget_says_which_one() -> None:
@@ -313,6 +351,46 @@ def test_a_composition_past_what_one_review_may_carry_is_refused_not_cut() -> No
     half = review_reading.MAX_STATEMENTS // 2 + 1
     with pytest.raises(review_reading.ReviewError, match="past what one review may carry"):
         review_reading.merge([readout("a", half), readout("b", half)], coverage={})
+
+
+@pytest.mark.integration
+def test_a_slice_holding_no_signal_is_not_where_the_risk_floor_drops(tmp_path: Path) -> None:
+    """The floor is a property of the change, not of a slice of it. Every reading was being asked
+    at its *own* floor — so a task whose diff happens to match no detector signal instructed the
+    extractor at `low` while the change was `high`, and the extractor's coverage was validated
+    against that lower bar. The parameter existed for this and the only caller passed the slice."""
+    from rein import review, review_reading
+    from tests.test_review import _reviewers
+
+    root = _composed_repo(tmp_path)
+    # One slice carries a security-boundary signal; the other and the seam carry none.
+    (root / "alpha" / "mod.py").write_text("def check_token(t):\n    return t\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "a boundary in one slice only")
+
+    floors: list[str] = []
+
+    def reviewer(role: str, request: Any) -> str:
+        import json
+
+        if role == "comparator":
+            return json.dumps({"claims": [], "actual_digest": request["actual_digest"]})
+        if role == "actual_extractor":
+            floors.append(str(request["deterministic_facts"]["risk_floor"]))
+            return json.dumps({"actual_statements": [], "coverage": {}})
+        return json.dumps({"findings": []})
+
+    repo = repo_mod.Repo(root)
+    review.generate(repo, _reviewers(reviewer))
+
+    whole = review_reading.whole_change_risk_floor(
+        repo,
+        base=review_reading.resolve_base(repo, None, None),
+        head=repo._git_rc("rev-parse", "HEAD")[1].strip(),
+        exclude=review_reading.not_the_product(repo, None),
+    )
+    assert whole == "high", "the change as a whole crosses a security boundary"
+    assert floors == [whole] * 3, floors
 
 
 @pytest.mark.integration

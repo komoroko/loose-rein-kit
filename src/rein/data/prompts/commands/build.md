@@ -30,16 +30,22 @@ If unapproved, do not work; say "please approve `/tasks` first" and stop.
    own. A step already established green against **this exact tree, in this exact image** is reused
    rather than re-run (the evidence ledger). Then the **negative control**: the same command steps
    are re-established over the base this change is a change to, with **only the task's test half
-   applied**. A test that discriminates the change fails there; if every step is still green, no
-   test in the change exercises it and the green that would have closed the task is a fact about
-   code that was already there — so it goes back to the implementer like a red step. A task that
-   changed no test file has no control to take, which is **recorded, not passed**: it says on the
-   record that this task's green rests on tests nobody wrote for it. Then the task's own
-   **`acceptance`** criteria are established the same way — a failing one returns through the same
-   channel a red gate step does, inheriting the send-back budget rather than growing a second one
-   beside it.
+   applied**. If every step is still green, no test in the change exercises it and the green that
+   would have closed the task is a fact about code that was already there — so it goes back to the
+   implementer like a red step. Read the outcomes for what each is worth: the **green** control is
+   the strong one, a fact about every test in the change at once; a **red** one says the test half
+   is not inert against the old code and no more, since it cannot separate a failed assertion from
+   an import the base never had. A task that changed no test file has no control to take, which is
+   **recorded, not passed**: it says on the record that this task's green rests on tests nobody
+   wrote for it. Then the task's own **`acceptance`** criteria are established the same way — a
+   failing one returns through the same channel a red gate step does, inheriting the send-back
+   budget rather than growing a second one beside it.
 5. **Budgets** — a failed `cmd` step goes back to the implementer up to that step's own `retries`
-   (over the budget → `blocked`). **Only a failure the code earned counts**: an agent that never
+   (over the budget → `blocked`). The two verdicts that are **not** configured steps — the negative
+   control, and each acceptance criterion — carry one send-back each: the failure names exactly
+   what is missing, and an implementer that cannot answer that in one more launch is saying the
+   ticket needs a human (`rein report --outcome needs-revision`). **Only a failure the code earned
+   counts**: an agent that never
    launched (capacity exhausted, the CLI not on PATH, a supervisor's signal) or a step that could
    not be run at all (no container runtime, no pinned image) produced no verdict, so it spends no
    budget, marks no task, and stops the run instead. A send-back that *cannot help* is not spent

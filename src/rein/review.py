@@ -468,6 +468,11 @@ def generate(
                 config=config,
                 trusted_base=trusted_base,
                 ceiling=limits["max_diff_bytes"],
+                # The floor the *whole* change carries, never the slice's own: a reading that
+                # happens to hold no signal must not be the place a risk drops (§13.5). It is the
+                # same number `build_loop` resolves when it warms a reading, so both look the
+                # question up under one key.
+                risk_floor=facts.risk_floor,
                 prior_blocking=prior_by_unit[m.reading.unit],
             )
             for m in measures
@@ -483,6 +488,7 @@ def generate(
                 measured=m,
                 trusted_base=trusted_base,
                 head=head,
+                risk_floor=facts.risk_floor,
                 prior_blocking=prior_by_unit[m.reading.unit],
                 on_stage=entered,
                 cache=cache,

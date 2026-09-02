@@ -157,11 +157,14 @@ QUALITY_GATE_KIND_VALUES = frozenset({"command", "agent"})
 #: join, rather than every task re-establishing the whole thing from scratch.
 GATE_STAGE_ORDER: tuple[str, ...] = ("task", "integration", "both")
 GATE_STAGE_VALUES = frozenset(GATE_STAGE_ORDER)
-#: What the negative control found: whether the DoD's green survives removing the task's source
-#: half. Only `discriminating` is a pass. The last two are not verdicts at all — they say the
-#: control could not be taken, which is a different sentence from "it was taken and it passed",
-#: and collapsing the two is how an unasked question becomes an answered one.
-NEGATIVE_CONTROL_VALUES = frozenset({"discriminating", "not_discriminating", "no_tests_changed", "undetermined"})
+#: What the negative control found, as a `done` may rest on it. Only `discriminating` is a pass,
+#: and it says the test half is not inert against the base — the absence of a failure, not a
+#: judgement that the tests are good. The last two are not verdicts at all: they say the control
+#: could not be taken, which is a different sentence from "it was taken and it passed", and
+#: collapsing the two is how an unasked question becomes an answered one. The outcome that blocks
+#: is deliberately absent — it stops there being a `done` for evidence to justify, so it travels as
+#: a task failure under `build_loop.NEGATIVE_CONTROL` instead of as a value here.
+NEGATIVE_CONTROL_VALUES = frozenset({"discriminating", "no_tests_changed", "undetermined"})
 #: What the per-task reviewer may say about a change. `must_fix` sends it back to the implementer
 #: within the review step's own budget; `consider` stops nothing and is carried to gate ④. Neither
 #: passes or fails a task on its own — the reviewer reports, and the loop decides what that costs.

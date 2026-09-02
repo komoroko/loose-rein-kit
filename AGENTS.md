@@ -140,9 +140,13 @@ findings; the implementer resolves them and the reviewer looks again.
   the implementer in the same launch as the code, and re-running them defends against an agent that
   *lies*, never against one that *self-confirms*. So the loop takes a **negative control**: the same
   command steps re-established over the base, with only the task's test half applied. Still green
-  means no test in the change exercises it, and the task goes back rather than landing. A task that
-  changed no test file has no control to take — **recorded, never passed**, so "this green rests on
-  tests nobody wrote for it" is on the record instead of being a silence.
+  means no test in the change exercises it, and the task goes back rather than landing. **The two
+  outcomes are not worth the same**: a green control is a fact about every test in the change at
+  once, while a red one says only that the test half is not inert against the old code — it cannot
+  tell an assertion that failed from an import that was never there, and does not claim to.
+  Whether the tests are any *good* is the reviewer's question, and the reviewer reads them. A task
+  that changed no test file has no control to take — **recorded, never passed**, so "this green
+  rests on tests nobody wrote for it" is on the record instead of being a silence.
 - **A task's own bar is `acceptance` in the plan, and the DoD still runs.** The DoD asks whether
   the code is *sound*; a task's acceptance criteria ask whether it did what it was *for* — both,
   and neither chosen by the implementer (a human freezes the list at gate ③). Each criterion says

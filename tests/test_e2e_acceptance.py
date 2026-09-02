@@ -14,8 +14,9 @@ and `awaiting-evidence` is the status that says so instead of rounding to `done`
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -79,6 +80,18 @@ def writing_agent(*, extra: dict[str, str] | None = None) -> object:
     return _run
 
 
+def counting_agent(launches: list[str]) -> object:
+    """`writing_agent`, recording the prompt of every implementer launch."""
+    inner = cast(Callable[..., tuple[int, str]], writing_agent())
+
+    def _run(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **kw: object) -> tuple[int, str]:
+        if cmd and cmd[0] == "claude":
+            launches.append(cmd[-1])
+        return inner(cmd, cwd, timeout, **kw)
+
+    return _run
+
+
 # --- criteria the loop can establish itself -------------------------------------
 
 
@@ -102,15 +115,23 @@ def test_a_failing_criterion_goes_back_through_the_same_retry_machinery(
 
     It returns through the channel a red gate step uses, so it inherits the send-back budget
     whole rather than growing a second, subtly different one beside it.
+
+    That claim was untrue for as long as it stood here. `acceptance:A-1` is not a configured step,
+    so `budgets.get(name, 0)` answered zero and the task ended on the first failing criterion
+    without the implementer ever being told which one — a silence this test could not see, because
+    it only ever asserted the end state. It counts the launches now.
     """
     repo = build_repo(
         tmp_path,
         [{"id": "A-1", "statement": "it holds", "evidence": {"kind": "command", "command": ["false"]}}],
     )
-    monkeypatch.setattr(build_loop, "_run", writing_agent())
+    launches: list[str] = []
+    monkeypatch.setattr(build_loop, "_run", counting_agent(launches))
 
     assert build(repo) == common.EXIT_HUMAN_NEEDED
     assert status_of(repo)["status"] == "blocked"
+    assert len(launches) == 1 + build_loop.SEND_BACK_RETRIES, launches
+    assert "A-1" in launches[-1], "the send-back names the criterion that is not satisfied"
 
 
 def test_an_artifact_criterion_requires_the_file_to_exist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

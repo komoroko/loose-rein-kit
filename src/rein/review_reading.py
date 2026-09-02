@@ -568,9 +568,10 @@ class ReadingFacts:
     #: a function of, so a reading survives every commit that cannot have changed it.
     content_digest: str
 
-    @property
-    def risk_floor(self) -> str:
-        return self.facts.risk_floor
+    # There is deliberately no `risk_floor` here. A reading has one — `facts.risk_floor` is right
+    # there — and it is never the number to use: the floor is a property of the whole change, so a
+    # slice holding no signal must not be where it drops (`whole_change_risk_floor`). Offering it
+    # on this class is how the only caller came to pass it.
 
     @property
     def analyzed_bytes(self) -> int:
@@ -850,22 +851,6 @@ def compose_coverage(
     return manifest
 
 
-def stamped(statements: Sequence[Mapping[str, Any]], unit: str) -> list[dict[str, Any]]:
-    """Each Actual Statement with the reading it was read out of.
-
-    Recorded on the statement rather than only on the manifest because a statement is what a
-    Decision Card, a claim verdict and an extra behaviour all cite. Without it a composed review
-    would present a reading of one task's diff and a reading of the whole tree in the same list,
-    in the same shape, with nothing to tell them apart — and the difference is exactly what a
-    reader needs when they ask whether "extra behaviours: 0" was said about everything.
-
-    Stamped after the comparison, never before: `actual_digest` binds the extractor's own answer,
-    and adding a field to what the comparator is handed would make the echo it is validated on
-    disagree with the bytes it was given.
-    """
-    return [{**dict(statement), "reading": unit} for statement in statements]
-
-
 # -- which readings a review is taken in --------------------------------------
 
 #: What the seam reading is called: the part of the change composition cannot attribute to one
@@ -996,7 +981,11 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
     Each extraction mints `AST-001` upward on its own, so a composed set would otherwise hold
     several statements with the same id — and the comparator resolves every citation by id. The
     renumbering happens before the comparator sees anything, so nothing downstream ever knows two
-    numberings existed.
+    numberings existed. The stamp goes on the statement rather than only on the manifest because a
+    statement is what a Decision Card, a claim verdict and an extra behaviour all cite: without it
+    a reading of one task's diff and a reading of the seam sit in one list, in one shape, with
+    nothing to tell them apart — which is exactly what a reader needs when they ask whether "extra
+    behaviours: 0" was said about everything.
 
     **Findings keep the id they were carried forward under, and only new ones are renumbered.** A
     blocking finding's id is what the next generation hands back to the reviewer that must re-state
@@ -1004,14 +993,22 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
     break the continuity the carry-over exists to provide. A finding this generation minted is new
     to the document either way, so moving its number costs nothing.
 
-    A single reading is left exactly as it was read: the ids are already unique, and the digest is
-    the extractor's own. Composing over one reading must not perturb the shape a whole-change
-    review has always had.
+    **A whole-change reading is left exactly as it was read** — no renumbering, no stamp, and the
+    extractor's own `actual_digest`. Not for continuity's sake but because the digest has to keep
+    meaning what it says it means: it binds *the statements the comparator is handed*, and the
+    extractor minted it over the statements it produced. Adding a `reading` field to them would
+    leave the two describing different bytes. Nothing is lost by leaving it off: `whole` is what
+    `coverage.composition.mode` already says, so the field would tell a reader what the manifest
+    told them, at the cost of the one digest that ties the Actual to the model that read it.
+
+    Every other shape goes through the merge below, one reading or several: there the stamp is
+    load-bearing (a statement about one slice must never read as a statement about the tree) and
+    the digest is re-minted over exactly what the comparator receives.
     """
-    if len(readouts) == 1:
+    if len(readouts) == 1 and readouts[0].reading.whole:
         only = readouts[0]
         return Composition(
-            statements=tuple(stamped(only.extraction.actual_statements, only.reading.unit)),
+            statements=tuple(dict(s) for s in only.extraction.actual_statements),
             actual_digest=only.extraction.actual_digest,
             findings=tuple(dict(f) for f in only.security.findings),
             resolved=tuple(dict(f) for f in only.security.resolved),
@@ -1059,6 +1056,7 @@ def keys_for(
     config: models.Config | None,
     trusted_base: str,
     ceiling: int,
+    risk_floor: str,
     prior_blocking: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, str]:
     """This reading's stage keys, from what the reading measured about itself.
@@ -1066,6 +1064,14 @@ def keys_for(
     The one place the mapping from a reading to its keys lives, because two callers make it and
     they have to agree exactly: `review.generate` at the gate, and `build_loop` when a task lands.
     A build that warms a key the gate then misses would pay for both readings and save nothing.
+
+    `risk_floor` is the one input here that is *not* a fact about this reading, and it is passed in
+    rather than read off `measured` for exactly that reason (`extraction_request`): the floor is a
+    property of the whole change, so a slice holding no signal must not be where it drops. It is in
+    the key because it is in the request — a key that did not cover it would serve an answer taken
+    under a different instruction — and the coupling it buys is bounded: the floor is a four-value
+    ladder that only ever rises as a cycle lands, so at worst the readings taken before a rise are
+    re-read once, and in the common case of a floor that never moves nothing is invalidated at all.
     """
     return reading_keys(
         config=config,
@@ -1073,7 +1079,7 @@ def keys_for(
         coverage_digest=digests.of(measured.coverage),
         trusted_base=trusted_base,
         ceiling=ceiling,
-        risk_floor=measured.risk_floor,
+        risk_floor=risk_floor,
         prior_blocking=[str(f.get("id", "")) for f in prior_blocking],
         unit=measured.reading.unit,
     )
@@ -1101,15 +1107,28 @@ def warm(
     Nothing is carried forward here: `prior_blocking` belongs to a generated review, and during a
     build there is not one yet about this head. A blocking finding the last review recorded is
     handled where it is read, at the gate, which is also the only place that can resolve it.
+
+    The risk floor is measured over the **whole** change and not over this reading, because that is
+    what the gate will send and a warm-up that asks a different question is a warm-up nobody
+    reuses. It costs one more `git diff` and one regex pass per task landing, both deterministic
+    and both cheap next to the launch they are protecting.
     """
     measured = read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits)
-    keys = keys_for(measured, config=config, trusted_base=base, ceiling=limits["max_diff_bytes"])
+    risk_floor = whole_change_risk_floor(repo, base=base, head=head, exclude=exclude)
+    keys = keys_for(
+        measured,
+        config=config,
+        trusted_base=base,
+        ceiling=limits["max_diff_bytes"],
+        risk_floor=risk_floor,
+    )
     return read_one(
         repo,
         reviewers,
         measured=measured,
         trusted_base=base,
         head=head,
+        risk_floor=risk_floor,
         prior_blocking=(),
         cache=cache,
         keys=keys,
@@ -1117,6 +1136,16 @@ def warm(
         reused=usage_mod.Ledger(),
         cancel=common.Cancellation(),
     )
+
+
+def whole_change_risk_floor(repo: repo_mod.Repo, *, base: str, head: str, exclude: Sequence[str]) -> str:
+    """The detector's risk floor over the whole change, whatever readings it is then taken in.
+
+    A property of the change and never of a slice of it (`extraction_request`). `review.generate`
+    already has this from the whole diff it measures the manifest on; `build_loop` does not, and
+    has to take it, because the key the gate will look under is a function of it.
+    """
+    return diff_facts.analyze(diff_of(repo, base, head, exclude)).risk_floor
 
 
 def _next_free(pattern: str, taken: Collection[str]) -> str:
@@ -1133,6 +1162,7 @@ def read_one(
     measured: ReadingFacts,
     trusted_base: str,
     head: str,
+    risk_floor: str,
     prior_blocking: Sequence[Mapping[str, Any]],
     on_stage: Callable[[str], None] = lambda _name: None,
     cache: review_cache.StageCache,
@@ -1190,11 +1220,11 @@ def read_one(
                 keys["actual_extraction"],
                 ran,
                 lambda ask: actual_extraction.run_extractor(
-                    extraction_request(measured, trusted_base=trusted_base, head=head, risk_floor=measured.risk_floor),
+                    extraction_request(measured, trusted_base=trusted_base, head=head, risk_floor=risk_floor),
                     ask,
                     repo=repo,
                     commit=head,
-                    risk_floor=measured.risk_floor,
+                    risk_floor=risk_floor,
                 ),
                 reviewers,
                 reused=reused,
