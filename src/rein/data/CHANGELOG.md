@@ -4,6 +4,337 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.0] - 2026-09-03
+
+**A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is
+the only automated evidence a task's `done` rests on, and nothing ever asked whether it could go
+red. The tests it runs are written by the implementer in the same launch as the code; the blind
+extractor is deliberately never shown them, the security reviewer reads them only as an attack
+surface, and the per-task reviewer is asked about the source. The Expected/Actual split this
+workflow is built on had been applied to the code and never once to the tests, so a test that
+asserts nothing produced a green that re-running reproduced exactly — and re-running is a defence
+against an agent that *lies*, not against one that *self-confirms*.
+
+- **The negative control.** After the command steps pass, the same steps are re-established over
+  the base this change is a change to, with **only the task's test half applied** (a throwaway
+  worktree; the task's own tree is never touched). A test that discriminates the change fails
+  there. If every step is still green, no test in the change exercises it, and the failure goes
+  back to the implementer through the same channel a red step does — spending that attempt's
+  budget, with the message naming what is missing rather than what broke.
+- **Three answers that are not passes, and they say so.** `no_tests_changed` — nothing to control,
+  which is a real situation and is *recorded* rather than waved through, so "this task's green
+  rests on tests nobody wrote for it" is on the record instead of being a silence. `undetermined` —
+  the experiment could not be set up (no base, an unapplied patch) and is evidence in neither
+  direction. `discriminating` is the only pass. All of it lands in `state.yaml`'s
+  `evidence.negative_control` beside the tree the verdict was reached on.
+- **The control's green is not the task's.** It runs the steps with the evidence note suppressed:
+  a green over the control tree is a true fact about *that* tree, and `evidence.steps` stays the
+  list of what this task's own DoD established.
+
+**The integration reviewer takes cross-task correctness, and the argument that it should not was
+wrong.** It reviewed the merged tree for shape only, reasoning that the command steps had just run
+over that exact tree so the bugs were already answered. But the suite over the merged tree is the
+*union of the leaves' suites*, and not one test in it was written with the merge in view: each was
+written in an isolated worktree against one ticket, by an implementer that could not see the other
+tasks. The interaction defect a merge creates is by construction the one no leaf's tests exercise.
+Nothing else covered it either — gate ④'s seam reading takes the paths two scopes share or none
+covers, and two tasks whose files are disjoint produce no seam at all. The prompt now asks for both
+halves and says why a green over the join settles nothing about the interaction.
+
+**Gate ④ reads the change one task at a time.** The grounded review read the whole cycle's diff in
+one generation, twice over — the blind extractor and the security reviewer are each sent the source
+half — so the peak of one launch was the size of a cycle, and every stage key was taken over the
+whole change, which meant fixing one review finding threw both readings away and paid for them
+again. On a real cycle that is where the session limit was hit, and the only remedy the tool
+offered was to split the scope and re-approve at gate ③.
+
+- **A review is now taken in *readings*.** `plan_readings` derives them from the scopes gate ③
+  froze: one per scoped task, plus the seam over what two scopes share and what none covers. Each
+  is measured, budget-checked and widened on its own, and keyed on **its own content** — the tree
+  digest narrowed to its paths — so a reading taken while one task landed is still the answer to
+  the same question after every later task has landed. A plan whose tasks declare no `scope` has
+  nothing to compose along and is read whole, exactly as before; `review_policy.composition: whole`
+  asks for that deliberately.
+- **Composition cannot hide the seam**, because hiding the seam is what would let "extra
+  behaviours: 0" be said about bytes nobody read. `coverage.composition` records every reading by
+  name, `unread_paths` names each changed path no reading covered and prices the manifest
+  `insufficient`, every Actual Statement and security finding carries the reading it came out of,
+  and a composed reading is **refused outright at critical risk** — behaviour that exists only once
+  two readings are in one tree was never read, and at critical the honest answer is to read the
+  change whole or make it small enough that reading it whole fits. This is the same objection that
+  deleted 0.3.7's `partitioned`/`truncated` vocabulary unimplemented, answered rather than avoided:
+  the split is along a seam a human froze, not along a byte count, and the seam is measured.
+- **The build takes the reading, so the gate finds it answered.** `rein build` warms each task's
+  reading as the task lands, asking the same question with the same key (`keys_for` is the one
+  place that mapping lives). The peak of one launch stays the size of one task, and a regeneration
+  after a review fix re-reads only the task whose code moved. A warm-up never fails a build: it is
+  an optimization over a cache the gate does not depend on, so an adapter that will not answer
+  stops the warming for the rest of the run and says so once.
+- **`SharedReading` primes one session per reading**, not one per generation. The two stages of one
+  reading still branch a single priming turn — the whole saving — and two readings never share a
+  context. The identity used to be positional, so the second reading was refused as "the pipeline
+  moved underneath the review", which is what a mismatch means when there is only ever meant to be
+  one; a composed review could not have been launched at all.
+
+**The merged tree is read too.** `stage:` was documented as moving *when* a step runs and never
+whether, and `_integration_gate` skipped every non-command step — so a join of two leaves faced the
+command steps alone, and "is it green" was asked of the merged tree while "is it well made" was
+not. An agent step declared `stage: integration` now runs there, with the `/simplify` discipline
+(the command steps have just settled the correctness half over that exact tree), reading what only
+the join can show: duplication between what two tasks added, one responsibility now in two places,
+an abstraction one task introduced that the next worked around. Its `must_fix` findings go to the
+integration fixer within the step's own budget; its `consider` findings are filed against the
+merged task whose scope owns the anchor — the same derivation gate ④ uses — and one nobody owns is
+said out loud rather than filed against a task that does not own it. This is also what makes the
+documented "security and maintainability review" true: the maintainability half existed only per
+task, where it could not see the join.
+
+**`rein dag --render` says how gate ④ will read the plan**, at gate ③, while it can still be
+changed — how many readings, and which tasks declare no `scope` and therefore land in the seam. A
+count of readings and not an estimate of bytes: the code does not exist yet, and a number invented
+for it would be the confident guess this tool exists to refuse. The `adversarial-reviewer` gains
+the matching gate-③ lens.
+
+**A document a newer rein wrote is not reported as damaged.** Running an older `rein doctor` in a
+repository a newer release wrote FAILs every SSOT document — that release widened a schema and this
+tool has the narrow one — and the repair line said `rein revise --to tasks`, sending a human to
+rewind an approved gate, invalidate its receipts and the review built on it, to fix a document that
+was never broken. The lock records who wrote it, so the skew is knowable: `lock.written_by_newer`
+names the writer and the command that installs it, and the repair says to upgrade. Still a FAIL —
+the tool genuinely cannot read the repository — but pointed at the tool rather than at the plan.
+The `.gitignore` check stops calling such a config "unreadable" for the same reason.
+
+**Gate ⑤ carries gate ④'s security review instead of commissioning a second one.** `/verify` told
+the agent to "re-run the whole-codebase security review (the same reviewer `rein review generate`
+uses at gate ④)" — the largest single read in the workflow, asking the same reviewer about the same
+commit, and landing the answer in a test-plan cell where nothing anchors it. Every part of that was
+already covered: a blocking finding holds gate ⑤ shut through the same `review_policy.blocking_reasons`
+gate ④ used, `approve.readiness("release")` re-checks the review's `subject_head_sha` against HEAD so
+a commit made since leaves it stale and the gate does not open, and the receipt binds it by
+`machine_digest`. The scope was wrong as well as redundant: *whole-codebase* is a different question
+from "is this change safe", and code no task touched is code no gate here approves. So the reading is
+gone and the test plan names the carried review — which commit, what it found — instead of restating
+it. The two checks the carry now rests on are pinned by a test at the release gate, not only at
+gate ④.
+
+**The dependency audit is the one security answer that must be taken again**, and `/verify` now says
+why: it is the only one that is not a function of the tree. The same commit audited last month and
+today can differ, the database having moved while the code stood still — so it can never be
+"established" the way tree-bound evidence is, and the result is recorded with the date and the commit
+it was taken against. The scaffold's security table gains that column, and stops naming
+`/security-review`, an agent-specific command in a tool-neutral template.
+
+
+**The gate guard stopped being blinded by a config it was never meant to validate.** It reads two
+settings out of `config.yaml` — `guard.template_mode` and `guard.paths` — and it was getting them
+through `models.Config.parse`, which validates the *whole* document against this release's schema.
+Those are different questions, and answering the second one there cost the guard its answer to the
+first. A repository written by a **newer** rein carries keys an older schema has never heard of, so
+the parse failed, the config came back as `None`, and two silent substitutions followed: the rule
+map fell back to `DEFAULT_GUARD_PATHS`, and `template_mode` became `False`.
+
+- **The template's own repository blocked every edit under `src/`**, with the message "gate 'tasks'
+  is not approved … complete /tasks first and get the human's signed approval" — the same wrong
+  repair this release removed from `doctor` for exactly this skew, now in the one place that stops work.
+  `guard.template_mode: true` was set, and the guard could not read it.
+- **A repository's own guarded paths silently disappeared.** Substituting the built-in defaults for
+  a rule map it could not read drops every path a product added to `guard.paths` — a *fail-open* in
+  the function whose module docstring says unreadable state fails closed.
+- Both are gone. `guard_settings` parses the document as YAML, reads those two keys, type-checks
+  them on their own, and ignores everything else in the file: a release that widens some unrelated
+  part of the schema cannot move them. What is still fatal is the guard's *own* inputs being
+  unreadable — YAML that does not parse, a `guard` block that is not a mapping, a `paths` list that
+  is not a list — and that now denies every guarded path with a message naming `config.yaml`
+  instead of naming a gate.
+
+**A verdict with no send-back budget ended the task instead of sending it back.** `budgets` is
+built from the configured `quality_gate` steps, and two verdicts that come back through the same
+channel are not steps: the negative control, and each acceptance criterion. `budgets.get(name, 0)`
+answered zero for both, so the task ended on the first occurrence with the implementer never told
+what was missing — while the docstring of each said it "inherits the send-back budget and the retry
+machinery whole". Both now carry `SEND_BACK_RETRIES`, and a verdict this loop has no send-back rule
+for **raises** rather than collecting a silent zero that reads like an exhausted budget.
+
+**The negative control's patch was missing the files it was about.** It is built from
+`git diff <base> -- <paths>`, and the path list comes from `git status -uall`, which names
+untracked files — which `git diff` cannot show. So a brand-new test file the implementer had not
+staged was listed as changed and then silently absent from the patch, rc 0, no error: the control
+re-established the base's own suite, found it green, and reported that no test in the change
+exercised it. `diff_from` now marks those paths `--intent-to-add` first, so the diff carries them
+as `new file mode`.
+
+**And the control says what it actually establishes.** A *green* control is the strong outcome — a
+fact about every test in the change at once. A *red* one says the test half is not inert against
+the old code, and cannot separate a failed assertion from an import the base never had; reading it
+as "the tests discriminate the change" claimed more than the experiment supports. Whether the tests
+are any good is the per-task reviewer's question, and the reviewer reads them. The blocking outcome
+also stops being a value in `evidence.negative_control`: that record justifies a `done`, and this is
+the verdict that stops there being one, so it travels as a task failure under `negative-control`.
+
+**A slice holding no signal is no longer where the risk floor drops.** `extraction_request` takes
+`risk_floor` as an argument precisely because the floor is a property of the whole change and not
+of one reading of it — and the only caller passed the reading's own. So a task whose diff matched
+no detector signal instructed the extractor at `low` while the change was `high`. The whole-change
+floor is passed now, at the gate and in `build_loop`'s warm-up (`whole_change_risk_floor`), so both
+look the question up under one key. It couples a reading's key to a four-value ladder that only
+rises as a cycle lands: at worst the readings taken before a rise are re-read once.
+
+**A whole-change reading keeps the `actual_digest` its extractor minted.** Stamping `reading:
+whole` onto its statements left the digest describing different bytes from the ones the comparator
+was handed — and `whole` is what `coverage.composition.mode` already says. Composed readings are
+stamped and re-minted together, as before.
+
+**This release's own `make check` was red, in two places nobody ran it.** `tests/test_build_loop.py`
+carried an untyped helper that mypy rejects — the same hook that stopped CI one release earlier —
+and `src/rein/data/rules/AGENTS.md`, the rules body `rein install` writes into a product
+repository, was two commits behind the repository's own `AGENTS.md`: it shipped without the
+negative-control rule and without the gate-⑤ security-review paragraph, both of which describe
+behaviour this release has. Propagated, and the check is green from `pre-commit` through `sync --check`.
+
+**Nobody was asked whether the tests are any good.** The negative control's own reasoning delegates
+that question — "whether the tests are any *good* is the per-task reviewer, which reads them" — and
+the reviewer's prompt asked for exactly two things, correctness and simplification. It was told to
+read the tests and never told what to ask of them, so a test asserting `is not None` where the
+criterion names a value went red against the base (the control's bar), passed the DoD, and landed
+with no reader. The reviewer now carries a third lens: for each acceptance criterion, which test in
+this change would go red if the behaviour were wrong, and which assertions would hold for any
+output at all. It costs no extra launch — same step, same findings file. The integration reviewer
+is deliberately **not** given it: the merged tree's suite is the union of the leaves' and every
+test in it was already read once.
+
+**And the control's own record reached the approver as a silence.** `evidence.negative_control` was
+written by `build_loop` and read by nothing — not the orient brief, not the decision cards, not
+`approve`'s readiness — so `no_tests_changed`, whose entire purpose is to say out loud that a task's
+green rests on tests nobody wrote for it, said it into a file the gate ④ review never opens. The
+same defect `residual_findings` was written to fix, and `template_lint`'s
+`check_declared_properties_are_read` cannot catch this shape by construction: it is a literal name
+search and the writer names the field. The orient brief now carries a `control` section following
+`verification`'s convention — the tasks whose control answered are a count, the ones where it could
+not be taken are rows naming the task and the reason. It blocks nothing: a task genuinely covered by
+tests that already existed is a real thing, and gating it would make the loop demand a test per task
+rather than evidence per claim.
+
+**Two smaller things in the adversarial reviewer.** Its gate-③ lens attacked "a ticket whose
+acceptance criteria or `test` command cannot objectively decide green" — tasks carry no `test`
+command, the DoD is the one `quality_gate`, so half that lens pointed at a field that does not
+exist; it now attacks the criteria's `evidence` and the ticket's automated-test approach. And the
+role file carries all three gates' lens sets while every round reviews one deliverable, so it now
+says to read the stance and then only the lens set for the gate it was delegated for.
+
+**`/code-review` and `/simplify` were real commands named in text that also runs somewhere they do
+not exist.** rein's reviewer prompts have carried "the /code-review discipline" and "the /simplify
+discipline" as bare prose for several releases. They are Claude Code's own commands and a headless
+launch reaches them — but the same prompt goes to `codex` and `gemini`, where the names resolve to
+nothing and the reviewer is left to guess what discipline it was being asked for. Neither was
+defined in this repository or in anything `rein install` writes.
+
+They are a **host capability** now, declared per adapter (`adapters.Adapter.disciplines`) the way
+`fork_flags` and `own_sandbox` already are, and named to the reviewer only where the launch will
+actually find them. The question is written out in the prompt either way, so a host without the
+command asks exactly the same thing — which is what `codex` and `gemini` reviewers get, unchanged
+from today. What the offer buys where it lands is the host's own reading: `/code-review` fans out
+over the branch, `/simplify` over four cleanup angles.
+
+**rein's contract stays on top of theirs**, because each command ends somewhere rein does not read:
+
+- `/simplify` finishes by **applying its fixes**. The prompt runs its review phase only. A reviewer
+  that edits is the arrangement this loop was changed to remove, and a tree that moves under the
+  gate sends every already-passed step back through it.
+- `/code-review --fix` applies the findings to the working tree, and `/code-review ultra` is
+  billed and user-triggered. The prompt forbids both by name rather than leaving either to be
+  discovered: `--fix` is the same collapse as `/simplify`'s by another route — the fix would be
+  the reviewer's own, and the second reader the loop exists to provide would never see it.
+- Both report where they choose. The answer this step reads is the findings file: no printed
+  report, no `ReportFindings`.
+
+**The security reviewer now stands in a checkout of the change.** A host security review reads a
+branch's *pending changes* and refuses outright outside a repository, and this stage was launched in
+an empty directory — so the discipline could be named to it and never used. It is handed a throwaway
+worktree added at the reviewed head and `reset --mixed` to the trusted base, which leaves exactly
+this change unstaged: the shape those reviews are written against, with no patch to apply. It costs
+that one stage the property the others keep — its answer is no longer a function of the request
+alone — and that is affordable here and nowhere else: this is the stage that is deliberately *not*
+blind (it is the only one sent the test half), and its input is still fully determined by the two
+shas the stage key already covers. **The blind extractor and the comparator keep the empty
+directory**, which is what the argument for cutting it was always about. A worktree that cannot be
+made falls back to the empty directory rather than failing the gate: the contract asks for the diff
+to be read either way.
+
+
+**The join's two send-backs were framed as the same work.** The integration reviewer's `must_fix`
+findings and a red command step over the merged tree both went to `integration_fix_prompt`, whose
+opening sentence says the combined state "fails the deterministic gate" and whose stated subject is
+"typically a cross-file lint/format/type error". One of those is true. An implementer handed a
+paragraph about a contract two tasks now read differently, under a heading that says it is looking
+at a lint failure, has to work out that the framing is wrong before it can start — and the framing
+is what says how much of the tree is in question and what a finished fix looks like. The review
+send-back has its own prompt now (`integration_review_fix_prompt`, the join's analogue of
+`review_fix_prompt`): it says the findings are about the join, that the fix usually belongs between
+the tasks rather than inside one of them, and that an independent reader looks again — which is what
+makes disputing a finding a real option instead of a silence.
+
+
+
+**And the review of that review found four more.** Reported, fixed, and each one shown to fail
+without its fix:
+
+- **`diff_from` returned `""` for a `git diff` that failed**, which the negative control reads as
+  "the test half of the change was empty" — a sentence about a diff that was never obtained. It
+  returns `None` for "could not be asked" and keeps `""` for a genuinely empty answer, and the
+  control names the two differently.
+- **A partially failed `git add --intent-to-add` left the index staged.** git can stage some of its
+  arguments and still exit non-zero; the paths were reported as "not staged" and the caller's
+  `finally` then took nothing back — moving the `fingerprint` the evidence ledger keys every gate
+  step on, for a tree nobody edited. The paths are returned whether or not the add succeeded, and
+  whether it succeeded is a separate answer that stops a diff missing a file from being read as the
+  change. `git ls-files -o` is read with `-z` besides: a quoted path is not the path.
+- **A quality gate with no command step controlled nothing, silently.** `no_tests_changed` exists to
+  say "this task's green rests on tests nobody wrote for it"; a DoD made only of agent steps said
+  nothing at all — no record, and so no row on the orient brief, which skips a task that has none.
+  It is recorded as `undetermined` with the reason, like every other experiment that could not be
+  taken.
+- **`guard.paths` dropped an entry missing half of itself.** The fail-open above, one branch
+  further in: an entry with a mistyped `path:` key was filtered out of the map, and a map left with
+  nothing in it fell through to `DEFAULT_GUARD_PATHS` — so the one rule a product had added to its
+  own guard disappeared over a typo. Unreadable, like every other rule map this guard cannot read
+  in full.
+
+**And the security reviewer's checkout stopped being the change's own directory.** Giving that one
+stage a checkout is what lets a host security discipline read anything at all — the command reviews
+a branch's pending changes and refuses outside a repository — but the directory it was given was a
+worktree of the real repository, at `head`. Two holes, neither of which the prompt could close:
+
+- **A worktree shares the repository it is a worktree of.** Its `.git` is a pointer into the common
+  directory, so it shares the object store, **the refs, and `.git/hooks`**: a reviewer standing in
+  one could move a branch, delete a tag or push, and every git command it ran fired this
+  repository's real hooks. "Whoever judges does not repair" was a property of the prompt there and
+  of nothing else. It is a local clone now, with `origin` removed — its own refs, git's own sample
+  hooks, no push target, and whatever it writes dies with the temporary directory. The
+  `worktree remove` + `prune` cleanup goes away with it: nothing is registered against the real
+  repository any more.
+- **A checkout carries the change's host configuration, and a CLI reads that before it reads its
+  prompt.** `.claude/settings.json`, `.mcp.json`, `CLAUDE.md` and their equivalents
+  (`adapters.PROJECT_CONFIG`) are the pre-authorized commands, the hooks, the MCP servers and the
+  instructions that decide what a launch may do without asking — so the stage that exists to catch
+  a hostile change was running under whatever that change said about its own permissions. Those
+  paths are pinned to the **trusted base**: the reviewer runs under the configuration a human
+  approved, which is the configuration every other rein launch in this repository already runs
+  under. They do not show as deleted either — saying "this change deletes `.claude/settings.json`"
+  would be a false statement about the change, handed to the one reader who must not get one.
+
+The reviewer does not lose sight of them. Every one of those paths is in the diff the request
+carries, and the contract now says out loud that they are in the diff rather than on disk, that
+their real content is unabridged there, and that a pre-authorized command, a hook, an MCP server or
+an instruction added to them is a finding. **Reading a hostile settings file stopped being the same
+act as obeying it.**
+
+What the stage still keeps, and what it still costs: its input is fully determined by
+`trusted_base_sha` and `subject_head_sha` — which between them fix every byte on disk — and both
+are already in the stage key. The base tree and `.rein/plan.yaml` are beside it, which is the one
+property the other two stages keep and this one does not. The blind extractor and the comparator
+still read an empty directory.
+
+
 ## [0.3.13] - 2026-09-01
 
 **A deletion is not content, and a commit is not a reading** (#44, measured on 0.3.12: a 17-task

@@ -23,11 +23,15 @@ reads it; it never writes to it.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import shutil
 import tempfile
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from rein import actual_extraction, adapters, common, digests, faults, models, review_policy
@@ -50,6 +54,15 @@ _PRIME_ACK = "READY"
 
 #: The stage-request key the reading lives under, and what replaces it in a branch.
 _READING_KEY = "diff"
+
+
+def _reading_digest(request: Mapping[str, Any]) -> str:
+    """Which reading this request is about — the identity a primed session is keyed by.
+
+    The bytes themselves, not the unit name: a session holds a *reading*, and two requests that
+    carry the same reading may branch it whatever either of them is called.
+    """
+    return digests.of_bytes(str(request.get(_READING_KEY, "")).encode("utf-8"))
 
 
 def shareable_reading(config: models.Config | None, roles: Sequence[str]) -> adapters.Adapter | None:
@@ -132,8 +145,12 @@ class SharedReading:
         self._timeout = timeout
         self._ledger = ledger
         self._lock = threading.Lock()
-        self._session = ""
-        self._digest = ""
+        #: One session per reading, keyed by the digest of the bytes it was primed with. A review
+        #: composed out of several readings primes several sessions — the two stages of *one*
+        #: reading branch one session, which is the whole saving, and two readings are two
+        #: different changes that must never share a context. Keyed by the reading itself rather
+        #: than counted, so the pipeline cannot accidentally hand one reading's session to another.
+        self._sessions: dict[str, str] = {}
 
     def branch_flags(self, request: Mapping[str, Any]) -> tuple[str, ...]:
         """The flags that put this request on its own branch of the shared reading.
@@ -158,25 +175,23 @@ class SharedReading:
         self._prime(request)
         return {
             **request,
-            _READING_KEY: {"in_previous_message": True, "digest": self._digest},
+            _READING_KEY: {"in_previous_message": True, "digest": _reading_digest(request)},
         }
 
     def _prime(self, request: Mapping[str, Any]) -> str:
-        """Create the shared session, once, and return its id.
+        """Create the session for this reading, once per reading, and return its id.
 
-        The reading is checked against the primed one rather than assumed to match: two stages
-        branching one session must be branching it about the same bytes, and a mismatch is a bug in
-        the pipeline above rather than something to paper over by sending the diff again.
+        Keyed by the reading's own bytes, so the two stages of one reading branch one session and
+        two readings of a composed review never share one. That identity used to be positional —
+        the first request to arrive primed *the* session and every later one had to match it — so a
+        review composed out of more than one reading could not be launched at all: the second
+        reading was refused as "the pipeline moved underneath the review", which is what a
+        mismatch means when there is only ever meant to be one.
         """
-        digest = digests.of_bytes(str(request.get(_READING_KEY, "")).encode("utf-8"))
+        digest = _reading_digest(request)
         with self._lock:
-            if self._session:
-                if digest != self._digest:
-                    raise TransportError(
-                        "two stages were about to branch one reading of different changes "
-                        f"({self._digest} vs {digest}) — the pipeline moved underneath the review"
-                    )
-                return self._session
+            if primed := self._sessions.get(digest):
+                return primed
             session = str(uuid.uuid4())
             # The instruction and the reading, and deliberately nothing else. The two shas used
             # to sit here, between them: duplicated out of a request that keeps them anyway
@@ -194,7 +209,7 @@ class SharedReading:
             # extractor's context, and a new path without the guard is how priming comes back.
             actual_extraction.assert_blind(payload)
             self._launch(session, payload)
-            self._session, self._digest = session, digest
+            self._sessions[digest] = session
             return session
 
     def _launch(self, session: str, payload: Mapping[str, Any]) -> None:
@@ -266,6 +281,102 @@ def shares_reading(config: models.Config | None) -> bool:
     return shareable_reading(config, _READING_ROLES) is not None
 
 
+#: The one stage whose reading benefits from standing in a checkout rather than in an empty
+#: directory: the host's security discipline reviews a branch's *pending changes*, and outside a
+#: repository it refuses outright. The other two stages read only what the request carries.
+_CHECKOUT_ROLE = "security_reviewer"
+
+
+@contextlib.contextmanager
+def _pending_changes(repo: repo_mod.Repo, base: str, head: str) -> Iterator[str | None]:
+    """A throwaway **clone** holding this change as unstaged modifications, or None.
+
+    `git status` there shows exactly base→head, unstaged, which is the shape `security-review` and
+    its kind are written against and the whole reason this stage gets a directory at all. The
+    change is not applied as a patch: the diff in the request was folded and widened for the
+    reading (`review_reading.fold_bodies`) and would not apply. Git already has both trees.
+
+    **A clone and not a worktree, and the host's own configuration pinned to the trusted base** —
+    two separate holes, both of which turned "the reviewer gets a directory" into "the reviewer
+    gets the change's directory":
+
+    * A worktree's `.git` is a pointer into the real repository's common directory. It shares the
+      object store, **the refs, and `.git/hooks`** — so a reviewer standing in one could move a
+      branch, delete a tag or push, and every git command it ran fired this repository's real
+      hooks. "Whoever judges does not repair" was a property of the prompt there and of nothing
+      else. A local clone has its own refs and git's own sample hooks; `origin` is removed, so
+      there is no longer anywhere to push. Whatever it writes dies with the temporary directory.
+    * A checkout carries `.claude/settings.json`, `.mcp.json`, `CLAUDE.md` and their equivalents
+      (:data:`adapters.PROJECT_CONFIG`) — the pre-authorized commands, the hooks, the MCP servers
+      and the instructions a CLI reads before it reads its prompt. At `head` those files *are the
+      change under review*, so the stage that exists to catch a hostile change was running under
+      whatever that change said about its own permissions. They are put back to `base` instead:
+      the reviewer runs under the configuration a human approved, which is the same configuration
+      every other rein launch in this repository already runs under.
+
+    The reviewer does not lose sight of them. Every one of those paths is in the diff the request
+    carries — `not_the_product` never excluded them — and the contract says out loud that they are
+    in the diff rather than on disk (`security_review.contract`). What changed is that reading a
+    hostile settings file is no longer the same act as obeying it.
+
+    None when it cannot be made, and the caller then uses the empty directory as before. This is a
+    better reading, never a required one: the contract asks the reviewer to read the diff itself
+    when the discipline is unavailable, and a host command that finds no repository says so and
+    the reviewer does exactly that. Failing a whole gate over an optimization would be the wrong
+    trade in the other direction.
+    """
+    if not base or not head:
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="rein-review-tree-", ignore_cleanup_errors=True) as parent:
+        tree = os.path.join(parent, "subject")
+        steps = (
+            # `--local` so this costs a hardlink per object rather than a copy, and `--no-checkout`
+            # because the commit wanted is `head`, not whatever the source's HEAD points at.
+            ["git", "-C", parent, "clone", "--quiet", "--local", "--no-checkout", str(repo.root), tree],
+            ["git", "-C", tree, "remote", "remove", "origin"],
+            ["git", "-C", tree, "checkout", "--detach", "--quiet", head],
+            ["git", "-C", tree, "reset", "--mixed", "--quiet", base],
+        )
+        for step in steps:
+            rc, _ = common.run(step)
+            if rc != 0:
+                yield None
+                return
+        yield tree if _pin_config_to_base(tree) else None
+
+
+def _pin_config_to_base(tree: str) -> bool:
+    """Put every :data:`adapters.PROJECT_CONFIG` path in `tree` back to the trusted base.
+
+    Called with the index already at the base and the working tree at the head, so the base's
+    content for a path is exactly what `git checkout -- <path>` restores. Each path is removed from
+    the working tree first, which is what handles the one `checkout` cannot: a file the change
+    *added*, which the base index has never heard of.
+
+    Afterwards the working tree and the index agree about these paths, so they do not show up in
+    `git status` as a change — least of all as a deletion. Saying "this change deletes
+    `.claude/settings.json`" would be a false statement about the change, and a security reviewer
+    is the last reader to hand one to.
+
+    A symlink is unlinked and never followed: `.claude` replaced by a link to somewhere else is
+    itself one of the things this is here to defuse, and resolving it would delete the target.
+    """
+    listed = common.run(["git", "-C", tree, "ls-files", "-z", "--", *adapters.PROJECT_CONFIG])
+    if listed[0] != 0:
+        return False
+    for rel in adapters.PROJECT_CONFIG:
+        path = Path(tree) / rel
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    at_base = [entry for entry in listed[1].split("\0") if entry]
+    if not at_base:
+        return True
+    return common.run(["git", "-C", tree, "checkout", "--", *at_base])[0] == 0
+
+
 def _adapter_reviewer(
     repo: repo_mod.Repo,
     role: str,
@@ -302,6 +413,25 @@ def _adapter_reviewer(
     project, and `deterministic_facts.files` instead of the `git rev-parse` a reviewer used to
     have to run to anchor anything. What the launch can still read is the user's own global CLI
     configuration, which is theirs and not this repository's to remove.
+
+    **The security reviewer is the exception, and only when its host has a discipline to use.** A
+    host security review reads a branch's pending changes and refuses outside a repository, so that
+    stage is given a throwaway clone holding exactly this change, unstaged (`_pending_changes`).
+    It costs that stage the property the other two keep — its answer is no longer a function of the
+    request alone, since the base tree and `.rein/plan.yaml` are on disk beside it.
+
+    What it does **not** cost is the two things a directory could have cost. The clone has its own
+    refs and no remote, so the stage cannot reach anything the rest of the workflow will read
+    afterwards, and every :data:`adapters.PROJECT_CONFIG` path in it is pinned to the trusted base,
+    so nothing the change says about tool permissions, hooks or MCP servers governs the launch that
+    is reviewing it. Both are mechanical; neither asks the reviewer to behave.
+
+    The rest is affordable *here and nowhere else*: this is the stage that is deliberately not blind
+    (it is the only one sent the test half), and its input is still fully determined by
+    `trusted_base_sha` and `subject_head_sha` — both of which the stage key covers through
+    `reviewer_identity` and the change digest, and which between them fix every byte on disk. The
+    blind extractor and the comparator keep the empty directory, which is the place the argument
+    above was actually about.
     """
 
     if config is None:
@@ -310,13 +440,20 @@ def _adapter_reviewer(
     role_argv = adapters.launch_argv(config, role)
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
+    wants_checkout = role == _CHECKOUT_ROLE and bool(record.disciplines.get(adapters.SECURITY))
+
     def call(request: Mapping[str, Any]) -> review_policy.Answer:
         argv = list(role_argv) + list(reading.branch_flags(request) if reading else ())
         payload = json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False)
+        checkout = (
+            _pending_changes(repo, str(request.get("trusted_base_sha", "")), str(request.get("subject_head_sha", "")))
+            if wants_checkout
+            else contextlib.nullcontext(None)
+        )
         # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
         # left something undeletable behind must not turn a finished review into a traceback.
-        with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as elsewhere:
-            rc, out = common.run(argv, cwd=elsewhere, timeout=timeout or None, input_text=payload)
+        with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as empty, checkout as tree:
+            rc, out = common.run(argv, cwd=tree or empty, timeout=timeout or None, input_text=payload)
         if rc != 0:
             ledger.add(role, usage_mod.Usage.unavailable())
             # What the adapter said, not merely that it stopped. `common.run` merges stderr into

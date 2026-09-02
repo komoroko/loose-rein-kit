@@ -56,7 +56,8 @@ card spends their attention on reconstruction.
 - **The orient stage says what was built, and under what conditions** — the delivered tasks and the
   claims they answer; which dependency manifests, generated files and migrations moved; **which
   sandbox, image and network posture each quality-gate step ran under**; whether anything ever
-  *launched* the deliverable; the Expected/Actual comparison on its three axes; and what is still
+  *launched* the deliverable; **which tasks' greens were controlled and which could not be** (a task
+  that changed no test file is named, not counted); the Expected/Actual comparison on its three axes; and what is still
   open, including what the implementer said about each task that did **not** land. Every line is
   **derived from the SSOT**, and where it carries a sentence somebody else wrote, the confidence and
   the code anchor travel with it. If the sandbox moved since gate ③ it says so: that blocks nothing
@@ -80,6 +81,13 @@ card spends their attention on reconstruction.
   high/critical — "extra behaviour: undeterminable" cannot be waved through as zero — and below
   that is recorded, shown, and does not shut the gate. The freeze and `rein approve build` read the
   same rule.
+- **A composed review says so, and what it could not read across.** `coverage.composition` names
+  every reading the change was read in — one per scoped task, plus the seam over what two scopes
+  share and what none covers — and every statement and finding carries the reading it came out of.
+  A changed path no reading covered is listed in `unread_paths` and makes the manifest
+  `insufficient`. What composition cannot rule out is behaviour that exists only once two readings
+  are in one tree; at `critical` it is therefore refused outright and the change is read whole or
+  reduced until reading it whole fits.
 - **A blown review budget splits the scope**; it never lengthens the screen. The budgets are
   measured, not declarative — including the diff size — so a change too large for one sitting
   blocks the freeze until the scope is reduced or the limit is raised as a recorded decision.

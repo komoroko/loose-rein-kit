@@ -42,15 +42,26 @@ GIT_TIMEOUT_SEC = 10
 SSOT_DIR = ".rein/"
 
 
-def pathspec_excluding(paths: Sequence[str]) -> tuple[str, ...]:
-    """`everything but these` as a git pathspec. `.` is explicit — only-exclusions match nothing.
+def pathspec_for(include: Sequence[str], exclude: Sequence[str]) -> tuple[str, ...]:
+    """`these paths, minus those` as a git pathspec. An empty `include` means the whole tree.
 
-    The one place the `:(exclude)` spelling lives. Two callers ask different questions of it: what
-    "the tree" is (always and only :data:`SSOT_DIR`) and what the *product under review* is, which
+    The one place the `:(exclude)` spelling lives. Callers ask different questions of it: what
+    "the tree" is (always and only :data:`SSOT_DIR`), what the *product under review* is, which
     is wider — the review must not be handed the plan's own prose or the surfaces `rein install`
-    wrote. Wider, and derived rather than written down: `review.not_the_product` builds the list.
+    wrote (`review_reading.not_the_product` builds that list) — and, when a review is composed out
+    of readings, which slice of the product one reading covers.
+
+    `.` is explicit whenever nothing is included, because a pathspec of only exclusions matches
+    nothing. With an `include` list it would widen the reading back to the whole change, so it is
+    left out.
     """
-    return (".", *(f":(exclude){p.rstrip('/')}" for p in paths))
+    heads = tuple(include) or (".",)
+    return (*heads, *(f":(exclude){p.rstrip('/')}" for p in exclude))
+
+
+def pathspec_excluding(paths: Sequence[str]) -> tuple[str, ...]:
+    """`everything but these` as a git pathspec."""
+    return pathspec_for((), paths)
 
 
 #: The same exclusion as a git pathspec, for the commands that take one.

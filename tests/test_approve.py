@@ -364,6 +364,61 @@ def test_gate_four_refuses_a_review_of_an_older_commit(tmp_path: Path) -> None:
     assert any("says nothing about the commits since" in b for b in approve.readiness(repo, "build"))
 
 
+# --- what gate 5 carries rather than re-reads -------------------------------------
+
+
+def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tmp_path: Path) -> None:
+    """`/verify` no longer commissions a second security reading, so these two checks are what
+    the release gate's security answer now rests on.
+
+    Re-running the reviewer at gate 5 asked the same reviewer about the same commit and wrote the
+    answer into a table cell nothing anchors — and the whole-codebase scope it asked for is a
+    different question from "is this change safe", one the cycle never asked. Carrying gate 4's
+    review instead is sound only because of these: a blocking finding holds this gate shut too, and
+    a review taken against an older commit is refused rather than trusted. If either stops holding,
+    gate 5 has no security evidence at all, so they are pinned here and not only at gate 4.
+    """
+    import subprocess
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    finding = {
+        "id": "SEC-001",
+        "severity": "high",
+        "category": "credential_exposure",
+        "attack_scenario": "the reviewer container reaches a host credential",
+        "blocking": True,
+    }
+    seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}))
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-qm", "reviewed")
+    reviewed_head = git("rev-parse", "HEAD")
+    repo = repo_mod.Repo(tmp_path)
+
+    blocking = make_review(generated=True, human_status="frozen", security_findings=[finding])
+    blocking["machine"]["binding"]["subject_head_sha"] = reviewed_head
+    seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=blocking)
+    assert any("SEC-001" in b for b in approve.readiness(repo, "release")), "a blocking finding holds gate 5 shut"
+
+    clean = make_review(generated=True, human_status="frozen", effective_risk="low")
+    clean["machine"]["binding"]["subject_head_sha"] = reviewed_head
+    seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=clean)
+    assert not [b for b in approve.readiness(repo, "release") if "says nothing" in b]
+
+    git("commit", "-q", "--allow-empty", "-m", "after the review")
+    assert any("says nothing about the commits since" in b for b in approve.readiness(repo, "release")), (
+        "a review about an earlier commit is not this release's security evidence"
+    )
+
+
 # --- what an approval covers ----------------------------------------------------
 
 

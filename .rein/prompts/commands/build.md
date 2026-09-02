@@ -28,11 +28,25 @@ If unapproved, do not work; say "please approve `/tasks` first" and stop.
 4. **DoD** — the `quality_gate` pipeline in `.rein/config.yaml` (default `test` → `check` →
    `review` → `smoke`), the single definition for every task; a task has no `test` command of its
    own. A step already established green against **this exact tree, in this exact image** is reused
-   rather than re-run (the evidence ledger). Then the task's own **`acceptance`** criteria are
-   established the same way — a failing one returns through the same channel a red gate step does,
-   inheriting the send-back budget rather than growing a second one beside it.
+   rather than re-run (the evidence ledger). Then the **negative control**: the same command steps
+   are re-established over the base this change is a change to, with **only the task's test half
+   applied**. If every step is still green, no test in the change exercises it and the green that
+   would have closed the task is a fact about code that was already there — so it goes back to the
+   implementer like a red step. Read the outcomes for what each is worth: the **green** control is
+   the strong one, a fact about every test in the change at once; a **red** one says the test half
+   is not inert against the old code and no more, since it cannot separate a failed assertion from
+   an import the base never had. A task that changed no test file has no control to take, which is
+   **recorded, not passed**, and the record is read: the gate ④ orientation counts the tasks whose
+   control answered and **names the ones where it could not be taken**, so "this task's green rests
+   on tests nobody wrote for it" reaches the approver instead of sitting in a file. Then the task's own **`acceptance`** criteria are established the same way — a
+   failing one returns through the same channel a red gate step does, inheriting the send-back
+   budget rather than growing a second one beside it.
 5. **Budgets** — a failed `cmd` step goes back to the implementer up to that step's own `retries`
-   (over the budget → `blocked`). **Only a failure the code earned counts**: an agent that never
+   (over the budget → `blocked`). The two verdicts that are **not** configured steps — the negative
+   control, and each acceptance criterion — carry one send-back each: the failure names exactly
+   what is missing, and an implementer that cannot answer that in one more launch is saying the
+   ticket needs a human (`rein report --outcome needs-revision`). **Only a failure the code earned
+   counts**: an agent that never
    launched (capacity exhausted, the CLI not on PATH, a supervisor's signal) or a step that could
    not be run at all (no container runtime, no pinned image) produced no verdict, so it spends no
    budget, marks no task, and stops the run instead. A send-back that *cannot help* is not spent
@@ -44,7 +58,10 @@ If unapproved, do not work; say "please approve `/tasks` first" and stop.
    sequentially in **ascending-id order** → **when a batch merged 2+ leaves, re-run the cmd steps
    once on the merged work branch**, since each leaf was green only in isolation. A red goes to a
    fixer within the step's `retries` budget, else the batch's tasks block; a single-leaf join skips
-   it.
+   it. The `agent` steps run over the join too, and there the reviewer is asked about **what only
+   the join can show — cross-task correctness as much as shape**: the suite that just passed here
+   is the union of the leaves' suites, and no test in it was written with this merge in view, so a
+   green over the merged tree says nothing about the interaction.
 7. **Close** — mark the merged tasks `done`, **each carrying the tree its DoD was established on**
    (`evidence` in `state.yaml`) — or **`awaiting-evidence`** when a criterion nobody here can
    establish is still open, which merges the work and parks only the task, and gate ④ cannot open
@@ -171,13 +188,28 @@ is the point; never fold them into the implementer's session.
   all of it). Auto-fixable hooks (ruff/format) resolve on the re-run; manual fixes (mypy, tsc)
   are part of the step. In a project without `make`, substitute that project's commands in the
   config steps.
-- **`review`** applies the **`/code-review`** (bugs/correctness) and **`/simplify`** (reuse/
-  simplification/efficiency — including stripping what the ticket's acceptance criteria do not
-  require: speculative generality, unused knobs/hooks; YAGNI) disciplines. **It reports; it does
+- **`review`** asks two disciplines — **correctness** (bugs) and **simplification** (reuse,
+  needless complexity, and what the ticket's acceptance criteria do not require: speculative
+  generality, unused knobs/hooks; YAGNI) — and then reads the **tests as evidence**: for each acceptance criterion, which test in this change would go red if
+  the behaviour were wrong, and which assertions would hold for any output at all. The negative
+  control below can show that the test half is not *inert*; whether the tests are any *good* is
+  asked here and nowhere else. **It reports; it does
   not repair, and it is launched without write access.** Findings go to
   `.rein/work/T-NNN.findings.json`; the implementer resolves the `must_fix` ones within the
   step's own `retries` budget and the reviewer looks again. A review whose findings cannot be read
   stops the step: an unreadable answer is not an answer that found nothing.
+  Both disciplines are **named to the host that has them**: under Claude Code the reviewer is
+  pointed at `/code-review` and `/simplify`, which read the branch it is on — with the two rules
+  those commands do not carry themselves, that `/simplify`'s fix-applying phase must not run here
+  (whoever judges does not repair) and that findings come back through the findings file and never
+  through a printed report. The questions are written out in the prompt regardless, so a host
+  without them asks exactly the same thing (`adapters.Adapter.disciplines`).
+  **Declared `stage: integration`, it reads the tree the merge produced instead** — the thing no
+  per-task reviewer can see, because each was right to stay inside its own task's scope:
+  duplication between what two tasks added, one responsibility now in two places, an abstraction
+  one task introduced that the next worked around. Its `must_fix` findings go to the integration
+  fixer within the step's own budget; its `consider` findings are filed against the merged task
+  whose scope owns the anchor and reach the human at gate ④.
 - **`stage:`** on any step says where it runs — `task`, `integration`, or `both` (the default).
   It moves *when* a step runs, never whether: a fast focused suite can guard each task while the
   whole one runs once over the join.
@@ -211,9 +243,16 @@ is the point; never fold them into the implementer's session.
 1. **Answer any open change requests first.** Run `rein changes list --gate build --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds gate ④ shut, and approving is what closes the addressed ones.
 2. **Generate the grounded review — the artefact gate ④ approves.** Run `rein review
    generate` (bound to the current HEAD). It runs a deterministic Coverage Manifest, a **blind**
-   actual-behaviour extraction (never given the plan), the Expected/Actual comparison, and the
-   structured security and maintainability review — writing `.rein/review.yaml` and recording
-   the pipeline events. What it reads is the **product**: not `.rein/`, not the plan's own prose
+   actual-behaviour extraction (never given the plan), the structured security review, and the
+   Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
+   **The change is read in *readings*, not in one sitting**: one per task the plan scopes, plus the
+   seam over what two scopes share and what none covers, each launched on its own so one launch
+   holds one task's slice. Most of them are already answered — `rein build` takes each task's
+   reading as it lands — so a regeneration after a review fix re-reads only the task whose code
+   moved. `coverage.composition` records every reading by name and `unread_paths` names any changed
+   path none of them covered, which makes the manifest `insufficient`; a composed reading is
+   refused outright at critical risk. Set `review_policy.composition: whole` to pay for one reading
+   of everything instead. What it reads is the **product**: not `.rein/`, not the plan's own prose
    (the documents gate ③ froze, `docs/tasks/`, the ADRs), not the surfaces `rein install` wrote,
    and — for the blind extractor alone — not the tests. The diff is measured
    against `review_policy.budgets.max_diff_bytes` *before* a model is launched — over

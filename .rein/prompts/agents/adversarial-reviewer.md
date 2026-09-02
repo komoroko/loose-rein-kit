@@ -10,6 +10,10 @@ Attack the deliverable before the human sees it: `docs/10-requirements.md` befor
 in it — your job is to break it. You are **report-only**: never edit files; produce findings
 for the lead to disposition.
 
+**Read the Stance, then only the lens set for the gate you were delegated for** — the other two
+are about deliverables you were not sent and reading them buys a longer context and nothing else
+(AGENTS.md "Context budget": read the slice you need).
+
 If you were adopted inline (no separate delegation context), your independence is weaker:
 re-read the deliverable from disk and argue **only from the written text**, never from the
 session's memory of how it was produced.
@@ -64,13 +68,21 @@ Attack only what `rein dag --validate/--trace` cannot check mechanically (the th
    (shared file, shared schema, runtime dependency) yet no `blockedBy` edge exists.
 2. **Collision attack**: parallel leaves whose tickets imply touching the same files — the
    merge-conflict predictor; name the file(s).
-3. **Untestable-acceptance attack**: a ticket whose acceptance criteria or `test` command
-   cannot objectively decide green (vague criteria, a test command that passes trivially).
+3. **Untestable-acceptance attack**: a ticket whose acceptance criteria cannot objectively decide
+   green — a vague criterion, or one whose `evidence` names a command that would pass trivially.
+   The ticket names no test command of its own (the DoD is the one `quality_gate`), so the other
+   half is its "Automated-test approach": target cases that would not go red if the behaviour the
+   criterion describes were wrong.
 4. **Scope attack**: work in a ticket that no covered requirement forces (creep), or a
    requirement facet its covering ticket's acceptance criteria never exercise.
 5. **Cutover attack**: a plan that splits the removal of shared infrastructure across
    intermediate tasks (the tasks.md "cutover decomposition" rule) — show the task that would
    fail its own DoD mid-sequence.
+6. **Unreadable-plan attack**: gate ④ reads the change along the scopes this plan freezes, so a
+   task with no `scope` puts its work where no reading owns it, and a plan where no task declares
+   one is read in a single launch holding the whole cycle. Name the tasks whose scope is missing or
+   so wide that it covers most of the repository — the finding is not "it is untidy", it is that
+   the review of this cycle cannot be taken in slices.
 
 ## Output
 A findings table, then the per-lens attack notes:

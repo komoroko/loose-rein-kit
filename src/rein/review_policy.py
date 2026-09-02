@@ -301,6 +301,24 @@ def review_schema_enum(*path: str) -> tuple[str, ...]:
     return tuple(str(value) for value in node)
 
 
+def review_schema_max_items(*path: str) -> int:
+    """The `maxItems` `review.schema.json` holds at `path`, walked from `$defs.machine.properties`.
+
+    Read rather than restated for the same reason the enum and the pattern are. It matters more
+    here than it looks: a review composed out of several readings can reach a ceiling a single
+    reading never did, and the caller refuses over it. A number written down twice would make that
+    refusal fire at the wrong size — either short of the schema, or after it, as a validation error
+    several steps from the cause.
+    """
+    node: Any = models.schema("review")["$defs"]["machine"]["properties"]
+    for key in path[1:] if path and path[0] == "machine" else path:
+        node = node[key]
+    limit = node.get("maxItems") if isinstance(node, dict) else None
+    if not isinstance(limit, int):
+        raise ReviewPolicyError(f"review.schema.json has no maxItems at {'.'.join(path)}")
+    return limit
+
+
 def review_schema_pattern(name: str) -> str:
     """The regex `review.schema.json` holds at `$defs.<name>.pattern`.
 
@@ -500,10 +518,24 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
 
     At high/critical, a gap means "Extra Behavior: undeterminable", which cannot be waved
     through as zero (plan §2.4). Below that, the gap is recorded but does not block the gate.
+
+    **A composed reading is refused outright at `critical`.** Composition reads each task's slice
+    on its own and the seam between them, which is enough to say what each slice does and not
+    enough to rule out behaviour that only exists once two of them are in the same tree. That is a
+    stated limit rather than a hidden one — the seam is measured and `coverage.composition` names
+    every reading — and at critical the honest answer is to read the change whole, or to make it
+    small enough that reading it whole is possible.
     """
+    manifest = review.coverage
+    composed = str((manifest.get("composition") or {}).get("mode", "")) == "composed" if manifest else False
+    if composed and models.risk_at_least(effective, "critical"):
+        return [
+            "this review was composed out of separate readings and the change is critical — "
+            "behaviour that only appears once two readings are in one tree was never read. "
+            "Re-read the change whole, or reduce the scope until reading it whole fits the budget"
+        ]
     if not models.risk_at_least(effective, "high"):
         return []
-    manifest = review.coverage
     if not manifest:
         return ["no coverage manifest — Extra Behavior is undeterminable, not zero, on a high/critical change"]
     if str(manifest.get("coverage_status")) == "sufficient":

@@ -392,3 +392,23 @@ def test_cli_trace_test_plan_flags_a_missing_requirement(tmp_path: Path) -> None
     test_plan.write_text("no requirement id appears here\n", encoding="utf-8")
     rc = dag.main(["--trace", "--test-plan", "docs/test/test-plan.md", "--repo", str(tmp_path)])
     assert rc == 1
+
+
+def test_the_render_says_how_gate_four_will_read_the_plan() -> None:
+    """Said at gate ③ because that is where it can still be changed: a plan whose tasks declare no
+    scope is read in one launch holding the whole cycle, and by gate ④ the only remedy left is to
+    split the scope and re-approve."""
+    unscoped = dag.Graph.from_tasks([dag.Task(id="T-001", title="a", kind="foundation")])
+    text = dag.render(unscoped)
+    assert "one reading of the whole cycle" in text
+
+    scoped = dag.Graph.from_tasks(
+        [
+            dag.Task(id="T-001", title="a", kind="foundation", scope_include=("alpha/",)),
+            dag.Task(id="T-002", title="b", kind="parallel", scope_include=("beta/",)),
+            dag.Task(id="T-003", title="c", kind="parallel"),
+        ]
+    )
+    text = dag.render(scoped)
+    assert "2 task reading(s) plus the seam" in text
+    assert "**1 task(s) declare no `scope`** (T-003)" in text

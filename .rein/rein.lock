@@ -2,36 +2,36 @@
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
 format: rein-grounded-v1
-tool_version: 0.3.13
+tool_version: 0.4.0
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.3.13
+  version: 0.4.0
   files:
-    AGENTS.rein.md: sha256:b2a9cb71c3d192fad345c541f89bfa5bce0de27fe2ca7e8a3cc2930721690c25
+    AGENTS.rein.md: sha256:87729c9840e3acc960b826f2d095aeada095e33c3f0f96b83e1ce47e0c880bc8
     oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
     oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
     oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
-    prompts/agents/adversarial-reviewer.md: sha256:8b0e688e806832019a24128f00098757090826ff3147dc533b3ce2eea4fdebe3
+    prompts/agents/adversarial-reviewer.md: sha256:ad06570024893dd1da00836376619c860cc26981d59b422ab2c0ccd327bdb5c1
     prompts/agents/architect.md: sha256:01f47a9e7b0342ca76fae5a3aa4539b9fd82bca60e7435458e8cf34a66a17d12
-    prompts/agents/implementer.md: sha256:6798571c003d677a6987ddfbbe427357cf97ef49a922a675984e37525473b9e7
+    prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64
     prompts/agents/requirements-analyst.md: sha256:f856541626e80f3439a3681c70a9ab09f557b0e3dc5c4ddd229f214b5f8efab3
-    prompts/commands/build.md: sha256:9721e86e6f8c7d80f8436390285ac824f80cd287b60c662c720c466f6a46e113
+    prompts/commands/build.md: sha256:de104f8b76c312d2cd1f40fe9f6055aec4ef5b64ae2c538250bc73b12295aafc
     prompts/commands/design.md: sha256:3990596267138462fb9864c3718f0b767171235287c71712add6cc38b9e1c470
     prompts/commands/onboard.md: sha256:47fd4093b4eda0b469312622f19b0152d2bde1374670976966fd7aa22495ce23
     prompts/commands/req.md: sha256:49f472fa26f5c91161a8edcd93eedf6f1e1fe95825a7e5e0b00be3e1eb54295b
     prompts/commands/revise.md: sha256:7585403488b36fb67395a21a634a889c4f58f2eb69ef53012f7a9b3fac904ff5
     prompts/commands/status.md: sha256:989c5bc65ae297332b350295aa98aa9eab3fc1d8c8d664765d5bb2fa8ede8159
-    prompts/commands/tasks.md: sha256:ef26fa578b566ffc00d40f5cdebeccc394cd2144a357052cdf3561d16b2e9c8e
-    prompts/commands/verify.md: sha256:e14ae224fae71ae7d72bf355ff407cf292206fcff9d1fc1ed2fd92ee950b54a9
-    prompts/rules/gate-workflow.md: sha256:3c3217b88e8f6a336bb825c171f57595411ba1c2c3cbf93de7c997adfbcde1ba
-    schema/config.schema.json: sha256:e4a2f34dbd7bf0110579a1ba6da5cdda7b57cbb8985c17511999b36a779c93cf
+    prompts/commands/tasks.md: sha256:e2d2d01b4413bae9e520eedabd90018c41fdc1d051ffbc0e5302fa87536966d5
+    prompts/commands/verify.md: sha256:05f63a2f4909c683bf26a891cfaa4a543dc77f636fb9063830a63cb9dd993b9d
+    prompts/rules/gate-workflow.md: sha256:d5459d00fa965a72ccf9082f9456b340f2f6019b2dcc28fe17a1dd21d4b14637
+    schema/config.schema.json: sha256:f173495e60717a6f75886a18d061fae6c390710acf1d5ec6179a9c74b8b961ef
     schema/event.schema.json: sha256:e2929100d79882f4929382ad688ad16b8d865588939d632be9e70e711fb49c21
     schema/plan.schema.json: sha256:d757ab47606c25899a5755fbd954b36019fa7f47622397e681d7f0e92bba153d
-    schema/review.schema.json: sha256:9bb34a87280ee4f97d98326e018a47a5da0aa1015d4e46d3b18f25a014403496
-    schema/state.schema.json: sha256:7886f698b8593727831a860f1f3b523101725d745a5d79142fa4ff8c079871ea
+    schema/review.schema.json: sha256:79192fda7059dd3921ecc6db737db3aec2faaf062ea02818ec417c1148f29291
+    schema/state.schema.json: sha256:c3d908de6b54d140202b12d784b201e77a735c3261308dceb4ab43376236d1c2
 integrations:
   claude:
-    version: 0.3.13
+    version: 0.4.0
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:d420f000ac6892cba6f1d753f5a3894018c0e334ad1df77cf2b0904b237ad430
@@ -51,7 +51,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.3.13
+    version: 0.4.0
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:fe72706426bcbb74f939842df53b792ca5c1bba52d3bf1909cb74b0e0ed0f09c
@@ -69,7 +69,7 @@ integrations:
       .codex/hooks.json: sha256:7b64f50c947287ac882d04f0816a79df4d8c7c6b3060137cfb9014d274af0909
       .codex/rein.md: sha256:1df93d787ccbf78331949376863500e069e9471831a870c20fe3ffb33eb7dc95
   copilot:
-    version: 0.3.13
+    version: 0.4.0
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:6a9126f67cd68da0494217e0b47a2c2344031ec0573e04d45d70feb250c7c68d
@@ -88,4 +88,4 @@ integrations:
       .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-09-01'
+updated_at: '2026-09-03'

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,8 @@ from rein import (
     faults,
     models,
     pr_stack,
+    review_policy,
+    review_reading,
 )
 from rein import events as events_mod
 from rein import repo as repo_mod
@@ -915,6 +918,168 @@ def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path)
     )
     assert "conflicted" in conflicted
     assert build_prompts.handoff_note({}) == ""  # a first attempt says nothing about a previous one
+
+
+# --- the reviewer prompt ------------------------------------------------------
+#
+# The reviewer is the only reader that judges the TESTS. The negative control can show that the
+# test half is not inert against the base; nothing else in the loop asks whether a test would go
+# red if the behaviour were wrong, so the question has to be in the prompt or it is asked nowhere.
+
+
+def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], dossier_path=".rein/work/T-001.json")
+    assert "would go red" in prompt
+    assert "not inert" in prompt
+    # And the reason it is here rather than left to the control.
+    assert "only place that judgement is made" in prompt
+
+
+def test_the_reviewer_is_pointed_at_the_criteria_nothing_else_establishes() -> None:
+    """`command` and `artifact` criteria are established by the caller; a prose one is judged here."""
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    prompt = build_prompts.review_prompt(
+        task, gate_cmds=["make test"], dossier_path=".rein/work/T-001.json", diff_cmd="git diff HEAD~1"
+    )
+    assert "`evidence.kind` is `prose`" in prompt
+    assert "already established by the caller" in prompt
+
+
+def test_the_integration_reviewer_is_not_asked_the_test_question() -> None:
+    """The merged tree's suite is the union of the leaves', and every test in it was already read."""
+    from rein import build_prompts
+
+    prompt = build_prompts.integration_review_prompt(
+        "T-001, T-002", gate_cmds=["make test"], diff_cmd="git diff main", findings_path="/tmp/f.json"
+    )
+    assert "would go red" not in prompt
+
+
+# --- the host's own review disciplines ----------------------------------------
+#
+# `/code-review` and `/simplify` were named in rein's prompts as bare prose for several releases:
+# real Claude Code commands, written into text that also runs under `codex` and `gemini`, where
+# they mean nothing. They are a host capability now, declared per adapter, and the question is
+# written out beside them so that a host without them asks the same thing.
+
+
+def _claude_disciplines() -> dict[str, str]:
+    return dict(adapters.ADAPTER_TABLE["claude"].disciplines)
+
+
+def test_only_a_host_that_has_them_is_told_to_use_them() -> None:
+    assert set(_claude_disciplines()) == {adapters.CORRECTNESS, adapters.SIMPLIFICATION, adapters.SECURITY}
+    assert adapters.ADAPTER_TABLE["codex"].disciplines == {}
+    assert adapters.ADAPTER_TABLE["gemini"].disciplines == {}
+    assert adapters.disciplines_for(["nothing-this-release-knows"]) == {}
+
+
+def test_a_host_without_them_is_never_pointed_at_a_command_that_is_not_there() -> None:
+    """The defect this replaced: the prompt named `/code-review` to a CLI that has no such thing."""
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    codex = adapters.ADAPTER_TABLE["codex"].disciplines
+    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=codex)
+    assert "/code-review" not in prompt and "/simplify" not in prompt
+    # The questions themselves are still asked — that is the floor, and it is what a codex reviewer
+    # has always had.
+    assert "correctness bugs" in prompt and "YAGNI" in prompt
+
+
+def test_a_claude_reviewer_is_pointed_at_both_and_told_what_they_must_not_do() -> None:
+    """`/simplify` ends by applying its fixes, and `/code-review ultra` is billed and user-triggered."""
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=_claude_disciplines())
+    assert "/code-review" in prompt and "/simplify" in prompt
+    assert "Run its review phase only" in prompt  # whoever judges does not repair
+    # `--fix` is the same collapse by another route: the reviewer's own fix, read by nobody.
+    assert "Never `/code-review --fix`" in prompt
+    assert "never `/code-review ultra`" in prompt
+    assert "ReportFindings" in prompt  # the answer comes back through the findings file
+    # And a host where the command is missing or disabled is not a reason to stop.
+    assert "ask the questions above yourself" in prompt
+
+
+def test_the_join_says_to_keep_only_what_the_join_shows() -> None:
+    """The disciplines read the whole branch, and each task inside it was already reviewed alone."""
+    from rein import build_prompts
+
+    prompt = build_prompts.integration_review_prompt(
+        "T-001, T-002",
+        gate_cmds=["make test"],
+        diff_cmd="git diff main",
+        findings_path="/tmp/f.json",
+        disciplines=_claude_disciplines(),
+    )
+    assert "Keep what only the join shows" in prompt
+    assert "already reviewed on its own" in prompt
+
+
+def test_the_security_discipline_is_offered_in_the_contract_and_never_replaces_it() -> None:
+    """Its own output is a markdown report; the answer here is the JSON, every finding anchored."""
+    from rein import security_review as sec
+
+    offered = sec.contract("/security-review")
+    assert "/security-review" in offered
+    assert "not the answer here" in offered
+    assert "one JSON object and no other text" in offered  # the contract is unchanged underneath
+    assert "/security-review" not in sec.contract()
+
+
+def test_the_joins_two_send_backs_are_not_framed_as_the_same_work() -> None:
+    """A reviewer's findings are not a red command step, and an implementer is told which it has.
+
+    Both used to go through `integration_fix_prompt`, whose subject is "typically a cross-file
+    lint/format/type error" — so an implementer handed a paragraph about a contract two tasks read
+    differently had to work out that the framing was wrong before it could start.
+    """
+    from rein import build_prompts
+
+    deterministic = build_prompts.integration_fix_prompt(
+        "T-001,T-002", "$ make check (rc=1)\nE  unused import", gate_cmds=["make check"]
+    )
+    from_review = build_prompts.integration_review_fix_prompt(
+        "T-001,T-002", "- must_fix: two tasks read `Config.timeout` differently", gate_cmds=["make check"]
+    )
+    assert "fails the deterministic gate" in deterministic
+    assert "fails the deterministic gate" not in from_review
+    # The review send-back names the reader who will look again, which is what makes disputing a
+    # finding a real option rather than a silence.
+    assert "reviewer looks again" in from_review
+    assert "reviewer looks again" not in deterministic
+    # And it says where the fix belongs, which is the thing only the join's framing carries.
+    assert "belongs between the tasks" in from_review
+
+
+def test_each_join_send_back_reaches_the_implementer_with_its_own_framing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The routing, not just the wording: the loop must hand each caller's prompt through."""
+    from rein import build_prompts
+
+    loop = orchestrator(tmp_path)
+    sent: list[str] = []
+
+    def capture(argv: list[str], **kwargs: object) -> str:
+        sent.append(argv[-1])
+        return ""
+
+    monkeypatch.setattr(loop, "_launch", capture)
+
+    loop._invoke_integration_fixer("T-001", loop._integration_fix_prompt("T-001", "rc=1"))
+    loop._invoke_integration_fixer(
+        "T-001", build_prompts.integration_review_fix_prompt("T-001", "- must_fix: x", gate_cmds=["make check"])
+    )
+    assert "fails the deterministic gate" in sent[0]
+    assert "reviewer looks again" in sent[1]
 
 
 # --- events -------------------------------------------------------------------
@@ -2134,3 +2299,284 @@ def test_the_task_gate_reports_the_step_that_failed(tmp_path: Path, monkeypatch:
     status, log = loop.task_gate(str(tmp_path))
 
     assert status == 1 and "2 tests failed" in log
+
+
+# --- the merged tree is read too ----------------------------------------------
+
+
+def test_an_agent_step_declared_at_the_integration_stage_runs_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stage:` moves *when* a step runs, never whether. An agent step at the integration stage was
+    skipped outright, which made the join the one tree no reviewer ever read."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    step = build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer", stage="integration")
+    monkeypatch.setattr(loop, "_steps_at", lambda stage: (step,) if stage == "integration" else ())
+
+    seen: list[str] = []
+    monkeypatch.setattr(loop, "_run_integration_agent_step", lambda s, tasks: seen.append(s.name))
+    ok, _ = loop._integration_gate([dag.Task(id="T-001", title="t", kind="parallel")])
+    assert ok and seen == ["review"], "the agent step declared at this stage has to run at it"
+
+
+def test_the_integration_reviewers_findings_go_to_the_task_whose_scope_owns_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finding about the join is carried to gate ④ beside the task that owns the code it names —
+    the same derivation gate ④ uses — and one nobody owns is said out loud rather than filed
+    against a task that does not own it."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    tasks = [
+        dag.Task(id="T-001", title="a", kind="parallel", scope_include=("alpha/",)),
+        dag.Task(id="T-002", title="b", kind="parallel", scope_include=("beta/",)),
+    ]
+    loop._file_integration_findings(
+        [
+            {"severity": "consider", "statement": "duplicated helper", "anchor": "beta/mod.py:4"},
+            {"severity": "consider", "statement": "about the join itself"},
+        ],
+        tasks,
+    )
+    assert loop._take_diagnostics("T-002")["review"]["findings"][0]["statement"] == "duplicated helper"
+    assert loop._take_diagnostics("T-001") == {}, "a finding nobody owns is not filed against a task"
+
+
+def test_a_second_review_of_a_task_does_not_discard_the_first(tmp_path: Path) -> None:
+    """A task can be read twice — in its worktree and again after it merges — and the two are
+    different observations. Replacing the key dropped whichever arrived first."""
+    loop = orchestrator(tmp_path)
+    loop._add_review_findings("T-001", [{"severity": "consider", "statement": "from its own reviewer"}])
+    loop._add_review_findings("T-001", [{"severity": "consider", "statement": "from the join"}])
+    kept = loop._take_diagnostics("T-001")["review"]["findings"]
+    assert [f["statement"] for f in kept] == ["from its own reviewer", "from the join"]
+
+
+def test_a_task_with_no_declared_scope_is_not_warmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An undeclared scope means unbounded, so its reading would be the whole change — neither one
+    task wide nor the question gate ④ will ask."""
+    loop = orchestrator(tmp_path)
+    warmed: list[str] = []
+    monkeypatch.setattr(review_reading, "warm", lambda *a, **k: warmed.append("yes"))
+    loop._warm_reading(dag.Task(id="T-001", title="t", kind="foundation"))
+    assert warmed == []
+
+
+def test_a_warm_up_that_cannot_be_taken_does_not_fail_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate takes the reading either way; retrying it once per task would spend a session limit
+    on an optimization."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+
+    def refuse(*_a: object, **_k: object) -> None:
+        raise review_policy.AdapterFailure("the provider said no", rc=429, output="")
+
+    monkeypatch.setattr(review_reading, "warm", refuse)
+    task = dag.Task(id="T-001", title="t", kind="foundation", scope_include=("alpha/",))
+    loop._warm_reading(task)
+    assert loop._warming_off, "one refusal stops the warming rather than being retried per task"
+    loop._warm_reading(task)  # and the second one does not even try
+
+
+# --- the negative control -----------------------------------------------------
+#
+# The DoD is the only automated evidence a task's `done` rests on, and until this existed
+# nothing ever asked whether it could go red. The tests it runs were written by the implementer
+# in the same launch as the code; the blind extractor is never shown them, the security reviewer
+# reads them only as an attack surface, and the per-task reviewer is asked about the source. So
+# the Expected/Actual split was applied to the code and never to the tests, and a test that
+# asserts nothing produces a green that re-running reproduces exactly. These tests pin the
+# experiment that closes it and — as much — the three answers that are *not* passes.
+
+
+def _controlled(
+    loop: build_loop.Orchestrator,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    changed: list[str],
+    reds: dict[str, str] | None = None,
+    apply_rc: int = 0,
+) -> list[str]:
+    """Wire a control run: `changed` is the task's diff, `reds` names the steps that go red."""
+    import contextlib as _contextlib
+
+    from rein import build_git as _build_git
+
+    ran: list[str] = []
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (changed, ""))
+    monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
+    monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "diff --git a/t b/t\n")
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, cwd=None, timeout=None: (apply_rc, "does not apply"))
+
+    @_contextlib.contextmanager
+    def _scratch(*_args: object, **_kw: object) -> Iterator[str]:
+        yield str(loop.root)
+
+    monkeypatch.setattr(_build_git, "scratch_worktree", _scratch)
+
+    def _step(step: build_loop.GateStep, cwd: str, *, note: bool = True) -> str:
+        ran.append(step.name)
+        assert note is False, "a control green is a fact about the control tree, not the task's"
+        return (reds or {}).get(step.name, "")
+
+    monkeypatch.setattr(loop, "_run_cmd_step", _step)
+    return ran
+
+
+def _cmd_steps() -> tuple[build_loop.GateStep, ...]:
+    return (
+        build_loop.GateStep(name="test", kind="command", command=("make", "test")),
+        build_loop.GateStep(name="check", kind="command", command=("make", "check")),
+    )
+
+
+def test_a_dod_that_is_green_without_the_change_does_not_let_the_task_land(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point. Every step still green over the base with only the tests applied means no
+    test in the change exercises it, so the green that would have closed the task is a fact about
+    code that was already there."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
+
+    # A leaf worktree, so the base is the commit it forked off rather than the caller's.
+    failed, message = loop._negative_control(_task(), str(tmp_path / "wt"), "", _cmd_steps())
+
+    assert failed == build_loop.NEGATIVE_CONTROL
+    assert "green without your change" in message
+    assert ran == ["test", "check"]
+    # Deliberately not recorded as evidence: `evidence.negative_control` justifies a `done`, and
+    # this is the verdict that stops there being one. It travels as a task failure instead.
+    assert loop._current_control == {}
+
+
+def test_a_step_that_goes_red_without_the_change_is_what_makes_the_control_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And it stops at the first red: one discriminating step settles the question."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"], reds={"test": "test_x.py::t FAILED"})
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == ["test"]
+    assert loop._current_control == {"result": "discriminating", "base": "a" * 40, "step": "test"}
+
+
+def test_a_task_that_changed_no_test_is_recorded_rather_than_passed_or_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """There is no control to take, and that is neither a pass nor a failure — a task genuinely
+    covered by tests that already existed is a real thing. What it must not be is silent: the
+    record is what says this task's green rests on tests nobody wrote for it."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "README.md"])
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "no_tests_changed"
+
+
+def test_a_control_that_could_not_be_set_up_is_undetermined_and_never_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken experiment is not evidence in either direction. It says why, and it does not
+    borrow the vocabulary of the two answers that were actually reached."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"], apply_rc=1)
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "undetermined"
+    assert "did not apply" in loop._current_control["detail"]
+
+
+def test_a_dod_with_no_command_step_records_that_it_could_not_be_controlled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the silence this record exists to end. `no_tests_changed` says "the green
+    rests on tests nobody wrote for it"; a quality gate made only of agent steps said nothing at
+    all — no record, and so no row on the orient brief, which skips a task that has none."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
+    agents_only = (build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),)
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, agents_only) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "undetermined"
+    assert "no command step" in loop._current_control["detail"]
+
+
+def test_a_diff_git_would_not_give_up_is_not_reported_as_an_empty_test_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`diff_from` returned "" for a failed `git diff`, which reads here as "the change touched no
+    test bytes" — a sentence about a diff that was never obtained."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
+    monkeypatch.setattr(loop.ws, "diff_from", lambda *a, **k: None)
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "undetermined"
+    assert "could not be read out of git" in loop._current_control["detail"]
+
+
+def test_a_control_failure_spends_a_send_back_rather_than_ending_the_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It comes back through the channel a red step uses, and until this test it did not get the
+    thing that channel is made of. `negative-control` is not a configured step, so
+    `budgets.get(name, 0)` answered zero: the task ended on the first control failure with the
+    implementer never told what was missing, while every line describing the mechanism said it
+    spends an attempt like a red step does."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
+    monkeypatch.setattr(loop, "_check_implementer_output", lambda *a, **k: ("", ""))
+    launched: list[str] = []
+    monkeypatch.setattr(loop, "_invoke_implementer", lambda task, cwd, failure_log, **k: launched.append(failure_log))
+    monkeypatch.setattr(
+        loop, "_run_pipeline", lambda task, cwd, base="": (build_loop.NEGATIVE_CONTROL, "green without your change")
+    )
+
+    ok, _ = loop._run_task_to_done(_task(), str(tmp_path))
+
+    assert ok is False
+    assert len(launched) == 1 + build_loop.SEND_BACK_RETRIES, launched
+    assert "green without your change" in launched[-1], "the send-back carries what is missing"
+
+
+def test_a_verdict_with_no_send_back_budget_is_a_failure_and_not_a_silent_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shape both bugs came out of: `.get(name, 0)` turned "this loop has no send-back rule for
+    that verdict" into "this verdict has no retries left", which reads identically in the log and
+    ends the task either way."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
+    monkeypatch.setattr(loop, "_check_implementer_output", lambda *a, **k: ("", ""))
+    monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: None)
+    monkeypatch.setattr(loop, "_run_pipeline", lambda task, cwd, base="": ("a-verdict-nobody-seeded", "x"))
+
+    with pytest.raises(common.ReinError, match="no retry budget is registered"):
+        loop._run_task_to_done(_task(), str(tmp_path))
+
+
+def test_the_control_runs_only_the_command_steps_that_actually_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It negates the claim the gate just made, so its subject is exactly the steps that made it —
+    an agent step judged nothing a re-run could contradict, and a step that never ran claimed
+    nothing to negate."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["tests/test_x.py"])
+    passed = (
+        build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),
+        build_loop.GateStep(name="smoke", kind="command"),
+        build_loop.GateStep(name="test", kind="command", command=("make", "test")),
+    )
+
+    loop._negative_control(_task(), str(loop.root), "a" * 40, passed)
+    assert ran == ["test"]

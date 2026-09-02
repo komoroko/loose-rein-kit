@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from rein import common, dag_trace, doctor, models, upstream
+from rein import lock as lock_mod
 from rein import repo as repo_mod
 from tests._support import (
     DEMO_CYCLE,
@@ -1210,6 +1211,24 @@ def test_a_schema_invalid_document_is_reported_with_the_command_that_repairs_it(
     failed = [f for f in findings if f.level == "FAIL" and f.message.startswith("config.yaml")]
     assert failed, "a config the schema refuses is a FAIL"
     assert "rein revise --to tasks" in failed[0].message
+
+
+def test_a_document_a_newer_rein_wrote_is_not_reported_as_damaged(tmp_path: Path) -> None:
+    """The same FAIL, a different cause, and the difference is what the human is told to do.
+
+    A repository written by a newer release carries keys this tool's schema has never heard of, so
+    every document check fails — and the standing repair sends them to `rein revise --to tasks`,
+    rewinding an approved gate to fix a document that is not broken. The skew is knowable (the lock
+    records who wrote it), so the repair line says to upgrade instead.
+    """
+    (tmp_path / ".rein").mkdir()
+    (tmp_path / ".rein" / "config.yaml").write_text("not_a_known_key: 1\n", encoding="utf-8")
+    lock_mod.write(tmp_path / ".rein" / "rein.lock", lock_mod.new("99.0.0", ""))
+    findings, _ = doctor.check_documents(repo_mod.Repo(tmp_path))
+    failed = [f for f in findings if f.level == "FAIL" and f.message.startswith("config.yaml")]
+    assert failed, "the tool still cannot read it, so it is still a FAIL"
+    assert "99.0.0" in failed[0].message
+    assert "rein revise --to tasks" not in failed[0].message, "never a gate rollback for a stale tool"
 
 
 def test_the_stack_extension_is_reported_when_gh_is_there(monkeypatch: pytest.MonkeyPatch) -> None:

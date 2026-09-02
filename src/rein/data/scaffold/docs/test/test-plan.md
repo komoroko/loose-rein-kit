@@ -31,16 +31,23 @@ Legend: ✅ pass / ❌ fail / ⬜ not run
 - [ ] No degradation at expected data volume
 
 ### Security (mandatory in `/verify`)
-- [ ] Run **`/security-review`** and resolve findings (code vulnerability review)
+
+The change's own review is **carried from gate ④, not re-run here**: it was taken against the
+commit under review, a blocking finding holds this gate shut, and readiness refuses a review whose
+`subject_head_sha` is not this HEAD. Name it below rather than repeating it. The dependency audit
+is the opposite case — its answer is not a function of the tree, so it must be taken again, and it
+is only worth what its date and commit say it is.
+
+- [ ] The carried gate-④ security review is named below (which review, and what it found)
 - [ ] Run **`make audit`** and have no known dependency vulnerabilities (Python: pip-audit / frontend: pnpm audit)
 - [ ] No plaintext storage / log output of secrets (gitleaks mechanically prevents this at the commit stage)
 - [ ] Input validation / injection countermeasures
 
-| Check | Result | Severity | Notes |
-|------|------|--------|------|
-| /security-review | ⬜ | | |
-| make audit (Python) | ⬜ | | |
-| make audit (frontend) | ⬜ | | |
+| Check | Result | Severity | Taken against (commit / date) | Notes |
+|------|------|--------|------|------|
+| gate-④ security review (carried) | ⬜ | | `subject_head_sha` | findings by severity |
+| make audit (Python) | ⬜ | | commit + date it was run | |
+| make audit (frontend) | ⬜ | | commit + date it was run | |
 
 ### Reliability / operations
 - [ ] Behavior on error is as defined

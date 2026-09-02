@@ -54,6 +54,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -71,6 +72,7 @@ from rein import (
     conflict,
     control_plane,
     dag,
+    diff_facts,
     digests,
     dossier,
     event_chain,
@@ -78,8 +80,13 @@ from rein import (
     executors,
     faults,
     gate_guard,
+    human_review,
     models,
     preflight,
+    review_cache,
+    review_policy,
+    review_reading,
+    review_transport,
     run_record,
     strict_yaml,
 )
@@ -88,6 +95,34 @@ from rein import store as store_mod
 from rein import usage as usage_mod
 
 logger = logging.getLogger(__name__)
+
+#: What the integration reviewer's findings file is named after. Not a task id — the subject is the
+#: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
+_INTEGRATION_SUBJECT = "integration"
+
+#: What a failed negative control is reported as. Not a step in `quality_gate` — it is a verdict on
+#: what those steps *together* claimed — but it comes back through the same channel a red step
+#: does, so the retry loop has to know the name.
+NEGATIVE_CONTROL = "negative-control"
+
+#: What a failed acceptance criterion is reported as, followed by the criterion's own id. Written
+#: down here because the retry loop has to seed a budget under the same name `_run_acceptance`
+#: returns, and a prefix spelled twice is a budget nobody finds.
+_ACCEPTANCE_PREFIX = "acceptance:"
+
+#: The send-back allowance for a gate verdict that is **not** a configured command step: the
+#: negative control, and each of the task's own acceptance criteria. Both come back through the
+#: channel a red step uses and neither has a `retries` of its own to inherit, so `budgets` had no
+#: entry for either and `.get(name, 0)` answered zero — the task ended on the first occurrence,
+#: having never told the implementer what was missing, while the docstring of each said it
+#: "inherits the send-back budget and the retry machinery whole".
+#:
+#: Not derived from `quality_gate`: no step there is either of these, and any step's number would
+#: be a guess wearing a derivation. One, because both failures name exactly what is missing — a
+#: test that fails against the old code, or the criterion the ticket asked for — and an implementer
+#: that cannot answer that in one more launch is telling you the ticket needs a human, which is
+#: what `rein report --outcome needs-revision` is for rather than a budget to keep spending.
+SEND_BACK_RETRIES = 1
 
 StopLoop = common.StopLoop
 EnvironmentFault = faults.EnvironmentFault
@@ -730,6 +765,9 @@ class Orchestrator:
         # established, outside the working tree. Off in a dry run (nothing is established) and
         # off when the operator says so. A miss only ever costs a re-run.
         self.ledger = evidence.Ledger.for_repo(self.repo, enabled=not dry_run and evidence.cache_enabled_by_env())
+        #: Set once a gate-④ warm-up could not be taken. Retrying it per task would spend a session
+        #: limit on an optimization, and the gate takes the reading either way (`_warm_reading`).
+        self._warming_off = False
         # What each task's gate steps were established green against, keyed by task id. Written
         # into `state.yaml` beside the `done` it justifies — this is the auditable half.
         self._evidence: dict[str, dict[str, Any]] = {}
@@ -781,6 +819,14 @@ class Orchestrator:
             established = []
             self._local.acceptance = established
         return established
+
+    @property
+    def _current_control(self) -> dict[str, Any]:
+        control = getattr(self._local, "negative_control", None)
+        if control is None:
+            control = {}
+            self._local.negative_control = control
+        return control
 
     def _row_for(self, role: str) -> dict[str, int]:
         return self._spent.setdefault(role, {"launches": 0, "prompt_bytes": 0, "handed_bytes": 0, "cold_launches": 0})
@@ -876,6 +922,22 @@ class Orchestrator:
             return
         with self._evidence_lock:
             self._pending_diagnostics.setdefault(task_id, {}).update(patch)
+
+    def _add_review_findings(self, task_id: str, findings: Sequence[Mapping[str, Any]]) -> None:
+        """Add review findings to what this task will carry, without discarding what it already has.
+
+        A task can be read twice — by its own reviewer in its worktree, and by the integration
+        reviewer once it has merged — and the two are different observations of different trees.
+        Replacing the key would silently drop whichever arrived first, which for the per-task
+        reviewer is the one whose findings `brief.residual_findings` carries to gate ④.
+        """
+        if self.dry_run or not task_id:
+            return
+        with self._evidence_lock:
+            review = self._pending_diagnostics.setdefault(task_id, {}).setdefault("review", {})
+            kept = list(review.get("findings") or [])
+            kept += [dict(f) for f in findings]
+            review["findings"] = kept
 
     def _take_diagnostics(self, task_id: str) -> dict[str, Any]:
         with self._evidence_lock:
@@ -1262,7 +1324,13 @@ class Orchestrator:
         return [], ""
 
     def _review_prompt(
-        self, task: dag.Task, cwd: str, base: str, dossier_path: str = "", findings_path: str = ""
+        self,
+        task: dag.Task,
+        cwd: str,
+        base: str,
+        dossier_path: str = "",
+        findings_path: str = "",
+        argv: Sequence[str] = (),
     ) -> str:
         changed, diff_cmd = self._review_scope(task, cwd, base)
         return build_prompts.review_prompt(
@@ -1272,6 +1340,10 @@ class Orchestrator:
             diff_cmd=diff_cmd,
             dossier_path=dossier_path,
             findings_path=findings_path,
+            # Keyed on the argv this step will actually be launched with, not on the default one: a
+            # step may name its own `agent_argv`, and offering a discipline the launched CLI does
+            # not have is the dangling reference this replaced.
+            disciplines=adapters.disciplines_for(argv or self.config.adapter_argv),
         )
 
     def _fingerprint(self, cwd: str) -> str:
@@ -1301,7 +1373,7 @@ class Orchestrator:
         rounds = max(0, step.retries)
         for attempt in range(rounds + 1):
             findings = self._collect_findings(step, task, cwd, base, role)
-            self._note_diagnostic(task.id, {"review": {"findings": list(findings)}})
+            self._add_review_findings(task.id, findings)
             outstanding = dossier.must_fix(findings)
             if not outstanding:
                 if findings:
@@ -1327,7 +1399,7 @@ class Orchestrator:
         target = dossier.findings_path(cwd, task.id)
         target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         argv = step.agent_argv or self.config.adapter_argv
-        prompt = self._review_prompt(task, cwd, base, dossier_path, f"{dossier.RELATIVE_PATH}/{target.name}")
+        prompt = self._review_prompt(task, cwd, base, dossier_path, f"{dossier.RELATIVE_PATH}/{target.name}", argv=argv)
         # No write flags: the reviewer's `.rein/work/` file is the only thing it needs to produce,
         # and everything else it might touch belongs to somebody else.
         self._launch(
@@ -1415,7 +1487,7 @@ class Orchestrator:
         )
         return str(self._read_report(ours).get("outcome", "")) if ours is not None else ""
 
-    def _run_cmd_step(self, step: GateStep, cwd: str) -> str:
+    def _run_cmd_step(self, step: GateStep, cwd: str, *, note: bool = True) -> str:
         """Run one cmd step in its executor profile. "" on pass, a compact failure otherwise.
 
         Raises :class:`faults.EnvironmentFault` when the step could not be *run* — no container
@@ -1438,7 +1510,8 @@ class Orchestrator:
         subject = self._fingerprint(cwd)
         if self.ledger.hit(evidence.KIND_GATE_STEP, subject, tool):
             print(f"    [gate] {step.name}: already green on this tree — reusing")
-            self._note_evidence(step, profile, reused=True)
+            if note:
+                self._note_evidence(step, profile, reused=True)
             return ""
         spec = executors.ExecutionSpec(
             command=tuple(step.command),
@@ -1457,7 +1530,8 @@ class Orchestrator:
             # a verdict on code nobody re-ran, which is the direction that costs correctness
             # rather than time.
             self.ledger.record(evidence.KIND_GATE_STEP, subject, tool)
-            self._note_evidence(step, profile, reused=False)
+            if note:
+                self._note_evidence(step, profile, reused=False)
             return ""
         fault = faults.classify_step(result.exit_code, result.output)
         if fault.is_environment:
@@ -1556,7 +1630,152 @@ class Orchestrator:
             if failure:
                 return step.name, failure
             passed.append(step)
+        failed, failure = self._negative_control(task, cwd, base, passed)
+        if failed:
+            return failed, failure
         return self._run_acceptance(task, cwd)
+
+    def _negative_control(
+        self, task: dag.Task, cwd: str, base: str, passed: Sequence[GateStep]
+    ) -> tuple[str | None, str]:
+        """Ask whether the DoD that just went green would have gone green *without* the change.
+
+        The DoD is the only automated evidence a task's `done` rests on, and until this existed
+        nobody ever asked whether it could go red. The tests it runs were written by the
+        implementer in the same launch as the code they test; the blind extractor is deliberately
+        never shown them (`review_reading.split_tests`), and the security reviewer reads them only
+        for what an attacker could do with them. So the Expected/Actual split this whole workflow is
+        built on reached the code and — until the per-task reviewer was asked the question named
+        below — never once the tests, and a test that asserts nothing produces a green that
+        re-running it reproduces exactly. Re-running defends against an agent that *lies*; it does nothing
+        against one that *self-confirms*, which is the failure mode this system exists to catch.
+
+        The control is the experiment that closes it, and it is mechanical rather than a reading:
+        take the base commit this change is a change to, apply **only the task's test half** onto
+        it, and re-establish the steps that just passed. If every step is still green, nothing in
+        the change is under test, and the green that would have closed the task is a fact about
+        code that was already there.
+
+        **Read the two outcomes for what each is worth — they are not symmetric.** A green control
+        is the strong one: it is a fact about every test in the change at once, and no reading of
+        the test files could establish it more cheaply or more surely. A red one says only that
+        the test half is *not inert* against the old code — the step that went red may have gone
+        red because a test asserted something false there, or because the test imports a symbol
+        the base does not have and never got as far as asserting anything. This experiment cannot
+        separate those without parsing a test runner's output, which is a thing this loop does not
+        do. So `discriminating` is the absence of the failure, not the presence of a good test;
+        what asks whether the tests are *any good* is the per-task reviewer, which reads them.
+
+        Three answers are not passes, and each says so rather than being folded into one:
+
+        * **no test path changed** — there is no control to take. Not a failure: a task whose work
+          is genuinely covered by tests that already existed is a real thing, and blocking it would
+          make the loop demand a test per task rather than evidence per claim. It is recorded, so
+          "this task's green rests on tests nobody wrote for it" is on the record instead of being
+          the silence it has always been.
+        * **the control could not be set up** — no base, no command step in the DoD to re-establish,
+          a diff git would not give up, an unapplied patch, a worktree that would not create.
+          Recorded with the reason. Never a pass and never a block: a broken experiment is not
+          evidence in either direction, and inventing a verdict from one is the thing the rest of
+          this module refuses to do.
+        * **every step green** — the block. It comes back through the same channel a red step does,
+          so it spends that attempt's budget and the implementer is told what is missing.
+        """
+        commands = [step for step in passed if step.kind == "command" and step.command]
+        if self.dry_run:
+            return None, ""
+        if not commands:
+            # Recorded rather than returned in silence, for the same reason `no_tests_changed` is:
+            # a quality gate made only of agent steps, or one whose command steps are all
+            # unconfigured, leaves the task's `done` resting on nothing this experiment can negate.
+            # Saying so is the whole point of the record, and `brief._control` reads it.
+            return self._control_undetermined("the quality gate passed no command step to re-establish")
+        changed, _ = self._review_scope(task, cwd, base)
+        tests = [path for path in changed if diff_facts.classify_path(path) == "test"]
+        if not tests:
+            self._note_control("no_tests_changed", detail="the change touched no test path")
+            print(f"    [control] {task.id}: no test path changed — the DoD's green is not controlled")
+            return None, ""
+        control_base = base if cwd == self.root else self.ws.fork_point(self.ws.target_branch(task.id), cwd)
+        if not control_base:
+            return self._control_undetermined("the base this change is a change to could not be resolved")
+        patch = self.ws.diff_from(control_base, cwd, tests)
+        if patch is None:
+            return self._control_undetermined(
+                f"the test half of the change against {control_base[:12]} could not be read out of git"
+            )
+        if not patch.strip():
+            return self._control_undetermined(f"the test half of the change against {control_base[:12]} was empty")
+        try:
+            return self._take_control(task, control_base, patch, commands)
+        except EnvironmentFault:
+            raise
+        except StopLoop as exc:
+            return self._control_undetermined(str(exc))
+
+    def _take_control(
+        self, task: dag.Task, control_base: str, patch: str, commands: Sequence[GateStep]
+    ) -> tuple[str | None, str]:
+        """Run `commands` over `control_base` + `patch` and report which of them went red."""
+        with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as handle:
+            handle.write(patch)
+            patch_file = handle.name
+        try:
+            with build_git.scratch_worktree(
+                self.repo, self.config.worktree_dir, f"control-{task.id}", control_base, _late_run
+            ) as control_cwd:
+                rc, out = _late_run(["git", "apply", patch_file], cwd=control_cwd)
+                if rc != 0:
+                    return self._control_undetermined(
+                        f"the test half did not apply onto {control_base[:12]}: {out[-300:]}"
+                    )
+                for step in commands:
+                    # `note=False`: this green is a fact about the control tree, not about the
+                    # task's, and the task's `evidence.steps` is the list of what its own DoD
+                    # established. The ledger still records it — it is a true fact about a real
+                    # tree, keyed on that tree's fingerprint, so it can never be mistaken for one
+                    # about the task's.
+                    if self._run_cmd_step(step, control_cwd, note=False):
+                        self._note_control("discriminating", base=control_base, step=step.name)
+                        print(
+                            f"    [control] {task.id}: '{step.name}' goes red without the change "
+                            "— the test half is not inert"
+                        )
+                        return None, ""
+        finally:
+            Path(patch_file).unlink(missing_ok=True)
+        # Deliberately not noted: `evidence.negative_control` justifies a `done`, and this verdict
+        # is the one that stops there being one. It travels as a task failure instead — the same
+        # channel a red step uses, under the step name `NEGATIVE_CONTROL` — so the event chain
+        # carries it and the next attempt inherits the summary.
+        names = ", ".join(step.name for step in commands)
+        return NEGATIVE_CONTROL, (
+            f"The quality gate is green, and it is green without your change. Re-running "
+            f"{names} over {control_base[:12]} with only this task's test files applied passed "
+            "every step, which means no test in this change exercises it: whatever the code now "
+            "does, the suite would say the same if the code were not there.\n"
+            "Add or fix a test that fails against the code as it was and passes against the code "
+            "as it is. If this task genuinely cannot be tested that way — it changes no behaviour "
+            "anything can observe — say so with `rein report --outcome needs-revision` and name "
+            "the acceptance criterion that has no observable form, rather than writing a test that "
+            "cannot fail."
+        )
+
+    def _control_undetermined(self, detail: str) -> tuple[str | None, str]:
+        self._note_control("undetermined", detail=detail)
+        print(f"    [control] could not be taken: {detail}")
+        return None, ""
+
+    def _note_control(self, result: str, *, base: str = "", step: str = "", detail: str = "") -> None:
+        record: dict[str, Any] = {"result": result}
+        if base:
+            record["base"] = base
+        if step:
+            record["step"] = step
+        if detail:
+            record["detail"] = detail[:500]
+        self._current_control.clear()
+        self._current_control.update(record)
 
     def _run_acceptance(self, task: dag.Task, cwd: str) -> tuple[str | None, str]:
         """Establish the task's own acceptance criteria, after the shared DoD has passed.
@@ -1583,7 +1802,7 @@ class Orchestrator:
             failure = self._establish_acceptance(task, ac_id, kind, evidence_spec, cwd)
             if failure:
                 statement = str(entry.get("statement", ""))
-                return f"acceptance:{ac_id}", f"{ac_id} ({statement}) is not satisfied.\n{failure}"
+                return f"{_ACCEPTANCE_PREFIX}{ac_id}", f"{ac_id} ({statement}) is not satisfied.\n{failure}"
         return None, ""
 
     def _establish_acceptance(self, task: dag.Task, ac_id: str, kind: str, spec: Mapping[str, Any], cwd: str) -> str:
@@ -1614,6 +1833,54 @@ class Orchestrator:
 
     def _note_acceptance(self, ac_id: str, kind: str, *, reused: bool) -> None:
         self._current_acceptance.append({"id": ac_id, "kind": kind, "reused": reused})
+
+    def _warm_reading(self, task: dag.Task) -> None:
+        """Take gate ④'s reading of this task now, while its diff is one task wide.
+
+        The gate reads the change in the readings the plan's task scopes describe
+        (`review_reading.plan_readings`), and it asks each one the same question this does — same
+        measure, same key. Answering it here means the gate finds it answered: the peak of one
+        launch stays the size of one task, and a review regenerated after a fix re-reads only the
+        task whose code moved.
+
+        **A warm-up never fails a build.** It is an optimization over a cache the gate does not
+        depend on: if it does not happen, `rein review generate` takes the reading itself, at the
+        cost this exists to avoid and with nothing else different. So an adapter that will not
+        answer stops the warming for the rest of the run — retrying it once per task would spend a
+        session limit on it — and says so once, rather than stopping the build.
+
+        Skipped for a task with no declared scope: an undeclared scope means *unbounded*, so its
+        reading would be the whole change, which is neither one task wide nor what the gate will
+        ask for.
+        """
+        if self.dry_run or self._warming_off or self.config.raw.composition == review_reading.WHOLE:
+            return
+        if not task.scope_include:
+            return
+        try:
+            # The same base the gate will resolve, not the plan's field: they differ whenever the
+            # plan names a commit this checkout does not have, and a warm-up taken against a
+            # different base answers a question nobody asks.
+            base = review_reading.resolve_base(self.repo, self._plan, None)
+            head = self.repo._git_rc("rev-parse", "HEAD")[1].strip()
+            if not base or not head:
+                return
+            exclude = review_reading.not_the_product(self.repo, self.state)
+            limits = {**human_review.DEFAULT_BUDGET, **self.config.raw.budgets}
+            review_reading.warm(
+                self.repo,
+                review_transport.StagedReviewers(self.repo, config=self.config.raw),
+                reading=review_reading.Reading(unit=task.id, include=tuple(task.scope_include)),
+                base=base,
+                head=head,
+                exclude=exclude,
+                limits=limits,
+                config=self.config.raw,
+                cache=review_cache.StageCache(self.repo.root),
+            )
+        except (review_policy.ReviewPolicyError, common.ReinError, OSError) as exc:
+            self._warming_off = True
+            print(f"    [review] {task.id}: the gate-④ reading was not taken here ({exc}); the gate will take it")
 
     def _completion_status(self, task: dag.Task) -> str:
         """`done`, or `awaiting-evidence` when a criterion nobody here can establish is still open.
@@ -1689,6 +1956,8 @@ class Orchestrator:
         }
         if self._current_acceptance:
             record["acceptance"] = list(self._current_acceptance)
+        if self._current_control:
+            record["negative_control"] = dict(self._current_control)
         fingerprint = self._fingerprint(cwd)
         if fingerprint:
             record["tree"] = fingerprint
@@ -1848,6 +2117,12 @@ class Orchestrator:
         attempt that already said "I am blocked" spends a model on a question nobody asked.
         """
         budgets = {s.name: s.retries for s in self._steps_for(task, cwd, base) if s.kind == "command"}
+        # Every other verdict `_run_pipeline` can return. Neither the negative control nor an
+        # acceptance criterion is a configured step, and both come back through this channel, so
+        # without an entry here each one got the silent zero `.get(name, 0)` produced.
+        budgets[NEGATIVE_CONTROL] = SEND_BACK_RETRIES
+        for entry in task.acceptance:
+            budgets[f"{_ACCEPTANCE_PREFIX}{entry.get('id', '?')}"] = SEND_BACK_RETRIES
         # What an earlier, interrupted attempt left behind. Restoring the budgets is the load-
         # bearing half: a run killed mid-task and restarted otherwise came back with a full
         # allowance every time, so a task that can never pass could burn retries forever.
@@ -1895,7 +2170,7 @@ class Orchestrator:
                     # "ask the same question a second time".
                     self._stop_before_the_gate(task, kind, message, tree=self._fingerprint(cwd))
                     return False, message
-            self._local.steps, self._local.acceptance = [], []
+            self._local.steps, self._local.acceptance, self._local.negative_control = [], [], {}
             after_implementer = self._fingerprint(cwd)
             failed, failure_log = self._run_pipeline(task, cwd, base)
             if failed is None:
@@ -1903,7 +2178,13 @@ class Orchestrator:
                 return True, ""
             futile = self._futile(task, failed, failure_log, after_implementer, seen)
             seen = (failed, digests.of_bytes(failure_log.encode("utf-8")), after_implementer)
-            left = 0 if futile else budgets.get(failed, 0)
+            if failed not in budgets:
+                # Every name `_run_pipeline` can return is seeded above. One that is not is a
+                # verdict this loop has no send-back rule for, and the old `.get(failed, 0)` gave
+                # it a silent zero — ending the task on its first occurrence, with the log saying
+                # "retries left: 0" for a budget nobody had ever set.
+                raise common.ReinError(f"internal: no retry budget is registered for the gate verdict {failed!r}")
+            left = 0 if futile else budgets[failed]
             if futile:
                 print(f"    quality gate fail at step '{failed}', not retried — {futile}")
             else:
@@ -1933,12 +2214,19 @@ class Orchestrator:
     def _integration_fix_prompt(self, ids: str, failure_log: str) -> str:
         return build_prompts.integration_fix_prompt(ids, failure_log, gate_cmds=self.config.gate_cmds)
 
-    def _invoke_integration_fixer(self, ids: str, failure_log: str) -> None:
+    def _invoke_integration_fixer(self, ids: str, prompt: str) -> None:
+        """One implementer launch over the merged tree. The caller says what it is being sent.
+
+        The prompt is the caller's because the join has two send-backs and they are not the same
+        work: a red command step, and a reviewer's findings about what only the join shows. Both
+        used to be framed as "the combined state fails the deterministic gate", which was true of
+        one of them (`integration_fix_prompt`, `integration_review_fix_prompt`).
+        """
         self._launch(
             [
                 *self.config.adapter_argv,
                 *adapters.write_flags(self.config.adapter_argv),
-                self._integration_fix_prompt(ids, failure_log),
+                prompt,
             ],
             cwd=self.root,
             where=f"{ids}: the integration fixer",
@@ -1967,7 +2255,14 @@ class Orchestrator:
         while True:
             failed, failure_log = None, ""
             for step in self._steps_at("integration"):
-                if step.kind != "command" or not step.command:
+                if step.kind == "agent":
+                    # `stage:` moves *when* a step runs, never whether — and an agent step declared
+                    # at the integration stage was being skipped, which made the join the one tree
+                    # no reviewer ever read. The command steps have just run over it; this is the
+                    # half of the question they cannot answer.
+                    self._run_integration_agent_step(step, tasks)
+                    continue
+                if not step.command:
                     continue
                 failure = self._run_cmd_step(step, cwd=self.root)
                 if failure:
@@ -1992,7 +2287,86 @@ class Orchestrator:
             if left <= 0:
                 return False, failure_log
             budgets[failed] = left - 1
-            self._invoke_integration_fixer(ids, failure_log)
+            self._invoke_integration_fixer(ids, self._integration_fix_prompt(ids, failure_log))
+
+    def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task]) -> None:
+        """Read the tree the merge produced, which no per-task reviewer ever saw.
+
+        Its `must_fix` findings go back to the integration fixer within this step's own retries,
+        the same shape a red command step takes; unresolved ones stop the batch rather than being
+        reported as passed. Its `consider` findings are attributed to the merged task whose
+        declared scope owns the anchor — the same derivation gate ④ uses to decide which task
+        answers a finding (`findings.owner_of_path`) — so they reach the human through
+        `brief.residual_findings` beside that task's own review, stamped with the tree they were
+        made against. A finding no task's scope owns is printed rather than filed against a task
+        that does not own it: gate ④'s seam reading covers exactly that region, and inventing an
+        owner here is the guess `findings` refuses to make.
+        """
+        ids = ",".join(t.id for t in tasks)
+        target = dossier.findings_path(self.root, _INTEGRATION_SUBJECT)
+        rounds = max(0, step.retries)
+        for attempt in range(rounds + 1):
+            target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
+            self._launch(
+                [
+                    *(step.agent_argv or self.config.adapter_argv),
+                    build_prompts.integration_review_prompt(
+                        ids,
+                        gate_cmds=self.config.gate_cmds,
+                        diff_cmd=f"git diff {self._plan.base_commit if self._plan else 'HEAD~1'}..HEAD",
+                        findings_path=f"{dossier.RELATIVE_PATH}/{target.name}",
+                        disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
+                    ),
+                ],
+                cwd=self.root,
+                where=f"{ids}: the '{step.name}' agent step over the merged tree",
+                role=step.agent_role or "code_reviewer",
+            )
+            if not target.exists():
+                raise StopLoop(
+                    f"{ids}: the integration reviewer wrote no findings file "
+                    f"({dossier.RELATIVE_PATH}/{target.name}). A review that produced nothing "
+                    "readable is not a review that found nothing."
+                )
+            try:
+                findings = dossier.parse_findings(target.read_text(encoding="utf-8"))
+            except (dossier.FindingsError, OSError) as exc:
+                raise StopLoop(f"{ids}: the integration reviewer's findings could not be read — {exc}") from None
+            outstanding = dossier.must_fix(findings)
+            if not outstanding:
+                self._file_integration_findings(findings, tasks)
+                if findings:
+                    print(f"    [review] {ids}: {len(findings)} finding(s) about the join, none blocking")
+                return
+            if attempt == rounds:
+                raise StopLoop(
+                    f"{ids}: the integration reviewer's findings were not resolved within "
+                    f"{rounds} round(s):\n{dossier.render_findings(outstanding)}"
+                )
+            print(f"    [review] {ids}: {len(outstanding)} must-fix finding(s) about the join → back to an implementer")
+            self._invoke_integration_fixer(
+                ids,
+                build_prompts.integration_review_fix_prompt(
+                    ids, dossier.render_findings(outstanding), gate_cmds=self.config.gate_cmds
+                ),
+            )
+
+    def _file_integration_findings(self, findings: Sequence[Mapping[str, Any]], tasks: Sequence[dag.Task]) -> None:
+        """Attribute each non-blocking finding to the merged task whose scope owns its anchor."""
+        owners = {t.id: t.scope_include for t in tasks}
+        for finding in findings:
+            path = str(finding.get("anchor", "")).split(":", 1)[0]
+            owner = ""
+            if path:
+                best = -1
+                for task_id, scope in owners.items():
+                    covered = common.longest_cover(path, scope)
+                    if covered is not None and len(covered.rstrip("/")) > best:
+                        owner, best = task_id, len(covered.rstrip("/"))
+            if owner:
+                self._add_review_findings(owner, [finding])
+            else:
+                print(f"    [review] a finding about the join no task's scope owns: {finding.get('statement', '')}")
 
     # -- worktree / merge --
 
@@ -2481,6 +2855,7 @@ class Orchestrator:
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
             self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
+            self._warm_reading(task)
 
     def _consume_parallel(self, tasks: list[dag.Task]) -> None:
         """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
@@ -2594,6 +2969,7 @@ class Orchestrator:
         if ok:
             for task in merged:
                 self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
+                self._warm_reading(task)
         else:
             for task in merged:
                 self._set_status(task.id, "blocked")

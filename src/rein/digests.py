@@ -206,13 +206,31 @@ def tree_digest(entries: Sequence[TreeEntry]) -> str:
     return of_texts(f"{e.path}\0{e.mode}\0{e.blob}" for e in sorted(entries))
 
 
-def filter_tree(entries: Iterable[TreeEntry], *, exclude_prefixes: Sequence[str]) -> list[TreeEntry]:
-    """Entries whose path is not under any of `exclude_prefixes` (each a POSIX dir prefix).
+def filter_tree(
+    entries: Iterable[TreeEntry],
+    *,
+    exclude_prefixes: Sequence[str],
+    include_prefixes: Sequence[str] = (),
+) -> list[TreeEntry]:
+    """Entries under one of `include_prefixes` and under none of `exclude_prefixes`.
 
     `change_digest` excludes the review/state/event artifacts (plan §17.3) — they
     are bound by their own digests, and including them would make every review that writes a
     file invalidate itself.
+
+    `include_prefixes` narrows the digest to one reading's own paths, and an empty list means the
+    whole tree. It is applied *after* the exclusion, never against it: narrowing cannot reach
+    something the exclusion already removed.
     """
-    prefixes = tuple(p if p.endswith("/") else f"{p}/" for p in exclude_prefixes)
-    exact = frozenset(p for p in exclude_prefixes if not p.endswith("/"))
-    return [e for e in entries if e.path not in exact and not e.path.startswith(prefixes)]
+
+    def under(path: str, prefixes: tuple[str, ...], exact: frozenset[str]) -> bool:
+        return path in exact or path.startswith(prefixes)
+
+    excluded = tuple(p if p.endswith("/") else f"{p}/" for p in exclude_prefixes)
+    excluded_exact = frozenset(p for p in exclude_prefixes if not p.endswith("/"))
+    kept = [e for e in entries if not under(e.path, excluded, excluded_exact)]
+    if not include_prefixes:
+        return kept
+    included = tuple(p if p.endswith("/") else f"{p}/" for p in include_prefixes)
+    included_exact = frozenset(p for p in include_prefixes if not p.endswith("/"))
+    return [e for e in kept if under(e.path, included, included_exact)]

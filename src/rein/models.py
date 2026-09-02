@@ -157,6 +157,14 @@ QUALITY_GATE_KIND_VALUES = frozenset({"command", "agent"})
 #: join, rather than every task re-establishing the whole thing from scratch.
 GATE_STAGE_ORDER: tuple[str, ...] = ("task", "integration", "both")
 GATE_STAGE_VALUES = frozenset(GATE_STAGE_ORDER)
+#: What the negative control found, as a `done` may rest on it. Only `discriminating` is a pass,
+#: and it says the test half is not inert against the base — the absence of a failure, not a
+#: judgement that the tests are good. The last two are not verdicts at all: they say the control
+#: could not be taken, which is a different sentence from "it was taken and it passed", and
+#: collapsing the two is how an unasked question becomes an answered one. The outcome that blocks
+#: is deliberately absent — it stops there being a `done` for evidence to justify, so it travels as
+#: a task failure under `build_loop.NEGATIVE_CONTROL` instead of as a value here.
+NEGATIVE_CONTROL_VALUES = frozenset({"discriminating", "no_tests_changed", "undetermined"})
 #: What the per-task reviewer may say about a change. `must_fix` sends it back to the implementer
 #: within the review step's own budget; `consider` stops nothing and is carried to gate ④. Neither
 #: passes or fails a task on its own — the reviewer reports, and the loop decides what that costs.
@@ -170,6 +178,15 @@ AGENT_ROLE_VALUES = frozenset({"implementer", "code_reviewer", "actual_extractor
 
 #: Did the Coverage Manifest manage to analyse the whole diff?
 COVERAGE_STATUS_VALUES = frozenset({"sufficient", "insufficient"})
+#: How a review's reading was taken: one reading of everything, or several composed — one per task
+#: that landed, plus the seam between them. Recorded on every review, never inferred: a reader must
+#: be able to see whether the tree in front of them was read whole (`review_reading.WHOLE`).
+COMPOSITION_WHOLE = "whole"
+COMPOSITION_COMPOSED = "composed"
+COMPOSITION_VALUES = frozenset({COMPOSITION_WHOLE, COMPOSITION_COMPOSED})
+#: What an operator may ask for at gate ④. `composed` is not among them: composing is decided by
+#: whether the plan actually declares task scopes to compose along, never by a preference.
+COMPOSITION_MODE_VALUES = frozenset({"auto", COMPOSITION_WHOLE})
 INTEGRITY_STATUS_VALUES = frozenset({"verified", "failed", "unavailable"})
 SEMANTIC_SUPPORT_VALUES = frozenset({"supported", "contradicted", "conflicted", "unknown"})
 #: How the semantic judgement was reached. `machine_assessed` is an AI's opinion and must
@@ -1336,6 +1353,19 @@ class Config:
         if not isinstance(raw, dict):
             return {}
         return {k: v for k, v in raw.items() if isinstance(v, int) and k in BUDGET_NAME_VALUES}
+
+    @property
+    def composition(self) -> str:
+        """How gate ④ takes its reading: `auto` composes from the plan's tasks, `whole` never does.
+
+        `auto` is the default because composition is what keeps the peak of one launch at the size
+        of one task rather than of a cycle. `whole` is the escape for a repository that would
+        rather pay for one reading of everything — and it is what the policy forces at `critical`
+        risk regardless of this setting (`review_policy.coverage_blocks`).
+        """
+        policy = self.raw.get("review_policy")
+        value = policy.get("composition") if isinstance(policy, dict) else None
+        return value if value in COMPOSITION_MODE_VALUES else "auto"
 
     @property
     def github(self) -> Mapping[str, Any]:

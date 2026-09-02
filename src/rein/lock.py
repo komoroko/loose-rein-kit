@@ -162,6 +162,30 @@ def tool_version_of(data: dict[str, Any]) -> str:
     return str(value) if isinstance(value, str) else ""
 
 
+def written_by_newer(repo: repo_mod.Repo, running_version: str) -> tuple[str, str] | None:
+    """The version that wrote the lock and the command that installs it, when it is newer than
+    the running tool — otherwise None.
+
+    Separate from `startup_warning` because a version skew is not only worth a line of its own: it
+    is the *explanation* for everything else the older tool then fails to understand. A repository
+    written by a newer rein carries documents whose schemas that release widened, so the old tool
+    reports them as invalid — and the repair for "invalid" is not the repair for "behind".
+    """
+    data = read(repo.lock)
+    if data is None:
+        return None
+    recorded = tool_version_of(data)
+    if not recorded:
+        return None
+    try:
+        recorded_v, running_v = Version(recorded), Version(running_version)
+    except InvalidVersion:
+        return None
+    if recorded_v <= running_v:
+        return None
+    return recorded, _upgrade_hint(source_of(data))
+
+
 def startup_warning(repo: repo_mod.Repo, running_version: str) -> str | None:
     """The cheap per-invocation check: one warning line, or None when all is well.
 

@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 from rein import event_chain, gate_guard, models, store
 from rein import repo as repo_mod
@@ -235,6 +238,106 @@ def test_defaults_apply_when_config_declares_no_paths(tmp_path: Path) -> None:
     config["guard"].pop("paths")  # type: ignore[union-attr]
     seed_repo(tmp_path, config=config, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
     assert not decide(tmp_path, "src/app.py")[0]
+
+
+# --- an unreadable config is the guard's own input, not a gate verdict --------
+
+
+def _rewrite_config(root: Path, mutate: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+    """Put a config on disk that `seed_repo` would have refused, and return it. The whole subject
+    here is a document this release's schema rejects, so it cannot go through the schema-checked
+    fixture."""
+    path = root / ".rein" / "config.yaml"
+    document: dict[str, Any] = yaml.safe_load(path.read_text(encoding="utf-8"))
+    mutate(document)
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return document
+
+
+def test_a_key_this_release_has_never_heard_of_does_not_disarm_the_guard(tmp_path: Path) -> None:
+    """The guard reads two settings out of config.yaml and used to get them through
+    `Config.parse`, which validates the whole file against a schema this release may be too old
+    for. A repository written by a *newer* rein then came back as no config at all:
+    `template_mode` silently became False and every edit under `src/` was denied with a message
+    telling the human to complete /tasks and get a gate approved. The document was intact."""
+    seed_repo(
+        tmp_path,
+        config=make_config(guard_paths=[{"path": "core/", "requires_gate": "tasks"}]),
+        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+    )
+    written = _rewrite_config(tmp_path, lambda d: d.setdefault("review_policy", {}).update(a_key_from_the_future=True))
+    assert models.schema_errors(written, "config"), "the point of this test is a document the schema rejects"
+
+    settings = gate_guard.guard_settings(repo_mod.Repo(tmp_path))
+    assert settings.unreadable == ""
+    assert settings.paths == {"core/": "tasks"}
+    assert not decide(tmp_path, "core/thing.py")[0]
+    assert decide(tmp_path, "src/app.py")[0]  # still not in this repo's map
+
+
+def test_a_config_that_does_not_parse_denies_and_names_the_config(tmp_path: Path) -> None:
+    """Fail closed, and on the guard's own input: the previous behaviour blamed the gate."""
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    (tmp_path / ".rein" / "config.yaml").write_text("guard: [this is not a mapping\n", encoding="utf-8")
+
+    allowed, reason = decide(tmp_path, "src/app.py")
+    assert not allowed
+    assert "config.yaml" in reason and "fails closed" in reason
+    assert "not approved" not in reason  # the gate is not what went wrong
+
+
+def test_the_config_the_guard_could_not_read_is_the_one_path_it_still_lets_through(
+    tmp_path: Path,
+) -> None:
+    """A guard that denied every path because config.yaml did not load would be denying the repair
+    it just asked for — and rule 3 runs at commit stage over every changed path, so the human's own
+    `git commit` of the fix would be denied too."""
+    seed_repo(
+        tmp_path,
+        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending"), plan_status="draft"),
+    )
+    (tmp_path / ".rein" / "config.yaml").write_text("guard: [not a mapping\n", encoding="utf-8")
+
+    assert not decide(tmp_path, "src/app.py")[0]
+    assert decide(tmp_path, gate_guard.CONFIG_PATH)[0], "the file to repair must be repairable"
+
+    # And at commit stage, which is the one that would otherwise refuse the human's own `git
+    # commit` of the fix — rule 2 does not apply there, so nothing else would let it through.
+    repo = repo_mod.Repo(tmp_path)
+    assert gate_guard.evaluate(str(tmp_path / gate_guard.CONFIG_PATH), repo, stage="commit")[0]
+    assert not gate_guard.evaluate(str(tmp_path / "src/app.py"), repo, stage="commit")[0]
+
+
+def test_a_rule_map_that_cannot_be_read_is_never_replaced_by_the_defaults(tmp_path: Path) -> None:
+    """The fail-open this closes: `guard.paths` that did not parse fell back to
+    DEFAULT_GUARD_PATHS, dropping every path a repository had added to its own guard."""
+    seed_repo(
+        tmp_path,
+        config=make_config(guard_paths=[{"path": "infra/", "requires_gate": "tasks"}]),
+        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+    )
+    _rewrite_config(tmp_path, lambda d: d["guard"].update(paths="infra/"))
+
+    settings = gate_guard.guard_settings(repo_mod.Repo(tmp_path))
+    assert "guard.paths" in settings.unreadable
+    assert not decide(tmp_path, "infra/main.tf")[0]
+    assert not decide(tmp_path, "README.md")[0]  # it does not know what it guards, so: all of it
+
+
+def test_a_rule_entry_missing_half_of_itself_is_unreadable_rather_than_dropped(tmp_path: Path) -> None:
+    """The same fail-open one branch further in: an entry with a mistyped `path:` key was filtered
+    out of the map, and a map left with nothing in it fell through to DEFAULT_GUARD_PATHS — so the
+    one rule a product had added to its own guard disappeared over a typo."""
+    seed_repo(
+        tmp_path,
+        config=make_config(guard_paths=[{"path": "infra/", "requires_gate": "tasks"}]),
+        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+    )
+    _rewrite_config(tmp_path, lambda d: d["guard"].update(paths=[{"pth": "infra/", "requires_gate": "tasks"}]))
+
+    settings = gate_guard.guard_settings(repo_mod.Repo(tmp_path))
+    assert "guard.paths" in settings.unreadable
+    assert not decide(tmp_path, "infra/main.tf")[0]
 
 
 # --- rule 4: only humans open gates -------------------------------------------
