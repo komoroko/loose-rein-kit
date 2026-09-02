@@ -130,6 +130,12 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
     store = store_mod.Store(repo)
     findings: list[Finding] = []
     loaded: dict[str, object] = {}
+    # A repository written by a newer rein is the one case where "invalid document" is a fact about
+    # the reader, not the document: that release widened a schema, this tool has the narrow one, and
+    # the key it rejects is one the repo is entitled to carry. Saying `rein revise --to tasks` there
+    # sends a human to rewind an approved gate — the most expensive move the workflow has — to fix
+    # nothing. The skew already has its own WARN; this makes it the repair line too.
+    behind = lock_mod.written_by_newer(repo, rein.__version__)
     for name, reader in (
         ("config", store.read_config),
         ("state", store.read_state),
@@ -139,7 +145,15 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
         try:
             value = reader()
         except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-            findings.append(Finding("FAIL", "format", f"{name}.yaml: {exc}\n  repair: {_DOCUMENT_REPAIR[name]}"))
+            repair = _DOCUMENT_REPAIR[name]
+            if behind is not None:
+                recorded, hint = behind
+                repair = (
+                    f"this repository was written by rein {recorded} and you are running "
+                    f"{rein.__version__} — read the document with the release that wrote it before "
+                    f"treating it as damaged: {hint}"
+                )
+            findings.append(Finding("FAIL", "format", f"{name}.yaml: {exc}\n  repair: {repair}"))
             continue
         if value is None:
             findings.append(Finding("INFO", "format", f"{name}.yaml is absent"))
@@ -1115,7 +1129,13 @@ def check_gitignore(repo: repo_mod.Repo) -> list[Finding]:
         artifacts = sorted(gitignore.runtime_artifacts(repo.config.read_text(encoding="utf-8")))
     except (OSError, models.DocumentError, strict_yaml.StrictParseError):
         findings.append(
-            Finding("WARN", "gitignore", "config.yaml is unreadable — the runtime-artifact block was not checked")
+            Finding(
+                "WARN",
+                "gitignore",
+                "the runtime-artifact block was not checked — config.yaml did not load; the format "
+                "check above says why (it is not necessarily unreadable: a schema this tool is too "
+                "old for fails here the same way)",
+            )
         )
         return findings
 

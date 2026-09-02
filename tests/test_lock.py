@@ -157,3 +157,15 @@ def test_source_of_reads_the_top_level_field(tmp_path: Path) -> None:
     assert lock.source_of({"source": "git+https://x/y"}) == "git+https://x/y"
     assert lock.source_of({}) == ""
     assert lock.source_of({"source": 3}) == ""
+
+
+def test_written_by_newer_names_the_writer_and_stays_quiet_otherwise(tmp_path: Path) -> None:
+    """What `doctor` needs to tell "this document is damaged" from "this tool is behind"."""
+    behind = lock.written_by_newer(_repo_with(tmp_path, "0.5.0"), "0.4.0")
+    assert behind is not None
+    recorded, hint = behind
+    assert recorded == "0.5.0"
+    assert hint.startswith("`") and "install" in hint
+    assert lock.written_by_newer(_repo_with(tmp_path, "0.4.0"), "0.4.0") is None
+    assert lock.written_by_newer(_repo_with(tmp_path, "0.3.0"), "0.4.0") is None, "older is not this check's business"
+    assert lock.written_by_newer(repo_mod.Repo(tmp_path / "nowhere"), "0.4.0") is None

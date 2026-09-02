@@ -60,6 +60,15 @@ count of readings and not an estimate of bytes: the code does not exist yet, and
 for it would be the confident guess this tool exists to refuse. The `adversarial-reviewer` gains
 the matching gate-③ lens.
 
+**A document a newer rein wrote is not reported as damaged.** Running an older `rein doctor` in a
+repository a newer release wrote FAILs every SSOT document — that release widened a schema and this
+tool has the narrow one — and the repair line said `rein revise --to tasks`, sending a human to
+rewind an approved gate, invalidate its receipts and the review built on it, to fix a document that
+was never broken. The lock records who wrote it, so the skew is knowable: `lock.written_by_newer`
+names the writer and the command that installs it, and the repair says to upgrade. Still a FAIL —
+the tool genuinely cannot read the repository — but pointed at the tool rather than at the plan.
+The `.gitignore` check stops calling such a config "unreadable" for the same reason.
+
 ## [0.3.13] - 2026-09-01
 
 **A deletion is not content, and a commit is not a reading** (#44, measured on 0.3.12: a 17-task
