@@ -2203,12 +2203,19 @@ class Orchestrator:
     def _integration_fix_prompt(self, ids: str, failure_log: str) -> str:
         return build_prompts.integration_fix_prompt(ids, failure_log, gate_cmds=self.config.gate_cmds)
 
-    def _invoke_integration_fixer(self, ids: str, failure_log: str) -> None:
+    def _invoke_integration_fixer(self, ids: str, prompt: str) -> None:
+        """One implementer launch over the merged tree. The caller says what it is being sent.
+
+        The prompt is the caller's because the join has two send-backs and they are not the same
+        work: a red command step, and a reviewer's findings about what only the join shows. Both
+        used to be framed as "the combined state fails the deterministic gate", which was true of
+        one of them (`integration_fix_prompt`, `integration_review_fix_prompt`).
+        """
         self._launch(
             [
                 *self.config.adapter_argv,
                 *adapters.write_flags(self.config.adapter_argv),
-                self._integration_fix_prompt(ids, failure_log),
+                prompt,
             ],
             cwd=self.root,
             where=f"{ids}: the integration fixer",
@@ -2269,7 +2276,7 @@ class Orchestrator:
             if left <= 0:
                 return False, failure_log
             budgets[failed] = left - 1
-            self._invoke_integration_fixer(ids, failure_log)
+            self._invoke_integration_fixer(ids, self._integration_fix_prompt(ids, failure_log))
 
     def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task]) -> None:
         """Read the tree the merge produced, which no per-task reviewer ever saw.
@@ -2326,7 +2333,12 @@ class Orchestrator:
                     f"{rounds} round(s):\n{dossier.render_findings(outstanding)}"
                 )
             print(f"    [review] {ids}: {len(outstanding)} must-fix finding(s) about the join → back to an implementer")
-            self._invoke_integration_fixer(ids, dossier.render_findings(outstanding))
+            self._invoke_integration_fixer(
+                ids,
+                build_prompts.integration_review_fix_prompt(
+                    ids, dossier.render_findings(outstanding), gate_cmds=self.config.gate_cmds
+                ),
+            )
 
     def _file_integration_findings(self, findings: Sequence[Mapping[str, Any]], tasks: Sequence[dag.Task]) -> None:
         """Attribute each non-blocking finding to the merged task whose scope owns its anchor."""

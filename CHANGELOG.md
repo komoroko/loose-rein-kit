@@ -142,6 +142,19 @@ made falls back to the empty directory rather than failing the gate: the contrac
 to be read either way.
 
 
+**The join's two send-backs were framed as the same work.** The integration reviewer's `must_fix`
+findings and a red command step over the merged tree both went to `integration_fix_prompt`, whose
+opening sentence says the combined state "fails the deterministic gate" and whose stated subject is
+"typically a cross-file lint/format/type error". One of those is true. An implementer handed a
+paragraph about a contract two tasks now read differently, under a heading that says it is looking
+at a lint failure, has to work out that the framing is wrong before it can start — and the framing
+is what says how much of the tree is in question and what a finished fix looks like. The review
+send-back has its own prompt now (`integration_review_fix_prompt`, the join's analogue of
+`review_fix_prompt`): it says the findings are about the join, that the fix usually belongs between
+the tasks rather than inside one of them, and that an independent reader looks again — which is what
+makes disputing a finding a real option instead of a silence.
+
+
 ## [0.4.0] - 2026-09-02
 
 **A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is

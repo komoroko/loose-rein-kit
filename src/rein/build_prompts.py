@@ -261,7 +261,44 @@ def review_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str]
     )
 
 
+def integration_review_fix_prompt(ids: str, findings: str, *, gate_cmds: Sequence[str]) -> str:
+    """Hand the integration reviewer's must-fix findings back to an implementer.
+
+    The join's analogue of :func:`review_fix_prompt`, and it did not exist: both of the join's
+    send-backs went through `integration_fix_prompt`, whose first sentence says the combined state
+    "fails the deterministic gate" and whose subject is "typically a cross-file lint/format/type
+    error". A reviewer's findings are neither. An implementer told it is looking at a lint failure,
+    and handed a paragraph about a contract two tasks now read differently, has to work out for
+    itself that the framing is wrong before it can start — and the framing is what says how much of
+    the tree is in question and what a finished fix looks like.
+
+    What the two send-backs actually have in common is only the commit prefix and the budget. The
+    rest differs: this one names an independent reader who will look again, which is what makes
+    disputing a finding a real option rather than a silence.
+    """
+    return (
+        f"You are the implementer for the merged state of {ids}. An independent reviewer read these "
+        "tasks as one tree — the first time anyone did; each was reviewed on its own branch — and "
+        "found the following, and each one has to be resolved before this batch can land:\n"
+        f"{findings}\n"
+        "Fix them with the minimal change. These are findings about the **join**: a contract two "
+        "tasks now read differently, a responsibility that ended up in two places, an invariant one "
+        "of them removed. So the fix usually belongs between the tasks rather than inside one of "
+        "them — do not redo either task, and do not widen scope to tidy what the finding did not "
+        "name. If a finding is wrong, say so in your `rein report --summary` rather than silently "
+        "ignoring it: the reviewer looks again afterwards.\n"
+        "Commit your fix to this branch (excluding the orchestration state .rein/):\n"
+        f'  git add -A -- {_pathspec()} && git commit -m "{ids}: review fix"\n'
+        f"Keep {_gate_list(gate_cmds)} green."
+    )
+
+
 def integration_fix_prompt(ids: str, failure_log: str, *, gate_cmds: Sequence[str]) -> str:
+    """Hand the *deterministic* post-merge failure to an implementer.
+
+    Its subject is a red command step over the merged tree, never a reviewer's findings — those go
+    to :func:`integration_review_fix_prompt`.
+    """
     return (
         f"You are the integration fixer. The independent leaf tasks {ids} each passed the quality gate "
         "in their own isolated worktrees, but after merging them into this work branch the combined "

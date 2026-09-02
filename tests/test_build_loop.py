@@ -1034,6 +1034,54 @@ def test_the_security_discipline_is_offered_in_the_contract_and_never_replaces_i
     assert "/security-review" not in sec.contract()
 
 
+def test_the_joins_two_send_backs_are_not_framed_as_the_same_work() -> None:
+    """A reviewer's findings are not a red command step, and an implementer is told which it has.
+
+    Both used to go through `integration_fix_prompt`, whose subject is "typically a cross-file
+    lint/format/type error" — so an implementer handed a paragraph about a contract two tasks read
+    differently had to work out that the framing was wrong before it could start.
+    """
+    from rein import build_prompts
+
+    deterministic = build_prompts.integration_fix_prompt(
+        "T-001,T-002", "$ make check (rc=1)\nE  unused import", gate_cmds=["make check"]
+    )
+    from_review = build_prompts.integration_review_fix_prompt(
+        "T-001,T-002", "- must_fix: two tasks read `Config.timeout` differently", gate_cmds=["make check"]
+    )
+    assert "fails the deterministic gate" in deterministic
+    assert "fails the deterministic gate" not in from_review
+    # The review send-back names the reader who will look again, which is what makes disputing a
+    # finding a real option rather than a silence.
+    assert "reviewer looks again" in from_review
+    assert "reviewer looks again" not in deterministic
+    # And it says where the fix belongs, which is the thing only the join's framing carries.
+    assert "belongs between the tasks" in from_review
+
+
+def test_each_join_send_back_reaches_the_implementer_with_its_own_framing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The routing, not just the wording: the loop must hand each caller's prompt through."""
+    from rein import build_prompts
+
+    loop = orchestrator(tmp_path)
+    sent: list[str] = []
+
+    def capture(argv: list[str], **kwargs: object) -> str:
+        sent.append(argv[-1])
+        return ""
+
+    monkeypatch.setattr(loop, "_launch", capture)
+
+    loop._invoke_integration_fixer("T-001", loop._integration_fix_prompt("T-001", "rc=1"))
+    loop._invoke_integration_fixer(
+        "T-001", build_prompts.integration_review_fix_prompt("T-001", "- must_fix: x", gate_cmds=["make check"])
+    )
+    assert "fails the deterministic gate" in sent[0]
+    assert "reviewer looks again" in sent[1]
+
+
 # --- events -------------------------------------------------------------------
 
 
