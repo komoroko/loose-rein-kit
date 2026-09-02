@@ -299,11 +299,40 @@ without its fix:
   own guard disappeared over a typo. Unreadable, like every other rule map this guard cannot read
   in full.
 
-And one cost stated rather than implied: the security reviewer's checkout carries the reviewed
-tree's `.claude/settings.json` — its pre-authorized commands and hook registrations — so the stage
-meant to catch a hostile change runs under what that change says about tool permissions. The
-edit-stage guard denies writes there and the lock records its hash, which is what it rests on. That
-is narrower than "the launch reads nothing but the request", and `review_transport` now says so.
+**And the security reviewer's checkout stopped being the change's own directory.** Giving that one
+stage a checkout is what lets a host security discipline read anything at all — the command reviews
+a branch's pending changes and refuses outside a repository — but the directory it was given was a
+worktree of the real repository, at `head`. Two holes, neither of which the prompt could close:
+
+- **A worktree shares the repository it is a worktree of.** Its `.git` is a pointer into the common
+  directory, so it shares the object store, **the refs, and `.git/hooks`**: a reviewer standing in
+  one could move a branch, delete a tag or push, and every git command it ran fired this
+  repository's real hooks. "Whoever judges does not repair" was a property of the prompt there and
+  of nothing else. It is a local clone now, with `origin` removed — its own refs, git's own sample
+  hooks, no push target, and whatever it writes dies with the temporary directory. The
+  `worktree remove` + `prune` cleanup goes away with it: nothing is registered against the real
+  repository any more.
+- **A checkout carries the change's host configuration, and a CLI reads that before it reads its
+  prompt.** `.claude/settings.json`, `.mcp.json`, `CLAUDE.md` and their equivalents
+  (`adapters.PROJECT_CONFIG`) are the pre-authorized commands, the hooks, the MCP servers and the
+  instructions that decide what a launch may do without asking — so the stage that exists to catch
+  a hostile change was running under whatever that change said about its own permissions. Those
+  paths are pinned to the **trusted base**: the reviewer runs under the configuration a human
+  approved, which is the configuration every other rein launch in this repository already runs
+  under. They do not show as deleted either — saying "this change deletes `.claude/settings.json`"
+  would be a false statement about the change, handed to the one reader who must not get one.
+
+The reviewer does not lose sight of them. Every one of those paths is in the diff the request
+carries, and the contract now says out loud that they are in the diff rather than on disk, that
+their real content is unabridged there, and that a pre-authorized command, a hook, an MCP server or
+an instruction added to them is a finding. **Reading a hostile settings file stopped being the same
+act as obeying it.**
+
+What the stage still keeps, and what it still costs: its input is fully determined by
+`trusted_base_sha` and `subject_head_sha` — which between them fix every byte on disk — and both
+are already in the stage key. The base tree and `.rein/plan.yaml` are beside it, which is the one
+property the other two stages keep and this one does not. The blind extractor and the comparator
+still read an empty directory.
 
 
 ## [0.3.13] - 2026-09-01

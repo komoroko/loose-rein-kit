@@ -37,6 +37,37 @@ SIMPLIFICATION = "simplification"
 SECURITY = "security"
 
 
+#: What an agent CLI reads out of a project directory *before* it reads the prompt it was sent:
+#: instruction files, and the settings, hooks, skills, sub-agents and MCP servers that decide which
+#: tools it may run without asking. Whoever writes these decides what the launch is allowed to do.
+#:
+#: Named here rather than per adapter because the point is the union: one launch may sit in a tree
+#: carrying another host's surfaces, and a directory is dangerous to hand a reviewer if *any* host
+#: would act on what is in it. Broader than `gate_guard.HOOK_REGISTRATION`, which answers a
+#: different question — what an agent may never edit — and is deliberately narrow so that a denial
+#: names something an agent actually did.
+#:
+#: `.github/workflows/` is deliberately absent: CI configuration is not read by a CLI at launch,
+#: and it is exactly the kind of change a security reviewer should be looking at.
+PROJECT_CONFIG: tuple[str, ...] = (
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    ".cursorrules",
+    ".mcp.json",
+    ".claude/",
+    ".codex/",
+    ".agents/",
+    ".gemini/",
+    ".cursor/",
+    ".github/agents/",
+    ".github/hooks/",
+    ".github/instructions/",
+    ".github/prompts/",
+    ".github/copilot-instructions.md",
+)
+
+
 @dataclass(frozen=True)
 class Adapter:
     """What one agent CLI can do, as a declaration rather than as branches spread through the loop.

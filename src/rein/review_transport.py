@@ -26,10 +26,12 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import shutil
 import tempfile
 import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from rein import actual_extraction, adapters, common, digests, faults, models, review_policy
@@ -287,16 +289,35 @@ _CHECKOUT_ROLE = "security_reviewer"
 
 @contextlib.contextmanager
 def _pending_changes(repo: repo_mod.Repo, base: str, head: str) -> Iterator[str | None]:
-    """A throwaway worktree holding this change as **unstaged** modifications, or None.
+    """A throwaway **clone** holding this change as unstaged modifications, or None.
 
-    `git worktree add --detach <dir> <head>` puts the reviewed tree on disk; `git reset --mixed
-    <base>` then moves HEAD and the index back to the base and leaves the working tree alone. What
-    `git status` shows afterwards is exactly base→head, unstaged — which is the shape
-    `security-review` and its kind are written against, and the reason this stage gets a directory
-    at all.
+    `git status` there shows exactly base→head, unstaged, which is the shape `security-review` and
+    its kind are written against and the whole reason this stage gets a directory at all. The
+    change is not applied as a patch: the diff in the request was folded and widened for the
+    reading (`review_reading.fold_bodies`) and would not apply. Git already has both trees.
 
-    The change is not applied as a patch: the diff in the request has been folded and widened for
-    the reading (`review_reading.fold_bodies`) and would not apply. Git already has both trees.
+    **A clone and not a worktree, and the host's own configuration pinned to the trusted base** —
+    two separate holes, both of which turned "the reviewer gets a directory" into "the reviewer
+    gets the change's directory":
+
+    * A worktree's `.git` is a pointer into the real repository's common directory. It shares the
+      object store, **the refs, and `.git/hooks`** — so a reviewer standing in one could move a
+      branch, delete a tag or push, and every git command it ran fired this repository's real
+      hooks. "Whoever judges does not repair" was a property of the prompt there and of nothing
+      else. A local clone has its own refs and git's own sample hooks; `origin` is removed, so
+      there is no longer anywhere to push. Whatever it writes dies with the temporary directory.
+    * A checkout carries `.claude/settings.json`, `.mcp.json`, `CLAUDE.md` and their equivalents
+      (:data:`adapters.PROJECT_CONFIG`) — the pre-authorized commands, the hooks, the MCP servers
+      and the instructions a CLI reads before it reads its prompt. At `head` those files *are the
+      change under review*, so the stage that exists to catch a hostile change was running under
+      whatever that change said about its own permissions. They are put back to `base` instead:
+      the reviewer runs under the configuration a human approved, which is the same configuration
+      every other rein launch in this repository already runs under.
+
+    The reviewer does not lose sight of them. Every one of those paths is in the diff the request
+    carries — `not_the_product` never excluded them — and the contract says out loud that they are
+    in the diff rather than on disk (`security_review.contract`). What changed is that reading a
+    hostile settings file is no longer the same act as obeying it.
 
     None when it cannot be made, and the caller then uses the empty directory as before. This is a
     better reading, never a required one: the contract asks the reviewer to read the diff itself
@@ -309,18 +330,51 @@ def _pending_changes(repo: repo_mod.Repo, base: str, head: str) -> Iterator[str 
         return
     with tempfile.TemporaryDirectory(prefix="rein-review-tree-", ignore_cleanup_errors=True) as parent:
         tree = os.path.join(parent, "subject")
-        rc, _ = repo._git_rc("worktree", "add", "--detach", "--quiet", tree, head)
-        if rc != 0:
-            yield None
-            return
-        try:
-            rc, _ = common.run(["git", "-C", tree, "reset", "--mixed", "--quiet", base])
-            yield tree if rc == 0 else None
-        finally:
-            # Pruned as well as removed: a worktree whose directory is about to be deleted under
-            # git leaves an administrative entry behind, and they accumulate one per review.
-            repo._git_rc("worktree", "remove", "--force", tree)
-            repo._git_rc("worktree", "prune")
+        steps = (
+            # `--local` so this costs a hardlink per object rather than a copy, and `--no-checkout`
+            # because the commit wanted is `head`, not whatever the source's HEAD points at.
+            ["git", "-C", parent, "clone", "--quiet", "--local", "--no-checkout", str(repo.root), tree],
+            ["git", "-C", tree, "remote", "remove", "origin"],
+            ["git", "-C", tree, "checkout", "--detach", "--quiet", head],
+            ["git", "-C", tree, "reset", "--mixed", "--quiet", base],
+        )
+        for step in steps:
+            rc, _ = common.run(step)
+            if rc != 0:
+                yield None
+                return
+        yield tree if _pin_config_to_base(tree) else None
+
+
+def _pin_config_to_base(tree: str) -> bool:
+    """Put every :data:`adapters.PROJECT_CONFIG` path in `tree` back to the trusted base.
+
+    Called with the index already at the base and the working tree at the head, so the base's
+    content for a path is exactly what `git checkout -- <path>` restores. Each path is removed from
+    the working tree first, which is what handles the one `checkout` cannot: a file the change
+    *added*, which the base index has never heard of.
+
+    Afterwards the working tree and the index agree about these paths, so they do not show up in
+    `git status` as a change — least of all as a deletion. Saying "this change deletes
+    `.claude/settings.json`" would be a false statement about the change, and a security reviewer
+    is the last reader to hand one to.
+
+    A symlink is unlinked and never followed: `.claude` replaced by a link to somewhere else is
+    itself one of the things this is here to defuse, and resolving it would delete the target.
+    """
+    listed = common.run(["git", "-C", tree, "ls-files", "-z", "--", *adapters.PROJECT_CONFIG])
+    if listed[0] != 0:
+        return False
+    for rel in adapters.PROJECT_CONFIG:
+        path = Path(tree) / rel
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+    at_base = [entry for entry in listed[1].split("\0") if entry]
+    if not at_base:
+        return True
+    return common.run(["git", "-C", tree, "checkout", "--", *at_base])[0] == 0
 
 
 def _adapter_reviewer(
@@ -362,20 +416,22 @@ def _adapter_reviewer(
 
     **The security reviewer is the exception, and only when its host has a discipline to use.** A
     host security review reads a branch's pending changes and refuses outside a repository, so that
-    stage is given a throwaway worktree holding exactly this change, unstaged (`_pending_changes`).
+    stage is given a throwaway clone holding exactly this change, unstaged (`_pending_changes`).
     It costs that stage the property the other two keep — its answer is no longer a function of the
-    request alone, since the base tree, `.rein/plan.yaml` and any `CLAUDE.md` are on disk beside it.
-    **And the host configuration in the tree under review is now the reviewer's own**: a checkout
-    carries `.claude/settings.json` — its pre-authorized commands and its hook registrations — so
-    the stage that is meant to catch a hostile change runs under whatever that change says about
-    tool permissions. The edit-stage guard denies writes there (`gate_guard.HOOK_REGISTRATION`) and
-    the lock records its hash, which is what this rests on; it is a narrower guarantee than "the
-    launch reads nothing but the request", and it is stated rather than implied.
-    That is affordable *here and nowhere else*: this is the stage that is deliberately not blind (it
-    is the only one sent the test half), and its input is still fully determined by `trusted_base_sha`
-    and `subject_head_sha`, both of which the stage key covers through `reviewer_identity` and the
-    change digest. The blind extractor and the comparator keep the empty directory, which is the
-    place the argument above was actually about.
+    request alone, since the base tree and `.rein/plan.yaml` are on disk beside it.
+
+    What it does **not** cost is the two things a directory could have cost. The clone has its own
+    refs and no remote, so the stage cannot reach anything the rest of the workflow will read
+    afterwards, and every :data:`adapters.PROJECT_CONFIG` path in it is pinned to the trusted base,
+    so nothing the change says about tool permissions, hooks or MCP servers governs the launch that
+    is reviewing it. Both are mechanical; neither asks the reviewer to behave.
+
+    The rest is affordable *here and nowhere else*: this is the stage that is deliberately not blind
+    (it is the only one sent the test half), and its input is still fully determined by
+    `trusted_base_sha` and `subject_head_sha` — both of which the stage key covers through
+    `reviewer_identity` and the change digest, and which between them fix every byte on disk. The
+    blind extractor and the comparator keep the empty directory, which is the place the argument
+    above was actually about.
     """
 
     if config is None:
