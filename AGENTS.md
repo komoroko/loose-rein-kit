@@ -136,6 +136,13 @@ findings; the implementer resolves them and the reviewer looks again.
   channel its account of the work travels on; `blocked` and `needs-revision` park the task
   **before** a reviewer or a test suite is spent on it, and no outcome it can report finishes
   anything. What it says is a claim (`--touched` is checked against the real diff), never a verdict.
+- **A green is evidence only if it could have been red.** The tests the DoD runs were written by
+  the implementer in the same launch as the code, and re-running them defends against an agent that
+  *lies*, never against one that *self-confirms*. So the loop takes a **negative control**: the same
+  command steps re-established over the base, with only the task's test half applied. Still green
+  means no test in the change exercises it, and the task goes back rather than landing. A task that
+  changed no test file has no control to take — **recorded, never passed**, so "this green rests on
+  tests nobody wrote for it" is on the record instead of being a silence.
 - **A task's own bar is `acceptance` in the plan, and the DoD still runs.** The DoD asks whether
   the code is *sound*; a task's acceptance criteria ask whether it did what it was *for* — both,
   and neither chosen by the implementer (a human freezes the list at gate ③). Each criterion says

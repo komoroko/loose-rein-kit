@@ -171,9 +171,14 @@ def review_prompt(
         f"Write your findings to `{findings_path}` and nothing else:\n"
         '  {"findings": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}\n'
         "`must_fix` is a defect the change cannot land with — a bug, a broken contract, a security "
-        "problem. `consider` is everything else worth saying; it stops nothing and is carried to the "
-        "human at gate ④. An empty list is a real answer, and the right one when the change is sound: "
-        "inventing a finding to look thorough costs an implementer round for nothing."
+        "problem you can point at. `consider` is everything else worth saying; it stops nothing and is "
+        "carried to the human at gate ④. An empty list is a real answer, and the right one when the "
+        "change is sound: inventing a finding to look thorough costs an implementer round for nothing.\n"
+        "\n"
+        "**This is not the security review.** A structured security reviewer reads this same change "
+        "when it lands — anchors validated against the committed blobs, a blocking flag the gate reads, "
+        "findings that cannot be dropped until the code they name is gone. Say what you see here so it "
+        "is fixed cheaply, and do not treat your own silence as that review having happened."
     )
 
 
@@ -275,12 +280,18 @@ def integration_review_prompt(
     right to stay there — a reviewer that wanders outside its task's scope reviews somebody else's
     work. What none of them could see is the thing the merge makes: two tasks that each added a
     helper, a responsibility that ended up in two places, an abstraction one task introduced and
-    the next one worked around. Until this existed the merged tree faced only the command steps,
-    so "is it green" was asked of the join and "is it well made" was not.
+    the next one worked around, a contract two tasks now read differently.
 
-    Deliberately the `/simplify` discipline rather than the correctness one: the command steps have
-    just run over this exact tree, and asking a model to look for bugs a test suite already
-    answered spends a launch on the half of the question that is already settled.
+    **This asks about correctness as well as shape, and the argument that it should not was
+    wrong.** It used to be the `/simplify` discipline alone, on the reasoning that the command
+    steps had just run over this exact tree so the bugs were already answered. But the suite over
+    the merged tree is the *union of the leaves' suites*, and not one test in it was written with
+    the merge in view: each was written in an isolated worktree against one ticket, by an
+    implementer that could not see the other tasks. The interaction defect a merge creates is by
+    construction the one no leaf's tests exercise, so "already settled" named the half that is
+    least settled here. Nothing else covers it either — gate ④'s seam reading takes the paths two
+    scopes share or none covers, and two tasks whose files are disjoint produce no seam at all.
+    Cross-task correctness had no owner; it has one now.
     """
     cmds = ", ".join(f"`{c}`" for c in gate_cmds)
     return (
@@ -288,12 +299,19 @@ def integration_review_prompt(
         f"Each of these tasks was reviewed on its own branch; this is the first time anyone has read "
         f"them as one tree. The combined change is `{diff_cmd}`.\n"
         "\n"
-        "Review it for what only the join can show: duplication between what two tasks added, one "
-        "responsibility now living in two places, an abstraction one task introduced that the next "
-        "worked around, a contract two tasks now disagree about. Reuse, simplification, and anything "
-        "no ticket's acceptance criteria require (the /simplify discipline). Do not re-review either "
-        f"task against its own ticket, and do not run {cmds} — the caller has just run them over this "
-        "exact tree and decides by their exit status.\n"
+        "Review it for what only the join can show, and for both halves of that:\n"
+        "- **Correctness across tasks**: a contract two tasks now read differently, an invariant one "
+        "task relies on and another removed, an order or lifetime that only holds when one of them is "
+        "absent, shared state two tasks both write. The suite that just passed here is the union of "
+        "the leaves' suites and no test in it was written with this merge in view, so a green says "
+        "nothing about the interaction — that is the gap you are here for.\n"
+        "- **Shape**: duplication between what two tasks added, one responsibility now living in two "
+        "places, an abstraction one task introduced that the next worked around, anything no ticket's "
+        "acceptance criteria require (the /simplify discipline).\n"
+        "\n"
+        "Do not re-review either task against its own ticket — that already happened, on its own "
+        f"branch. Do not run {cmds}: the caller has just run them over this exact tree and decides by "
+        "their exit status, and re-running them tells you only what it already knows.\n"
         "\n"
         "**You do not change the code.** You have no write access to it; an implementer resolves what "
         "you find and you look again.\n"

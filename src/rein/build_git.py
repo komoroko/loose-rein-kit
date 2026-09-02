@@ -9,7 +9,7 @@ doctor/pr_draft already rely on (see build_loop's `_late_run`).
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -400,6 +400,30 @@ class GitWorkspace:
             paths.update(p for p in out.splitlines() if p.strip())
         paths.update(self.dirty_paths(self.root))
         return sorted(paths)
+
+    def fork_point(self, ref: str, cwd: str) -> str:
+        """The commit `cwd`'s HEAD forked off `ref` at, or "" when it cannot be determined.
+
+        The base a leaf's change is a change *to*. `branch_changed_paths` already reads the leaf
+        with `git diff <ref>...HEAD`, whose three dots mean exactly this commit; naming it here
+        lets a caller that needs the base itself — rather than the paths — ask for it instead of
+        re-deriving the same merge base with a different spelling.
+        """
+        rc, out = self._run(["git", "merge-base", ref, "HEAD"], cwd=cwd)
+        return out.strip() if rc == 0 else ""
+
+    def diff_from(self, base: str, cwd: str, paths: Sequence[str]) -> str:
+        """`git diff <base> -- <paths>` taken in `cwd`: the change against `base`, dirty tree included.
+
+        Two dots and not `base..HEAD` on purpose. A serial task's work may still be uncommitted
+        when the gate runs (`finalize_commit` is what puts it on the branch, and it runs later), so
+        a diff that stops at HEAD would describe a tree nobody is about to gate. This one describes
+        what is actually there.
+        """
+        if not base or not paths:
+            return ""
+        rc, out = self._run(["git", "diff", base, "--", *paths], cwd=cwd)
+        return out if rc == 0 else ""
 
     def finalize_commit(self, cwd: str, message: str) -> bool:
         """Commit any outstanding diff in `cwd` (excluding .rein/) — a no-op on a clean tree.

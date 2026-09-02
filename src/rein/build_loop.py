@@ -54,6 +54,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 import uuid
@@ -71,6 +72,7 @@ from rein import (
     conflict,
     control_plane,
     dag,
+    diff_facts,
     digests,
     dossier,
     event_chain,
@@ -794,6 +796,14 @@ class Orchestrator:
             self._local.acceptance = established
         return established
 
+    @property
+    def _current_control(self) -> dict[str, Any]:
+        control = getattr(self._local, "negative_control", None)
+        if control is None:
+            control = {}
+            self._local.negative_control = control
+        return control
+
     def _row_for(self, role: str) -> dict[str, int]:
         return self._spent.setdefault(role, {"launches": 0, "prompt_bytes": 0, "handed_bytes": 0, "cold_launches": 0})
 
@@ -1443,7 +1453,7 @@ class Orchestrator:
         )
         return str(self._read_report(ours).get("outcome", "")) if ours is not None else ""
 
-    def _run_cmd_step(self, step: GateStep, cwd: str) -> str:
+    def _run_cmd_step(self, step: GateStep, cwd: str, *, note: bool = True) -> str:
         """Run one cmd step in its executor profile. "" on pass, a compact failure otherwise.
 
         Raises :class:`faults.EnvironmentFault` when the step could not be *run* — no container
@@ -1466,7 +1476,8 @@ class Orchestrator:
         subject = self._fingerprint(cwd)
         if self.ledger.hit(evidence.KIND_GATE_STEP, subject, tool):
             print(f"    [gate] {step.name}: already green on this tree — reusing")
-            self._note_evidence(step, profile, reused=True)
+            if note:
+                self._note_evidence(step, profile, reused=True)
             return ""
         spec = executors.ExecutionSpec(
             command=tuple(step.command),
@@ -1485,7 +1496,8 @@ class Orchestrator:
             # a verdict on code nobody re-ran, which is the direction that costs correctness
             # rather than time.
             self.ledger.record(evidence.KIND_GATE_STEP, subject, tool)
-            self._note_evidence(step, profile, reused=False)
+            if note:
+                self._note_evidence(step, profile, reused=False)
             return ""
         fault = faults.classify_step(result.exit_code, result.output)
         if fault.is_environment:
@@ -1584,7 +1596,128 @@ class Orchestrator:
             if failure:
                 return step.name, failure
             passed.append(step)
+        failed, failure = self._negative_control(task, cwd, base, passed)
+        if failed:
+            return failed, failure
         return self._run_acceptance(task, cwd)
+
+    def _negative_control(
+        self, task: dag.Task, cwd: str, base: str, passed: Sequence[GateStep]
+    ) -> tuple[str | None, str]:
+        """Ask whether the DoD that just went green would have gone green *without* the change.
+
+        The DoD is the only automated evidence a task's `done` rests on, and until this existed
+        nobody ever asked whether it could go red. The tests it runs were written by the
+        implementer in the same launch as the code they test; the blind extractor is deliberately
+        never shown them (`review_reading.split_tests`), the security reviewer reads them only for
+        what an attacker could do with them, and the per-task reviewer is asked about the source.
+        So the Expected/Actual split this whole workflow is built on was applied to the code and
+        never once to the tests, and a test that asserts nothing produces a green that re-running
+        it reproduces exactly. Re-running defends against an agent that *lies*; it does nothing
+        against one that *self-confirms*, which is the failure mode this system exists to catch.
+
+        The control is the experiment that closes it, and it is mechanical rather than a reading:
+        take the base commit this change is a change to, apply **only the task's test half** onto
+        it, and re-establish the steps that just passed. A test that discriminates the change fails
+        there. If every step is still green, nothing in the change is under test, and the green
+        that would have closed the task is a fact about code that was already there.
+
+        Three answers are not passes, and each says so rather than being folded into one:
+
+        * **no test path changed** — there is no control to take. Not a failure: a task whose work
+          is genuinely covered by tests that already existed is a real thing, and blocking it would
+          make the loop demand a test per task rather than evidence per claim. It is recorded, so
+          "this task's green rests on tests nobody wrote for it" is on the record instead of being
+          the silence it has always been.
+        * **the control could not be set up** — no base, an unapplied patch, a worktree that would
+          not create. Recorded with the reason. Never a pass and never a block: a broken experiment
+          is not evidence in either direction, and inventing a verdict from one is the thing the
+          rest of this module refuses to do.
+        * **every step green** — the block. It comes back through the same channel a red step does,
+          so it spends that attempt's budget and the implementer is told what is missing.
+        """
+        commands = [step for step in passed if step.kind == "command" and step.command]
+        if self.dry_run or not commands:
+            return None, ""
+        changed, _ = self._review_scope(task, cwd, base)
+        tests = [path for path in changed if diff_facts.classify_path(path) == "test"]
+        if not tests:
+            self._note_control("no_tests_changed", detail="the change touched no test path")
+            print(f"    [control] {task.id}: no test path changed — the DoD's green is not controlled")
+            return None, ""
+        control_base = base if cwd == self.root else self.ws.fork_point(self.ws.target_branch(task.id), cwd)
+        if not control_base:
+            return self._control_undetermined("the base this change is a change to could not be resolved")
+        patch = self.ws.diff_from(control_base, cwd, tests)
+        if not patch.strip():
+            return self._control_undetermined(f"the test half of the change against {control_base[:12]} was empty")
+        try:
+            return self._take_control(task, control_base, patch, commands)
+        except EnvironmentFault:
+            raise
+        except StopLoop as exc:
+            return self._control_undetermined(str(exc))
+
+    def _take_control(
+        self, task: dag.Task, control_base: str, patch: str, commands: Sequence[GateStep]
+    ) -> tuple[str | None, str]:
+        """Run `commands` over `control_base` + `patch` and report which of them went red."""
+        with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as handle:
+            handle.write(patch)
+            patch_file = handle.name
+        try:
+            with build_git.scratch_worktree(
+                self.repo, self.config.worktree_dir, f"control-{task.id}", control_base, _late_run
+            ) as control_cwd:
+                rc, out = _late_run(["git", "apply", patch_file], cwd=control_cwd)
+                if rc != 0:
+                    return self._control_undetermined(
+                        f"the test half did not apply onto {control_base[:12]}: {out[-300:]}"
+                    )
+                for step in commands:
+                    # `note=False`: this green is a fact about the control tree, not about the
+                    # task's, and the task's `evidence.steps` is the list of what its own DoD
+                    # established. The ledger still records it — it is a true fact about a real
+                    # tree, keyed on that tree's fingerprint, so it can never be mistaken for one
+                    # about the task's.
+                    if self._run_cmd_step(step, control_cwd, note=False):
+                        self._note_control("discriminating", base=control_base, step=step.name)
+                        print(
+                            f"    [control] {task.id}: '{step.name}' goes red without the change "
+                            "— the tests discriminate it"
+                        )
+                        return None, ""
+        finally:
+            Path(patch_file).unlink(missing_ok=True)
+        self._note_control("not_discriminating", base=control_base)
+        names = ", ".join(step.name for step in commands)
+        return "negative-control", (
+            f"The quality gate is green, and it is green without your change. Re-running "
+            f"{names} over {control_base[:12]} with only this task's test files applied passed "
+            "every step, which means no test in this change exercises it: whatever the code now "
+            "does, the suite would say the same if the code were not there.\n"
+            "Add or fix a test that fails against the code as it was and passes against the code "
+            "as it is. If this task genuinely cannot be tested that way — it changes no behaviour "
+            "anything can observe — say so with `rein report --outcome needs-revision` and name "
+            "the acceptance criterion that has no observable form, rather than writing a test that "
+            "cannot fail."
+        )
+
+    def _control_undetermined(self, detail: str) -> tuple[str | None, str]:
+        self._note_control("undetermined", detail=detail)
+        print(f"    [control] could not be taken: {detail}")
+        return None, ""
+
+    def _note_control(self, result: str, *, base: str = "", step: str = "", detail: str = "") -> None:
+        record: dict[str, Any] = {"result": result}
+        if base:
+            record["base"] = base
+        if step:
+            record["step"] = step
+        if detail:
+            record["detail"] = detail[:500]
+        self._current_control.clear()
+        self._current_control.update(record)
 
     def _run_acceptance(self, task: dag.Task, cwd: str) -> tuple[str | None, str]:
         """Establish the task's own acceptance criteria, after the shared DoD has passed.
@@ -1765,6 +1898,8 @@ class Orchestrator:
         }
         if self._current_acceptance:
             record["acceptance"] = list(self._current_acceptance)
+        if self._current_control:
+            record["negative_control"] = dict(self._current_control)
         fingerprint = self._fingerprint(cwd)
         if fingerprint:
             record["tree"] = fingerprint
@@ -1971,7 +2106,7 @@ class Orchestrator:
                     # "ask the same question a second time".
                     self._stop_before_the_gate(task, kind, message, tree=self._fingerprint(cwd))
                     return False, message
-            self._local.steps, self._local.acceptance = [], []
+            self._local.steps, self._local.acceptance, self._local.negative_control = [], [], {}
             after_implementer = self._fingerprint(cwd)
             failed, failure_log = self._run_pipeline(task, cwd, base)
             if failed is None:

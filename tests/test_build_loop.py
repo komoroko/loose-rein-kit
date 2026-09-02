@@ -2216,3 +2216,131 @@ def test_a_warm_up_that_cannot_be_taken_does_not_fail_the_build(
     loop._warm_reading(task)
     assert loop._warming_off, "one refusal stops the warming rather than being retried per task"
     loop._warm_reading(task)  # and the second one does not even try
+
+
+# --- the negative control -----------------------------------------------------
+#
+# The DoD is the only automated evidence a task's `done` rests on, and until this existed
+# nothing ever asked whether it could go red. The tests it runs were written by the implementer
+# in the same launch as the code; the blind extractor is never shown them, the security reviewer
+# reads them only as an attack surface, and the per-task reviewer is asked about the source. So
+# the Expected/Actual split was applied to the code and never to the tests, and a test that
+# asserts nothing produces a green that re-running reproduces exactly. These tests pin the
+# experiment that closes it and — as much — the three answers that are *not* passes.
+
+
+def _controlled(
+    loop: build_loop.Orchestrator,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    changed: list[str],
+    reds: dict[str, str] | None = None,
+    apply_rc: int = 0,
+) -> list[str]:
+    """Wire a control run: `changed` is the task's diff, `reds` names the steps that go red."""
+    import contextlib as _contextlib
+
+    from rein import build_git as _build_git
+
+    ran: list[str] = []
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (changed, ""))
+    monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
+    monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "diff --git a/t b/t\n")
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, cwd=None, timeout=None: (apply_rc, "does not apply"))
+
+    @_contextlib.contextmanager
+    def _scratch(repo, worktree_dir, name, branch, run):  # noqa: ANN001, ARG001
+        yield str(loop.root)
+
+    monkeypatch.setattr(_build_git, "scratch_worktree", _scratch)
+
+    def _step(step: build_loop.GateStep, cwd: str, *, note: bool = True) -> str:
+        ran.append(step.name)
+        assert note is False, "a control green is a fact about the control tree, not the task's"
+        return (reds or {}).get(step.name, "")
+
+    monkeypatch.setattr(loop, "_run_cmd_step", _step)
+    return ran
+
+
+def _cmd_steps() -> tuple[build_loop.GateStep, ...]:
+    return (
+        build_loop.GateStep(name="test", kind="command", command=("make", "test")),
+        build_loop.GateStep(name="check", kind="command", command=("make", "check")),
+    )
+
+
+def test_a_dod_that_is_green_without_the_change_does_not_let_the_task_land(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point. Every step still green over the base with only the tests applied means no
+    test in the change exercises it, so the green that would have closed the task is a fact about
+    code that was already there."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
+
+    # A leaf worktree, so the base is the commit it forked off rather than the caller's.
+    failed, message = loop._negative_control(_task(), str(tmp_path / "wt"), "", _cmd_steps())
+
+    assert failed == "negative-control"
+    assert "green without your change" in message
+    assert ran == ["test", "check"]
+    assert loop._current_control == {"result": "not_discriminating", "base": "b" * 40}
+
+
+def test_a_step_that_goes_red_without_the_change_is_what_makes_the_control_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And it stops at the first red: one discriminating step settles the question."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"], reds={"test": "test_x.py::t FAILED"})
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == ["test"]
+    assert loop._current_control == {"result": "discriminating", "base": "a" * 40, "step": "test"}
+
+
+def test_a_task_that_changed_no_test_is_recorded_rather_than_passed_or_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """There is no control to take, and that is neither a pass nor a failure — a task genuinely
+    covered by tests that already existed is a real thing. What it must not be is silent: the
+    record is what says this task's green rests on tests nobody wrote for it."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "README.md"])
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "no_tests_changed"
+
+
+def test_a_control_that_could_not_be_set_up_is_undetermined_and_never_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken experiment is not evidence in either direction. It says why, and it does not
+    borrow the vocabulary of the two answers that were actually reached."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"], apply_rc=1)
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "undetermined"
+    assert "did not apply" in loop._current_control["detail"]
+
+
+def test_the_control_runs_only_the_command_steps_that_actually_passed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It negates the claim the gate just made, so its subject is exactly the steps that made it —
+    an agent step judged nothing a re-run could contradict, and a step that never ran claimed
+    nothing to negate."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["tests/test_x.py"])
+    passed = (
+        build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),
+        build_loop.GateStep(name="smoke", kind="command"),
+        build_loop.GateStep(name="test", kind="command", command=("make", "test")),
+    )
+
+    loop._negative_control(_task(), str(loop.root), "a" * 40, passed)
+    assert ran == ["test"]

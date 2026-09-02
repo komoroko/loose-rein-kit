@@ -28,9 +28,16 @@ If unapproved, do not work; say "please approve `/tasks` first" and stop.
 4. **DoD** — the `quality_gate` pipeline in `.rein/config.yaml` (default `test` → `check` →
    `review` → `smoke`), the single definition for every task; a task has no `test` command of its
    own. A step already established green against **this exact tree, in this exact image** is reused
-   rather than re-run (the evidence ledger). Then the task's own **`acceptance`** criteria are
-   established the same way — a failing one returns through the same channel a red gate step does,
-   inheriting the send-back budget rather than growing a second one beside it.
+   rather than re-run (the evidence ledger). Then the **negative control**: the same command steps
+   are re-established over the base this change is a change to, with **only the task's test half
+   applied**. A test that discriminates the change fails there; if every step is still green, no
+   test in the change exercises it and the green that would have closed the task is a fact about
+   code that was already there — so it goes back to the implementer like a red step. A task that
+   changed no test file has no control to take, which is **recorded, not passed**: it says on the
+   record that this task's green rests on tests nobody wrote for it. Then the task's own
+   **`acceptance`** criteria are established the same way — a failing one returns through the same
+   channel a red gate step does, inheriting the send-back budget rather than growing a second one
+   beside it.
 5. **Budgets** — a failed `cmd` step goes back to the implementer up to that step's own `retries`
    (over the budget → `blocked`). **Only a failure the code earned counts**: an agent that never
    launched (capacity exhausted, the CLI not on PATH, a supervisor's signal) or a step that could
@@ -44,7 +51,10 @@ If unapproved, do not work; say "please approve `/tasks` first" and stop.
    sequentially in **ascending-id order** → **when a batch merged 2+ leaves, re-run the cmd steps
    once on the merged work branch**, since each leaf was green only in isolation. A red goes to a
    fixer within the step's `retries` budget, else the batch's tasks block; a single-leaf join skips
-   it.
+   it. The `agent` steps run over the join too, and there the reviewer is asked about **what only
+   the join can show — cross-task correctness as much as shape**: the suite that just passed here
+   is the union of the leaves' suites, and no test in it was written with this merge in view, so a
+   green over the merged tree says nothing about the interaction.
 7. **Close** — mark the merged tasks `done`, **each carrying the tree its DoD was established on**
    (`evidence` in `state.yaml`) — or **`awaiting-evidence`** when a criterion nobody here can
    establish is still open, which merges the work and parks only the task, and gate ④ cannot open

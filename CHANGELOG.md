@@ -6,6 +6,47 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.4.0] - 2026-09-02
 
+**A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is
+the only automated evidence a task's `done` rests on, and nothing ever asked whether it could go
+red. The tests it runs are written by the implementer in the same launch as the code; the blind
+extractor is deliberately never shown them, the security reviewer reads them only as an attack
+surface, and the per-task reviewer is asked about the source. The Expected/Actual split this
+workflow is built on had been applied to the code and never once to the tests, so a test that
+asserts nothing produced a green that re-running reproduced exactly — and re-running is a defence
+against an agent that *lies*, not against one that *self-confirms*.
+
+- **The negative control.** After the command steps pass, the same steps are re-established over
+  the base this change is a change to, with **only the task's test half applied** (a throwaway
+  worktree; the task's own tree is never touched). A test that discriminates the change fails
+  there. If every step is still green, no test in the change exercises it, and the failure goes
+  back to the implementer through the same channel a red step does — spending that attempt's
+  budget, with the message naming what is missing rather than what broke.
+- **Three answers that are not passes, and they say so.** `no_tests_changed` — nothing to control,
+  which is a real situation and is *recorded* rather than waved through, so "this task's green
+  rests on tests nobody wrote for it" is on the record instead of being a silence. `undetermined` —
+  the experiment could not be set up (no base, an unapplied patch) and is evidence in neither
+  direction. `discriminating` is the only pass. All of it lands in `state.yaml`'s
+  `evidence.negative_control` beside the tree the verdict was reached on.
+- **The control's green is not the task's.** It runs the steps with the evidence note suppressed:
+  a green over the control tree is a true fact about *that* tree, and `evidence.steps` stays the
+  list of what this task's own DoD established.
+
+**The integration reviewer takes cross-task correctness, and the argument that it should not was
+wrong.** It reviewed the merged tree for shape only, reasoning that the command steps had just run
+over that exact tree so the bugs were already answered. But the suite over the merged tree is the
+*union of the leaves' suites*, and not one test in it was written with the merge in view: each was
+written in an isolated worktree against one ticket, by an implementer that could not see the other
+tasks. The interaction defect a merge creates is by construction the one no leaf's tests exercise.
+Nothing else covered it either — gate ④'s seam reading takes the paths two scopes share or none
+covers, and two tasks whose files are disjoint produce no seam at all. The prompt now asks for both
+halves and says why a green over the join settles nothing about the interaction.
+
+**The per-task reviewer no longer sounds like the security review.** Its `must_fix` includes "a
+security problem", which is worth having — it is caught before landing, cheaply — but it carries
+none of the structured reviewer's machinery: no anchors validated against the committed blobs, no
+blocking flag the gate reads, no finding that survives until the code it names is gone. It is now
+told so, and told not to read its own silence as that review having happened.
+
 **Gate ④ reads the change one task at a time.** The grounded review read the whole cycle's diff in
 one generation, twice over — the blind extractor and the security reviewer are each sent the source
 half — so the peak of one launch was the size of a cycle, and every stage key was taken over the

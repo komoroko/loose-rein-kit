@@ -271,6 +271,38 @@
                   }
                 }
               },
+              "negative_control": {
+                "description": "Whether the DoD that went green over this tree would have gone green WITHOUT the task's source change. The steps are re-established over the base commit with only this task's test half applied: if they are still green, no test in the change discriminates it, and the green that closed the task is a fact about code that was already there. `discriminating` is the pass. `not_discriminating` blocks the task. `no_tests_changed` and `undetermined` are not passes — they say the control could not be taken, and they say why.",
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "result"
+                ],
+                "properties": {
+                  "result": {
+                    "enum": [
+                      "discriminating",
+                      "not_discriminating",
+                      "no_tests_changed",
+                      "undetermined"
+                    ]
+                  },
+                  "base": {
+                    "description": "The commit the control was taken against — the tree the task's change is a change to.",
+                    "$ref": "#/$defs/commit"
+                  },
+                  "step": {
+                    "description": "The gate step that went red without the change, which is what makes the control a pass.",
+                    "type": "string",
+                    "maxLength": 64
+                  },
+                  "detail": {
+                    "description": "Why the control could not be taken, for `no_tests_changed` and `undetermined`.",
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                }
+              },
               "reported": {
                 "description": "What the implementer said about its own work, before anything was checked. Kept beside the verified facts rather than instead of them.",
                 "enum": [
