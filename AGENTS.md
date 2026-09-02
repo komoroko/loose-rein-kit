@@ -157,8 +157,11 @@ findings; the implementer resolves them and the reviewer looks again.
 ## Security gate
 
 **gitleaks** at commit stage; a **structured security review** feeds the grounded review before
-gate ④ (bound to the reviewed HEAD; a later commit leaves it stale), repeated with a **dependency
-audit** at `/verify` (detail: build.md, verify.md).
+gate ④ (bound to the reviewed HEAD; a later commit leaves it stale). Gate ⑤ **carries that review
+rather than re-reading the code** — its readiness refuses a review that is not about this HEAD, and
+its receipt binds the machine digest — and runs a **dependency audit**, the one security answer
+that is not a function of the tree and therefore the only one that must be taken again (detail:
+build.md, verify.md).
 
 ## Branch / commit / permissions
 

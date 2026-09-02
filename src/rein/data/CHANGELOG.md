@@ -69,6 +69,26 @@ names the writer and the command that installs it, and the repair says to upgrad
 the tool genuinely cannot read the repository — but pointed at the tool rather than at the plan.
 The `.gitignore` check stops calling such a config "unreadable" for the same reason.
 
+**Gate ⑤ carries gate ④'s security review instead of commissioning a second one.** `/verify` told
+the agent to "re-run the whole-codebase security review (the same reviewer `rein review generate`
+uses at gate ④)" — the largest single read in the workflow, asking the same reviewer about the same
+commit, and landing the answer in a test-plan cell where nothing anchors it. Every part of that was
+already covered: a blocking finding holds gate ⑤ shut through the same `review_policy.blocking_reasons`
+gate ④ used, `approve.readiness("release")` re-checks the review's `subject_head_sha` against HEAD so
+a commit made since leaves it stale and the gate does not open, and the receipt binds it by
+`machine_digest`. The scope was wrong as well as redundant: *whole-codebase* is a different question
+from "is this change safe", and code no task touched is code no gate here approves. So the reading is
+gone and the test plan names the carried review — which commit, what it found — instead of restating
+it. The two checks the carry now rests on are pinned by a test at the release gate, not only at
+gate ④.
+
+**The dependency audit is the one security answer that must be taken again**, and `/verify` now says
+why: it is the only one that is not a function of the tree. The same commit audited last month and
+today can differ, the database having moved while the code stood still — so it can never be
+"established" the way tree-bound evidence is, and the result is recorded with the date and the commit
+it was taken against. The scaffold's security table gains that column, and stops naming
+`/security-review`, an agent-specific command in a tool-neutral template.
+
 ## [0.3.13] - 2026-09-01
 
 **A deletion is not content, and a commit is not a reading** (#44, measured on 0.3.12: a 17-task

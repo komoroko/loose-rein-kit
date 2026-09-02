@@ -22,7 +22,7 @@ prompts:
     prompts/commands/revise.md: sha256:7585403488b36fb67395a21a634a889c4f58f2eb69ef53012f7a9b3fac904ff5
     prompts/commands/status.md: sha256:989c5bc65ae297332b350295aa98aa9eab3fc1d8c8d664765d5bb2fa8ede8159
     prompts/commands/tasks.md: sha256:e2d2d01b4413bae9e520eedabd90018c41fdc1d051ffbc0e5302fa87536966d5
-    prompts/commands/verify.md: sha256:e14ae224fae71ae7d72bf355ff407cf292206fcff9d1fc1ed2fd92ee950b54a9
+    prompts/commands/verify.md: sha256:05f63a2f4909c683bf26a891cfaa4a543dc77f636fb9063830a63cb9dd993b9d
     prompts/rules/gate-workflow.md: sha256:d9974d70414b094ea4f53f44b50070cef1efc31ccc65acd6805497a863e671e4
     schema/config.schema.json: sha256:f173495e60717a6f75886a18d061fae6c390710acf1d5ec6179a9c74b8b961ef
     schema/event.schema.json: sha256:e2929100d79882f4929382ad688ad16b8d865588939d632be9e70e711fb49c21

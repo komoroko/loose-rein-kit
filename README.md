@@ -413,7 +413,9 @@ Three layers:
 - **gitleaks** at pre-commit (false positives → `.gitleaksignore`)
 - a **structured security review**, folded into the grounded review at gate ④ — `rein review
   generate` runs it bound to the reviewed HEAD, and a blocking finding blocks the gate
-- a **security review + a dependency audit** in `/verify`
+- a **dependency audit** in `/verify` — gate ⑤ carries gate ④'s review instead of re-reading
+  the code (its readiness refuses a review that is not about this HEAD) and adds the one
+  security answer the tree does not determine: the database moves while the code stands still
 
 The findings are structured (severity + code anchor + blocking flag), not prose, and a later commit
 leaves the review stale until it is regenerated.
