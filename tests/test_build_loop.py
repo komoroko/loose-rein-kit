@@ -2493,6 +2493,37 @@ def test_a_control_that_could_not_be_set_up_is_undetermined_and_never_a_pass(
     assert "did not apply" in loop._current_control["detail"]
 
 
+def test_a_dod_with_no_command_step_records_that_it_could_not_be_controlled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the silence this record exists to end. `no_tests_changed` says "the green
+    rests on tests nobody wrote for it"; a quality gate made only of agent steps said nothing at
+    all — no record, and so no row on the orient brief, which skips a task that has none."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
+    agents_only = (build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),)
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, agents_only) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "undetermined"
+    assert "no command step" in loop._current_control["detail"]
+
+
+def test_a_diff_git_would_not_give_up_is_not_reported_as_an_empty_test_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`diff_from` returned "" for a failed `git diff`, which reads here as "the change touched no
+    test bytes" — a sentence about a diff that was never obtained."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
+    monkeypatch.setattr(loop.ws, "diff_from", lambda *a, **k: None)
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "undetermined"
+    assert "could not be read out of git" in loop._current_control["detail"]
+
+
 def test_a_control_failure_spends_a_send_back_rather_than_ending_the_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

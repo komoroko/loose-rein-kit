@@ -1673,16 +1673,23 @@ class Orchestrator:
           make the loop demand a test per task rather than evidence per claim. It is recorded, so
           "this task's green rests on tests nobody wrote for it" is on the record instead of being
           the silence it has always been.
-        * **the control could not be set up** — no base, an unapplied patch, a worktree that would
-          not create. Recorded with the reason. Never a pass and never a block: a broken experiment
-          is not evidence in either direction, and inventing a verdict from one is the thing the
-          rest of this module refuses to do.
+        * **the control could not be set up** — no base, no command step in the DoD to re-establish,
+          a diff git would not give up, an unapplied patch, a worktree that would not create.
+          Recorded with the reason. Never a pass and never a block: a broken experiment is not
+          evidence in either direction, and inventing a verdict from one is the thing the rest of
+          this module refuses to do.
         * **every step green** — the block. It comes back through the same channel a red step does,
           so it spends that attempt's budget and the implementer is told what is missing.
         """
         commands = [step for step in passed if step.kind == "command" and step.command]
-        if self.dry_run or not commands:
+        if self.dry_run:
             return None, ""
+        if not commands:
+            # Recorded rather than returned in silence, for the same reason `no_tests_changed` is:
+            # a quality gate made only of agent steps, or one whose command steps are all
+            # unconfigured, leaves the task's `done` resting on nothing this experiment can negate.
+            # Saying so is the whole point of the record, and `brief._control` reads it.
+            return self._control_undetermined("the quality gate passed no command step to re-establish")
         changed, _ = self._review_scope(task, cwd, base)
         tests = [path for path in changed if diff_facts.classify_path(path) == "test"]
         if not tests:
@@ -1693,6 +1700,10 @@ class Orchestrator:
         if not control_base:
             return self._control_undetermined("the base this change is a change to could not be resolved")
         patch = self.ws.diff_from(control_base, cwd, tests)
+        if patch is None:
+            return self._control_undetermined(
+                f"the test half of the change against {control_base[:12]} could not be read out of git"
+            )
         if not patch.strip():
             return self._control_undetermined(f"the test half of the change against {control_base[:12]} was empty")
         try:

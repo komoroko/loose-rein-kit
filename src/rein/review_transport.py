@@ -365,6 +365,12 @@ def _adapter_reviewer(
     stage is given a throwaway worktree holding exactly this change, unstaged (`_pending_changes`).
     It costs that stage the property the other two keep — its answer is no longer a function of the
     request alone, since the base tree, `.rein/plan.yaml` and any `CLAUDE.md` are on disk beside it.
+    **And the host configuration in the tree under review is now the reviewer's own**: a checkout
+    carries `.claude/settings.json` — its pre-authorized commands and its hook registrations — so
+    the stage that is meant to catch a hostile change runs under whatever that change says about
+    tool permissions. The edit-stage guard denies writes there (`gate_guard.HOOK_REGISTRATION`) and
+    the lock records its hash, which is what this rests on; it is a narrower guarantee than "the
+    launch reads nothing but the request", and it is stated rather than implied.
     That is affordable *here and nowhere else*: this is the stage that is deliberately not blind (it
     is the only one sent the test half), and its input is still fully determined by `trusted_base_sha`
     and `subject_head_sha`, both of which the stage key covers through `reviewer_identity` and the

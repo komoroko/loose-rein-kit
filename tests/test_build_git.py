@@ -186,6 +186,7 @@ def test_the_diff_of_a_dirty_tree_carries_a_file_git_has_never_seen(
 
     before = ws.fingerprint(str(root))
     diff = ws.diff_from(base, str(root), paths)
+    assert diff is not None
     assert "tests/test_new.py" in diff and "assert False" in diff
     assert "new file mode" in diff
 
@@ -209,5 +210,44 @@ def test_a_path_that_is_gone_does_not_fail_the_whole_diff(
     (root / "fresh.py").write_text("y = 2\n", encoding="utf-8")
 
     diff = ws.diff_from(base, str(root), ["doomed.py", "fresh.py"])
+    assert diff is not None
     assert "deleted file mode" in diff
     assert "fresh.py" in diff and "y = 2" in diff
+
+
+def test_a_diff_git_would_not_give_up_is_not_an_empty_diff(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """`rc != 0` used to return `""`, which the negative control reads as "the test half was
+    empty" — a verdict about a change git never handed over. None says so instead."""
+    root, ws, _ = workspace
+    (root / "fresh.py").write_text("y = 2\n", encoding="utf-8")
+
+    assert ws.diff_from("not-a-commit", str(root), ["fresh.py"]) is None
+
+
+def test_a_failed_intent_to_add_takes_back_what_it_managed_to_stage(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`git add` can stage some of its arguments and still exit non-zero. Reporting "nothing was
+    staged" then left intent-to-add entries in the index for a tree nobody edited, which moves the
+    fingerprint the evidence ledger keys every gate step on."""
+    root, ws, _ = workspace
+    base = git(root, "rev-parse", "HEAD")
+    (root / "kept.py").write_text("y = 2\n", encoding="utf-8")
+    before = ws.fingerprint(str(root))
+    real = ws._run
+
+    def half_staged(argv: list[str], cwd: str) -> tuple[int, str]:
+        if argv[:3] == ["git", "add", "--intent-to-add"]:
+            real(argv, cwd=cwd)  # git staged what it could …
+            return 1, "fatal: pathspec 'gone.py' did not match any files"  # … and then failed
+        return real(argv, cwd=cwd)
+
+    monkeypatch.setattr(ws, "_run", half_staged)
+
+    assert ws.diff_from(base, str(root), ["kept.py"]) is None, "a diff that may be missing a file is not the change"
+    monkeypatch.undo()
+    assert ws.fingerprint(str(root)) == before, "the index is back where it was"
+    assert git(root, "status", "--porcelain", "-uall").splitlines()[-1].startswith("??")

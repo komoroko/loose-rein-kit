@@ -324,6 +324,22 @@ def test_a_rule_map_that_cannot_be_read_is_never_replaced_by_the_defaults(tmp_pa
     assert not decide(tmp_path, "README.md")[0]  # it does not know what it guards, so: all of it
 
 
+def test_a_rule_entry_missing_half_of_itself_is_unreadable_rather_than_dropped(tmp_path: Path) -> None:
+    """The same fail-open one branch further in: an entry with a mistyped `path:` key was filtered
+    out of the map, and a map left with nothing in it fell through to DEFAULT_GUARD_PATHS — so the
+    one rule a product had added to its own guard disappeared over a typo."""
+    seed_repo(
+        tmp_path,
+        config=make_config(guard_paths=[{"path": "infra/", "requires_gate": "tasks"}]),
+        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+    )
+    _rewrite_config(tmp_path, lambda d: d["guard"].update(paths=[{"pth": "infra/", "requires_gate": "tasks"}]))
+
+    settings = gate_guard.guard_settings(repo_mod.Repo(tmp_path))
+    assert "guard.paths" in settings.unreadable
+    assert not decide(tmp_path, "infra/main.tf")[0]
+
+
 # --- rule 4: only humans open gates -------------------------------------------
 
 

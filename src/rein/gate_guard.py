@@ -202,9 +202,13 @@ def guard_settings(repo: repo_mod.Repo) -> GuardSettings:
         return GuardSettings(template_mode=template_mode)
     if not isinstance(entries, list) or not all(isinstance(entry, Mapping) for entry in entries):
         return GuardSettings(unreadable="config.yaml's `guard.paths` is not a list of {path, requires_gate} entries")
-    rules = {str(e.get("path", "")): str(e.get("requires_gate", "")) for e in entries if e.get("path")}
-    if not all(rules.values()):
-        return GuardSettings(unreadable="config.yaml has a `guard.paths` entry with no `requires_gate`")
+    rules = {str(e.get("path", "")): str(e.get("requires_gate", "")) for e in entries}
+    if not all(rules) or not all(rules.values()):
+        # An entry missing either half used to be dropped from the map instead, which put this
+        # function back in the business it was written to get out of: a mistyped `path:` key made a
+        # rule vanish, and with it the only entry a product had added to its own guard. A rule map
+        # the guard cannot read in full is a rule map it does not have.
+        return GuardSettings(unreadable="config.yaml has a `guard.paths` entry with no `path` or no `requires_gate`")
     # An empty list is not "guard nothing": the defaults stand, exactly as they do for a config
     # that names no paths at all. Disarming rule 3 is what `template_mode` is for, and it says so.
     return GuardSettings(template_mode=template_mode, paths=rules or dict(DEFAULT_GUARD_PATHS))
