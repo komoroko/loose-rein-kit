@@ -171,14 +171,9 @@ def review_prompt(
         f"Write your findings to `{findings_path}` and nothing else:\n"
         '  {"findings": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}\n'
         "`must_fix` is a defect the change cannot land with — a bug, a broken contract, a security "
-        "problem you can point at. `consider` is everything else worth saying; it stops nothing and is "
-        "carried to the human at gate ④. An empty list is a real answer, and the right one when the "
-        "change is sound: inventing a finding to look thorough costs an implementer round for nothing.\n"
-        "\n"
-        "**This is not the security review.** A structured security reviewer reads this same change "
-        "when it lands — anchors validated against the committed blobs, a blocking flag the gate reads, "
-        "findings that cannot be dropped until the code they name is gone. Say what you see here so it "
-        "is fixed cheaply, and do not treat your own silence as that review having happened."
+        "problem. `consider` is everything else worth saying; it stops nothing and is carried to the "
+        "human at gate ④. An empty list is a real answer, and the right one when the change is sound: "
+        "inventing a finding to look thorough costs an implementer round for nothing."
     )
 
 

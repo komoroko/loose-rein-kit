@@ -41,12 +41,6 @@ Nothing else covered it either — gate ④'s seam reading takes the paths two s
 covers, and two tasks whose files are disjoint produce no seam at all. The prompt now asks for both
 halves and says why a green over the join settles nothing about the interaction.
 
-**The per-task reviewer no longer sounds like the security review.** Its `must_fix` includes "a
-security problem", which is worth having — it is caught before landing, cheaply — but it carries
-none of the structured reviewer's machinery: no anchors validated against the committed blobs, no
-blocking flag the gate reads, no finding that survives until the code it names is gone. It is now
-told so, and told not to read its own silence as that review having happened.
-
 **Gate ④ reads the change one task at a time.** The grounded review read the whole cycle's diff in
 one generation, twice over — the blind extractor and the security reviewer are each sent the source
 half — so the peak of one launch was the size of a cycle, and every stage key was taken over the
