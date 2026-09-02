@@ -121,8 +121,10 @@ over the branch, `/simplify` over four cleanup angles.
 - `/simplify` finishes by **applying its fixes**. The prompt runs its review phase only. A reviewer
   that edits is the arrangement this loop was changed to remove, and a tree that moves under the
   gate sends every already-passed step back through it.
-- `/code-review ultra` is billed and user-triggered — an agent cannot launch it, and the prompt
-  says so rather than leaving it to be discovered.
+- `/code-review --fix` applies the findings to the working tree, and `/code-review ultra` is
+  billed and user-triggered. The prompt forbids both by name rather than leaving either to be
+  discovered: `--fix` is the same collapse as `/simplify`'s by another route — the fix would be
+  the reviewer's own, and the second reader the loop exists to provide would never see it.
 - Both report where they choose. The answer this step reads is the findings file: no printed
   report, no `ReportFindings`.
 

@@ -146,7 +146,12 @@ def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: boo
             "under the gate sends every already-passed step back through it.\n"
         )
     if correctness:
-        note += f"- **Never `{correctness} ultra`.** It is billed and user-triggered, and an agent cannot launch it.\n"
+        note += (
+            f"- **Never `{correctness} --fix`, and never `{correctness} ultra`.** `--fix` applies the "
+            "findings to the working tree, which is the rule above reached by another route: the fix "
+            "would be the reviewer's own and nobody would read it. `ultra` is billed and "
+            "user-triggered, and an agent cannot launch it.\n"
+        )
     if at_the_join:
         note += (
             "- They read the whole branch, which here is the join plus every task inside it. Keep what "

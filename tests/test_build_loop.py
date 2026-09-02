@@ -1000,7 +1000,9 @@ def test_a_claude_reviewer_is_pointed_at_both_and_told_what_they_must_not_do() -
     prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=_claude_disciplines())
     assert "/code-review" in prompt and "/simplify" in prompt
     assert "Run its review phase only" in prompt  # whoever judges does not repair
-    assert "Never `/code-review ultra`" in prompt
+    # `--fix` is the same collapse by another route: the reviewer's own fix, read by nobody.
+    assert "Never `/code-review --fix`" in prompt
+    assert "never `/code-review ultra`" in prompt
     assert "ReportFindings" in prompt  # the answer comes back through the findings file
     # And a host where the command is missing or disabled is not a reason to stop.
     assert "ask the questions above yourself" in prompt
