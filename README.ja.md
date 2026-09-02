@@ -379,8 +379,8 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 ルールは次の2つである。
 
 - タスクが完了になるのは、`config.yaml` の `quality_gate` を通過した場合のみである。これが
-  **DoD の唯一の定義**であり、既定は `test` → `check` → `/code-review` + `/simplify` による
-  review ステップ → 起動できる成果物であれば実起動の smoke テストとなる(起動できるようになった
+  **DoD の唯一の定義**であり、既定は `test` → `check` → correctness と simplification を問う
+  review ステップ(Claude Code ではその host 自身の `/code-review` と `/simplify` を通して問う) → 起動できる成果物であれば実起動の smoke テストとなる(起動できるようになった
   時点で、smoke ステップに `required: true` を設定する)。各ステップにはリトライ予算があり、
   使い切ると `blocked` になる。ステップは `paths:` でスコープを絞れるため、複数スタックが混在する
   リポジトリでも無関係な分まで毎回実行せずに済む(タスクごとに変えられる設定ではなく、gate ③ で

@@ -418,3 +418,70 @@ def test_a_reading_two_tasks_both_declared_is_credited_to_both() -> None:
     section = brief.derive(plan=plan, state=None, config=None, actual_statements=statements)["requirements_on_people"]
     assert "unobserved" not in section
     assert section["as_declared"]["count"] == 2
+
+
+# --- the negative control -----------------------------------------------------
+#
+# The record `build_loop` writes beside each task's status, and which nothing read until the brief
+# did. The pin that matters is the asymmetry: a control that answered is a number, one that could
+# not be taken is a row naming the task, because the second is the one an approver has to know.
+
+
+def _controlled(**by_task: dict[str, Any]) -> dict[str, Any]:
+    state = models.State(
+        {
+            **make_state(tasks={task_id: "done" for task_id in by_task}),
+            "tasks": {
+                task_id: {"status": "done", "evidence": {"negative_control": control}}
+                for task_id, control in by_task.items()
+            },
+        }
+    )
+    section = brief.derive(plan=None, state=state, config=_config()).get("control", {})
+    return section if isinstance(section, dict) else {}
+
+
+def test_a_control_that_answered_is_counted_not_listed() -> None:
+    section = _controlled(
+        **{
+            "T-001": {"result": "discriminating", "step": "test"},
+            "T-002": {"result": "discriminating", "step": "test"},
+        }
+    )
+    assert section == {"discriminating": 2}
+
+
+def test_a_task_that_changed_no_test_file_is_named_with_its_reason() -> None:
+    """The whole point of the record: this task's green rests on tests nobody wrote for it."""
+    section = _controlled(
+        **{
+            "T-001": {"result": "discriminating", "step": "test"},
+            "T-002": {"result": "no_tests_changed", "detail": "the change touched no test path"},
+        }
+    )
+    assert section == {
+        "discriminating": 1,
+        "no_tests_changed": [{"task_id": "T-002", "detail": "the change touched no test path"}],
+    }
+
+
+def test_a_control_that_could_not_be_set_up_is_its_own_row() -> None:
+    section = _controlled(**{"T-001": {"result": "undetermined", "detail": "the worktree would not create"}})
+    assert section == {"undetermined": [{"task_id": "T-001", "detail": "the worktree would not create"}]}
+
+
+def test_a_task_that_did_not_land_carries_no_control_row() -> None:
+    """A blocked task has no `done` for evidence to justify, so its control is not evidence here."""
+    state = models.State(
+        {
+            **make_state(tasks={"T-001": "blocked"}),
+            "tasks": {"T-001": {"status": "blocked", "evidence": {"negative_control": {"result": "no_tests_changed"}}}},
+        }
+    )
+    assert "control" not in brief.derive(plan=None, state=state, config=_config())
+
+
+def test_a_run_that_recorded_no_control_reports_nothing_rather_than_zero() -> None:
+    """Absence stays distinguishable from unmeasured: no section, not `discriminating: 0`."""
+    state = models.State({**make_state(tasks={"T-001": "done"}), "tasks": {"T-001": {"status": "done"}}})
+    assert "control" not in brief.derive(plan=None, state=state, config=_config())

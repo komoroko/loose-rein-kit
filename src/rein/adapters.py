@@ -18,8 +18,8 @@ that name.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 
 from rein import models
 from rein import usage as usage_mod
@@ -27,6 +27,14 @@ from rein import usage as usage_mod
 
 class LaunchRefused(Exception):
     """A role cannot be launched as configured — an unknown adapter, or an unpassable model."""
+
+
+#: The review disciplines rein's prompts ask for, by the neutral name they use. A host that has
+#: its own is named in `Adapter.disciplines`; one that has not gets the question written out in
+#: the prompt, which is the floor either way (`build_prompts`).
+CORRECTNESS = "correctness"
+SIMPLIFICATION = "simplification"
+SECURITY = "security"
 
 
 @dataclass(frozen=True)
@@ -77,6 +85,18 @@ class Adapter:
     #: cannot pass would declare a separation nothing performs. `launch_argv` refuses that
     #: combination rather than launching the CLI's default under another model's name.
     model_flags: tuple[str, ...] = ()
+    #: The host's own review disciplines, keyed by the neutral names above. Prompts name a
+    #: discipline, never a host's command, and this is where the two meet — the same arrangement
+    #: AGENTS.md's capability vocabulary makes for the human-facing verbs. rein's prompts carried
+    #: `/code-review` and `/simplify` as bare prose for several releases: real commands, named in
+    #: text that also runs under `codex` and `gemini`, where they mean nothing at all.
+    #:
+    #: A discipline named here is offered, never relied on: the prompt states the question in full
+    #: beside the command, so a host where the command is missing, disabled or renamed asks the
+    #: same thing itself. What it buys where it is present is a better reading than a
+    #: re-derivation — `/code-review` fans out over the branch, `/simplify` over four cleanup
+    #: angles — and the prompt is what keeps rein's own answer contract on top of it.
+    disciplines: Mapping[str, str] = field(default_factory=dict)
     #: What makes a resume *branch* the session instead of continuing it: the forks share
     #: everything read before the fork and none of what any of them then concludes. That is the
     #: difference between sharing the reading and sharing the readings, and it is what lets two
@@ -122,6 +142,15 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         model_flags=("--model",),
         usage_flags=usage_mod.CLAUDE_JSON_FLAGS,
         envelope=usage_mod.parse_claude_envelope,
+        # Claude Code carries all three as commands of its own, and a headless `-p` launch reaches
+        # them. `/code-review` has levels and `ultra` is billed and user-triggered — the prompts
+        # forbid it rather than naming a level, because a level is an operator's choice and this
+        # is not the file that makes it.
+        disciplines={
+            CORRECTNESS: "/code-review",
+            SIMPLIFICATION: "/simplify",
+            SECURITY: "/security-review",
+        },
     ),
     "codex": Adapter(
         name="codex",
@@ -165,6 +194,14 @@ def launch_refusal(config: models.Config | None, role: str) -> str:
             "— drop the model, or point the role at an adapter whose model flag is known."
         )
     return ""
+
+
+def disciplines_for(argv: Sequence[str]) -> Mapping[str, str]:
+    """The review disciplines the CLI `argv` launches carries, or none for one this release does
+    not know. Keyed on the CLI's own name, like `write_flags`, because the build loop holds an
+    argv rather than a role."""
+    adapter = adapter_for(argv)
+    return adapter.disciplines if adapter else {}
 
 
 def write_flags(argv: tuple[str, ...]) -> tuple[str, ...]:

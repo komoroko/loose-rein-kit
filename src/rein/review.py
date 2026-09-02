@@ -490,6 +490,7 @@ def generate(
                 head=head,
                 risk_floor=facts.risk_floor,
                 prior_blocking=prior_by_unit[m.reading.unit],
+                discipline=review_reading.security_discipline(config),
                 on_stage=entered,
                 cache=cache,
                 keys=keys_by_unit[m.reading.unit],

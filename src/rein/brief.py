@@ -344,6 +344,62 @@ def _verification(config: models.Config | None, state: models.State | None) -> d
     return section
 
 
+#: The negative-control outcomes that are not a control. `discriminating` is the one that says the
+#: experiment ran and answered, so it is a count; these two say it did not, and they are the rows.
+_UNCONTROLLED = ("no_tests_changed", "undetermined")
+
+
+def _control(state: models.State | None) -> dict[str, Any]:
+    """Which landed tasks' greens were controlled, and which were not.
+
+    The DoD's green is the only automated evidence a task's `done` rests on, and the negative
+    control is what asks whether it could have been red: the command steps re-established over the
+    base with only the task's test half applied. `build_loop` records the outcome beside the status
+    and, until this section existed, **nothing read it** — not the orient brief, not the decision
+    cards, not `approve`'s readiness. So `no_tests_changed`, whose whole purpose is to put "this
+    task's green rests on tests nobody wrote for it" on the record rather than leave it a silence,
+    reached the human as a silence in a different file. (`template_lint`'s
+    `check_declared_properties_are_read` cannot catch this shape by construction: it is a literal
+    name search and the writer names the field.)
+
+    It follows `_verification`'s convention, which is the right one here for the same reason: the
+    tasks whose control answered say what everybody assumed on opening the screen, so they are a
+    number, and only the ones where the experiment could not be taken are lines.
+
+    **It blocks nothing.** A task whose work is genuinely covered by tests that already existed is a
+    real thing, and turning this into a gate would make the loop demand a test per task rather than
+    evidence per claim — the judgement `_negative_control` makes explicitly. This says what happened;
+    what the tests are worth is the per-task reviewer's question, and its findings arrive beside
+    this one (`residual_findings`).
+    """
+    tasks = state.raw.get("tasks") if state is not None else None
+    rows: dict[str, list[dict[str, str]]] = {result: [] for result in _UNCONTROLLED}
+    controlled = 0
+    for task_id, entry in sorted((tasks if isinstance(tasks, dict) else {}).items()):
+        if not isinstance(entry, dict) or str(entry.get("status", "")) not in _LANDED:
+            continue
+        evidence = entry.get("evidence")
+        control = evidence.get("negative_control") if isinstance(evidence, dict) else None
+        if not isinstance(control, Mapping):
+            continue
+        result = str(control.get("result", ""))
+        if result == "discriminating":
+            controlled += 1
+        elif result in rows:
+            row = {"task_id": str(task_id)}
+            detail = control.get("detail")
+            if detail:
+                row["detail"] = str(detail)
+            rows[result].append(row)
+    section: dict[str, Any] = {}
+    if controlled:
+        section["discriminating"] = controlled
+    for result in _UNCONTROLLED:
+        if rows[result]:
+            section[result] = rows[result][:MAX_TASKS]
+    return section
+
+
 def _residuals(state: models.State | None) -> dict[str, Any]:
     """What is still open — the part of gate ④ that is easiest to approve past without noticing."""
     if state is None:
@@ -457,6 +513,10 @@ def derive(
     verification = _verification(config, state)
     if verification:
         sections["verification"] = verification
+
+    control = _control(state)
+    if control:
+        sections["control"] = control
 
     residuals = _residuals(state)
     if residuals:

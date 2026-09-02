@@ -375,7 +375,8 @@ decisions reach the audit chain only through the control plane the orchestrator 
 The rules:
 
 - A task is done only once it passes `quality_gate` in `config.yaml` — the **single DoD
-  definition** (default: `test` → `check` → a `/code-review`+`/simplify` review step → a
+  definition** (default: `test` → `check` → a correctness+simplification review step, which
+  under Claude Code is asked through that host's own `/code-review` and `/simplify` → a
   real-launch smoke test for runnable deliverables; set the smoke step `required: true` once the
   deliverable is runnable). Each step has its own retry budget; exhausting it → `blocked`. A step
   can scope itself to `paths:` (glob patterns) so a repo mixing several stacks doesn't pay every

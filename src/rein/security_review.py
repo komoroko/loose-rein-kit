@@ -51,13 +51,29 @@ def categories() -> tuple[str, ...]:
     )
 
 
-def contract() -> str:
+def contract(discipline: str = "") -> str:
     """What the security reviewer is being asked for, carried *in* the request.
 
     Carried here for the same reason the other two stages' contracts are
     (`actual_extraction.contract`): the launch is given nothing else to read, so everything the
     answer needs — the anchors' blobs and line counts included — has to arrive with the question.
+
+    `discipline` is the host's own security review, when it has one (`adapters.Adapter`). This is
+    the one stage whose working directory is a checkout rather than an empty temp dir
+    (`review_transport`), precisely so that such a discipline has the thing it reads: the change,
+    as this branch's pending changes. It is offered, never relied on — the reviewer that does not
+    have it, or whose host refuses it, reads the diff below exactly as before, and either way the
+    answer is the JSON, never the report the discipline would end with.
     """
+    host = (
+        f"- Your host carries `{discipline}` — a security review of this branch's pending changes, "
+        "which is what your working directory holds: a checkout of this change, unstaged. Use it "
+        "for the reading. Its own output is a markdown report, and that is not the answer here — "
+        "the answer is the one JSON object above, every finding anchored. If it is unavailable, or "
+        "refuses, review the diff below yourself and say nothing about having tried.\n"
+        if discipline
+        else ""
+    )
     return (
         "Review the change below for security and for the ways it could be attacked. Findings, "
         "not prose: the gate reads the flag, never the paragraph.\n"
@@ -86,7 +102,8 @@ def contract() -> str:
         "nobody else. Tests are code an agent wrote and they run with the operator's credentials, "
         "so review them as code: a fixture that reaches the network, a credential in a test "
         "constant, a helper that shells out. Anchor into them exactly as into anything else.\n"
-        "- An empty `findings` list is a real answer. Say it rather than inventing something."
+        "- An empty `findings` list is a real answer. Say it rather than inventing something.\n"
+        f"{host}"
     )
 
 
@@ -98,6 +115,7 @@ def build_request(
     trusted_base_sha: str,
     subject_head_sha: str,
     prior_blocking: Iterable[Mapping[str, Any]] = (),
+    discipline: str = "",
 ) -> dict[str, Any]:
     """The security reviewer's input: the change, widened around each hunk, and the signals.
 
@@ -115,7 +133,7 @@ def build_request(
     # Diff first, volatile scalars after it: the prompt cache matches on an exact prefix, and a
     # sha that changes every commit in front of the diff throws the reading away with it
     # (`actual_extraction.build_request` carries the argument in full).
-    request: dict[str, Any] = {"contract": contract(), "diff": diff_text}
+    request: dict[str, Any] = {"contract": contract(discipline), "diff": diff_text}
     # The test half of the change, which only this stage is sent (`review.split_tests`). It rides
     # in its own key rather than concatenated into `diff` because `diff` is the reading both
     # reading stages share and prime one session with — and the blind extractor must not read a

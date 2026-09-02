@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from rein import dag
+from rein import adapters, dag
 from rein import repo as repo_mod
 
 
@@ -119,6 +119,49 @@ def implementer_prompt(
     return prompt
 
 
+def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: bool = False) -> str:
+    """Offer the host's own review disciplines — with what each one must not do here.
+
+    The prompts state every question in full whether or not this returns anything, so a host
+    without these asks exactly the same thing. What this adds is the host's own reading of it,
+    and the two sentences that keep rein's contract on top of it: `/simplify` ends by applying its
+    fixes, and a reviewer that edits is the arrangement this loop was changed to remove; both
+    report where they choose, and the only answer this step reads is the findings file.
+    """
+    offered = dict(disciplines or {})
+    correctness = offered.get(adapters.CORRECTNESS, "")
+    simplification = offered.get(adapters.SIMPLIFICATION, "")
+    if not correctness and not simplification:
+        return ""
+    named = " and ".join(f"`{c}`" for c in (correctness, simplification) if c)
+    note = (
+        f"\n**Your host carries {named} as disciplines of its own — use them for the reading above.** "
+        "They read the branch you are on, and they were written for this by people who do nothing "
+        "else; re-deriving the same questions from scratch is the worse of the two readings.\n"
+    )
+    if simplification:
+        note += (
+            f"- **{simplification} ends by applying its fixes. Run its review phase only.** Leave every "
+            "file exactly as you found it — whoever judges does not repair here, and a tree that moves "
+            "under the gate sends every already-passed step back through it.\n"
+        )
+    if correctness:
+        note += f"- **Never `{correctness} ultra`.** It is billed and user-triggered, and an agent cannot launch it.\n"
+    if at_the_join:
+        note += (
+            "- They read the whole branch, which here is the join plus every task inside it. Keep what "
+            "only the join shows; a finding about one task alone was already reviewed on its own "
+            "branch, and reporting it again spends an implementer round on a settled question.\n"
+        )
+    note += (
+        "- Report through neither of them. Whatever they produce, the answer this step reads is the "
+        "findings file below — do not print a report and do not use `ReportFindings`.\n"
+        "- A discipline that is missing, disabled or renamed on this host is not a reason to stop: "
+        "ask the questions above yourself.\n"
+    )
+    return note
+
+
 def review_prompt(
     task: dag.Task,
     *,
@@ -127,6 +170,7 @@ def review_prompt(
     diff_cmd: str = "",
     dossier_path: str = "",
     findings_path: str = "",
+    disciplines: Mapping[str, str] | None = None,
 ) -> str:
     # Scope the reviewer's read to the task's actual diff: it runs in a fresh context (independent
     # verification — deliberately not the implementer's session), and without this hint it must
@@ -137,9 +181,12 @@ def review_prompt(
     if dossier_path:
         scope = (
             f"**Read {dossier_path} first.** It carries the claims this task answers, its acceptance "
-            "criteria, its declared scope, and its changed paths already split into source, tests and "
-            "mechanical churn — review the source and tests, not the churn. Judge the change against "
-            f"the acceptance criteria, one at a time. The full diff is `{diff_cmd}`.\n"
+            "criteria and how each one is judged, its declared scope, and its changed paths already "
+            "split into source, tests and mechanical churn — review the source and tests, not the "
+            "churn. Judge the change against the acceptance criteria, starting with the ones whose "
+            "`evidence.kind` is `prose`: a criterion carrying a `command` or an `artifact` was "
+            "already established by the caller, and a prose one is judged by nobody between you and "
+            f"gate ④. The full diff is `{diff_cmd}`.\n"
             if diff_cmd
             else f"**Read {dossier_path} first.** It carries the claims this task answers, its acceptance "
             "criteria, its declared scope, and its changed paths split by kind.\n"
@@ -157,11 +204,22 @@ def review_prompt(
     return (
         f'You are the reviewer for task {task.id} "{task.title}" (the quality gate\'s agent step).\n'
         f"{scope}"
-        "Review this branch's changes for this task for correctness bugs (the /code-review discipline), "
-        "then for simplification: reuse existing code, needless complexity, and anything the ticket's "
-        "acceptance criteria do not require — speculative generality, unused knobs/hooks (YAGNI; the "
-        "/simplify discipline). Stay within this task's scope; a requirements/design defect is a finding "
-        "like any other, not something to work around.\n"
+        "Review this branch's changes for this task for correctness bugs, then for simplification: "
+        "reuse existing code, needless complexity, and anything the ticket's acceptance criteria do "
+        "not require — speculative generality, unused knobs/hooks (YAGNI). Stay within this task's "
+        "scope; a requirements/design defect is a finding like any other, not something to work "
+        "around.\n"
+        f"{_disciplines_note(disciplines)}"
+        "\n"
+        "**Then read the tests as evidence, not as code that passes.** The caller re-establishes the "
+        "gate's command steps over the base with only this change's test half applied, which can show "
+        "that the test half is not inert against the old code — never that the tests are any good, and "
+        "this is the only place that judgement is made. For each acceptance criterion, name the test in "
+        "this change that would go red if the behaviour the criterion describes were wrong; a criterion "
+        "with no such test is a finding. So is an assertion that would hold for any output (a bare "
+        "not-null or truthiness check where the criterion names a value, a mock asserted against "
+        "itself), a test that pins the implementation's internals rather than its behaviour, and an "
+        "expected-exception check that never looks at what was raised.\n"
         "\n"
         "**You do not change the code, and you do not run anything.** You have no write access to it, "
         f"and running {cmds} would only repeat what the caller runs itself and decides by. Judging a "
@@ -268,6 +326,7 @@ def integration_review_prompt(
     gate_cmds: Sequence[str],
     diff_cmd: str,
     findings_path: str,
+    disciplines: Mapping[str, str] | None = None,
 ) -> str:
     """Review the tree the merge produced, which no per-task reviewer ever saw.
 
@@ -302,7 +361,8 @@ def integration_review_prompt(
         "nothing about the interaction — that is the gap you are here for.\n"
         "- **Shape**: duplication between what two tasks added, one responsibility now living in two "
         "places, an abstraction one task introduced that the next worked around, anything no ticket's "
-        "acceptance criteria require (the /simplify discipline).\n"
+        "acceptance criteria require.\n"
+        f"{_disciplines_note(disciplines, at_the_join=True)}"
         "\n"
         "Do not re-review either task against its own ticket — that already happened, on its own "
         f"branch. Do not run {cmds}: the caller has just run them over this exact tree and decides by "

@@ -26,6 +26,7 @@ from typing import Any, TypeVar
 
 from rein import (
     actual_extraction,
+    adapters,
     common,
     diff_facts,
     digests,
@@ -647,15 +648,33 @@ def extraction_request(
     )
 
 
+def security_discipline(config: models.Config | None) -> str:
+    """The host's own security review, when the configured reviewer has one (`adapters`).
+
+    Read from the role's adapter rather than passed down from a caller, so the offer and the launch
+    cannot disagree. It is not in the stage key: `reviewer_identity` already covers the adapter this
+    is derived from, so pointing the role at a different CLI re-reads, and pointing it at the same
+    one cannot change the answer to this.
+    """
+    try:
+        return adapters.adapter_for_role(config, "security_reviewer").disciplines.get(adapters.SECURITY, "")
+    except adapters.LaunchRefused:
+        # A role this release cannot launch is refused where it is launched, with a message that
+        # says what to repair. Refusing here as well would report it from the wrong place.
+        return ""
+
+
 def security_request(
     measured: ReadingFacts,
     *,
     trusted_base: str,
     head: str,
     prior_blocking: Sequence[Mapping[str, Any]] = (),
+    discipline: str = "",
 ) -> dict[str, Any]:
     """The security reviewer's input for one reading — the only stage sent the test half."""
     return security_review.build_request(
+        discipline=discipline,
         diff_text=measured.reviewable.source,
         tests_diff=measured.reviewable.tests,
         deterministic_facts={
@@ -1130,6 +1149,7 @@ def warm(
         head=head,
         risk_floor=risk_floor,
         prior_blocking=(),
+        discipline=security_discipline(config),
         cache=cache,
         keys=keys,
         ran=set(),
@@ -1164,6 +1184,7 @@ def read_one(
     head: str,
     risk_floor: str,
     prior_blocking: Sequence[Mapping[str, Any]],
+    discipline: str = "",
     on_stage: Callable[[str], None] = lambda _name: None,
     cache: review_cache.StageCache,
     keys: Mapping[str, str],
@@ -1193,7 +1214,9 @@ def read_one(
     order, and reporting whichever thread lost a race would make the error a reader sees depend on
     timing.
     """
-    security_req = security_request(measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking)
+    security_req = security_request(
+        measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking, discipline=discipline
+    )
 
     def run_security() -> security_review.SecurityResult:
         # Bound on this thread — the worker's — because the transport is reached through the

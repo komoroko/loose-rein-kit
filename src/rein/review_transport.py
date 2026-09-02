@@ -23,11 +23,13 @@ reads it; it never writes to it.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import tempfile
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 from rein import actual_extraction, adapters, common, digests, faults, models, review_policy
@@ -277,6 +279,50 @@ def shares_reading(config: models.Config | None) -> bool:
     return shareable_reading(config, _READING_ROLES) is not None
 
 
+#: The one stage whose reading benefits from standing in a checkout rather than in an empty
+#: directory: the host's security discipline reviews a branch's *pending changes*, and outside a
+#: repository it refuses outright. The other two stages read only what the request carries.
+_CHECKOUT_ROLE = "security_reviewer"
+
+
+@contextlib.contextmanager
+def _pending_changes(repo: repo_mod.Repo, base: str, head: str) -> Iterator[str | None]:
+    """A throwaway worktree holding this change as **unstaged** modifications, or None.
+
+    `git worktree add --detach <dir> <head>` puts the reviewed tree on disk; `git reset --mixed
+    <base>` then moves HEAD and the index back to the base and leaves the working tree alone. What
+    `git status` shows afterwards is exactly base→head, unstaged — which is the shape
+    `security-review` and its kind are written against, and the reason this stage gets a directory
+    at all.
+
+    The change is not applied as a patch: the diff in the request has been folded and widened for
+    the reading (`review_reading.fold_bodies`) and would not apply. Git already has both trees.
+
+    None when it cannot be made, and the caller then uses the empty directory as before. This is a
+    better reading, never a required one: the contract asks the reviewer to read the diff itself
+    when the discipline is unavailable, and a host command that finds no repository says so and
+    the reviewer does exactly that. Failing a whole gate over an optimization would be the wrong
+    trade in the other direction.
+    """
+    if not base or not head:
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="rein-review-tree-", ignore_cleanup_errors=True) as parent:
+        tree = os.path.join(parent, "subject")
+        rc, _ = repo._git_rc("worktree", "add", "--detach", "--quiet", tree, head)
+        if rc != 0:
+            yield None
+            return
+        try:
+            rc, _ = common.run(["git", "-C", tree, "reset", "--mixed", "--quiet", base])
+            yield tree if rc == 0 else None
+        finally:
+            # Pruned as well as removed: a worktree whose directory is about to be deleted under
+            # git leaves an administrative entry behind, and they accumulate one per review.
+            repo._git_rc("worktree", "remove", "--force", tree)
+            repo._git_rc("worktree", "prune")
+
+
 def _adapter_reviewer(
     repo: repo_mod.Repo,
     role: str,
@@ -313,6 +359,17 @@ def _adapter_reviewer(
     project, and `deterministic_facts.files` instead of the `git rev-parse` a reviewer used to
     have to run to anchor anything. What the launch can still read is the user's own global CLI
     configuration, which is theirs and not this repository's to remove.
+
+    **The security reviewer is the exception, and only when its host has a discipline to use.** A
+    host security review reads a branch's pending changes and refuses outside a repository, so that
+    stage is given a throwaway worktree holding exactly this change, unstaged (`_pending_changes`).
+    It costs that stage the property the other two keep — its answer is no longer a function of the
+    request alone, since the base tree, `.rein/plan.yaml` and any `CLAUDE.md` are on disk beside it.
+    That is affordable *here and nowhere else*: this is the stage that is deliberately not blind (it
+    is the only one sent the test half), and its input is still fully determined by `trusted_base_sha`
+    and `subject_head_sha`, both of which the stage key covers through `reviewer_identity` and the
+    change digest. The blind extractor and the comparator keep the empty directory, which is the
+    place the argument above was actually about.
     """
 
     if config is None:
@@ -321,13 +378,20 @@ def _adapter_reviewer(
     role_argv = adapters.launch_argv(config, role)
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
+    wants_checkout = role == _CHECKOUT_ROLE and bool(record.disciplines.get(adapters.SECURITY))
+
     def call(request: Mapping[str, Any]) -> review_policy.Answer:
         argv = list(role_argv) + list(reading.branch_flags(request) if reading else ())
         payload = json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False)
+        checkout = (
+            _pending_changes(repo, str(request.get("trusted_base_sha", "")), str(request.get("subject_head_sha", "")))
+            if wants_checkout
+            else contextlib.nullcontext(None)
+        )
         # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
         # left something undeletable behind must not turn a finished review into a traceback.
-        with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as elsewhere:
-            rc, out = common.run(argv, cwd=elsewhere, timeout=timeout or None, input_text=payload)
+        with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as empty, checkout as tree:
+            rc, out = common.run(argv, cwd=tree or empty, timeout=timeout or None, input_text=payload)
         if rc != 0:
             ledger.add(role, usage_mod.Usage.unavailable())
             # What the adapter said, not merely that it stopped. `common.run` merges stderr into

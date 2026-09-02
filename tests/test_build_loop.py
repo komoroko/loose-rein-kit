@@ -920,6 +920,118 @@ def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path)
     assert build_prompts.handoff_note({}) == ""  # a first attempt says nothing about a previous one
 
 
+# --- the reviewer prompt ------------------------------------------------------
+#
+# The reviewer is the only reader that judges the TESTS. The negative control can show that the
+# test half is not inert against the base; nothing else in the loop asks whether a test would go
+# red if the behaviour were wrong, so the question has to be in the prompt or it is asked nowhere.
+
+
+def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], dossier_path=".rein/work/T-001.json")
+    assert "would go red" in prompt
+    assert "not inert" in prompt
+    # And the reason it is here rather than left to the control.
+    assert "only place that judgement is made" in prompt
+
+
+def test_the_reviewer_is_pointed_at_the_criteria_nothing_else_establishes() -> None:
+    """`command` and `artifact` criteria are established by the caller; a prose one is judged here."""
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    prompt = build_prompts.review_prompt(
+        task, gate_cmds=["make test"], dossier_path=".rein/work/T-001.json", diff_cmd="git diff HEAD~1"
+    )
+    assert "`evidence.kind` is `prose`" in prompt
+    assert "already established by the caller" in prompt
+
+
+def test_the_integration_reviewer_is_not_asked_the_test_question() -> None:
+    """The merged tree's suite is the union of the leaves', and every test in it was already read."""
+    from rein import build_prompts
+
+    prompt = build_prompts.integration_review_prompt(
+        "T-001, T-002", gate_cmds=["make test"], diff_cmd="git diff main", findings_path="/tmp/f.json"
+    )
+    assert "would go red" not in prompt
+
+
+# --- the host's own review disciplines ----------------------------------------
+#
+# `/code-review` and `/simplify` were named in rein's prompts as bare prose for several releases:
+# real Claude Code commands, written into text that also runs under `codex` and `gemini`, where
+# they mean nothing. They are a host capability now, declared per adapter, and the question is
+# written out beside them so that a host without them asks the same thing.
+
+
+def _claude_disciplines() -> dict[str, str]:
+    return dict(adapters.ADAPTER_TABLE["claude"].disciplines)
+
+
+def test_only_a_host_that_has_them_is_told_to_use_them() -> None:
+    assert set(_claude_disciplines()) == {adapters.CORRECTNESS, adapters.SIMPLIFICATION, adapters.SECURITY}
+    assert adapters.ADAPTER_TABLE["codex"].disciplines == {}
+    assert adapters.ADAPTER_TABLE["gemini"].disciplines == {}
+    assert adapters.disciplines_for(["nothing-this-release-knows"]) == {}
+
+
+def test_a_host_without_them_is_never_pointed_at_a_command_that_is_not_there() -> None:
+    """The defect this replaced: the prompt named `/code-review` to a CLI that has no such thing."""
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    codex = adapters.ADAPTER_TABLE["codex"].disciplines
+    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=codex)
+    assert "/code-review" not in prompt and "/simplify" not in prompt
+    # The questions themselves are still asked — that is the floor, and it is what a codex reviewer
+    # has always had.
+    assert "correctness bugs" in prompt and "YAGNI" in prompt
+
+
+def test_a_claude_reviewer_is_pointed_at_both_and_told_what_they_must_not_do() -> None:
+    """`/simplify` ends by applying its fixes, and `/code-review ultra` is billed and user-triggered."""
+    from rein import build_prompts
+
+    task = dag.Task(id="T-001", title="base", kind="foundation")
+    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=_claude_disciplines())
+    assert "/code-review" in prompt and "/simplify" in prompt
+    assert "Run its review phase only" in prompt  # whoever judges does not repair
+    assert "Never `/code-review ultra`" in prompt
+    assert "ReportFindings" in prompt  # the answer comes back through the findings file
+    # And a host where the command is missing or disabled is not a reason to stop.
+    assert "ask the questions above yourself" in prompt
+
+
+def test_the_join_says_to_keep_only_what_the_join_shows() -> None:
+    """The disciplines read the whole branch, and each task inside it was already reviewed alone."""
+    from rein import build_prompts
+
+    prompt = build_prompts.integration_review_prompt(
+        "T-001, T-002",
+        gate_cmds=["make test"],
+        diff_cmd="git diff main",
+        findings_path="/tmp/f.json",
+        disciplines=_claude_disciplines(),
+    )
+    assert "Keep what only the join shows" in prompt
+    assert "already reviewed on its own" in prompt
+
+
+def test_the_security_discipline_is_offered_in_the_contract_and_never_replaces_it() -> None:
+    """Its own output is a markdown report; the answer here is the JSON, every finding anchored."""
+    from rein import security_review as sec
+
+    offered = sec.contract("/security-review")
+    assert "/security-review" in offered
+    assert "not the answer here" in offered
+    assert "one JSON object and no other text" in offered  # the contract is unchanged underneath
+    assert "/security-review" not in sec.contract()
+
+
 # --- events -------------------------------------------------------------------
 
 

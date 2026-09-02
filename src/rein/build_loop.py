@@ -1324,7 +1324,13 @@ class Orchestrator:
         return [], ""
 
     def _review_prompt(
-        self, task: dag.Task, cwd: str, base: str, dossier_path: str = "", findings_path: str = ""
+        self,
+        task: dag.Task,
+        cwd: str,
+        base: str,
+        dossier_path: str = "",
+        findings_path: str = "",
+        argv: Sequence[str] = (),
     ) -> str:
         changed, diff_cmd = self._review_scope(task, cwd, base)
         return build_prompts.review_prompt(
@@ -1334,6 +1340,10 @@ class Orchestrator:
             diff_cmd=diff_cmd,
             dossier_path=dossier_path,
             findings_path=findings_path,
+            # Keyed on the argv this step will actually be launched with, not on the default one: a
+            # step may name its own `agent_argv`, and offering a discipline the launched CLI does
+            # not have is the dangling reference this replaced.
+            disciplines=adapters.disciplines_for(argv or self.config.adapter_argv),
         )
 
     def _fingerprint(self, cwd: str) -> str:
@@ -1389,7 +1399,7 @@ class Orchestrator:
         target = dossier.findings_path(cwd, task.id)
         target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         argv = step.agent_argv or self.config.adapter_argv
-        prompt = self._review_prompt(task, cwd, base, dossier_path, f"{dossier.RELATIVE_PATH}/{target.name}")
+        prompt = self._review_prompt(task, cwd, base, dossier_path, f"{dossier.RELATIVE_PATH}/{target.name}", argv=argv)
         # No write flags: the reviewer's `.rein/work/` file is the only thing it needs to produce,
         # and everything else it might touch belongs to somebody else.
         self._launch(
@@ -1633,11 +1643,11 @@ class Orchestrator:
         The DoD is the only automated evidence a task's `done` rests on, and until this existed
         nobody ever asked whether it could go red. The tests it runs were written by the
         implementer in the same launch as the code they test; the blind extractor is deliberately
-        never shown them (`review_reading.split_tests`), the security reviewer reads them only for
-        what an attacker could do with them, and the per-task reviewer is asked about the source.
-        So the Expected/Actual split this whole workflow is built on was applied to the code and
-        never once to the tests, and a test that asserts nothing produces a green that re-running
-        it reproduces exactly. Re-running defends against an agent that *lies*; it does nothing
+        never shown them (`review_reading.split_tests`), and the security reviewer reads them only
+        for what an attacker could do with them. So the Expected/Actual split this whole workflow is
+        built on reached the code and — until the per-task reviewer was asked the question named
+        below — never once the tests, and a test that asserts nothing produces a green that
+        re-running it reproduces exactly. Re-running defends against an agent that *lies*; it does nothing
         against one that *self-confirms*, which is the failure mode this system exists to catch.
 
         The control is the experiment that closes it, and it is mechanical rather than a reading:
@@ -2287,6 +2297,7 @@ class Orchestrator:
                         gate_cmds=self.config.gate_cmds,
                         diff_cmd=f"git diff {self._plan.base_commit if self._plan else 'HEAD~1'}..HEAD",
                         findings_path=f"{dossier.RELATIVE_PATH}/{target.name}",
+                        disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
                     ),
                 ],
                 cwd=self.root,

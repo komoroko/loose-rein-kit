@@ -7,6 +7,8 @@ the wiring writes a schema-valid review.yaml and resets the human half.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import json
 import os
 import re
@@ -235,7 +237,15 @@ def test_the_orientation_brief_is_derived_into_the_machine_half(review_repo: Pat
 
     state_path = review_repo / ".rein" / "state.yaml"
     document = yaml.safe_load(state_path.read_text(encoding="utf-8"))
-    document["tasks"] = {"T-001": {"status": "done", "evidence": {"steps": [{"name": "test"}]}}}
+    document["tasks"] = {
+        "T-001": {
+            "status": "done",
+            "evidence": {
+                "steps": [{"name": "test"}],
+                "negative_control": {"result": "no_tests_changed", "detail": "the change touched no test path"},
+            },
+        }
+    }
     state_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     _git(review_repo, "add", "-A")
     _git(review_repo, "commit", "-qm", "task done")
@@ -248,6 +258,11 @@ def test_the_orientation_brief_is_derived_into_the_machine_half(review_repo: Pat
     assert brief_section["verification"]["established_for_nothing"] == ["check"]
     # `make_config`'s default profiles are host ones, so the boundary reports what that really is.
     assert {row["network"] for row in brief_section["execution_boundary"]} == {"unconfined"}
+    # The task's green was never shown to be able to go red, and the approver is told which task —
+    # the record `build_loop` has always written and nothing used to read.
+    assert brief_section["control"] == {
+        "no_tests_changed": [{"task_id": "T-001", "detail": "the change touched no test path"}]
+    }
     # It survived the schema-validated write, not only the in-memory assembly.
     stored = store_mod.Store(repo_mod.Repo(review_repo)).read_review()
     assert stored is not None and stored.machine["brief"] == brief_section
@@ -1042,6 +1057,109 @@ def test_an_adapter_that_said_nothing_is_reported_as_saying_nothing(
     with pytest.raises(review_policy.ReviewPolicyError) as excinfo:
         call({"expected_model": {}})
     assert "exited 127 and said nothing" in str(excinfo.value)
+
+
+# -- where each stage stands while it reads ------------------------------------
+#
+# Two stages read an empty directory on purpose: an agent CLI reads its working directory, and the
+# repository root is where the Expected Model lives. The security reviewer is the deliberate
+# exception, and only when its host has a discipline to use — that discipline reviews a branch's
+# pending changes and refuses outside a repository, so it is handed a checkout of exactly this
+# change, unstaged.
+
+
+def _seen_by(review_repo: Path, role: str, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
+    """What the launch for `role` could see, read *while it stood there*.
+
+    Captured inside the call rather than from the path afterwards: both directories are temporary
+    and gone by the time the call returns, so a test that looked at the path would only ever be
+    asserting that cleanup happened.
+    """
+    repo = repo_mod.Repo(review_repo)
+    seen: dict[str, object] = {}
+
+    def record(argv: list[str], **kwargs: object) -> tuple[int, str]:
+        cwd = Path(str(kwargs.get("cwd", "")))
+        seen["cwd"] = str(cwd)
+        seen["entries"] = sorted(p.name for p in cwd.iterdir())
+        seen["is_repo"] = (cwd / ".git").exists()
+        return 0, agent_envelope('{"findings": []}')
+
+    monkeypatch.setattr(common, "run", record)
+    head = repo._git_rc("rev-parse", "HEAD")[1].strip()
+    call = review_transport._adapter_reviewer(repo, role, ledger=usage_mod.Ledger())
+    call({"diff": "", "trusted_base_sha": head, "subject_head_sha": head})
+    return seen
+
+
+def test_the_blind_stages_still_read_an_empty_directory(review_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The argument for cutting the directory was about these two, and it has not moved."""
+    for role in ("actual_extractor", "comparator"):
+        assert _seen_by(review_repo, role, monkeypatch)["entries"] == [], f"{role} was given something to read"
+
+
+def test_the_security_reviewer_stands_in_a_checkout_of_the_change(
+    review_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A git repository holding the tree — not the repo itself, and not the others' empty directory."""
+    seen = _seen_by(review_repo, "security_reviewer", monkeypatch)
+    assert seen["is_repo"] is True
+    assert seen["cwd"] != str(review_repo)
+    assert seen["entries"], "a checkout with nothing in it is not a checkout"
+
+
+def test_the_change_is_there_as_pending_changes(review_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shape a host security review is written against: `git status` shows base→head unstaged.
+
+    Taken over two real commits so the assertion is about git's behaviour, not about a mock: the
+    worktree is added at head and reset to the base, which leaves the file modified and unstaged.
+    """
+    repo = repo_mod.Repo(review_repo)
+    base = repo._git_rc("rev-parse", "HEAD")[1].strip()
+    (review_repo / "subject.py").write_text("value = 1\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "the change")
+    head = repo._git_rc("rev-parse", "HEAD")[1].strip()
+
+    seen: dict[str, str] = {}
+
+    def record(argv: list[str], **kwargs: object) -> tuple[int, str]:
+        cwd = str(kwargs.get("cwd", ""))
+        if argv[:2] == ["git", "-C"]:  # the reset this helper is here to let happen
+            return common_run(argv, **kwargs)  # type: ignore[arg-type]
+        seen["status"] = common_run(["git", "-C", cwd, "status", "--porcelain"])[1]
+        return 0, agent_envelope('{"findings": []}')
+
+    common_run = common.run
+    monkeypatch.setattr(common, "run", record)
+    call = review_transport._adapter_reviewer(repo, "security_reviewer", ledger=usage_mod.Ledger())
+    call({"diff": "", "trusted_base_sha": base, "subject_head_sha": head})
+    # Unstaged (a leading space, not `A`/`M` in the first column): the working tree is head and the
+    # index is base, which is what "pending changes on the current branch" means.
+    assert "?? subject.py" in seen["status"] or " M subject.py" in seen["status"], seen["status"]
+
+
+def test_a_worktree_that_cannot_be_made_falls_back_to_the_empty_directory(
+    review_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A better reading, never a required one — the contract asks for the diff to be read either way.
+
+    Failing the gate over an optimization would be the wrong trade in the other direction: the host
+    discipline then finds no repository, says so, and the reviewer reads the diff it was sent.
+    """
+    monkeypatch.setattr(review_transport, "_pending_changes", lambda *a, **k: contextlib.nullcontext(None))
+    seen = _seen_by(review_repo, "security_reviewer", monkeypatch)
+    assert seen["entries"] == []
+
+
+def test_a_host_with_no_security_discipline_is_given_no_checkout(
+    review_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checkout exists to serve a discipline. Without one there is nothing for it to do, and the
+    stage keeps the property the other two have — its answer is a function of its request alone."""
+    bare = dataclasses.replace(adapters.ADAPTER_TABLE["claude"], disciplines={})
+    monkeypatch.setitem(adapters.ADAPTER_TABLE, "claude", bare)
+    assert _seen_by(review_repo, "security_reviewer", monkeypatch)["entries"] == []
 
 
 # -- what the pipeline had been handing its own stages -------------------------

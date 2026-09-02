@@ -267,6 +267,13 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
   const residuals = b.residuals || {};
   const verification = b.verification || {};
   const establishedForNothing = verification.established_for_nothing || [];
+  const control = b.control || {};
+  // The tasks whose negative control could not be taken. `discriminating` is a count because the
+  // experiment answered; these are the rows because it did not, and the reason travels with each.
+  const uncontrolled = [
+    ...(control.no_tests_changed || []).map((t) => ({ ...t, why: "changed no test file" })),
+    ...(control.undetermined || []).map((t) => ({ ...t, why: "the control could not be set up" })),
+  ];
   const findings = data.residual_findings || [];
 
   const residualRows = ["awaiting_evidence", "blocked", "unstarted"]
@@ -380,7 +387,7 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
 
       <RequirementsOnPeople section={b.requirements_on_people} onAsBuilt={onAsBuilt} />
 
-      {b.verification || b.operations ? (
+      {b.verification || b.operations || b.control ? (
         <>
           <Subhead spaced>What the gate established</Subhead>
           <Table>
@@ -394,7 +401,28 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
                 <td className="mono">{establishedForNothing.join(" ")}</td>
               </tr>
             ) : null}
+            {control.discriminating ? (
+              <tr>
+                <td>greens shown to be controlled</td>
+                <td>{control.discriminating}</td>
+              </tr>
+            ) : null}
+            {uncontrolled.map((t) => (
+              <tr key={t.task_id}>
+                <td>green not controlled</td>
+                <td>
+                  <span className="mono">{t.task_id}</span> — {t.detail || t.why}
+                </td>
+              </tr>
+            ))}
           </Table>
+          {uncontrolled.length ? (
+            <Warn>
+              Those tasks&apos; greens were never shown to be able to go red: the gate passed over a change with
+              no test of its own to fail. Not a blocker — work covered by tests that already existed is a real
+              thing — but the DoD says less about them than about the rest.
+            </Warn>
+          ) : null}
           {establishedForNothing.length ? (
             <Warn>
               Those steps ran for nothing: every task's diff missed their paths, or the run never got that far.

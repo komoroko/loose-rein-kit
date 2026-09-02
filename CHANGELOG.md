@@ -72,6 +72,74 @@ repository, was two commits behind the repository's own `AGENTS.md`: it shipped 
 negative-control rule and without the gate-⑤ security-review paragraph, both of which describe
 behaviour 0.4.0 has. Propagated, and the check is green from `pre-commit` through `sync --check`.
 
+**Nobody was asked whether the tests are any good.** The negative control's own reasoning delegates
+that question — "whether the tests are any *good* is the per-task reviewer, which reads them" — and
+the reviewer's prompt asked for exactly two things, correctness and simplification. It was told to
+read the tests and never told what to ask of them, so a test asserting `is not None` where the
+criterion names a value went red against the base (the control's bar), passed the DoD, and landed
+with no reader. The reviewer now carries a third lens: for each acceptance criterion, which test in
+this change would go red if the behaviour were wrong, and which assertions would hold for any
+output at all. It costs no extra launch — same step, same findings file. The integration reviewer
+is deliberately **not** given it: the merged tree's suite is the union of the leaves' and every
+test in it was already read once.
+
+**And the control's own record reached the approver as a silence.** `evidence.negative_control` was
+written by `build_loop` and read by nothing — not the orient brief, not the decision cards, not
+`approve`'s readiness — so `no_tests_changed`, whose entire purpose is to say out loud that a task's
+green rests on tests nobody wrote for it, said it into a file the gate ④ review never opens. The
+same defect `residual_findings` was written to fix, and `template_lint`'s
+`check_declared_properties_are_read` cannot catch this shape by construction: it is a literal name
+search and the writer names the field. The orient brief now carries a `control` section following
+`verification`'s convention — the tasks whose control answered are a count, the ones where it could
+not be taken are rows naming the task and the reason. It blocks nothing: a task genuinely covered by
+tests that already existed is a real thing, and gating it would make the loop demand a test per task
+rather than evidence per claim.
+
+**Two smaller things in the adversarial reviewer.** Its gate-③ lens attacked "a ticket whose
+acceptance criteria or `test` command cannot objectively decide green" — tasks carry no `test`
+command, the DoD is the one `quality_gate`, so half that lens pointed at a field that does not
+exist; it now attacks the criteria's `evidence` and the ticket's automated-test approach. And the
+role file carries all three gates' lens sets while every round reviews one deliverable, so it now
+says to read the stance and then only the lens set for the gate it was delegated for.
+
+**`/code-review` and `/simplify` were real commands named in text that also runs somewhere they do
+not exist.** rein's reviewer prompts have carried "the /code-review discipline" and "the /simplify
+discipline" as bare prose for several releases. They are Claude Code's own commands and a headless
+launch reaches them — but the same prompt goes to `codex` and `gemini`, where the names resolve to
+nothing and the reviewer is left to guess what discipline it was being asked for. Neither was
+defined in this repository or in anything `rein install` writes.
+
+They are a **host capability** now, declared per adapter (`adapters.Adapter.disciplines`) the way
+`fork_flags` and `own_sandbox` already are, and named to the reviewer only where the launch will
+actually find them. The question is written out in the prompt either way, so a host without the
+command asks exactly the same thing — which is what `codex` and `gemini` reviewers get, unchanged
+from today. What the offer buys where it lands is the host's own reading: `/code-review` fans out
+over the branch, `/simplify` over four cleanup angles.
+
+**rein's contract stays on top of theirs**, because each command ends somewhere rein does not read:
+
+- `/simplify` finishes by **applying its fixes**. The prompt runs its review phase only. A reviewer
+  that edits is the arrangement this loop was changed to remove, and a tree that moves under the
+  gate sends every already-passed step back through it.
+- `/code-review ultra` is billed and user-triggered — an agent cannot launch it, and the prompt
+  says so rather than leaving it to be discovered.
+- Both report where they choose. The answer this step reads is the findings file: no printed
+  report, no `ReportFindings`.
+
+**The security reviewer now stands in a checkout of the change.** A host security review reads a
+branch's *pending changes* and refuses outright outside a repository, and this stage was launched in
+an empty directory — so the discipline could be named to it and never used. It is handed a throwaway
+worktree added at the reviewed head and `reset --mixed` to the trusted base, which leaves exactly
+this change unstaged: the shape those reviews are written against, with no patch to apply. It costs
+that one stage the property the others keep — its answer is no longer a function of the request
+alone — and that is affordable here and nowhere else: this is the stage that is deliberately *not*
+blind (it is the only one sent the test half), and its input is still fully determined by the two
+shas the stage key already covers. **The blind extractor and the comparator keep the empty
+directory**, which is what the argument for cutting it was always about. A worktree that cannot be
+made falls back to the empty directory rather than failing the gate: the contract asks for the diff
+to be read either way.
+
+
 ## [0.4.0] - 2026-09-02
 
 **A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is

@@ -56,7 +56,8 @@ card spends their attention on reconstruction.
 - **The orient stage says what was built, and under what conditions** — the delivered tasks and the
   claims they answer; which dependency manifests, generated files and migrations moved; **which
   sandbox, image and network posture each quality-gate step ran under**; whether anything ever
-  *launched* the deliverable; the Expected/Actual comparison on its three axes; and what is still
+  *launched* the deliverable; **which tasks' greens were controlled and which could not be** (a task
+  that changed no test file is named, not counted); the Expected/Actual comparison on its three axes; and what is still
   open, including what the implementer said about each task that did **not** land. Every line is
   **derived from the SSOT**, and where it carries a sentence somebody else wrote, the confidence and
   the code anchor travel with it. If the sandbox moved since gate ③ it says so: that blocks nothing
