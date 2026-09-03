@@ -141,7 +141,10 @@ class SharedReading:
         #: model is not another model's, so a prime on the CLI default under branches pinned to a
         #: model pays for the reading and serves nobody. Measured: the branch that followed such a
         #: prime wrote the whole prefix again.
-        self._argv = tuple(argv) if argv is not None else record.launch_argv()
+        # `READ` whichever way the argv arrived: priming a reading is a read, and on a CLI whose
+        # tools are deny-by-default a launch with no grant cannot open anything it was sent to read.
+        base = tuple(argv) if argv is not None else record.launch_argv()
+        self._argv = (*base, *record.access_flags(adapters.READ))
         self._timeout = timeout
         self._ledger = ledger
         self._lock = threading.Lock()
@@ -437,7 +440,10 @@ def _adapter_reviewer(
     if config is None:
         config = store_mod.Store(repo).read_config()
     record = adapters.adapter_for_role(config, role)
-    role_argv = adapters.launch_argv(config, role)
+    # `READ` and never more: a gate-④ stage is handed its payload on stdin, answers on stdout, and
+    # must change nothing. That is not the same as passing no flags — a CLI whose tools are
+    # deny-by-default without a grant cannot open the checkout the security stage is given to read.
+    role_argv = (*adapters.launch_argv(config, role), *record.access_flags(adapters.READ))
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
     wants_checkout = role == _CHECKOUT_ROLE and bool(record.disciplines.get(adapters.SECURITY))

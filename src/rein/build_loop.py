@@ -1207,7 +1207,7 @@ class Orchestrator:
             flags += [*(adapter.resume_flags if resume else adapter.session_flags), session]
         try:
             self._launch(
-                adapters.command(self.config.adapter_argv, prompt, write=True, extra=flags),
+                adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE, extra=flags),
                 cwd=cwd,
                 where=where,
                 env=self._leaf_env(task),
@@ -1229,7 +1229,7 @@ class Orchestrator:
         # A fresh token: the first one was spent on the launch that failed, and the server
         # accepts each nonce once.
         self._launch(
-            adapters.command(self.config.adapter_argv, prompt, write=True),
+            adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
             cwd=cwd,
             where=where,
             env=self._leaf_env(task),
@@ -1399,11 +1399,15 @@ class Orchestrator:
         target = dossier.findings_path(cwd, task.id)
         target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         argv = step.agent_argv or self.config.adapter_argv
-        prompt = self._review_prompt(task, cwd, base, dossier_path, f"{dossier.RELATIVE_PATH}/{target.name}", argv=argv)
-        # No write flags: the reviewer's `.rein/work/` file is the only thing it needs to produce,
-        # and everything else it might touch belongs to somebody else.
+        findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
+        prompt = self._review_prompt(task, cwd, base, dossier_path, findings_rel, argv=argv)
+        # `REVIEW`, not `WRITE`: the reviewer's `.rein/work/` file is the only thing it needs to
+        # produce, and everything else it might touch belongs to somebody else. Naming the file
+        # here is what lets an adapter that can scope a write grant exactly that one — and what
+        # made "no flags at all" wrong for every CLI whose tools are deny-by-default, whose
+        # reviewer could not write the findings the loop then refused to proceed without.
         self._launch(
-            adapters.command(argv, prompt),
+            adapters.command(argv, prompt, access=adapters.REVIEW, writable=findings_rel),
             cwd=cwd,
             where=f"{task.id}: the '{step.name}' agent step",
             env=self._leaf_env(task, role),
@@ -1428,7 +1432,7 @@ class Orchestrator:
                 build_prompts.review_fix_prompt(
                     task, findings, gate_cmds=self.config.gate_cmds, dossier_path=dossier_path
                 ),
-                write=True,
+                access=adapters.WRITE,
             ),
             cwd=cwd,
             where=f"{task.id}: the review fixer",
@@ -1478,7 +1482,7 @@ class Orchestrator:
         theirs = self._graph_task(collision.theirs_task)
         prompt = build_prompts.conflict_prompt(ours, theirs, collision.paths, gate_cmds=self.config.gate_cmds)
         self._launch(
-            adapters.command(self.config.adapter_argv, prompt, write=True),
+            adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
             cwd=cwd,
             where=f"{collision.ours_task or 'merge'}: conflict",
             env=self._leaf_env(ours) if ours is not None else None,
@@ -2223,7 +2227,7 @@ class Orchestrator:
         one of them (`integration_fix_prompt`, `integration_review_fix_prompt`).
         """
         self._launch(
-            adapters.command(self.config.adapter_argv, prompt, write=True),
+            adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
             cwd=self.root,
             where=f"{ids}: the integration fixer",
             role="implementer",
@@ -2303,6 +2307,7 @@ class Orchestrator:
         rounds = max(0, step.retries)
         for attempt in range(rounds + 1):
             target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
+            findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
             self._launch(
                 adapters.command(
                     step.agent_argv or self.config.adapter_argv,
@@ -2310,9 +2315,11 @@ class Orchestrator:
                         ids,
                         gate_cmds=self.config.gate_cmds,
                         diff_cmd=f"git diff {self._plan.base_commit if self._plan else 'HEAD~1'}..HEAD",
-                        findings_path=f"{dossier.RELATIVE_PATH}/{target.name}",
+                        findings_path=findings_rel,
                         disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
                     ),
+                    access=adapters.REVIEW,
+                    writable=findings_rel,
                 ),
                 cwd=self.root,
                 where=f"{ids}: the '{step.name}' agent step over the merged tree",

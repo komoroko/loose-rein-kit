@@ -206,10 +206,10 @@ _AGENT_GATE = [
 ]
 
 
-def _config_with_split_adapters() -> build_loop.Config:
+def _config_with_split_adapters(reviewer: str = "codex") -> build_loop.Config:
     raw = make_config(quality_gate=list(_AGENT_GATE))
     raw["agents"]["implementer"] = {"adapter": "claude"}
-    raw["agents"]["code_reviewer"] = {"adapter": "codex"}
+    raw["agents"]["code_reviewer"] = {"adapter": reviewer}
     return build_loop.Config.from_models(models.Config(raw))
 
 
@@ -250,23 +250,47 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
     )
 
 
-def test_the_reviewer_is_launched_without_write_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """It reports; it does not repair.
+def test_the_reviewer_is_granted_its_findings_file_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It reports; it does not repair — and on a CLI that can say so, the launcher enforces it.
 
-    `codex exec` is read-only unless told otherwise, and the reviewer is the one launch that
-    should stay that way. Handing it `--sandbox workspace-write` let one participant both judge a
-    change and edit the judgement away — and moved the tree underneath the gate, so every
-    already-passed step had to be re-run behind it.
+    The reviewer needs exactly three things: read the change, run `git diff`, write the one
+    findings file its prompt names. `copilot` can be told precisely that, so the review prompt's
+    "you do not change the code, you have no write access to it" is a fact here rather than an
+    instruction the model is asked to respect. What it must not get is the implementer's grant.
     """
     root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
+    orch = build_loop.Orchestrator(_config_with_split_adapters("copilot"), dry_run=False, repo=repo_mod.Repo(root))
     monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
     launched: list[list[str]] = []
     monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
 
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
-    assert "--sandbox" not in launched[0], "the reviewer was launched able to change the code it is judging"
+    assert "write(.rein/work/T-001.findings.json)" in launched[0], "the one file it is there to produce"
+    assert "--allow-all-tools" not in launched[0], "the reviewer was launched able to change the code it judges"
+
+
+def test_a_reviewer_on_a_read_only_cli_can_still_write_its_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`codex exec` is read-only unless told otherwise, and the reviewer used to be told nothing.
+
+    So it could not write the findings file — and `_collect_findings` refuses to read a verdict out
+    of the chatter, so the step stopped the loop with "the reviewer wrote no findings file" for a
+    reviewer that had done its job. codex cannot name a writable path, so what it can promise is
+    the workspace; the loop's before/after fingerprint is what still catches a judge that repaired.
+    """
+    root = build_repo(tmp_path)
+    orch = build_loop.Orchestrator(_config_with_split_adapters("codex"), dry_run=False, repo=repo_mod.Repo(root))
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+
+    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
+
+    assert "--sandbox" in launched[0] and "workspace-write" in launched[0]
 
 
 def test_a_must_fix_finding_goes_to_the_implementer_and_the_reviewer_looks_again(
@@ -313,8 +337,8 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
     """The flags are one CLI's own vocabulary, not a portable concept — nothing else grows them."""
     claude = adapters.ADAPTER_TABLE["claude"].launch_argv()
-    assert adapters.command(claude, "P", write=True) == adapters.command(claude, "P")
-    assert adapters.command((), "P", write=True) == ["P"]
+    assert adapters.command(claude, "P", access=adapters.WRITE) == adapters.command(claude, "P")
+    assert adapters.command((), "P", access=adapters.WRITE) == ["P"]
 
 
 @pytest.mark.parametrize(
@@ -332,16 +356,24 @@ def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: st
     this did while claude, whose `-p` is a boolean, was the only adapter that passed a model — sent
     `--model` as the prompt and the model name as a stray positional."""
     record = adapters.ADAPTER_TABLE[name]
-    assert adapters.command(record.launch_argv(model), "P", write=True) == expected
+    assert adapters.command(record.launch_argv(model), "P", access=adapters.WRITE) == expected
 
 
-def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A reviewer that cannot write is the point. The transport launches the bare adapter argv, so
-    the read-only default is the one the reviewer wants — assert it stays that way."""
+@pytest.mark.parametrize("adapter", ["codex", "copilot"])
+def test_the_review_transport_is_granted_a_read_and_no_more(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, adapter: str
+) -> None:
+    """A gate-④ stage is handed its payload on stdin, answers on stdout, and changes nothing.
+
+    That is `READ`, which is not the same as passing no flags — and the difference is the whole
+    reason the level exists. `codex exec` reads without being told, so its launch stays bare;
+    `copilot` grants no tool at all without one, so an ungranted launch could not open the checkout
+    the security stage is given to read. Neither gets a grant that could change anything.
+    """
     from rein import common, review_transport
 
     raw = make_config()
-    raw["agents"]["code_reviewer"] = {"adapter": "codex"}
+    raw["agents"]["code_reviewer"] = {"adapter": adapter}
     repo = repo_mod.Repo(seed_repo(tmp_path, config=raw))
     launched: list[list[str]] = []
 
@@ -355,7 +387,10 @@ def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.Monk
     monkeypatch.setattr(common, "run", fake_run)
     ledger = usage_mod.Ledger()
     review_transport._adapter_reviewer(repo, "code_reviewer", ledger=ledger)({"request": "x"})
-    assert launched[0] == list(adapters.ADAPTER_TABLE["codex"].launch_argv())
+
+    record = adapters.ADAPTER_TABLE[adapter]
+    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ)]
+    assert not set(launched[0]) & set(record.access_flags(adapters.WRITE)) - set(record.launch_argv())
 
 
 def test_an_unlaunchable_role_adapter_stops_the_build_before_it_starts() -> None:
@@ -1645,12 +1680,42 @@ def test_every_adapter_declares_what_it_can_do() -> None:
     only thing any caller reads.
     """
     codex = adapters.ADAPTER_TABLE["codex"]
-    assert codex.write_flags == ("--sandbox", "workspace-write")
+    assert codex.access_flags(adapters.WRITE) == ("--sandbox", "workspace-write")
+    assert codex.access_flags(adapters.READ) == (), "codex exec reads without being asked"
     assert codex.own_sandbox, "codex sandboxes itself — the fact the nested-sandbox check needs"
     assert not codex.resumable, "codex resumes the *last* session, which parallel leaves cannot name"
 
     claude = adapters.ADAPTER_TABLE["claude"]
-    assert claude.resumable and not claude.own_sandbox and not claude.write_flags
+    assert claude.resumable and not claude.own_sandbox
+    assert not any(claude.access_flags(level) for level in (adapters.READ, adapters.REVIEW, adapters.WRITE))
+
+
+@pytest.mark.parametrize("name", sorted(adapters.ADAPTER_TABLE))
+def test_no_launch_is_granted_more_than_the_one_above_it(name: str) -> None:
+    """READ ⊆ REVIEW ⊆ WRITE is the whole point of there being three levels rather than a flag.
+
+    A CLI that cannot separate two of them declares them equal, which is honest; what must never
+    happen is a reviewer granted something the implementer is not, or a read granted a write.
+    """
+    record = adapters.ADAPTER_TABLE[name]
+    read, review = record.access_flags(adapters.READ), record.access_flags(adapters.REVIEW)
+    assert adapters.WRITE not in read and "--allow-all-tools" not in read
+    assert "--allow-all-tools" not in review, "a reviewer never gets the implementer's grant"
+    assert record.access_flags(adapters.REVIEW, "f.json") != () or not record.grants
+
+
+def test_only_a_cli_that_can_name_a_path_is_asked_to() -> None:
+    """`scoped_write` is applied to the REVIEW grant and to nothing else — a READ launch has no
+    file to write, and a WRITE launch is not being narrowed to one."""
+    copilot = adapters.ADAPTER_TABLE["copilot"]
+    assert "write(x.json)" in copilot.access_flags(adapters.REVIEW, "x.json")
+    assert "write(x.json)" not in copilot.access_flags(adapters.READ, "x.json")
+    assert "write(x.json)" not in copilot.access_flags(adapters.WRITE, "x.json")
+    # A CLI with no way to say it is not made to pretend: the grant is what it can promise.
+    assert adapters.ADAPTER_TABLE["codex"].access_flags(adapters.REVIEW, "x.json") == (
+        "--sandbox",
+        "workspace-write",
+    )
 
 
 def test_a_resumable_implementer_stamps_then_resumes_its_session(

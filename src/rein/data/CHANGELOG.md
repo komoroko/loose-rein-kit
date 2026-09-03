@@ -54,10 +54,31 @@ and `preflight` said *Install it* and stopped; each adapter now carries the comm
 (`Adapter.install_hint`) and both print it. What lands on an operator's PATH, and what it is then
 allowed to reach, stays their choice.
 
-**Known limitation**: a *reviewer* role on `copilot` cannot work. The review transport deliberately
-withholds the write flags, and for `copilot` those flags are what grants any tool at all — so the
-launch could not read the code, let alone write its findings file. Point the reviewer roles at
-another CLI.
+**A launch says what access it needs, and gets no more.** `Adapter.write_flags` answered "may it
+write?" where the loop asks "what may it write?", so everything that was not an implementer got no
+flags at all — which is only survivable on a CLI that grants its tools by default. It replaced
+three different launches with one bit:
+
+| | what it does | granted |
+|---|---|---|
+| `READ` | a gate-④ stage: payload on stdin, answer on stdout, changes nothing | the tools to read |
+| `REVIEW` | the per-task reviewer: reads the change, runs `git diff`, writes one findings file | read + git + that file |
+| `WRITE` | the implementer, the review fixer, the conflict and integration fixers | the tree |
+
+`Adapter.grants` maps each level to what that CLI must be told, and `Adapter.scoped_write` narrows
+a `REVIEW` grant to the one path the reviewer's prompt names. Two bugs fall out of the split:
+
+- A **codex reviewer could never work.** `codex exec` is read-only unless told otherwise, so it
+  could not write the findings file — and `_collect_findings` refuses to read a verdict out of the
+  chatter, so the step stopped the loop with "the reviewer wrote no findings file" for a reviewer
+  that had done its job. It now gets `workspace-write`, which is what codex can promise; the loop's
+  before/after fingerprint is what still catches a judge that repaired.
+- A **copilot launch had no tools at all**, at any level, because its grant is deny-by-default.
+
+`copilot` is also the only adapter here that can name a writable path, so under it the review
+prompt's *"you do not change the code, you have no write access to it"* is enforced by the
+launcher — `--allow-tool read --allow-tool 'shell(git:*)' --allow-tool 'write(<findings file>)'` —
+rather than being an instruction the model is asked to respect.
 
 ## [0.4.0] - 2026-09-03
 
