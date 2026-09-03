@@ -267,6 +267,8 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         # which is what "no flags" bought.
         grants={WRITE: ("--sandbox", "workspace-write"), REVIEW: ("--sandbox", "workspace-write")},
         own_sandbox=True,
+        usage_flags=usage_mod.CODEX_JSONL_FLAGS,
+        envelope=usage_mod.parse_codex_envelope,
         install_hint="npm install -g @openai/codex",
     ),
     "gemini": Adapter(
@@ -279,14 +281,19 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         # file but not the `git diff` the review prompt points the reviewer at, and an approval
         # nobody is there to give is a run that hangs — so a reviewer takes `yolo` too.
         grants={WRITE: ("--approval-mode", "yolo"), REVIEW: ("--approval-mode", "yolo")},
+        usage_flags=usage_mod.GEMINI_JSON_FLAGS,
+        envelope=usage_mod.parse_gemini_envelope,
         install_hint="npm install -g @google/gemini-cli",
     ),
     "copilot": Adapter(
         name="copilot",
         # `--no-ask-user` because a launch from this loop has no human at the other end: without
         # it the agent may pause for input and the run hangs until `agent_timeout_sec` (default:
-        # no limit) rather than failing.
-        argv=("copilot", "--no-ask-user"),
+        # no limit) rather than failing. `-s` because gate ④ asks its stages for "one JSON object
+        # and no other text" and parses the whole of stdout strictly — a stats footer around the
+        # object is not a smaller answer, it is an unreadable one. It is what the CLI's own
+        # programmatic reference offers for exactly this ("outputting only the agent's response").
+        argv=("copilot", "--no-ask-user", "-s"),
         prompt_flags=("-p",),
         model_flags=("--model",),
         install_hint="npm install -g @github/copilot",
@@ -308,7 +315,9 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         # empty: guessing would hand one leaf another leaf's context. Every retry is a fresh read.
         #
         # `usage_flags` / `envelope` — the programmatic reference documents no machine-readable
-        # envelope, so a launch is recorded as *unmeasured* rather than as zero.
+        # envelope, so a launch is recorded as *unmeasured* rather than as zero. `-s` above is
+        # what makes the answer readable; it does not make the bill knowable, and those are not
+        # the same thing.
         #
         # `disciplines` — no `/code-review` equivalent. The prompts state each question in full
         # beside the command, which is the floor a host without one lands on.

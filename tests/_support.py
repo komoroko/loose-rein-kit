@@ -170,14 +170,68 @@ def make_plan(
 
 
 def agent_output(cmd: list[str], text: str = "") -> str:
-    """What the CLI in `cmd` would answer with — an envelope for the ones that report usage.
+    """What the CLI in `cmd` would answer with, in that CLI's own protocol.
 
-    For a fake standing in for more than one adapter: `claude` is launched asking for its usage
-    and answers with an envelope, `codex` and `gemini` answer with bare text, and a fake that got
-    that backwards would be testing a transport nothing uses.
+    A fake standing in for an adapter has to speak the adapter's protocol, or it is testing a
+    transport nothing uses. `claude` and `gemini` each answer with one JSON envelope, `codex`
+    streams JSONL events, and `copilot` — launched with `-s`, which strips its decoration —
+    answers with the bare text.
     """
     record = adapters.adapter_for(cmd)
-    return agent_envelope(text) if record and record.usage_flags else text
+    envelope = _ENVELOPES.get(record.name if record else "")
+    return envelope(text) if envelope is not None else text
+
+
+def gemini_envelope(text: str, *, prompt_tokens: int = 100, candidates_tokens: int = 20) -> str:
+    """What `gemini --output-format json` answers with: one object, the answer under `response`."""
+    import json
+
+    return json.dumps(
+        {
+            "session_id": "s-1",
+            "response": text,
+            "stats": {
+                "models": {
+                    "gemini-3-pro": {
+                        "tokens": {
+                            "prompt": prompt_tokens,
+                            "candidates": candidates_tokens,
+                            "cached": 0,
+                            "thoughts": 0,
+                        }
+                    }
+                }
+            },
+        }
+    )
+
+
+def codex_events(text: str, *, input_tokens: int = 100, output_tokens: int = 20) -> str:
+    """What `codex exec --json` streams: JSONL, the answer in the last `agent_message` item.
+
+    The reasoning item is here on purpose — taking the *first* agent message, or any item, would
+    hand gate ④ a paragraph of thinking where it asked for one JSON object.
+    """
+    import json
+
+    return "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "thread.started", "thread_id": "t-1"},
+            {"type": "item.completed", "item": {"id": "1", "type": "reasoning", "text": "thinking about it"}},
+            {"type": "item.completed", "item": {"id": "2", "type": "agent_message", "text": text}},
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
+                    "reasoning_output_tokens": 0,
+                },
+            },
+        )
+    )
 
 
 def agent_envelope(text: str, *, input_tokens: int = 100, output_tokens: int = 20) -> str:
@@ -199,6 +253,15 @@ def agent_envelope(text: str, *, input_tokens: int = 100, output_tokens: int = 2
             "modelUsage": {"claude-opus-5": {"inputTokens": input_tokens, "outputTokens": output_tokens}},
         }
     )
+
+
+#: adapter name → the fake that speaks its protocol. Keyed by name so a new adapter that reports
+#: nothing falls through to bare text, which is what such a CLI actually prints.
+_ENVELOPES: dict[str, Callable[[str], str]] = {
+    "claude": agent_envelope,
+    "gemini": gemini_envelope,
+    "codex": codex_events,
+}
 
 
 def make_review(

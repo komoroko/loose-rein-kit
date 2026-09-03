@@ -41,7 +41,6 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
 from tests._support import (
-    agent_envelope,
     agent_output,
     fake_git,
     make_config,
@@ -230,7 +229,7 @@ def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[st
         target = dossier.findings_path(cwd or str(root), "T-001")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"findings": findings}), encoding="utf-8")
-        return 0, agent_envelope("")
+        return 0, agent_output(cmd, "")
 
     return fake_run
 
@@ -245,8 +244,8 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
     assert launched, "the agent step never launched anything"
-    assert tuple(launched[0][:2]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
-        f"the agent step launched {launched[0][:2]} — it must use agents.code_reviewer, not agents.implementer"
+    assert tuple(launched[0][:3]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
+        f"the agent step launched {launched[0][:3]} — it must use agents.code_reviewer, not agents.implementer"
     )
 
 
@@ -328,7 +327,7 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
     root = build_repo(tmp_path)
     orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
     monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
-    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, "I had a good look, honestly"))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, agent_output(cmd, "I had a good look, honestly")))
 
     with pytest.raises(common.StopLoop, match="wrote no findings file"):
         orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
@@ -345,9 +344,17 @@ def test_a_claude_launch_gains_no_sandbox_flags() -> None:
     ("name", "model", "expected"),
     [
         ("claude", "opus", ["claude", "-p", "--model", "opus", "--output-format", "json", "P"]),
-        ("codex", "", ["codex", "exec", "--sandbox", "workspace-write", "P"]),
-        ("gemini", "gemini-2.5-flash", ["gemini", "--model", "gemini-2.5-flash", "--approval-mode", "yolo", "-p", "P"]),
-        ("copilot", "gpt-5.2", ["copilot", "--no-ask-user", "--model", "gpt-5.2", "--allow-all-tools", "-p", "P"]),
+        ("codex", "", ["codex", "exec", "--json", "--sandbox", "workspace-write", "P"]),
+        (
+            "gemini",
+            "gemini-2.5-flash",
+            ["gemini", "--model", "gemini-2.5-flash", "--output-format", "json", "--approval-mode", "yolo", "-p", "P"],
+        ),
+        (
+            "copilot",
+            "gpt-5.2",
+            ["copilot", "--no-ask-user", "-s", "--model", "gpt-5.2", "--allow-all-tools", "-p", "P"],
+        ),
     ],
 )
 def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: str, expected: list[str]) -> None:
