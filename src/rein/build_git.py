@@ -19,9 +19,6 @@ from rein import common, digests
 from rein import repo as repo_mod
 from rein.common import StopLoop
 
-#: Never part of what "the tree" means (see `repo.SSOT_DIR` for why it is one constant).
-_EXCLUDED: tuple[str, ...] = (repo_mod.SSOT_DIR,)
-
 
 class EventSink(Protocol):
     """Where the git layer reports what happened. The orchestrator supplies a Store-backed one."""
@@ -102,6 +99,20 @@ class GitWorkspace:
         self.branch = branch
         self.dry_run = dry_run
         self.worktree_dir = worktree_dir
+        #: Prefixes that are never part of what "the tree" means, and the git pathspec spelling
+        #: the same thing. Four answers read them — the fingerprint, the paths a task is credited
+        #: with, the commit it produces, and the `git add` an implementer is told to type — and
+        #: they have to agree, which is why they are derived here once rather than spelled out
+        #: four times (`test_the_tree_exclusion_lives_in_exactly_one_place`).
+        #:
+        #: `.rein/` is orchestration state (see `repo.SSOT_DIR`). The leaf worktree root is the
+        #: other half and had been left out: it holds *other* tasks' work in progress, so a
+        #: serial task running beside a leaf counted that leaf's whole worktree as its own change
+        #: — against its declared scope, into its fingerprint, and, through `git add -A`, into its
+        #: commit as a gitlink. It is configurable (`execution.worktree_dir`), which is why this
+        #: is per-instance where `repo.SSOT_PATHSPEC` is a constant.
+        self.excluded: tuple[str, ...] = (repo_mod.SSOT_DIR, worktree_dir.rstrip("/") + "/")
+        self.pathspec: tuple[str, ...] = repo_mod.pathspec_excluding(self.excluded)
         self.branch_pattern = branch_pattern
         self._run = run
         # Where this layer reports what it did. Injected rather than imported: git surgery
@@ -208,11 +219,11 @@ class GitWorkspace:
             return ""
         if listed.strip() and not entries:
             return ""
-        committed = digests.tree_digest(digests.filter_tree(entries, exclude_prefixes=_EXCLUDED))
-        rc, diff = self._run(["git", "diff", "HEAD", "--binary", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
+        committed = digests.tree_digest(digests.filter_tree(entries, exclude_prefixes=self.excluded))
+        rc, diff = self._run(["git", "diff", "HEAD", "--binary", "--", *self.pathspec], cwd=cwd)
         if rc != 0 or common.was_truncated(diff):
             return ""
-        rc, listing = self._run(["git", "ls-files", "-o", "--exclude-standard", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
+        rc, listing = self._run(["git", "ls-files", "-o", "--exclude-standard", "--", *self.pathspec], cwd=cwd)
         if rc != 0 or common.was_truncated(listing):
             return ""
         untracked = [name for name in listing.splitlines() if name.strip()]
@@ -381,7 +392,7 @@ class GitWorkspace:
         something.
         """
         paths: set[str] = set()
-        rc, out = self._run(["git", "status", "--porcelain", "-uall", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
+        rc, out = self._run(["git", "status", "--porcelain", "-uall", "--", *self.pathspec], cwd=cwd)
         if rc == 0:
             for line in out.splitlines():
                 if len(line) < 4:
@@ -506,7 +517,7 @@ class GitWorkspace:
         """
         if self.dry_run:
             return True
-        pathspec = list(repo_mod.SSOT_PATHSPEC)
+        pathspec = list(self.pathspec)
         rc, out = self._run(["git", "status", "--porcelain", "--", *pathspec], cwd=cwd)
         if rc == 0 and not out.strip():
             return True  # clean tree — nothing to preserve

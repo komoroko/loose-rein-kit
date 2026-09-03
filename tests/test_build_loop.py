@@ -51,6 +51,11 @@ from tests._support import (
     seed_repo,
 )
 
+#: What a run's own `GitWorkspace` computes: `.rein/` and the leaf worktree root, excluded from
+#: the `git add` the implementer is told to type as well as from the loop's own reading of the
+#: tree. These tests build prompts without a workspace, so they name it directly.
+PATHSPEC = (".", ":(exclude).rein", ":(exclude).worktrees")
+
 
 def graph_of(done: tuple[str, ...] = ()) -> dag.Graph:
     def status(tid: str) -> str:
@@ -904,7 +909,7 @@ def test_the_prompt_names_the_claims_the_task_answers_for(tmp_path: Path) -> Non
     from rein import build_prompts
 
     task = dag.Task(id="T-002", title="retry", kind="parallel", claim_ids=("C-002",))
-    prompt = build_prompts.implementer_prompt(task, "", gate_cmds=["make test"], has_baseline=False)
+    prompt = build_prompts.implementer_prompt(task, "", gate_cmds=["make test"], has_baseline=False, pathspec=PATHSPEC)
     assert "C-002" in prompt
     assert "answerable for" in prompt
 
@@ -913,7 +918,7 @@ def test_the_prompt_falls_back_to_the_whole_design_without_claims() -> None:
     from rein import build_prompts
 
     task = dag.Task(id="T-001", title="base", kind="foundation")
-    prompt = build_prompts.implementer_prompt(task, "", gate_cmds=["make test"], has_baseline=False)
+    prompt = build_prompts.implementer_prompt(task, "", gate_cmds=["make test"], has_baseline=False, pathspec=PATHSPEC)
     assert "docs/20-design.md" in prompt
 
 
@@ -922,7 +927,7 @@ def test_a_previous_failure_is_passed_through_already_summarized() -> None:
 
     task = dag.Task(id="T-001", title="base", kind="foundation")
     prompt = build_prompts.implementer_prompt(
-        task, "$ make test (rc=1)\nE  assert 1 == 2", gate_cmds=["make test"], has_baseline=False
+        task, "$ make test (rc=1)\nE  assert 1 == 2", gate_cmds=["make test"], has_baseline=False, pathspec=PATHSPEC
     )
     assert "assert 1 == 2" in prompt
 
@@ -989,6 +994,7 @@ def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path)
         "",
         gate_cmds=["make test"],
         has_baseline=False,
+        pathspec=PATHSPEC,
         handoff={"salvage_branch": "b-T-001-salvage-1", "salvage_state": "restored"},
     )
     assert "already been merged" in restored and "b-T-001-salvage-1" in restored
@@ -997,6 +1003,7 @@ def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path)
         "",
         gate_cmds=["make test"],
         has_baseline=False,
+        pathspec=PATHSPEC,
         handoff={"salvage_branch": "b-T-001-salvage-1", "salvage_state": "conflict"},
     )
     assert "conflicted" in conflicted
@@ -1127,10 +1134,13 @@ def test_the_joins_two_send_backs_are_not_framed_as_the_same_work() -> None:
     from rein import build_prompts
 
     deterministic = build_prompts.integration_fix_prompt(
-        "T-001,T-002", "$ make check (rc=1)\nE  unused import", gate_cmds=["make check"]
+        "T-001,T-002", "$ make check (rc=1)\nE  unused import", gate_cmds=["make check"], pathspec=PATHSPEC
     )
     from_review = build_prompts.integration_review_fix_prompt(
-        "T-001,T-002", "- must_fix: two tasks read `Config.timeout` differently", gate_cmds=["make check"]
+        "T-001,T-002",
+        "- must_fix: two tasks read `Config.timeout` differently",
+        gate_cmds=["make check"],
+        pathspec=PATHSPEC,
     )
     assert "fails the deterministic gate" in deterministic
     assert "fails the deterministic gate" not in from_review
@@ -1159,7 +1169,10 @@ def test_each_join_send_back_reaches_the_implementer_with_its_own_framing(
 
     loop._invoke_integration_fixer("T-001", loop._integration_fix_prompt("T-001", "rc=1"))
     loop._invoke_integration_fixer(
-        "T-001", build_prompts.integration_review_fix_prompt("T-001", "- must_fix: x", gate_cmds=["make check"])
+        "T-001",
+        build_prompts.integration_review_fix_prompt(
+            "T-001", "- must_fix: x", gate_cmds=["make check"], pathspec=PATHSPEC
+        ),
     )
     assert "fails the deterministic gate" in sent[0]
     assert "reviewer looks again" in sent[1]

@@ -145,6 +145,32 @@ says the part that was implicit: **never turn a detach into a poll.** Re-enterin
 build is done spends a launch, a context and a share of the session limit on learning that it is
 still building.
 
+**A serial task is isolated from the working tree the way a parallel leaf already was.** A leaf is
+cut with `git worktree add`, so it starts from a clean checkout and everything it finds afterwards is
+its own. A serial task runs in the repository root, where its change is derived as "the commits since
+the pre-task HEAD, plus the dirty tree" — exact when the tree starts clean and silently wrong when it
+does not. Uncommitted work already sitting there was attributed to the first task that ran: counted
+against its declared `scope` (which is how a stray `package-lock.json` blocked a task that never
+touched it), filling the empty-diff check that exists to catch an implementer which wrote *nothing*,
+reaching the reviewer as part of the change under review, and landing inside `T-NNN: <title>` through
+`finalize_commit`'s `git add -A` — in the history a gate ④ receipt names. `rein build` now refuses to
+start on any uncommitted change, naming the paths, and naming any task an earlier run left
+`in-progress` so leftovers are not mistaken for junk and stashed. The narrower "a source document the
+build reads is uncommitted" refusal is deleted: it was this rule asked about five files.
+
+**And the leaf worktrees are not the serial task's dirty tree either.** `.worktrees/` is untracked
+and lives inside the root, so every reading taken there swallowed a parked leaf whole — its scope,
+its fingerprint, and `git add -A` embedding it as a gitlink in another task's commit. It is now
+excluded beside `.rein/` in the one place the exclusion is derived, which the four answers that must
+agree — the fingerprint, the credited paths, the commit, and the `git add` the implementer is told to
+type — all read.
+
+**A scope violation is `needs-revision`, not `blocked`.** Its own message says the way forward is a
+human widening the scope at `/revise`; `blocked` says the implementer could not make the code work.
+Filing a plan defect as a code defect sends the next reader to the wrong place and offers a retry for
+something no retry can decide. The loop already drew this line for `rein report --outcome
+needs-revision` and this is the second thing on the right side of it.
+
 ## [0.4.0] - 2026-09-03
 
 **A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is

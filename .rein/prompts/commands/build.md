@@ -21,7 +21,10 @@ If unapproved, do not work; say "please approve `/tasks` first" and stop.
    `no_implementation`, a change outside the plan's declared `scope` is `scope_violation`, and an
    implementer that ended `rein report --outcome blocked` / `needs-revision` parks the task; in all
    three cases without spending a reviewer or a test suite on it, and `--touched` naming paths the
-   diff does not contain is itself a finding. Each verdict is recorded with the **fingerprint of the
+   diff does not contain is itself a finding. `scope_violation` parks the task **`needs-revision`,
+   not `blocked`**: the plan drew the scope, so either the change belongs to another task or the
+   scope was too small, and both are answered by a human at `/revise` rather than by an implementer
+   trying again. Each verdict is recorded with the **fingerprint of the
    tree it was reached over**, so a later `rein build` re-raises it with `futile:` instead of paying
    for a launch that reaches it again (`rein task reset <T-NNN> --fresh` is how a human says they
    repaired something outside the tree).
@@ -89,10 +92,17 @@ rein build --dry-run   # check just the control flow without calling the agent C
 ```
 
 It refuses to start (exit `2`) when a document it would send an agent to read has moved since
-gate ③ froze it, or has uncommitted changes. The second has no other symptom: a parallel leaf is cut
-from the work branch's tip and reads only what is committed there, so an uncommitted ticket edit
-reaches no task at all. Commit it, or roll back with `rein revise --to tasks` if the approval no
-longer covers it.
+gate ③ froze it — commit it, or roll back with `rein revise --to tasks` if the approval no longer
+covers it.
+
+It also refuses on **any** uncommitted change in the working tree. A serial task runs in the
+repository root and its change is derived as "the commits since the pre-task HEAD, plus the dirty
+tree", so an edit already sitting there is attributed to the first task that runs: it counts
+against that task's declared scope, fills the empty-diff check that exists to catch an implementer
+which wrote nothing, reaches the reviewer as part of the change under review, and `git add -A`
+lands it inside `T-NNN: <title>` — in the history the gate ④ record names. A parallel leaf never
+had this problem: `git worktree add` hands it a clean checkout, so everything it finds afterwards
+is its own. The refusal is how a serial task gets the same guarantee. Commit or stash first.
 
 It also refuses **before the first agent launch** on anything about the machine that this run
 cannot finish without: no container runtime while a step needs an OCI sandbox, a pinned image
