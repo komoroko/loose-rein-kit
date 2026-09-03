@@ -101,8 +101,9 @@ uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # 
 ```
 
 **3. Provide a headless agent CLI** — it is what the implementation phase (`rein build`) drives.
-The default is `claude -p`; switch with `rein agent codex` (`gemini` also works). Without one,
-`rein build` refuses to start.
+The default is `claude`; switch with `rein agent codex` (`gemini` and `copilot` also work).
+Without one, `rein build` refuses to start — and it names the command that installs the CLI it
+wanted rather than installing anything itself.
 
 **4. Seed the repository** — the same command for a new and an existing repo. Brownfield is
 auto-detected and changes what `init` writes (see "Adopting into an existing repository"):
@@ -160,7 +161,7 @@ rein next         # only the next recommended command (--json for integrations)
 rein ui           # local dashboard — read the gate's deliverables and approve from the page
 ```
 
-`rein agent codex` switches the headless agent CLI (claude | codex | gemini | a custom command),
+`rein agent codex` switches the headless agent CLI (claude | codex | gemini | copilot),
 and `rein project add` registers a repo the dashboard's switcher can target — both are set once,
 not daily. With several repos registered, the dashboard grows a **project switcher** (a dropdown
 in its header) that retargets the whole board without restarting the server; `rein ui` always adds
@@ -541,6 +542,7 @@ The rules (`AGENTS.md`) and procedures (`.rein/prompts/`) name human-interaction
 | approval presentation | plan mode + ExitPlanMode | Plan mode / explicit "approve" | explicit "approve" |
 | role delegation | subagents | custom agents `@architect` … | subagents (`.codex/agents/*.toml`), explicit |
 | autonomous build | `rein build` | `rein build` | `rein build` |
+| selectable as the build's CLI | `rein agent claude` | `rein agent copilot` | `rein agent codex` |
 | pending-gate notification | PushNotification | end of turn | end of turn |
 
 An agent with no mapping of its own (one that only reads AGENTS.md) follows the degradation

@@ -27,7 +27,7 @@ Notes:
   setting can hand an agent a gate.
 - **The implementation phase is `rein build`, and needs a headless agent CLI** (installed and
   authenticated) — the orchestrator launches the CLI named by `agents.implementer.adapter`
-  (`claude` by default; `codex` / `gemini` also work). It is one command whose completion is the
+  (`claude` by default; `codex`, `gemini` and `copilot` also work). It is one command whose completion is the
   signal, never polled.
 - **Codex's `exec` caps how long one command may run**, and a real build outlasts that cap. With no
   `background-wait`, take its degradation: start the run detached with its output in a file

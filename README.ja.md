@@ -101,8 +101,9 @@ uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # 
 ```
 
 **3. ヘッドレスのエージェント CLI を用意する** — 実装フェーズ(`rein build`)が呼び出す対象を
-指定する。既定は `claude -p` で、`rein agent codex` により切り替えられる(`gemini` も指定できる)。
-用意がない場合、`rein build` は起動しない。
+指定する。既定は `claude` で、`rein agent codex` により切り替えられる(`gemini` と `copilot` も
+指定できる)。用意がない場合、`rein build` は起動しない。このとき示されるのは当該 CLI の
+インストールコマンドであって、`rein` が代わりにインストールすることはない。
 
 **4. リポジトリを初期化する** — 新規・既存のどちらでも同じコマンドを使う。既存かどうかは自動で
 判定され、その結果に応じて `init` が書き込む内容が変わる(「既存リポジトリへの導入」):
@@ -160,7 +161,7 @@ rein ui           # ローカルダッシュボード。ゲートの成果物を
 ```
 
 `rein agent codex` はヘッドレスで使うエージェント CLI を切り替え(claude | codex | gemini |
-任意コマンド)、`rein project add` はダッシュボードの切替対象にリポジトリを登録する。どちらも
+copilot)、`rein project add` はダッシュボードの切替対象にリポジトリを登録する。どちらも
 最初に一度設定するもので、日常的に打つものではない。複数のリポジトリを登録すると、ダッシュ
 ボードのヘッダに**プロジェクト切替**のドロップダウンが表示され、サーバを再起動せずに対象を
 切り替えられる。`rein ui` は起動元のリポジトリを自動で登録する。単発の操作であれば、`rein --repo <path> <verb>`(または
@@ -553,6 +554,7 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 | 承認の提示 | plan mode + ExitPlanMode | Plan モード / 明示的な「approve」 | 明示的な「approve」 |
 | ロール委譲 | subagents | custom agents `@architect` など | subagents(`.codex/agents/*.toml`、明示委譲) |
 | 自律ビルド | `rein build` | `rein build` | `rein build` |
+| ビルドの CLI として選択 | `rein agent claude` | `rein agent copilot` | `rein agent codex` |
 | ゲート待ちの通知 | PushNotification | ターン終了時に明示 | ターン終了時に明示 |
 
 対応表を持たないエージェント(AGENTS.md だけを読むもの)は、`AGENTS.md` の能力ボキャブラリ表に

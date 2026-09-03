@@ -4,6 +4,61 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.1] - 2026-09-03
+
+**GitHub Copilot is selectable as the CLI that does the building, and the dashboard picks the
+agents.** Copilot was already a first-class *host* here — surfaces, hooks, an instructions file, a
+label in `doctor` — and was not a launchable adapter: `rein agent copilot` exited 2, and the
+instructions file this repository ships said so out loud (`codex` / `gemini` also work). It is now
+one of four in `ADAPTER_TABLE`, with a model flag, so a role may be pointed at it.
+
+**The prompt had to become the last thing on the command line first.** `launch_argv` appended the
+model and usage flags after the whole argv and the prompt after those, which parses only because
+claude's `-p` is a boolean and its prompt is a positional. `gemini -p` and `copilot -p` take the
+prompt as the flag's *value*, so `gemini -p --model X <prompt>` would have sent `--model` as the
+prompt. `Adapter.prompt_flags` now carries what introduces the prompt and `adapters.command()`
+assembles every launch, so the ordering is decided in one place instead of at eight call sites.
+That is also what let `gemini` gain the flags it never had: it could not be told a model
+(`launch_refusal` rejected any `model:` beside it) and could not write at all (no approval-mode
+flag, so every tool call waited for an approval nobody was there to give).
+
+**Changing the agent or the model no longer rewinds an approved plan.** `agents` has moved out of
+`Config.frozen_digest` and into `environment_digest`, beside the image pins and for the same
+reason: which CLI and which model write the code is a running choice, not a term of the plan a
+human approved. `rein guard` no longer sends you to `rein revise --to tasks` over it; `doctor` and
+the gate ④ brief report the environment as moved, and a new `agents_switched` line in the audit
+chain records what changed. What gate ④'s independence check settles on was never this file — it
+is the model each launch *reports* having answered.
+
+**BREAKING**: a repository whose plan is already frozen will see its `config_digest` disagree with
+the receipt once, because the digest now covers less. Run `rein revise --to tasks` once, or re-freeze
+at gate ③.
+
+**The dashboard's Console was broken everywhere it shipped, and is now the verbs its buttons name.**
+`action_argv` built `make doctor`, `make test`, `make revise` and `make cycle-close`. This
+repository's makefile wraps the package's own dev workflow and has none of those targets, and a
+product repository has no makefile at all — `rein init` writes none. Every button ran a command
+that did not exist, while its own label already read `rein doctor`. They are `rein` verbs now,
+passed as argv elements to a `shell=False` subprocess, so the `shlex.quote` the `make ARGS=` string
+needed is gone with it.
+
+- **Agents pane** — the Console names the CLI and model behind each of the five roles, offers only
+  the adapters this release can launch, repeats `rein agent --show`'s independence verdict, and
+  applies a change through `rein agent`. No confirm dialog: a switch rewinds nothing.
+- **The `tests` button is removed**, not repaired. `make test` was this repository's own pytest,
+  never a product's DoD. The DoD's test step is re-run by the build loop and its result is on the
+  record gate ④ reads.
+
+**A missing agent CLI is told how to install itself, and `rein` still installs nothing.** `doctor`
+and `preflight` said *Install it* and stopped; each adapter now carries the command
+(`Adapter.install_hint`) and both print it. What lands on an operator's PATH, and what it is then
+allowed to reach, stays their choice.
+
+**Known limitation**: a *reviewer* role on `copilot` cannot work. The review transport deliberately
+withholds the write flags, and for `copilot` those flags are what grants any tool at all — so the
+launch could not read the code, let alone write its findings file. Point the reviewer roles at
+another CLI.
+
 ## [0.4.0] - 2026-09-03
 
 **A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is
