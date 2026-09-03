@@ -133,18 +133,20 @@ def _execution_boundary(config: models.Config | None) -> list[dict[str, Any]]:
 
 
 def _environment_drift(state: models.State | None, config: models.Config | None) -> dict[str, Any]:
-    """Is the sandbox the evidence was produced in the one gate ③ approved? {} when it is, or
+    """Is the environment the evidence was produced in the one gate ③ approved? {} when it is, or
     when the freeze recorded nothing to compare against.
 
-    Gate ③ deliberately does not freeze the image pin: a task that adds a dependency makes the
-    pinned image wrong, and rebuilding it is a rebuild of the same sandbox rather than a change of
-    decision. That permission is what this section pays for. The approver at gate ④ is signing over
-    evidence, and "the environment it was produced in moved after the plan was approved" is a fact
-    about that evidence — not a blocker, and not something they should have to go and look for.
+    Gate ③ deliberately freezes neither the image pin nor `agents`: a task that adds a dependency
+    makes the pinned image wrong, and rebuilding it is a rebuild of the same sandbox rather than a
+    change of decision; and which CLI and model a role launches is a running choice an operator may
+    remake without rewinding an approved plan. That permission is what this section pays for. The
+    approver at gate ④ is signing over evidence, and "the environment it was produced in moved
+    after the plan was approved" is a fact about that evidence — not a blocker, and not something
+    they should have to go and look for.
 
-    Reported as the two digests and nothing else. Naming *which* image moved would mean reading a
-    config.yaml that has since been rewritten again; the `environment_repinned` events in the chain
-    are where that history actually lives.
+    Reported as the two digests and nothing else. Naming *which* image or role moved would mean
+    reading a config.yaml that has since been rewritten again; the `environment_repinned` and
+    `agents_switched` events in the chain are where that history actually lives.
     """
     if state is None or config is None:
         return {}

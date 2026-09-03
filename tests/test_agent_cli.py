@@ -177,6 +177,44 @@ def test_the_rewrite_is_still_schema_valid(tmp_path: Path) -> None:
     assert config.independence_group("comparator") == "claude/haiku", "the group is derived, never authored"
 
 
+def test_copilot_is_selectable_for_every_role(tmp_path: Path) -> None:
+    """copilot was a first-class *host* — surfaces, hooks, an instructions file, a label in
+    `doctor` — and not a launchable adapter, so `rein agent copilot` exited 2. It takes a model
+    flag, so the bulk switch the scaffold's three model-bearing review roles need also lands."""
+    seed_repo(tmp_path)
+    assert agent_cli.main(["copilot", "--repo", str(tmp_path)]) == 0
+    config = parsed(tmp_path)
+    assert {config.adapter(role) for role in agent_cli.ROLES} == {"copilot"}
+    assert config.independence_group("actual_extractor") == "copilot/opus"
+
+
+def test_a_switch_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
+    """`agents` is outside the gate ③ freeze, so nothing asks a human before this file moves —
+    which makes the chain the only place the change survives, and the only way gate ④ can be told
+    the evidence in front of it came from a different agent than the one gate ③ saw."""
+    from rein import event_chain
+
+    root = seed_repo(tmp_path)
+    assert agent_cli.main(["codex", "--role", "implementer", "--repo", str(root)]) == 0
+    events, defects = event_chain.scan(root / ".rein" / "events.ndjson")
+    assert defects == []
+    switches = [e for e in events if e.event == "agents_switched"]
+    assert len(switches) == 1
+    assert switches[0].detail["adapter"] == "codex"
+    assert switches[0].detail["roles"] == ["implementer"]
+    assert switches[0].detail["before"] != switches[0].detail["after"]
+
+
+def test_setting_a_role_to_what_it_already_is_records_nothing(tmp_path: Path) -> None:
+    """A no-op switch moved no environment, and a chain line saying otherwise is a false record."""
+    from rein import event_chain
+
+    root = seed_repo(tmp_path)
+    assert agent_cli.main(["claude", "--role", "implementer", "--repo", str(root)]) == 0
+    events, _ = event_chain.scan(root / ".rein" / "events.ndjson")
+    assert [e for e in events if e.event == "agents_switched"] == []
+
+
 def test_a_model_the_adapter_cannot_be_told_to_run_is_refused_before_it_is_written(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

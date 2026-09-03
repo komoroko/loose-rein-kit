@@ -31,6 +31,7 @@
         "run_aborted",
         "run_measured",
         "environment_repinned",
+        "agents_switched",
         "decision_declared",
         "coverage_generated",
         "actual_extraction_generated",

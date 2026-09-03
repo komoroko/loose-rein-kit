@@ -375,6 +375,13 @@ EVENT_ORDER: tuple[str, ...] = (
     # gate ③ approval never saw" answerable then. Before this, `rein oci build --write-config`
     # rewrote config.yaml with `path.write_text` and the audit chain never heard about it.
     "environment_repinned",
+    # A role was pointed at a different agent CLI or model. Deliberately its own name rather than
+    # a second meaning for `environment_repinned`: that one says an image was rebuilt, and a
+    # closed vocabulary is closed so the log stays aggregatable. `agents` is outside the gate ③
+    # freeze (`Config.frozen_digest`), so a switch needs no approval — which makes this line the
+    # only record that it happened, and the only way gate ④ can be told the evidence in front of
+    # it was produced by a different agent than the one gate ③ saw.
+    "agents_switched",
     "decision_declared",
     "coverage_generated",
     # No `actual_extraction_started`: the vocabulary carried one and nothing ever emitted it. A
@@ -1167,21 +1174,29 @@ class GateStep:
 PIN_KEY = "image"
 
 
-def _without_image_pins(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """`raw` with every `executor_profiles.<name>.image` removed (a copy; the input is untouched)."""
+def _without_mutable_environment(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """`raw` without the parts a cycle may legitimately move: the image pins, and `agents`.
+
+    A copy; the input is untouched. Both are covered by :meth:`Config.environment_digest` instead,
+    so neither is unbound — they are recorded as facts about the environment the evidence was
+    produced in rather than as terms of the plan a human approved.
+    """
     profiles = raw.get("executor_profiles")
-    if not isinstance(profiles, dict):
-        return dict(raw)
-    stripped = {
-        name: ({k: v for k, v in body.items() if k != PIN_KEY} if isinstance(body, dict) else body)
-        for name, body in profiles.items()
-    }
-    return {**raw, "executor_profiles": stripped}
+    stripped = (
+        {
+            name: ({k: v for k, v in body.items() if k != PIN_KEY} if isinstance(body, dict) else body)
+            for name, body in profiles.items()
+        }
+        if isinstance(profiles, dict)
+        else profiles
+    )
+    without = {k: v for k, v in raw.items() if k != "agents"}
+    return without if not isinstance(profiles, dict) else {**without, "executor_profiles": stripped}
 
 
 @dataclass(frozen=True)
 class Config:
-    """``config.yaml`` — execution knobs, frozen at gate ③ apart from the image pins.
+    """``config.yaml`` — execution knobs, frozen at gate ③ apart from the image pins and `agents`.
 
     Read by the guard hook, the build loop, the executors, and doctor. Note what it cannot
     answer: *who* may approve anything. There is no knob for that here — a gate opens only by a
@@ -1200,32 +1215,43 @@ class Config:
         return cls(document)
 
     def frozen_digest(self) -> str:
-        """The part of config.yaml gate ③'s approval covers: everything but the image pins.
+        """The part of config.yaml gate ③'s approval covers: everything but the image pins and
+        `agents`.
 
-        The pin is deliberately outside. A task that legitimately adds a dependency makes the
-        pinned image wrong — the closure it needs is not baked in, and a `network: none` sandbox
-        fails the same way on every retry — so the image has to be rebuilt *during* the cycle. With
-        the whole file frozen, that one digest string cost a `rein revise --to tasks`: the plan
+        Both exclusions answer the same question — is this a change of *decision*, or a change of
+        the environment the decision is carried out in?
+
+        The pin is outside because a task that legitimately adds a dependency makes the pinned
+        image wrong — the closure it needs is not baked in, and a `network: none` sandbox fails
+        the same way on every retry — so the image has to be rebuilt *during* the cycle. With the
+        whole file frozen, that one digest string cost a `rein revise --to tasks`: the plan
         un-froze, every gate below reset in a chain, and the human re-approved a plan nothing had
-        changed. The environment moved; the decision did not.
+        changed.
 
-        What stays inside is everything that is a decision: which profile each role runs under,
-        `kind`, `network_profile`, `mount_repo`, the limits, the quality gate, the budgets, the
-        guard. Flipping a profile from `oci` to `host`, or opening its network, still breaks the
-        freeze and still needs a human — those widen what may happen, and only the pin narrows to
-        "same sandbox, rebuilt".
+        `agents` is outside for the same reason and by explicit choice: which CLI and which model
+        write the code is a running decision an operator may remake mid-cycle — a model is
+        deprecated, a CLI is down, a role needs a second opinion from elsewhere — and rewinding an
+        approved plan is a heavy price for it. It is not thereby unchecked. What gate ④'s
+        independence check settles on has never been this file: it is the model each launch
+        *reports* having answered (`usage.Usage.models`), recorded on the review.
 
-        The pin is not thereby unbound: :meth:`environment_digest` covers it, gate ③ records that
+        What stays inside is everything that is a decision about the work: which profile each role
+        runs under, `kind`, `network_profile`, `mount_repo`, the limits, the quality gate, the
+        budgets, the guard. Flipping a profile from `oci` to `host`, or opening its network, still
+        breaks the freeze and still needs a human — those widen what may happen.
+
+        Neither exclusion is unbound: :meth:`environment_digest` covers both, gate ③ records that
         digest beside this one, and `rein doctor` and the gate ④ brief report when it has moved.
         """
-        return digests.of(_without_image_pins(self.raw), drop=digests.VOLATILE_TIMESTAMP_KEYS)
+        return digests.of(_without_mutable_environment(self.raw), drop=digests.VOLATILE_TIMESTAMP_KEYS)
 
     def environment_digest(self) -> str:
-        """The sandbox picture as one digest: role→profile, and every profile body including its pin.
+        """What produced the evidence, as one digest: the sandboxes, and the agents.
 
-        This is what :meth:`frozen_digest` leaves out, plus what it keeps of the sandbox — so a
-        reader comparing two of these is asking "was the evidence produced in the same environment",
-        which is a different question from "is this the approved plan".
+        role→profile, every profile body including its pin, and `agents` — which CLI and which
+        model each role launches. This is what :meth:`frozen_digest` leaves out, plus what it keeps
+        of the sandbox, so a reader comparing two of these is asking "was the evidence produced in
+        the same environment", which is a different question from "is this the approved plan".
 
         Its predecessor hashed `{"executors": ...}` alone — the role→profile *name* map — while
         claiming in its own docstring to move when the sandbox a step ran in changed. It did not:
@@ -1234,7 +1260,11 @@ class Config:
         claim was never contradicted by anything.
         """
         return digests.of(
-            {"executors": self.raw.get("executors"), "executor_profiles": self.raw.get("executor_profiles")}
+            {
+                "executors": self.raw.get("executors"),
+                "executor_profiles": self.raw.get("executor_profiles"),
+                "agents": self.raw.get("agents"),
+            }
         )
 
     @property

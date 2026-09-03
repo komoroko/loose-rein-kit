@@ -133,6 +133,30 @@ def test_a_draft_plan_is_editable(tmp_path: Path) -> None:
     assert decide(tmp_path, ".rein/config.yaml")[0]
 
 
+def test_pointing_a_role_at_another_agent_does_not_break_a_frozen_plan(tmp_path: Path) -> None:
+    """`agents` is outside `Config.frozen_digest`, so a switch mid-cycle needs no approval and
+    rewinds nothing — the audit chain's `agents_switched` line is what records it instead.
+
+    Contrast the sandbox: flipping a profile to `host` still breaks the freeze here, because that
+    widens what may happen and widening is the judgement a human made at gate ③.
+    """
+    raw = make_config()
+    state = make_state(plan_status="frozen")
+    state["plan"]["config_digest"] = models.Config(raw).frozen_digest()
+    repo = repo_mod.Repo(seed_repo(tmp_path, config=raw, state=state))
+    assert gate_guard._frozen_artifact_failures(repo) == []
+
+    config_path = tmp_path / ".rein" / "config.yaml"
+    switched = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    switched["agents"]["implementer"] = {"adapter": "copilot"}
+    config_path.write_text(yaml.safe_dump(switched, sort_keys=False), encoding="utf-8")
+    assert gate_guard._frozen_artifact_failures(repo) == []
+
+    switched["executor_profiles"]["implementer"] = {"kind": "host", "network_profile": "egress"}
+    config_path.write_text(yaml.safe_dump(switched, sort_keys=False), encoding="utf-8")
+    assert any("rein revise --to tasks" in f for f in gate_guard._frozen_artifact_failures(repo))
+
+
 def test_an_unreadable_state_fails_closed_on_the_frozen_set(tmp_path: Path) -> None:
     seed_repo(tmp_path)
     (tmp_path / ".rein" / "state.yaml").write_text("a: [1, 2\n", encoding="utf-8")
