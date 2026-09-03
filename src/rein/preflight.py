@@ -27,7 +27,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from rein import executors, models
+from rein import adapters, executors, models
 
 
 @dataclass(frozen=True)
@@ -125,10 +125,16 @@ def _cli_problems(argv_by_role: Mapping[str, Sequence[str]]) -> list[Problem]:
                 )
             )
         elif shutil.which(argv[0]) is None:
+            # The remedy names the install command rather than the word "install": `rein` never
+            # runs a third-party installer — what lands on an operator's PATH is theirs to choose.
+            record = adapters.adapter_for(argv)
+            hint = record.install_hint if record is not None else ""
             problems.append(
                 Problem(
                     f"role {role!r} launches {argv[0]!r}, which is not on PATH",
-                    f"install {argv[0]}, or point that role at a different adapter",
+                    (f"install it with `{hint}`" if hint else f"install {argv[0]}")
+                    + ", or point that role at a different adapter with `rein agent <cli> --role "
+                    + f"{role}`",
                 )
             )
     return problems

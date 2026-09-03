@@ -354,27 +354,33 @@ def _source_drift(state: models.State, repo: repo_mod.Repo | None) -> list[Findi
 
 
 def _environment_drift(state: models.State, config: models.Config | None) -> Finding:
-    """Has the sandbox the evidence is produced in moved since gate ③ saw it?
+    """Has the environment the evidence is produced in moved since gate ③ saw it?
 
-    Never a FAIL, and that is the whole point of it existing. An image rebuilt because a task added
-    a dependency is a legitimate mid-cycle change — `frozen_digest` deliberately does not cover the
-    pin, so nothing blocks. What must not happen is that it goes *unsaid*: an approval taken at
-    gate ④ over evidence produced in an environment the gate ③ approval never saw is a fact its
-    reader is entitled to. So it is reported here, and again in the gate ④ brief.
+    Two things live in that environment and both may legitimately move mid-cycle: the pinned
+    sandbox image (rebuilt because a task added a dependency) and `agents` (the CLI and model each
+    role launches). `frozen_digest` deliberately covers neither, so nothing blocks. What must not
+    happen is that it goes *unsaid*: an approval taken at gate ④ over evidence produced in an
+    environment the gate ③ approval never saw is a fact its reader is entitled to. So it is
+    reported here, and again in the gate ④ brief.
     """
     recorded = state.plan_environment_digest
     if not recorded:
-        return Finding("INFO", "gates", "the freeze records no environment digest — nothing to compare the sandbox to")
+        return Finding(
+            "INFO", "gates", "the freeze records no environment digest — nothing to compare the environment to"
+        )
     if config is None:
-        return Finding("WARN", "gates", "config.yaml cannot be read, so the sandbox cannot be compared to the freeze")
+        return Finding(
+            "WARN", "gates", "config.yaml cannot be read, so the environment cannot be compared to the freeze"
+        )
     live = config.environment_digest()
     if live == recorded:
-        return Finding("PASS", "gates", "the sandbox is the one gate 3 saw")
+        return Finding("PASS", "gates", "the sandboxes and agents are the ones gate 3 saw")
     return Finding(
         "INFO",
         "gates",
-        f"the sandbox has changed since gate 3 saw it ({recorded[:19]}… → {live[:19]}…) — allowed "
-        "(a rebuilt image is the same sandbox), and gate 4 shows it beside the evidence it produced",
+        f"the environment has changed since gate 3 saw it ({recorded[:19]}… → {live[:19]}…) — allowed "
+        "(a rebuilt image, or a role pointed at another agent), and gate 4 shows it beside the "
+        "evidence it produced",
     )
 
 
@@ -754,12 +760,17 @@ def check_adapters(config: models.Config | None, state: models.State | None) -> 
         if shutil.which(binary):
             findings.append(Finding("PASS", "agents", f"{binary} found on PATH ({who})"))
         else:
+            hint = next(
+                (a.install_hint for a in adapters.ADAPTER_TABLE.values() if a.argv[0] == binary and a.install_hint),
+                "",
+            )
             findings.append(
                 Finding(
                     level,
                     "agents",
                     f"{binary} not found on PATH — `rein build` launches it for {who}. "
-                    "Install it, or point the roles elsewhere with `rein agent <cli>`",
+                    + (f"Install it yourself (`{hint}`)" if hint else "Install it")
+                    + ", or point the roles elsewhere with `rein agent <cli>`",
                 )
             )
     return findings

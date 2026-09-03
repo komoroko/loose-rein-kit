@@ -1202,12 +1202,12 @@ class Orchestrator:
         prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, base, "implementer"))
         where = f"{task.id}: implementer"
         adapter = self._implementer_adapter
-        flags = list(adapters.write_flags(self.config.adapter_argv))
+        flags: list[str] = []
         if session and adapter is not None:
             flags += [*(adapter.resume_flags if resume else adapter.session_flags), session]
         try:
             self._launch(
-                [*self.config.adapter_argv, *flags, prompt],
+                adapters.command(self.config.adapter_argv, prompt, write=True, extra=flags),
                 cwd=cwd,
                 where=where,
                 env=self._leaf_env(task),
@@ -1229,7 +1229,7 @@ class Orchestrator:
         # A fresh token: the first one was spent on the launch that failed, and the server
         # accepts each nonce once.
         self._launch(
-            [*self.config.adapter_argv, *adapters.write_flags(self.config.adapter_argv), prompt],
+            adapters.command(self.config.adapter_argv, prompt, write=True),
             cwd=cwd,
             where=where,
             env=self._leaf_env(task),
@@ -1403,7 +1403,7 @@ class Orchestrator:
         # No write flags: the reviewer's `.rein/work/` file is the only thing it needs to produce,
         # and everything else it might touch belongs to somebody else.
         self._launch(
-            [*argv, prompt],
+            adapters.command(argv, prompt),
             cwd=cwd,
             where=f"{task.id}: the '{step.name}' agent step",
             env=self._leaf_env(task, role),
@@ -1423,13 +1423,13 @@ class Orchestrator:
     def _invoke_review_fixer(self, task: dag.Task, cwd: str, base: str, findings: str) -> None:
         dossier_path = self._write_dossier(task, cwd, base, "implementer")
         self._launch(
-            [
-                *self.config.adapter_argv,
-                *adapters.write_flags(self.config.adapter_argv),
+            adapters.command(
+                self.config.adapter_argv,
                 build_prompts.review_fix_prompt(
                     task, findings, gate_cmds=self.config.gate_cmds, dossier_path=dossier_path
                 ),
-            ],
+                write=True,
+            ),
             cwd=cwd,
             where=f"{task.id}: the review fixer",
             env=self._leaf_env(task),
@@ -1478,7 +1478,7 @@ class Orchestrator:
         theirs = self._graph_task(collision.theirs_task)
         prompt = build_prompts.conflict_prompt(ours, theirs, collision.paths, gate_cmds=self.config.gate_cmds)
         self._launch(
-            [*self.config.adapter_argv, *adapters.write_flags(self.config.adapter_argv), prompt],
+            adapters.command(self.config.adapter_argv, prompt, write=True),
             cwd=cwd,
             where=f"{collision.ours_task or 'merge'}: conflict",
             env=self._leaf_env(ours) if ours is not None else None,
@@ -2223,11 +2223,7 @@ class Orchestrator:
         one of them (`integration_fix_prompt`, `integration_review_fix_prompt`).
         """
         self._launch(
-            [
-                *self.config.adapter_argv,
-                *adapters.write_flags(self.config.adapter_argv),
-                prompt,
-            ],
+            adapters.command(self.config.adapter_argv, prompt, write=True),
             cwd=self.root,
             where=f"{ids}: the integration fixer",
             role="implementer",
@@ -2308,8 +2304,8 @@ class Orchestrator:
         for attempt in range(rounds + 1):
             target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
             self._launch(
-                [
-                    *(step.agent_argv or self.config.adapter_argv),
+                adapters.command(
+                    step.agent_argv or self.config.adapter_argv,
                     build_prompts.integration_review_prompt(
                         ids,
                         gate_cmds=self.config.gate_cmds,
@@ -2317,7 +2313,7 @@ class Orchestrator:
                         findings_path=f"{dossier.RELATIVE_PATH}/{target.name}",
                         disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
                     ),
-                ],
+                ),
                 cwd=self.root,
                 where=f"{ids}: the '{step.name}' agent step over the merged tree",
                 role=step.agent_role or "code_reviewer",

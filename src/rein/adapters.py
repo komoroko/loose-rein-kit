@@ -134,6 +134,24 @@ class Adapter:
     #: stages that must reach independent verdicts be handed one (large, expensive) diff once
     #: (`review_transport.SharedReading`). Empty for a CLI that cannot branch a session.
     fork_flags: tuple[str, ...] = ()
+    #: What introduces a prompt passed on the command line, placed immediately before it. For a
+    #: CLI whose flag *takes the prompt as its value* (`gemini -p <text>`, `copilot -p <text>`)
+    #: nothing may come between the two, and everything in `argv`, `model_flags` and `usage_flags`
+    #: is inserted before it rather than after. Putting such a flag in `argv` is what would make
+    #: `gemini -p --model X <text>` send `--model` as the prompt and the model name as a stray
+    #: argument — invisible until a model was configured, which is why `gemini` carried no
+    #: `model_flags` and worked.
+    #:
+    #: Empty for a CLI whose prompt is a bare positional (`codex exec <text>`) — and for one whose
+    #: flag is a *boolean* non-interactive switch (`claude -p`), which belongs in `argv` because
+    #: the review transport needs it too, and there the payload arrives on stdin with no prompt
+    #: argument at all.
+    prompt_flags: tuple[str, ...] = ()
+    #: How a human installs this CLI. **Never run** — printed by `doctor` and `preflight` when the
+    #: binary is missing. Installing a third-party agent CLI on someone's behalf decides for them
+    #: what lands on their PATH and what it is allowed to reach; naming the command is the whole
+    #: job, and the choice stays theirs.
+    install_hint: str = ""
 
     @property
     def resumable(self) -> bool:
@@ -155,6 +173,14 @@ class Adapter:
         chosen = (*self.model_flags, model) if model and self.model_flags else ()
         return self.argv + chosen + self.usage_flags
 
+    def prompt_argv(self, prompt: str) -> tuple[str, ...]:
+        """The tail of a command line: whatever introduces the prompt, then the prompt.
+
+        Always the last thing appended, after `launch_argv` and after any write flags — that
+        ordering is the whole reason `prompt_flags` is a separate field.
+        """
+        return (*self.prompt_flags, prompt)
+
     def read_output(self, output: str) -> tuple[str, usage_mod.Usage]:
         """`(what it said, what it cost)`. An adapter with no envelope says it did not measure."""
         if self.envelope is None:
@@ -166,6 +192,9 @@ class Adapter:
 ADAPTER_TABLE: dict[str, Adapter] = {
     "claude": Adapter(
         name="claude",
+        # `-p` is in `argv`, not `prompt_flags`: for claude it is the boolean "print and exit",
+        # needed just as much when the payload arrives on stdin (the review transport), and the
+        # prompt is then a plain positional.
         argv=("claude", "-p"),
         session_flags=("--session-id",),
         resume_flags=("--resume",),
@@ -173,6 +202,7 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         model_flags=("--model",),
         usage_flags=usage_mod.CLAUDE_JSON_FLAGS,
         envelope=usage_mod.parse_claude_envelope,
+        install_hint="curl -fsSL https://claude.ai/install.sh | bash",
         # Claude Code carries all three as commands of its own, and a headless `-p` launch reaches
         # them. `/code-review` has levels and `ultra` is billed and user-triggered — the prompts
         # forbid it rather than naming a level, because a level is an operator's choice and this
@@ -188,8 +218,50 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         argv=("codex", "exec"),
         write_flags=("--sandbox", "workspace-write"),
         own_sandbox=True,
+        install_hint="npm install -g @openai/codex",
     ),
-    "gemini": Adapter(name="gemini", argv=("gemini", "-p")),
+    "gemini": Adapter(
+        name="gemini",
+        argv=("gemini",),
+        prompt_flags=("-p",),
+        # `--yolo` is deprecated upstream in favour of this; the CLI reference says so in the same
+        # row. Without it every tool call waits for an approval nobody is there to give, which
+        # reaches the run as a task that changed nothing.
+        write_flags=("--approval-mode", "yolo"),
+        model_flags=("--model",),
+        install_hint="npm install -g @google/gemini-cli",
+    ),
+    "copilot": Adapter(
+        name="copilot",
+        # `--no-ask-user` because a launch from this loop has no human at the other end: without
+        # it the agent may pause for input and the run hangs until `agent_timeout_sec` (default:
+        # no limit) rather than failing.
+        argv=("copilot", "--no-ask-user"),
+        prompt_flags=("-p",),
+        write_flags=("--allow-all-tools",),
+        model_flags=("--model",),
+        install_hint="npm install -g @github/copilot",
+        # Everything below is empty on purpose, and each for its own reason:
+        #
+        # `session_flags` / `resume_flags` / `fork_flags` — `--resume` picks a session
+        # interactively and there is no flag that stamps one, so with `max_parallel` leaves in
+        # flight there is no way to say which session a retry means. The same reason `codex` is
+        # empty: guessing would hand one leaf another leaf's context. Every retry is a fresh read.
+        #
+        # `usage_flags` / `envelope` — the programmatic reference documents no machine-readable
+        # envelope, so a launch is recorded as *unmeasured* rather than as zero.
+        #
+        # `disciplines` — no `/code-review` equivalent. The prompts state each question in full
+        # beside the command, which is the floor a host without one lands on.
+        #
+        # `own_sandbox` — `--cloud` is an opt-in that runs the session somewhere else entirely,
+        # not isolation around the launch this loop makes.
+        #
+        # **A reviewer role on this adapter cannot work.** The review transport deliberately
+        # withholds `write_flags`, and for `copilot` those flags are what grants *any* tool at
+        # all — so a reviewer launch could not read the code, let alone write its findings file.
+        # Point the reviewer roles at another CLI (`rein agent <cli> --role code_reviewer`).
+    ),
 }
 
 
@@ -235,10 +307,20 @@ def disciplines_for(argv: Sequence[str]) -> Mapping[str, str]:
     return adapter.disciplines if adapter else {}
 
 
-def write_flags(argv: tuple[str, ...]) -> tuple[str, ...]:
-    """The write-enabling flags for the CLI `argv` launches, keyed on the CLI's own name."""
-    adapter = adapter_for(argv)
-    return adapter.write_flags if adapter else ()
+def command(argv: Sequence[str], prompt: str, *, write: bool = False, extra: Sequence[str] = ()) -> list[str]:
+    """The whole command line for one launch: `argv`, the flags it needs, then the prompt.
+
+    The one place that knows the prompt goes last and that `prompt_flags` goes immediately before
+    it. Assembling it at each launch site is what let `write_flags` be appended *after* a
+    prompt-introducing flag, which no CLI but claude survives (`Adapter.prompt_flags`).
+
+    `write` adds what makes the CLI able to change the tree — the review transport never passes
+    it. `extra` carries the caller's own flags (the session id an implementer retry resumes).
+    """
+    record = adapter_for(argv)
+    flags = (*(record.write_flags if write and record is not None else ()), *extra)
+    tail = record.prompt_argv(prompt) if record is not None else (prompt,)
+    return [*argv, *flags, *tail]
 
 
 def adapter_for_role(config: models.Config | None, role: str) -> Adapter:

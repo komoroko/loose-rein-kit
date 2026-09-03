@@ -17,7 +17,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from rein import models, preflight
+import pytest
+
+from rein import adapters, models, preflight
 from tests import conftest
 
 _PINNED = {"kind": "oci", "image": "localhost/rein-python@sha256:" + "0" * 64, "network_profile": "none"}
@@ -121,6 +123,15 @@ def test_a_missing_agent_cli_refuses_to_start() -> None:
     problems = preflight.check(_config(), [_step("test")], {"implementer": ["definitely-not-a-real-cli"]}, runtime=None)
     assert len(problems) == 1
     assert "not on PATH" in problems[0].what
+
+
+def test_a_missing_adapter_is_told_how_to_be_installed_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The remedy names the command; nothing here runs it. Installing an agent CLI on someone's
+    behalf decides for them what reaches their machine."""
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    problems = preflight.check(_config(), [_step("test")], {"implementer": ["copilot"]}, runtime=None)
+    assert adapters.ADAPTER_TABLE["copilot"].install_hint in problems[0].remedy
+    assert "rein agent <cli> --role implementer" in problems[0].remedy
 
 
 def test_a_role_with_no_command_configured_is_reported() -> None:

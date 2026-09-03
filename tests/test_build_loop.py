@@ -312,9 +312,27 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
     """The flags are one CLI's own vocabulary, not a portable concept — nothing else grows them."""
-    assert adapters.write_flags(adapters.ADAPTER_TABLE["claude"].launch_argv()) == ()
-    assert adapters.write_flags(adapters.ADAPTER_TABLE["gemini"].launch_argv()) == ()
-    assert adapters.write_flags(()) == ()
+    claude = adapters.ADAPTER_TABLE["claude"].launch_argv()
+    assert adapters.command(claude, "P", write=True) == adapters.command(claude, "P")
+    assert adapters.command((), "P", write=True) == ["P"]
+
+
+@pytest.mark.parametrize(
+    ("name", "model", "expected"),
+    [
+        ("claude", "opus", ["claude", "-p", "--model", "opus", "--output-format", "json", "P"]),
+        ("codex", "", ["codex", "exec", "--sandbox", "workspace-write", "P"]),
+        ("gemini", "gemini-2.5-flash", ["gemini", "--model", "gemini-2.5-flash", "--approval-mode", "yolo", "-p", "P"]),
+        ("copilot", "gpt-5.2", ["copilot", "--no-ask-user", "--model", "gpt-5.2", "--allow-all-tools", "-p", "P"]),
+    ],
+)
+def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: str, expected: list[str]) -> None:
+    """`gemini -p` and `copilot -p` take the prompt as the flag's *value*, so nothing may be inserted
+    between the two. Appending the model and the write flags after the whole argv — which is what
+    this did while claude, whose `-p` is a boolean, was the only adapter that passed a model — sent
+    `--model` as the prompt and the model name as a stray positional."""
+    record = adapters.ADAPTER_TABLE[name]
+    assert adapters.command(record.launch_argv(model), "P", write=True) == expected
 
 
 def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
