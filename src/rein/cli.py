@@ -65,7 +65,7 @@ VERBS: dict[str, Verb] = {
     # daily
     "start": Verb("resume", "first run: setup wizard; afterwards: what moved since you last looked"),
     "next": Verb("status_api", "only the next recommended command (deterministic; --json for integrations)"),
-    "ui": Verb("ui", "local dashboard — read gates, do the gate-4 human review, run doctor/revise"),
+    "ui": Verb("ui", "local dashboard — read gates, do the gate-4 human review, run doctor/revise, pick agents"),
     # gates and shipping
     "approve": Verb("approve", "readiness check, then the human's confirmation at this terminal"),
     "changes": Verb("change_request", "ask for changes instead of approving (holds the gate shut)"),

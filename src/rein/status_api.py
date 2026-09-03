@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from rein import common, dag, dag_trace, event_chain, findings, models, strict_yaml
+from rein import adapters, agent_cli, common, dag, dag_trace, event_chain, findings, models, strict_yaml
 from rein import events as events_mod
 from rein import lock as lock_mod
 from rein import repo as repo_mod
@@ -618,6 +618,31 @@ def task_status_of(root: str | Path | repo_mod.Repo) -> dict[str, str]:
     return dict(state.task_status) if state else {}
 
 
+def _agents_block(config: models.Config | None) -> dict[str, object] | None:
+    """Which CLI and model each role launches, and whether the independence pair holds.
+
+    Read straight off `agent_cli` and `adapters` — the dashboard offers exactly the adapters this
+    release can launch and repeats exactly the independence verdict `rein agent --show` prints, so
+    the page cannot show a choice the loop would refuse or a warning the CLI does not agree with.
+    """
+    if config is None:
+        return None
+    level, messages = agent_cli.independence_status(config)
+    return {
+        "adapters": sorted(adapters.ADAPTER_TABLE),
+        "roles": [
+            {
+                "role": role,
+                "adapter": config.adapter(role) or "claude",
+                "model": config.model(role),
+                "group": config.independence_group(role),
+            }
+            for role in agent_cli.ROLES
+        ],
+        "independence": {"level": level, "messages": list(messages)},
+    }
+
+
 def collect_status(
     root: str | Path | repo_mod.Repo = ".",
     *,
@@ -785,6 +810,7 @@ def collect_status(
         "review_outlook": outlook,
         "tasks": tasks_block,
         "trace": trace_block,
+        "agents": _agents_block(config),
         "template_mode": config.template_mode if config else False,
         "github_enabled": bool(config.github.get("enabled")) if config else False,
         "chain": {

@@ -223,6 +223,52 @@
       }
     ]
   },
+  "agents": {
+    "adapters": [
+      "claude",
+      "codex",
+      "copilot",
+      "gemini"
+    ],
+    "roles": [
+      {
+        "role": "implementer",
+        "adapter": "claude",
+        "model": "",
+        "group": ""
+      },
+      {
+        "role": "code_reviewer",
+        "adapter": "claude",
+        "model": "",
+        "group": ""
+      },
+      {
+        "role": "actual_extractor",
+        "adapter": "claude",
+        "model": "opus",
+        "group": "claude/opus"
+      },
+      {
+        "role": "comparator",
+        "adapter": "claude",
+        "model": "sonnet",
+        "group": "claude/sonnet"
+      },
+      {
+        "role": "security_reviewer",
+        "adapter": "claude",
+        "model": "opus",
+        "group": "claude/opus"
+      }
+    ],
+    "independence": {
+      "level": "WARN",
+      "messages": [
+        "actual_extractor ('claude/opus') and comparator ('claude/sonnet') are distinct models of the same provider. This passes the mechanical check but is weaker than two providers."
+      ]
+    }
+  },
   "template_mode": false,
   "github_enabled": false,
   "chain": {

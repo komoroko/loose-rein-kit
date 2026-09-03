@@ -188,7 +188,7 @@ export default function App() {
           )}
           {route.view === "board" && <Board status={status} />}
           {route.view === "record" && <RecordView recordSeq={recordSeq} />}
-          {route.view === "console" && <ConsoleView />}
+          {route.view === "console" && <ConsoleView status={status} />}
         </main>
       </div>
 

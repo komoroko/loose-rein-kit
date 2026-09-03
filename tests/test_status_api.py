@@ -644,3 +644,25 @@ def test_uninitialized_is_decided_by_two_documents(
 def test_nothing_read_yet_is_treated_as_uninitialized(tmp_path: Path) -> None:
     """Fail closed: a repository whose documents cannot be read is not a product to work in."""
     assert status_api.is_uninitialized(None, None) is True
+
+
+def test_the_status_names_which_agent_each_role_launches(tmp_path: Path) -> None:
+    """The dashboard switches adapters, so it has to be told the current ones — and it must offer
+    exactly the adapters this release can launch, or the page would present a choice `rein agent`
+    then refuses. The independence verdict comes from `agent_cli`, so the page and `rein agent
+    --show` cannot disagree about it."""
+    from rein import adapters, agent_cli
+
+    status = status_api.collect_status(seed_repo(tmp_path))
+    agents = status["agents"]
+    assert isinstance(agents, dict)
+    assert agents["adapters"] == sorted(adapters.ADAPTER_TABLE)
+    assert [row["role"] for row in agents["roles"]] == list(agent_cli.ROLES)
+    assert agents["independence"]["level"] in {"PASS", "WARN", "FAIL"}
+
+
+def test_a_repo_with_no_config_reports_no_agents(tmp_path: Path) -> None:
+    """`None`, not an empty table: a page that cannot read the config must not draw a row saying
+    every role is on the default."""
+    (tmp_path / ".rein").mkdir(parents=True)
+    assert status_api.collect_status(tmp_path)["agents"] is None

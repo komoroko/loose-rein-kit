@@ -31,7 +31,89 @@ function Confirm({ question, consequence, onGo, onCancel }) {
 
 const PHASES = ["requirements", "design", "tasks", "build"];
 
-export default function ConsoleView() {
+// Which CLI and model each role launches. Not a gate ③ decision — `agents` sits outside the config
+// digest the freeze covers — so this changes without rewinding anything, and the switch lands in
+// the audit chain as `agents_switched` so gate ④ can still be told the evidence in front of it was
+// produced by a different agent than the one gate ③ saw.
+function Agents({ agents, onApply }) {
+  const [draft, setDraft] = useState({});
+  if (!agents) return <Empty>No config.yaml to read the roles from.</Empty>;
+
+  const { level, messages } = agents.independence || {};
+  const value = (row, key) => (draft[row.role] || {})[key] ?? (key === "model" ? row.model || "" : row.adapter);
+  const edit = (role, key, v) => setDraft((d) => ({ ...d, [role]: { ...(d[role] || {}), [key]: v } }));
+
+  return (
+    <>
+      {level && level !== "PASS" ? (
+        <div className={level === "FAIL" ? "confirm" : "note"} id="agentIndependence">
+          <p className="lede">Independence: {level}</p>
+          {(messages || []).map((m, i) => (
+            <p className="note" key={i}>{m}</p>
+          ))}
+        </div>
+      ) : null}
+      <table className="agents" id="agentRoles">
+        <thead>
+          <tr>
+            <th>role</th>
+            <th>adapter</th>
+            <th>model</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {agents.roles.map((row) => (
+            <tr key={row.role}>
+              <td><code>{row.role}</code></td>
+              <td>
+                <select
+                  id={`agent-${row.role}-adapter`}
+                  aria-label={`Adapter for ${row.role}`}
+                  value={value(row, "adapter")}
+                  onChange={(e) => edit(row.role, "adapter", e.target.value)}
+                >
+                  {agents.adapters.map((a) => (
+                    <option key={a}>{a}</option>
+                  ))}
+                </select>
+              </td>
+              <td>
+                <input
+                  id={`agent-${row.role}-model`}
+                  size="16"
+                  placeholder="(cli default)"
+                  aria-label={`Model for ${row.role}`}
+                  value={value(row, "model")}
+                  onChange={(e) => edit(row.role, "model", e.target.value)}
+                />
+              </td>
+              <td>
+                <button
+                  onClick={() =>
+                    onApply({
+                      role: row.role,
+                      adapter: value(row, "adapter"),
+                      model: value(row, "model").trim(),
+                    })
+                  }
+                >
+                  Apply
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="note">
+        A switch rewinds no approval. It does move the environment digest, so gate ④ shows it beside
+        the evidence that was produced before it.
+      </p>
+    </>
+  );
+}
+
+export default function ConsoleView({ status }) {
   const [out, setOut] = useState(null);
   const [phase, setPhase] = useState(PHASES[0]);
   const [reason, setReason] = useState("");
@@ -103,10 +185,20 @@ export default function ConsoleView() {
             <Empty>Running with --read-only; nothing here can be run.</Empty>
           ) : (
             <>
-              <div className="subhead">Diagnostics</div>
+              <div className="subhead">Agents</div>
+              {/* Keyed on what the server says the roles are, so an unsent draft is dropped the
+                  moment the file actually moves — the config is the authority, not this pane. */}
+              <Agents
+                key={JSON.stringify(((status || {}).agents || {}).roles || null)}
+                agents={(status || {}).agents}
+                onApply={(params) => run("agent", params)}
+              />
+
+              <div className="subhead" style={{ marginTop: "1.4rem" }}>
+                Diagnostics
+              </div>
               <div className="row">
                 <button onClick={() => run("doctor", {})}>rein doctor</button>
-                <button onClick={() => run("tests", {})}>make test</button>
               </div>
 
               <div className="subhead" style={{ marginTop: "1.4rem" }}>
