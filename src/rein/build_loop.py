@@ -150,6 +150,48 @@ def _wait_out_the_machine(where: str, rc: int, attempt: int) -> None:
     time.sleep(delay)
 
 
+#: How often a launch in flight says it is still in flight. Not a progress bar and not a poll:
+#: nothing is asked and nothing is read, the run just keeps talking.
+#:
+#: It exists because the *host* is what kills a silent command. Gemini CLI's shell tool caps a
+#: command by `tools.shell.inactivityTimeout` — 300 seconds **without output**, not 300 seconds of
+#: runtime — and a single implementer launch is silent for far longer than that, because
+#: `common.run` captures the CLI's output rather than streaming it. So a foreground `rein build`
+#: died mid-task on a host that would happily have waited all day, and the only advice left was
+#: "detach and end your turn", which is how a build gets abandoned by the session that started it.
+#: One line a minute is what makes the host's own wait usable, and it costs no tokens: the CLI
+#: prints it, not a model.
+_HEARTBEAT_SEC = 60.0
+
+
+class _Heartbeat:
+    """Prints one line every :data:`_HEARTBEAT_SEC` while a launch is in flight.
+
+    A thread rather than a wrapper around `common.run`, because what has to keep talking is the
+    *waiting*, and the waiting is inside a call that captures its child's output by design (an
+    agent's stdout is an answer to be parsed, not console noise).
+    """
+
+    def __init__(self, what: str) -> None:
+        self._what = what
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._tick, daemon=True)
+
+    def _tick(self) -> None:
+        waited = 0.0
+        while not self._done.wait(_HEARTBEAT_SEC):
+            waited += _HEARTBEAT_SEC
+            print(f"    [waiting] {self._what}: {waited / 60:.0f}m so far", flush=True)
+
+    def __enter__(self) -> _Heartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._done.set()
+        self._thread.join(timeout=1.0)
+
+
 #: Where a sandboxed gate step sees the tree it is testing. One constant, so the mount and the
 #: working directory cannot disagree about where the repository is.
 _SANDBOX_WORKDIR = "/work"
@@ -1004,7 +1046,8 @@ class Orchestrator:
             # `run_measured` event disagreeing with each other — the byte counter saying 1 where
             # the billed one said 3.
             self._spend(role or where, prompt_bytes, resumed=resumed)
-            rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
+            with _Heartbeat(where):
+                rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
             if rc == 0:
                 try:
                     said, spent = record.read_output(out) if record else (out, usage_mod.Usage.unavailable())
@@ -1526,7 +1569,10 @@ class Orchestrator:
         )
         where = f"gate step '{step.name}'"
         try:
-            result = executors.for_profile(profile).run(spec)
+            # Same reason as a launch: an executor captures its child's output, so a test suite
+            # that takes twenty minutes is twenty silent minutes to whatever host is waiting.
+            with _Heartbeat(where):
+                result = executors.for_profile(profile).run(spec)
         except executors.ExecutorError as exc:
             raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
         if result.exit_code == 0:

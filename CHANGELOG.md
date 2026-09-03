@@ -115,6 +115,36 @@ guarded.
 every document listing the launchable CLIs lists all of them — prose lists went stale twice in this
 cycle alone.
 
+
+**A build the session that started it actually waits for.** Reported from a Copilot session: the
+implementation phase was launched and the conversation ended without it. Three of the four host
+mapping files said `background-wait: **none**`, which routed every one of them to "detach, end the
+turn, let a human bring you back" — the worst of the available options, presented as the only one.
+
+The vocabulary was the mistake. `background-wait` was defined as claude's mechanism ("be re-entered
+when it exits"), so a host without *that* read as a host with nothing, when what it actually has is
+the plainer thing: **the tool call waits**. Each host's real mechanism is now named, from its own
+reference:
+
+| host | how it waits |
+|---|---|
+| Claude Code | `run_in_background: true` — the run's exit re-invokes you |
+| Codex | the shell tool's `timeout_ms` (the one-shot default is 10s; an interactive exec has no completion timeout at all) |
+| Gemini CLI | the foreground: `tools.shell.inactivityTimeout` counts **silence**, not runtime (default 300s) |
+| VS Code Copilot | the foreground: nothing documents a cap, and promoting to the background is a human keystroke, not a tool |
+
+**And the run keeps talking, which is what makes those waits usable.** `common.run` captures the
+agent CLI's output by design — it is an answer to be parsed, not console noise — so an implementer
+launch was silent for its whole duration, and a gate step for the whole of a test suite. On a host
+whose cap counts silence, a foreground build died mid-task on a host that would have waited all day.
+`rein build` now prints a `[waiting] <what>: Nm so far` line every minute while a launch or a gate
+step is in flight. It costs no tokens: the CLI prints it, not a model.
+
+`build.md` orders the three now — host re-entry, then the foreground wait, then detaching — and
+says the part that was implicit: **never turn a detach into a poll.** Re-entering to ask whether the
+build is done spends a launch, a context and a share of the session limit on learning that it is
+still building.
+
 ## [0.4.0] - 2026-09-03
 
 **A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is

@@ -13,6 +13,7 @@ and hands over to the review pipeline.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -2702,3 +2703,38 @@ def test_the_control_runs_only_the_command_steps_that_actually_passed(
 
     loop._negative_control(_task(), str(loop.root), "a" * 40, passed)
     assert ran == ["test"]
+
+
+# --- the heartbeat: what makes a host's own wait usable -------------------------
+
+
+def test_a_launch_in_flight_keeps_saying_so(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A silent command is what a host kills, not a slow one.
+
+    Gemini's shell tool caps a command by `tools.shell.inactivityTimeout` — 300 seconds *without
+    output*, not 300 seconds of runtime — and `common.run` captures the agent CLI's output rather
+    than streaming it, so a single implementer launch was silent for far longer than that. The
+    foreground wait every host actually has was unusable, and the only advice left was "detach and
+    end your turn", which is how a build gets abandoned by the session that started it.
+    """
+    monkeypatch.setattr(build_loop, "_HEARTBEAT_SEC", 0.02)
+    with build_loop._Heartbeat("T-001: implementer"):
+        time.sleep(0.12)
+    out = capsys.readouterr().out
+    assert "[waiting] T-001: implementer" in out
+    assert out.count("[waiting]") >= 2, "one line is a notice; a heartbeat has to keep coming"
+
+
+def test_a_fast_launch_says_nothing_and_leaves_no_thread(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It is a heartbeat, not a progress bar: a launch that returns promptly adds no noise, and
+    the thread is gone by the time the block is."""
+    monkeypatch.setattr(build_loop, "_HEARTBEAT_SEC", 5.0)
+    before = threading.active_count()
+    with build_loop._Heartbeat("T-001: implementer"):
+        pass
+    assert "[waiting]" not in capsys.readouterr().out
+    assert threading.active_count() <= before, "the heartbeat outlived the wait it was reporting on"
