@@ -557,7 +557,7 @@ def test_surfaces_on_disk_count_even_when_the_lock_records_no_install(tmp_path: 
     from rein import install
 
     seed_repo(tmp_path, config=make_config(profiles=SANDBOXED_PROFILES))
-    for rel, blob in install._dest_map(install.INTEGRATIONS["claude"]).items():
+    for rel, blob in install._dest_map(install.INTEGRATIONS["claude"].files).items():
         dest = tmp_path / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(blob)

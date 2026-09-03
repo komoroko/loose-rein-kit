@@ -124,6 +124,7 @@ one into a repo seeded non-interactively:
 rein install claude         # writes .claude/ wrappers + merges settings.json
 rein install copilot        # writes .github/ prompt/agent/hook wrappers
 rein install codex          # writes .agents/skills/ + .codex/ agent/hook wrappers
+rein install gemini         # writes .gemini/ commands/skills + merges .gemini/settings.json
 ```
 
 These files are usually discovered only at session or editor start, so open a **new** session
@@ -450,7 +451,7 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
 2. **Delta cycles** — each `brief → /req → … → /verify` pass describes **one change**, closed with
    `rein cycle-close` (same steps as "Daily use"). `docs/00-product-brief.md` and
    `docs/05-current-state.md` persist across cycles.
-3. **Retract any time** — `rein uninstall claude|copilot|codex` retracts an agent surface (pristine
+3. **Retract any time** — `rein uninstall claude|copilot|codex|gemini` retracts an agent surface (pristine
    files only; the settings merge is reverted entry-by-entry), and `rein uninstall --all`
    removes every materialized artifact and the lock. Your repo state (SSOT, `docs/`) is never
    touched.
@@ -497,7 +498,7 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
 - **`rein: command not found` in a hook** — install the CLI on PATH (see "Setup"); `rein doctor`
   FAILs when the hook binary is unresolvable.
 - **`/req` (or other phase commands) don't show up in your agent** — no surface is installed
-  (the wizard asks; `rein init` off a TTY does not): run `rein install claude|copilot|codex` for
+  (the wizard asks; `rein init` off a TTY does not): run `rein install claude|copilot|codex|gemini` for
   whichever agent you use, then open a new session (Setup, step 5).
 
 ## Repository layout
@@ -534,21 +535,21 @@ and any other agent that reads `AGENTS.md` (rules + procedures; gates by convent
 The rules (`AGENTS.md`) and procedures (`.rein/prompts/`) name human-interaction points with a
 **capability vocabulary**; each agent's mapping file says how to realize it.
 
-| Capability | Claude Code | VS Code Copilot | Codex |
-|---|---|---|---|
-| phase entry points | slash commands (`.claude/commands/`) | prompt files (`.github/prompts/`) | skills `$req` … (`.agents/skills/`) |
-| gate enforcement | PreToolUse hook + commit-stage check | same hook via agent hooks (preview) + commit-stage check | same hook on `apply_patch` (`.codex/hooks.json`) + commit-stage check |
-| structured questions | AskUserQuestion | numbered options in chat | numbered options in chat |
-| approval presentation | plan mode + ExitPlanMode | Plan mode / explicit "approve" | explicit "approve" |
-| role delegation | subagents | custom agents `@architect` … | subagents (`.codex/agents/*.toml`), explicit |
-| autonomous build | `rein build` | `rein build` | `rein build` |
-| selectable as the build's CLI | `rein agent claude` | `rein agent copilot` | `rein agent codex` |
-| pending-gate notification | PushNotification | end of turn | end of turn |
+| Capability | Claude Code | VS Code Copilot | Codex | Gemini CLI |
+|---|---|---|---|---|
+| phase entry points | slash commands (`.claude/commands/`) | prompt files (`.github/prompts/`) | skills `$req` … (`.agents/skills/`) | custom commands (`.gemini/commands/*.toml`) |
+| gate enforcement | PreToolUse hook + commit-stage check | same hook via agent hooks (preview) + commit-stage check | same hook on `apply_patch` (`.codex/hooks.json`) + commit-stage check | same hook on `BeforeTool` (`.gemini/settings.json`) + commit-stage check |
+| structured questions | AskUserQuestion | numbered options in chat | numbered options in chat | numbered options in chat |
+| approval presentation | plan mode + ExitPlanMode | Plan mode / explicit "approve" | explicit "approve" | explicit "approve" |
+| role delegation | subagents | custom agents `@architect` … | subagents (`.codex/agents/*.toml`), explicit | skills (`.gemini/skills/*/SKILL.md`) |
+| autonomous build | `rein build` | `rein build` | `rein build` | `rein build` |
+| selectable as the build's CLI | `rein agent claude` | `rein agent copilot` | `rein agent codex` | `rein agent gemini` |
+| pending-gate notification | PushNotification | end of turn | end of turn | end of turn |
 
 An agent with no mapping of its own (one that only reads AGENTS.md) follows the degradation
 column in `AGENTS.md`'s capability vocabulary table.
 
-- Agent surfaces are opt-in — `rein install claude|copilot|codex` writes them, and they invoke
+- Agent surfaces are opt-in — `rein install claude|copilot|codex|gemini` writes them, and they invoke
   the installed `rein` CLI (so `uv tool install` is a prerequisite of the hooks).
 - The Codex surfaces are **unverified against a live Codex**: the hook payload shape and the
   skill/subagent discovery paths come from openai/codex's source and docs, not an observed

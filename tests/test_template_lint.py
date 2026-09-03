@@ -122,6 +122,17 @@ def _wrapper_tree(root: Path) -> None:
     (root / ".github" / "agents" / "architect.agent.md").write_text(
         "---\ndescription: Designs.\n---\nRead `.rein/prompts/agents/architect.md`.\n", encoding="utf-8"
     )
+    # Gemini: a command is TOML and a role is a skill directory — one host using both shapes at
+    # once, which is what the pattern vocabulary has to survive.
+    (root / ".gemini" / "commands").mkdir(parents=True)
+    (root / ".gemini" / "skills" / "architect").mkdir(parents=True)
+    (root / ".gemini" / "commands" / "req.toml").write_text(
+        'description = "Phase 1."\nprompt = """\nRead `.rein/prompts/commands/req.md`.\n"""\n', encoding="utf-8"
+    )
+    (root / ".gemini" / "skills" / "architect" / "SKILL.md").write_text(
+        "---\nname: architect\ndescription: Designs.\n---\nRead `.rein/prompts/agents/architect.md`.\n",
+        encoding="utf-8",
+    )
     # Codex: a skill is a directory, and a subagent is TOML — the same two facts the parity
     # check has to handle to cover a third host at all.
     (root / ".agents" / "skills" / "req").mkdir(parents=True)
@@ -178,6 +189,7 @@ def test_check_wrapper_parity_reads_a_toml_description_as_the_same_sentence(tmp_
         (Path(".claude/agents/architect.md"), '---\nname: architect\ndescription: Presents "options".\n---\n'),
         (Path(".github/agents/architect.agent.md"), '---\ndescription: Presents "options".\n---\n'),
         (Path(".codex/agents/architect.toml"), 'description = "Presents \\"options\\"."\n'),
+        (Path(".gemini/skills/architect/SKILL.md"), '---\nname: architect\ndescription: Presents "options".\n---\n'),
     ):
         body = "Read `.rein/prompts/agents/architect.md`.\n"
         (tmp_path / path).write_text(text + body, encoding="utf-8")

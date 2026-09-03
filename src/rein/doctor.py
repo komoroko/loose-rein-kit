@@ -55,6 +55,7 @@ from rein import store as store_mod
 logger = logging.getLogger(__name__)
 
 SETTINGS_PATH = ".claude/settings.json"
+GEMINI_SETTINGS_PATH = ".gemini/settings.json"
 COPILOT_HOOKS_DIR = ".github/hooks"
 #: Codex reads hooks from either form, so both are checked; a repository that ships neither has
 #: no edit-time guard under Codex.
@@ -820,7 +821,7 @@ def check_stack_extension() -> list[Finding]:
 
 
 #: Hook host → how it is named to a human.
-_HOST_LABEL = {"claude": "Claude Code", "copilot": "VS Code Copilot", "codex": "Codex"}
+_HOST_LABEL = {"claude": "Claude Code", "copilot": "VS Code Copilot", "codex": "Codex", "gemini": "Gemini CLI"}
 
 
 def _mentions_guard(text: str) -> bool:
@@ -891,6 +892,7 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
         "claude": [repo.path(SETTINGS_PATH)],
         "copilot": sorted(repo.path(COPILOT_HOOKS_DIR).glob("*.json")),
         "codex": [repo.path(rel) for rel in CODEX_HOOK_FILES],
+        "gemini": [repo.path(GEMINI_SETTINGS_PATH)],
     }
     surfaces = [host for host, files in registered.items() if any(_reads_guard(f) for f in files)]
     if not surfaces:
@@ -899,7 +901,8 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
                 "WARN",
                 "hook",
                 f"the gate guard is registered in none of {SETTINGS_PATH}, {COPILOT_HOOKS_DIR}/*.json, "
-                f"{', '.join(CODEX_HOOK_FILES)} — edit-time enforcement is absent. The commit-stage check "
+                f"{', '.join(CODEX_HOOK_FILES)}, {GEMINI_SETTINGS_PATH} — edit-time enforcement is absent. "
+                "The commit-stage check "
                 "(`rein guard --check-diff`) still applies if the pre-commit hook is installed.",
             )
         ]

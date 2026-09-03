@@ -124,6 +124,7 @@ rein start   # 対話ウィザード。プロダクト名・brief の1行・エ�
 rein install claude         # .claude/ のラッパーを書き、settings.json をマージ
 rein install copilot        # .github/ に prompt / agent / hook のラッパーを書く
 rein install codex          # .agents/skills/ と .codex/ に agent / hook のラッパーを書く
+rein install gemini         # .gemini/ に commands / skills を書き、.gemini/settings.json をマージ
 ```
 
 これらのファイルはセッションやエディタの起動時にのみ読み込まれることが多い。実行後は**新しい**
@@ -457,7 +458,7 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 2. **デルタサイクル** — `brief → /req → … → /verify` の1周で**1つの変更**を扱い、
    `rein cycle-close` で締める(進め方は「使い方」と同じ)。`docs/00-product-brief.md` と
    `docs/05-current-state.md` はサイクルをまたいで残る。
-3. **いつでも撤去できる** — `rein uninstall claude|copilot|codex` はエージェント連携ファイルを
+3. **いつでも撤去できる** — `rein uninstall claude|copilot|codex|gemini` はエージェント連携ファイルを
    削除する(対象は未変更のファイルのみで、settings のマージはエントリ単位で戻す)。
    `rein uninstall --all` は、実体化された成果物と lock をすべて削除する。リポジトリ自身の状態
    (SSOT と `docs/`)には触れない。
@@ -507,7 +508,7 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
   フックのバイナリが見つからない状態は、`rein doctor` でも FAIL になる。
 - **`/req` などのフェーズコマンドが、使用しているエージェントに表示されない** — 連携ファイルが
   未配置である(ウィザードは尋ねるが、TTY 外の `rein init` は配置しない)。使用している
-  エージェントに合わせて `rein install claude|copilot|codex` を実行し、新しいセッションを開く
+  エージェントに合わせて `rein install claude|copilot|codex|gemini` を実行し、新しいセッションを開く
   (「セットアップ」の手順5)。
 
 ## リポジトリ構成
@@ -546,21 +547,21 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 必要な箇所を**能力ボキャブラリ**という共通の語彙で表す。各エージェントでどう実現するかは、
 エージェントごとの対応表ファイルが定める。
 
-| 能力 | Claude Code | VS Code Copilot | Codex |
-|---|---|---|---|
-| フェーズの呼び出し | スラッシュコマンド(`.claude/commands/`) | prompt files(`.github/prompts/`) | skills `$req` …(`.agents/skills/`) |
-| ゲート強制 | PreToolUse フック + コミット段のチェック | 同じフックを agent hooks(preview)で + コミット段のチェック | 同じフックを `apply_patch` に(`.codex/hooks.json`)+ コミット段のチェック |
-| 人間への構造化質問 | AskUserQuestion | チャットで番号付きの選択肢 | チャットで番号付きの選択肢 |
-| 承認の提示 | plan mode + ExitPlanMode | Plan モード / 明示的な「approve」 | 明示的な「approve」 |
-| ロール委譲 | subagents | custom agents `@architect` など | subagents(`.codex/agents/*.toml`、明示委譲) |
-| 自律ビルド | `rein build` | `rein build` | `rein build` |
-| ビルドの CLI として選択 | `rein agent claude` | `rein agent copilot` | `rein agent codex` |
-| ゲート待ちの通知 | PushNotification | ターン終了時に明示 | ターン終了時に明示 |
+| 能力 | Claude Code | VS Code Copilot | Codex | Gemini CLI |
+|---|---|---|---|---|
+| フェーズの呼び出し | スラッシュコマンド(`.claude/commands/`) | prompt files(`.github/prompts/`) | skills `$req` …(`.agents/skills/`) | custom commands(`.gemini/commands/*.toml`) |
+| ゲート強制 | PreToolUse フック + コミット段のチェック | 同じフックを agent hooks(preview)で + コミット段のチェック | 同じフックを `apply_patch` に(`.codex/hooks.json`)+ コミット段のチェック | 同じフックを `BeforeTool` に(`.gemini/settings.json`)+ コミット段のチェック |
+| 人間への構造化質問 | AskUserQuestion | チャットで番号付きの選択肢 | チャットで番号付きの選択肢 | チャットで番号付きの選択肢 |
+| 承認の提示 | plan mode + ExitPlanMode | Plan モード / 明示的な「approve」 | 明示的な「approve」 | 明示的な「approve」 |
+| ロール委譲 | subagents | custom agents `@architect` など | subagents(`.codex/agents/*.toml`、明示委譲) | skills(`.gemini/skills/*/SKILL.md`) |
+| 自律ビルド | `rein build` | `rein build` | `rein build` | `rein build` |
+| ビルドの CLI として選択 | `rein agent claude` | `rein agent copilot` | `rein agent codex` | `rein agent gemini` |
+| ゲート待ちの通知 | PushNotification | ターン終了時に明示 | ターン終了時に明示 | ターン終了時に明示 |
 
 対応表を持たないエージェント(AGENTS.md だけを読むもの)は、`AGENTS.md` の能力ボキャブラリ表に
 ある劣化列に従う。
 
-- エージェント連携ファイルの配置は任意で、`rein install claude|copilot|codex` が行う。これらは
+- エージェント連携ファイルの配置は任意で、`rein install claude|copilot|codex|gemini` が行う。これらは
   インストール済みの `rein` CLI を呼び出すため、フックの前提として `uv tool install` が必要になる。
 - Codex 側は **実機で未検証**である。フックのペイロード形式と、skills・subagents の探索パスは、
   openai/codex のソースと公式ドキュメントから確定させたもので、実際の Codex セッションで観測した

@@ -97,7 +97,7 @@ def _place_claude_surface(root: Path) -> int:
     from rein import install
 
     written = 0
-    for rel, blob in install._dest_map(install.INTEGRATIONS["claude"]).items():
+    for rel, blob in install._dest_map(install.INTEGRATIONS["claude"].files).items():
         dest = root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(blob)
@@ -880,7 +880,7 @@ def test_the_shipped_matcher_covers_every_write_tool() -> None:
     every product — checking only the repo's own copy would miss exactly that."""
     from rein import gate_guard, install
 
-    groups = install._settings_template()["hooks"]["PreToolUse"]
+    groups = install._settings_template(install.INTEGRATIONS["claude"].settings_source)["hooks"]["PreToolUse"]
     covered = {tool for group in groups for tool in str(group.get("matcher", "")).split("|")}
     assert covered >= set(gate_guard.CLAUDE_WRITE_TOOLS), f"missing: {set(gate_guard.CLAUDE_WRITE_TOOLS) - covered}"
 

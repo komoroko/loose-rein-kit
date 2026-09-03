@@ -323,7 +323,9 @@ def detect_agent(root: Path) -> str | None:
         return "codex"
     if (root / ".github" / "prompts").is_dir():
         return "copilot"
-    for name in ("claude", "codex"):
+    if (root / ".gemini").is_dir() or (root / "GEMINI.md").is_file():
+        return "gemini"
+    for name in ("claude", "codex", "gemini"):
         if shutil.which(name):
             return name
     return None

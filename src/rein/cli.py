@@ -56,7 +56,7 @@ class Verb:
 VERBS: dict[str, Verb] = {
     # setup
     "init": Verb("init_cmd", "seed this repo with Loose Rein state (wizard on a TTY; brownfield auto-detected)"),
-    "install": Verb("install:cmd_install", "add an agent's surfaces (claude / codex / copilot)"),
+    "install": Verb("install:cmd_install", "add an agent's surfaces (claude / codex / copilot / gemini)"),
     "uninstall": Verb("install:cmd_uninstall", "retract integration surfaces (pristine files only)"),
     "agent": Verb("agent_cli", "point the AI roles at an adapter (--show lists them and their groups)"),
     "oci": Verb("oci_cli", "build the sandbox images and pin their digests"),

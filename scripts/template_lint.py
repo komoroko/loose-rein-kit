@@ -48,9 +48,10 @@ CONFIG_PATH = ".rein/config.yaml"
 CLAUDE_MAPPING = "CLAUDE.md"
 COPILOT_MAPPING = ".github/instructions/rein.instructions.md"
 CODEX_MAPPING = ".codex/rein.md"
+GEMINI_MAPPING = ".gemini/rein.md"
 #: Every per-host capability mapping. A host added to `_WRAPPER_SETS` and not to this tuple gets
 #: its wrappers checked and its capability table checked by nobody.
-CAPABILITY_MAPPINGS: tuple[str, ...] = (CLAUDE_MAPPING, COPILOT_MAPPING, CODEX_MAPPING)
+CAPABILITY_MAPPINGS: tuple[str, ...] = (CLAUDE_MAPPING, COPILOT_MAPPING, CODEX_MAPPING, GEMINI_MAPPING)
 
 # The shared procedure/role bodies and their per-agent thin wrappers. Each body must have a
 # wrapper in every dialect, and each wrapper must reference its body — check_wrapper_parity.
@@ -61,6 +62,7 @@ _WRAPPER_SETS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             (".claude/commands", "{stem}.md"),
             (".github/prompts", "{stem}.prompt.md"),
             (".agents/skills", "{stem}/SKILL.md"),
+            (".gemini/commands", "{stem}.toml"),
         ),
     ),
     (
@@ -69,6 +71,7 @@ _WRAPPER_SETS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             (".claude/agents", "{stem}.md"),
             (".github/agents", "{stem}.agent.md"),
             (".codex/agents", "{stem}.toml"),
+            (".gemini/skills", "{stem}/SKILL.md"),
         ),
     ),
 )
@@ -504,6 +507,9 @@ _DATA_PARITY: tuple[tuple[str, str], ...] = (
     (".github/hooks", "integrations/copilot/hooks"),
     (".github/instructions", "integrations/copilot/instructions"),
     (".agents/skills", "integrations/codex/skills"),
+    (".gemini/commands", "integrations/gemini/commands"),
+    (".gemini/skills", "integrations/gemini/skills"),
+    (".gemini/rein.md", "integrations/gemini/rein.md"),
     (".codex/agents", "integrations/codex/agents"),
     (".codex/hooks.json", "integrations/codex/hooks.json"),
     (".codex/rein.md", "integrations/codex/rein.md"),

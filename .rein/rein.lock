@@ -86,6 +86,35 @@ integrations:
       .github/prompts/status.prompt.md: sha256:2d6c78b176a66af1c6a5e93ce98c0d6482aec6e71576772806e603a8fcaf3496
       .github/prompts/tasks.prompt.md: sha256:73713a15f2a2f683dc6212d466a90e16fb0a14518f1f8b5d0d37eac0a4f2520e
       .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
+  gemini:
+    version: 0.4.1
+    installed_at: '2026-09-03'
+    files:
+      .gemini/commands/build.toml: sha256:106963f31be528aa749819ba4c915d81871496e27bd4c606e0abc979874b21a6
+      .gemini/commands/design.toml: sha256:c23d19880d355994bc8f4b87980175effd876d3b0b1703441878c7fdd1186a99
+      .gemini/commands/onboard.toml: sha256:32cc7d9efca91dfd3d4b91f5fa31fbde2c3e99e88d17aa74d1f10d9ab832c171
+      .gemini/commands/req.toml: sha256:5f7c4659c6601773722f73850ab7041c31183c295a3876dcb84a9097922966f4
+      .gemini/commands/revise.toml: sha256:3a102597ef57eb45fce1c7deab610cc417a7414563e1a4c6ee7d872c0c7c7de1
+      .gemini/commands/status.toml: sha256:84b5ed2015a4318e4cdcbfb3f078a22274de48c3bc6c293e729746249a0fdb40
+      .gemini/commands/tasks.toml: sha256:8271ee6dc5ba4bca6e2e864e99d487b27354134624ac2905b3cb7cadad7b6db6
+      .gemini/commands/verify.toml: sha256:f47a22f25f82f49ff0bc9efb06229deef2d0f8f426e7960a03e35f3b974aab79
+      .gemini/rein.md: sha256:e5987858977b55eba2601302dd564597a25cfd2ebcd0f4f45b0a9c9ffc45b858
+      .gemini/skills/adversarial-reviewer/SKILL.md: sha256:bf972e7da1c6ec8b382cf62f24466135bc845df98ef4821db4959d67bfa0a1b4
+      .gemini/skills/architect/SKILL.md: sha256:58134244c61d8748a4e74af6caeefb7f90e7774b5bd34e211318f95bf8f17892
+      .gemini/skills/implementer/SKILL.md: sha256:23623fcd81a0520a53d29a8a156b2b9e535c3036d3247d84d0c6be83674a21be
+      .gemini/skills/requirements-analyst/SKILL.md: sha256:6d273f14a53d2367f7b0907cd68a46fd2c9e9844b3c440ebd86daf89e2da8566
+    settings:
+      created: true
+      permissions_allow: []
+      hooks:
+        BeforeTool:
+        - matcher: write_file|replace
+          hooks:
+          - type: command
+            name: rein-gate-guard
+            description: Deny edits to a next-phase deliverable while its prerequisite
+              gate is pending.
+            command: rein guard
 seeded: {}
 created_at: '2026-07-24'
 updated_at: '2026-09-03'

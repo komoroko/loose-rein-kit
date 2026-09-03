@@ -695,6 +695,34 @@ def test_a_notebook_edit_under_a_guarded_prefix_is_denied(tmp_path: Path) -> Non
     assert "gate 'tasks' is not approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
 
 
+def test_a_denial_is_written_in_every_hosts_dialect_at_once(tmp_path: Path) -> None:
+    """One guard serves every host, so its answer has to be readable by every host.
+
+    Claude Code and the hosts that copied it read `hookSpecificOutput.permissionDecision`; Gemini
+    CLI's `BeforeTool` reads a top-level `decision`/`reason` and ignores the rest. A denial written
+    in only one dialect is not a quieter denial — it is an *allow* on the host that cannot read it,
+    while `doctor` goes on reporting the guard as registered.
+    """
+    import io
+    import sys
+
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    payload = {"cwd": str(tmp_path), "tool_input": {"file_path": str(tmp_path / "src/app.py")}}
+    stdin, stdout = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+    try:
+        assert gate_guard.main([]) == 0
+        answer = json.loads(sys.stdout.getvalue().strip())
+    finally:
+        sys.stdin, sys.stdout = stdin, stdout
+    assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert answer["decision"] == "deny"
+    assert answer["reason"] == answer["hookSpecificOutput"]["permissionDecisionReason"], (
+        "two dialects saying different things is worse than one saying nothing"
+    )
+    assert "gate 'tasks' is not approved" in answer["reason"]
+
+
 def test_a_patch_touching_a_guarded_path_is_denied(tmp_path: Path) -> None:
     seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
     reason = codex_hook(tmp_path, _patch("*** Update File: src/app.py\n@@\n-a\n+b\n"))

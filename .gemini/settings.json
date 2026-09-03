@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": []
+  },
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "write_file|replace",
+        "hooks": [
+          {
+            "type": "command",
+            "name": "rein-gate-guard",
+            "description": "Deny edits to a next-phase deliverable while its prerequisite gate is pending.",
+            "command": "rein guard"
+          }
+        ]
+      }
+    ]
+  }
+}
