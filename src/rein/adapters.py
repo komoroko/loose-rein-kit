@@ -325,12 +325,70 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         # `own_sandbox` — `--cloud` is an opt-in that runs the session somewhere else entirely,
         # not isolation around the launch this loop makes.
     ),
+    "cursor": Adapter(
+        name="cursor",
+        # `--trust` is documented as headless-only, and it is the same bargain `--no-ask-user` is
+        # for copilot: there is no human here to answer a workspace-trust prompt, so without it
+        # the run hangs instead of failing.
+        argv=("cursor-agent", "-p", "--trust"),
+        model_flags=("--model",),
+        # `-f, --force` — "force allow commands unless explicitly denied" (`--yolo` is its alias).
+        # Reading is not a command it needs forcing for, which is why READ is empty.
+        grants={WRITE: ("--force",), REVIEW: ("--force",)},
+        usage_flags=usage_mod.CURSOR_JSON_FLAGS,
+        envelope=usage_mod.parse_cursor_envelope,
+        install_hint="curl https://cursor.com/install -fsS | bash",
+        # `--resume [chatId]` resumes an existing chat and there is no flag that stamps a new one,
+        # so a retry cannot be told which of `max_parallel` leaves it belongs to — the same reason
+        # `codex` and `copilot` are cold on every retry.
+    ),
+    "amp": Adapter(
+        name="amp",
+        # `-x` takes the message as its value, so it goes last. Execute mode "prints its final
+        # message and exits", which is already the shape gate ④ parses — no envelope needed, and
+        # none offered: nothing here reports what a launch cost, so it is recorded as unmeasured.
+        argv=("amp",),
+        prompt_flags=("-x",),
+        # Empty, and not for lack of looking: the execute-mode reference documents no model flag
+        # (only `--fast`) and no tool-permission flag. `launch_refusal` therefore rejects a
+        # `model:` on this adapter rather than launching amp's default under another model's name.
+        grants={},
+        install_hint="npm install -g @sourcegraph/amp",
+    ),
+    "opencode": Adapter(
+        name="opencode",
+        # The prompt is `run`'s positional `[message..]`, so no flag introduces it.
+        argv=("opencode", "run"),
+        model_flags=("--model",),
+        # `--auto` — "auto-approve permissions not explicitly denied".
+        grants={WRITE: ("--auto",), REVIEW: ("--auto",)},
+        usage_flags=usage_mod.OPENCODE_JSON_FLAGS,
+        envelope=usage_mod.parse_opencode_envelope,
+        install_hint="npm install -g opencode-ai",
+        # `--session <id>` and `--continue` resume an existing session; neither creates one under
+        # an id this loop chose, so there is nothing to stamp and nothing to resume by name.
+    ),
 }
+
+
+#: binary name → the record that launches it. `ADAPTER_TABLE` is keyed by the name a human writes
+#: in `agents.<role>.adapter`, and that is not always the name of the executable: `cursor` launches
+#: `cursor-agent`. Looking a record up by `argv[0]` against the table's own keys worked only while
+#: every adapter happened to be named after its binary — and it failed *silently*, handing back
+#: `None`, which `command()` reads as "an argv this module does not know" and launches with no
+#: access flags at all. So the index is built once, and a collision is a startup error rather than
+#: one record quietly shadowing another.
+_BY_BINARY: dict[str, Adapter] = {}
+for _record in ADAPTER_TABLE.values():
+    if _record.argv[0] in _BY_BINARY:
+        raise RuntimeError(f"two adapters launch {_record.argv[0]!r}; a launch could not be attributed to either")
+    _BY_BINARY[_record.argv[0]] = _record
+del _record
 
 
 def adapter_for(argv: Sequence[str]) -> Adapter | None:
     """The capability record of whatever CLI `argv` launches, or None for an unknown one."""
-    return ADAPTER_TABLE.get(argv[0]) if argv else None
+    return _BY_BINARY.get(argv[0]) if argv else None
 
 
 def launch_refusal(config: models.Config | None, role: str) -> str:

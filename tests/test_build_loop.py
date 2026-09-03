@@ -355,6 +355,28 @@ def test_a_claude_launch_gains_no_sandbox_flags() -> None:
             "gpt-5.2",
             ["copilot", "--no-ask-user", "-s", "--model", "gpt-5.2", "--allow-all-tools", "-p", "P"],
         ),
+        (
+            "cursor",
+            "gpt-5.2",
+            ["cursor-agent", "-p", "--trust", "--model", "gpt-5.2", "--output-format", "json", "--force", "P"],
+        ),
+        # `amp -x` takes the message as the flag's value, and the adapter declares no model flag —
+        # the reason `launch_refusal` refuses a `model:` beside it rather than dropping it.
+        ("amp", "", ["amp", "-x", "P"]),
+        (
+            "opencode",
+            "anthropic/claude-opus-5",
+            [
+                "opencode",
+                "run",
+                "--model",
+                "anthropic/claude-opus-5",
+                "--format",
+                "json",
+                "--auto",
+                "P",
+            ],
+        ),
     ],
 )
 def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: str, expected: list[str]) -> None:
@@ -1695,6 +1717,16 @@ def test_every_adapter_declares_what_it_can_do() -> None:
     claude = adapters.ADAPTER_TABLE["claude"]
     assert claude.resumable and not claude.own_sandbox
     assert not any(claude.access_flags(level) for level in (adapters.READ, adapters.REVIEW, adapters.WRITE))
+
+
+def test_an_adapter_named_differently_from_its_binary_is_still_found() -> None:
+    """`ADAPTER_TABLE` is keyed by the name a human writes in config; `adapter_for` is handed an
+    argv. `cursor` launches `cursor-agent`, and looking the record up by `argv[0]` against the
+    table's own keys returned None — which `command()` reads as an argv it does not know and
+    launches with no access flags at all. A reviewer that cannot write, silently."""
+    record = adapters.ADAPTER_TABLE["cursor"]
+    assert adapters.adapter_for(record.launch_argv()) is record
+    assert "--force" in adapters.command(record.launch_argv(), "P", access=adapters.WRITE)
 
 
 @pytest.mark.parametrize("name", sorted(adapters.ADAPTER_TABLE))

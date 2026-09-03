@@ -101,7 +101,23 @@ uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # 
 ```
 
 **3. Provide a headless agent CLI** — it is what the implementation phase (`rein build`) drives.
-The default is `claude`; switch with `rein agent codex` (`gemini` and `copilot` also work).
+The default is `claude`; switch with `rein agent <cli>`. Seven are launchable, and they differ in
+what they can be *told* — `rein agent --show` prints the current roles, `rein doctor` says which
+binaries are on PATH and how to install a missing one:
+
+| `adapter:` | binary | model | retry continues its session | reports what a launch cost |
+|---|---|---|---|---|
+| `claude` | `claude` | yes | yes (and forks a shared reading) | yes |
+| `codex` | `codex` | no | no | yes (`--json`) |
+| `gemini` | `gemini` | yes | no | yes (`--output-format json`) |
+| `copilot` | `copilot` | yes | no | no |
+| `cursor` | `cursor-agent` | yes | no | no |
+| `amp` | `amp` | no | no | no |
+| `opencode` | `opencode` | yes | no | when its step reports one |
+
+An adapter that cannot be told a model refuses a `model:` beside it rather than launching its own
+default under that name — the gate ④ independence check is derived from the model, so a separation
+written down and not performed is refused where it is written.
 Without one, `rein build` refuses to start — and it names the command that installs the CLI it
 wanted rather than installing anything itself.
 
@@ -162,7 +178,8 @@ rein next         # only the next recommended command (--json for integrations)
 rein ui           # local dashboard — read the gate's deliverables and approve from the page
 ```
 
-`rein agent codex` switches the headless agent CLI (claude | codex | gemini | copilot),
+`rein agent codex` switches the headless agent CLI (`rein agent --show` lists every one this
+release can launch),
 and `rein project add` registers a repo the dashboard's switcher can target — both are set once,
 not daily. With several repos registered, the dashboard grows a **project switcher** (a dropdown
 in its header) that retargets the whole board without restarting the server; `rein ui` always adds

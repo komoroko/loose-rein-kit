@@ -101,8 +101,24 @@ uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # 
 ```
 
 **3. ヘッドレスのエージェント CLI を用意する** — 実装フェーズ(`rein build`)が呼び出す対象を
-指定する。既定は `claude` で、`rein agent codex` により切り替えられる(`gemini` と `copilot` も
-指定できる)。用意がない場合、`rein build` は起動しない。このとき示されるのは当該 CLI の
+指定する。既定は `claude` で、`rein agent <cli>` により切り替える。起動できるのは 7 つあり、
+「何を指示できるか」が異なる(現在の割り当ては `rein agent --show`、PATH 上の有無と未導入時の
+インストール方法は `rein doctor` が示す):
+
+| `adapter:` | 実行ファイル | model 指定 | リトライがセッションを継続 | 消費量の報告 |
+|---|---|---|---|---|
+| `claude` | `claude` | 可 | 可(読解の共有もフォークできる) | 可 |
+| `codex` | `codex` | 不可 | 不可 | 可(`--json`) |
+| `gemini` | `gemini` | 可 | 不可 | 可(`--output-format json`) |
+| `copilot` | `copilot` | 可 | 不可 | 不可 |
+| `cursor` | `cursor-agent` | 可 | 不可 | 不可 |
+| `amp` | `amp` | 不可 | 不可 | 不可 |
+| `opencode` | `opencode` | 可 | 不可 | ステップが報告したときのみ |
+
+model を指示できないアダプタに `model:` を書くと、そのアダプタ自身の既定を別のモデル名で
+起動するのではなく、書かれた時点で拒否される。gate ④ の独立性判定は model から導かれるため、
+「書いただけで実行されていない分離」は書かれた場所で止める。用意がない場合、`rein build` は
+起動しない。このとき示されるのは当該 CLI の
 インストールコマンドであって、`rein` が代わりにインストールすることはない。
 
 **4. リポジトリを初期化する** — 新規・既存のどちらでも同じコマンドを使う。既存かどうかは自動で
@@ -161,8 +177,9 @@ rein next         # 次に実行すべきコマンドだけを表示(連携用�
 rein ui           # ローカルダッシュボード。ゲートの成果物を読み、その場で承認できる
 ```
 
-`rein agent codex` はヘッドレスで使うエージェント CLI を切り替え(claude | codex | gemini |
-copilot)、`rein project add` はダッシュボードの切替対象にリポジトリを登録する。どちらも
+`rein agent codex` はヘッドレスで使うエージェント CLI を切り替え(このリリースが起動できる
+CLI の一覧は `rein agent --show`)、`rein project add` はダッシュボードの切替対象にリポジトリを
+登録する。どちらも
 最初に一度設定するもので、日常的に打つものではない。複数のリポジトリを登録すると、ダッシュ
 ボードのヘッダに**プロジェクト切替**のドロップダウンが表示され、サーバを再起動せずに対象を
 切り替えられる。`rein ui` は起動元のリポジトリを自動で登録する。単発の操作であれば、`rein --repo <path> <verb>`(または

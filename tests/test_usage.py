@@ -232,3 +232,39 @@ def test_a_count_in_the_millions_is_rendered_in_millions() -> None:
     assert usage._tokens(34_000) == "34.0k"
     assert usage._tokens(999_999) == "1000.0k"
     assert usage._tokens(3_067_272) == "3.07M"
+
+
+def test_a_cursor_envelope_is_read_for_its_answer_and_claims_no_bill() -> None:
+    """Its object shape is claude's, and its own reference says neither format carries token
+    counts. Reusing claude's parser would have reported every cursor launch as measured and free,
+    which is the one thing `Usage.unavailable()` exists to prevent (plan §2.4)."""
+    from tests._support import cursor_envelope
+
+    answer, spent = usage.parse_cursor_envelope(cursor_envelope('{"verdict": "ok"}'))
+    assert answer == '{"verdict": "ok"}'
+    assert not spent.available and spent.launches == 1
+    with pytest.raises(usage.AdapterEnvelopeError, match="failed run"):
+        usage.parse_cursor_envelope(json.dumps({"is_error": True, "result": "out of credit"}))
+
+
+def test_an_opencode_stream_answers_with_its_last_finished_text_part() -> None:
+    from tests._support import opencode_events
+
+    answer, spent = usage.parse_opencode_envelope(opencode_events("the answer"))
+    assert answer == "the answer", "reasoning is never the answer"
+    assert spent.available and (spent.input_tokens, spent.output_tokens) == (100, 20)
+
+
+def test_an_opencode_step_with_no_token_mapping_is_unmeasured_not_free() -> None:
+    """There is no published schema for that part. A count defaulted to zero would report the
+    launch as free; absent counts have to read as "we did not measure"."""
+    stream = '{"type": "step_finish", "part": {"type": "step-finish"}}\n{"type": "text", "part": {"text": "hi"}}'
+    answer, spent = usage.parse_opencode_envelope(stream)
+    assert answer == "hi" and not spent.available
+
+
+def test_an_opencode_error_event_is_not_read_as_an_answer() -> None:
+    with pytest.raises(usage.AdapterEnvelopeError, match="rate"):
+        usage.parse_opencode_envelope('{"type": "error", "error": {"message": "rate limited"}}')
+    with pytest.raises(usage.AdapterEnvelopeError, match="no events"):
+        usage.parse_opencode_envelope("just some words")

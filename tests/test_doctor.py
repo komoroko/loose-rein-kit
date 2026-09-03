@@ -555,10 +555,10 @@ def test_a_missing_adapter_names_the_install_command_and_runs_nothing(monkeypatc
 
 def test_an_adapter_this_release_cannot_launch_fails_whatever_is_on_path() -> None:
     config = make_config()
-    config["agents"]["implementer"]["adapter"] = "cursor"  # type: ignore[index]
+    config["agents"]["implementer"]["adapter"] = "nonesuch"  # type: ignore[index]
     results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
     assert results[0].level == "FAIL"
-    assert "'cursor'" in results[0].message
+    assert "'nonesuch'" in results[0].message
 
 
 def test_a_model_the_adapter_cannot_be_told_to_run_fails() -> None:

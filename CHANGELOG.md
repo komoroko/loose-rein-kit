@@ -80,6 +80,41 @@ prompt's *"you do not change the code, you have no write access to it"* is enfor
 launcher — `--allow-tool read --allow-tool 'shell(git:*)' --allow-tool 'write(<findings file>)'` —
 rather than being an instruction the model is asked to respect.
 
+
+**Four more agent CLIs, and gate ④ working on any of them.** `rein agent` takes seven adapters
+now: `claude`, `codex`, `gemini`, `copilot`, `cursor` (`cursor-agent`), `amp` and `opencode`. What
+each can be *told* differs and is declared rather than assumed — README's install section carries
+the table, and an adapter that cannot be told a model refuses a `model:` beside it rather than
+launching its own default under that name.
+
+`adapter_for` recovered a record from `argv[0]` against `ADAPTER_TABLE`'s own keys, which worked
+only while every adapter was named after its executable. `cursor` launches `cursor-agent`, and the
+lookup returned `None` — read by `command()` as "an argv this module does not know", which launches
+with no access flags at all. The index is built from the records now, and two adapters claiming one
+binary is a startup error rather than one silently shadowing the other.
+
+**`rein install gemini`.** gemini was launchable as a role's adapter and absent as a host: no
+`/req`…`/verify`, no role delegation, no edit-time gate enforcement — copilot's asymmetry in
+reverse. It now installs `.gemini/commands/*.toml`, `.gemini/skills/*/SKILL.md`, `.gemini/rein.md`,
+a `BeforeTool` hook merged into `.gemini/settings.json`, and the rules import in `GEMINI.md`, which
+gemini needs because it reads `GEMINI.md` and not `AGENTS.md`.
+
+`INTEGRATIONS` is a table of hosts rather than a table of file pairs plus an `if name == "claude"`
+on the install path, the same test on the uninstall path, and an `entry = "$req" if name ==
+"codex"` in the closing message. A host declares where its settings live, which context file it
+reads and how a human types a phase command. `review_reading` was naming `.claude/settings.json`
+for every integration that recorded a settings merge — right only while claude was the only host
+with one.
+
+**The gate guard answers in both hook dialects at once**, `hookSpecificOutput` for Claude Code and
+the hosts that copied it, top-level `decision`/`reason` for Gemini's `BeforeTool`. A denial in the
+wrong dialect is not a quieter denial: it is an allow, on a host `doctor` goes on reporting as
+guarded.
+
+**Two new canaries.** `template_lint` checks gemini in all four host canaries, and checks that
+every document listing the launchable CLIs lists all of them — prose lists went stale twice in this
+cycle alone.
+
 ## [0.4.0] - 2026-09-03
 
 **A green is evidence only if it could have been red — the DoD now proves it.** The quality gate is

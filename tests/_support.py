@@ -255,12 +255,43 @@ def agent_envelope(text: str, *, input_tokens: int = 100, output_tokens: int = 2
     )
 
 
-#: adapter name → the fake that speaks its protocol. Keyed by name so a new adapter that reports
-#: nothing falls through to bare text, which is what such a CLI actually prints.
+def cursor_envelope(text: str) -> str:
+    """What `cursor-agent -p --output-format json` answers with: claude's object shape, and its
+    own reference is explicit that it carries no token counts."""
+    import json
+
+    return json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text})
+
+
+def opencode_events(text: str) -> str:
+    """What `opencode run --format json` streams. A `text` event is emitted only once its part is
+    finished, so the last one is the answer; the reasoning event is here to prove it is skipped."""
+    import json
+
+    return "\n".join(
+        json.dumps(event)
+        for event in (
+            {"type": "step_start", "sessionID": "s-1", "part": {"type": "step-start"}},
+            {"type": "reasoning", "sessionID": "s-1", "part": {"type": "reasoning", "text": "thinking"}},
+            {"type": "text", "sessionID": "s-1", "part": {"type": "text", "text": text}},
+            {
+                "type": "step_finish",
+                "sessionID": "s-1",
+                "part": {"type": "step-finish", "tokens": {"input": 100, "output": 20}, "cost": 0.01},
+            },
+        )
+    )
+
+
+#: adapter name → the fake that speaks its protocol. An adapter absent from this map answers with
+#: bare text, which is what a CLI with no envelope actually prints (`amp` prints its final message
+#: and exits; `copilot -s` prints only the agent's response).
 _ENVELOPES: dict[str, Callable[[str], str]] = {
     "claude": agent_envelope,
     "gemini": gemini_envelope,
     "codex": codex_events,
+    "cursor": cursor_envelope,
+    "opencode": opencode_events,
 }
 
 
