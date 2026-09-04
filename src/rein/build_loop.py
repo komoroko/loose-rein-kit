@@ -1738,10 +1738,11 @@ class Orchestrator:
           "this task's green rests on tests nobody wrote for it" is on the record instead of being
           the silence it has always been.
         * **the control could not be set up** — no base, no command step in the DoD to re-establish,
-          a diff git would not give up, an unapplied patch, a worktree that would not create.
-          Recorded with the reason. Never a pass and never a block: a broken experiment is not
-          evidence in either direction, and inventing a verdict from one is the thing the rest of
-          this module refuses to do.
+          a diff git would not give up, an unapplied patch, a worktree that would not create, a
+          sandbox that would not run the control's own steps. Recorded with the reason. Never a
+          pass, never a block, and never an abort: a broken experiment is not evidence in either
+          direction, and inventing a verdict from one is the thing the rest of this module refuses
+          to do.
         * **every step green** — the block. It comes back through the same channel a red step does,
           so it spends that attempt's budget and the implementer is told what is missing.
         """
@@ -1772,9 +1773,14 @@ class Orchestrator:
             return self._control_undetermined(f"the test half of the change against {control_base[:12]} was empty")
         try:
             return self._take_control(task, control_base, patch, commands)
-        except EnvironmentFault:
-            raise
-        except StopLoop as exc:
+        except (EnvironmentFault, StopLoop) as exc:
+            # Including the environment fault, which used to be re-raised. That made a third
+            # ending the three above do not name: the task's *own* DoD had already gone green,
+            # and a container that would not start for the control run aborted the leaf, reset it
+            # to `todo` and made the next run implement it again. A broken experiment is not
+            # evidence in either direction — that is this method's whole stated posture — and an
+            # abort is the strongest verdict of the three. The steps that decide the task run
+            # outside this call and still fault normally; only the control's own does not.
             return self._control_undetermined(str(exc))
 
     def _take_control(
@@ -1916,6 +1922,12 @@ class Orchestrator:
         Skipped for a task with no declared scope: an undeclared scope means *unbounded*, so its
         reading would be the whole change, which is neither one task wide nor what the gate will
         ask for.
+
+        **And skipped once the change is `critical`**, because the gate will not compose there:
+        `review_reading.plan_readings` reads a critical change whole whatever the configuration
+        says, so every per-task reading warmed after that point is one nothing will ever look up.
+        The risk is a property of the whole change and it only ever rises, so this stops the
+        warming for the rest of the run the same way an unanswerable adapter does.
         """
         if self.dry_run or self._warming_off or self.config.raw.composition == review_reading.WHOLE:
             return
@@ -1931,6 +1943,18 @@ class Orchestrator:
                 return
             exclude = review_reading.not_the_product(self.repo, self.state)
             limits = {**human_review.DEFAULT_BUDGET, **self.config.raw.budgets}
+            # One analysis of one whole diff answers both: the floor the gate will key on, and
+            # whether the gate will take per-task readings at all.
+            risk_floor, effective = review_reading.whole_change_risk(
+                self.repo, self._plan, base=base, head=head, exclude=exclude
+            )
+            if models.risk_at_least(effective, "critical"):
+                self._warming_off = True
+                print(
+                    f"    [review] {task.id}: the change is {effective} — gate ④ reads it whole, "
+                    "so no per-task reading is warmed from here on"
+                )
+                return
             review_reading.warm(
                 self.repo,
                 review_transport.StagedReviewers(self.repo, config=self.config.raw),
@@ -1939,10 +1963,16 @@ class Orchestrator:
                 head=head,
                 exclude=exclude,
                 limits=limits,
+                risk_floor=risk_floor,
                 config=self.config.raw,
                 cache=review_cache.StageCache(self.repo.root),
             )
-        except (review_policy.ReviewPolicyError, common.ReinError, OSError) as exc:
+        except (
+            review_policy.ReviewPolicyError,
+            review_transport.TransportError,
+            common.ReinError,
+            OSError,
+        ) as exc:
             self._warming_off = True
             print(f"    [review] {task.id}: the gate-④ reading was not taken here ({exc}); the gate will take it")
 
@@ -2298,7 +2328,7 @@ class Orchestrator:
             role="implementer",
         )
 
-    def _integration_gate(self, tasks: list[dag.Task]) -> tuple[bool, str]:
+    def _integration_gate(self, tasks: list[dag.Task], before_join: str) -> tuple[bool, str]:
         """Re-verify the merged/integrated state of the work branch after a multi-leaf join.
 
         Each leaf passed the gate only in its own isolated worktree; the *combined* file set can
@@ -2325,7 +2355,7 @@ class Orchestrator:
                     # at the integration stage was being skipped, which made the join the one tree
                     # no reviewer ever read. The command steps have just run over it; this is the
                     # half of the question they cannot answer.
-                    self._run_integration_agent_step(step, tasks)
+                    self._run_integration_agent_step(step, tasks, before_join)
                     continue
                 if not step.command:
                     continue
@@ -2354,8 +2384,16 @@ class Orchestrator:
             budgets[failed] = left - 1
             self._invoke_integration_fixer(ids, self._integration_fix_prompt(ids, failure_log))
 
-    def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task]) -> None:
+    def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task], before_join: str) -> None:
         """Read the tree the merge produced, which no per-task reviewer ever saw.
+
+        **`before_join` is what makes "the join" a real subject.** The diff this reviewer is
+        pointed at used to start at `plan.base_commit`, which is the base of the *cycle*: every
+        batch after the first re-read every batch before it, at full price, and every finding
+        about code that landed two batches ago came back again. Worse, the attribution below only
+        knows this batch's tasks — so a finding about an earlier one matched no owner, was printed
+        instead of filed, and never reached the human. The join is the commits these merges added,
+        and that is the range.
 
         Its `must_fix` findings go back to the integration fixer within this step's own retries,
         the same shape a red command step takes; unresolved ones stop the batch rather than being
@@ -2379,7 +2417,7 @@ class Orchestrator:
                     build_prompts.integration_review_prompt(
                         ids,
                         gate_cmds=self.config.gate_cmds,
-                        diff_cmd=f"git diff {self._plan.base_commit if self._plan else 'HEAD~1'}..HEAD",
+                        diff_cmd=f"git diff {before_join}..HEAD",
                         findings_path=findings_rel,
                         disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
                     ),
@@ -2999,6 +3037,10 @@ class Orchestrator:
         landed: dict[str, str] = {}
         # The first fault in id order, so which one is reported does not depend on thread timing.
         fault = next((results[t.id].fault for t in sorted(tasks, key=lambda t: t.id) if results[t.id].fault), None)
+        # What the work branch was before any of this batch landed on it. The integration gate's
+        # reviewer reads the join, and the join is what these merges added — not the cycle. Taken
+        # here because it is the last moment it is still true.
+        before_join = self.ws.head()
         # Merge deterministically in ascending id order (sequential join).
         for task in sorted(tasks, key=lambda t: t.id):
             outcome = results[task.id]
@@ -3074,7 +3116,7 @@ class Orchestrator:
             # The next run resets them to `todo` and re-plays them, which re-runs the integration
             # gate. Duplicated work, never a skipped verification — marking them `done` would be
             # the other way round, and nothing would ever come back to check.
-            ok, log = self._integration_gate(merged)
+            ok, log = self._integration_gate(merged, before_join)
         else:
             ok, log = True, ""
         ids = ",".join(t.id for t in merged)

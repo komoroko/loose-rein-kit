@@ -775,3 +775,38 @@ def test_patch_paths_resolve_against_the_session_cwd(tmp_path: Path) -> None:
     finally:
         sys.stdin, sys.stdout = stdin, stdout
     assert "gate 'tasks' is not approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_a_hosts_own_spelling_of_the_call_is_read_as_well_as_answered(tmp_path: Path) -> None:
+    """The *answer* was taught every host's dialect and the *question* was not.
+
+    A denial is written as `hookSpecificOutput` and as top-level `decision`/`reason` at once, on
+    the stated ground that one guard serves every host — while the payload was still read as
+    `payload["tool_input"]` alone. Gemini CLI's `BeforeTool` names it `tool_args`: there was no path
+    to check, `hook_paths` answered `[]`, and the guard exited 0. It allowed every edit, silently,
+    while `doctor` reported it registered — the exact failure this module names for Codex, arriving
+    through the door the response fixed.
+    """
+    import io
+    import sys
+
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    payload = {"cwd": str(tmp_path), "tool_args": {"file_path": str(tmp_path / "src/app.py")}}
+    stdin, stdout = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+    try:
+        assert gate_guard.main([]) == 0
+        said = sys.stdout.getvalue().strip()
+    finally:
+        sys.stdin, sys.stdout = stdin, stdout
+    assert said, "a payload the guard cannot read is an allow, and this one is readable"
+    assert "gate 'tasks' is not approved" in json.loads(said)["reason"]
+
+
+def test_every_spelling_of_the_call_arguments_finds_the_same_path() -> None:
+    """One question, several hosts. A key this release has never seen leaves the answer empty
+    rather than guessing at some other field's contents."""
+    for key in gate_guard.TOOL_ARGS_KEYS:
+        assert gate_guard.tool_arguments({key: {"file_path": "src/app.py"}}) == {"file_path": "src/app.py"}
+    assert gate_guard.tool_arguments({"arguments": {"file_path": "src/app.py"}}) == {}
+    assert gate_guard.tool_arguments({"tool_input": "not a mapping"}) == {}

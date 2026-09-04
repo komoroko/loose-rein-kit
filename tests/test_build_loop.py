@@ -23,6 +23,7 @@ import pytest
 
 from rein import (
     adapters,
+    build_git,
     build_loop,
     common,
     conflict,
@@ -398,12 +399,15 @@ def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: st
 def test_the_review_transport_is_granted_a_read_and_no_more(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, adapter: str
 ) -> None:
-    """A gate-④ stage is handed its payload on stdin, answers on stdout, and changes nothing.
+    """A gate-④ stage is handed its request, answers on stdout, and changes nothing.
 
     That is `READ`, which is not the same as passing no flags — and the difference is the whole
     reason the level exists. `codex exec` reads without being told, so its launch stays bare;
     `copilot` grants no tool at all without one, so an ungranted launch could not open the checkout
     the security stage is given to read. Neither gets a grant that could change anything.
+
+    The request itself goes where that CLI takes one (`review_transport.prompt_call`): neither of
+    these reads stdin, so the payload is the last thing on the line, after the grant.
     """
     from rein import common, review_transport
 
@@ -424,7 +428,8 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
     review_transport._adapter_reviewer(repo, "code_reviewer", ledger=ledger)({"request": "x"})
 
     record = adapters.ADAPTER_TABLE[adapter]
-    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ)]
+    payload = json.dumps({"request": "x"})
+    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ), *record.prompt_argv(payload)]
     assert not set(launched[0]) & set(record.access_flags(adapters.WRITE)) - set(record.launch_argv())
 
 
@@ -500,7 +505,7 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
-    monkeypatch.setattr(loop, "_integration_gate", lambda merged: (True, ""))
+    monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (True, ""))
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: next(heads))
 
     loop._consume_parallel(tasks)
@@ -1271,7 +1276,7 @@ def test_the_integration_gate_actually_runs_the_command_steps(tmp_path: Path, mo
     monkeypatch.setattr(common, "run", fake_git({("make", "test"): (1, "tests/x.py::t FAILED")}))
     monkeypatch.setattr(build_loop, "_run", fake_git())  # the fixer the gate hands the failure to
     task = dag.Task(id="T-001", title="t", kind="parallel")
-    ok, failure = loop._integration_gate([task])
+    ok, failure = loop._integration_gate([task], "b" * 40)
     assert not ok
     assert "FAILED" in failure
 
@@ -2304,7 +2309,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: "a" * 40)
 
-    def record_gate(merged: list[dag.Task]) -> tuple[bool, str]:
+    def record_gate(merged: list[dag.Task], before_join: str) -> tuple[bool, str]:
         gated.append([t.id for t in merged])
         return True, ""
 
@@ -2451,8 +2456,8 @@ def test_an_agent_step_declared_at_the_integration_stage_runs_there(
     monkeypatch.setattr(loop, "_steps_at", lambda stage: (step,) if stage == "integration" else ())
 
     seen: list[str] = []
-    monkeypatch.setattr(loop, "_run_integration_agent_step", lambda s, tasks: seen.append(s.name))
-    ok, _ = loop._integration_gate([dag.Task(id="T-001", title="t", kind="parallel")])
+    monkeypatch.setattr(loop, "_run_integration_agent_step", lambda s, tasks, before: seen.append(s.name))
+    ok, _ = loop._integration_gate([dag.Task(id="T-001", title="t", kind="parallel")], "b" * 40)
     assert ok and seen == ["review"], "the agent step declared at this stage has to run at it"
 
 
@@ -2751,3 +2756,91 @@ def test_a_fast_launch_says_nothing_and_leaves_no_thread(
         pass
     assert "[waiting]" not in capsys.readouterr().out
     assert threading.active_count() <= before, "the heartbeat outlived the wait it was reporting on"
+
+
+def test_a_gate_four_stage_reaches_a_cli_that_does_not_read_stdin() -> None:
+    """The transport handed every stage its request on stdin with no prompt argument.
+
+    That is claude's shape — `-p` is a boolean there and the prompt is a positional — and it is
+    nobody else's. Under a CLI whose prompt is a flag's *value*, that launch asks nothing: it does
+    not error, it waits for input that is not coming, until `agent_timeout_sec` (default: no
+    limit). The adapter table said so all along, in `prompt_flags`, and the transport never read it.
+    """
+    from rein import review_transport
+
+    claude = adapters.ADAPTER_TABLE["claude"]
+    argv, stdin = review_transport.prompt_call(claude, ["claude", "-p"], "PAYLOAD")
+    assert (argv, stdin) == (["claude", "-p"], "PAYLOAD"), "the one CLI whose stdin is established"
+
+    for name in ("gemini", "copilot", "amp", "opencode", "codex", "cursor"):
+        record = adapters.ADAPTER_TABLE[name]
+        argv, stdin = review_transport.prompt_call(record, list(record.argv), "PAYLOAD")
+        assert argv[-1] == "PAYLOAD", f"{name} was launched without its question"
+        assert stdin == "", f"{name} does not read stdin, so nothing may be left there"
+
+
+def test_a_request_too_large_for_an_argument_is_refused_rather_than_sent() -> None:
+    """`max_diff_bytes` defaults to 512 KiB and one argv element holds 128. Handing that to
+    `execve` raises `E2BIG`, which surfaces as an OSError naming a syscall rather than as a
+    reviewer that cannot be reached — so the refusal is taken here, naming both ways out."""
+    from rein import review_transport
+
+    record = adapters.ADAPTER_TABLE["gemini"]
+    oversize = "x" * (review_transport.MAX_PROMPT_ARG_BYTES + 1)
+    with pytest.raises(review_transport.TransportError, match="max_diff_bytes"):
+        review_transport.prompt_call(record, list(record.argv), oversize)
+    # And the byte before the cliff still goes.
+    argv, _ = review_transport.prompt_call(record, list(record.argv), "x" * review_transport.MAX_PROMPT_ARG_BYTES)
+    assert argv[-1].startswith("x")
+
+
+def test_a_broken_negative_control_is_undetermined_and_not_an_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sandbox that will not run the *control's* steps is a broken experiment, not a verdict.
+
+    It used to be re-raised: the task's own DoD had already gone green, and a container that would
+    not start for the control aborted the leaf, reset it to `todo` and made the next run implement
+    it again. The three endings this method names are pass, block, and could-not-be-taken; an abort
+    is none of them.
+    """
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    task = dag.Task(id="T-001", title="t", kind="parallel")
+    step = build_loop.GateStep(name="test", kind="command", command=("true",))
+    monkeypatch.setattr(loop, "_review_scope", lambda t, cwd, base: (["tests/test_x.py"], "git diff"))
+    monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
+    monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "--- a\n+++ b\n")
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise faults.EnvironmentFault(faults.Fault.ENV_PERMANENT, where="control", rc=1, output="no container")
+
+    monkeypatch.setattr(build_git, "scratch_worktree", explode)
+    failed, log = loop._negative_control(task, str(tmp_path), "a" * 40, [step])
+
+    assert (failed, log) == (None, ""), "the task's own green stands; only the experiment failed"
+    assert loop._current_control["result"] == "undetermined"
+    assert "no container" in loop._current_control["detail"]
+
+
+def test_the_integration_reviewer_reads_the_join_and_not_the_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The diff started at the plan's base commit, so every batch re-read every batch before it —
+    and the attribution below only knows *this* batch's tasks, so a finding about an earlier one
+    matched no owner, was printed instead of filed, and never reached the human."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    step = build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer", stage="integration")
+    prompts: list[str] = []
+    target = dossier.findings_path(loop.root, "integration")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    def answer(argv: list[str], **_kw: object) -> None:
+        prompts.append(argv[-1])
+        target.write_text(json.dumps({"findings": []}), encoding="utf-8")
+
+    monkeypatch.setattr(loop, "_launch", answer)
+    loop._run_integration_agent_step(step, [dag.Task(id="T-001", title="t", kind="parallel")], "c" * 40)
+
+    assert f"git diff {'c' * 40}..HEAD" in prompts[0]

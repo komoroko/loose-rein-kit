@@ -406,7 +406,7 @@ def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:
 # --- rule 4: gate-approval write protection -----------------------------------
 
 
-def _proposed_text(current_text: str, tool_input: dict[str, Any]) -> str | None:
+def _proposed_text(current_text: str, tool_input: Mapping[str, Any]) -> str | None:
     """state.yaml's content as it would be after this Write/Edit/MultiEdit. None = unknown shape.
 
     Write carries the whole new content; Edit carries one old/new pair (both host spellings
@@ -449,7 +449,7 @@ def _gates_or_empty(text: str) -> dict[str, str]:
     return {gate: state.gate_status(gate) for gate in state.gates}
 
 
-def gate_flip_denial(tool_input: dict[str, Any], repo: repo_mod.Repo | None = None) -> str:
+def gate_flip_denial(tool_input: Mapping[str, Any], repo: repo_mod.Repo | None = None) -> str:
     """Deny reason when this edit would flip a gate to approved; "" to allow.
 
     Reached only for state.yaml, which rule 1 already denies outright — this stays as the
@@ -656,6 +656,34 @@ PATH_KEYS: tuple[str, ...] = ("file_path", "filePath", "notebook_path", "noteboo
 #: of ours to keep tidy — a dead alternative in a regex costs nothing and keeps an older host covered.
 CLAUDE_WRITE_TOOLS: tuple[str, ...] = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
+#: The same claim for Gemini CLI's `BeforeTool`, whose write-capable tools are named differently and
+#: whose matcher `rein install gemini` ships. Checked by `doctor` exactly as claude's is: registering
+#: a hook and registering it over the tools that write are two questions, and a host that only ever
+#: got the first one asked is a host where `doctor` says PASS over a guard that never fires.
+GEMINI_WRITE_TOOLS: tuple[str, ...] = ("write_file", "replace")
+
+#: Every spelling a host uses for "the arguments of the call this hook is about". Claude Code and
+#: the hosts that copied its `PreToolUse` payload send `tool_input`; Gemini CLI's `BeforeTool` sends
+#: `tool_args`.
+#:
+#: This tuple exists because the *answer* was taught both dialects and the *question* was not. A
+#: denial is written as `hookSpecificOutput` and as top-level `decision`/`reason` at once, on the
+#: stated ground that one guard serves every host — while the payload was still read as
+#: `payload["tool_input"]` alone. Under a host that names it otherwise there is no path to check,
+#: `hook_paths` answers `[]`, and the guard exits 0: it allows every edit, silently, while `doctor`
+#: reports it registered. That is the failure this module's own docstring names for Codex
+#: (`patch_targets`) arriving through the door the response fixed.
+TOOL_ARGS_KEYS: tuple[str, ...] = ("tool_input", "tool_args", "toolInput", "toolArgs")
+
+
+def tool_arguments(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The call's arguments, whichever of :data:`TOOL_ARGS_KEYS` this host named them under."""
+    for key in TOOL_ARGS_KEYS:
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
 
 def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
     """The paths this tool call is about to write, as the host named them.
@@ -710,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
         # visible in the hook log rather than silently absent. The commit-stage check still runs.
         logger.warning("gate_guard: unparseable hook payload on stdin — allowing without a gate check")
         return 0
-    tool_input = payload.get("tool_input") or {}
+    tool_input = tool_arguments(payload)
     paths = hook_paths(tool_input)
     if not paths:
         return 0

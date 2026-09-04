@@ -9,6 +9,7 @@ doctor/pr_draft already rely on (see build_loop's `_late_run`).
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -57,25 +58,40 @@ def worktree_heads(repo: repo_mod.Repo, run: Runner) -> list[tuple[str, str]]:
     return found
 
 
+#: Held across the `worktree remove` / `prune` / `add` triple below and across the teardown, and
+#: never across the body in between.
+#:
+#: `git worktree prune` is a **repository-wide** operation — it rewrites `.git/worktrees` for every
+#: worktree at once, not for the one being made — and this used to be called only from the merge
+#: step, which runs after the parallel phase and therefore alone. The negative control calls it from
+#: inside each leaf's own thread, so up to `max_parallel` of them now overlap. Serialising the admin
+#: calls is what keeps two threads out of one `.git/worktrees`; serialising the *body* would undo
+#: the parallelism the control runs inside.
+_WORKTREE_ADMIN = threading.Lock()
+
+
 @contextmanager
 def scratch_worktree(repo: repo_mod.Repo, worktree_dir: str, name: str, branch: str, run: Runner) -> Iterator[str]:
     """A throwaway worktree with `branch` checked out, removed on the way out.
 
-    For merging into a branch nothing else has checked out. A leftover from a killed run is
-    cleared first — it holds no work of its own, so removing it cannot lose anything, which is
-    exactly what is *not* true of the leaf worktrees above.
+    For merging into a branch nothing else has checked out, and for the negative control's
+    re-establishment over the base. A leftover from a killed run is cleared first — it holds no work
+    of its own, so removing it cannot lose anything, which is exactly what is *not* true of the leaf
+    worktrees above.
     """
     path = str(repo.path(worktree_dir) / name)
-    run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
-    run(["git", "worktree", "prune"], cwd=str(repo.root))
-    rc, out = run(["git", "worktree", "add", "--force", path, branch], cwd=str(repo.root))
+    with _WORKTREE_ADMIN:
+        run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
+        run(["git", "worktree", "prune"], cwd=str(repo.root))
+        rc, out = run(["git", "worktree", "add", "--force", path, branch], cwd=str(repo.root))
     if rc != 0:
         raise StopLoop(f"could not create the scratch worktree at {path}: {out}")
     try:
         yield path
     finally:
-        run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
-        run(["git", "worktree", "prune"], cwd=str(repo.root))
+        with _WORKTREE_ADMIN:
+            run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
+            run(["git", "worktree", "prune"], cwd=str(repo.root))
 
 
 class GitWorkspace:

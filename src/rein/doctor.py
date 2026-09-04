@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -913,7 +914,9 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
             Finding("INFO", "hook", f"{' / '.join(missing)} sessions run without it — no hook host registered for them")
         )
     if "claude" in surfaces:
-        findings += _check_claude_matcher(repo)
+        findings += _check_matcher(repo, SETTINGS_PATH, "PreToolUse", gate_guard.CLAUDE_WRITE_TOOLS)
+    if "gemini" in surfaces:
+        findings += _check_matcher(repo, GEMINI_SETTINGS_PATH, "BeforeTool", gate_guard.GEMINI_WRITE_TOOLS)
     if "codex" in surfaces:
         findings.append(
             Finding(
@@ -926,39 +929,41 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
     return findings
 
 
-def _check_claude_matcher(repo: repo_mod.Repo) -> list[Finding]:
+def _check_matcher(repo: repo_mod.Repo, rel: str, event: str, write_tools: Sequence[str]) -> list[Finding]:
     """Every write-capable tool must be in a matcher whose hooks run the guard.
 
     "Is the guard registered?" and "does the registration cover the tools that write?" are two
-    questions and only the first was asked. The matcher read `Write|Edit|MultiEdit` — `MultiEdit`
-    retired upstream, `NotebookEdit` never added — so a `.ipynb` under a guarded prefix passed the
-    edit-stage check untouched and only the commit-stage one ever looked at it. A hook that fires on
-    a subset of the writes is the failure mode this whole file exists to make visible.
+    questions and only the first was asked. Claude's matcher read `Write|Edit|MultiEdit` —
+    `MultiEdit` retired upstream, `NotebookEdit` never added — so a `.ipynb` under a guarded prefix
+    passed the edit-stage check untouched and only the commit-stage one ever looked at it. A hook
+    that fires on a subset of the writes is the failure mode this whole file exists to make visible.
+
+    Taken per host rather than for claude alone, which is how it was written: a second host with a
+    settings file and a matcher of its own (Gemini CLI's `BeforeTool`) was checked for the guard's
+    *presence* and never for its coverage, so the same hole would have reported PASS there.
     """
     try:
-        settings = json.loads(repo.path(SETTINGS_PATH).read_text(encoding="utf-8"))
+        settings = json.loads(repo.path(rel).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return []  # _reads_guard already established it parses far enough to mention the guard
     covered: set[str] = set()
-    for group in settings.get("hooks", {}).get("PreToolUse", []) or []:
+    for group in settings.get("hooks", {}).get(event, []) or []:
         if not isinstance(group, dict) or not _mentions_guard(json.dumps(group.get("hooks", []))):
             continue
         matcher = group.get("matcher")
         if not isinstance(matcher, str):
             continue  # no matcher means "every tool" on hosts that ignore it — nothing to check
         covered |= {tool.strip() for tool in matcher.split("|")}
-    uncovered = [tool for tool in gate_guard.CLAUDE_WRITE_TOOLS if tool not in covered]
+    uncovered = [tool for tool in write_tools if tool not in covered]
     if not uncovered:
-        return [
-            Finding("PASS", "hook", f"the matcher covers every write tool ({', '.join(gate_guard.CLAUDE_WRITE_TOOLS)})")
-        ]
+        return [Finding("PASS", "hook", f"{rel}'s matcher covers every write tool ({', '.join(write_tools)})")]
     return [
         Finding(
             "WARN",
             "hook",
-            f"{SETTINGS_PATH}'s PreToolUse matcher does not name {', '.join(uncovered)}, so an edit made "
+            f"{rel}'s {event} matcher does not name {', '.join(uncovered)}, so an edit made "
             "with it never reaches the guard — the commit-stage check becomes the only layer. Add them to "
-            "the matcher (`rein install claude --force` restores the shipped one).",
+            "the matcher (`rein install <host> --force` restores the shipped one).",
         )
     ]
 

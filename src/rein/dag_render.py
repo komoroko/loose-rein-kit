@@ -7,6 +7,7 @@ re-exports them lazily (PEP 562), so import this module directly only from dag i
 
 from __future__ import annotations
 
+from rein import models
 from rein.dag import STATUS_ORDER, Graph
 
 
@@ -69,10 +70,26 @@ def _how_gate_four_will_read(graph: Graph) -> list[str]:
 
     Deliberately a count of readings and not an estimate of bytes: the code does not exist yet, and
     a number invented for it would be the kind of confident guess this tool exists to refuse.
+
+    **A `critical` task settles it before the scopes do.** Effective risk is the max of every
+    contributor, a task's own risk is one of them, and at critical gate ④ reads the change whole
+    whatever the scopes say — composition cannot rule out behaviour that exists only once two
+    slices are in one tree. That is knowable here, from the plan alone, and it is the one case
+    where declaring more scopes changes nothing. (A claim's risk and the detector's floor can push
+    a plan there later; this names the half that is already decided.)
     """
     lines = ["### How gate ④ will read this"]
     if not graph.tasks:
         return [*lines, "- (no tasks)"]
+    critical = [t.id for t in graph.tasks if models.risk_at_least(t.risk, "critical")]
+    if critical:
+        return [
+            *lines,
+            f"- **one reading of the whole change** — {', '.join(critical)} is `critical`, and a "
+            "critical change is read whole whatever the scopes say: behaviour that appears only "
+            "once two slices are in one tree cannot be read in slices. Splitting the scope is how "
+            "that reading is made affordable, not how it is avoided.",
+        ]
     scoped = [t for t in graph.tasks if t.scope_include]
     unscoped = [t.id for t in graph.tasks if not t.scope_include]
     if not scoped:

@@ -56,6 +56,49 @@ _PRIME_ACK = "READY"
 _READING_KEY = "diff"
 
 
+#: The most bytes one argv element may carry. Linux's `MAX_ARG_STRLEN` is 32 pages — 131072 — and
+#: it is a per-*element* cap, so a large payload cannot be split into more arguments to get under
+#: it. macOS's `ARG_MAX` is a total and larger. The smaller of the two is the one to hold to: a
+#: refusal that only appears on some operators' machines is worse than one that appears on all.
+MAX_PROMPT_ARG_BYTES = 128 * 1024
+
+
+def prompt_call(
+    record: adapters.Adapter, argv: Sequence[str], payload: str, *, role: str = ""
+) -> tuple[list[str], str]:
+    """`(the command line, what to write to its stdin)` for a launch whose whole input is `payload`.
+
+    Gate ④'s stages have exactly one input — the JSON request — and two ways to receive it. Which
+    one a CLI has is a fact about that CLI, declared in `Adapter.prompt_on_stdin`, and this is the
+    only place that reads it.
+
+    It used to be neither declared nor read: every stage was launched with no prompt argument and
+    the request on stdin, which is claude's shape and nobody else's. Under a CLI whose prompt is a
+    flag's value — `gemini -p <text>`, `copilot -p <text>`, `amp -x <text>` — that launch asks
+    nothing. It does not error, either: the process waits for input that is not coming, until
+    `agent_timeout_sec` (default: no limit). "A reviewer can be any of these CLIs" was true of the
+    access flags and of the envelope parsing, and false here.
+
+    **A payload too large for an argument is refused, not sent.** `max_diff_bytes` defaults to
+    512 KiB and one argv element holds 128 (:data:`MAX_PROMPT_ARG_BYTES`); handing that to `execve`
+    raises `E2BIG`, which surfaces as an `OSError` naming a syscall rather than a reviewer that
+    cannot be reached. The refusal names both ways out, and neither is "send it anyway".
+    """
+    if record.prompt_on_stdin:
+        return list(argv), payload
+    size = len(payload.encode("utf-8"))
+    if size > MAX_PROMPT_ARG_BYTES:
+        named = role or "this stage"
+        raise TransportError(
+            f"the {record.name} adapter takes its prompt as a command-line argument and {named}'s "
+            f"request is {size} bytes, past the {MAX_PROMPT_ARG_BYTES} one argument may carry. "
+            f"Point it at an adapter that reads its prompt from stdin "
+            f"(`rein agent claude --role {role or '<role>'}`), or lower "
+            f"`review_policy.budgets.max_diff_bytes` until the reading fits"
+        )
+    return [*argv, *record.prompt_argv(payload)], ""
+
+
 def _reading_digest(request: Mapping[str, Any]) -> str:
     """Which reading this request is about — the identity a primed session is keyed by.
 
@@ -222,11 +265,14 @@ class SharedReading:
         would hide a broken adapter behind a bill twice the size, and `--supervise` already waits
         out the failures that time alone fixes.
         """
-        argv = list(self._argv) + [*self._record.session_flags, session]
+        argv, stdin = prompt_call(
+            self._record,
+            [*self._argv, *self._record.session_flags, session],
+            json.dumps(payload, ensure_ascii=False),
+            role=_SHARED_READING_ROLE,
+        )
         with tempfile.TemporaryDirectory(prefix="rein-reading-", ignore_cleanup_errors=True) as elsewhere:
-            rc, out = common.run(
-                argv, cwd=elsewhere, timeout=self._timeout or None, input_text=json.dumps(payload, ensure_ascii=False)
-            )
+            rc, out = common.run(argv, cwd=elsewhere, timeout=self._timeout or None, input_text=stdin)
         if rc != 0:
             self._ledger.add(_SHARED_READING_ROLE, usage_mod.Usage.unavailable())
             said = faults.said(out)
@@ -440,17 +486,22 @@ def _adapter_reviewer(
     if config is None:
         config = store_mod.Store(repo).read_config()
     record = adapters.adapter_for_role(config, role)
-    # `READ` and never more: a gate-④ stage is handed its payload on stdin, answers on stdout, and
-    # must change nothing. That is not the same as passing no flags — a CLI whose tools are
-    # deny-by-default without a grant cannot open the checkout the security stage is given to read.
+    # `READ` and never more: a gate-④ stage is handed its request, answers on stdout, and must
+    # change nothing. That is not the same as passing no flags — a CLI whose tools are
+    # deny-by-default without a grant cannot open the checkout the security stage is given to
+    # read. How the request reaches it — stdin, or an argument — is `prompt_call`'s question.
     role_argv = (*adapters.launch_argv(config, role), *record.access_flags(adapters.READ))
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
     wants_checkout = role == _CHECKOUT_ROLE and bool(record.disciplines.get(adapters.SECURITY))
 
     def call(request: Mapping[str, Any]) -> review_policy.Answer:
-        argv = list(role_argv) + list(reading.branch_flags(request) if reading else ())
-        payload = json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False)
+        argv, stdin = prompt_call(
+            record,
+            [*role_argv, *(reading.branch_flags(request) if reading else ())],
+            json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False),
+            role=role,
+        )
         checkout = (
             _pending_changes(repo, str(request.get("trusted_base_sha", "")), str(request.get("subject_head_sha", "")))
             if wants_checkout
@@ -459,7 +510,7 @@ def _adapter_reviewer(
         # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
         # left something undeletable behind must not turn a finished review into a traceback.
         with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as empty, checkout as tree:
-            rc, out = common.run(argv, cwd=tree or empty, timeout=timeout or None, input_text=payload)
+            rc, out = common.run(argv, cwd=tree or empty, timeout=timeout or None, input_text=stdin)
         if rc != 0:
             ledger.add(role, usage_mod.Usage.unavailable())
             # What the adapter said, not merely that it stopped. `common.run` merges stderr into

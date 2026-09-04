@@ -193,7 +193,12 @@ def _record_switch(
         store = store_mod.Store(repo)
         state = store.read_state()
         if state is None or not state.cycle_id:
-            return  # no cycle to record it under — `rein init` has not run
+            # Said rather than skipped. The chain is where this switch survives — nothing else
+            # records it — so "there was nowhere to write it" is the one thing a silent return
+            # must not be. Before a cycle exists there is genuinely nothing to attach it to, and
+            # the next `rein init` starts a chain that never heard of this change.
+            logger.warning("the adapter is switched, but there is no cycle yet to record it under")
+            return
         with store.transaction() as tx:
             tx.append(
                 "agents_switched",
