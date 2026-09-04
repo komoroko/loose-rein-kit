@@ -37,6 +37,27 @@ SIMPLIFICATION = "simplification"
 SECURITY = "security"
 
 
+#: What a launch is allowed to do. Three levels, because the loop makes exactly three kinds of
+#: launch and used to be able to name two of them:
+#:
+#: * ``READ`` — the gate-④ stages. They are handed their payload on stdin, answer on stdout, and
+#:   must change nothing. Not the same as "no flags": a CLI whose tools are all deny-by-default
+#:   without a grant cannot even open the file it was sent to read.
+#: * ``REVIEW`` — the per-task reviewer. It reads the change, runs `git diff`, and writes exactly
+#:   one file: the findings its prompt names. It must not touch the code it is judging.
+#: * ``WRITE`` — the implementer, the review fixer, the conflict and integration fixers. The tree
+#:   is theirs to change.
+#:
+#: There was one field, `write_flags`, and everything that was not an implementer got nothing. That
+#: collapsed READ and REVIEW into "no flags", which is only survivable on a CLI that grants its
+#: tools by default: `codex exec` is read-only without them, so its reviewer could not write the
+#: findings file the loop then refused to proceed without, and `copilot` grants no tool at all, so
+#: its reviewer could not read the code.
+READ = "read"
+REVIEW = "review"
+WRITE = "write"
+
+
 #: What an agent CLI reads out of a project directory *before* it reads the prompt it was sent:
 #: instruction files, and the settings, hooks, skills, sub-agents and MCP servers that decide which
 #: tools it may run without asking. Whoever writes these decides what the launch is allowed to do.
@@ -85,11 +106,17 @@ class Adapter:
     name: str
     #: How to launch it headless. The prompt is appended as the last argv element.
     argv: tuple[str, ...]
-    #: What makes it able to change the tree. Empty when it can already. `codex exec` runs
-    #: read-only unless told otherwise, so without this every task produced an empty diff and
-    #: nothing said why. The review transport (`review_transport`) deliberately never gets these — a
-    #: reviewer that cannot write is the point.
-    write_flags: tuple[str, ...] = ()
+    #: How to grant each access level above, keyed by it. A level this CLI already has without
+    #: being told maps to `()` — claude's `-p` carries the project's own permissions, and `codex
+    #: exec` reads without being asked. A level absent from the mapping is `()` as well.
+    grants: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: How to narrow a `REVIEW` grant to the one file the reviewer must produce. Each element is
+    #: `str.format`-ed with `path=`, and the result is appended to the `REVIEW` grant when the
+    #: launch names its findings file. Empty for a CLI that cannot say "this path and no other" —
+    #: which is most of them, and is why the review prompt's "you have no write access to the
+    #: code" is an enforced fact under `copilot` and a convention (plus the loop's before/after
+    #: fingerprint) everywhere else.
+    scoped_write: tuple[str, ...] = ()
     #: How to stamp a launch with a session id, and how to resume that id. Both empty means the
     #: CLI gets a fresh launch per retry: it re-reads its ticket, its design slice and the code
     #: from cold every time, which is the single largest avoidable cost in a long build.
@@ -134,6 +161,24 @@ class Adapter:
     #: stages that must reach independent verdicts be handed one (large, expensive) diff once
     #: (`review_transport.SharedReading`). Empty for a CLI that cannot branch a session.
     fork_flags: tuple[str, ...] = ()
+    #: What introduces a prompt passed on the command line, placed immediately before it. For a
+    #: CLI whose flag *takes the prompt as its value* (`gemini -p <text>`, `copilot -p <text>`)
+    #: nothing may come between the two, and everything in `argv`, `model_flags` and `usage_flags`
+    #: is inserted before it rather than after. Putting such a flag in `argv` is what would make
+    #: `gemini -p --model X <text>` send `--model` as the prompt and the model name as a stray
+    #: argument — invisible until a model was configured, which is why `gemini` carried no
+    #: `model_flags` and worked.
+    #:
+    #: Empty for a CLI whose prompt is a bare positional (`codex exec <text>`) — and for one whose
+    #: flag is a *boolean* non-interactive switch (`claude -p`), which belongs in `argv` because
+    #: the review transport needs it too, and there the payload arrives on stdin with no prompt
+    #: argument at all.
+    prompt_flags: tuple[str, ...] = ()
+    #: How a human installs this CLI. **Never run** — printed by `doctor` and `preflight` when the
+    #: binary is missing. Installing a third-party agent CLI on someone's behalf decides for them
+    #: what lands on their PATH and what it is allowed to reach; naming the command is the whole
+    #: job, and the choice stays theirs.
+    install_hint: str = ""
 
     @property
     def resumable(self) -> bool:
@@ -155,6 +200,26 @@ class Adapter:
         chosen = (*self.model_flags, model) if model and self.model_flags else ()
         return self.argv + chosen + self.usage_flags
 
+    def access_flags(self, level: str, writable: str = "") -> tuple[str, ...]:
+        """What to pass so a launch at `level` can do its job — and nothing past it.
+
+        `writable` is the one path a `REVIEW` launch must be able to write. It is used only by a
+        CLI that can scope a write to a path; the others grant the least they can express, which
+        is why this returns what the CLI *can* promise rather than what the caller asked for.
+        """
+        flags = self.grants.get(level, ())
+        if level == REVIEW and writable and self.scoped_write:
+            flags = (*flags, *(part.format(path=writable) for part in self.scoped_write))
+        return flags
+
+    def prompt_argv(self, prompt: str) -> tuple[str, ...]:
+        """The tail of a command line: whatever introduces the prompt, then the prompt.
+
+        Always the last thing appended, after `launch_argv` and after any write flags — that
+        ordering is the whole reason `prompt_flags` is a separate field.
+        """
+        return (*self.prompt_flags, prompt)
+
     def read_output(self, output: str) -> tuple[str, usage_mod.Usage]:
         """`(what it said, what it cost)`. An adapter with no envelope says it did not measure."""
         if self.envelope is None:
@@ -166,6 +231,9 @@ class Adapter:
 ADAPTER_TABLE: dict[str, Adapter] = {
     "claude": Adapter(
         name="claude",
+        # `-p` is in `argv`, not `prompt_flags`: for claude it is the boolean "print and exit",
+        # needed just as much when the payload arrives on stdin (the review transport), and the
+        # prompt is then a plain positional.
         argv=("claude", "-p"),
         session_flags=("--session-id",),
         resume_flags=("--resume",),
@@ -173,6 +241,12 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         model_flags=("--model",),
         usage_flags=usage_mod.CLAUDE_JSON_FLAGS,
         envelope=usage_mod.parse_claude_envelope,
+        install_hint="curl -fsSL https://claude.ai/install.sh | bash",
+        # Every level is empty: a `-p` launch carries the permissions the project already
+        # configured, and there is no flag here that would narrow them per launch. So what keeps
+        # this reviewer off the code is the prompt and the loop's before/after fingerprint, not
+        # the launcher — stated here rather than left to be inferred from three blank tuples.
+        grants={},
         # Claude Code carries all three as commands of its own, and a headless `-p` launch reaches
         # them. `/code-review` has levels and `ultra` is billed and user-triggered — the prompts
         # forbid it rather than naming a level, because a level is an operator's choice and this
@@ -186,16 +260,135 @@ ADAPTER_TABLE: dict[str, Adapter] = {
     "codex": Adapter(
         name="codex",
         argv=("codex", "exec"),
-        write_flags=("--sandbox", "workspace-write"),
+        # `codex exec` reads without being asked, so READ needs nothing. It has three sandbox
+        # modes and no way to name a writable file, so a reviewer that must produce one file gets
+        # the same grant an implementer does — `workspace-write`. That is what this CLI can
+        # promise, and saying so is better than a reviewer that cannot write its findings at all,
+        # which is what "no flags" bought.
+        grants={WRITE: ("--sandbox", "workspace-write"), REVIEW: ("--sandbox", "workspace-write")},
         own_sandbox=True,
+        usage_flags=usage_mod.CODEX_JSONL_FLAGS,
+        envelope=usage_mod.parse_codex_envelope,
+        install_hint="npm install -g @openai/codex",
     ),
-    "gemini": Adapter(name="gemini", argv=("gemini", "-p")),
+    "gemini": Adapter(
+        name="gemini",
+        argv=("gemini",),
+        prompt_flags=("-p",),
+        model_flags=("--model",),
+        # `default` auto-approves the read-only tools and stops at everything else; `--yolo` is
+        # deprecated upstream in favour of naming the mode. `auto_edit` would cover the findings
+        # file but not the `git diff` the review prompt points the reviewer at, and an approval
+        # nobody is there to give is a run that hangs — so a reviewer takes `yolo` too.
+        grants={WRITE: ("--approval-mode", "yolo"), REVIEW: ("--approval-mode", "yolo")},
+        usage_flags=usage_mod.GEMINI_JSON_FLAGS,
+        envelope=usage_mod.parse_gemini_envelope,
+        install_hint="npm install -g @google/gemini-cli",
+    ),
+    "copilot": Adapter(
+        name="copilot",
+        # `--no-ask-user` because a launch from this loop has no human at the other end: without
+        # it the agent may pause for input and the run hangs until `agent_timeout_sec` (default:
+        # no limit) rather than failing. `-s` because gate ④ asks its stages for "one JSON object
+        # and no other text" and parses the whole of stdout strictly — a stats footer around the
+        # object is not a smaller answer, it is an unreadable one. It is what the CLI's own
+        # programmatic reference offers for exactly this ("outputting only the agent's response").
+        argv=("copilot", "--no-ask-user", "-s"),
+        prompt_flags=("-p",),
+        model_flags=("--model",),
+        install_hint="npm install -g @github/copilot",
+        # Deny-by-default, and the only CLI here that can say exactly what a reviewer may write.
+        # So this is the one adapter under which the review prompt's "you do not change the code,
+        # you have no write access to it" is a fact the launcher enforces rather than an
+        # instruction the model is asked to respect: read the tree, run git, write one file.
+        grants={
+            READ: ("--allow-tool", "read"),
+            REVIEW: ("--allow-tool", "read", "--allow-tool", "shell(git:*)"),
+            WRITE: ("--allow-all-tools",),
+        },
+        scoped_write=("--allow-tool", "write({path})"),
+        # Everything below is empty on purpose, and each for its own reason:
+        #
+        # `session_flags` / `resume_flags` / `fork_flags` — `--resume` picks a session
+        # interactively and there is no flag that stamps one, so with `max_parallel` leaves in
+        # flight there is no way to say which session a retry means. The same reason `codex` is
+        # empty: guessing would hand one leaf another leaf's context. Every retry is a fresh read.
+        #
+        # `usage_flags` / `envelope` — the programmatic reference documents no machine-readable
+        # envelope, so a launch is recorded as *unmeasured* rather than as zero. `-s` above is
+        # what makes the answer readable; it does not make the bill knowable, and those are not
+        # the same thing.
+        #
+        # `disciplines` — no `/code-review` equivalent. The prompts state each question in full
+        # beside the command, which is the floor a host without one lands on.
+        #
+        # `own_sandbox` — `--cloud` is an opt-in that runs the session somewhere else entirely,
+        # not isolation around the launch this loop makes.
+    ),
+    "cursor": Adapter(
+        name="cursor",
+        # `--trust` is documented as headless-only, and it is the same bargain `--no-ask-user` is
+        # for copilot: there is no human here to answer a workspace-trust prompt, so without it
+        # the run hangs instead of failing.
+        argv=("cursor-agent", "-p", "--trust"),
+        model_flags=("--model",),
+        # `-f, --force` — "force allow commands unless explicitly denied" (`--yolo` is its alias).
+        # Reading is not a command it needs forcing for, which is why READ is empty.
+        grants={WRITE: ("--force",), REVIEW: ("--force",)},
+        usage_flags=usage_mod.CURSOR_JSON_FLAGS,
+        envelope=usage_mod.parse_cursor_envelope,
+        install_hint="curl https://cursor.com/install -fsS | bash",
+        # `--resume [chatId]` resumes an existing chat and there is no flag that stamps a new one,
+        # so a retry cannot be told which of `max_parallel` leaves it belongs to — the same reason
+        # `codex` and `copilot` are cold on every retry.
+    ),
+    "amp": Adapter(
+        name="amp",
+        # `-x` takes the message as its value, so it goes last. Execute mode "prints its final
+        # message and exits", which is already the shape gate ④ parses — no envelope needed, and
+        # none offered: nothing here reports what a launch cost, so it is recorded as unmeasured.
+        argv=("amp",),
+        prompt_flags=("-x",),
+        # Empty, and not for lack of looking: the execute-mode reference documents no model flag
+        # (only `--fast`) and no tool-permission flag. `launch_refusal` therefore rejects a
+        # `model:` on this adapter rather than launching amp's default under another model's name.
+        grants={},
+        install_hint="npm install -g @sourcegraph/amp",
+    ),
+    "opencode": Adapter(
+        name="opencode",
+        # The prompt is `run`'s positional `[message..]`, so no flag introduces it.
+        argv=("opencode", "run"),
+        model_flags=("--model",),
+        # `--auto` — "auto-approve permissions not explicitly denied".
+        grants={WRITE: ("--auto",), REVIEW: ("--auto",)},
+        usage_flags=usage_mod.OPENCODE_JSON_FLAGS,
+        envelope=usage_mod.parse_opencode_envelope,
+        install_hint="npm install -g opencode-ai",
+        # `--session <id>` and `--continue` resume an existing session; neither creates one under
+        # an id this loop chose, so there is nothing to stamp and nothing to resume by name.
+    ),
 }
+
+
+#: binary name → the record that launches it. `ADAPTER_TABLE` is keyed by the name a human writes
+#: in `agents.<role>.adapter`, and that is not always the name of the executable: `cursor` launches
+#: `cursor-agent`. Looking a record up by `argv[0]` against the table's own keys worked only while
+#: every adapter happened to be named after its binary — and it failed *silently*, handing back
+#: `None`, which `command()` reads as "an argv this module does not know" and launches with no
+#: access flags at all. So the index is built once, and a collision is a startup error rather than
+#: one record quietly shadowing another.
+_BY_BINARY: dict[str, Adapter] = {}
+for _record in ADAPTER_TABLE.values():
+    if _record.argv[0] in _BY_BINARY:
+        raise RuntimeError(f"two adapters launch {_record.argv[0]!r}; a launch could not be attributed to either")
+    _BY_BINARY[_record.argv[0]] = _record
+del _record
 
 
 def adapter_for(argv: Sequence[str]) -> Adapter | None:
     """The capability record of whatever CLI `argv` launches, or None for an unknown one."""
-    return ADAPTER_TABLE.get(argv[0]) if argv else None
+    return _BY_BINARY.get(argv[0]) if argv else None
 
 
 def launch_refusal(config: models.Config | None, role: str) -> str:
@@ -229,16 +422,28 @@ def launch_refusal(config: models.Config | None, role: str) -> str:
 
 def disciplines_for(argv: Sequence[str]) -> Mapping[str, str]:
     """The review disciplines the CLI `argv` launches carries, or none for one this release does
-    not know. Keyed on the CLI's own name, like `write_flags`, because the build loop holds an
+    not know. Keyed on the CLI's own name, like the access grants, because the build loop holds an
     argv rather than a role."""
     adapter = adapter_for(argv)
     return adapter.disciplines if adapter else {}
 
 
-def write_flags(argv: tuple[str, ...]) -> tuple[str, ...]:
-    """The write-enabling flags for the CLI `argv` launches, keyed on the CLI's own name."""
-    adapter = adapter_for(argv)
-    return adapter.write_flags if adapter else ()
+def command(
+    argv: Sequence[str], prompt: str, *, access: str = READ, writable: str = "", extra: Sequence[str] = ()
+) -> list[str]:
+    """The whole command line for one launch: `argv`, the access it needs, then the prompt.
+
+    The one place that knows the prompt goes last and that `prompt_flags` goes immediately before
+    it. Assembling it at each launch site is what let the access flags be appended *after* a
+    prompt-introducing flag, which no CLI but claude survives (`Adapter.prompt_flags`).
+
+    `access` is one of `READ` / `REVIEW` / `WRITE`; `writable` is the one file a `REVIEW` launch
+    must produce. `extra` carries the caller's own flags (the session id a retry resumes).
+    """
+    record = adapter_for(argv)
+    granted = record.access_flags(access, writable) if record is not None else ()
+    tail = record.prompt_argv(prompt) if record is not None else (prompt,)
+    return [*argv, *granted, *extra, *tail]
 
 
 def adapter_for_role(config: models.Config | None, role: str) -> Adapter:

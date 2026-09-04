@@ -678,7 +678,8 @@ def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
 #: The guard has exactly two invocations, and a human asking about them is a third thing entirely.
 USAGE = """usage: rein guard [--check-diff]
 
-  (no arguments)  PreToolUse hook mode: reads the host's JSON payload on stdin and answers
+  (no arguments)  pre-tool hook mode (Claude Code `PreToolUse`, Gemini CLI `BeforeTool`, and the
+                  hosts that copied either): reads the host's JSON payload on stdin and answers
                   whether the paths it is about to write may be written right now.
   --check-diff    commit-stage mode: checks every path in the diff against HEAD. This is what
                   .pre-commit-config.yaml registers, and what `make check` runs.
@@ -733,12 +734,20 @@ def main(argv: list[str] | None = None) -> int:
         # One patch may touch many files; a single guarded path denies the whole call, because
         # applying "the rest of it" is not something a hook can do. Which path it was has to be
         # said out loud then — rule 3's message names the gate, not the file.
+        # Both dialects in one object, because one guard serves every host. Claude Code and the
+        # hosts that copied it read `hookSpecificOutput.permissionDecision`; Gemini CLI's
+        # `BeforeTool` reads top-level `decision`/`reason` and ignores the rest. Detecting which
+        # host asked would be a branch on a fact the answer does not need — an extra key each
+        # host ignores costs nothing, and a host whose key is missing does not deny at all.
+        said = f"{raw}: {reason}" if len(paths) > 1 else reason
         decision = {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": f"{raw}: {reason}" if len(paths) > 1 else reason,
-            }
+                "permissionDecisionReason": said,
+            },
+            "decision": "deny",
+            "reason": said,
         }
         print(json.dumps(decision, ensure_ascii=False))
         return 0

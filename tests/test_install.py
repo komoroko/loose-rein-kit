@@ -86,7 +86,7 @@ def test_changelog_between_returns_sections_newer_than_installed() -> None:
 
 
 def test_claude_import_block_roundtrip() -> None:
-    text = "# My rules\nDo the thing.\n" + install.claude_import_block()
+    text = "# My rules\nDo the thing.\n" + install.context_import_block("claude")
     assert install.remove_claude_import(text) == "# My rules\nDo the thing.\n"
     assert install.remove_claude_import("# plain\n") == "# plain\n"
 
@@ -223,6 +223,33 @@ def test_install_claude_writes_surfaces_and_merges_settings(repo: repo_mod.Repo)
     assert data is not None and "claude" in data["integrations"]
     assert ".claude/commands/req.md" in data["integrations"]["claude"]["files"]
     assert "settings" in data["integrations"]["claude"]
+
+
+def test_install_gemini_writes_every_surface_a_gemini_session_reads(repo: repo_mod.Repo) -> None:
+    """gemini was launchable as the build's CLI and absent as a host: no phase commands, no role
+    delegation, no gate guard. All four surfaces now come from the same table the other hosts use,
+    which is what stops the next new phase from silently skipping it."""
+    assert install.install_integration(repo, "gemini") == 0
+    assert repo.path(".gemini/commands/req.toml").is_file()
+    assert repo.path(".gemini/skills/architect/SKILL.md").is_file()
+    assert repo.path(".gemini/rein.md").is_file()
+    settings = json.loads(repo.path(".gemini/settings.json").read_text(encoding="utf-8"))
+    hook_cmds = [h["command"] for g in settings["hooks"]["BeforeTool"] for h in g["hooks"]]
+    assert any("rein guard" in c for c in hook_cmds)
+    # GEMINI.md, not CLAUDE.md: gemini does not read AGENTS.md, so without the block the operating
+    # rules never load at all.
+    assert "rein-rules" in repo.path("GEMINI.md").read_text(encoding="utf-8")
+    assert ".gemini/rein.md" in repo.path("GEMINI.md").read_text(encoding="utf-8")
+
+
+def test_uninstalling_gemini_takes_back_its_settings_and_its_context_block(repo: repo_mod.Repo) -> None:
+    """The settings merge and the context block were a hard-coded `if name == "claude"` on both
+    paths; a host added without touching both would install cleanly and never fully uninstall."""
+    assert install.install_integration(repo, "gemini") == 0
+    assert install.uninstall_integration(repo, "gemini") == 0
+    assert not repo.path(".gemini/commands/req.toml").exists()
+    assert not repo.path(".gemini/settings.json").exists(), "install created it and left nothing behind"
+    assert not repo.path("GEMINI.md").exists(), "it held only the Loose Rein block"
 
 
 def test_install_claude_skips_claude_md_when_rules_already_referenced(repo: repo_mod.Repo) -> None:

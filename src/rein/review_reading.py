@@ -90,14 +90,18 @@ def not_the_product(repo: repo_mod.Repo, state: models.State | None) -> tuple[st
     lock_data = lock_mod.read(repo.lock) or {}
     integrations = lock_data.get("integrations")
     if isinstance(integrations, dict):
-        for record in integrations.values():
+        for name, record in integrations.items():
             if not isinstance(record, dict):
                 continue
             paths |= {str(path) for path in (record.get("files") or {})}
-            # settings.json is recorded apart from `files` because install *merges* into it rather
-            # than owning it. It is still a surface this tool wrote, so it is still not the product.
-            if isinstance(record.get("settings"), dict):
-                paths.add(install_mod.SETTINGS_PATH)
+            # The settings file is recorded apart from `files` because install *merges* into it
+            # rather than owning it. It is still a surface this tool wrote, so it is still not the
+            # product. Which file that is comes off the host's own record: this named
+            # `.claude/settings.json` for every integration, which was right only while claude was
+            # the only host that had one.
+            spec = install_mod.INTEGRATIONS.get(str(name))
+            if isinstance(record.get("settings"), dict) and spec is not None and spec.settings:
+                paths.add(spec.settings)
     return tuple(sorted(paths))
 
 

@@ -115,7 +115,7 @@ test("the console states a roll-back's consequence above the button that runs it
     routes: baseRoutes((url, options) => {
       if (options?.method === "POST") {
         posts.push(JSON.parse(options.body));
-        return { action: "revise", argv: ["make", "revise"], exit_code: 0, stdout: "ok", stderr: "" };
+        return { action: "revise", argv: ["rein", "revise"], exit_code: 0, stdout: "ok", stderr: "" };
       }
       return undefined;
     }),
@@ -147,4 +147,39 @@ test("a half-typed reason survives the server speaking", async () => {
   await app.type("#revReason", "half a thou");
   await app.push("status", { ...STATUS, generated_at: "2026-08-31T09:00:00" });
   assert.equal(app.window.document.getElementById("revReason").value, "half a thou");
+});
+
+test("the console names the agent behind each role and switches one without a confirm", async () => {
+  // Pointing a role at another CLI is not a gate ③ decision — `agents` sits outside the config
+  // digest the freeze covers — so it takes no roll-back dialog, unlike the two commands above it.
+  const posts = [];
+  const app = await boot({
+    hash: "#console",
+    routes: baseRoutes((url, options) => {
+      if (options?.method === "POST") {
+        posts.push(JSON.parse(options.body));
+        return { action: "agent", argv: ["rein", "agent", "copilot"], exit_code: 0, stdout: "", stderr: "" };
+      }
+      return undefined;
+    }),
+  });
+  await app.open();
+  await app.push("status", STATUS);
+
+  const roles = app.text("agentRoles");
+  for (const role of ["implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"]) {
+    assert.match(roles, new RegExp(role), "every role the config declares is on the page");
+  }
+  // The independence verdict comes from the payload, so the page cannot disagree with `rein agent
+  // --show` about whether the extractor and the comparator are a real second opinion.
+  assert.match(app.text("agentIndependence"), /WARN/);
+
+  await app.select("#agent-implementer-adapter", "copilot");
+  await app.type("#agent-implementer-model", "gpt-5.2");
+  await app.click({ text: "Apply" });
+
+  assert.equal(app.window.document.getElementById("opsConfirm"), null, "a switch rewinds nothing");
+  assert.deepEqual(posts, [
+    { action: "agent", params: { role: "implementer", adapter: "copilot", model: "gpt-5.2" } },
+  ]);
 });

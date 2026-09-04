@@ -13,6 +13,7 @@ and hands over to the review pipeline.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -41,7 +42,6 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
 from tests._support import (
-    agent_envelope,
     agent_output,
     fake_git,
     make_config,
@@ -206,10 +206,10 @@ _AGENT_GATE = [
 ]
 
 
-def _config_with_split_adapters() -> build_loop.Config:
+def _config_with_split_adapters(reviewer: str = "codex") -> build_loop.Config:
     raw = make_config(quality_gate=list(_AGENT_GATE))
     raw["agents"]["implementer"] = {"adapter": "claude"}
-    raw["agents"]["code_reviewer"] = {"adapter": "codex"}
+    raw["agents"]["code_reviewer"] = {"adapter": reviewer}
     return build_loop.Config.from_models(models.Config(raw))
 
 
@@ -230,7 +230,7 @@ def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[st
         target = dossier.findings_path(cwd or str(root), "T-001")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({"findings": findings}), encoding="utf-8")
-        return 0, agent_envelope("")
+        return 0, agent_output(cmd, "")
 
     return fake_run
 
@@ -245,28 +245,52 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
     assert launched, "the agent step never launched anything"
-    assert tuple(launched[0][:2]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
-        f"the agent step launched {launched[0][:2]} — it must use agents.code_reviewer, not agents.implementer"
+    assert tuple(launched[0][:3]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
+        f"the agent step launched {launched[0][:3]} — it must use agents.code_reviewer, not agents.implementer"
     )
 
 
-def test_the_reviewer_is_launched_without_write_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """It reports; it does not repair.
+def test_the_reviewer_is_granted_its_findings_file_and_nothing_else(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It reports; it does not repair — and on a CLI that can say so, the launcher enforces it.
 
-    `codex exec` is read-only unless told otherwise, and the reviewer is the one launch that
-    should stay that way. Handing it `--sandbox workspace-write` let one participant both judge a
-    change and edit the judgement away — and moved the tree underneath the gate, so every
-    already-passed step had to be re-run behind it.
+    The reviewer needs exactly three things: read the change, run `git diff`, write the one
+    findings file its prompt names. `copilot` can be told precisely that, so the review prompt's
+    "you do not change the code, you have no write access to it" is a fact here rather than an
+    instruction the model is asked to respect. What it must not get is the implementer's grant.
     """
     root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
+    orch = build_loop.Orchestrator(_config_with_split_adapters("copilot"), dry_run=False, repo=repo_mod.Repo(root))
     monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
     launched: list[list[str]] = []
     monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
 
     orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
 
-    assert "--sandbox" not in launched[0], "the reviewer was launched able to change the code it is judging"
+    assert "write(.rein/work/T-001.findings.json)" in launched[0], "the one file it is there to produce"
+    assert "--allow-all-tools" not in launched[0], "the reviewer was launched able to change the code it judges"
+
+
+def test_a_reviewer_on_a_read_only_cli_can_still_write_its_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`codex exec` is read-only unless told otherwise, and the reviewer used to be told nothing.
+
+    So it could not write the findings file — and `_collect_findings` refuses to read a verdict out
+    of the chatter, so the step stopped the loop with "the reviewer wrote no findings file" for a
+    reviewer that had done its job. codex cannot name a writable path, so what it can promise is
+    the workspace; the loop's before/after fingerprint is what still catches a judge that repaired.
+    """
+    root = build_repo(tmp_path)
+    orch = build_loop.Orchestrator(_config_with_split_adapters("codex"), dry_run=False, repo=repo_mod.Repo(root))
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+
+    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
+
+    assert "--sandbox" in launched[0] and "workspace-write" in launched[0]
 
 
 def test_a_must_fix_finding_goes_to_the_implementer_and_the_reviewer_looks_again(
@@ -304,7 +328,7 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
     root = build_repo(tmp_path)
     orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
     monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
-    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, "I had a good look, honestly"))
+    monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, agent_output(cmd, "I had a good look, honestly")))
 
     with pytest.raises(common.StopLoop, match="wrote no findings file"):
         orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
@@ -312,18 +336,74 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
     """The flags are one CLI's own vocabulary, not a portable concept — nothing else grows them."""
-    assert adapters.write_flags(adapters.ADAPTER_TABLE["claude"].launch_argv()) == ()
-    assert adapters.write_flags(adapters.ADAPTER_TABLE["gemini"].launch_argv()) == ()
-    assert adapters.write_flags(()) == ()
+    claude = adapters.ADAPTER_TABLE["claude"].launch_argv()
+    assert adapters.command(claude, "P", access=adapters.WRITE) == adapters.command(claude, "P")
+    assert adapters.command((), "P", access=adapters.WRITE) == ["P"]
 
 
-def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A reviewer that cannot write is the point. The transport launches the bare adapter argv, so
-    the read-only default is the one the reviewer wants — assert it stays that way."""
+@pytest.mark.parametrize(
+    ("name", "model", "expected"),
+    [
+        ("claude", "opus", ["claude", "-p", "--model", "opus", "--output-format", "json", "P"]),
+        ("codex", "", ["codex", "exec", "--json", "--sandbox", "workspace-write", "P"]),
+        (
+            "gemini",
+            "gemini-2.5-flash",
+            ["gemini", "--model", "gemini-2.5-flash", "--output-format", "json", "--approval-mode", "yolo", "-p", "P"],
+        ),
+        (
+            "copilot",
+            "gpt-5.2",
+            ["copilot", "--no-ask-user", "-s", "--model", "gpt-5.2", "--allow-all-tools", "-p", "P"],
+        ),
+        (
+            "cursor",
+            "gpt-5.2",
+            ["cursor-agent", "-p", "--trust", "--model", "gpt-5.2", "--output-format", "json", "--force", "P"],
+        ),
+        # `amp -x` takes the message as the flag's value, and the adapter declares no model flag —
+        # the reason `launch_refusal` refuses a `model:` beside it rather than dropping it.
+        ("amp", "", ["amp", "-x", "P"]),
+        (
+            "opencode",
+            "anthropic/claude-opus-5",
+            [
+                "opencode",
+                "run",
+                "--model",
+                "anthropic/claude-opus-5",
+                "--format",
+                "json",
+                "--auto",
+                "P",
+            ],
+        ),
+    ],
+)
+def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: str, expected: list[str]) -> None:
+    """`gemini -p` and `copilot -p` take the prompt as the flag's *value*, so nothing may be inserted
+    between the two. Appending the model and the write flags after the whole argv — which is what
+    this did while claude, whose `-p` is a boolean, was the only adapter that passed a model — sent
+    `--model` as the prompt and the model name as a stray positional."""
+    record = adapters.ADAPTER_TABLE[name]
+    assert adapters.command(record.launch_argv(model), "P", access=adapters.WRITE) == expected
+
+
+@pytest.mark.parametrize("adapter", ["codex", "copilot"])
+def test_the_review_transport_is_granted_a_read_and_no_more(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, adapter: str
+) -> None:
+    """A gate-④ stage is handed its payload on stdin, answers on stdout, and changes nothing.
+
+    That is `READ`, which is not the same as passing no flags — and the difference is the whole
+    reason the level exists. `codex exec` reads without being told, so its launch stays bare;
+    `copilot` grants no tool at all without one, so an ungranted launch could not open the checkout
+    the security stage is given to read. Neither gets a grant that could change anything.
+    """
     from rein import common, review_transport
 
     raw = make_config()
-    raw["agents"]["code_reviewer"] = {"adapter": "codex"}
+    raw["agents"]["code_reviewer"] = {"adapter": adapter}
     repo = repo_mod.Repo(seed_repo(tmp_path, config=raw))
     launched: list[list[str]] = []
 
@@ -337,7 +417,10 @@ def test_the_review_transport_is_not_given_write_access(monkeypatch: pytest.Monk
     monkeypatch.setattr(common, "run", fake_run)
     ledger = usage_mod.Ledger()
     review_transport._adapter_reviewer(repo, "code_reviewer", ledger=ledger)({"request": "x"})
-    assert launched[0] == list(adapters.ADAPTER_TABLE["codex"].launch_argv())
+
+    record = adapters.ADAPTER_TABLE[adapter]
+    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ)]
+    assert not set(launched[0]) & set(record.access_flags(adapters.WRITE)) - set(record.launch_argv())
 
 
 def test_an_unlaunchable_role_adapter_stops_the_build_before_it_starts() -> None:
@@ -1627,12 +1710,52 @@ def test_every_adapter_declares_what_it_can_do() -> None:
     only thing any caller reads.
     """
     codex = adapters.ADAPTER_TABLE["codex"]
-    assert codex.write_flags == ("--sandbox", "workspace-write")
+    assert codex.access_flags(adapters.WRITE) == ("--sandbox", "workspace-write")
+    assert codex.access_flags(adapters.READ) == (), "codex exec reads without being asked"
     assert codex.own_sandbox, "codex sandboxes itself — the fact the nested-sandbox check needs"
     assert not codex.resumable, "codex resumes the *last* session, which parallel leaves cannot name"
 
     claude = adapters.ADAPTER_TABLE["claude"]
-    assert claude.resumable and not claude.own_sandbox and not claude.write_flags
+    assert claude.resumable and not claude.own_sandbox
+    assert not any(claude.access_flags(level) for level in (adapters.READ, adapters.REVIEW, adapters.WRITE))
+
+
+def test_an_adapter_named_differently_from_its_binary_is_still_found() -> None:
+    """`ADAPTER_TABLE` is keyed by the name a human writes in config; `adapter_for` is handed an
+    argv. `cursor` launches `cursor-agent`, and looking the record up by `argv[0]` against the
+    table's own keys returned None — which `command()` reads as an argv it does not know and
+    launches with no access flags at all. A reviewer that cannot write, silently."""
+    record = adapters.ADAPTER_TABLE["cursor"]
+    assert adapters.adapter_for(record.launch_argv()) is record
+    assert "--force" in adapters.command(record.launch_argv(), "P", access=adapters.WRITE)
+
+
+@pytest.mark.parametrize("name", sorted(adapters.ADAPTER_TABLE))
+def test_no_launch_is_granted_more_than_the_one_above_it(name: str) -> None:
+    """READ ⊆ REVIEW ⊆ WRITE is the whole point of there being three levels rather than a flag.
+
+    A CLI that cannot separate two of them declares them equal, which is honest; what must never
+    happen is a reviewer granted something the implementer is not, or a read granted a write.
+    """
+    record = adapters.ADAPTER_TABLE[name]
+    read, review = record.access_flags(adapters.READ), record.access_flags(adapters.REVIEW)
+    assert adapters.WRITE not in read and "--allow-all-tools" not in read
+    assert "--allow-all-tools" not in review, "a reviewer never gets the implementer's grant"
+    assert record.access_flags(adapters.REVIEW, "f.json") != () or not record.grants
+
+
+def test_only_a_cli_that_can_name_a_path_is_asked_to() -> None:
+    """`scoped_write` is applied to the REVIEW grant and to nothing else — a READ launch has no
+    file to write, and a WRITE launch is not being narrowed to one."""
+    copilot = adapters.ADAPTER_TABLE["copilot"]
+    assert "write(x.json)" in copilot.access_flags(adapters.REVIEW, "x.json")
+    assert "write(x.json)" not in copilot.access_flags(adapters.READ, "x.json")
+    assert "write(x.json)" not in copilot.access_flags(adapters.WRITE, "x.json")
+    # A CLI with no way to say it is not made to pretend: the grant is what it can promise.
+    assert adapters.ADAPTER_TABLE["codex"].access_flags(adapters.REVIEW, "x.json") == (
+        "--sandbox",
+        "workspace-write",
+    )
 
 
 def test_a_resumable_implementer_stamps_then_resumes_its_session(
@@ -2580,3 +2703,38 @@ def test_the_control_runs_only_the_command_steps_that_actually_passed(
 
     loop._negative_control(_task(), str(loop.root), "a" * 40, passed)
     assert ran == ["test"]
+
+
+# --- the heartbeat: what makes a host's own wait usable -------------------------
+
+
+def test_a_launch_in_flight_keeps_saying_so(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A silent command is what a host kills, not a slow one.
+
+    Gemini's shell tool caps a command by `tools.shell.inactivityTimeout` — 300 seconds *without
+    output*, not 300 seconds of runtime — and `common.run` captures the agent CLI's output rather
+    than streaming it, so a single implementer launch was silent for far longer than that. The
+    foreground wait every host actually has was unusable, and the only advice left was "detach and
+    end your turn", which is how a build gets abandoned by the session that started it.
+    """
+    monkeypatch.setattr(build_loop, "_HEARTBEAT_SEC", 0.02)
+    with build_loop._Heartbeat("T-001: implementer"):
+        time.sleep(0.12)
+    out = capsys.readouterr().out
+    assert "[waiting] T-001: implementer" in out
+    assert out.count("[waiting]") >= 2, "one line is a notice; a heartbeat has to keep coming"
+
+
+def test_a_fast_launch_says_nothing_and_leaves_no_thread(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It is a heartbeat, not a progress bar: a launch that returns promptly adds no noise, and
+    the thread is gone by the time the block is."""
+    monkeypatch.setattr(build_loop, "_HEARTBEAT_SEC", 5.0)
+    before = threading.active_count()
+    with build_loop._Heartbeat("T-001: implementer"):
+        pass
+    assert "[waiting]" not in capsys.readouterr().out
+    assert threading.active_count() <= before, "the heartbeat outlived the wait it was reporting on"

@@ -65,13 +65,79 @@ def test_output_that_is_not_the_promised_envelope_is_refused() -> None:
 
 
 def test_an_adapter_that_does_not_report_records_unmeasured_rather_than_zero() -> None:
-    """ "We did not measure" and "it was free" must never render the same (plan §2.4)."""
-    codex = adapters.ADAPTER_TABLE["codex"]
-    assert codex.usage_flags == () and codex.envelope is None
-    answer, spent = codex.read_output("some free-form output")
+    """ "We did not measure" and "it was free" must never render the same (plan §2.4).
+
+    `copilot` is the one left: its programmatic reference documents no machine-readable envelope,
+    and `-s` makes its answer readable without making its bill knowable — two different things.
+    """
+    copilot = adapters.ADAPTER_TABLE["copilot"]
+    assert copilot.usage_flags == () and copilot.envelope is None
+    answer, spent = copilot.read_output("some free-form output")
     assert answer == "some free-form output"
     assert spent.launches == 1 and not spent.available
     assert spent.to_detail() == {"launches": 1, "measured": False}
+
+
+def test_every_gate_four_adapter_answers_something_that_parses_as_one_json_object() -> None:
+    """Gate ④'s three stages ask for "one JSON object and no other text" and parse the whole of
+    stdout strictly. A CLI that prints a banner, its reasoning or a stats footer around that object
+    has not given a smaller answer — it has given an unreadable one, and every stage reported it as
+    the reviewer's fault. Only `claude` had an envelope, so only `claude` ever worked there."""
+    from rein import review_policy
+    from tests._support import agent_output
+
+    for name, record in adapters.ADAPTER_TABLE.items():
+        raw = agent_output(list(record.launch_argv()), '{"verdict": "ok"}')
+        answer, _ = record.read_output(raw)
+        assert review_policy.parse_reviewer_output(answer, what=name) == {"verdict": "ok"}
+
+
+def test_a_gemini_envelope_is_read_for_its_answer_and_its_bill() -> None:
+    envelope = {
+        "response": "the answer",
+        "stats": {"models": {"gemini-3-pro": {"tokens": {"prompt": 10, "candidates": 5, "cached": 3, "thoughts": 2}}}},
+    }
+    answer, spent = usage.parse_gemini_envelope(json.dumps(envelope))
+    assert answer == "the answer"
+    assert (spent.input_tokens, spent.output_tokens, spent.cache_read_tokens, spent.reasoning_tokens) == (10, 5, 3, 2)
+    assert spent.available and spent.models == ("gemini-3-pro",)
+
+
+def test_a_gemini_run_that_failed_is_not_read_as_an_answer() -> None:
+    """`error` can arrive on a process that exited 0; without this the failure reaches the stage
+    validator and is reported as a malformed reviewer answer."""
+    with pytest.raises(usage.AdapterEnvelopeError, match="quota"):
+        usage.parse_gemini_envelope(json.dumps({"error": {"type": "ApiError", "message": "quota exceeded"}}))
+    with pytest.raises(usage.AdapterEnvelopeError, match="no `response`"):
+        usage.parse_gemini_envelope(json.dumps({"stats": {}}))
+
+
+def test_a_codex_stream_answers_with_its_last_agent_message() -> None:
+    """The earlier items are the agent talking to itself on the way there. Taking the first would
+    hand gate ④ a paragraph of reasoning where it asked for one JSON object."""
+    from tests._support import codex_events
+
+    answer, spent = usage.parse_codex_envelope(codex_events("the answer", input_tokens=7, output_tokens=3))
+    assert answer == "the answer"
+    assert (spent.input_tokens, spent.output_tokens) == (7, 3)
+    assert spent.available
+
+
+def test_a_codex_stream_that_never_finished_a_turn_is_a_failed_run() -> None:
+    """A process that exited mid-turn with nobody saying why is not an agent that said nothing."""
+    with pytest.raises(usage.AdapterEnvelopeError, match="no events"):
+        usage.parse_codex_envelope("just some words")
+    with pytest.raises(usage.AdapterEnvelopeError, match="without a completed turn"):
+        usage.parse_codex_envelope('{"type": "thread.started"}')
+    with pytest.raises(usage.AdapterEnvelopeError, match="rate limited"):
+        usage.parse_codex_envelope('{"type": "turn.failed", "error": {"message": "rate limited"}}')
+
+
+def test_a_codex_turn_that_said_nothing_is_not_a_failure() -> None:
+    """An implementer that edited files and reported no message ran fine; the caller that actually
+    needed words is the one that says so, in its own vocabulary."""
+    answer, spent = usage.parse_codex_envelope('{"type": "turn.completed", "usage": {"input_tokens": 4}}')
+    assert answer == "" and spent.available and spent.input_tokens == 4
 
 
 def test_only_an_adapter_with_an_envelope_asks_for_one() -> None:
@@ -166,3 +232,39 @@ def test_a_count_in_the_millions_is_rendered_in_millions() -> None:
     assert usage._tokens(34_000) == "34.0k"
     assert usage._tokens(999_999) == "1000.0k"
     assert usage._tokens(3_067_272) == "3.07M"
+
+
+def test_a_cursor_envelope_is_read_for_its_answer_and_claims_no_bill() -> None:
+    """Its object shape is claude's, and its own reference says neither format carries token
+    counts. Reusing claude's parser would have reported every cursor launch as measured and free,
+    which is the one thing `Usage.unavailable()` exists to prevent (plan §2.4)."""
+    from tests._support import cursor_envelope
+
+    answer, spent = usage.parse_cursor_envelope(cursor_envelope('{"verdict": "ok"}'))
+    assert answer == '{"verdict": "ok"}'
+    assert not spent.available and spent.launches == 1
+    with pytest.raises(usage.AdapterEnvelopeError, match="failed run"):
+        usage.parse_cursor_envelope(json.dumps({"is_error": True, "result": "out of credit"}))
+
+
+def test_an_opencode_stream_answers_with_its_last_finished_text_part() -> None:
+    from tests._support import opencode_events
+
+    answer, spent = usage.parse_opencode_envelope(opencode_events("the answer"))
+    assert answer == "the answer", "reasoning is never the answer"
+    assert spent.available and (spent.input_tokens, spent.output_tokens) == (100, 20)
+
+
+def test_an_opencode_step_with_no_token_mapping_is_unmeasured_not_free() -> None:
+    """There is no published schema for that part. A count defaulted to zero would report the
+    launch as free; absent counts have to read as "we did not measure"."""
+    stream = '{"type": "step_finish", "part": {"type": "step-finish"}}\n{"type": "text", "part": {"text": "hi"}}'
+    answer, spent = usage.parse_opencode_envelope(stream)
+    assert answer == "hi" and not spent.available
+
+
+def test_an_opencode_error_event_is_not_read_as_an_answer() -> None:
+    with pytest.raises(usage.AdapterEnvelopeError, match="rate"):
+        usage.parse_opencode_envelope('{"type": "error", "error": {"message": "rate limited"}}')
+    with pytest.raises(usage.AdapterEnvelopeError, match="no events"):
+        usage.parse_opencode_envelope("just some words")

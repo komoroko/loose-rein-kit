@@ -148,18 +148,32 @@ Every agent host caps how long one tool call may run, and a real build outlasts 
 on the run, and each check is a launch, a context, and a share of the session limit spent on
 learning that the build is still building.
 
-**If you have `background-wait`, use it**: start `rein build --supervise` through it and get on
-with something else. The run's exit brings you back on its own, which is waiting — no timer, no
-check, no launch spent.
+**Wait for it. Your capability mapping says how** — every host has one of these, and they are in
+this order:
 
-**Detach instead when the run has to outlive this session**, because a host-managed background task
-belongs to the host and an orphaned process does not:
+1. **The host re-enters you when it exits.** Start `rein build --supervise` through that mechanism
+   and get on with something else; its exit brings you back on its own. No timer, no check, no
+   launch spent.
+2. **The tool call itself waits.** Run it in the **foreground** with the longest wait your shell
+   tool allows — a timeout parameter you can raise, or a cap that counts *silence* rather than
+   runtime. The build prints a `[waiting]` line every minute while a launch or a gate step is in
+   flight, exactly so that a wait like that can hold: the line costs nothing, and it is what tells
+   the host the command is alive.
+
+**Detach only when neither can hold it** — when the run has to outlive this session, or your host
+kills a foreground command by the clock no matter what it prints. A host-managed background task
+belongs to the host; an orphaned process does not:
 
 ```sh
 nohup rein build --supervise > .rein/build.log 2>&1 &   # returns immediately; the run owns the lock
 ```
 
-Then **end your turn** and let the human bring you back. Either way, when you come back read the
+Then **end your turn** and let the human bring you back. This is the worst of the three: a build
+nobody is waiting on is a build that finished hours before anyone read it.
+
+**Never turn a detach into a poll.** Re-entering to ask "is it done yet" spends a launch, a context
+and a share of the session limit on learning that the build is still building, and it does that
+every time. If you cannot wait, stop — do not check. Either way, when you come back read the
 run's own record — never re-invoke the build to find out how it is going:
 
 - `rein start` — what changed since you last looked, and what is waiting on a human

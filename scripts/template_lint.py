@@ -48,9 +48,10 @@ CONFIG_PATH = ".rein/config.yaml"
 CLAUDE_MAPPING = "CLAUDE.md"
 COPILOT_MAPPING = ".github/instructions/rein.instructions.md"
 CODEX_MAPPING = ".codex/rein.md"
+GEMINI_MAPPING = ".gemini/rein.md"
 #: Every per-host capability mapping. A host added to `_WRAPPER_SETS` and not to this tuple gets
 #: its wrappers checked and its capability table checked by nobody.
-CAPABILITY_MAPPINGS: tuple[str, ...] = (CLAUDE_MAPPING, COPILOT_MAPPING, CODEX_MAPPING)
+CAPABILITY_MAPPINGS: tuple[str, ...] = (CLAUDE_MAPPING, COPILOT_MAPPING, CODEX_MAPPING, GEMINI_MAPPING)
 
 # The shared procedure/role bodies and their per-agent thin wrappers. Each body must have a
 # wrapper in every dialect, and each wrapper must reference its body — check_wrapper_parity.
@@ -61,6 +62,7 @@ _WRAPPER_SETS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             (".claude/commands", "{stem}.md"),
             (".github/prompts", "{stem}.prompt.md"),
             (".agents/skills", "{stem}/SKILL.md"),
+            (".gemini/commands", "{stem}.toml"),
         ),
     ),
     (
@@ -69,6 +71,7 @@ _WRAPPER_SETS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             (".claude/agents", "{stem}.md"),
             (".github/agents", "{stem}.agent.md"),
             (".codex/agents", "{stem}.toml"),
+            (".gemini/skills", "{stem}/SKILL.md"),
         ),
     ),
 )
@@ -208,6 +211,45 @@ def check_wrapper_parity(root: Path) -> list[str]:
         for stem, per_dir in sorted(descriptions.items()):
             if len(set(per_dir.values())) > 1:
                 failures.append(f"wrapper descriptions for `{stem}` differ across {', '.join(sorted(per_dir))}")
+    return failures
+
+
+_ADAPTER_KEY_RE = re.compile(r'^    "([a-z0-9][a-z0-9_-]*)": Adapter\(', re.MULTILINE)
+
+#: Where a human is told which agent CLIs this release can launch. Prose lists of them have gone
+#: stale twice — README claimed "a custom command" worked when `launch_refusal` refuses one, and
+#: `rein uninstall`'s own error named two of the four integrations — so the list is a canary now
+#: rather than something everyone remembers to update.
+_ADAPTER_LISTS: tuple[str, ...] = (
+    "README.md",
+    "README.ja.md",
+    ".github/instructions/rein.instructions.md",
+    ".codex/rein.md",
+    ".gemini/rein.md",
+)
+
+
+def check_adapter_lists(root: Path) -> list[str]:
+    """Every place that lists the launchable agent CLIs lists all of them.
+
+    The names come from `ADAPTER_TABLE` itself, so adding an adapter and forgetting a document is
+    a failure here rather than a sentence that is quietly wrong until somebody follows it.
+    """
+    source = (root / "src/rein/adapters.py").read_text(encoding="utf-8")
+    names = set(_ADAPTER_KEY_RE.findall(source))
+    if not names:
+        return ["src/rein/adapters.py: no adapters found — the canary cannot check what it cannot read"]
+    failures = []
+    for rel in _ADAPTER_LISTS:
+        # Inside inline code spans only: an adapter is named as `codex` or as `rein agent codex`,
+        # and matching bare prose would let the word "cursor" in a sentence about text cursors
+        # pass for a mention of the CLI. Fenced blocks come out first — an odd number of fences
+        # between two mentions repairs the backtick pairing into nonsense.
+        text = re.sub(r"```.*?```", " ", (root / rel).read_text(encoding="utf-8"), flags=re.DOTALL)
+        spans = " ".join(re.findall(r"`([^`\n]+)`", text))
+        missing = sorted(name for name in names if not re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", spans))
+        if missing:
+            failures.append(f"{rel}: never names the launchable adapter(s) {', '.join(missing)}")
     return failures
 
 
@@ -504,6 +546,9 @@ _DATA_PARITY: tuple[tuple[str, str], ...] = (
     (".github/hooks", "integrations/copilot/hooks"),
     (".github/instructions", "integrations/copilot/instructions"),
     (".agents/skills", "integrations/codex/skills"),
+    (".gemini/commands", "integrations/gemini/commands"),
+    (".gemini/skills", "integrations/gemini/skills"),
+    (".gemini/rein.md", "integrations/gemini/rein.md"),
     (".codex/agents", "integrations/codex/agents"),
     (".codex/hooks.json", "integrations/codex/hooks.json"),
     (".codex/rein.md", "integrations/codex/rein.md"),
@@ -933,6 +978,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         failures = check_vocabulary(files)
         failures += check_wrapper_parity(root)
+        failures += check_adapter_lists(root)
         failures += check_capability_mapping(
             {path: (root / path).read_text(encoding="utf-8") for path in CAPABILITY_MAPPINGS},
             files[AGENTS_MD],

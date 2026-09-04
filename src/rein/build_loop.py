@@ -150,6 +150,48 @@ def _wait_out_the_machine(where: str, rc: int, attempt: int) -> None:
     time.sleep(delay)
 
 
+#: How often a launch in flight says it is still in flight. Not a progress bar and not a poll:
+#: nothing is asked and nothing is read, the run just keeps talking.
+#:
+#: It exists because the *host* is what kills a silent command. Gemini CLI's shell tool caps a
+#: command by `tools.shell.inactivityTimeout` — 300 seconds **without output**, not 300 seconds of
+#: runtime — and a single implementer launch is silent for far longer than that, because
+#: `common.run` captures the CLI's output rather than streaming it. So a foreground `rein build`
+#: died mid-task on a host that would happily have waited all day, and the only advice left was
+#: "detach and end your turn", which is how a build gets abandoned by the session that started it.
+#: One line a minute is what makes the host's own wait usable, and it costs no tokens: the CLI
+#: prints it, not a model.
+_HEARTBEAT_SEC = 60.0
+
+
+class _Heartbeat:
+    """Prints one line every :data:`_HEARTBEAT_SEC` while a launch is in flight.
+
+    A thread rather than a wrapper around `common.run`, because what has to keep talking is the
+    *waiting*, and the waiting is inside a call that captures its child's output by design (an
+    agent's stdout is an answer to be parsed, not console noise).
+    """
+
+    def __init__(self, what: str) -> None:
+        self._what = what
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._tick, daemon=True)
+
+    def _tick(self) -> None:
+        waited = 0.0
+        while not self._done.wait(_HEARTBEAT_SEC):
+            waited += _HEARTBEAT_SEC
+            print(f"    [waiting] {self._what}: {waited / 60:.0f}m so far", flush=True)
+
+    def __enter__(self) -> _Heartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._done.set()
+        self._thread.join(timeout=1.0)
+
+
 #: Where a sandboxed gate step sees the tree it is testing. One constant, so the mount and the
 #: working directory cannot disagree about where the repository is.
 _SANDBOX_WORKDIR = "/work"
@@ -1004,7 +1046,8 @@ class Orchestrator:
             # `run_measured` event disagreeing with each other — the byte counter saying 1 where
             # the billed one said 3.
             self._spend(role or where, prompt_bytes, resumed=resumed)
-            rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
+            with _Heartbeat(where):
+                rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
             if rc == 0:
                 try:
                     said, spent = record.read_output(out) if record else (out, usage_mod.Usage.unavailable())
@@ -1202,12 +1245,12 @@ class Orchestrator:
         prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, base, "implementer"))
         where = f"{task.id}: implementer"
         adapter = self._implementer_adapter
-        flags = list(adapters.write_flags(self.config.adapter_argv))
+        flags: list[str] = []
         if session and adapter is not None:
             flags += [*(adapter.resume_flags if resume else adapter.session_flags), session]
         try:
             self._launch(
-                [*self.config.adapter_argv, *flags, prompt],
+                adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE, extra=flags),
                 cwd=cwd,
                 where=where,
                 env=self._leaf_env(task),
@@ -1229,7 +1272,7 @@ class Orchestrator:
         # A fresh token: the first one was spent on the launch that failed, and the server
         # accepts each nonce once.
         self._launch(
-            [*self.config.adapter_argv, *adapters.write_flags(self.config.adapter_argv), prompt],
+            adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
             cwd=cwd,
             where=where,
             env=self._leaf_env(task),
@@ -1399,11 +1442,15 @@ class Orchestrator:
         target = dossier.findings_path(cwd, task.id)
         target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         argv = step.agent_argv or self.config.adapter_argv
-        prompt = self._review_prompt(task, cwd, base, dossier_path, f"{dossier.RELATIVE_PATH}/{target.name}", argv=argv)
-        # No write flags: the reviewer's `.rein/work/` file is the only thing it needs to produce,
-        # and everything else it might touch belongs to somebody else.
+        findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
+        prompt = self._review_prompt(task, cwd, base, dossier_path, findings_rel, argv=argv)
+        # `REVIEW`, not `WRITE`: the reviewer's `.rein/work/` file is the only thing it needs to
+        # produce, and everything else it might touch belongs to somebody else. Naming the file
+        # here is what lets an adapter that can scope a write grant exactly that one — and what
+        # made "no flags at all" wrong for every CLI whose tools are deny-by-default, whose
+        # reviewer could not write the findings the loop then refused to proceed without.
         self._launch(
-            [*argv, prompt],
+            adapters.command(argv, prompt, access=adapters.REVIEW, writable=findings_rel),
             cwd=cwd,
             where=f"{task.id}: the '{step.name}' agent step",
             env=self._leaf_env(task, role),
@@ -1423,13 +1470,13 @@ class Orchestrator:
     def _invoke_review_fixer(self, task: dag.Task, cwd: str, base: str, findings: str) -> None:
         dossier_path = self._write_dossier(task, cwd, base, "implementer")
         self._launch(
-            [
-                *self.config.adapter_argv,
-                *adapters.write_flags(self.config.adapter_argv),
+            adapters.command(
+                self.config.adapter_argv,
                 build_prompts.review_fix_prompt(
                     task, findings, gate_cmds=self.config.gate_cmds, dossier_path=dossier_path
                 ),
-            ],
+                access=adapters.WRITE,
+            ),
             cwd=cwd,
             where=f"{task.id}: the review fixer",
             env=self._leaf_env(task),
@@ -1478,7 +1525,7 @@ class Orchestrator:
         theirs = self._graph_task(collision.theirs_task)
         prompt = build_prompts.conflict_prompt(ours, theirs, collision.paths, gate_cmds=self.config.gate_cmds)
         self._launch(
-            [*self.config.adapter_argv, *adapters.write_flags(self.config.adapter_argv), prompt],
+            adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
             cwd=cwd,
             where=f"{collision.ours_task or 'merge'}: conflict",
             env=self._leaf_env(ours) if ours is not None else None,
@@ -1522,7 +1569,10 @@ class Orchestrator:
         )
         where = f"gate step '{step.name}'"
         try:
-            result = executors.for_profile(profile).run(spec)
+            # Same reason as a launch: an executor captures its child's output, so a test suite
+            # that takes twenty minutes is twenty silent minutes to whatever host is waiting.
+            with _Heartbeat(where):
+                result = executors.for_profile(profile).run(spec)
         except executors.ExecutorError as exc:
             raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
         if result.exit_code == 0:
@@ -2223,11 +2273,7 @@ class Orchestrator:
         one of them (`integration_fix_prompt`, `integration_review_fix_prompt`).
         """
         self._launch(
-            [
-                *self.config.adapter_argv,
-                *adapters.write_flags(self.config.adapter_argv),
-                prompt,
-            ],
+            adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
             cwd=self.root,
             where=f"{ids}: the integration fixer",
             role="implementer",
@@ -2307,17 +2353,20 @@ class Orchestrator:
         rounds = max(0, step.retries)
         for attempt in range(rounds + 1):
             target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
+            findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
             self._launch(
-                [
-                    *(step.agent_argv or self.config.adapter_argv),
+                adapters.command(
+                    step.agent_argv or self.config.adapter_argv,
                     build_prompts.integration_review_prompt(
                         ids,
                         gate_cmds=self.config.gate_cmds,
                         diff_cmd=f"git diff {self._plan.base_commit if self._plan else 'HEAD~1'}..HEAD",
-                        findings_path=f"{dossier.RELATIVE_PATH}/{target.name}",
+                        findings_path=findings_rel,
                         disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
                     ),
-                ],
+                    access=adapters.REVIEW,
+                    writable=findings_rel,
+                ),
                 cwd=self.root,
                 where=f"{ids}: the '{step.name}' agent step over the merged tree",
                 role=step.agent_role or "code_reviewer",

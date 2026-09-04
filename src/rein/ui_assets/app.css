@@ -324,6 +324,11 @@ th {
 tr.clk { cursor: pointer; }
 tr.clk:hover td { background: var(--sheet-2); }
 
+/* The Console's role→adapter table: controls sit on the text baseline of the role they belong to,
+   and the last column hugs its button rather than stretching to the page. */
+table.agents td { vertical-align: middle; }
+table.agents td:last-child { width: 1%; white-space: nowrap; }
+
 pre.out {
   background: var(--code-bg); color: var(--code-ink); padding: .7rem; margin-top: .8rem;
   font-size: .76rem; white-space: pre-wrap; overflow: auto; max-height: 22rem; border-radius: 2px;

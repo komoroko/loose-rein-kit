@@ -15,7 +15,7 @@ This file only maps AGENTS.md's capability vocabulary onto Codex mechanisms.
 | `session-compaction` | `/compact`, or a fresh session; the next command rehydrates from the SSOT (`.rein/state.yaml`, `plan.yaml`, `docs/**`) |
 | `role-delegation` | subagents `.codex/agents/*.toml` — delegate **explicitly**; Codex never auto-spawns a custom agent |
 | `command-preauthorization` | `approval_policy` / `sandbox_mode` in `.codex/config.toml` — coarse by nature: Codex has no per-command allowlist |
-| `background-wait` | **none** — Codex's `exec` has no way to be re-entered when a detached command exits, so use the degradation: detach with the output in a file, end the turn, read the log when a human brings you back |
+| `background-wait` | the shell tool's own `timeout_ms`: pass one longer than the run and the tool call **is** the wait (a one-shot exec defaults to 10s and an interactive one has no completion timeout at all). Nothing re-enters you when a *detached* command exits, so detaching is the last resort, not the first |
 
 Notes:
 - The gates' **mechanism layer** runs under Codex: `.codex/hooks.json` registers `rein guard`
@@ -27,13 +27,17 @@ Notes:
   setting can hand an agent a gate.
 - **The implementation phase is `rein build`, and needs a headless agent CLI** (installed and
   authenticated) — the orchestrator launches the CLI named by `agents.implementer.adapter`
-  (`claude` by default; `codex` / `gemini` also work). It is one command whose completion is the
+  (`claude` by default; `codex`, `gemini`, `copilot`, `cursor`, `amp` and `opencode` also work; `rein agent --show`
+  lists them). It is one command whose completion is the
   signal, never polled.
-- **Codex's `exec` caps how long one command may run**, and a real build outlasts that cap. With no
-  `background-wait`, take its degradation: start the run detached with its output in a file
-  (`nohup rein build --supervise > .rein/build.log 2>&1 &`), end the turn, and read `rein start` /
-  the log when you come back — **never re-run `rein build` to check on it** (build.md, "When the run
-  outlasts your host's command timeout").
+- **A real build takes far longer than a normal tool call, and you wait for it anyway.** Run it in
+  the foreground and give the shell tool a `timeout_ms` longer than the build — the default is ten
+  seconds, which is what made this look like a cap nothing could get past. The run prints a
+  `[waiting]` line every minute so the wait is legible. Detach
+  (`nohup rein build --supervise > .rein/build.log 2>&1 &`) and end the turn only if the run has to
+  outlive this session, and **never turn that into a poll**: re-entering to ask whether it is done
+  spends a launch to learn that it is still building (build.md, "When the run outlasts your host's
+  command timeout").
 - The security review before gate ④ / at `/verify`: perform a security-focused review pass; it is
   recorded in `review.yaml`'s `machine.security` by `rein review generate`, bound to the
   reviewed HEAD, and summarized in the test plan's security column.

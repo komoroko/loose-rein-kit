@@ -133,6 +133,30 @@ def test_a_draft_plan_is_editable(tmp_path: Path) -> None:
     assert decide(tmp_path, ".rein/config.yaml")[0]
 
 
+def test_pointing_a_role_at_another_agent_does_not_break_a_frozen_plan(tmp_path: Path) -> None:
+    """`agents` is outside `Config.frozen_digest`, so a switch mid-cycle needs no approval and
+    rewinds nothing — the audit chain's `agents_switched` line is what records it instead.
+
+    Contrast the sandbox: flipping a profile to `host` still breaks the freeze here, because that
+    widens what may happen and widening is the judgement a human made at gate ③.
+    """
+    raw = make_config()
+    state = make_state(plan_status="frozen")
+    state["plan"]["config_digest"] = models.Config(raw).frozen_digest()
+    repo = repo_mod.Repo(seed_repo(tmp_path, config=raw, state=state))
+    assert gate_guard._frozen_artifact_failures(repo) == []
+
+    config_path = tmp_path / ".rein" / "config.yaml"
+    switched = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    switched["agents"]["implementer"] = {"adapter": "copilot"}
+    config_path.write_text(yaml.safe_dump(switched, sort_keys=False), encoding="utf-8")
+    assert gate_guard._frozen_artifact_failures(repo) == []
+
+    switched["executor_profiles"]["implementer"] = {"kind": "host", "network_profile": "egress"}
+    config_path.write_text(yaml.safe_dump(switched, sort_keys=False), encoding="utf-8")
+    assert any("rein revise --to tasks" in f for f in gate_guard._frozen_artifact_failures(repo))
+
+
 def test_an_unreadable_state_fails_closed_on_the_frozen_set(tmp_path: Path) -> None:
     seed_repo(tmp_path)
     (tmp_path / ".rein" / "state.yaml").write_text("a: [1, 2\n", encoding="utf-8")
@@ -669,6 +693,34 @@ def test_a_notebook_edit_under_a_guarded_prefix_is_denied(tmp_path: Path) -> Non
         sys.stdin, sys.stdout = stdin, stdout
     assert raw, "a NotebookEdit under src/ must produce a decision, not silence"
     assert "gate 'tasks' is not approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_a_denial_is_written_in_every_hosts_dialect_at_once(tmp_path: Path) -> None:
+    """One guard serves every host, so its answer has to be readable by every host.
+
+    Claude Code and the hosts that copied it read `hookSpecificOutput.permissionDecision`; Gemini
+    CLI's `BeforeTool` reads a top-level `decision`/`reason` and ignores the rest. A denial written
+    in only one dialect is not a quieter denial — it is an *allow* on the host that cannot read it,
+    while `doctor` goes on reporting the guard as registered.
+    """
+    import io
+    import sys
+
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    payload = {"cwd": str(tmp_path), "tool_input": {"file_path": str(tmp_path / "src/app.py")}}
+    stdin, stdout = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
+    try:
+        assert gate_guard.main([]) == 0
+        answer = json.loads(sys.stdout.getvalue().strip())
+    finally:
+        sys.stdin, sys.stdout = stdin, stdout
+    assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert answer["decision"] == "deny"
+    assert answer["reason"] == answer["hookSpecificOutput"]["permissionDecisionReason"], (
+        "two dialects saying different things is worse than one saying nothing"
+    )
+    assert "gate 'tasks' is not approved" in answer["reason"]
 
 
 def test_a_patch_touching_a_guarded_path_is_denied(tmp_path: Path) -> None:

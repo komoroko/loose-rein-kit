@@ -14,8 +14,13 @@ A measurement that cannot see that cannot answer what a cycle cost or where it w
 
 **An adapter that does not report usage records nothing, never zero.** `Usage.unavailable()` is a
 state with a name, the same rule the Coverage Manifest follows (plan §2.4): "we did not measure"
-and "it was free" must never render the same. Only `claude` is wired here, because it is the only
-one whose envelope this release has actually seen.
+and "it was free" must never render the same.
+
+An envelope is not only a bill. Gate ④'s three stages answer with **one JSON object and no other
+text** (`review_policy.parse_reviewer_output` parses the whole of it, strictly), and a CLI that
+prints a banner, its reasoning or a stats footer around that object has not answered — it has said
+something nobody can read. So for `codex` and `gemini` the envelope is what makes those stages work
+at all, and `copilot`, which reports no usage, still needs `-s` to stop decorating its answer.
 """
 
 from __future__ import annotations
@@ -30,6 +35,17 @@ from rein import common
 
 #: The flags that make an adapter answer with a usage envelope instead of bare text.
 CLAUDE_JSON_FLAGS: tuple[str, ...] = ("--output-format", "json")
+#: `{session_id, response, stats, error?, warnings?}` — one object, the answer under `response`.
+GEMINI_JSON_FLAGS: tuple[str, ...] = ("--output-format", "json")
+#: `codex exec --json` prints the turn as JSONL events rather than one object; the answer is the
+#: last `item.completed` carrying an `agent_message`, and the bill is on `turn.completed`.
+CODEX_JSONL_FLAGS: tuple[str, ...] = ("--json",)
+#: The same `{type, subtype, is_error, result, …}` object claude answers with, minus the counts:
+#: cursor's own reference says neither of its formats carries token usage.
+CURSOR_JSON_FLAGS: tuple[str, ...] = ("--output-format", "json")
+#: `opencode run --format json` streams `{type, timestamp, sessionID, …}` events; the answer is
+#: the last finished `text` part.
+OPENCODE_JSON_FLAGS: tuple[str, ...] = ("--format", "json")
 
 
 class AdapterEnvelopeError(Exception):
@@ -134,8 +150,8 @@ def _int(source: Any, *keys: str) -> int:
     return common.as_int(value)
 
 
-def parse_claude_envelope(output: str) -> tuple[str, Usage]:
-    """`(the answer, what it cost)` from a `claude -p --output-format json` envelope.
+def _result_envelope(output: str) -> dict[str, Any]:
+    """The `{type, subtype, is_error, result, …}` object claude and cursor both answer with.
 
     Raises :class:`AdapterEnvelopeError` when the envelope says the run failed. That matters
     beyond bookkeeping: `is_error` can be set on a process that exited 0, so without this check a
@@ -153,16 +169,20 @@ def parse_claude_envelope(output: str) -> tuple[str, Usage]:
         raise AdapterEnvelopeError(
             f"the adapter reported a failed run: {said}" if said else "the adapter reported a failed run"
         )
-    answer = envelope.get("result")
-    if not isinstance(answer, str):
+    if not isinstance(envelope.get("result"), str):
         raise AdapterEnvelopeError("the adapter's envelope carries no `result`")
+    return envelope
 
+
+def parse_claude_envelope(output: str) -> tuple[str, Usage]:
+    """`(the answer, what it cost)` from a `claude -p --output-format json` envelope."""
+    envelope = _result_envelope(output)
     usage_block = envelope.get("usage")
     usage_block = usage_block if isinstance(usage_block, dict) else {}
     by_model = envelope.get("modelUsage")
     models = tuple(sorted(by_model)) if isinstance(by_model, dict) else ()
     cost = envelope.get("total_cost_usd")
-    return answer, Usage(
+    return str(envelope["result"]), Usage(
         available=True,
         launches=1,
         input_tokens=_int(usage_block, "input_tokens"),
@@ -172,6 +192,167 @@ def parse_claude_envelope(output: str) -> tuple[str, Usage]:
         reasoning_tokens=_int(usage_block, "output_tokens_details", "thinking_tokens"),
         cost_usd=float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else 0.0,
         models=models,
+    )
+
+
+def parse_cursor_envelope(output: str) -> tuple[str, Usage]:
+    """`(the answer, unmeasured)` from a `cursor-agent -p --output-format json` envelope.
+
+    The same object shape claude answers with — `result`, `is_error`, `subtype` — and its own
+    reference is explicit that **no token usage fields are included in either format**. So the
+    envelope is read for the answer and the cost is recorded as *not measured*, which is the
+    honest reading: a zero here would say the launch was free (plan §2.4).
+    """
+    return str(_result_envelope(output)["result"]), Usage.unavailable()
+
+
+def parse_gemini_envelope(output: str) -> tuple[str, Usage]:
+    """`(the answer, what it cost)` from a `gemini --output-format json` envelope.
+
+    `{session_id?, response?, stats?, error?, warnings?}`, where `stats.models` is keyed by the
+    model id and carries Gemini's own token names: `prompt` is the request, `candidates` the
+    answer, `cached` the part served from cache and `thoughts` the reasoning. A run can span more
+    than one model, so every count is summed and every id is reported — the same shape claude's
+    `modelUsage` gets. No cost is reported, and `0.0` is what that means here rather than "free":
+    `available` is what says a launch was measured at all.
+    """
+    try:
+        envelope = json.loads(output)
+    except ValueError as exc:
+        raise AdapterEnvelopeError(f"the adapter was asked for JSON and did not answer with any: {exc}") from None
+    if not isinstance(envelope, dict):
+        raise AdapterEnvelopeError("the adapter's JSON is not an object")
+    error = envelope.get("error")
+    if isinstance(error, dict):
+        said = str(error.get("message") or error.get("type") or "")
+        raise AdapterEnvelopeError(f"the adapter reported a failed run: {said}" if said else "a failed run")
+    answer = envelope.get("response")
+    if not isinstance(answer, str):
+        raise AdapterEnvelopeError("the adapter's envelope carries no `response`")
+
+    by_model = envelope.get("stats")
+    by_model = by_model.get("models") if isinstance(by_model, dict) else None
+    by_model = by_model if isinstance(by_model, dict) else {}
+    tokens = [metrics.get("tokens") for metrics in by_model.values() if isinstance(metrics, dict)]
+    return answer, Usage(
+        available=True,
+        launches=1,
+        input_tokens=sum(_int(t, "prompt") for t in tokens),
+        output_tokens=sum(_int(t, "candidates") for t in tokens),
+        cache_read_tokens=sum(_int(t, "cached") for t in tokens),
+        reasoning_tokens=sum(_int(t, "thoughts") for t in tokens),
+        models=tuple(sorted(by_model)),
+    )
+
+
+def parse_codex_envelope(output: str) -> tuple[str, Usage]:
+    """`(the answer, what it cost)` from a `codex exec --json` event stream.
+
+    JSONL, not one object: `thread.started`, then `item.completed` per item, then exactly one of
+    `turn.completed` (carrying `usage`) or `turn.failed`. The answer is the **last** item of type
+    `agent_message` — the earlier ones are the agent talking to itself on the way there, and
+    taking the first would hand gate ④ a paragraph of reasoning where it asked for JSON.
+
+    A turn that completed while the agent said nothing answers `""` rather than raising: a launch
+    that edited files and reported no message is not a failed run, and the caller that actually
+    needed words says so in its own vocabulary. A stream with no terminal event *is* a failed run —
+    the process exited, mid-turn, with nobody having said why.
+    """
+    answer = ""
+    usage: Usage | None = None
+    saw_event = False
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue  # the CLI is entitled to a stray line; a stream with no events is caught below
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        saw_event = saw_event or isinstance(kind, str)
+        if kind == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                answer = str(item.get("text") or "")
+        elif kind == "turn.completed":
+            spent = event.get("usage")
+            spent = spent if isinstance(spent, dict) else {}
+            usage = Usage(
+                available=True,
+                launches=1,
+                input_tokens=_int(spent, "input_tokens"),
+                output_tokens=_int(spent, "output_tokens"),
+                cache_read_tokens=_int(spent, "cached_input_tokens"),
+                cache_creation_tokens=_int(spent, "cache_write_input_tokens"),
+                reasoning_tokens=_int(spent, "reasoning_output_tokens"),
+            )
+        elif kind in ("turn.failed", "error"):
+            said = event.get("error") if kind == "turn.failed" else event
+            said = str(said.get("message") or "") if isinstance(said, dict) else ""
+            raise AdapterEnvelopeError(f"the adapter reported a failed run: {said}" if said else "a failed run")
+    if not saw_event:
+        raise AdapterEnvelopeError("the adapter was asked for a JSONL event stream and emitted no events")
+    if usage is None:
+        raise AdapterEnvelopeError("the event stream ended without a completed turn")
+    return answer, usage
+
+
+def parse_opencode_envelope(output: str) -> tuple[str, Usage]:
+    """`(the answer, what it cost)` from an `opencode run --format json` event stream.
+
+    JSONL of `{type, timestamp, sessionID, …}`. A `text` event is emitted only once its part is
+    *finished* (`part.time.end` is set upstream), so the answer is the last one of them — the
+    earlier ones are the steps on the way there, and `reasoning` is never the answer.
+
+    The cost is claimed only when a `step_finish` part actually carried a token mapping this
+    release could read. There is no published schema for that part, and a count defaulted to zero
+    would report the launch as free rather than as unmeasured.
+    """
+    answer = ""
+    tokens: Mapping[str, Any] | None = None
+    cost = 0.0
+    saw_event = False
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        saw_event = saw_event or isinstance(kind, str)
+        part = event.get("part")
+        part = part if isinstance(part, dict) else {}
+        if kind == "text":
+            answer = str(part.get("text") or "")
+        elif kind == "step_finish":
+            if isinstance(part.get("tokens"), dict):
+                tokens = part["tokens"]
+            spent = part.get("cost")
+            cost += float(spent) if isinstance(spent, (int, float)) and not isinstance(spent, bool) else 0.0
+        elif kind == "error":
+            said = event.get("error")
+            said = str(said.get("message") or said.get("name") or "") if isinstance(said, dict) else str(said or "")
+            raise AdapterEnvelopeError(f"the adapter reported a failed run: {said}" if said else "a failed run")
+    if not saw_event:
+        raise AdapterEnvelopeError("the adapter was asked for a JSON event stream and emitted no events")
+    if tokens is None:
+        return answer, Usage.unavailable()
+    return answer, Usage(
+        available=True,
+        launches=1,
+        input_tokens=_int(tokens, "input"),
+        output_tokens=_int(tokens, "output"),
+        cache_read_tokens=_int(tokens, "cache", "read"),
+        cache_creation_tokens=_int(tokens, "cache", "write"),
+        reasoning_tokens=_int(tokens, "reasoning"),
+        cost_usd=cost,
     )
 
 

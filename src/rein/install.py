@@ -54,7 +54,6 @@ logger = logging.getLogger(__name__)
 CLAUDE_IMPORT_MARKER = "<!-- rein-rules -->"
 AGENTS_MARKER_END = "<!-- /rein-rules -->"
 REIN_RULES_PATH = ".rein/AGENTS.rein.md"
-SETTINGS_PATH = ".claude/settings.json"
 
 # What sync materializes: data payload prefix (or file) → repo-relative destination.
 MATERIALIZED: tuple[tuple[str, str], ...] = (
@@ -66,26 +65,80 @@ MATERIALIZED: tuple[tuple[str, str], ...] = (
     ("rules/AGENTS.md", ".rein/AGENTS.rein.md"),
 )
 
-# Per-integration file surfaces: data prefix → repo-relative destination prefix.
-INTEGRATIONS: dict[str, tuple[tuple[str, str], ...]] = {
-    "claude": (
-        ("integrations/claude/commands/", ".claude/commands/"),
-        ("integrations/claude/agents/", ".claude/agents/"),
+
+@dataclass(frozen=True)
+class Integration:
+    """One agent host's surfaces, and the two things beyond plain files it may need.
+
+    `settings` and `context_file` were a hard-coded `if name == "claude"` on both the install and
+    the uninstall path, which is why adding a fourth host meant editing four branches rather than
+    one table. They are per-host *facts* — where that CLI keeps its tool-permission and hook
+    config, and which file it reads for project context — so they are declared here, like the
+    launch capabilities in `adapters`.
+    """
+
+    #: data payload prefix (or file) → repo-relative destination prefix (or file).
+    files: tuple[tuple[str, str], ...]
+    #: Where this host keeps the settings the hook registration is merged into, and the packaged
+    #: template to merge. Both empty for a host whose hook lives in a plain file above.
+    settings: str = ""
+    settings_source: str = ""
+    #: The file this host reads for project context, into which the rules import block is
+    #: appended (marker-guarded, retracted on uninstall). Empty for a host that reads `AGENTS.md`,
+    #: which `sync` already wires.
+    context_file: str = ""
+    #: The mapping file that block points at — the host's capability table.
+    mapping_file: str = ""
+    #: How a human invokes a phase command here. Telling someone to type a command their host does
+    #: not have is how a working install gets reported as broken.
+    entry: str = "/req"
+
+
+# Per-integration surfaces. A host missing from this table is a host every new phase skips.
+INTEGRATIONS: dict[str, Integration] = {
+    "claude": Integration(
+        files=(
+            ("integrations/claude/commands/", ".claude/commands/"),
+            ("integrations/claude/agents/", ".claude/agents/"),
+        ),
+        settings=".claude/settings.json",
+        settings_source="integrations/claude/settings.json",
+        context_file="CLAUDE.md",
     ),
-    "copilot": (
-        ("integrations/copilot/prompts/", ".github/prompts/"),
-        ("integrations/copilot/agents/", ".github/agents/"),
-        ("integrations/copilot/hooks/", ".github/hooks/"),
-        ("integrations/copilot/instructions/", ".github/instructions/"),
+    "copilot": Integration(
+        files=(
+            ("integrations/copilot/prompts/", ".github/prompts/"),
+            ("integrations/copilot/agents/", ".github/agents/"),
+            ("integrations/copilot/hooks/", ".github/hooks/"),
+            ("integrations/copilot/instructions/", ".github/instructions/"),
+        ),
     ),
     # Codex's phase entry points are **skills**, not prompt files: custom prompts are deprecated
     # upstream and live only in the user's home, so they cannot be shipped with a repository at
     # all. Skills are repo-scoped, which is why they can be an integration surface.
-    "codex": (
-        ("integrations/codex/skills/", ".agents/skills/"),
-        ("integrations/codex/agents/", ".codex/agents/"),
-        ("integrations/codex/hooks.json", ".codex/hooks.json"),
-        ("integrations/codex/rein.md", ".codex/rein.md"),
+    "codex": Integration(
+        files=(
+            ("integrations/codex/skills/", ".agents/skills/"),
+            ("integrations/codex/agents/", ".codex/agents/"),
+            ("integrations/codex/hooks.json", ".codex/hooks.json"),
+            ("integrations/codex/rein.md", ".codex/rein.md"),
+        ),
+        entry="$req",
+    ),
+    # Gemini keeps its hooks in settings.json (like claude) and reads `GEMINI.md` rather than
+    # `AGENTS.md`, so without the import block the rules would never load. Its phase entry points
+    # are custom commands and its roles are skills — deliberately under `.gemini/skills/` rather
+    # than the `.agents/skills/` alias it also reads, which Codex already owns for phases.
+    "gemini": Integration(
+        files=(
+            ("integrations/gemini/commands/", ".gemini/commands/"),
+            ("integrations/gemini/skills/", ".gemini/skills/"),
+            ("integrations/gemini/rein.md", ".gemini/rein.md"),
+        ),
+        settings=".gemini/settings.json",
+        settings_source="integrations/gemini/settings.json",
+        context_file="GEMINI.md",
+        mapping_file=".gemini/rein.md",
     ),
 }
 
@@ -100,24 +153,41 @@ class PlanItem:
 # --- pure settings/marker helpers (unit-tested) --------------------------------
 
 
-def claude_import_block() -> str:
-    """The block appended to CLAUDE.md: the Claude Code capability mapping plus the rules
-    import. The @import must stay the block's last line — remove_claude_import() strips
-    marker→first-@ inclusive, so everything in between is retracted with it on uninstall."""
-    return (
-        f"\n{CLAUDE_IMPORT_MARKER}\n"
-        "## Loose Rein\n"
-        "This repo uses Loose Rein (Human-on-the-Loop, gated delta cycles). Claude Code realizes\n"
-        "the rules' capability vocabulary as: `phase-invocation` → the /req … /status slash\n"
-        "commands; `structured-question` → AskUserQuestion; `notify-and-wait` → PushNotification;\n"
-        "`approval-presentation` → plan mode + ExitPlanMode; `session-compaction` → /compact\n"
-        "(human-run); `role-delegation` → the subagents in .claude/agents/;\n"
-        "`command-preauthorization` → permissions.allow in\n"
-        ".claude/settings.json; `background-wait` → Bash with run_in_background (the run's exit\n"
-        "re-invokes you). The implementation phase is `rein build` — one command whose completion\n"
-        "is the signal, so wait for it and never poll it. The operating rules are imported from:\n"
-        f"@{REIN_RULES_PATH}\n"
-    )
+def context_import_block(name: str) -> str:
+    """The block appended to a host's context file: its capability mapping, plus the rules import.
+
+    The @import must stay the block's last line — :func:`remove_claude_import` strips
+    marker→first-@ inclusive, so everything in between is retracted with it on uninstall.
+
+    A host whose mapping ships as a materialized file (gemini's `.gemini/rein.md`) gets a pointer
+    at it rather than a second copy of the table: two hand-maintained copies of one mapping is the
+    drift `template_lint.check_capability_mapping` exists to catch, and the cheapest way not to
+    have it is not to write it twice.
+    """
+    spec = INTEGRATIONS[name]
+    if spec.mapping_file:
+        body = (
+            "## Loose Rein\n"
+            "This repo uses Loose Rein (Human-on-the-Loop, gated delta cycles). The capability\n"
+            f"mapping for this host — how `phase-invocation`, `structured-question`,\n"
+            f"`approval-presentation` and the rest are realized here — is in {spec.mapping_file}.\n"
+            "The implementation phase is `rein build` — one command whose completion is the signal,\n"
+            "so wait for it and never poll it. The operating rules are imported from:\n"
+        )
+    else:
+        body = (
+            "## Loose Rein\n"
+            "This repo uses Loose Rein (Human-on-the-Loop, gated delta cycles). Claude Code realizes\n"
+            "the rules' capability vocabulary as: `phase-invocation` → the /req … /status slash\n"
+            "commands; `structured-question` → AskUserQuestion; `notify-and-wait` → PushNotification;\n"
+            "`approval-presentation` → plan mode + ExitPlanMode; `session-compaction` → /compact\n"
+            "(human-run); `role-delegation` → the subagents in .claude/agents/;\n"
+            "`command-preauthorization` → permissions.allow in\n"
+            ".claude/settings.json; `background-wait` → Bash with run_in_background (the run's exit\n"
+            "re-invokes you). The implementation phase is `rein build` — one command whose completion\n"
+            "is the signal, so wait for it and never poll it. The operating rules are imported from:\n"
+        )
+    return f"\n{CLAUDE_IMPORT_MARKER}\n{body}@{REIN_RULES_PATH}\n"
 
 
 def agents_pointer_block() -> str:
@@ -401,7 +471,7 @@ def present_surfaces(repo: repo_mod.Repo, name: str) -> list[str]:
     cannot answer differently — both enumerate `_dest_sources`, the same reason check_materialized
     reuses _dest_map.
     """
-    return sorted(dest for dest, _ in _dest_sources(INTEGRATIONS[name]) if repo.path(dest).is_file())
+    return sorted(dest for dest, _ in _dest_sources(INTEGRATIONS[name].files) if repo.path(dest).is_file())
 
 
 def _apply_plan(repo: repo_mod.Repo, items: list[PlanItem], desired: dict[str, bytes]) -> dict[str, str]:
@@ -681,15 +751,14 @@ def _refresh_gitignore(repo: repo_mod.Repo, *, write: bool) -> bool:
     return changed
 
 
-def _settings_template() -> dict[str, Any]:
-    raw = data_mod.read_text("integrations/claude/settings.json")
-    loaded = json.loads(raw)
+def _settings_template(source: str) -> dict[str, Any]:
+    loaded = json.loads(data_mod.read_text(source))
     return loaded if isinstance(loaded, dict) else {}
 
 
-def _read_settings(repo: repo_mod.Repo) -> tuple[dict[str, Any], bool]:
-    """(settings mapping, existed) — a missing/broken settings.json starts empty."""
-    path = repo.path(SETTINGS_PATH)
+def _read_settings(repo: repo_mod.Repo, rel: str) -> tuple[dict[str, Any], bool]:
+    """(settings mapping, existed) — a missing/broken settings file starts empty."""
+    path = repo.path(rel)
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -697,8 +766,8 @@ def _read_settings(repo: repo_mod.Repo) -> tuple[dict[str, Any], bool]:
     return (loaded if isinstance(loaded, dict) else {}), True
 
 
-def _write_settings(repo: repo_mod.Repo, settings: dict[str, Any]) -> None:
-    path = repo.path(SETTINGS_PATH)
+def _write_settings(repo: repo_mod.Repo, rel: str, settings: dict[str, Any]) -> None:
+    path = repo.path(rel)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
@@ -715,7 +784,8 @@ def install_integration(
     if name not in INTEGRATIONS:
         logger.error(f"unknown integration '{name}' (one of: {', '.join(sorted(INTEGRATIONS))})")
         return 2
-    desired = _dest_map(INTEGRATIONS[name])
+    spec = INTEGRATIONS[name]
+    desired = _dest_map(spec.files)
     data = _lock_or_new(repo)
     integrations = data.setdefault("integrations", {})
     previous = integrations.get(name) if isinstance(integrations.get(name), dict) else {}
@@ -734,21 +804,21 @@ def install_integration(
         "files": files,
     }
 
-    if name == "claude":
-        settings, existed = _read_settings(repo)
+    if spec.settings:
+        settings, existed = _read_settings(repo, spec.settings)
         installed_record = previous.get("settings") if isinstance(previous.get("settings"), dict) else None
-        template = _settings_template()
+        template = _settings_template(spec.settings_source)
         if not existed and "$schema" in template:
-            # A settings.json we bring into existence carries the editor schema pointer too;
+            # A settings file we bring into existence carries the editor schema pointer too;
             # merge_settings only tracks permissions/hooks, so seed it before the merge.
             settings = {"$schema": template["$schema"], **settings}
         if installed_record:
             merged, notes, added = upgrade_settings(settings, installed_record, template)
         else:
             merged, notes, added = merge_settings(settings, template)
-        _write_settings(repo, merged)
-        # `created` survives re-installs: whether *we* brought settings.json into existence
-        # decides if a full unmerge may delete the file again on uninstall.
+        _write_settings(repo, spec.settings, merged)
+        # `created` survives re-installs: whether *we* brought the settings file into existence
+        # decides if a full unmerge may delete it again on uninstall.
         if installed_record and "created" in installed_record:
             created = bool(installed_record["created"])
         else:
@@ -756,26 +826,30 @@ def install_integration(
         record["settings"] = {"created": created, **added}
         for note in notes:
             print(f"  settings      {note}")
-        # The rules import block (CLAUDE.md) — appended at most once (marker-guarded), and only
-        # where it adds anything: a CLAUDE.md that already references the rules body carries its
-        # own wiring, and in template_mode the repo IS the template — its CLAUDE.md imports the
-        # rules via @AGENTS.md, so appending the block would double-load the same rules text.
-        claude_md = repo.path("CLAUDE.md")
-        text = claude_md.read_text(encoding="utf-8") if claude_md.is_file() else ""
+
+    if spec.context_file:
+        # The rules import block — appended at most once (marker-guarded), and only where it adds
+        # anything: a context file that already references the rules body carries its own wiring,
+        # and in template_mode the repo IS the template — its own context file imports the rules
+        # via @AGENTS.md, so appending the block would double-load the same rules text.
+        context = repo.path(spec.context_file)
+        text = context.read_text(encoding="utf-8") if context.is_file() else ""
         if CLAUDE_IMPORT_MARKER in text:
             pass  # already installed (marker present)
         elif REIN_RULES_PATH in text:
-            print(f"  skip          CLAUDE.md (already references {REIN_RULES_PATH})")
+            print(f"  skip          {spec.context_file} (already references {REIN_RULES_PATH})")
         elif _template_mode(repo):
-            print("  skip          CLAUDE.md (guard.template_mode: the repo's own CLAUDE.md imports the rules)")
+            print(f"  skip          {spec.context_file} (guard.template_mode: the repo's own file imports the rules)")
         else:
-            claude_md.write_text(text + claude_import_block(), encoding="utf-8")
-            print("  merge         CLAUDE.md (capability mapping + rules @import appended)")
-        if shutil.which("rein") is None:
-            logger.warning(
-                "  ! `rein` is not on PATH — the hooks in .claude/settings.json need it:"
-                " run `uv tool install git+<the rein repo>` (or add it to PATH)."
-            )
+            context.write_text(text + context_import_block(name), encoding="utf-8")
+            print(f"  merge         {spec.context_file} (capability mapping + rules @import appended)")
+
+    if (spec.settings or spec.files) and shutil.which("rein") is None:
+        where = spec.settings or f"the {name} hook files"
+        logger.warning(
+            f"  ! `rein` is not on PATH — the hooks in {where} need it:"
+            " run `uv tool install git+<the rein repo>` (or add it to PATH)."
+        )
 
     integrations[name] = record
     lock_mod.write(repo.lock, data)
@@ -783,10 +857,10 @@ def install_integration(
     if announce_next:
         print("  note          open a new session (or restart the editor) to pick up the new commands —")
         print("                an already-running session won't see files added mid-session.")
-        # Codex invokes its skills with `$`, not `/` — telling someone to type a command their host
-        # does not have is how a working install gets reported as broken.
-        entry = "$req" if name == "codex" else "/req"
-        print(f"  next          in that new session the phase commands ({entry} …) work; `rein next`")
+        # Codex invokes its skills with `$`, not `/`, so the entry is per-host data: telling
+        # someone to type a command their host does not have is how a working install gets
+        # reported as broken.
+        print(f"  next          in that new session the phase commands ({spec.entry} …) work; `rein next`")
         print("                shows where you are and what to run.")
     return 0
 
@@ -836,31 +910,34 @@ def uninstall_integration(repo: repo_mod.Repo, name: str, *, force: bool = False
             removed.append(item.rel)
     _prune_empty_dirs(repo, removed)
 
-    if name == "claude":
+    spec = INTEGRATIONS[name]
+    if spec.settings:
         installed_record = record.get("settings") if isinstance(record.get("settings"), dict) else None
         if installed_record:
-            settings, existed = _read_settings(repo)
+            settings, existed = _read_settings(repo, spec.settings)
             if existed:
                 unmerged, notes = unmerge_settings(settings, installed_record)
                 # A file install itself created is deleted once nothing but the schema pointer
                 # is left; a pre-existing file always survives (it is the repo's).
                 remaining = {k: v for k, v in unmerged.items() if k != "$schema"}
                 if installed_record.get("created") and not remaining:
-                    repo.path(SETTINGS_PATH).unlink(missing_ok=True)
-                    print(f"  remove        {SETTINGS_PATH} (created by install; empty after unmerge)")
+                    repo.path(spec.settings).unlink(missing_ok=True)
+                    print(f"  remove        {spec.settings} (created by install; empty after unmerge)")
                 else:
-                    _write_settings(repo, unmerged)
+                    _write_settings(repo, spec.settings, unmerged)
                     for note in notes:
                         print(f"  settings      {note}")
-        claude_md = repo.path("CLAUDE.md")
-        if claude_md.is_file():
-            stripped = remove_claude_import(claude_md.read_text(encoding="utf-8"))
+        _prune_empty_dirs(repo, [spec.settings])  # the host's own directory, once the file went too
+
+    if spec.context_file:
+        context = repo.path(spec.context_file)
+        if context.is_file():
+            stripped = remove_claude_import(context.read_text(encoding="utf-8"))
             if stripped.strip():
-                claude_md.write_text(stripped, encoding="utf-8")
+                context.write_text(stripped, encoding="utf-8")
             else:
-                claude_md.unlink()
-                print("  remove        CLAUDE.md (held only the Loose Rein block)")
-        _prune_empty_dirs(repo, [SETTINGS_PATH])  # .claude/ itself, once the settings file went too
+                context.unlink()
+                print(f"  remove        {spec.context_file} (held only the Loose Rein block)")
 
     assert data is not None
     data.get("integrations", {}).pop(name, None)
@@ -1039,7 +1116,7 @@ def cmd_uninstall(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     common.configure_logging()
     if not args.names and not args.all_:
-        parser.error("name an integration (claude | copilot) or pass --all")
+        parser.error(f"name an integration ({' | '.join(sorted(INTEGRATIONS))}) or pass --all")
     try:
         repo = _repo_from(args)
     except repo_mod.RepoNotFoundError as exc:

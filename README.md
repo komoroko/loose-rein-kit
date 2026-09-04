@@ -101,8 +101,25 @@ uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # 
 ```
 
 **3. Provide a headless agent CLI** — it is what the implementation phase (`rein build`) drives.
-The default is `claude -p`; switch with `rein agent codex` (`gemini` also works). Without one,
-`rein build` refuses to start.
+The default is `claude`; switch with `rein agent <cli>`. Seven are launchable, and they differ in
+what they can be *told* — `rein agent --show` prints the current roles, `rein doctor` says which
+binaries are on PATH and how to install a missing one:
+
+| `adapter:` | binary | model | retry continues its session | reports what a launch cost |
+|---|---|---|---|---|
+| `claude` | `claude` | yes | yes (and forks a shared reading) | yes |
+| `codex` | `codex` | no | no | yes (`--json`) |
+| `gemini` | `gemini` | yes | no | yes (`--output-format json`) |
+| `copilot` | `copilot` | yes | no | no |
+| `cursor` | `cursor-agent` | yes | no | no |
+| `amp` | `amp` | no | no | no |
+| `opencode` | `opencode` | yes | no | when its step reports one |
+
+An adapter that cannot be told a model refuses a `model:` beside it rather than launching its own
+default under that name — the gate ④ independence check is derived from the model, so a separation
+written down and not performed is refused where it is written.
+Without one, `rein build` refuses to start — and it names the command that installs the CLI it
+wanted rather than installing anything itself.
 
 **4. Seed the repository** — the same command for a new and an existing repo. Brownfield is
 auto-detected and changes what `init` writes (see "Adopting into an existing repository"):
@@ -123,6 +140,7 @@ one into a repo seeded non-interactively:
 rein install claude         # writes .claude/ wrappers + merges settings.json
 rein install copilot        # writes .github/ prompt/agent/hook wrappers
 rein install codex          # writes .agents/skills/ + .codex/ agent/hook wrappers
+rein install gemini         # writes .gemini/ commands/skills + merges .gemini/settings.json
 ```
 
 These files are usually discovered only at session or editor start, so open a **new** session
@@ -160,7 +178,8 @@ rein next         # only the next recommended command (--json for integrations)
 rein ui           # local dashboard — read the gate's deliverables and approve from the page
 ```
 
-`rein agent codex` switches the headless agent CLI (claude | codex | gemini | a custom command),
+`rein agent codex` switches the headless agent CLI (`rein agent --show` lists every one this
+release can launch),
 and `rein project add` registers a repo the dashboard's switcher can target — both are set once,
 not daily. With several repos registered, the dashboard grows a **project switcher** (a dropdown
 in its header) that retargets the whole board without restarting the server; `rein ui` always adds
@@ -449,7 +468,7 @@ Existing files are **never overwritten** (idempotent re-runs). Then, inside the 
 2. **Delta cycles** — each `brief → /req → … → /verify` pass describes **one change**, closed with
    `rein cycle-close` (same steps as "Daily use"). `docs/00-product-brief.md` and
    `docs/05-current-state.md` persist across cycles.
-3. **Retract any time** — `rein uninstall claude|copilot|codex` retracts an agent surface (pristine
+3. **Retract any time** — `rein uninstall claude|copilot|codex|gemini` retracts an agent surface (pristine
    files only; the settings merge is reverted entry-by-entry), and `rein uninstall --all`
    removes every materialized artifact and the lock. Your repo state (SSOT, `docs/`) is never
    touched.
@@ -496,7 +515,7 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
 - **`rein: command not found` in a hook** — install the CLI on PATH (see "Setup"); `rein doctor`
   FAILs when the hook binary is unresolvable.
 - **`/req` (or other phase commands) don't show up in your agent** — no surface is installed
-  (the wizard asks; `rein init` off a TTY does not): run `rein install claude|copilot|codex` for
+  (the wizard asks; `rein init` off a TTY does not): run `rein install claude|copilot|codex|gemini` for
   whichever agent you use, then open a new session (Setup, step 5).
 
 ## Repository layout
@@ -533,20 +552,21 @@ and any other agent that reads `AGENTS.md` (rules + procedures; gates by convent
 The rules (`AGENTS.md`) and procedures (`.rein/prompts/`) name human-interaction points with a
 **capability vocabulary**; each agent's mapping file says how to realize it.
 
-| Capability | Claude Code | VS Code Copilot | Codex |
-|---|---|---|---|
-| phase entry points | slash commands (`.claude/commands/`) | prompt files (`.github/prompts/`) | skills `$req` … (`.agents/skills/`) |
-| gate enforcement | PreToolUse hook + commit-stage check | same hook via agent hooks (preview) + commit-stage check | same hook on `apply_patch` (`.codex/hooks.json`) + commit-stage check |
-| structured questions | AskUserQuestion | numbered options in chat | numbered options in chat |
-| approval presentation | plan mode + ExitPlanMode | Plan mode / explicit "approve" | explicit "approve" |
-| role delegation | subagents | custom agents `@architect` … | subagents (`.codex/agents/*.toml`), explicit |
-| autonomous build | `rein build` | `rein build` | `rein build` |
-| pending-gate notification | PushNotification | end of turn | end of turn |
+| Capability | Claude Code | VS Code Copilot | Codex | Gemini CLI |
+|---|---|---|---|---|
+| phase entry points | slash commands (`.claude/commands/`) | prompt files (`.github/prompts/`) | skills `$req` … (`.agents/skills/`) | custom commands (`.gemini/commands/*.toml`) |
+| gate enforcement | PreToolUse hook + commit-stage check | same hook via agent hooks (preview) + commit-stage check | same hook on `apply_patch` (`.codex/hooks.json`) + commit-stage check | same hook on `BeforeTool` (`.gemini/settings.json`) + commit-stage check |
+| structured questions | AskUserQuestion | numbered options in chat | numbered options in chat | numbered options in chat |
+| approval presentation | plan mode + ExitPlanMode | Plan mode / explicit "approve" | explicit "approve" | explicit "approve" |
+| role delegation | subagents | custom agents `@architect` … | subagents (`.codex/agents/*.toml`), explicit | skills (`.gemini/skills/*/SKILL.md`) |
+| autonomous build | `rein build` | `rein build` | `rein build` | `rein build` |
+| selectable as the build's CLI | `rein agent claude` | `rein agent copilot` | `rein agent codex` | `rein agent gemini` |
+| pending-gate notification | PushNotification | end of turn | end of turn | end of turn |
 
 An agent with no mapping of its own (one that only reads AGENTS.md) follows the degradation
 column in `AGENTS.md`'s capability vocabulary table.
 
-- Agent surfaces are opt-in — `rein install claude|copilot|codex` writes them, and they invoke
+- Agent surfaces are opt-in — `rein install claude|copilot|codex|gemini` writes them, and they invoke
   the installed `rein` CLI (so `uv tool install` is a prerequisite of the hooks).
 - The Codex surfaces are **unverified against a live Codex**: the hook payload shape and the
   skill/subagent discovery paths come from openai/codex's source and docs, not an observed

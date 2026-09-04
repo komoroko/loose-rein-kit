@@ -56,7 +56,7 @@ class Verb:
 VERBS: dict[str, Verb] = {
     # setup
     "init": Verb("init_cmd", "seed this repo with Loose Rein state (wizard on a TTY; brownfield auto-detected)"),
-    "install": Verb("install:cmd_install", "add an agent's surfaces (claude / codex / copilot)"),
+    "install": Verb("install:cmd_install", "add an agent's surfaces (claude / codex / copilot / gemini)"),
     "uninstall": Verb("install:cmd_uninstall", "retract integration surfaces (pristine files only)"),
     "agent": Verb("agent_cli", "point the AI roles at an adapter (--show lists them and their groups)"),
     "oci": Verb("oci_cli", "build the sandbox images and pin their digests"),
@@ -65,7 +65,7 @@ VERBS: dict[str, Verb] = {
     # daily
     "start": Verb("resume", "first run: setup wizard; afterwards: what moved since you last looked"),
     "next": Verb("status_api", "only the next recommended command (deterministic; --json for integrations)"),
-    "ui": Verb("ui", "local dashboard — read gates, do the gate-4 human review, run doctor/revise"),
+    "ui": Verb("ui", "local dashboard — read gates, do the gate-4 human review, run doctor/revise, pick agents"),
     # gates and shipping
     "approve": Verb("approve", "readiness check, then the human's confirmation at this terminal"),
     "changes": Verb("change_request", "ask for changes instead of approving (holds the gate shut)"),

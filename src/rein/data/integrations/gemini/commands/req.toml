@@ -1,0 +1,5 @@
+# req — a thin wrapper. The procedure itself lives in .rein/prompts/, which every host reads.
+description = "Phase 1 requirements. Sound out from the brief, firm up the requirements, and ask for approval at gate ①."
+prompt = """
+Read the file `.rein/prompts/commands/req.md` and execute that procedure exactly. Capability terms resolve per the capability mapping in `.gemini/rein.md`.
+"""

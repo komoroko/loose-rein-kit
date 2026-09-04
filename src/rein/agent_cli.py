@@ -23,8 +23,9 @@ import argparse
 import logging
 import re
 
-from rein import adapters, common, models, strict_yaml
+from rein import adapters, common, event_chain, models, strict_yaml
 from rein import repo as repo_mod
+from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +174,43 @@ def render_show(config: models.Config) -> str:
     return "\n".join(lines)
 
 
+def _record_switch(
+    repo: repo_mod.Repo, roles: tuple[str, ...], adapter: str, model: str, before: str, after: str
+) -> None:
+    """Put the switch in the audit chain. Never the reason the switch fails.
+
+    `agents` sits outside the gate ③ freeze on purpose (`models.Config.frozen_digest`), so nothing
+    asks a human before this file moves. That makes this line the only place the change survives,
+    and the only way gate ④ can be told that the evidence in front of it was produced by a
+    different agent than the one gate ③ saw — which is what `environment_digest` moving says.
+
+    Same posture as `oci_cli._record_repin`: the config on disk is already correct by the time this
+    runs, so a chain that cannot be appended to is reported loudly and does not undo the write.
+    """
+    if before == after:
+        return  # set to what it already was: nothing about the environment moved
+    try:
+        store = store_mod.Store(repo)
+        state = store.read_state()
+        if state is None or not state.cycle_id:
+            return  # no cycle to record it under — `rein init` has not run
+        with store.transaction() as tx:
+            tx.append(
+                "agents_switched",
+                cycle_id=state.cycle_id,
+                subject_ids=sorted(roles),
+                detail={
+                    "roles": sorted(roles),
+                    "adapter": adapter,
+                    "model": model,
+                    "before": before,
+                    "after": after,
+                },
+            )
+    except (store_mod.StoreError, models.DocumentError, OSError, event_chain.ChainError) as exc:
+        logger.error(f"the adapter is switched, but the change could not be recorded in the audit chain: {exc}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="point the AI roles at an adapter")
     parser.add_argument("adapter", nargs="?", default="", help="the adapter name to set")
@@ -224,7 +262,9 @@ def main(argv: list[str] | None = None) -> int:
             logger.error(refusal)
         return 2
 
+    before = config.environment_digest()
     repo.config.write_text(updated, encoding="utf-8")
+    _record_switch(repo, roles, args.adapter, args.model, before, new_config.environment_digest())
     print(f"adapter '{args.adapter}' set for: {', '.join(roles)}")
     for warning in independence_report(new_config):
         logger.warning(warning)

@@ -539,6 +539,19 @@ def test_the_environment_digest_covers_the_profile_bodies_not_only_their_names()
     assert pinned.environment_digest() != on_the_host.environment_digest()
 
 
+def test_switching_an_agent_does_not_move_the_frozen_digest() -> None:
+    """Which CLI and model a role launches is a running choice, not a term of the approved plan.
+
+    It used to be inside the freeze, so `rein agent copilot` mid-cycle made the next `rein guard`
+    say "config.yaml has changed since gate 3 froze it — roll back with `rein revise --to tasks`":
+    a rewound approval for a plan nobody had touched.
+    """
+    before = _config(impl=_PINNED, rev=_PINNED)
+    after = models.Config({**before.raw, "agents": {"implementer": {"adapter": "copilot", "model": "gpt-5.2"}}})
+    assert before.frozen_digest() == after.frozen_digest()
+    assert before.environment_digest() != after.environment_digest()
+
+
 def test_a_config_with_no_profiles_still_digests() -> None:
     bare = models.Config({"project": {"name": "demo"}})
     assert digests.is_digest(bare.frozen_digest())

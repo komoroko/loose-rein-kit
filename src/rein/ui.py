@@ -13,9 +13,10 @@ approval-wait: browser notifications are opt-in; the tab title and favicon alway
 
 What the page may do is bounded by principle, not habit: (a) **read** inside the target repository
 — every GET resolves paths server-side from fixed specs, never from the client; (b) run **local,
-side-effect-free diagnostics** whose argv is fixed here (`action_argv`: doctor, tests); (c) record
+side-effect-free diagnostics** whose argv is fixed here (`action_argv`: doctor); (c) record
 **human decisions that already have a single sanctioned CLI write path** (gate approval via
-approve.py, the human review, revise / cycle-close). The client only ever sends an action id and
+approve.py, the human review, revise / cycle-close, and pointing a role at another agent CLI via
+`rein agent`). The client only ever sends an action id and
 typed parameters; command lines are built server-side, so arbitrary command execution is
 structurally impossible. Phase execution (/req … /build) and outward-facing operations (push / PR /
 merge) are deliberately absent.
@@ -67,7 +68,6 @@ import logging
 import os
 import re
 import secrets
-import shlex
 import subprocess
 import threading
 import time
@@ -79,7 +79,19 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from rein import approve, change_request, common, event_chain, human_review, models, review_api, revise, status_api
+from rein import (
+    adapters,
+    agent_cli,
+    approve,
+    change_request,
+    common,
+    event_chain,
+    human_review,
+    models,
+    review_api,
+    revise,
+    status_api,
+)
 from rein import events as events_mod
 from rein import registry as registry_mod
 from rein import repo as repo_mod
@@ -98,6 +110,9 @@ _STREAM_SWEEP_SEC = 20.0
 _STREAM_RETRY_SEC = 2.0
 _OUTPUT_LIMIT = 8000  # tail shown per stream (failures are summarized, not dumped)
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+#: The same shape config.schema.json accepts for `agents.<role>.model`, so the dashboard cannot
+#: write a config the schema would then reject.
+_MODEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 # The frontend, shipped beside this module. Served by exact name only (no traversal surface);
 # read per request so a rebuild shows up on reload during development. The dict stays explicit —
 # no directory scan — so what the server can hand out is reviewable here; a test asserts it
@@ -264,15 +279,18 @@ class UiActionError(Exception):
 def action_argv(action: str, params: dict[str, object]) -> list[str]:
     """Build the command line for a whitelisted action id. Everything else is rejected (400).
 
-    The argv mirrors the documented make targets one-to-one, so what the button runs is exactly what
-    the human would have typed; typed parameters are validated and shell-quoted here, never client-side.
+    Each is the `rein` verb a human would have typed, so what the button runs is what the
+    documentation says it runs. It used to build `make` targets — `make doctor`, `make revise`,
+    `make cycle-close` — and not one of them existed: this repository's makefile wraps the
+    package's own dev workflow and has no such targets, and a product repository has no makefile at
+    all (`rein init` writes none). Every button on this pane was broken everywhere it shipped, while
+    its own labels already read `rein doctor`.
+
+    Parameters are validated here and passed as separate argv elements to a `shell=False`
+    subprocess, so there is nothing to quote and nothing a quote could escape from.
     """
     if action == "doctor":
-        return ["make", "doctor"]
-    if action == "tests":
-        # Lets the reviewer confirm green with their own eyes from the review pane (gate ④/⑤)
-        # instead of trusting a reported result. Parameterless — zero injection surface.
-        return ["make", "test"]
+        return ["rein", "doctor"]
     # There is deliberately no `events_resolve` action: a log an operator can close by hand is
     # not evidence of anything, and dispositions live in `review.yaml`, where they are signed.
     if action == "revise":
@@ -284,12 +302,28 @@ def action_argv(action: str, params: dict[str, object]) -> list[str]:
         reason = str(params.get("reason") or "").strip()
         if not reason:
             raise UiActionError(HTTPStatus.BAD_REQUEST, "revise needs a non-empty 'reason'")
-        return ["make", "revise", f"ARGS=--to {phase} --reason {shlex.quote(reason)}"]
+        return ["rein", "revise", "--to", phase, "--reason", reason]
     if action == "cycle_close":
         slug = str(params.get("slug") or "")
         if not _SLUG_RE.match(slug):
             raise UiActionError(HTTPStatus.BAD_REQUEST, "cycle_close 'slug' must match [a-z0-9][a-z0-9-]*")
-        return ["make", "cycle-close", f"NAME={slug}"]
+        return ["rein", "cycle-close", "--name", slug]
+    if action == "agent":
+        # Not a decision gate ③ freezes: `agents` sits outside `Config.frozen_digest`, so pointing
+        # a role at another CLI needs no approval and rewinds nothing. `rein agent` refuses a
+        # combination the loop could not launch, and records the switch in the audit chain.
+        role = str(params.get("role") or "")
+        if role not in agent_cli.ROLES:
+            raise UiActionError(HTTPStatus.BAD_REQUEST, f"agent 'role' must be one of {', '.join(agent_cli.ROLES)}")
+        adapter = str(params.get("adapter") or "")
+        if adapter not in adapters.ADAPTER_TABLE:
+            raise UiActionError(
+                HTTPStatus.BAD_REQUEST, f"agent 'adapter' must be one of {', '.join(sorted(adapters.ADAPTER_TABLE))}"
+            )
+        model = str(params.get("model") or "").strip()
+        if model and not _MODEL_RE.match(model):
+            raise UiActionError(HTTPStatus.BAD_REQUEST, "agent 'model' must match [a-z0-9][a-z0-9._-]*")
+        return ["rein", "agent", adapter, "--role", role] + (["--model", model] if model else [])
     raise UiActionError(HTTPStatus.BAD_REQUEST, f"unknown action '{action}'")
 
 

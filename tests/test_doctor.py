@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import common, dag_trace, doctor, models, upstream
+from rein import adapters, common, dag_trace, doctor, models, upstream
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 from tests._support import (
@@ -97,7 +97,7 @@ def _place_claude_surface(root: Path) -> int:
     from rein import install
 
     written = 0
-    for rel, blob in install._dest_map(install.INTEGRATIONS["claude"]).items():
+    for rel, blob in install._dest_map(install.INTEGRATIONS["claude"].files).items():
         dest = root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(blob)
@@ -361,7 +361,7 @@ def test_a_rebuilt_image_is_reported_and_never_failed() -> None:
     repinned = make_config(profiles=_repinned(SANDBOXED_PROFILES))
     results = doctor.check_freeze_drift(_frozen(plan_doc, config_doc), models.Plan(plan_doc), models.Config(repinned))
     assert [f.level for f in results] == ["PASS", "PASS", "INFO"]
-    assert "the sandbox has changed" in results[-1].message
+    assert "the environment has changed" in results[-1].message
     assert not [f for f in results if f.level == "FAIL"]
 
 
@@ -543,12 +543,22 @@ def test_a_missing_adapter_fails_once_the_build_phase_is_open(monkeypatch: pytes
     assert [f.level for f in results] == ["FAIL"]
 
 
+def test_a_missing_adapter_names_the_install_command_and_runs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rein` never installs a third-party agent CLI — what lands on an operator's PATH, and what
+    it is then allowed to reach, is theirs to choose. Saying *Install it* and stopping there left
+    them to go and find out how; the adapter carries the command, and doctor prints it."""
+    _no_adapter_on_path(monkeypatch)
+    results = doctor.check_adapters(models.Config(make_config()), models.State({"current_phase": "build"}))
+    assert adapters.ADAPTER_TABLE["claude"].install_hint in results[0].message
+    assert all(a.install_hint for a in adapters.ADAPTER_TABLE.values()), "every adapter can say how"
+
+
 def test_an_adapter_this_release_cannot_launch_fails_whatever_is_on_path() -> None:
     config = make_config()
-    config["agents"]["implementer"]["adapter"] = "cursor"  # type: ignore[index]
+    config["agents"]["implementer"]["adapter"] = "nonesuch"  # type: ignore[index]
     results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
     assert results[0].level == "FAIL"
-    assert "'cursor'" in results[0].message
+    assert "'nonesuch'" in results[0].message
 
 
 def test_a_model_the_adapter_cannot_be_told_to_run_fails() -> None:
@@ -870,7 +880,7 @@ def test_the_shipped_matcher_covers_every_write_tool() -> None:
     every product — checking only the repo's own copy would miss exactly that."""
     from rein import gate_guard, install
 
-    groups = install._settings_template()["hooks"]["PreToolUse"]
+    groups = install._settings_template(install.INTEGRATIONS["claude"].settings_source)["hooks"]["PreToolUse"]
     covered = {tool for group in groups for tool in str(group.get("matcher", "")).split("|")}
     assert covered >= set(gate_guard.CLAUDE_WRITE_TOOLS), f"missing: {set(gate_guard.CLAUDE_WRITE_TOOLS) - covered}"
 

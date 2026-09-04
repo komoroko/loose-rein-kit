@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from rein import models, registry, store, ui
+from rein import adapters, models, registry, store, ui
 from tests._support import SANDBOXED_PROFILES, chain, make_config, make_state, seed_repo
 
 # The frontend's source. `ui_assets/app.js` is a built bundle — minified React plus this code — so a
@@ -38,16 +38,64 @@ def ui_sources() -> dict[str, str]:
 
 
 def test_action_argv_whitelist() -> None:
-    assert ui.action_argv("doctor", {}) == ["make", "doctor"]
-    assert ui.action_argv("tests", {}) == ["make", "test"]  # parameterless: zero injection surface
-    argv = ui.action_argv("revise", {"phase": "design", "reason": "rethink auth"})
-    assert argv[:2] == ["make", "revise"] and "--to design" in argv[2]
-    assert "'rethink auth'" in argv[2]  # free text is shell-quoted server-side
-    assert ui.action_argv("cycle_close", {"slug": "payment-refactor"}) == [
-        "make",
-        "cycle-close",
-        "NAME=payment-refactor",
+    """Every action is the `rein` verb its own button is labelled with.
+
+    They were `make` targets, and `make doctor` / `make revise` / `make cycle-close` exist in no
+    makefile — least of all in a product repository, which `rein init` gives no makefile at all.
+    """
+    assert ui.action_argv("doctor", {}) == ["rein", "doctor"]
+    # Free text is its own argv element, so there is nothing to quote: `shell=False`.
+    assert ui.action_argv("revise", {"phase": "design", "reason": "rethink auth; rm -rf /"}) == [
+        "rein",
+        "revise",
+        "--to",
+        "design",
+        "--reason",
+        "rethink auth; rm -rf /",
     ]
+    assert ui.action_argv("cycle_close", {"slug": "payment-refactor"}) == [
+        "rein",
+        "cycle-close",
+        "--name",
+        "payment-refactor",
+    ]
+
+
+def test_the_agent_action_is_the_switch_a_human_would_have_typed() -> None:
+    """Pointing a role at another CLI is not a gate ③ decision — `agents` is outside the config
+    digest the freeze covers — so the dashboard may run it, and `rein agent` is what refuses a
+    combination the loop could not launch."""
+    assert ui.action_argv("agent", {"role": "implementer", "adapter": "copilot"}) == [
+        "rein",
+        "agent",
+        "copilot",
+        "--role",
+        "implementer",
+    ]
+    assert ui.action_argv("agent", {"role": "comparator", "adapter": "claude", "model": "sonnet"}) == [
+        "rein",
+        "agent",
+        "claude",
+        "--role",
+        "comparator",
+        "--model",
+        "sonnet",
+    ]
+
+
+def test_the_dashboard_never_runs_an_installer() -> None:
+    """A missing agent CLI is named, never fetched: what lands on an operator's PATH is theirs to
+    choose. No whitelisted action installs anything, and every adapter carries the command to
+    print instead."""
+    cases: tuple[tuple[str, dict[str, object]], ...] = (
+        ("doctor", {}),
+        ("revise", {"phase": "design", "reason": "x"}),
+        ("cycle_close", {"slug": "c"}),
+        ("agent", {"role": "implementer", "adapter": "codex"}),
+    )
+    for action, params in cases:
+        assert ui.action_argv(action, params)[0] == "rein"
+    assert all(a.install_hint for a in adapters.ADAPTER_TABLE.values())
 
 
 @pytest.mark.parametrize(
@@ -62,6 +110,13 @@ def test_action_argv_whitelist() -> None:
         ("revise", {"phase": "design", "reason": "  "}),  # empty reason
         ("cycle_close", {"slug": "Bad Slug!"}),  # invalid slug characters
         ("cycle_close", {"slug": "x; rm -rf /"}),  # injection attempt
+        # `tests` ran `make test` — this repository's own pytest, never a product's DoD, and in a
+        # product repository no makefile at all. Gone rather than repaired: the DoD's test step is
+        # re-run by the build loop and its result is on the record gate ④ reads.
+        ("tests", {}),
+        ("agent", {"role": "nobody", "adapter": "claude"}),  # not a role the config declares
+        ("agent", {"role": "implementer", "adapter": "cluade"}),  # not an adapter this release launches
+        ("agent", {"role": "implementer", "adapter": "claude", "model": "Opus 5"}),  # not a model string
     ],
 )
 def test_action_argv_rejects_invalid(action: str, params: dict[str, object]) -> None:

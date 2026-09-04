@@ -27,7 +27,7 @@ or a way of running something — with these neutral capabilities, never an agen
 | `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
 | `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |
 | `command-preauthorization` | pre-authorize known-safe commands | approve each interactively |
-| `background-wait` | start a long command detached and be re-entered when it exits — waiting, not polling | detach with the output in a file, end the turn, read the log when a human brings you back |
+| `background-wait` | wait out a command that runs longer than one turn's worth of patience, without asking it anything: either the host re-enters you when it exits, or the tool call itself waits | run it in the foreground with the longest wait the host allows; only when even that cannot hold it, detach with the output in a file, end the turn, and read the log when a human brings you back |
 
 ## Language
 
