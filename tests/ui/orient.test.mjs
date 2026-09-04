@@ -53,6 +53,22 @@ test("a control that answered is a number and one that could not be taken names 
   assert.equal(app.errors.length, 0, app.errors.join("\n"));
 });
 
+test("a landed task carrying no control at all is a row, not a silence", async () => {
+  // Only the uncontrolled are listed, so a task the loop never asked about looked exactly like one
+  // whose experiment answered. The brief names that absence; this is where a human sees it.
+  const app = await orient({
+    verification: { steps: 4 },
+    control: {
+      unrecorded: [{ task_id: "T-009", detail: "this task closed before the negative control existed" }],
+    },
+  });
+  const html = app.html("rvMain");
+  assert.match(html, /T-009/);
+  assert.match(html, /before the negative control existed/);
+  assert.match(html, /never shown to be able to go red/);
+  assert.equal(app.errors.length, 0, app.errors.join("\n"));
+});
+
 test("every control that answered leaves no warning at all", async () => {
   const app = await orient({ verification: { steps: 4 }, control: { discriminating: 3 } });
   const html = app.html("rvMain");

@@ -124,6 +124,14 @@ _ACCEPTANCE_PREFIX = "acceptance:"
 #: what `rein report --outcome needs-revision` is for rather than a budget to keep spending.
 SEND_BACK_RETRIES = 1
 
+#: Attempt endings that are a defect in the **plan**, not in the code, and so call for
+#: `needs-revision` rather than `blocked`. `blocked` says the implementer could not make
+#: the code work; filing a plan defect under it sends the next reader looking in the wrong
+#: place, and `needs-revision` is the status `/revise` and `rein dag --impacted` act on.
+#: A scope violation is one by construction: its own message says the way forward is a
+#: human re-approving a wider scope.
+_PLAN_DEFECT_KINDS = frozenset({"agent_needs_revision", "scope_violation"})
+
 StopLoop = common.StopLoop
 EnvironmentFault = faults.EnvironmentFault
 
@@ -162,6 +170,11 @@ def _wait_out_the_machine(where: str, rc: int, attempt: int) -> None:
 #: One line a minute is what makes the host's own wait usable, and it costs no tokens: the CLI
 #: prints it, not a model.
 _HEARTBEAT_SEC = 60.0
+
+#: How many uncommitted paths the clean-tree refusal names before summarizing the rest.
+#: Enough to recognize what is in the way; a full listing of a tree nobody committed is
+#: not more informative than its first screen.
+_DIRTY_PATHS_SHOWN = 20
 
 
 class _Heartbeat:
@@ -1201,6 +1214,7 @@ class Orchestrator:
             failure_log,
             gate_cmds=self.config.gate_cmds,
             has_baseline=self.repo.path("docs/05-current-state.md").exists(),
+            pathspec=self.ws.pathspec,
             handoff=self._handoff_for(task),
             dossier_path=dossier_path,
         )
@@ -1724,10 +1738,11 @@ class Orchestrator:
           "this task's green rests on tests nobody wrote for it" is on the record instead of being
           the silence it has always been.
         * **the control could not be set up** — no base, no command step in the DoD to re-establish,
-          a diff git would not give up, an unapplied patch, a worktree that would not create.
-          Recorded with the reason. Never a pass and never a block: a broken experiment is not
-          evidence in either direction, and inventing a verdict from one is the thing the rest of
-          this module refuses to do.
+          a diff git would not give up, an unapplied patch, a worktree that would not create, a
+          sandbox that would not run the control's own steps. Recorded with the reason. Never a
+          pass, never a block, and never an abort: a broken experiment is not evidence in either
+          direction, and inventing a verdict from one is the thing the rest of this module refuses
+          to do.
         * **every step green** — the block. It comes back through the same channel a red step does,
           so it spends that attempt's budget and the implementer is told what is missing.
         """
@@ -1758,9 +1773,14 @@ class Orchestrator:
             return self._control_undetermined(f"the test half of the change against {control_base[:12]} was empty")
         try:
             return self._take_control(task, control_base, patch, commands)
-        except EnvironmentFault:
-            raise
-        except StopLoop as exc:
+        except (EnvironmentFault, StopLoop) as exc:
+            # Including the environment fault, which used to be re-raised. That made a third
+            # ending the three above do not name: the task's *own* DoD had already gone green,
+            # and a container that would not start for the control run aborted the leaf, reset it
+            # to `todo` and made the next run implement it again. A broken experiment is not
+            # evidence in either direction — that is this method's whole stated posture — and an
+            # abort is the strongest verdict of the three. The steps that decide the task run
+            # outside this call and still fault normally; only the control's own does not.
             return self._control_undetermined(str(exc))
 
     def _take_control(
@@ -1902,6 +1922,12 @@ class Orchestrator:
         Skipped for a task with no declared scope: an undeclared scope means *unbounded*, so its
         reading would be the whole change, which is neither one task wide nor what the gate will
         ask for.
+
+        **And skipped once the change is `critical`**, because the gate will not compose there:
+        `review_reading.plan_readings` reads a critical change whole whatever the configuration
+        says, so every per-task reading warmed after that point is one nothing will ever look up.
+        The risk is a property of the whole change and it only ever rises, so this stops the
+        warming for the rest of the run the same way an unanswerable adapter does.
         """
         if self.dry_run or self._warming_off or self.config.raw.composition == review_reading.WHOLE:
             return
@@ -1917,6 +1943,18 @@ class Orchestrator:
                 return
             exclude = review_reading.not_the_product(self.repo, self.state)
             limits = {**human_review.DEFAULT_BUDGET, **self.config.raw.budgets}
+            # One analysis of one whole diff answers both: the floor the gate will key on, and
+            # whether the gate will take per-task readings at all.
+            risk_floor, effective = review_reading.whole_change_risk(
+                self.repo, self._plan, base=base, head=head, exclude=exclude
+            )
+            if models.risk_at_least(effective, "critical"):
+                self._warming_off = True
+                print(
+                    f"    [review] {task.id}: the change is {effective} — gate ④ reads it whole, "
+                    "so no per-task reading is warmed from here on"
+                )
+                return
             review_reading.warm(
                 self.repo,
                 review_transport.StagedReviewers(self.repo, config=self.config.raw),
@@ -1925,10 +1963,16 @@ class Orchestrator:
                 head=head,
                 exclude=exclude,
                 limits=limits,
+                risk_floor=risk_floor,
                 config=self.config.raw,
                 cache=review_cache.StageCache(self.repo.root),
             )
-        except (review_policy.ReviewPolicyError, common.ReinError, OSError) as exc:
+        except (
+            review_policy.ReviewPolicyError,
+            review_transport.TransportError,
+            common.ReinError,
+            OSError,
+        ) as exc:
             self._warming_off = True
             print(f"    [review] {task.id}: the gate-④ reading was not taken here ({exc}); the gate will take it")
 
@@ -2066,7 +2110,10 @@ class Orchestrator:
                 f"{task.id}: changed {', '.join(outside)}, which its declared scope does not cover "
                 f"(include={list(task.scope_include)}, exclude={list(task.scope_exclude)}). "
                 "The plan says where this task's work belongs; landing it elsewhere is a scope change, "
-                "and a scope change to an approved plan is a human's decision.",
+                "and a scope change to an approved plan is a human's decision. Either the change "
+                "belongs to another task, or the plan drew this one's scope too small — the second "
+                "is answered with `rein revise --to tasks`, widening `scope.include`, and a "
+                "re-approval, never by editing the frozen plan in place.",
             )
 
         claimed = {str(p) for p in report.get("touched", []) if isinstance(p, str)}
@@ -2126,7 +2173,7 @@ class Orchestrator:
         logger.warning(f"[escalation] {message}")
         if not self.dry_run and self.cycle_id:
             record_escalation(self.repo, task.id, kind=kind, message=message, tree=tree, futile=futile)
-        self._stops[task.id] = "needs-revision" if kind == "agent_needs_revision" else "blocked"
+        self._stops[task.id] = "needs-revision" if kind in _PLAN_DEFECT_KINDS else "blocked"
 
     def _already_answered(self, task: dag.Task, cwd: str) -> tuple[str, str, str] | None:
         """`(kind, message, tree)` this task already reached over exactly this tree. None = ask again.
@@ -2262,7 +2309,9 @@ class Orchestrator:
     # -- post-merge integration gate --
 
     def _integration_fix_prompt(self, ids: str, failure_log: str) -> str:
-        return build_prompts.integration_fix_prompt(ids, failure_log, gate_cmds=self.config.gate_cmds)
+        return build_prompts.integration_fix_prompt(
+            ids, failure_log, gate_cmds=self.config.gate_cmds, pathspec=self.ws.pathspec
+        )
 
     def _invoke_integration_fixer(self, ids: str, prompt: str) -> None:
         """One implementer launch over the merged tree. The caller says what it is being sent.
@@ -2279,7 +2328,7 @@ class Orchestrator:
             role="implementer",
         )
 
-    def _integration_gate(self, tasks: list[dag.Task]) -> tuple[bool, str]:
+    def _integration_gate(self, tasks: list[dag.Task], before_join: str) -> tuple[bool, str]:
         """Re-verify the merged/integrated state of the work branch after a multi-leaf join.
 
         Each leaf passed the gate only in its own isolated worktree; the *combined* file set can
@@ -2306,7 +2355,7 @@ class Orchestrator:
                     # at the integration stage was being skipped, which made the join the one tree
                     # no reviewer ever read. The command steps have just run over it; this is the
                     # half of the question they cannot answer.
-                    self._run_integration_agent_step(step, tasks)
+                    self._run_integration_agent_step(step, tasks, before_join)
                     continue
                 if not step.command:
                     continue
@@ -2335,8 +2384,16 @@ class Orchestrator:
             budgets[failed] = left - 1
             self._invoke_integration_fixer(ids, self._integration_fix_prompt(ids, failure_log))
 
-    def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task]) -> None:
+    def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task], before_join: str) -> None:
         """Read the tree the merge produced, which no per-task reviewer ever saw.
+
+        **`before_join` is what makes "the join" a real subject.** The diff this reviewer is
+        pointed at used to start at `plan.base_commit`, which is the base of the *cycle*: every
+        batch after the first re-read every batch before it, at full price, and every finding
+        about code that landed two batches ago came back again. Worse, the attribution below only
+        knows this batch's tasks — so a finding about an earlier one matched no owner, was printed
+        instead of filed, and never reached the human. The join is the commits these merges added,
+        and that is the range.
 
         Its `must_fix` findings go back to the integration fixer within this step's own retries,
         the same shape a red command step takes; unresolved ones stop the batch rather than being
@@ -2360,7 +2417,7 @@ class Orchestrator:
                     build_prompts.integration_review_prompt(
                         ids,
                         gate_cmds=self.config.gate_cmds,
-                        diff_cmd=f"git diff {self._plan.base_commit if self._plan else 'HEAD~1'}..HEAD",
+                        diff_cmd=f"git diff {before_join}..HEAD",
                         findings_path=findings_rel,
                         disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
                     ),
@@ -2396,7 +2453,10 @@ class Orchestrator:
             self._invoke_integration_fixer(
                 ids,
                 build_prompts.integration_review_fix_prompt(
-                    ids, dossier.render_findings(outstanding), gate_cmds=self.config.gate_cmds
+                    ids,
+                    dossier.render_findings(outstanding),
+                    gate_cmds=self.config.gate_cmds,
+                    pathspec=self.ws.pathspec,
                 ),
             )
 
@@ -2642,6 +2702,8 @@ class Orchestrator:
             with build_lock(self.repo), control_plane.serving(self.repo) as server:
                 self.control = server
                 try:
+                    if refusal := self._tree_refusal():
+                        return refusal
                     rc = self._run_loop()
                     outcome = _RUN_OUTCOME.get(rc, "failed")
                     return rc
@@ -2660,6 +2722,29 @@ class Orchestrator:
             # shutdown often enough that reading this as fatal would stop the loop for good.
             logger.error(f"another build run holds the lock: {exc}")
             return common.EXIT_RETRY_LATER
+
+    def _tree_refusal(self) -> int:
+        """`EXIT_CANNOT_PROCEED` when the working tree is not this run's to measure; 0 to proceed.
+
+        **Asked inside the build lock, on purpose.** A dirty tree and a run already in progress are
+        the same picture from outside — the other run's implementer is editing the root *right now*
+        — so asking before the lock would tell the second `rein build` to commit or stash the
+        first one's live work, and to do it under "cannot proceed" where the honest answer is
+        "another run holds the repository, retry". The lock answers first; what is uncommitted
+        underneath it belongs to nobody but this run.
+
+        A git that cannot answer raises rather than reporting a clean tree
+        (`build_git.GitWorkspace._lines_of`), and the raise is handled here because this is the
+        first thing the locked section does — before the batch loop that handles the rest.
+        """
+        try:
+            problems = self._tree_problems()
+        except StopLoop as exc:
+            logger.error(str(exc))
+            return exc.code
+        for problem in problems:
+            logger.error(problem)
+        return common.EXIT_CANNOT_PROCEED if problems else 0
 
     def _preflight(self) -> list[preflight.Problem]:
         """Why this run cannot finish, found before the first launch (`rein.preflight`).
@@ -2699,18 +2784,13 @@ class Orchestrator:
     def _source_problems(self) -> list[str]:
         """Why the prose this build would read is not the prose gate ③ approved.
 
-        Two distinct failures, and the second is the one that had no symptom at all:
+        A ticket edited after the freeze changes what gets built, and `plan.yaml` being
+        digest-frozen said nothing about it. Refusing here is the same posture `rein guard`
+        already takes towards a frozen document — the way forward is `rein revise --to tasks`
+        and a re-approval, not an edit nobody recorded.
 
-          **It moved.** A ticket edited after the freeze changes what gets built, and `plan.yaml`
-          being digest-frozen said nothing about it. Refusing here is the same posture `rein
-          guard` already takes towards a frozen document — the way forward is `rein revise --to
-          tasks` and a re-approval, not an edit nobody recorded.
-
-          **It is not committed.** A parallel leaf is cut from the work branch's tip
-          (`git worktree add <path> <branch>`), so it reads the *committed* text and nothing else.
-          An uncommitted ticket edit therefore reached no leaf, silently, and the run implemented
-          the old definition while the author was reading the new one on screen. Naming it costs a
-          commit; not naming it costs a task built to the wrong spec.
+        A source that is merely *uncommitted* is caught earlier and more widely by
+        :meth:`_tree_problems`, which refuses any uncommitted change at all.
 
         Empty when the plan was frozen before this release recorded sources, so an in-flight
         repository upgrading mid-cycle is not stopped by a check it has no data for.
@@ -2727,16 +2807,63 @@ class Orchestrator:
                 f"{', '.join(moved)}. Building now would implement text nobody approved — "
                 "roll back with `rein revise --to tasks`, re-approve, and run again."
             ]
+        return []
+
+    def _tree_problems(self) -> list[str]:
+        """Why this run cannot tell its own work from what was already in the tree.
+
+        **A serial task is only isolated from the working tree if the working tree is a commit.**
+        A parallel leaf gets that by construction — `git worktree add` hands it a clean checkout of
+        the branch, so everything it finds there afterwards is its own. A serial task runs in the
+        repository root, where its change is derived as "the commits since the pre-task HEAD, plus
+        the dirty tree" (:meth:`build_git.Workspace.changed_since`). That derivation is exact when
+        the tree starts clean and silently wrong when it does not: an edit that was already sitting
+        there is indistinguishable from one the implementer just made, and every reading built on
+        top of it inherits the confusion —
+
+          * it counts against the task's declared `scope`, so unrelated work in the tree blocks a
+            task that never touched it;
+          * it fills the empty-diff check, so an implementer that wrote *nothing* looks productive
+            — the exact failure `no_implementation` exists to catch, defeated from the other side;
+          * it reaches the reviewer as part of the change under review;
+          * and `finalize_commit`'s `git add -A` lands it inside `T-NNN: <title>`, so the commit the
+            gate ④ record names contains work no task claimed. That one does not wash out on the
+            next run — it is in the history.
+
+        So the tree is a precondition, not something to compensate for afterwards. Subtracting a
+        recorded baseline was the alternative and it cannot fix the last item without scoping the
+        finalize commit to a path list, which merely hands the same unowned diff to the next task.
+
+        `.rein/` and the leaf worktree root are excluded, as they are everywhere else
+        (`build_git.GitWorkspace.excluded`): neither is any task's work.
+        """
         if self.dry_run:
             return []
-        dirty = sorted(set(self.ws.dirty_paths(self.root)) & set(pinned))
-        if dirty:
-            return [
-                f"{len(dirty)} document(s) the build reads have uncommitted changes: {', '.join(dirty)}. "
-                f"Parallel worktrees are cut from `{self.branch}` and read only what is committed there, "
-                "so those edits would reach no task. Commit them first."
-            ]
-        return []
+        dirty = self.ws.dirty_paths(self.root)
+        if not dirty:
+            return []
+        shown = ", ".join(dirty[:_DIRTY_PATHS_SHOWN])
+        if len(dirty) > _DIRTY_PATHS_SHOWN:
+            shown += f", and {len(dirty) - _DIRTY_PATHS_SHOWN} more"
+        lines = [
+            f"{len(dirty)} uncommitted change(s) in the working tree: {shown}. "
+            "A serial task's change is measured against the commit it started from, so anything "
+            f"already uncommitted is attributed to the first task this run touches — it counts "
+            f"against that task's scope and lands inside its commit. Commit them on `{self.branch}` "
+            "or stash them, then run again."
+        ]
+        interrupted = sorted(
+            task_id
+            for task_id, status in (self.state.task_status if self.state else {}).items()
+            if status == "in-progress"
+        )
+        if interrupted:
+            lines.append(
+                f"{', '.join(interrupted)} is still 'in-progress' from a run that did not finish. "
+                "If these paths are its work, commit them as `T-NNN: <its title>` so the task keeps "
+                "the commit that completed it."
+            )
+        return lines
 
     def _live_digest(self, path: str) -> str:
         candidate = self.repo.path(path)
@@ -2936,6 +3063,10 @@ class Orchestrator:
         landed: dict[str, str] = {}
         # The first fault in id order, so which one is reported does not depend on thread timing.
         fault = next((results[t.id].fault for t in sorted(tasks, key=lambda t: t.id) if results[t.id].fault), None)
+        # What the work branch was before any of this batch landed on it. The integration gate's
+        # reviewer reads the join, and the join is what these merges added — not the cycle. Taken
+        # here because it is the last moment it is still true.
+        before_join = self.ws.head()
         # Merge deterministically in ascending id order (sequential join).
         for task in sorted(tasks, key=lambda t: t.id):
             outcome = results[task.id]
@@ -3011,7 +3142,7 @@ class Orchestrator:
             # The next run resets them to `todo` and re-plays them, which re-runs the integration
             # gate. Duplicated work, never a skipped verification — marking them `done` would be
             # the other way round, and nothing would ever come back to check.
-            ok, log = self._integration_gate(merged)
+            ok, log = self._integration_gate(merged, before_join)
         else:
             ok, log = True, ""
         ids = ",".join(t.id for t in merged)

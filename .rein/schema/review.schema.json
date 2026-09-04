@@ -1156,13 +1156,14 @@
               }
             },
             "control": {
-              "description": "Whether each landed task's DoD green could have been red. The negative control re-establishes the gate's command steps over the base with only that task's test half applied; `discriminating` means a step went red without the source change, so the test half is not inert. Those tasks are a count — the experiment ran and answered — and the ones where it could not be taken are the rows: `no_tests_changed` says the task changed no test file, so its green rests on tests nobody wrote for it, and `undetermined` says the control itself could not be set up. Neither blocks: a task genuinely covered by tests that already existed is a real thing, and blocking would make the loop demand a test per task rather than evidence per claim. Whether the tests are any GOOD is not this section's question — it is the per-task reviewer's, and its answer arrives as a residual finding.",
+              "description": "Whether each landed task's DoD green could have been red. The negative control re-establishes the gate's command steps over the base with only that task's test half applied; `discriminating` means a step went red without the source change, so the test half is not inert. Those tasks are a count — the experiment ran and answered — and the ones where it could not be taken are the rows: `no_tests_changed` says the task changed no test file, so its green rests on tests nobody wrote for it, `undetermined` says the control itself could not be set up, and `unrecorded` says the task carries no control at all — a task closed by a release older than the experiment. None of the three blocks: a task genuinely covered by tests that already existed is a real thing, and blocking would make the loop demand a test per task rather than evidence per claim. Whether the tests are any GOOD is not this section's question — it is the per-task reviewer's, and its answer arrives as a residual finding.",
               "type": "object",
               "additionalProperties": false,
               "properties": {
                 "discriminating": { "type": "integer", "minimum": 0 },
                 "no_tests_changed": { "$ref": "#/$defs/uncontrolledTasks" },
-                "undetermined": { "$ref": "#/$defs/uncontrolledTasks" }
+                "undetermined": { "$ref": "#/$defs/uncontrolledTasks" },
+                "unrecorded": { "$ref": "#/$defs/uncontrolledTasks" }
               }
             },
             "residuals": {

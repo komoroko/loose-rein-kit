@@ -9,6 +9,7 @@ doctor/pr_draft already rely on (see build_loop's `_late_run`).
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -18,9 +19,6 @@ from typing import Protocol
 from rein import common, digests
 from rein import repo as repo_mod
 from rein.common import StopLoop
-
-#: Never part of what "the tree" means (see `repo.SSOT_DIR` for why it is one constant).
-_EXCLUDED: tuple[str, ...] = (repo_mod.SSOT_DIR,)
 
 
 class EventSink(Protocol):
@@ -60,25 +58,40 @@ def worktree_heads(repo: repo_mod.Repo, run: Runner) -> list[tuple[str, str]]:
     return found
 
 
+#: Held across the `worktree remove` / `prune` / `add` triple below and across the teardown, and
+#: never across the body in between.
+#:
+#: `git worktree prune` is a **repository-wide** operation — it rewrites `.git/worktrees` for every
+#: worktree at once, not for the one being made — and this used to be called only from the merge
+#: step, which runs after the parallel phase and therefore alone. The negative control calls it from
+#: inside each leaf's own thread, so up to `max_parallel` of them now overlap. Serialising the admin
+#: calls is what keeps two threads out of one `.git/worktrees`; serialising the *body* would undo
+#: the parallelism the control runs inside.
+_WORKTREE_ADMIN = threading.Lock()
+
+
 @contextmanager
 def scratch_worktree(repo: repo_mod.Repo, worktree_dir: str, name: str, branch: str, run: Runner) -> Iterator[str]:
     """A throwaway worktree with `branch` checked out, removed on the way out.
 
-    For merging into a branch nothing else has checked out. A leftover from a killed run is
-    cleared first — it holds no work of its own, so removing it cannot lose anything, which is
-    exactly what is *not* true of the leaf worktrees above.
+    For merging into a branch nothing else has checked out, and for the negative control's
+    re-establishment over the base. A leftover from a killed run is cleared first — it holds no work
+    of its own, so removing it cannot lose anything, which is exactly what is *not* true of the leaf
+    worktrees above.
     """
     path = str(repo.path(worktree_dir) / name)
-    run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
-    run(["git", "worktree", "prune"], cwd=str(repo.root))
-    rc, out = run(["git", "worktree", "add", "--force", path, branch], cwd=str(repo.root))
+    with _WORKTREE_ADMIN:
+        run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
+        run(["git", "worktree", "prune"], cwd=str(repo.root))
+        rc, out = run(["git", "worktree", "add", "--force", path, branch], cwd=str(repo.root))
     if rc != 0:
         raise StopLoop(f"could not create the scratch worktree at {path}: {out}")
     try:
         yield path
     finally:
-        run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
-        run(["git", "worktree", "prune"], cwd=str(repo.root))
+        with _WORKTREE_ADMIN:
+            run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
+            run(["git", "worktree", "prune"], cwd=str(repo.root))
 
 
 class GitWorkspace:
@@ -102,6 +115,20 @@ class GitWorkspace:
         self.branch = branch
         self.dry_run = dry_run
         self.worktree_dir = worktree_dir
+        #: Prefixes that are never part of what "the tree" means, and the git pathspec spelling
+        #: the same thing. Four answers read them — the fingerprint, the paths a task is credited
+        #: with, the commit it produces, and the `git add` an implementer is told to type — and
+        #: they have to agree, which is why they are derived here once rather than spelled out
+        #: four times (`test_the_tree_exclusion_lives_in_exactly_one_place`).
+        #:
+        #: `.rein/` is orchestration state (see `repo.SSOT_DIR`). The leaf worktree root is the
+        #: other half and had been left out: it holds *other* tasks' work in progress, so a
+        #: serial task running beside a leaf counted that leaf's whole worktree as its own change
+        #: — against its declared scope, into its fingerprint, and, through `git add -A`, into its
+        #: commit as a gitlink. It is configurable (`execution.worktree_dir`), which is why this
+        #: is per-instance where `repo.SSOT_PATHSPEC` is a constant.
+        self.excluded: tuple[str, ...] = (repo_mod.SSOT_DIR, worktree_dir.rstrip("/") + "/")
+        self.pathspec: tuple[str, ...] = repo_mod.pathspec_excluding(self.excluded)
         self.branch_pattern = branch_pattern
         self._run = run
         # Where this layer reports what it did. Injected rather than imported: git surgery
@@ -208,11 +235,11 @@ class GitWorkspace:
             return ""
         if listed.strip() and not entries:
             return ""
-        committed = digests.tree_digest(digests.filter_tree(entries, exclude_prefixes=_EXCLUDED))
-        rc, diff = self._run(["git", "diff", "HEAD", "--binary", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
+        committed = digests.tree_digest(digests.filter_tree(entries, exclude_prefixes=self.excluded))
+        rc, diff = self._run(["git", "diff", "HEAD", "--binary", "--", *self.pathspec], cwd=cwd)
         if rc != 0 or common.was_truncated(diff):
             return ""
-        rc, listing = self._run(["git", "ls-files", "-o", "--exclude-standard", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
+        rc, listing = self._run(["git", "ls-files", "-o", "--exclude-standard", "--", *self.pathspec], cwd=cwd)
         if rc != 0 or common.was_truncated(listing):
             return ""
         untracked = [name for name in listing.splitlines() if name.strip()]
@@ -364,40 +391,79 @@ class GitWorkspace:
         implementer produced nothing" and "the implementer has not committed yet" were the same
         answer. They are not the same thing, and one of them is a failure.
         """
-        paths: set[str] = set()
         branch = self.branch_for(task_id)
-        rc, out = self._run(["git", "diff", "--name-only", f"{self.target_branch(task_id)}...{branch}"], cwd=self.root)
-        if rc == 0:
-            paths.update(p for p in out.splitlines() if p.strip())
+        paths = set(
+            self._lines_of(
+                ["diff", "--name-only", f"{self.target_branch(task_id)}...{branch}"],
+                self.root,
+                what=f"what {task_id} committed on {branch}",
+            )
+        )
         if cwd:
             paths.update(self.dirty_paths(cwd))
         return sorted(paths)
 
-    def dirty_paths(self, cwd: str) -> list[str]:
-        """Uncommitted paths in `cwd` — modified, staged and untracked — excluding `.rein/`.
+    def _lines_of(self, args: list[str], cwd: str, *, what: str) -> list[str]:
+        """The lines `git <args>` printed. **Never a silent empty answer.**
 
-        `.rein/` is excluded for the same reason `finalize_commit` excludes it: orchestration
-        state is not any task's work, and counting it would make every task look like it changed
-        something.
+        Each of the three callers turns this into "which paths changed", and each of those answers decides
+        something: whether the run may start at all, what a task is credited with changing, whether
+        its diff stayed inside its declared scope. `rc == 0` guarding the parse — with no `else` —
+        made a git that *could not answer* indistinguishable from a git that answered *nothing*: an
+        index another process has locked, a pathspec a mis-set `execution.worktree_dir` makes
+        invalid, a repository the runner could not enter. The precondition built on that
+        (`build_loop._tree_problems`) then passes **because** the check broke, which is the one way
+        a precondition must never pass.
+
+        A capped output is the same lie one line further on, so it is refused too: a prefix is not
+        the answer, which is why `fingerprint` has always asked (`common.was_truncated`).
+
+        `EXIT_CANNOT_PROCEED`, not the default: nothing here is a verdict about the code, and
+        re-running before the named thing is repaired is wasted.
+        """
+        rc, out = self._run(["git", *args], cwd=cwd)
+        printed = out.strip()
+        if rc != 0:
+            raise StopLoop(
+                f"could not determine {what}: `git {' '.join(args)}` exited {rc} in {cwd}"
+                + (f"\n{printed}" if printed else " and said nothing"),
+                code=common.EXIT_CANNOT_PROCEED,
+            )
+        if common.was_truncated(out):
+            raise StopLoop(
+                f"could not determine {what}: `git {' '.join(args)}` printed past the "
+                f"{common.MAX_OUTPUT_BYTES}-byte cap on one command's output, so what came back is "
+                "a prefix rather than the answer",
+                code=common.EXIT_CANNOT_PROCEED,
+            )
+        return [line for line in out.splitlines() if line.strip()]
+
+    def dirty_paths(self, cwd: str) -> list[str]:
+        """Uncommitted paths in `cwd` — modified, staged and untracked — excluding :attr:`excluded`.
+
+        `.rein/` and the leaf worktree root are excluded for the same reason `finalize_commit`
+        excludes them: neither is any task's work, and counting them would make every task look
+        like it changed something.
         """
         paths: set[str] = set()
-        rc, out = self._run(["git", "status", "--porcelain", "-uall", "--", *repo_mod.SSOT_PATHSPEC], cwd=cwd)
-        if rc == 0:
-            for line in out.splitlines():
-                if len(line) < 4:
-                    continue
-                path = line[3:]
-                if " -> " in path:
-                    path = path.split(" -> ", 1)[1]
-                paths.add(path.strip('"'))
+        for line in self._lines_of(
+            ["status", "--porcelain", "-uall", "--", *self.pathspec], cwd, what=f"the uncommitted paths in {cwd}"
+        ):
+            if len(line) < 4:
+                continue
+            path = line[3:]
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            paths.add(path.strip('"'))
         return sorted(paths)
 
     def changed_since(self, base: str) -> list[str]:
         """Paths a serial task changed on the work branch: commits since `base` plus the dirty tree."""
-        paths: set[str] = set()
-        rc, out = self._run(["git", "diff", "--name-only", f"{base}..HEAD"], cwd=self.root)
-        if rc == 0:
-            paths.update(p for p in out.splitlines() if p.strip())
+        paths = set(
+            self._lines_of(
+                ["diff", "--name-only", f"{base}..HEAD"], self.root, what=f"what was committed since {base[:12]}"
+            )
+        )
         paths.update(self.dirty_paths(self.root))
         return sorted(paths)
 
@@ -506,7 +572,7 @@ class GitWorkspace:
         """
         if self.dry_run:
             return True
-        pathspec = list(repo_mod.SSOT_PATHSPEC)
+        pathspec = list(self.pathspec)
         rc, out = self._run(["git", "status", "--porcelain", "--", *pathspec], cwd=cwd)
         if rc == 0 and not out.strip():
             return True  # clean tree — nothing to preserve

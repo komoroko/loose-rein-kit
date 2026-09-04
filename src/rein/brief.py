@@ -346,9 +346,14 @@ def _verification(config: models.Config | None, state: models.State | None) -> d
     return section
 
 
+#: What "there is no control" is called when the task carries no `negative_control` at all. Not a
+#: value `build_loop` writes — it is the *absence* of one — so it is minted here, where the absence
+#: is what has to be said out loud.
+_UNRECORDED = "unrecorded"
+
 #: The negative-control outcomes that are not a control. `discriminating` is the one that says the
-#: experiment ran and answered, so it is a count; these two say it did not, and they are the rows.
-_UNCONTROLLED = ("no_tests_changed", "undetermined")
+#: experiment ran and answered, so it is a count; these say it did not, and they are the rows.
+_UNCONTROLLED = ("no_tests_changed", "undetermined", _UNRECORDED)
 
 
 def _control(state: models.State | None) -> dict[str, Any]:
@@ -383,6 +388,15 @@ def _control(state: models.State | None) -> dict[str, Any]:
         evidence = entry.get("evidence")
         control = evidence.get("negative_control") if isinstance(evidence, dict) else None
         if not isinstance(control, Mapping):
+            # A landed task with no control record at all, and it used to be skipped — which read
+            # to a human exactly like a controlled one, because only the uncontrolled are listed.
+            # This section exists to stop `no_tests_changed` reaching the gate as a silence; a
+            # `continue` here reintroduced the same silence one case over. The reachable cause is
+            # a task closed by a release older than the control, and the honest word for that is
+            # not "controlled".
+            rows[_UNRECORDED].append(
+                {"task_id": str(task_id), "detail": "this task closed before the negative control existed"}
+            )
             continue
         result = str(control.get("result", ""))
         if result == "discriminating":

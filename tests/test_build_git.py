@@ -13,6 +13,7 @@ happened either way is reported to whoever records the handoff.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -119,20 +120,27 @@ def test_a_fully_merged_branch_is_not_resurrected(
     assert salvaged == []
 
 
-def test_the_ssot_exclusion_lives_in_exactly_one_place() -> None:
+def test_the_tree_exclusion_lives_in_exactly_one_place(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
     """Four answers have to agree about what "the tree" excludes: the fingerprint, the paths a task
     is credited with, the commit it produces, and the change a review is bound to. They were four
     separate spellings of `.rein/` — two module constants and four inline `:(exclude).rein`
     pathspecs, plus the copy inside the implementer's own instructions — so any one of them could
     drift and nothing would notice until a fact was invalidated by having been recorded.
+
+    The set is `.rein/` **and the leaf worktree root**. The second was missing, so a serial task
+    running beside a parked leaf was credited with that leaf's entire worktree.
     """
     import re
 
     from rein import build_prompts
 
-    assert build_git._EXCLUDED == (repo_mod.SSOT_DIR,)
+    _, ws, _ = workspace
+    assert ws.excluded == (repo_mod.SSOT_DIR, ".worktrees/")
+    assert ws.pathspec == (".", ":(exclude).rein", ":(exclude).worktrees")
     # The instruction an agent actually types renders the same pathspec the loop applies for it.
-    assert build_prompts._pathspec() == ". ':(exclude).rein'"
+    assert build_prompts._pathspec(ws.pathspec) == ". ':(exclude).rein' ':(exclude).worktrees'"
     assert repo_mod.SSOT_PATHSPEC == (".", ":(exclude).rein")
 
     literal = re.compile(r":\(exclude\)")
@@ -251,3 +259,80 @@ def test_a_failed_intent_to_add_takes_back_what_it_managed_to_stage(
     monkeypatch.undo()
     assert ws.fingerprint(str(root)) == before, "the index is back where it was"
     assert git(root, "status", "--porcelain", "-uall").splitlines()[-1].startswith("??")
+
+
+def test_a_leafs_worktree_is_not_the_serial_tasks_dirty_tree(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """A parked leaf's worktree sits inside the repository root, untracked, holding its own work.
+
+    Every reading of "what changed" taken from the root would otherwise swallow it: the serial
+    task running next is credited with the leaf's entire tree, blocked for a scope it never
+    reached into, and — through `finalize_commit`'s `git add -A` — hands `T-NNN: <title>` a
+    gitlink to somebody else's worktree.
+    """
+    root, ws, _ = workspace
+    ws.add_worktree("T-002")
+    (root / ".worktrees" / "T-002" / "leaf.py").write_text("someone else's work\n", encoding="utf-8")
+    (root / "mine.py").write_text("this task's work\n", encoding="utf-8")
+
+    assert ws.dirty_paths(str(root)) == ["mine.py"]
+
+    before = ws.fingerprint(str(root))
+    (root / ".worktrees" / "T-002" / "leaf.py").write_text("the leaf moved on\n", encoding="utf-8")
+    assert ws.fingerprint(str(root)) == before, "a sibling leaf writing must not move this tree's fingerprint"
+
+    assert ws.finalize_commit(str(root), "T-001: serial work")
+    assert git(root, "show", "--name-only", "--format=", "HEAD").split() == ["mine.py"]
+
+
+def test_a_git_that_cannot_answer_is_not_an_answer_of_nothing(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """Every path query below parsed its output under `if rc == 0` with no `else`.
+
+    So a git that *could not answer* — an index another process holds, a pathspec a mis-set
+    `execution.worktree_dir` makes invalid, a repository the runner could not enter — read exactly
+    like a git that answered *nothing*. Three answers rest on that: whether the run may start at
+    all (`build_loop._tree_problems`), what a task is credited with changing, and whether its diff
+    stayed inside its declared scope. A precondition that passes because the check broke is the one
+    way a precondition must never pass.
+    """
+    root, ws, _ = workspace
+    (root / "stray.py").write_text("x = 1\n", encoding="utf-8")
+    assert ws.dirty_paths(str(root)) == ["stray.py"]  # the same question, answered
+
+    calls: list[list[str]] = []
+
+    def refusing(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
+        calls.append(cmd)
+        return 128, "fatal: unable to read index"
+
+    ws._run = refusing  # type: ignore[assignment]
+    queries: tuple[Callable[[], list[str]], ...] = (
+        lambda: ws.dirty_paths(str(root)),
+        lambda: ws.changed_since("HEAD~1"),
+        lambda: ws.branch_changed_paths("T-001"),
+    )
+    for query in queries:
+        with pytest.raises(common.StopLoop) as caught:
+            query()
+        assert "could not determine" in str(caught.value)
+        assert "unable to read index" in str(caught.value)
+        assert caught.value.code == common.EXIT_CANNOT_PROCEED
+    assert len(calls) == 3
+
+
+def test_a_capped_listing_is_a_prefix_and_not_the_answer(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """`fingerprint` has always refused a truncated output; the path queries took one as fact.
+
+    A capped `git status` is a prefix of the uncommitted paths, so the tail — which may hold the
+    only path that violates a scope — reads as absent rather than as unknown.
+    """
+    root, ws, _ = workspace
+    ws._run = lambda cmd, cwd=None, **kw: (0, "?? a.py\n" + common.TRUNCATION_MARKER)  # type: ignore[assignment]
+    with pytest.raises(common.StopLoop) as caught:
+        ws.dirty_paths(str(root))
+    assert "prefix rather than the answer" in str(caught.value)

@@ -13,6 +13,8 @@ and hands over to the review pipeline.
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -23,6 +25,7 @@ import pytest
 
 from rein import (
     adapters,
+    build_git,
     build_loop,
     common,
     conflict,
@@ -50,6 +53,11 @@ from tests._support import (
     make_task,
     seed_repo,
 )
+
+#: What a run's own `GitWorkspace` computes: `.rein/` and the leaf worktree root, excluded from
+#: the `git add` the implementer is told to type as well as from the loop's own reading of the
+#: tree. These tests build prompts without a workspace, so they name it directly.
+PATHSPEC = (".", ":(exclude).rein", ":(exclude).worktrees")
 
 
 def graph_of(done: tuple[str, ...] = ()) -> dag.Graph:
@@ -393,12 +401,15 @@ def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: st
 def test_the_review_transport_is_granted_a_read_and_no_more(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, adapter: str
 ) -> None:
-    """A gate-④ stage is handed its payload on stdin, answers on stdout, and changes nothing.
+    """A gate-④ stage is handed its request, answers on stdout, and changes nothing.
 
     That is `READ`, which is not the same as passing no flags — and the difference is the whole
     reason the level exists. `codex exec` reads without being told, so its launch stays bare;
     `copilot` grants no tool at all without one, so an ungranted launch could not open the checkout
     the security stage is given to read. Neither gets a grant that could change anything.
+
+    The request itself goes where that CLI takes one (`review_transport.prompt_call`): neither of
+    these reads stdin, so the payload is the last thing on the line, after the grant.
     """
     from rein import common, review_transport
 
@@ -419,7 +430,8 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
     review_transport._adapter_reviewer(repo, "code_reviewer", ledger=ledger)({"request": "x"})
 
     record = adapters.ADAPTER_TABLE[adapter]
-    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ)]
+    payload = json.dumps({"request": "x"})
+    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ), *record.prompt_argv(payload)]
     assert not set(launched[0]) & set(record.access_flags(adapters.WRITE)) - set(record.launch_argv())
 
 
@@ -495,7 +507,7 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
-    monkeypatch.setattr(loop, "_integration_gate", lambda merged: (True, ""))
+    monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (True, ""))
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: next(heads))
 
     loop._consume_parallel(tasks)
@@ -904,7 +916,7 @@ def test_the_prompt_names_the_claims_the_task_answers_for(tmp_path: Path) -> Non
     from rein import build_prompts
 
     task = dag.Task(id="T-002", title="retry", kind="parallel", claim_ids=("C-002",))
-    prompt = build_prompts.implementer_prompt(task, "", gate_cmds=["make test"], has_baseline=False)
+    prompt = build_prompts.implementer_prompt(task, "", gate_cmds=["make test"], has_baseline=False, pathspec=PATHSPEC)
     assert "C-002" in prompt
     assert "answerable for" in prompt
 
@@ -913,7 +925,7 @@ def test_the_prompt_falls_back_to_the_whole_design_without_claims() -> None:
     from rein import build_prompts
 
     task = dag.Task(id="T-001", title="base", kind="foundation")
-    prompt = build_prompts.implementer_prompt(task, "", gate_cmds=["make test"], has_baseline=False)
+    prompt = build_prompts.implementer_prompt(task, "", gate_cmds=["make test"], has_baseline=False, pathspec=PATHSPEC)
     assert "docs/20-design.md" in prompt
 
 
@@ -922,7 +934,7 @@ def test_a_previous_failure_is_passed_through_already_summarized() -> None:
 
     task = dag.Task(id="T-001", title="base", kind="foundation")
     prompt = build_prompts.implementer_prompt(
-        task, "$ make test (rc=1)\nE  assert 1 == 2", gate_cmds=["make test"], has_baseline=False
+        task, "$ make test (rc=1)\nE  assert 1 == 2", gate_cmds=["make test"], has_baseline=False, pathspec=PATHSPEC
     )
     assert "assert 1 == 2" in prompt
 
@@ -989,6 +1001,7 @@ def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path)
         "",
         gate_cmds=["make test"],
         has_baseline=False,
+        pathspec=PATHSPEC,
         handoff={"salvage_branch": "b-T-001-salvage-1", "salvage_state": "restored"},
     )
     assert "already been merged" in restored and "b-T-001-salvage-1" in restored
@@ -997,6 +1010,7 @@ def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path)
         "",
         gate_cmds=["make test"],
         has_baseline=False,
+        pathspec=PATHSPEC,
         handoff={"salvage_branch": "b-T-001-salvage-1", "salvage_state": "conflict"},
     )
     assert "conflicted" in conflicted
@@ -1127,10 +1141,13 @@ def test_the_joins_two_send_backs_are_not_framed_as_the_same_work() -> None:
     from rein import build_prompts
 
     deterministic = build_prompts.integration_fix_prompt(
-        "T-001,T-002", "$ make check (rc=1)\nE  unused import", gate_cmds=["make check"]
+        "T-001,T-002", "$ make check (rc=1)\nE  unused import", gate_cmds=["make check"], pathspec=PATHSPEC
     )
     from_review = build_prompts.integration_review_fix_prompt(
-        "T-001,T-002", "- must_fix: two tasks read `Config.timeout` differently", gate_cmds=["make check"]
+        "T-001,T-002",
+        "- must_fix: two tasks read `Config.timeout` differently",
+        gate_cmds=["make check"],
+        pathspec=PATHSPEC,
     )
     assert "fails the deterministic gate" in deterministic
     assert "fails the deterministic gate" not in from_review
@@ -1159,7 +1176,10 @@ def test_each_join_send_back_reaches_the_implementer_with_its_own_framing(
 
     loop._invoke_integration_fixer("T-001", loop._integration_fix_prompt("T-001", "rc=1"))
     loop._invoke_integration_fixer(
-        "T-001", build_prompts.integration_review_fix_prompt("T-001", "- must_fix: x", gate_cmds=["make check"])
+        "T-001",
+        build_prompts.integration_review_fix_prompt(
+            "T-001", "- must_fix: x", gate_cmds=["make check"], pathspec=PATHSPEC
+        ),
     )
     assert "fails the deterministic gate" in sent[0]
     assert "reviewer looks again" in sent[1]
@@ -1258,7 +1278,7 @@ def test_the_integration_gate_actually_runs_the_command_steps(tmp_path: Path, mo
     monkeypatch.setattr(common, "run", fake_git({("make", "test"): (1, "tests/x.py::t FAILED")}))
     monkeypatch.setattr(build_loop, "_run", fake_git())  # the fixer the gate hands the failure to
     task = dag.Task(id="T-001", title="t", kind="parallel")
-    ok, failure = loop._integration_gate([task])
+    ok, failure = loop._integration_gate([task], "b" * 40)
     assert not ok
     assert "FAILED" in failure
 
@@ -2291,7 +2311,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: "a" * 40)
 
-    def record_gate(merged: list[dag.Task]) -> tuple[bool, str]:
+    def record_gate(merged: list[dag.Task], before_join: str) -> tuple[bool, str]:
         gated.append([t.id for t in merged])
         return True, ""
 
@@ -2438,8 +2458,8 @@ def test_an_agent_step_declared_at_the_integration_stage_runs_there(
     monkeypatch.setattr(loop, "_steps_at", lambda stage: (step,) if stage == "integration" else ())
 
     seen: list[str] = []
-    monkeypatch.setattr(loop, "_run_integration_agent_step", lambda s, tasks: seen.append(s.name))
-    ok, _ = loop._integration_gate([dag.Task(id="T-001", title="t", kind="parallel")])
+    monkeypatch.setattr(loop, "_run_integration_agent_step", lambda s, tasks, before: seen.append(s.name))
+    ok, _ = loop._integration_gate([dag.Task(id="T-001", title="t", kind="parallel")], "b" * 40)
     assert ok and seen == ["review"], "the agent step declared at this stage has to run at it"
 
 
@@ -2738,3 +2758,148 @@ def test_a_fast_launch_says_nothing_and_leaves_no_thread(
         pass
     assert "[waiting]" not in capsys.readouterr().out
     assert threading.active_count() <= before, "the heartbeat outlived the wait it was reporting on"
+
+
+def test_a_gate_four_stage_reaches_a_cli_that_does_not_read_stdin() -> None:
+    """The transport handed every stage its request on stdin with no prompt argument.
+
+    That is claude's shape — `-p` is a boolean there and the prompt is a positional — and it is
+    nobody else's. Under a CLI whose prompt is a flag's *value*, that launch asks nothing: it does
+    not error, it waits for input that is not coming, until `agent_timeout_sec` (default: no
+    limit). The adapter table said so all along, in `prompt_flags`, and the transport never read it.
+    """
+    from rein import review_transport
+
+    claude = adapters.ADAPTER_TABLE["claude"]
+    argv, stdin = review_transport.prompt_call(claude, ["claude", "-p"], "PAYLOAD")
+    assert (argv, stdin) == (["claude", "-p"], "PAYLOAD"), "the one CLI whose stdin is established"
+
+    for name in ("gemini", "copilot", "amp", "opencode", "codex", "cursor"):
+        record = adapters.ADAPTER_TABLE[name]
+        argv, stdin = review_transport.prompt_call(record, list(record.argv), "PAYLOAD")
+        assert argv[-1] == "PAYLOAD", f"{name} was launched without its question"
+        assert stdin == "", f"{name} does not read stdin, so nothing may be left there"
+
+
+def test_a_request_too_large_for_an_argument_is_refused_rather_than_sent() -> None:
+    """`max_diff_bytes` defaults to 512 KiB and one argv element holds 128. Handing that to
+    `execve` raises `E2BIG`, which surfaces as an OSError naming a syscall rather than as a
+    reviewer that cannot be reached — so the refusal is taken here, naming both ways out."""
+    from rein import review_transport
+
+    record = adapters.ADAPTER_TABLE["gemini"]
+    oversize = "x" * (review_transport.MAX_PROMPT_ARG_BYTES + 1)
+    with pytest.raises(review_transport.TransportError, match="max_diff_bytes"):
+        review_transport.prompt_call(record, list(record.argv), oversize)
+    # And the byte before the cliff still goes.
+    argv, _ = review_transport.prompt_call(record, list(record.argv), "x" * review_transport.MAX_PROMPT_ARG_BYTES)
+    assert argv[-1].startswith("x")
+
+
+def test_a_broken_negative_control_is_undetermined_and_not_an_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sandbox that will not run the *control's* steps is a broken experiment, not a verdict.
+
+    It used to be re-raised: the task's own DoD had already gone green, and a container that would
+    not start for the control aborted the leaf, reset it to `todo` and made the next run implement
+    it again. The three endings this method names are pass, block, and could-not-be-taken; an abort
+    is none of them.
+    """
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    task = dag.Task(id="T-001", title="t", kind="parallel")
+    step = build_loop.GateStep(name="test", kind="command", command=("true",))
+    monkeypatch.setattr(loop, "_review_scope", lambda t, cwd, base: (["tests/test_x.py"], "git diff"))
+    monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
+    monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "--- a\n+++ b\n")
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise faults.EnvironmentFault(faults.Fault.ENV_PERMANENT, where="control", rc=1, output="no container")
+
+    monkeypatch.setattr(build_git, "scratch_worktree", explode)
+    failed, log = loop._negative_control(task, str(tmp_path), "a" * 40, [step])
+
+    assert (failed, log) == (None, ""), "the task's own green stands; only the experiment failed"
+    assert loop._current_control["result"] == "undetermined"
+    assert "no container" in loop._current_control["detail"]
+
+
+def test_the_integration_reviewer_reads_the_join_and_not_the_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The diff started at the plan's base commit, so every batch re-read every batch before it —
+    and the attribution below only knows *this* batch's tasks, so a finding about an earlier one
+    matched no owner, was printed instead of filed, and never reached the human."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(common, "run", fake_git())
+    step = build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer", stage="integration")
+    prompts: list[str] = []
+    target = dossier.findings_path(loop.root, "integration")
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    def answer(argv: list[str], **_kw: object) -> None:
+        prompts.append(argv[-1])
+        target.write_text(json.dumps({"findings": []}), encoding="utf-8")
+
+    monkeypatch.setattr(loop, "_launch", answer)
+    loop._run_integration_agent_step(step, [dag.Task(id="T-001", title="t", kind="parallel")], "c" * 40)
+
+    assert f"git diff {'c' * 40}..HEAD" in prompts[0]
+
+
+def _committed_build_repo(tmp_path: Path) -> Path:
+    """`build_repo` in a git repository whose tree is clean — what the loop requires to start.
+
+    In a subdirectory because the suite points `XDG_RUNTIME_DIR` at `tmp_path/run`: seeded at
+    `tmp_path` itself, the lock and control socket would sit *inside* the repository and read as
+    uncommitted work, which they never are on a real machine.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    build_repo(root)
+    for args in (
+        ["init", "-q", "-b", "build/demo"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-q", "-m", "base"],
+    ):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    return root
+
+
+def test_a_dirty_tree_stops_the_run_before_a_task_is_touched(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A serial task's change is measured against the commit it started from.
+
+    So anything already uncommitted is attributed to the first task this run touches — it counts
+    against that task's declared scope, fills the empty-diff check, reaches the reviewer, and lands
+    inside `T-NNN: <title>`. The refusal names the paths rather than only the count.
+    """
+    root = _committed_build_repo(tmp_path)
+    (root / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    repo = repo_mod.Repo(root)
+    with caplog.at_level(logging.ERROR, logger="rein.build_loop"):
+        rc = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo).run()
+    assert rc == common.EXIT_CANNOT_PROCEED
+    assert "package-lock.json" in caplog.text
+
+
+def test_the_lock_answers_before_the_working_tree_does(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A dirty tree and a run already in progress are the same picture from outside.
+
+    The other run's implementer is editing the repository root *right now*, so asking about the
+    tree before taking the lock would tell the second `rein build` to commit or stash the first
+    one's live work — and to do it under `cannot proceed`, where the honest answer is "another run
+    holds the repository, retry". The tree question belongs inside the lock, where what is
+    uncommitted belongs to nobody but this run.
+    """
+    root = _committed_build_repo(tmp_path)
+    (root / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    repo = repo_mod.Repo(root)
+    store_mod.ensure_private_dir(store_mod.Store(repo).runtime)
+    with caplog.at_level(logging.ERROR, logger="rein.build_loop"), build_loop.build_lock(repo):
+        rc = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo).run()
+    assert rc == common.EXIT_RETRY_LATER
+    assert "holds the lock" in caplog.text
+    assert "package-lock.json" not in caplog.text

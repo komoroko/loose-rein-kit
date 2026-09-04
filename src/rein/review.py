@@ -306,7 +306,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         diff_bytes=facts.coverage.analyzed_bytes,
         ceiling=int(limits["max_diff_bytes"]),
         unreadable=tuple(sorted(p for p in unreadable if p)),
-        effective_risk=_effective_risk(facts, plan),
+        effective_risk=review_reading.effective_risk(facts, plan),
         composition=tuple(bytes_by_kind(diff_text).items()),
     )
 
@@ -414,27 +414,39 @@ def generate(
         whole_diff = review_reading.diff_of(repo, trusted_base, head, exclude)
         facts = diff_facts.analyze(whole_diff)
         review_reading.refuse_over_budget(facts.coverage.analyzed_bytes, limits)
-        effective = _effective_risk(facts, plan)
+        effective = review_reading.effective_risk(facts, plan)
         changed = [f.path for f in facts.files]
+
+        # What the last review found blocking *about this same base*. Taken from the copy read at
+        # the top rather than re-read here, and before the calls below, which are about to move off
+        # this thread — the store is not something to touch from two. It is needed this early
+        # because it decides how the change may be read at all: see the re-take below.
+        prior_blocking = _prior_blocking(existing, trusted_base)
 
         # How the change is read: one reading of everything, or one per task the plan scopes plus
         # the seam between them. Each is measured and widened on its own, so one launch holds one
         # task's slice rather than a whole cycle, and a slice nobody read is named rather than
         # counted as read (`compose_coverage`).
         readings = review_reading.plan_readings(
-            plan, changed, mode=config.composition if config is not None else "auto"
+            plan, changed, mode=config.composition if config is not None else "auto", risk=effective
         )
-        measures = [
-            review_reading.read_facts(
-                repo, reading=reading, base=trusted_base, head=head, exclude=exclude, limits=limits
+        measures = review_reading.take_readings(
+            repo, readings, base=trusted_base, head=head, exclude=exclude, limits=limits
+        )
+        # A composition is a way of reading *this* change only if every finding carried into it
+        # lands on a reading that can see the code it names. One that does not is not a finding to
+        # be assigned somewhere anyway — the reviewer that got it could neither re-state nor
+        # resolve it, and the refusal for dropping a carried finding is not passable from there.
+        # Asked after the empty slices are dropped, because a dropped reading owns nothing.
+        if orphaned := review_reading.unowned_priors([m.reading for m in measures], prior_blocking):
+            logger.warning(
+                f"carried blocking finding(s) {', '.join(orphaned)} are anchored in code no task "
+                "scope covers, so no slice of this change can answer for them — reading the change "
+                "whole instead of composing it"
             )
-            for reading in readings
-        ]
-        # A slice this cycle did not touch has nothing in it to read. Launching two models at an
-        # empty diff buys an empty answer at full price, and a task the cycle never reached would
-        # cost that on every regeneration. The whole-change reading is never dropped: an empty
-        # change still gets the reading that says so, which is the shape a review has always had.
-        measures = [m for m in measures if m.reading.whole or m.facts.files]
+            measures = review_reading.take_readings(
+                repo, [review_reading.WHOLE_READING], base=trusted_base, head=head, exclude=exclude, limits=limits
+            )
         coverage = review_reading.compose_coverage(facts.coverage.to_manifest(), measures, changed_paths=changed)
 
         subject = {
@@ -448,15 +460,11 @@ def generate(
             "subject_head_sha": head,
         }
 
-        # What the last review found blocking *about this same base*. Taken from the copy read at
-        # the top rather than re-read here, and taken before the calls below, which are about to
-        # move off this thread — the store is not something to touch from two. It goes *into the
-        # request*, which is both where the reviewer reads it and where the validator now takes it
-        # from: the reviewer is refused for dropping one of these, and was being refused on
-        # knowledge nobody had given it. `prior_for` splits it by reading, because a reading can
-        # only be held to findings anchored in code it was actually sent.
-        prior_blocking = _prior_blocking(existing, trusted_base)
-        prior_by_unit = {m.reading.unit: review_reading.prior_for(m.reading, prior_blocking) for m in measures}
+        # The carried findings go *into the request*, which is both where the reviewer reads them
+        # and where the validator now takes them from: the reviewer is refused for dropping one,
+        # and was being refused on knowledge nobody had given it. `priors_by_reading` splits them,
+        # because a reading can only be held to findings anchored in code it was actually sent.
+        prior_by_unit = review_reading.priors_by_reading([m.reading for m in measures], prior_blocking)
 
         cancel = common.Cancellation()
         cache = review_cache.StageCache(repo.root, enabled=not force)
@@ -850,20 +858,6 @@ def _prior_blocking(review: models.Review | None, trusted_base: str) -> list[dic
     if not recorded or recorded != trusted_base:
         return []
     return [dict(f) for f in review.blocking_security_findings]
-
-
-def _effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> str:
-    """The change's effective risk: the max of every contributor (plan §13.5).
-
-    The detector's `risk_floor` alone would leave the frozen plan's own judgment out of it — a
-    change touching a `critical` claim reading as `low` because no regex fired. So the plan
-    supplies claim and task risk; everything else comes off the deterministic signals, so an AI
-    cannot argue any of it down.
-    """
-    claim_risk = models.max_risk([c.risk for c in plan.claims]) if plan is not None else "low"
-    task_risk = models.max_risk([t.risk for t in plan.tasks]) if plan is not None else "low"
-    inputs = review_policy.risk_inputs_from_facts(facts, claim_risk=claim_risk, task_risk=task_risk)
-    return review_policy.effective_risk(inputs)
 
 
 def _independence_record(

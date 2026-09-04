@@ -412,3 +412,32 @@ def test_the_render_says_how_gate_four_will_read_the_plan() -> None:
     text = dag.render(scoped)
     assert "2 task reading(s) plus the seam" in text
     assert "**1 task(s) declare no `scope`** (T-003)" in text
+
+
+def test_a_critical_task_says_the_gate_will_read_the_change_whole() -> None:
+    """Said at gate ③, where it can still be acted on.
+
+    Effective risk is the max of every contributor and a task's own risk is one of them, so a
+    critical task settles the reading before the scopes do — and it is the one case where declaring
+    more scopes changes nothing. Learning that while the review is being generated is too late:
+    the plan is frozen by then.
+    """
+    graph = dag.Graph.from_tasks(
+        [
+            dag.Task(id="T-001", title="a", kind="foundation", risk="critical", scope_include=("alpha/",)),
+            dag.Task(id="T-002", title="b", kind="parallel", blocked_by=("T-001",), scope_include=("beta/",)),
+        ]
+    )
+    rendered = dag.render(graph)
+    assert "one reading of the whole change" in rendered
+    assert "T-001" in rendered.split("How gate ④ will read this")[1]
+
+
+def test_a_scoped_plan_below_critical_is_read_one_task_at_a_time() -> None:
+    graph = dag.Graph.from_tasks(
+        [
+            dag.Task(id="T-001", title="a", kind="foundation", scope_include=("alpha/",)),
+            dag.Task(id="T-002", title="b", kind="parallel", blocked_by=("T-001",), scope_include=("beta/",)),
+        ]
+    )
+    assert "2 task reading(s) plus the seam" in dag.render(graph)

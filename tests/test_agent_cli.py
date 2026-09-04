@@ -264,3 +264,19 @@ def test_an_invalid_config_is_reported_not_overwritten(tmp_path: Path) -> None:
     seed_repo(tmp_path)
     (tmp_path / ".rein" / "config.yaml").write_text("project: {}\n", encoding="utf-8")
     assert agent_cli.main(["codex", "--repo", str(tmp_path)]) == 1
+
+
+def test_a_switch_with_no_cycle_to_record_it_under_says_so(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The chain is where this switch survives — nothing else records it — so "there was nowhere to
+    write it" is the one thing a silent return must not be."""
+    import logging
+
+    seed_repo(tmp_path)
+    (tmp_path / ".rein/state.yaml").unlink()  # before `rein init`: there is no cycle to attach it to
+    with caplog.at_level(logging.WARNING):
+        assert agent_cli.main(["gemini", "--repo", str(tmp_path)]) == 0
+    assert any("no cycle yet to record it under" in record.message for record in caplog.records)
+    assert (
+        models.Config.parse((tmp_path / ".rein/config.yaml").read_text(encoding="utf-8")).adapter("implementer")
+        == "gemini"
+    ), "the switch itself still lands; the record is what could not be made"

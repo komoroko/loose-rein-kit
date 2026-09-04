@@ -339,11 +339,64 @@ def test_an_uncommitted_ticket_edit_stops_the_build(repo: repo_mod.Repo) -> None
 
     A leaf is cut from the work branch's tip, so it reads the committed text and nothing else. An
     uncommitted edit reached no task, silently, while its author read the new version on screen.
+    It is now one instance of the wider rule below: nothing uncommitted starts a build.
     """
     digest = write_ticket(repo, "# T-001\n edited but never committed\n")
     freeze_sources(repo, {"docs/tasks/T-001.md": digest})
 
     assert build(repo) == common.EXIT_CANNOT_PROCEED
+
+
+def test_an_uncommitted_change_of_any_kind_stops_the_build(
+    repo: repo_mod.Repo, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A serial task's change is measured against a commit, so the tree must be at one.
+
+    The path this pins is the one that had no defence: work already sitting in the tree gets
+    attributed to whichever task runs first — counted against its declared scope, filling the
+    empty-diff check that catches an implementer which wrote nothing, and committed inside
+    `T-NNN: <title>`. A parallel leaf never had the problem (`git worktree add` gives it a clean
+    checkout); this is how a serial task gets the same guarantee.
+    """
+    # An implementer that would otherwise take this run all the way to `done`, so the refusal is
+    # what stops it and not some other thing going wrong.
+    monkeypatch.setattr(build_loop, "_run", agent(writes=True, reports="implemented"))
+    (repo.root / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+
+    assert build(repo) == common.EXIT_CANNOT_PROCEED
+    assert "package-lock.json" in caplog.text
+    assert status_of(repo, "T-001").get("status", "todo") == "todo"
+
+
+def test_orchestration_state_is_not_what_makes_a_tree_dirty(
+    repo: repo_mod.Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`.rein/` is excluded, as it is in `dirty_paths` and `finalize_commit`.
+
+    The loop writes its own state as it goes, so counting it would mean no second `rein build`
+    could ever start.
+    """
+    repo.path(".rein/scratch.txt").write_text("orchestration state\n", encoding="utf-8")
+    monkeypatch.setattr(build_loop, "_run", agent(writes=True, reports="implemented"))
+
+    assert build(repo) == common.EXIT_DONE
+
+
+def test_the_refusal_names_a_task_an_earlier_run_left_in_progress(
+    repo: repo_mod.Repo, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leftovers from a killed run are somebody's work, and the human is told whose.
+
+    Without this the message reads as "unrelated junk in your tree", and the reader stashes the
+    only copy of the task's implementation.
+    """
+    monkeypatch.setattr(build_loop, "_run", agent(writes=True, reports="implemented"))
+    build_loop.set_task_status(repo, "T-001", "in-progress")
+    (repo.root / "src" / "half_done.py").parent.mkdir(parents=True, exist_ok=True)
+    (repo.root / "src" / "half_done.py").write_text("# half written\n", encoding="utf-8")
+
+    assert build(repo) == common.EXIT_CANNOT_PROCEED
+    assert "T-001 is still 'in-progress'" in caplog.text
 
 
 def test_a_committed_and_unchanged_ticket_builds(repo: repo_mod.Repo, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -376,7 +429,10 @@ def test_a_change_outside_the_tasks_declared_scope_blocks_it(
     monkeypatch.setattr(build_loop, "_run", agent(writes=True, reports="implemented"))
 
     assert build(repo) == common.EXIT_HUMAN_NEEDED
-    assert status_of(repo, "T-001")["status"] == "blocked"
+    # `needs-revision`, not `blocked`: the plan drew the scope, so the defect is in the plan and
+    # `blocked` would file it as a defect in the code — sending the next reader to the wrong place
+    # and offering an implementer retry for something no implementer can decide.
+    assert status_of(repo, "T-001")["status"] == "needs-revision"
     assert ("knowledge_gap", "scope_violation") in events_of(repo)
 
 

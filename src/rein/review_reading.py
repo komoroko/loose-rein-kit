@@ -575,7 +575,7 @@ class ReadingFacts:
 
     # There is deliberately no `risk_floor` here. A reading has one — `facts.risk_floor` is right
     # there — and it is never the number to use: the floor is a property of the whole change, so a
-    # slice holding no signal must not be where it drops (`whole_change_risk_floor`). Offering it
+    # slice holding no signal must not be where it drops (`whole_change_risk`). Offering it
     # on this class is how the only caller came to pass it.
 
     @property
@@ -623,6 +623,32 @@ def read_facts(
         coverage=facts.coverage.to_manifest(),
         content_digest=change_digest(repo, head, exclude, include=reading.include),
     )
+
+
+def take_readings(
+    repo: repo_mod.Repo,
+    readings: Sequence[Reading],
+    *,
+    base: str,
+    head: str,
+    exclude: Sequence[str],
+    limits: Mapping[str, int],
+) -> list[ReadingFacts]:
+    """:func:`read_facts` for each reading, minus the slices this cycle did not touch.
+
+    A slice this cycle did not touch has nothing in it to read. Launching two models at an empty
+    diff buys an empty answer at full price, and a task the cycle never reached would cost that on
+    every regeneration. The whole-change reading is never dropped: an empty change still gets the
+    reading that says so, which is the shape a review has always had.
+
+    A function rather than a comprehension at the one call site because there are two: a
+    composition that turns out not to cover a carried finding (`unowned_priors`) is re-taken whole,
+    and both takings have to be the same taking.
+    """
+    measures = [
+        read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits) for reading in readings
+    ]
+    return [m for m in measures if m.reading.whole or m.facts.files]
 
 
 def extraction_request(
@@ -713,6 +739,12 @@ def cached_stage(
     under an entry taken before it, and leaving the entry in place would wedge the review behind
     bytes that can never pass again. The re-run's own failure, if there is one, is what raises.
 
+    **The scope is stated in the `except` clause too, and was not.** It caught bare `Exception`,
+    so a `TypeError` or an `AttributeError` introduced by a refactor of a validator read as "the
+    stored answer no longer validates": every cached stage was silently dropped and re-read from a
+    model, at full price, with one `warning` line to say so. What a stale entry actually raises is
+    a validation error, and that is what is caught here — a bug in this process still crashes.
+
     **A replay puts the original launch's provenance back too**, into `reused` — which model
     answered, and what that reading cost when it was taken. Kept apart from the transport's ledger
     because they answer different questions: the ledger is this run's bill and must not be inflated
@@ -726,7 +758,7 @@ def cached_stage(
     if stored is not None:
         try:
             result = run(review_cache.replay(stored.answer))
-        except Exception as exc:
+        except (review_policy.ReviewPolicyError, ReviewError) as exc:
             logger.warning(f"the stored {stage} answer no longer validates ({exc}) — re-reading")
             cache.drop(stage, key)
         else:
@@ -887,6 +919,7 @@ def plan_readings(
     changed_paths: Sequence[str],
     *,
     mode: str = "auto",
+    risk: str = "low",
 ) -> list[Reading]:
     """The readings gate ④ takes, derived from the frozen plan's task scopes.
 
@@ -894,6 +927,19 @@ def plan_readings(
     along: the operator asked for `whole`, there is no plan, or no task declares a scope. An
     undeclared scope means *unbounded* (`models.PlanTask.scope_include`), and a reading that covers
     everything is not a slice of anything.
+
+    **And whenever the change is `critical`**, which is the case that was decided in two places and
+    settled in neither. `review_policy.coverage_blocks` refuses a composed review at critical —
+    composition cannot rule out behaviour that exists only once two slices are in one tree — while
+    `config.yaml` and the schema both promised the change would simply be *read whole* there
+    instead. Neither happened: the caller had `effective` in hand one line above this call and did
+    not pass it, so a critical change was read in slices and then blocked for having been. The
+    remedy the block named ("re-read the change whole") had no way to be carried out — the mode
+    lives in `review_policy`, which is inside gate ③'s frozen digest, and `rein review generate`
+    has no override — so the only exit was `rein revise --to tasks` and a re-approval of a plan
+    nothing had changed. Deciding it here makes the documented behaviour the real one and leaves
+    `coverage_blocks` as what it should always have been: a backstop over a document, not the
+    place the policy is enforced.
 
     Otherwise one reading per scoped task, in plan order, plus :data:`SEAM`.
 
@@ -912,7 +958,7 @@ def plan_readings(
     allowed to change; a reading is about what is in the tree, and a path excluded from one task's
     scope that changed anyway is exactly what the seam exists to catch.
     """
-    if mode == WHOLE or plan is None:
+    if mode == WHOLE or plan is None or models.risk_at_least(risk, "critical"):
         return [WHOLE_READING]
     scoped = [task for task in plan.tasks if task.scope_include]
     if not scoped:
@@ -932,29 +978,121 @@ def plan_readings(
     return [*readings, Reading(unit=SEAM, include=tuple(sorted(seam)))]
 
 
-def prior_for(reading: Reading, prior_blocking: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """The carried-forward blocking findings this reading is answerable for.
+def _prior_owner(paths: Sequence[str], slices: Sequence[Reading], seam: Reading | None) -> str | None:
+    """The one reading that can be held to a finding anchored at `paths`, or None when none can.
 
-    A reading is shown — and held to — only the findings anchored inside the paths it covers. Hand
-    a reading a finding about code it was never sent and the refusal for dropping one becomes
-    unpassable: the reviewer cannot re-state a finding it cannot see, and cannot resolve it either.
-    A finding with no anchor at all belongs to no slice, so it travels with the whole-change
-    reading and, in a composed review, with the seam — the reading whose job is what no slice owns.
+    Ownership is `findings._first_owned`, spelled with readings instead of tasks and answering the
+    same way for the same input: each anchor in turn, the scope covering it most specifically wins,
+    and the first anchor that has an owner at all settles it. Two derivations of "whose finding is
+    this" would eventually name two different tasks for one finding — the reading that must re-state
+    it and the task it is filed against.
+
+    The seam takes what no slice owns: a path more than one scope covers, a path none does, and a
+    finding with no anchor at all, which belongs to no slice by construction.
+
+    **None is a real answer and the caller acts on it.** A finding anchored in code that is inside
+    no reading cannot be re-stated by anybody — the reviewer would be asked about a file it was
+    never sent — and `security_review.run_security_review` refuses an answer that drops it, so the
+    composition simply cannot hold that finding.
     """
-    if reading.whole:
-        return [dict(f) for f in prior_blocking]
-    covers = reading.include
-    mine: list[dict[str, Any]] = []
+    for path in paths:
+        owner, best = None, -1
+        for reading in slices:
+            cover = common.longest_cover(path, reading.include)
+            if cover is not None and len(cover) > best:
+                owner, best = reading.unit, len(cover)
+        if owner is not None:
+            return owner
+    if seam is None:
+        return None
+    if not paths:
+        return seam.unit
+    return seam.unit if any(common.longest_cover(path, seam.include) for path in paths) else None
+
+
+def _anchor_paths(finding: Mapping[str, Any]) -> list[str]:
+    """The non-empty paths this finding is anchored at. Empty = anchored nowhere."""
+    anchors = finding.get("code_anchors")
+    if not isinstance(anchors, list):
+        return []
+    return [str(a.get("path", "")) for a in anchors if isinstance(a, Mapping) and a.get("path")]
+
+
+def unowned_priors(readings: Sequence[Reading], prior_blocking: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ids of the carried blocking findings this set of readings cannot hold. Empty = it can.
+
+    A composition is only a way of reading *this* change if every finding carried into it lands on
+    a reading that can see the code it names. One that does not is not a slicing problem to be
+    assigned around: it is a change these slices do not cover, and the answer is to stop slicing
+    (`review.generate` re-reads it whole). Without this, such a finding went to whichever reading
+    came first, whose reviewer could neither re-state nor resolve it — and the refusal for dropping
+    a carried finding is not passable from there.
+
+    A whole-change reading owns everything, so this is empty by construction for one. No readings
+    at all — every scoped slice empty and nothing left over, which is an empty change — owns
+    nothing, so a finding carried onto one comes back here and is answered whole.
+    """
+    if any(reading.whole for reading in readings):
+        return []
+    slices, seam = _slices_and_seam(readings)
+    return [
+        str(finding.get("id", ""))
+        for finding in prior_blocking
+        if _prior_owner(_anchor_paths(finding), slices, seam) is None
+    ]
+
+
+def _slices_and_seam(readings: Sequence[Reading]) -> tuple[list[Reading], Reading | None]:
+    """The task readings and the seam, told apart once for the two functions that need both."""
+    return (
+        [r for r in readings if not r.whole and r.unit != SEAM],
+        next((r for r in readings if r.unit == SEAM), None),
+    )
+
+
+def priors_by_reading(
+    readings: Sequence[Reading], prior_blocking: Sequence[Mapping[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Which reading answers for each carried-forward blocking finding — **exactly one of them**.
+
+    A reading is shown, and held to, only the findings anchored inside the paths it covers: hand a
+    reading a finding about code it was never sent and the refusal for dropping one becomes
+    unpassable, because the reviewer can neither re-state it nor resolve it.
+
+    **The assignment is made across all the readings at once, and that is the whole repair.** This
+    was a per-reading filter — "is any anchor inside my paths?" — asked independently by each
+    reading, and a path that two task scopes both cover is inside *three* of them: both tasks', and
+    the seam's, which lists that path precisely because more than one scope covers it. So one
+    carried finding was handed to three readings, each of them was required to re-state it, and
+    `merge` kept the id of anything a reading had carried — producing one review carrying `SEC-001`
+    three times, three `security_finding_resolved` events for one resolution, and the same defect
+    printed three times to the human it was meant to reach once. Verified against the real
+    functions before it was fixed; a schema that validates the shape of an id cannot see it.
+
+    Who answers is :func:`_prior_owner`. That it answers for *every* finding is
+    :func:`unowned_priors`, which the caller has already asked — a set of readings that cannot hold
+    one of these is not composed at all, so the only reading left here is the whole change, which
+    owns everything.
+
+    Every reading gets a key, including the empty ones: the caller looks its own unit up.
+    """
+    assigned: dict[str, list[dict[str, Any]]] = {reading.unit: [] for reading in readings}
+    if not readings:
+        return assigned
+    if any(reading.whole for reading in readings):
+        assigned[readings[0].unit] = [dict(finding) for finding in prior_blocking]
+        return assigned
+    slices, seam = _slices_and_seam(readings)
     for finding in prior_blocking:
-        anchors = finding.get("code_anchors")
-        paths = [str(a.get("path", "")) for a in anchors if isinstance(a, Mapping)] if isinstance(anchors, list) else []
-        if not paths:
-            if reading.unit == SEAM:
-                mine.append(dict(finding))
-            continue
-        if any(common.longest_cover(path, covers) for path in paths if path):
-            mine.append(dict(finding))
-    return mine
+        owner = _prior_owner(_anchor_paths(finding), slices, seam)
+        if owner is None:
+            raise ReviewError(
+                f"the readings do not cover carried finding {finding.get('id', '?')}, so no reviewer "
+                "can be held to it — `unowned_priors` decides this before a reading is measured, and "
+                "reaching here means it was not asked"
+            )
+        assigned[owner].append(dict(finding))
+    return assigned
 
 
 # -- merging what several readings said ---------------------------------------
@@ -979,7 +1117,7 @@ class ReadOut:
     reading: Reading
     extraction: actual_extraction.ExtractionResult
     security: security_review.SecurityResult
-    #: The ids of the blocking findings this reading was handed (`prior_for`). A finding answering
+    #: The ids of the blocking findings this reading was handed (`priors_by_reading`). A finding answering
     #: to one of them is the carried finding itself and keeps its number; anything else that comes
     #: back under the same number is a different reading's new finding and is renumbered.
     carried_ids: tuple[str, ...] = ()
@@ -1012,9 +1150,13 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
 
     **Findings keep the id they were carried forward under, and only new ones are renumbered.** A
     blocking finding's id is what the next generation hands back to the reviewer that must re-state
-    it (`prior_for`, `security_review.run_security_review`), so renumbering a carried finding would
-    break the continuity the carry-over exists to provide. A finding this generation minted is new
-    to the document either way, so moving its number costs nothing.
+    it (`security_review.run_security_review`), so renumbering a carried finding would break the
+    continuity the carry-over exists to provide. A finding this generation minted is new to the
+    document either way, so moving its number costs nothing.
+
+    That an id kept here is unique rests on `priors_by_reading` handing each carried finding to
+    exactly one reading. It has to: two readings re-stating the same carried finding would both
+    keep its number, and this loop would append both.
 
     **A whole-change reading is left exactly as it was read** — no renumbering, no stamp, and the
     extractor's own `actual_digest`. Not for continuity's sake but because the digest has to keep
@@ -1117,6 +1259,7 @@ def warm(
     head: str,
     exclude: Sequence[str],
     limits: Mapping[str, int],
+    risk_floor: str,
     config: models.Config | None,
     cache: review_cache.StageCache,
 ) -> ReadOut:
@@ -1131,13 +1274,13 @@ def warm(
     build there is not one yet about this head. A blocking finding the last review recorded is
     handled where it is read, at the gate, which is also the only place that can resolve it.
 
-    The risk floor is measured over the **whole** change and not over this reading, because that is
-    what the gate will send and a warm-up that asks a different question is a warm-up nobody
-    reuses. It costs one more `git diff` and one regex pass per task landing, both deterministic
-    and both cheap next to the launch they are protecting.
+    `risk_floor` is the one measured over the **whole** change (`whole_change_risk`), not over this
+    reading, because that is what the gate will send and a warm-up that asks a different question
+    is a warm-up nobody reuses. It is taken by the caller rather than here: the same analysis
+    answers whether the gate will compose at all, and a caller that has to ask that first should
+    not pay for the diff twice.
     """
     measured = read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits)
-    risk_floor = whole_change_risk_floor(repo, base=base, head=head, exclude=exclude)
     keys = keys_for(
         measured,
         config=config,
@@ -1162,14 +1305,37 @@ def warm(
     )
 
 
-def whole_change_risk_floor(repo: repo_mod.Repo, *, base: str, head: str, exclude: Sequence[str]) -> str:
-    """The detector's risk floor over the whole change, whatever readings it is then taken in.
+def effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> str:
+    """The change's effective risk: the max of every contributor (plan §13.5).
 
-    A property of the change and never of a slice of it (`extraction_request`). `review.generate`
-    already has this from the whole diff it measures the manifest on; `build_loop` does not, and
-    has to take it, because the key the gate will look under is a function of it.
+    The detector's `risk_floor` alone would leave the frozen plan's own judgment out of it — a
+    change touching a `critical` claim reading as `low` because no regex fired. So the plan
+    supplies claim and task risk; everything else comes off the deterministic signals, so an AI
+    cannot argue any of it down.
+
+    Here rather than in `review` because two callers need the same number and one of them is
+    `build_loop`: whether a reading is worth warming depends on whether the gate will compose at
+    all, and that is decided at critical (`plan_readings`).
     """
-    return diff_facts.analyze(diff_of(repo, base, head, exclude)).risk_floor
+    claim_risk = models.max_risk([c.risk for c in plan.claims]) if plan is not None else "low"
+    task_risk = models.max_risk([t.risk for t in plan.tasks]) if plan is not None else "low"
+    inputs = review_policy.risk_inputs_from_facts(facts, claim_risk=claim_risk, task_risk=task_risk)
+    return review_policy.effective_risk(inputs)
+
+
+def whole_change_risk(
+    repo: repo_mod.Repo, plan: models.Plan | None, *, base: str, head: str, exclude: Sequence[str]
+) -> tuple[str, str]:
+    """`(the detector's risk floor, the effective risk)` over the **whole** change.
+
+    Both are properties of the change and never of a slice of it (`extraction_request`), and both
+    come out of one analysis of one diff — which is why they are taken together. `review.generate`
+    already has them from the diff it measures the manifest on; `build_loop` does not, and has to
+    take them: the key the gate will look under is a function of the floor, and whether the gate
+    will compose at all is a function of the effective risk.
+    """
+    facts = diff_facts.analyze(diff_of(repo, base, head, exclude))
+    return facts.risk_floor, effective_risk(facts, plan)
 
 
 def _next_free(pattern: str, taken: Collection[str]) -> str:

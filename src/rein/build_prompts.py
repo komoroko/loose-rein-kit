@@ -11,21 +11,23 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from rein import adapters, dag
-from rein import repo as repo_mod
 
 
 def _gate_list(gate_cmds: Sequence[str]) -> str:
     return " and ".join(f"`{c}`" for c in gate_cmds) or "the quality-gate commands"
 
 
-def _pathspec() -> str:
-    """The commit pathspec, shell-quoted, from the one constant that defines it.
+def _pathspec(pathspec: Sequence[str]) -> str:
+    """The commit pathspec, shell-quoted, as the run itself computed it.
 
     The implementer is told to run the same exclusion `finalize_commit` applies when the
     implementer does not. Spelled out twice by hand, those two could drift — and the instruction
-    is the copy an agent actually types.
+    is the copy an agent actually types. Taken as an argument rather than read from
+    `repo.SSOT_PATHSPEC` because half of it is configurable: the leaf worktree root
+    (`execution.worktree_dir`) is excluded alongside `.rein/`, and a serial task committing from
+    the repository root would otherwise embed every sibling leaf's worktree in its own commit.
     """
-    return " ".join(part if part == "." else f"'{part}'" for part in repo_mod.SSOT_PATHSPEC)
+    return " ".join(part if part == "." else f"'{part}'" for part in pathspec)
 
 
 def handoff_note(handoff: Mapping[str, object]) -> str:
@@ -58,6 +60,7 @@ def implementer_prompt(
     *,
     gate_cmds: Sequence[str],
     has_baseline: bool,
+    pathspec: Sequence[str],
     handoff: Mapping[str, object] | None = None,
     dossier_path: str = "",
 ) -> str:
@@ -103,7 +106,7 @@ def implementer_prompt(
         f"{task_test_ref}"
         f"Write automated tests and get {_gate_list(gate_cmds)} green.\n"
         "When done, commit your changes to this branch (excluding the orchestration state .rein/):\n"
-        f'  git add -A -- {_pathspec()} && git commit -m "{task.id}: <summary>"\n'
+        f'  git add -A -- {_pathspec(pathspec)} && git commit -m "{task.id}: <summary>"\n'
         "Do not reach outside scope (other tasks' territory). If you find a requirements/design defect, "
         "do not fix it on your own — report it.\n"
         "End with one `rein report --outcome implemented|blocked|needs-revision --summary … --touched …` "
@@ -261,7 +264,7 @@ def review_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str]
     )
 
 
-def integration_review_fix_prompt(ids: str, findings: str, *, gate_cmds: Sequence[str]) -> str:
+def integration_review_fix_prompt(ids: str, findings: str, *, gate_cmds: Sequence[str], pathspec: Sequence[str]) -> str:
     """Hand the integration reviewer's must-fix findings back to an implementer.
 
     The join's analogue of :func:`review_fix_prompt`, and it did not exist: both of the join's
@@ -288,12 +291,12 @@ def integration_review_fix_prompt(ids: str, findings: str, *, gate_cmds: Sequenc
         "name. If a finding is wrong, say so in your `rein report --summary` rather than silently "
         "ignoring it: the reviewer looks again afterwards.\n"
         "Commit your fix to this branch (excluding the orchestration state .rein/):\n"
-        f'  git add -A -- {_pathspec()} && git commit -m "{ids}: review fix"\n'
+        f'  git add -A -- {_pathspec(pathspec)} && git commit -m "{ids}: review fix"\n'
         f"Keep {_gate_list(gate_cmds)} green."
     )
 
 
-def integration_fix_prompt(ids: str, failure_log: str, *, gate_cmds: Sequence[str]) -> str:
+def integration_fix_prompt(ids: str, failure_log: str, *, gate_cmds: Sequence[str], pathspec: Sequence[str]) -> str:
     """Hand the *deterministic* post-merge failure to an implementer.
 
     Its subject is a red command step over the merged tree, never a reviewer's findings — those go
@@ -306,7 +309,7 @@ def integration_fix_prompt(ids: str, failure_log: str, *, gate_cmds: Sequence[st
         "lint/format/type error, or the tasks' changes interfering) with the minimal change — do not "
         "widen scope or redo the tasks themselves.\n"
         "Commit your fix to this branch (excluding the orchestration state .rein/):\n"
-        f'  git add -A -- {_pathspec()} && git commit -m "{ids}: integration fix"\n'
+        f'  git add -A -- {_pathspec(pathspec)} && git commit -m "{ids}: integration fix"\n'
         f"Keep {_gate_list(gate_cmds)} green.\n\n"
         f"Resolve this integration failure:\n{failure_log}"
     )

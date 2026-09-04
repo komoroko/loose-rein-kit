@@ -9,6 +9,7 @@ rather than counted as read.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ import pytest
 
 from rein import diff_facts, digests, models, review_policy, review_reading
 from rein import repo as repo_mod
+from rein import usage as usage_mod
 
 
 def _git(root: Path, *args: str) -> str:
@@ -217,7 +219,7 @@ def test_a_reading_over_budget_says_which_one() -> None:
 # --- a composed review, end to end --------------------------------------------
 
 
-def _composed_repo(tmp_path: Path) -> Path:
+def _composed_repo(tmp_path: Path, *, base_files: Mapping[str, str] | None = None) -> Path:
     """A repository whose plan scopes two tasks, and whose change touches both plus a stray file."""
     from tests._support import make_claim, make_config, make_plan, make_state, make_task, seed_repo
 
@@ -234,6 +236,8 @@ def _composed_repo(tmp_path: Path) -> Path:
         config=make_config(),
     )
     _git(tmp_path, "init", "-q", "-b", "main")
+    for name, body in (base_files or {}).items():
+        (tmp_path / name).write_text(body, encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-qm", "seed")
     # The review is taken against `main` (the plan's base commit is not in this repository), so the
@@ -383,8 +387,9 @@ def test_a_slice_holding_no_signal_is_not_where_the_risk_floor_drops(tmp_path: P
     repo = repo_mod.Repo(root)
     review.generate(repo, _reviewers(reviewer))
 
-    whole = review_reading.whole_change_risk_floor(
+    whole, _effective = review_reading.whole_change_risk(
         repo,
+        None,
         base=review_reading.resolve_base(repo, None, None),
         head=repo._git_rc("rev-parse", "HEAD")[1].strip(),
         exclude=review_reading.not_the_product(repo, None),
@@ -407,3 +412,215 @@ def test_every_reading_is_held_to_the_extractors_blindness(tmp_path: Path) -> No
     assert len(extractions) == 3
     for diff in extractions:
         assert "C-001" not in diff and "claim" not in diff.lower()
+
+
+# --- what composition refuses to do -------------------------------------------
+
+
+def _scoped_plan() -> models.Plan:
+    from tests._support import make_claim, make_plan, make_task
+
+    return models.Plan(
+        make_plan(
+            claims=[make_claim()],
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], scope_include=["alpha/shared.py"]),
+            ],
+        )
+    )
+
+
+def test_a_critical_change_is_read_whole_whatever_the_configuration_says() -> None:
+    """Decided here, once, instead of in two places that disagreed.
+
+    `coverage_blocks` refuses a composed review at critical while config.yaml promised the change
+    would simply be read whole there. Neither happened: `generate` had the effective risk one line
+    above this call and did not pass it, so a critical change was read in slices and then blocked
+    for having been — and the remedy the block named ("re-read it whole") could not be carried out,
+    because the mode lives inside gate ③'s frozen digest and `rein review generate` has no override.
+    """
+    plan, changed = _scoped_plan(), ["alpha/mod.py", "alpha/shared.py"]
+    assert [r.unit for r in review_reading.plan_readings(plan, changed)] != [review_reading.WHOLE]
+    assert [r.unit for r in review_reading.plan_readings(plan, changed, risk="critical")] == [review_reading.WHOLE]
+    # And only there: the limit is about what composition cannot rule out, not about caution.
+    assert [r.unit for r in review_reading.plan_readings(plan, changed, risk="high")] != [review_reading.WHOLE]
+
+
+def test_a_carried_finding_is_answered_by_exactly_one_reading() -> None:
+    """A path two scopes both cover is inside three readings — both tasks' and the seam's, which
+    lists it *because* more than one scope covers it. Asked per reading, all three were handed the
+    same carried finding, all three were required to re-state it, and `merge` keeps the id of
+    anything a reading carried: one review carrying `SEC-001` three times.
+    """
+    readings = review_reading.plan_readings(_scoped_plan(), ["alpha/mod.py", "alpha/shared.py", "loose.py"])
+    assert review_reading.SEAM in {r.unit for r in readings}
+    prior: list[Mapping[str, Any]] = [
+        {"id": "SEC-001", "code_anchors": [{"path": "alpha/shared.py", "line": 1}]},
+        {"id": "SEC-002", "code_anchors": [{"path": "loose.py", "line": 1}]},
+        {"id": "SEC-003"},
+    ]
+    assigned = review_reading.priors_by_reading(readings, prior)
+    assert [f["id"] for f in assigned["T-002"]] == ["SEC-001"], "the most specific scope owns it"
+    assert [f["id"] for f in assigned["T-001"]] == []
+    assert [f["id"] for f in assigned[review_reading.SEAM]] == ["SEC-002", "SEC-003"], "unowned, and anchorless"
+    handed = [f["id"] for findings in assigned.values() for f in findings]
+    assert sorted(handed) == ["SEC-001", "SEC-002", "SEC-003"], "each carried finding travels once"
+
+
+def test_the_whole_change_reading_carries_every_prior() -> None:
+    """There is no slice to own anything, so the one reading answers for all of them."""
+    prior: list[Mapping[str, Any]] = [{"id": "SEC-001", "code_anchors": [{"path": "anywhere.py"}]}, {"id": "SEC-002"}]
+    assigned = review_reading.priors_by_reading([review_reading.WHOLE_READING], prior)
+    assert [f["id"] for f in assigned[review_reading.WHOLE]] == ["SEC-001", "SEC-002"]
+
+
+@pytest.mark.integration
+def test_a_carried_finding_outside_every_scope_is_re_read_whole(tmp_path: Path) -> None:
+    """End to end: the composition that cannot hold a carried finding is not the one taken.
+
+    The security stage is handed a checkout, not only its slice's diff, so it can anchor a finding
+    at a file this change never touched — `README.md` here, which no task scope declares and which
+    the seam therefore never lists. Carried into the next generation, that finding has no reading
+    to answer for it, and the reviewer that got it anyway could neither re-state nor resolve it.
+    """
+    import json
+
+    from rein import review, security_review
+    from tests.test_review import _reviewers
+
+    # `legacy.py` is committed on the base, so it is in the tree the security stage is handed and
+    # in no reading's diff — and no task scope declares it, so the seam never lists it either.
+    root = _composed_repo(tmp_path, base_files={"legacy.py": "LEGACY = 1\n"})
+    repo = repo_mod.Repo(root)
+    blob = _git(root, "rev-parse", "HEAD:legacy.py").strip()
+    finding = {
+        "id": "SEC-001",
+        "severity": "high",
+        "category": "credential_exposure",
+        "attack_scenario": "the change reintroduces a credential path this file still reaches",
+        "blocking": True,
+        "code_anchors": [{"path": "legacy.py", "blob": "git-blob:" + blob, "start_line": 1, "end_line": 1}],
+    }
+
+    def reviewer(role: str, request: Any) -> str:
+        if role == "comparator":
+            return json.dumps({"claims": [], "actual_digest": request["actual_digest"]})
+        if role == "security_reviewer":
+            # What was carried in is re-stated, as a real reviewer must; the finding is minted from
+            # one reading only, so the carry-over is one finding rather than one per slice.
+            carried = list(security_review.prior_blocking_of(request))
+            fresh = [finding] if not carried and "alpha/mod.py" in str(request.get("diff", "")) else []
+            return json.dumps({"findings": carried + fresh})
+        return json.dumps({"actual_statements": [], "coverage": {}})
+
+    first = review.generate(repo, _reviewers(reviewer))
+    assert first["coverage"]["composition"]["mode"] == "composed"
+    assert [f["id"] for f in first["security"]["findings"]] == ["SEC-001"]
+
+    second = review.generate(repo, _reviewers(reviewer), force=True)
+    assert second["coverage"]["composition"]["mode"] == "whole", "no slice can answer for SEC-001"
+    assert [f["id"] for f in second["security"]["findings"]] == ["SEC-001"], "and it is still carried"
+
+
+def test_a_carried_finding_no_reading_can_see_stops_the_composition() -> None:
+    """The assignment above answers *which* reading; this answers whether one exists at all.
+
+    A carried finding is anchored where no task scope reaches and the seam does not list it —
+    the security stage reads a checkout, not only the diff, so it can anchor a finding to a file
+    this change never touched. There is then no reading that can be held to it: the reviewer that
+    got it would be asked about code it was never sent, could neither re-state nor resolve it, and
+    the refusal for dropping a carried finding is not passable from there. Handing it to whichever
+    reading came first is the wrong repair; the change is not one these slices cover, so
+    `review.generate` reads it whole.
+    """
+    readings = review_reading.plan_readings(_scoped_plan(), ["alpha/mod.py"])
+    assert review_reading.SEAM not in {r.unit for r in readings}, "nothing shared, nothing unowned"
+    unreachable: list[Mapping[str, Any]] = [{"id": "SEC-009", "code_anchors": [{"path": "beta/caller.py"}]}]
+    assert review_reading.unowned_priors(readings, unreachable) == ["SEC-009"]
+    # And nothing else is: a finding a scope covers, and one the whole-change reading holds.
+    inside: list[Mapping[str, Any]] = [{"id": "SEC-001", "code_anchors": [{"path": "alpha/mod.py"}]}]
+    assert review_reading.unowned_priors(readings, inside) == []
+    assert review_reading.unowned_priors([review_reading.WHOLE_READING], unreachable) == []
+
+
+def test_the_reading_shown_a_finding_is_the_task_it_is_filed_against() -> None:
+    """Two derivations of "whose finding is this" would eventually name two different tasks.
+
+    `findings.owner_of_path` decides who a finding is *filed* against; `priors_by_reading` decides
+    who is *shown* it and required to re-state it. For a finding anchored in more than one place
+    those have to be the same task, so both take the first anchor that has an owner at all.
+    """
+    from rein import findings as findings_mod
+
+    plan = _scoped_plan()
+    readings = review_reading.plan_readings(plan, ["alpha/mod.py", "alpha/shared.py", "loose.py"])
+    finding: Mapping[str, Any] = {
+        "id": "SEC-004",
+        "code_anchors": [{"path": "alpha/mod.py"}, {"path": "alpha/shared.py"}],
+    }
+    filed = findings_mod.owner_of_path(plan, "alpha/mod.py")
+    shown = next(unit for unit, carried in review_reading.priors_by_reading(readings, [finding]).items() if carried)
+    assert shown == filed == "T-001", "the first anchor that has an owner, on both sides"
+
+
+class _NoReviewers:
+    def for_role(self, role: str) -> Any:
+        raise AssertionError("a replay that raised for a reason of ours must not re-read from a model")
+
+    def spend(self) -> dict[str, usage_mod.Usage]:
+        return {}
+
+
+def test_a_stored_answer_that_fails_for_a_reason_other_than_validation_is_not_swallowed(tmp_path: Path) -> None:
+    """ "The stored answer no longer validates" was `except Exception`.
+
+    So a `TypeError` from a refactored validator read as a stale entry: every cached stage was
+    dropped and re-read from a model, at full price, behind one warning line. A bug in this process
+    crashes; only a validation error means the stored bytes can no longer pass.
+    """
+    from rein import review_cache
+
+    cache = review_cache.StageCache(tmp_path)
+    cache.write("actual_extraction", "k", "{}", usage_mod.Usage.unavailable())
+
+    def boom(_reviewer: Any) -> Any:
+        raise TypeError("a validator was refactored")
+
+    with pytest.raises(TypeError, match="refactored"):
+        review_reading.cached_stage(
+            cache, "actual_extraction", "k", set(), boom, _NoReviewers(), reused=usage_mod.Ledger()
+        )
+    assert cache.has("actual_extraction", "k"), "an entry dropped for a bug of ours is an entry paid for twice"
+
+
+def test_a_stored_answer_that_no_longer_validates_is_dropped_and_re_read(tmp_path: Path) -> None:
+    """The recovery this catch is actually for: a release tightened a validator under an entry
+    taken before it, and leaving it in place would wedge the review behind bytes that can never
+    pass again."""
+    from rein import review_cache
+
+    cache = review_cache.StageCache(tmp_path)
+    cache.write("actual_extraction", "k", "{}", usage_mod.Usage.unavailable())
+    attempts: list[str] = []
+
+    def run(_reviewer: Any) -> str:
+        attempts.append("call")
+        if len(attempts) == 1:
+            raise review_policy.ReviewPolicyError("a field this release requires is absent")
+        return "fresh"
+
+    class _Reviewers:
+        def for_role(self, role: str) -> Any:
+            return lambda request: review_policy.Answer("{}")
+
+        def spend(self) -> dict[str, usage_mod.Usage]:
+            return {}
+
+    assert (
+        review_reading.cached_stage(
+            cache, "actual_extraction", "k", set(), run, _Reviewers(), reused=usage_mod.Ledger()
+        )
+        == "fresh"
+    )
+    assert attempts == ["call", "call"], "the stale entry was dropped and the stage ran for real"

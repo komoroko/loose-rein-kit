@@ -481,7 +481,21 @@ def test_a_task_that_did_not_land_carries_no_control_row() -> None:
     assert "control" not in brief.derive(plan=None, state=state, config=_config())
 
 
-def test_a_run_that_recorded_no_control_reports_nothing_rather_than_zero() -> None:
-    """Absence stays distinguishable from unmeasured: no section, not `discriminating: 0`."""
+def test_a_landed_task_carrying_no_control_is_a_row_and_not_a_silence() -> None:
+    """The absence of a control is reported, because skipping it reads as a control that passed.
+
+    Only the uncontrolled are listed, so a task the loop simply never asked about looked exactly
+    like one whose experiment answered. This section exists to stop `no_tests_changed` reaching a
+    human as a silence; a `continue` here reintroduced the same silence one case over. The
+    reachable cause is a task closed by a release older than the control.
+    """
     state = models.State({**make_state(tasks={"T-001": "done"}), "tasks": {"T-001": {"status": "done"}}})
+    control = brief.derive(plan=None, state=state, config=_config())["control"]
+    assert [row["task_id"] for row in control["unrecorded"]] == ["T-001"]
+    assert "discriminating" not in control, "a task nobody asked about is not a controlled one"
+
+
+def test_a_task_that_never_landed_has_no_control_to_report() -> None:
+    """Absence stays distinguishable from unmeasured: no section at all, not `discriminating: 0`."""
+    state = models.State({**make_state(tasks={"T-001": "todo"}), "tasks": {"T-001": {"status": "todo"}}})
     assert "control" not in brief.derive(plan=None, state=state, config=_config())

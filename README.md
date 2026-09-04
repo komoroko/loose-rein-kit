@@ -118,8 +118,18 @@ binaries are on PATH and how to install a missing one:
 An adapter that cannot be told a model refuses a `model:` beside it rather than launching its own
 default under that name — the gate ④ independence check is derived from the model, so a separation
 written down and not performed is refused where it is written.
-Without one, `rein build` refuses to start — and it names the command that installs the CLI it
-wanted rather than installing anything itself.
+
+Without the binary, `rein build` refuses to start — and it names the command that installs the CLI
+it wanted rather than installing anything itself.
+
+A gate ④ **reviewer** role has one more constraint, and it is about how a CLI takes its question.
+Only `claude` is established to read a prompt from stdin; the rest are handed theirs the way their
+own reference says they take one — as an argument, which the operating system caps at 128 KiB. A
+gate ④ reading is usually larger than that, so on any adapter but `claude` the launch is **refused,
+naming the two ways out** (point the gate ④ roles at `claude`, or lower
+`review_policy.budgets.max_diff_bytes` until the reading fits) rather than sent into a channel
+nobody has shown works. Read that as the practical bound it is: the other CLIs review a change of
+up to ~128 KiB, not a change of any size.
 
 **4. Seed the repository** — the same command for a new and an existing repo. Brownfield is
 auto-detected and changes what `init` writes (see "Adopting into an existing repository"):
@@ -351,8 +361,9 @@ is decided on. What is:
   task lands. A review regenerated after a fix re-reads only the task whose code moved. Composition
   is recorded rather than assumed: `coverage.composition` names every reading, every statement and
   finding carries the one it came out of, a changed path no reading covered makes the manifest
-  `insufficient`, and at `critical` risk a composed reading is refused — behaviour that exists only
-  once two readings are in one tree was never read, and that is said rather than hidden.
+  `insufficient`, and at `critical` risk the change is read **whole** whatever the configuration
+  says — behaviour that exists only once two readings are in one tree cannot be read in slices, so
+  the reading changes rather than the verdict being softened.
 - **The merged tree is read too.** Each leaf was reviewed inside its own task's scope, so what the
   join makes — duplication between two tasks, one responsibility in two places, an abstraction the
   next task worked around — was nobody's to see. A `review` step declared `stage: integration`

@@ -523,8 +523,13 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
     on its own and the seam between them, which is enough to say what each slice does and not
     enough to rule out behaviour that only exists once two of them are in the same tree. That is a
     stated limit rather than a hidden one — the seam is measured and `coverage.composition` names
-    every reading — and at critical the honest answer is to read the change whole, or to make it
-    small enough that reading it whole is possible.
+    every reading.
+
+    This is a **backstop over the document**, not where the policy is decided: `plan_readings`
+    reads a critical change whole in the first place, so a review this release generated can never
+    land here. What can is a `review.yaml` written by a release that composed one anyway, which is
+    exactly the shape a validator must still refuse — and the way out is now a regeneration rather
+    than a rewind of gate ③.
     """
     manifest = review.coverage
     composed = str((manifest.get("composition") or {}).get("mode", "")) == "composed" if manifest else False
@@ -532,7 +537,8 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
         return [
             "this review was composed out of separate readings and the change is critical — "
             "behaviour that only appears once two readings are in one tree was never read. "
-            "Re-read the change whole, or reduce the scope until reading it whole fits the budget"
+            "Re-read it whole with `rein review generate --force`, which is what this release "
+            "does at critical risk whatever `review_policy.composition` says"
         ]
     if not models.risk_at_least(effective, "high"):
         return []

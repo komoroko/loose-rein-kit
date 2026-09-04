@@ -40,9 +40,10 @@ SECURITY = "security"
 #: What a launch is allowed to do. Three levels, because the loop makes exactly three kinds of
 #: launch and used to be able to name two of them:
 #:
-#: * ``READ`` — the gate-④ stages. They are handed their payload on stdin, answer on stdout, and
-#:   must change nothing. Not the same as "no flags": a CLI whose tools are all deny-by-default
-#:   without a grant cannot even open the file it was sent to read.
+#: * ``READ`` — the gate-④ stages. They are handed their request (on stdin or as the prompt
+#:   argument, per `prompt_on_stdin`), answer on stdout, and must change nothing. Not the same as
+#:   "no flags": a CLI whose tools are all deny-by-default without a grant cannot even open the
+#:   file it was sent to read.
 #: * ``REVIEW`` — the per-task reviewer. It reads the change, runs `git diff`, and writes exactly
 #:   one file: the findings its prompt names. It must not touch the code it is judging.
 #: * ``WRITE`` — the implementer, the review fixer, the conflict and integration fixers. The tree
@@ -174,6 +175,22 @@ class Adapter:
     #: the review transport needs it too, and there the payload arrives on stdin with no prompt
     #: argument at all.
     prompt_flags: tuple[str, ...] = ()
+    #: Whether this CLI reads its prompt from **stdin** when the command line names none. True only
+    #: where that is established, and it is established for exactly one: `claude -p`, which is what
+    #: gate ④'s transport has always used and what ships working today.
+    #:
+    #: It is a field rather than an assumption because the transport used to make the assumption for
+    #: everybody. `review_transport` hands a stage its request on stdin with no prompt argument at
+    #: all — which is right for claude, where `-p` is a boolean and the prompt is a positional, and
+    #: wrong for every CLI in this table that says, in its own `prompt_flags`, that the prompt is a
+    #: flag's *value* (`gemini -p`, `copilot -p`, `amp -x`). Such a launch receives no question. It
+    #: does not fail: it waits, until `agent_timeout_sec` (default: no limit) or forever.
+    #:
+    #: So a CLI that has not been shown to read stdin gets the prompt the way its own reference says
+    #: it takes one — as an argument — and a payload too large for one argument is *refused*
+    #: (`review_transport.prompt_call`). Asserting stdin here to dodge that refusal would be
+    #: declaring a channel nobody has run, which is the same class of claim `model_flags` refuses.
+    prompt_on_stdin: bool = False
     #: How a human installs this CLI. **Never run** — printed by `doctor` and `preflight` when the
     #: binary is missing. Installing a third-party agent CLI on someone's behalf decides for them
     #: what lands on their PATH and what it is allowed to reach; naming the command is the whole
@@ -235,6 +252,10 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         # needed just as much when the payload arrives on stdin (the review transport), and the
         # prompt is then a plain positional.
         argv=("claude", "-p"),
+        # The one CLI whose stdin-as-prompt is established: it is what gate ④'s transport has run
+        # since it existed, and it is what makes a half-megabyte reading possible at all — no argv
+        # element holds that (Linux caps one at 128 KiB).
+        prompt_on_stdin=True,
         session_flags=("--session-id",),
         resume_flags=("--resume",),
         fork_flags=("--fork-session",),

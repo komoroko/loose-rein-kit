@@ -273,6 +273,7 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
   const uncontrolled = [
     ...(control.no_tests_changed || []).map((t) => ({ ...t, why: "changed no test file" })),
     ...(control.undetermined || []).map((t) => ({ ...t, why: "the control could not be set up" })),
+    ...(control.unrecorded || []).map((t) => ({ ...t, why: "no control was recorded" })),
   ];
   const findings = data.residual_findings || [];
 

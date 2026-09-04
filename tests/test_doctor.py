@@ -1319,3 +1319,50 @@ def test_the_opt_out_is_reported_as_the_reason(make_repo_obj: object, monkeypatc
     )
     finding = _upstream(repo)
     assert finding.level == "INFO" and upstream.NO_CHECK_ENV in finding.message
+
+
+def test_a_second_hosts_matcher_is_checked_for_coverage_too(tmp_path: Path) -> None:
+    """Coverage was asked of claude alone, which is how it happened to be written.
+
+    A host with a settings file and a matcher of its own — Gemini CLI's `BeforeTool` — was checked
+    for the guard's *presence* and never for what that matcher names, so the same hole would have
+    reported PASS there: a hook registered, `doctor` green, and an edit that never reaches it.
+    """
+    from rein import gate_guard
+
+    seed_repo(tmp_path)
+    gemini = tmp_path / doctor.GEMINI_SETTINGS_PATH
+    gemini.parent.mkdir(parents=True, exist_ok=True)
+    gemini.write_text(
+        json.dumps({"hooks": {"BeforeTool": [{"matcher": "write_file", "hooks": [{"command": "rein guard"}]}]}}),
+        encoding="utf-8",
+    )
+    findings = doctor.check_hook(repo_mod.Repo(tmp_path))
+    assert _levels(findings, "does not name") == ["WARN"]
+    assert "replace" in [f for f in findings if "does not name" in f.message][0].message
+
+    gemini.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "BeforeTool": [
+                        {
+                            "matcher": "|".join(gate_guard.GEMINI_WRITE_TOOLS),
+                            "hooks": [{"command": "rein guard"}],
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert _levels(doctor.check_hook(repo_mod.Repo(tmp_path)), "covers every write tool") == ["PASS"]
+
+
+def test_the_shipped_gemini_matcher_covers_every_write_tool() -> None:
+    """The payload is what `rein install gemini` writes, so a hole there ships to every product."""
+    from rein import gate_guard, install
+
+    groups = install._settings_template(install.INTEGRATIONS["gemini"].settings_source)["hooks"]["BeforeTool"]
+    covered = {tool for group in groups for tool in str(group.get("matcher", "")).split("|")}
+    assert covered >= set(gate_guard.GEMINI_WRITE_TOOLS), f"missing: {set(gate_guard.GEMINI_WRITE_TOOLS) - covered}"
