@@ -4,6 +4,103 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.2] - 2026-09-04
+
+**A serial task is isolated from the working tree the way a parallel leaf already was.** A leaf is
+cut with `git worktree add`, so it starts from a clean checkout and everything it finds afterwards is
+its own. A serial task runs in the repository root, where its change is derived as "the commits since
+the pre-task HEAD, plus the dirty tree" — exact when the tree starts clean and silently wrong when it
+does not. Uncommitted work already sitting there was attributed to the first task that ran: counted
+against its declared `scope` (which is how a stray `package-lock.json` blocked a task that never
+touched it), filling the empty-diff check that exists to catch an implementer which wrote *nothing*,
+reaching the reviewer as part of the change under review, and landing inside `T-NNN: <title>` through
+`finalize_commit`'s `git add -A` — in the history a gate ④ receipt names. `rein build` now refuses to
+start on any uncommitted change, naming the paths, and naming any task an earlier run left
+`in-progress` so leftovers are not mistaken for junk and stashed. The narrower "a source document the
+build reads is uncommitted" refusal is deleted: it was this rule asked about five files.
+
+**And the leaf worktrees are not the serial task's dirty tree either.** `.worktrees/` is untracked
+and lives inside the root, so every reading taken there swallowed a parked leaf whole — its scope,
+its fingerprint, and `git add -A` embedding it as a gitlink in another task's commit. It is now
+excluded beside `.rein/` in the one place the exclusion is derived, which the four answers that must
+agree — the fingerprint, the credited paths, the commit, and the `git add` the implementer is told to
+type — all read.
+
+**A scope violation is `needs-revision`, not `blocked`.** Its own message says the way forward is a
+human widening the scope at `/revise`; `blocked` says the implementer could not make the code work.
+Filing a plan defect as a code defect sends the next reader to the wrong place and offers a retry for
+something no retry can decide. The loop already drew this line for `rein report --outcome
+needs-revision` and this is the second thing on the right side of it.
+
+### What an adversarial pass found in 0.4.1
+
+**A `critical` change was read in slices and then blocked for having been.** The policy lived in
+two places that disagreed: `coverage_blocks` refuses a composed review at critical, while
+`config.yaml` and the schema both promised the change would simply be read *whole* there instead.
+Neither happened — `review.generate` had the effective risk one line above the call that decides
+the readings and did not pass it — and the remedy the block named could not be carried out:
+`review_policy.composition` is inside gate ③'s frozen digest and `rein review generate` has no
+override, so the only exit from a default-configured cycle was `rein revise --to tasks` and a
+re-approval of a plan nothing had changed. `plan_readings` takes the risk now and reads a critical
+change whole, `coverage_blocks` is what it should always have been — a backstop over a document
+another release wrote — and `build_loop` stops warming per-task readings the gate will not look up.
+
+**And `rein dag --render` says which of the two a plan will get.** A `critical` task settles the
+reading before the scopes do — effective risk is the max of every contributor — and it is the one
+case where declaring more scopes changes nothing. Knowable from the plan alone, so it is said at
+gate ③, where the plan is not yet frozen.
+
+**One carried finding, three times in one review.** A path two task scopes both cover sits inside
+three readings — both tasks' and the seam's, which lists it *because* more than one scope covers
+it. `prior_for` was asked per reading, so all three were handed the same blocking finding, all
+three were required to re-state it, and `merge` keeps the id of anything a reading carried. The
+result was `SEC-001` three times in `security.findings`, three `security_finding_resolved` lines
+for one resolution, and the same defect printed three times to the human it was meant to reach
+once. `priors_by_reading` assigns across the readings at once, to the task whose scope covers an
+anchor most specifically — the derivation `findings.owner_of_path` already uses — with the seam
+taking what no scope owns and what carries no anchor at all.
+
+**The gate guard learned every host's dialect for the answer and none for the question.** A denial
+is written as `hookSpecificOutput` and as top-level `decision`/`reason` at once, on the stated
+ground that one guard serves every host — while the payload was still read as `payload["tool_input"]`
+alone. Gemini CLI's `BeforeTool` names it `tool_args`: there was no path to check, `hook_paths`
+answered `[]`, and the guard exited 0. It allowed every edit, silently, while `doctor` reported it
+registered. `TOOL_ARGS_KEYS` covers both spellings, and `doctor`'s matcher-coverage check — asked of
+claude alone, which is how it happened to be written — is asked of every host with a matcher.
+
+**A gate ④ stage could not reach four of the seven CLIs.** The transport handed every stage its
+request on stdin with no prompt argument. That is claude's shape (`-p` is a boolean there, the
+prompt a positional) and nobody else's: under a CLI whose prompt is a flag's *value* the launch
+asks nothing, and does not fail — it waits for input that is not coming, until `agent_timeout_sec`,
+whose default is no limit. The adapter table said so all along, in `prompt_flags`, and the
+transport never read it. `Adapter.prompt_on_stdin` declares the channel where it is *established*,
+which is claude and nothing else; every other CLI is handed its request the way its own reference
+says it takes one, and a request past the 128 KiB one argv element may carry is refused, naming
+both ways out, rather than sent into `execve` to come back as `E2BIG`.
+
+**The integration reviewer read the cycle and called it the join.** Its diff started at the plan's
+base commit, so every batch re-read every batch before it at full price — and the attribution
+beside it only knows *this* batch's tasks, so a finding about an earlier one matched no owner, was
+printed instead of filed, and never reached the human. It reads `<work branch before the merges>..HEAD`.
+
+**A broken negative control stopped being a verdict.** An `EnvironmentFault` from the control's own
+steps was re-raised: the task's DoD had already gone green, and a container that would not start
+for the experiment aborted the leaf, reset it to `todo` and made the next run implement it again.
+Three endings are named — pass, block, could-not-be-taken — and an abort is none of them.
+
+**A landed task carrying no control is a row, not a silence.** The brief skipped one with no
+`negative_control` record, which reads exactly like a controlled task, because only the
+uncontrolled are listed. The section exists to stop `no_tests_changed` reaching a human as a
+silence; the skip reintroduced the same silence one case over. It is reported as `unrecorded`.
+
+**Three narrower holes.** `cached_stage` caught bare `Exception` around a replayed answer, so a
+`TypeError` from a refactored validator dropped every cached stage and re-read it from a model at
+full price behind one warning line — it catches validation errors now. `rein agent` returned
+silently when there was no cycle to record a switch under, while the chain is the only place that
+switch survives — it says so. And `scratch_worktree` runs `git worktree prune`, which is
+repository-wide, and the negative control now calls it from inside each leaf's thread — the admin
+calls are serialised, the body is not.
+
 ## [0.4.1] - 2026-09-03
 
 **GitHub Copilot is selectable as the CLI that does the building, and the dashboard picks the
@@ -144,101 +241,6 @@ step is in flight. It costs no tokens: the CLI prints it, not a model.
 says the part that was implicit: **never turn a detach into a poll.** Re-entering to ask whether the
 build is done spends a launch, a context and a share of the session limit on learning that it is
 still building.
-
-**A serial task is isolated from the working tree the way a parallel leaf already was.** A leaf is
-cut with `git worktree add`, so it starts from a clean checkout and everything it finds afterwards is
-its own. A serial task runs in the repository root, where its change is derived as "the commits since
-the pre-task HEAD, plus the dirty tree" — exact when the tree starts clean and silently wrong when it
-does not. Uncommitted work already sitting there was attributed to the first task that ran: counted
-against its declared `scope` (which is how a stray `package-lock.json` blocked a task that never
-touched it), filling the empty-diff check that exists to catch an implementer which wrote *nothing*,
-reaching the reviewer as part of the change under review, and landing inside `T-NNN: <title>` through
-`finalize_commit`'s `git add -A` — in the history a gate ④ receipt names. `rein build` now refuses to
-start on any uncommitted change, naming the paths, and naming any task an earlier run left
-`in-progress` so leftovers are not mistaken for junk and stashed. The narrower "a source document the
-build reads is uncommitted" refusal is deleted: it was this rule asked about five files.
-
-**And the leaf worktrees are not the serial task's dirty tree either.** `.worktrees/` is untracked
-and lives inside the root, so every reading taken there swallowed a parked leaf whole — its scope,
-its fingerprint, and `git add -A` embedding it as a gitlink in another task's commit. It is now
-excluded beside `.rein/` in the one place the exclusion is derived, which the four answers that must
-agree — the fingerprint, the credited paths, the commit, and the `git add` the implementer is told to
-type — all read.
-
-**A scope violation is `needs-revision`, not `blocked`.** Its own message says the way forward is a
-human widening the scope at `/revise`; `blocked` says the implementer could not make the code work.
-Filing a plan defect as a code defect sends the next reader to the wrong place and offers a retry for
-something no retry can decide. The loop already drew this line for `rein report --outcome
-needs-revision` and this is the second thing on the right side of it.
-
-### What an adversarial pass found in this branch
-
-**A `critical` change was read in slices and then blocked for having been.** The policy lived in
-two places that disagreed: `coverage_blocks` refuses a composed review at critical, while
-`config.yaml` and the schema both promised the change would simply be read *whole* there instead.
-Neither happened — `review.generate` had the effective risk one line above the call that decides
-the readings and did not pass it — and the remedy the block named could not be carried out:
-`review_policy.composition` is inside gate ③'s frozen digest and `rein review generate` has no
-override, so the only exit from a default-configured cycle was `rein revise --to tasks` and a
-re-approval of a plan nothing had changed. `plan_readings` takes the risk now and reads a critical
-change whole, `coverage_blocks` is what it should always have been — a backstop over a document
-another release wrote — and `build_loop` stops warming per-task readings the gate will not look up.
-
-**And `rein dag --render` says which of the two a plan will get.** A `critical` task settles the
-reading before the scopes do — effective risk is the max of every contributor — and it is the one
-case where declaring more scopes changes nothing. Knowable from the plan alone, so it is said at
-gate ③, where the plan is not yet frozen.
-
-**One carried finding, three times in one review.** A path two task scopes both cover sits inside
-three readings — both tasks' and the seam's, which lists it *because* more than one scope covers
-it. `prior_for` was asked per reading, so all three were handed the same blocking finding, all
-three were required to re-state it, and `merge` keeps the id of anything a reading carried. The
-result was `SEC-001` three times in `security.findings`, three `security_finding_resolved` lines
-for one resolution, and the same defect printed three times to the human it was meant to reach
-once. `priors_by_reading` assigns across the readings at once, to the task whose scope covers an
-anchor most specifically — the derivation `findings.owner_of_path` already uses — with the seam
-taking what no scope owns and what carries no anchor at all.
-
-**The gate guard learned every host's dialect for the answer and none for the question.** A denial
-is written as `hookSpecificOutput` and as top-level `decision`/`reason` at once, on the stated
-ground that one guard serves every host — while the payload was still read as `payload["tool_input"]`
-alone. Gemini CLI's `BeforeTool` names it `tool_args`: there was no path to check, `hook_paths`
-answered `[]`, and the guard exited 0. It allowed every edit, silently, while `doctor` reported it
-registered. `TOOL_ARGS_KEYS` covers both spellings, and `doctor`'s matcher-coverage check — asked of
-claude alone, which is how it happened to be written — is asked of every host with a matcher.
-
-**A gate ④ stage could not reach four of the seven CLIs.** The transport handed every stage its
-request on stdin with no prompt argument. That is claude's shape (`-p` is a boolean there, the
-prompt a positional) and nobody else's: under a CLI whose prompt is a flag's *value* the launch
-asks nothing, and does not fail — it waits for input that is not coming, until `agent_timeout_sec`,
-whose default is no limit. The adapter table said so all along, in `prompt_flags`, and the
-transport never read it. `Adapter.prompt_on_stdin` declares the channel where it is *established*,
-which is claude and nothing else; every other CLI is handed its request the way its own reference
-says it takes one, and a request past the 128 KiB one argv element may carry is refused, naming
-both ways out, rather than sent into `execve` to come back as `E2BIG`.
-
-**The integration reviewer read the cycle and called it the join.** Its diff started at the plan's
-base commit, so every batch re-read every batch before it at full price — and the attribution
-beside it only knows *this* batch's tasks, so a finding about an earlier one matched no owner, was
-printed instead of filed, and never reached the human. It reads `<work branch before the merges>..HEAD`.
-
-**A broken negative control stopped being a verdict.** An `EnvironmentFault` from the control's own
-steps was re-raised: the task's DoD had already gone green, and a container that would not start
-for the experiment aborted the leaf, reset it to `todo` and made the next run implement it again.
-Three endings are named — pass, block, could-not-be-taken — and an abort is none of them.
-
-**A landed task carrying no control is a row, not a silence.** The brief skipped one with no
-`negative_control` record, which reads exactly like a controlled task, because only the
-uncontrolled are listed. The section exists to stop `no_tests_changed` reaching a human as a
-silence; the skip reintroduced the same silence one case over. It is reported as `unrecorded`.
-
-**Three narrower holes.** `cached_stage` caught bare `Exception` around a replayed answer, so a
-`TypeError` from a refactored validator dropped every cached stage and re-read it from a model at
-full price behind one warning line — it catches validation errors now. `rein agent` returned
-silently when there was no cycle to record a switch under, while the chain is the only place that
-switch survives — it says so. And `scratch_worktree` runs `git worktree prune`, which is
-repository-wide, and the negative control now calls it from inside each leaf's thread — the admin
-calls are serialised, the body is not.
 
 ## [0.4.0] - 2026-09-03
 
