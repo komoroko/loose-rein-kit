@@ -85,10 +85,13 @@ def _how_gate_four_will_read(graph: Graph) -> list[str]:
     if critical:
         return [
             *lines,
-            f"- **one reading of the whole change** — {', '.join(critical)} is `critical`, and a "
-            "critical change is read whole whatever the scopes say: behaviour that appears only "
-            "once two slices are in one tree cannot be read in slices. Splitting the scope is how "
-            "that reading is made affordable, not how it is avoided.",
+            f"- **one reading of the whole change** — {', '.join(critical)} {'are' if len(critical) > 1 else 'is'} "
+            "`critical`, and a critical change is read whole whatever the scopes say: behaviour that "
+            "appears only once two slices are in one tree cannot be read in slices. So the *whole* "
+            "change has to fit `review_policy.budgets.max_diff_bytes` on its own — splitting these "
+            "scopes does not make that one reading any smaller. The two levers are what this cycle "
+            "claims and the budget itself, and both are decided here rather than at gate ④, where "
+            "the tasks are already implemented and merged.",
         ]
     scoped = [t for t in graph.tasks if t.scope_include]
     unscoped = [t.id for t in graph.tasks if not t.scope_include]

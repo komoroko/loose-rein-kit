@@ -13,6 +13,8 @@ and hands over to the review pipeline.
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
 import threading
 import time
 from collections.abc import Iterator
@@ -2844,3 +2846,60 @@ def test_the_integration_reviewer_reads_the_join_and_not_the_cycle(
     loop._run_integration_agent_step(step, [dag.Task(id="T-001", title="t", kind="parallel")], "c" * 40)
 
     assert f"git diff {'c' * 40}..HEAD" in prompts[0]
+
+
+def _committed_build_repo(tmp_path: Path) -> Path:
+    """`build_repo` in a git repository whose tree is clean — what the loop requires to start.
+
+    In a subdirectory because the suite points `XDG_RUNTIME_DIR` at `tmp_path/run`: seeded at
+    `tmp_path` itself, the lock and control socket would sit *inside* the repository and read as
+    uncommitted work, which they never are on a real machine.
+    """
+    root = tmp_path / "repo"
+    root.mkdir()
+    build_repo(root)
+    for args in (
+        ["init", "-q", "-b", "build/demo"],
+        ["config", "user.email", "t@example.com"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-q", "-m", "base"],
+    ):
+        subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+    return root
+
+
+def test_a_dirty_tree_stops_the_run_before_a_task_is_touched(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A serial task's change is measured against the commit it started from.
+
+    So anything already uncommitted is attributed to the first task this run touches — it counts
+    against that task's declared scope, fills the empty-diff check, reaches the reviewer, and lands
+    inside `T-NNN: <title>`. The refusal names the paths rather than only the count.
+    """
+    root = _committed_build_repo(tmp_path)
+    (root / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    repo = repo_mod.Repo(root)
+    with caplog.at_level(logging.ERROR, logger="rein.build_loop"):
+        rc = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo).run()
+    assert rc == common.EXIT_CANNOT_PROCEED
+    assert "package-lock.json" in caplog.text
+
+
+def test_the_lock_answers_before_the_working_tree_does(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A dirty tree and a run already in progress are the same picture from outside.
+
+    The other run's implementer is editing the repository root *right now*, so asking about the
+    tree before taking the lock would tell the second `rein build` to commit or stash the first
+    one's live work — and to do it under `cannot proceed`, where the honest answer is "another run
+    holds the repository, retry". The tree question belongs inside the lock, where what is
+    uncommitted belongs to nobody but this run.
+    """
+    root = _committed_build_repo(tmp_path)
+    (root / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    repo = repo_mod.Repo(root)
+    store_mod.ensure_private_dir(store_mod.Store(repo).runtime)
+    with caplog.at_level(logging.ERROR, logger="rein.build_loop"), build_loop.build_lock(repo):
+        rc = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo).run()
+    assert rc == common.EXIT_RETRY_LATER
+    assert "holds the lock" in caplog.text
+    assert "package-lock.json" not in caplog.text

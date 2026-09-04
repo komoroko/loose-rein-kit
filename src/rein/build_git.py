@@ -391,40 +391,79 @@ class GitWorkspace:
         implementer produced nothing" and "the implementer has not committed yet" were the same
         answer. They are not the same thing, and one of them is a failure.
         """
-        paths: set[str] = set()
         branch = self.branch_for(task_id)
-        rc, out = self._run(["git", "diff", "--name-only", f"{self.target_branch(task_id)}...{branch}"], cwd=self.root)
-        if rc == 0:
-            paths.update(p for p in out.splitlines() if p.strip())
+        paths = set(
+            self._lines_of(
+                ["diff", "--name-only", f"{self.target_branch(task_id)}...{branch}"],
+                self.root,
+                what=f"what {task_id} committed on {branch}",
+            )
+        )
         if cwd:
             paths.update(self.dirty_paths(cwd))
         return sorted(paths)
 
-    def dirty_paths(self, cwd: str) -> list[str]:
-        """Uncommitted paths in `cwd` — modified, staged and untracked — excluding `.rein/`.
+    def _lines_of(self, args: list[str], cwd: str, *, what: str) -> list[str]:
+        """The lines `git <args>` printed. **Never a silent empty answer.**
 
-        `.rein/` is excluded for the same reason `finalize_commit` excludes it: orchestration
-        state is not any task's work, and counting it would make every task look like it changed
-        something.
+        Each of the three callers turns this into "which paths changed", and each of those answers decides
+        something: whether the run may start at all, what a task is credited with changing, whether
+        its diff stayed inside its declared scope. `rc == 0` guarding the parse — with no `else` —
+        made a git that *could not answer* indistinguishable from a git that answered *nothing*: an
+        index another process has locked, a pathspec a mis-set `execution.worktree_dir` makes
+        invalid, a repository the runner could not enter. The precondition built on that
+        (`build_loop._tree_problems`) then passes **because** the check broke, which is the one way
+        a precondition must never pass.
+
+        A capped output is the same lie one line further on, so it is refused too: a prefix is not
+        the answer, which is why `fingerprint` has always asked (`common.was_truncated`).
+
+        `EXIT_CANNOT_PROCEED`, not the default: nothing here is a verdict about the code, and
+        re-running before the named thing is repaired is wasted.
+        """
+        rc, out = self._run(["git", *args], cwd=cwd)
+        printed = out.strip()
+        if rc != 0:
+            raise StopLoop(
+                f"could not determine {what}: `git {' '.join(args)}` exited {rc} in {cwd}"
+                + (f"\n{printed}" if printed else " and said nothing"),
+                code=common.EXIT_CANNOT_PROCEED,
+            )
+        if common.was_truncated(out):
+            raise StopLoop(
+                f"could not determine {what}: `git {' '.join(args)}` printed past the "
+                f"{common.MAX_OUTPUT_BYTES}-byte cap on one command's output, so what came back is "
+                "a prefix rather than the answer",
+                code=common.EXIT_CANNOT_PROCEED,
+            )
+        return [line for line in out.splitlines() if line.strip()]
+
+    def dirty_paths(self, cwd: str) -> list[str]:
+        """Uncommitted paths in `cwd` — modified, staged and untracked — excluding :attr:`excluded`.
+
+        `.rein/` and the leaf worktree root are excluded for the same reason `finalize_commit`
+        excludes them: neither is any task's work, and counting them would make every task look
+        like it changed something.
         """
         paths: set[str] = set()
-        rc, out = self._run(["git", "status", "--porcelain", "-uall", "--", *self.pathspec], cwd=cwd)
-        if rc == 0:
-            for line in out.splitlines():
-                if len(line) < 4:
-                    continue
-                path = line[3:]
-                if " -> " in path:
-                    path = path.split(" -> ", 1)[1]
-                paths.add(path.strip('"'))
+        for line in self._lines_of(
+            ["status", "--porcelain", "-uall", "--", *self.pathspec], cwd, what=f"the uncommitted paths in {cwd}"
+        ):
+            if len(line) < 4:
+                continue
+            path = line[3:]
+            if " -> " in path:
+                path = path.split(" -> ", 1)[1]
+            paths.add(path.strip('"'))
         return sorted(paths)
 
     def changed_since(self, base: str) -> list[str]:
         """Paths a serial task changed on the work branch: commits since `base` plus the dirty tree."""
-        paths: set[str] = set()
-        rc, out = self._run(["git", "diff", "--name-only", f"{base}..HEAD"], cwd=self.root)
-        if rc == 0:
-            paths.update(p for p in out.splitlines() if p.strip())
+        paths = set(
+            self._lines_of(
+                ["diff", "--name-only", f"{base}..HEAD"], self.root, what=f"what was committed since {base[:12]}"
+            )
+        )
         paths.update(self.dirty_paths(self.root))
         return sorted(paths)
 

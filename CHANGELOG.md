@@ -19,12 +19,16 @@ start on any uncommitted change, naming the paths, and naming any task an earlie
 `in-progress` so leftovers are not mistaken for junk and stashed. The narrower "a source document the
 build reads is uncommitted" refusal is deleted: it was this rule asked about five files.
 
-**And the leaf worktrees are not the serial task's dirty tree either.** `.worktrees/` is untracked
-and lives inside the root, so every reading taken there swallowed a parked leaf whole — its scope,
-its fingerprint, and `git add -A` embedding it as a gitlink in another task's commit. It is now
-excluded beside `.rein/` in the one place the exclusion is derived, which the four answers that must
-agree — the fingerprint, the credited paths, the commit, and the `git add` the implementer is told to
-type — all read.
+**And the leaf worktrees are not the serial task's dirty tree either.** The worktree root lives
+inside the repository, so a serial task running beside a parked leaf would be credited with that
+leaf's whole worktree — against its scope, into its fingerprint, and, through `git add -A`, into its
+commit as a gitlink. What has been standing between that and every product is `.gitignore`: the
+runtime-artifact block `rein init` writes derives the entry from `execution.worktree_dir`, so in a
+repository whose block is current git never lists the directory at all. That is a real defence and
+the wrong place for this one to live — it is a file a human edits, one `rein doctor` can only
+report on after the fact. The worktree root is now excluded beside `.rein/` in the one place the
+exclusion is derived, which the four answers that must agree — the fingerprint, the credited paths,
+the commit, and the `git add` the implementer is told to type — all read.
 
 **A scope violation is `needs-revision`, not `blocked`.** Its own message says the way forward is a
 human widening the scope at `/revise`; `blocked` says the implementer could not make the code work.
@@ -44,6 +48,14 @@ override, so the only exit from a default-configured cycle was `rein revise --to
 re-approval of a plan nothing had changed. `plan_readings` takes the risk now and reads a critical
 change whole, `coverage_blocks` is what it should always have been — a backstop over a document
 another release wrote — and `build_loop` stops warming per-task readings the gate will not look up.
+
+**This makes `max_diff_bytes` a budget on the whole change once the risk is `critical`**, where a
+composed review only ever had to fit one slice at a time. A critical cycle larger than the budget
+now refuses to generate a review at all, before any launch, rather than composing one and being
+blocked afterwards by a remedy nobody could carry out — and the refusal names the two moves that
+exist: narrow what the cycle claims through `/revise`, or record a higher
+`review_policy.budgets.max_diff_bytes` as a deliberate decision. `rein dag --render` says so at
+gate ③, where both of them are still possible.
 
 **And `rein dag --render` says which of the two a plan will get.** A `critical` task settles the
 reading before the scopes do — effective risk is the max of every contributor — and it is the one
@@ -76,7 +88,10 @@ whose default is no limit. The adapter table said so all along, in `prompt_flags
 transport never read it. `Adapter.prompt_on_stdin` declares the channel where it is *established*,
 which is claude and nothing else; every other CLI is handed its request the way its own reference
 says it takes one, and a request past the 128 KiB one argv element may carry is refused, naming
-both ways out, rather than sent into `execve` to come back as `E2BIG`.
+both ways out, rather than sent into `execve` to come back as `E2BIG`. Read that bound as the
+practical one it is: a gate ④ reading is usually larger than 128 KiB, so what the other six CLIs
+gain here is a reviewer that works on a change of up to about that size and says so plainly above
+it — not parity with `claude`, which is the only adapter whose stdin channel has been run.
 
 **The integration reviewer read the cycle and called it the join.** Its diff started at the plan's
 base commit, so every batch re-read every batch before it at full price — and the attribution
@@ -100,6 +115,36 @@ silently when there was no cycle to record a switch under, while the chain is th
 switch survives — it says so. And `scratch_worktree` runs `git worktree prune`, which is
 repository-wide, and the negative control now calls it from inside each leaf's thread — the admin
 calls are serialised, the body is not.
+
+### And what a pass over this branch found
+
+**A precondition that passes because the check broke is not a precondition.** The working-tree
+refusal above rests on `dirty_paths`, which parsed `git status` under `if rc == 0` with no `else`:
+a git that *could not answer* — an index another process holds, a pathspec a mis-set
+`execution.worktree_dir` makes invalid — was indistinguishable from a git that answered *nothing*,
+and the run started on the dirty tree the refusal exists to catch. The same shape decided what a
+task is credited with changing (`changed_since`, `branch_changed_paths`), where a silent empty
+answer is a scope violation nobody sees. All three go through one query that raises on a non-zero
+exit and on a capped output, because a prefix is not an answer either.
+
+**And the tree question is asked inside the build lock.** A dirty tree and a run already in
+progress are the same picture from outside — the other run's implementer is editing the repository
+root right now — so asking before the lock told the second `rein build` to commit or stash the
+first one's live work, under `cannot proceed`, where the honest answer is "another run holds the
+repository, retry". The lock answers first.
+
+**The guard's next unknown host is audible.** `tool_arguments` returning `{}` made "this tool call
+has no arguments" and "this host names them something I have never seen" the same fact — which is
+exactly how the Gemini hole stayed invisible, one host over. It returns `None` for the second, and
+the guard says so in the hook log before allowing.
+
+**A carried finding no reading can see stops the composition instead of picking one.** The
+per-reading assignment above hands each carried blocking finding to the reading whose scope covers
+its anchor; a finding anchored where *no* scope reaches — the security stage reads a checkout, not
+only the diff — had no owner, and fell to whichever reading came first. That reviewer can neither
+re-state it nor resolve it, and the refusal for dropping a carried finding is not passable from
+there. `unowned_priors` asks the question before a reading is measured, and a composition that
+cannot hold one is not composed: the change is read whole.
 
 ## [0.4.1] - 2026-09-03
 

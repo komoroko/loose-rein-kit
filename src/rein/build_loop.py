@@ -2678,7 +2678,7 @@ class Orchestrator:
                 "fill `branch:` in state.md or check out the work branch first."
             )
             return common.EXIT_CANNOT_PROCEED
-        if problems := self._source_problems() + self._tree_problems():
+        if problems := self._source_problems():
             for problem in problems:
                 logger.error(problem)
             return common.EXIT_CANNOT_PROCEED
@@ -2702,6 +2702,8 @@ class Orchestrator:
             with build_lock(self.repo), control_plane.serving(self.repo) as server:
                 self.control = server
                 try:
+                    if refusal := self._tree_refusal():
+                        return refusal
                     rc = self._run_loop()
                     outcome = _RUN_OUTCOME.get(rc, "failed")
                     return rc
@@ -2720,6 +2722,29 @@ class Orchestrator:
             # shutdown often enough that reading this as fatal would stop the loop for good.
             logger.error(f"another build run holds the lock: {exc}")
             return common.EXIT_RETRY_LATER
+
+    def _tree_refusal(self) -> int:
+        """`EXIT_CANNOT_PROCEED` when the working tree is not this run's to measure; 0 to proceed.
+
+        **Asked inside the build lock, on purpose.** A dirty tree and a run already in progress are
+        the same picture from outside — the other run's implementer is editing the root *right now*
+        — so asking before the lock would tell the second `rein build` to commit or stash the
+        first one's live work, and to do it under "cannot proceed" where the honest answer is
+        "another run holds the repository, retry". The lock answers first; what is uncommitted
+        underneath it belongs to nobody but this run.
+
+        A git that cannot answer raises rather than reporting a clean tree
+        (`build_git.GitWorkspace._lines_of`), and the raise is handled here because this is the
+        first thing the locked section does — before the batch loop that handles the rest.
+        """
+        try:
+            problems = self._tree_problems()
+        except StopLoop as exc:
+            logger.error(str(exc))
+            return exc.code
+        for problem in problems:
+            logger.error(problem)
+        return common.EXIT_CANNOT_PROCEED if problems else 0
 
     def _preflight(self) -> list[preflight.Problem]:
         """Why this run cannot finish, found before the first launch (`rein.preflight`).
@@ -2809,7 +2834,8 @@ class Orchestrator:
         recorded baseline was the alternative and it cannot fix the last item without scoping the
         finalize commit to a path list, which merely hands the same unowned diff to the next task.
 
-        `.rein/` is excluded, as it is everywhere else: orchestration state is not any task's work.
+        `.rein/` and the leaf worktree root are excluded, as they are everywhere else
+        (`build_git.GitWorkspace.excluded`): neither is any task's work.
         """
         if self.dry_run:
             return []

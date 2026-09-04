@@ -417,6 +417,12 @@ def generate(
         effective = review_reading.effective_risk(facts, plan)
         changed = [f.path for f in facts.files]
 
+        # What the last review found blocking *about this same base*. Taken from the copy read at
+        # the top rather than re-read here, and before the calls below, which are about to move off
+        # this thread — the store is not something to touch from two. It is needed this early
+        # because it decides how the change may be read at all: see the re-take below.
+        prior_blocking = _prior_blocking(existing, trusted_base)
+
         # How the change is read: one reading of everything, or one per task the plan scopes plus
         # the seam between them. Each is measured and widened on its own, so one launch holds one
         # task's slice rather than a whole cycle, and a slice nobody read is named rather than
@@ -424,17 +430,23 @@ def generate(
         readings = review_reading.plan_readings(
             plan, changed, mode=config.composition if config is not None else "auto", risk=effective
         )
-        measures = [
-            review_reading.read_facts(
-                repo, reading=reading, base=trusted_base, head=head, exclude=exclude, limits=limits
+        measures = review_reading.take_readings(
+            repo, readings, base=trusted_base, head=head, exclude=exclude, limits=limits
+        )
+        # A composition is a way of reading *this* change only if every finding carried into it
+        # lands on a reading that can see the code it names. One that does not is not a finding to
+        # be assigned somewhere anyway — the reviewer that got it could neither re-state nor
+        # resolve it, and the refusal for dropping a carried finding is not passable from there.
+        # Asked after the empty slices are dropped, because a dropped reading owns nothing.
+        if orphaned := review_reading.unowned_priors([m.reading for m in measures], prior_blocking):
+            logger.warning(
+                f"carried blocking finding(s) {', '.join(orphaned)} are anchored in code no task "
+                "scope covers, so no slice of this change can answer for them — reading the change "
+                "whole instead of composing it"
             )
-            for reading in readings
-        ]
-        # A slice this cycle did not touch has nothing in it to read. Launching two models at an
-        # empty diff buys an empty answer at full price, and a task the cycle never reached would
-        # cost that on every regeneration. The whole-change reading is never dropped: an empty
-        # change still gets the reading that says so, which is the shape a review has always had.
-        measures = [m for m in measures if m.reading.whole or m.facts.files]
+            measures = review_reading.take_readings(
+                repo, [review_reading.WHOLE_READING], base=trusted_base, head=head, exclude=exclude, limits=limits
+            )
         coverage = review_reading.compose_coverage(facts.coverage.to_manifest(), measures, changed_paths=changed)
 
         subject = {
@@ -448,14 +460,10 @@ def generate(
             "subject_head_sha": head,
         }
 
-        # What the last review found blocking *about this same base*. Taken from the copy read at
-        # the top rather than re-read here, and taken before the calls below, which are about to
-        # move off this thread — the store is not something to touch from two. It goes *into the
-        # request*, which is both where the reviewer reads it and where the validator now takes it
-        # from: the reviewer is refused for dropping one of these, and was being refused on
-        # knowledge nobody had given it. `priors_by_reading` splits it, because a reading can
-        # only be held to findings anchored in code it was actually sent.
-        prior_blocking = _prior_blocking(existing, trusted_base)
+        # The carried findings go *into the request*, which is both where the reviewer reads them
+        # and where the validator now takes them from: the reviewer is refused for dropping one,
+        # and was being refused on knowledge nobody had given it. `priors_by_reading` splits them,
+        # because a reading can only be held to findings anchored in code it was actually sent.
         prior_by_unit = review_reading.priors_by_reading([m.reading for m in measures], prior_blocking)
 
         cancel = common.Cancellation()

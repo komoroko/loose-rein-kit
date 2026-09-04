@@ -13,6 +13,7 @@ happened either way is reported to whoever records the handoff.
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -283,3 +284,55 @@ def test_a_leafs_worktree_is_not_the_serial_tasks_dirty_tree(
 
     assert ws.finalize_commit(str(root), "T-001: serial work")
     assert git(root, "show", "--name-only", "--format=", "HEAD").split() == ["mine.py"]
+
+
+def test_a_git_that_cannot_answer_is_not_an_answer_of_nothing(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """Every path query below parsed its output under `if rc == 0` with no `else`.
+
+    So a git that *could not answer* — an index another process holds, a pathspec a mis-set
+    `execution.worktree_dir` makes invalid, a repository the runner could not enter — read exactly
+    like a git that answered *nothing*. Three answers rest on that: whether the run may start at
+    all (`build_loop._tree_problems`), what a task is credited with changing, and whether its diff
+    stayed inside its declared scope. A precondition that passes because the check broke is the one
+    way a precondition must never pass.
+    """
+    root, ws, _ = workspace
+    (root / "stray.py").write_text("x = 1\n", encoding="utf-8")
+    assert ws.dirty_paths(str(root)) == ["stray.py"]  # the same question, answered
+
+    calls: list[list[str]] = []
+
+    def refusing(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
+        calls.append(cmd)
+        return 128, "fatal: unable to read index"
+
+    ws._run = refusing  # type: ignore[assignment]
+    queries: tuple[Callable[[], list[str]], ...] = (
+        lambda: ws.dirty_paths(str(root)),
+        lambda: ws.changed_since("HEAD~1"),
+        lambda: ws.branch_changed_paths("T-001"),
+    )
+    for query in queries:
+        with pytest.raises(common.StopLoop) as caught:
+            query()
+        assert "could not determine" in str(caught.value)
+        assert "unable to read index" in str(caught.value)
+        assert caught.value.code == common.EXIT_CANNOT_PROCEED
+    assert len(calls) == 3
+
+
+def test_a_capped_listing_is_a_prefix_and_not_the_answer(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """`fingerprint` has always refused a truncated output; the path queries took one as fact.
+
+    A capped `git status` is a prefix of the uncommitted paths, so the tail — which may hold the
+    only path that violates a scope — reads as absent rather than as unknown.
+    """
+    root, ws, _ = workspace
+    ws._run = lambda cmd, cwd=None, **kw: (0, "?? a.py\n" + common.TRUNCATION_MARKER)  # type: ignore[assignment]
+    with pytest.raises(common.StopLoop) as caught:
+        ws.dirty_paths(str(root))
+    assert "prefix rather than the answer" in str(caught.value)

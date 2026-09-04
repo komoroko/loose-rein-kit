@@ -625,6 +625,32 @@ def read_facts(
     )
 
 
+def take_readings(
+    repo: repo_mod.Repo,
+    readings: Sequence[Reading],
+    *,
+    base: str,
+    head: str,
+    exclude: Sequence[str],
+    limits: Mapping[str, int],
+) -> list[ReadingFacts]:
+    """:func:`read_facts` for each reading, minus the slices this cycle did not touch.
+
+    A slice this cycle did not touch has nothing in it to read. Launching two models at an empty
+    diff buys an empty answer at full price, and a task the cycle never reached would cost that on
+    every regeneration. The whole-change reading is never dropped: an empty change still gets the
+    reading that says so, which is the shape a review has always had.
+
+    A function rather than a comprehension at the one call site because there are two: a
+    composition that turns out not to cover a carried finding (`unowned_priors`) is re-taken whole,
+    and both takings have to be the same taking.
+    """
+    measures = [
+        read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits) for reading in readings
+    ]
+    return [m for m in measures if m.reading.whole or m.facts.files]
+
+
 def extraction_request(
     measured: ReadingFacts,
     *,
@@ -952,6 +978,78 @@ def plan_readings(
     return [*readings, Reading(unit=SEAM, include=tuple(sorted(seam)))]
 
 
+def _prior_owner(paths: Sequence[str], slices: Sequence[Reading], seam: Reading | None) -> str | None:
+    """The one reading that can be held to a finding anchored at `paths`, or None when none can.
+
+    Ownership is `findings._first_owned`, spelled with readings instead of tasks and answering the
+    same way for the same input: each anchor in turn, the scope covering it most specifically wins,
+    and the first anchor that has an owner at all settles it. Two derivations of "whose finding is
+    this" would eventually name two different tasks for one finding — the reading that must re-state
+    it and the task it is filed against.
+
+    The seam takes what no slice owns: a path more than one scope covers, a path none does, and a
+    finding with no anchor at all, which belongs to no slice by construction.
+
+    **None is a real answer and the caller acts on it.** A finding anchored in code that is inside
+    no reading cannot be re-stated by anybody — the reviewer would be asked about a file it was
+    never sent — and `security_review.run_security_review` refuses an answer that drops it, so the
+    composition simply cannot hold that finding.
+    """
+    for path in paths:
+        owner, best = None, -1
+        for reading in slices:
+            cover = common.longest_cover(path, reading.include)
+            if cover is not None and len(cover) > best:
+                owner, best = reading.unit, len(cover)
+        if owner is not None:
+            return owner
+    if seam is None:
+        return None
+    if not paths:
+        return seam.unit
+    return seam.unit if any(common.longest_cover(path, seam.include) for path in paths) else None
+
+
+def _anchor_paths(finding: Mapping[str, Any]) -> list[str]:
+    """The non-empty paths this finding is anchored at. Empty = anchored nowhere."""
+    anchors = finding.get("code_anchors")
+    if not isinstance(anchors, list):
+        return []
+    return [str(a.get("path", "")) for a in anchors if isinstance(a, Mapping) and a.get("path")]
+
+
+def unowned_priors(readings: Sequence[Reading], prior_blocking: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ids of the carried blocking findings this set of readings cannot hold. Empty = it can.
+
+    A composition is only a way of reading *this* change if every finding carried into it lands on
+    a reading that can see the code it names. One that does not is not a slicing problem to be
+    assigned around: it is a change these slices do not cover, and the answer is to stop slicing
+    (`review.generate` re-reads it whole). Without this, such a finding went to whichever reading
+    came first, whose reviewer could neither re-state nor resolve it — and the refusal for dropping
+    a carried finding is not passable from there.
+
+    A whole-change reading owns everything, so this is empty by construction for one. No readings
+    at all — every scoped slice empty and nothing left over, which is an empty change — owns
+    nothing, so a finding carried onto one comes back here and is answered whole.
+    """
+    if any(reading.whole for reading in readings):
+        return []
+    slices, seam = _slices_and_seam(readings)
+    return [
+        str(finding.get("id", ""))
+        for finding in prior_blocking
+        if _prior_owner(_anchor_paths(finding), slices, seam) is None
+    ]
+
+
+def _slices_and_seam(readings: Sequence[Reading]) -> tuple[list[Reading], Reading | None]:
+    """The task readings and the seam, told apart once for the two functions that need both."""
+    return (
+        [r for r in readings if not r.whole and r.unit != SEAM],
+        next((r for r in readings if r.unit == SEAM), None),
+    )
+
+
 def priors_by_reading(
     readings: Sequence[Reading], prior_blocking: Sequence[Mapping[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -971,29 +1069,28 @@ def priors_by_reading(
     printed three times to the human it was meant to reach once. Verified against the real
     functions before it was fixed; a schema that validates the shape of an id cannot see it.
 
-    Who answers: **the task whose declared scope covers an anchor most specifically**, the same
-    derivation `findings.owner_of_path` uses to decide which task a finding is filed against, so a
-    reader is never told two different owners for one finding. What no task scope covers — and a
-    finding with no anchor at all, which belongs to no slice — goes to the seam, the reading whose
-    job is exactly that. With no seam (nothing is shared and nothing is unowned) it falls to the
-    first reading, which for a whole-change review is the only one there is.
+    Who answers is :func:`_prior_owner`. That it answers for *every* finding is
+    :func:`unowned_priors`, which the caller has already asked — a set of readings that cannot hold
+    one of these is not composed at all, so the only reading left here is the whole change, which
+    owns everything.
 
     Every reading gets a key, including the empty ones: the caller looks its own unit up.
     """
     assigned: dict[str, list[dict[str, Any]]] = {reading.unit: [] for reading in readings}
     if not readings:
         return assigned
-    slices = [r for r in readings if not r.whole and r.unit != SEAM]
-    fallback = next((r.unit for r in readings if r.unit == SEAM), readings[0].unit)
+    if any(reading.whole for reading in readings):
+        assigned[readings[0].unit] = [dict(finding) for finding in prior_blocking]
+        return assigned
+    slices, seam = _slices_and_seam(readings)
     for finding in prior_blocking:
-        anchors = finding.get("code_anchors")
-        paths = [str(a.get("path", "")) for a in anchors if isinstance(a, Mapping)] if isinstance(anchors, list) else []
-        owner, best = fallback, -1
-        for reading in slices:
-            for path in paths:
-                cover = common.longest_cover(path, reading.include) if path else None
-                if cover is not None and len(cover) > best:
-                    owner, best = reading.unit, len(cover)
+        owner = _prior_owner(_anchor_paths(finding), slices, seam)
+        if owner is None:
+            raise ReviewError(
+                f"the readings do not cover carried finding {finding.get('id', '?')}, so no reviewer "
+                "can be held to it — `unowned_priors` decides this before a reading is measured, and "
+                "reaching here means it was not asked"
+            )
         assigned[owner].append(dict(finding))
     return assigned
 

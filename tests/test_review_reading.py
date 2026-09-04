@@ -219,7 +219,7 @@ def test_a_reading_over_budget_says_which_one() -> None:
 # --- a composed review, end to end --------------------------------------------
 
 
-def _composed_repo(tmp_path: Path) -> Path:
+def _composed_repo(tmp_path: Path, *, base_files: Mapping[str, str] | None = None) -> Path:
     """A repository whose plan scopes two tasks, and whose change touches both plus a stray file."""
     from tests._support import make_claim, make_config, make_plan, make_state, make_task, seed_repo
 
@@ -236,6 +236,8 @@ def _composed_repo(tmp_path: Path) -> Path:
         config=make_config(),
     )
     _git(tmp_path, "init", "-q", "-b", "main")
+    for name, body in (base_files or {}).items():
+        (tmp_path / name).write_text(body, encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-qm", "seed")
     # The review is taken against `main` (the plan's base commit is not in this repository), so the
@@ -471,6 +473,95 @@ def test_the_whole_change_reading_carries_every_prior() -> None:
     prior: list[Mapping[str, Any]] = [{"id": "SEC-001", "code_anchors": [{"path": "anywhere.py"}]}, {"id": "SEC-002"}]
     assigned = review_reading.priors_by_reading([review_reading.WHOLE_READING], prior)
     assert [f["id"] for f in assigned[review_reading.WHOLE]] == ["SEC-001", "SEC-002"]
+
+
+@pytest.mark.integration
+def test_a_carried_finding_outside_every_scope_is_re_read_whole(tmp_path: Path) -> None:
+    """End to end: the composition that cannot hold a carried finding is not the one taken.
+
+    The security stage is handed a checkout, not only its slice's diff, so it can anchor a finding
+    at a file this change never touched — `README.md` here, which no task scope declares and which
+    the seam therefore never lists. Carried into the next generation, that finding has no reading
+    to answer for it, and the reviewer that got it anyway could neither re-state nor resolve it.
+    """
+    import json
+
+    from rein import review, security_review
+    from tests.test_review import _reviewers
+
+    # `legacy.py` is committed on the base, so it is in the tree the security stage is handed and
+    # in no reading's diff — and no task scope declares it, so the seam never lists it either.
+    root = _composed_repo(tmp_path, base_files={"legacy.py": "LEGACY = 1\n"})
+    repo = repo_mod.Repo(root)
+    blob = _git(root, "rev-parse", "HEAD:legacy.py").strip()
+    finding = {
+        "id": "SEC-001",
+        "severity": "high",
+        "category": "credential_exposure",
+        "attack_scenario": "the change reintroduces a credential path this file still reaches",
+        "blocking": True,
+        "code_anchors": [{"path": "legacy.py", "blob": "git-blob:" + blob, "start_line": 1, "end_line": 1}],
+    }
+
+    def reviewer(role: str, request: Any) -> str:
+        if role == "comparator":
+            return json.dumps({"claims": [], "actual_digest": request["actual_digest"]})
+        if role == "security_reviewer":
+            # What was carried in is re-stated, as a real reviewer must; the finding is minted from
+            # one reading only, so the carry-over is one finding rather than one per slice.
+            carried = list(security_review.prior_blocking_of(request))
+            fresh = [finding] if not carried and "alpha/mod.py" in str(request.get("diff", "")) else []
+            return json.dumps({"findings": carried + fresh})
+        return json.dumps({"actual_statements": [], "coverage": {}})
+
+    first = review.generate(repo, _reviewers(reviewer))
+    assert first["coverage"]["composition"]["mode"] == "composed"
+    assert [f["id"] for f in first["security"]["findings"]] == ["SEC-001"]
+
+    second = review.generate(repo, _reviewers(reviewer), force=True)
+    assert second["coverage"]["composition"]["mode"] == "whole", "no slice can answer for SEC-001"
+    assert [f["id"] for f in second["security"]["findings"]] == ["SEC-001"], "and it is still carried"
+
+
+def test_a_carried_finding_no_reading_can_see_stops_the_composition() -> None:
+    """The assignment above answers *which* reading; this answers whether one exists at all.
+
+    A carried finding is anchored where no task scope reaches and the seam does not list it —
+    the security stage reads a checkout, not only the diff, so it can anchor a finding to a file
+    this change never touched. There is then no reading that can be held to it: the reviewer that
+    got it would be asked about code it was never sent, could neither re-state nor resolve it, and
+    the refusal for dropping a carried finding is not passable from there. Handing it to whichever
+    reading came first is the wrong repair; the change is not one these slices cover, so
+    `review.generate` reads it whole.
+    """
+    readings = review_reading.plan_readings(_scoped_plan(), ["alpha/mod.py"])
+    assert review_reading.SEAM not in {r.unit for r in readings}, "nothing shared, nothing unowned"
+    unreachable: list[Mapping[str, Any]] = [{"id": "SEC-009", "code_anchors": [{"path": "beta/caller.py"}]}]
+    assert review_reading.unowned_priors(readings, unreachable) == ["SEC-009"]
+    # And nothing else is: a finding a scope covers, and one the whole-change reading holds.
+    inside: list[Mapping[str, Any]] = [{"id": "SEC-001", "code_anchors": [{"path": "alpha/mod.py"}]}]
+    assert review_reading.unowned_priors(readings, inside) == []
+    assert review_reading.unowned_priors([review_reading.WHOLE_READING], unreachable) == []
+
+
+def test_the_reading_shown_a_finding_is_the_task_it_is_filed_against() -> None:
+    """Two derivations of "whose finding is this" would eventually name two different tasks.
+
+    `findings.owner_of_path` decides who a finding is *filed* against; `priors_by_reading` decides
+    who is *shown* it and required to re-state it. For a finding anchored in more than one place
+    those have to be the same task, so both take the first anchor that has an owner at all.
+    """
+    from rein import findings as findings_mod
+
+    plan = _scoped_plan()
+    readings = review_reading.plan_readings(plan, ["alpha/mod.py", "alpha/shared.py", "loose.py"])
+    finding: Mapping[str, Any] = {
+        "id": "SEC-004",
+        "code_anchors": [{"path": "alpha/mod.py"}, {"path": "alpha/shared.py"}],
+    }
+    filed = findings_mod.owner_of_path(plan, "alpha/mod.py")
+    shown = next(unit for unit, carried in review_reading.priors_by_reading(readings, [finding]).items() if carried)
+    assert shown == filed == "T-001", "the first anchor that has an owner, on both sides"
 
 
 class _NoReviewers:

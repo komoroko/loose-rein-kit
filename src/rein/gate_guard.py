@@ -676,13 +676,20 @@ GEMINI_WRITE_TOOLS: tuple[str, ...] = ("write_file", "replace")
 TOOL_ARGS_KEYS: tuple[str, ...] = ("tool_input", "tool_args", "toolInput", "toolArgs")
 
 
-def tool_arguments(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    """The call's arguments, whichever of :data:`TOOL_ARGS_KEYS` this host named them under."""
+def tool_arguments(payload: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The call's arguments, whichever of :data:`TOOL_ARGS_KEYS` this host named them under.
+
+    **None, not `{}`, when no spelling matched.** A tool invoked with no arguments and a payload
+    this guard cannot read are the same empty mapping and *not* the same fact: the first is a call
+    with no path to check, the second is every call on that host going unchecked. Returning one
+    value for both is how the Gemini hole stayed invisible — `hook_paths` answered `[]`, the guard
+    exited 0, and `doctor` reported it registered. The caller says so out loud instead.
+    """
     for key in TOOL_ARGS_KEYS:
         value = payload.get(key)
         if isinstance(value, Mapping):
             return value
-    return {}
+    return None
 
 
 def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
@@ -739,6 +746,17 @@ def main(argv: list[str] | None = None) -> int:
         logger.warning("gate_guard: unparseable hook payload on stdin — allowing without a gate check")
         return 0
     tool_input = tool_arguments(payload)
+    if tool_input is None:
+        # Fail-open, for the same reason the unparseable payload above is — but never silently.
+        # This is the shape of the hole that was just closed for Gemini CLI, and the next host to
+        # name its arguments something else lands here: a warning in the hook log is what makes
+        # "the guard stopped guarding" visible, instead of a green `doctor` over a guard that
+        # allows every edit.
+        logger.warning(
+            f"gate_guard: this host names the tool call's arguments none of {', '.join(TOOL_ARGS_KEYS)} "
+            "— allowing without a gate check. The commit-stage `rein guard --check-diff` still runs."
+        )
+        return 0
     paths = hook_paths(tool_input)
     if not paths:
         return 0
