@@ -292,6 +292,45 @@ def test_a_scoped_plan_is_read_one_task_at_a_time_and_says_so(tmp_path: Path) ->
 
 
 @pytest.mark.integration
+def test_a_composed_run_names_each_reading_as_it_lands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The whole of #51 is about the composed run, and only the composed run has unit names to
+    print — a whole-change review has one reading and nothing to count.
+
+    A run like this printed its plan and then nothing for hours; the progress had to be recovered
+    by pulling `run_measured` out of `events.ndjson` and counting `decision` fields.
+    """
+    from rein import review
+    from tests.test_review import _reviewers
+
+    root = _composed_repo(tmp_path)
+    review.generate(repo_mod.Repo(root), _reviewers(_reviewer_seeing([])))
+
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines() if "[review]" in line]
+    # Three readings × two stages, plus the one comparison over the merged Actual.
+    assert len(lines) == 7, lines
+    assert [line.split()[1] for line in lines] == [f"{n}/7" for n in range(1, 8)], lines
+    for unit in ("T-001", "T-002", "seam"):
+        assert sum(1 for line in lines if f"[{unit}]" in line) == 2, (unit, lines)
+    assert lines[-1].split()[2] == "comparison:", lines[-1]
+
+
+@pytest.mark.integration
+def test_a_reused_reading_says_reuse_and_is_not_billed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """ "9 of 18 readings are cached" was the number that existed only in the audit chain."""
+    from rein import review
+    from tests.test_review import _reviewers
+
+    root = _composed_repo(tmp_path)
+    review.generate(repo_mod.Repo(root), _reviewers(_reviewer_seeing([])))
+    capsys.readouterr()
+    review.generate(repo_mod.Repo(root), _reviewers(_reviewer_seeing([])))
+
+    lines = [line for line in capsys.readouterr().out.splitlines() if "[review]" in line]
+    assert lines and all(": reuse" in line for line in lines), lines
+    assert not any("USD" in line for line in lines), "a reuse is not a launch and carries no bill"
+
+
+@pytest.mark.integration
 def test_a_composed_review_reuses_the_readings_the_change_did_not_move(tmp_path: Path) -> None:
     """The measurement this exists for: a fix inside one task's scope re-reads that task, and the
     tasks beside it stay read."""
@@ -624,3 +663,37 @@ def test_a_stored_answer_that_no_longer_validates_is_dropped_and_re_read(tmp_pat
         == "fresh"
     )
     assert attempts == ["call", "call"], "the stale entry was dropped and the stage ran for real"
+
+
+def test_only_the_cache_can_say_whether_a_stage_ran_for_this_reading(tmp_path: Path) -> None:
+    """`ran` is a set of stage *names*, shared across every reading of a composed review.
+
+    So a caller counting launches off it reports reuse as a launch from the second unit onwards —
+    which is why `on_done` exists rather than a `"stage" not in ran` test at the call site.
+    """
+    from rein import review_cache
+
+    cache = review_cache.StageCache(tmp_path)
+    seen: list[bool] = []
+    ran: set[str] = set()
+
+    class _Reviewers:
+        def for_role(self, role: str) -> Any:
+            return lambda request: review_policy.Answer("{}")
+
+        def spend(self) -> dict[str, usage_mod.Usage]:
+            return {}
+
+    for key in ("unit-a", "unit-b", "unit-a"):
+        review_reading.cached_stage(
+            cache,
+            "actual_extraction",
+            key,
+            ran,
+            lambda reviewer: reviewer({"ask": "read it"}).text,
+            _Reviewers(),
+            reused=usage_mod.Ledger(),
+            on_done=seen.append,
+        )
+    assert seen == [False, False, True], seen
+    assert ran == {"actual_extraction"}, "the name is in `ran` from the first launch onwards"

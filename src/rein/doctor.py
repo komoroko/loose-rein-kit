@@ -1431,6 +1431,48 @@ def check_last_run(repo: repo_mod.Repo) -> list[Finding]:
     ]
 
 
+def check_last_review_run(repo: repo_mod.Repo) -> list[Finding]:
+    """Did the last gate-④ generation stop for a machine reason, and has none succeeded since?
+
+    The same question :func:`check_last_run` asks about the build, and it has to be asked
+    separately because moving a transient review failure out of `events.ATTENTION_EVENTS` is
+    exactly what creates the state that check exists for: no escalation is open, the board reads
+    as it did before, and nothing says a run that was thirteen hours in died at 3am on a session
+    limit. The rows it used to leave were unactionable; their absence must not be silence.
+
+    What makes this worth an operator's attention rather than a shrug: `review_cache` kept every
+    reading the run had already taken, so re-running it is cheap — which is the fact a board that
+    looks unchanged cannot convey.
+    """
+    events, _ = event_chain.scan(repo.events)
+    last_abort = next((e for e in reversed(events) if e.event == "review_aborted"), None)
+    if last_abort is None:
+        return []
+    if any(e.seq > last_abort.seq and e.event == "review_generated" for e in events):
+        return []
+    stage = str(last_abort.detail.get("stage", "a stage"))
+    reason = str(last_abort.detail.get("reason", ""))
+    idle_sec = _seconds_since(last_abort.ts)
+    stale = idle_sec is not None and idle_sec >= _STALE_ABORT_AFTER_SEC
+    advice = (
+        f"Nothing has re-run it in over {int(idle_sec // 3600)}h — well past any capacity limit "
+        "that reports a same-day reset. "
+        if stale and idle_sec is not None
+        else ""
+    ) + (
+        "Re-run `rein review generate --supervise`: every reading it already took is cached, so it "
+        "resumes rather than re-reading the change."
+    )
+    return [
+        Finding(
+            "WARN" if stale else "INFO",
+            "review",
+            f"the last machine review stopped at {stage} for a machine reason"
+            f"{f' ({reason[:200]})' if reason else ''}. {advice}",
+        )
+    ]
+
+
 def check_review(review: models.Review | None, head: str = "") -> list[Finding]:
     if review is None or not review.is_generated:
         return [Finding("INFO", "review", "no machine review generated yet")]
@@ -1556,6 +1598,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_plan(repo, plan, state)
     findings += check_chain(repo)
     findings += check_last_run(repo)
+    findings += check_last_review_run(repo)
     rc, head_out = repo._git_rc("rev-parse", "HEAD")
     findings += check_review(review, head_out.strip() if rc == 0 else "")
     findings += check_review_outlook(repo)

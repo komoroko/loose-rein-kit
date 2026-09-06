@@ -103,6 +103,57 @@ def ask_yes_no(prompt: str) -> bool:
     return sys.stdin.readline().strip().lower() in ("y", "yes")
 
 
+#: How often a launch in flight says it is still in flight. Not a progress bar and not a poll:
+#: nothing is asked and nothing is read, the run just keeps talking.
+#:
+#: It exists because the *host* is what kills a silent command. Gemini CLI's shell tool caps a
+#: command by `tools.shell.inactivityTimeout` — 300 seconds **without output**, not 300 seconds of
+#: runtime — and a single agent launch is silent for far longer than that, because :func:`run`
+#: captures the CLI's output rather than streaming it. So a foreground `rein build` died mid-task
+#: on a host that would happily have waited all day, and the only advice left was "detach and end
+#: your turn", which is how a build gets abandoned by the session that started it. One line a
+#: minute is what makes the host's own wait usable, and it costs no tokens: the CLI prints it, not
+#: a model.
+HEARTBEAT_SEC = 60.0
+
+
+class Heartbeat:
+    """Prints one line every :data:`HEARTBEAT_SEC` while a launch is in flight.
+
+    A thread rather than a wrapper around :func:`run`, because what has to keep talking is the
+    *waiting*, and the waiting is inside a call that captures its child's output by design (an
+    agent's stdout is an answer to be parsed, not console noise).
+
+    Here rather than in the build loop, which is where it was written and where it was the only
+    caller. The property it defends is not the build's: it belongs to any `rein` command that
+    spends minutes inside one captured launch, and gate ④'s composed review — eighteen readings,
+    measured at thirteen hours on one run — is now the longer of the two. That run printed four
+    lines in eight hours and was killed twice by a host resource heuristic while it was in fact
+    progressing. One implementation, so the two cannot drift apart on what a live command sounds
+    like.
+    """
+
+    def __init__(self, what: str, *, indent: str = "    ") -> None:
+        self._what = what
+        self._indent = indent
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._tick, daemon=True)
+
+    def _tick(self) -> None:
+        waited = 0.0
+        while not self._done.wait(HEARTBEAT_SEC):
+            waited += HEARTBEAT_SEC
+            print(f"{self._indent}[waiting] {self._what}: {waited / 60:.0f}m so far", flush=True)
+
+    def __enter__(self) -> Heartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._done.set()
+        self._thread.join(timeout=1.0)
+
+
 class Cancellation:
     """A handle another thread can trip to end a :func:`run` before it finishes.
 

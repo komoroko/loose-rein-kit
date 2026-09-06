@@ -727,8 +727,14 @@ def cached_stage(
     reviewers: review_policy.Reviewers,
     *,
     reused: usage_mod.Ledger,
+    on_done: Callable[[bool], None] = lambda _reused: None,
 ) -> T:
     """`run` the stage, reusing the stored answer to this exact question when there is one.
+
+    `on_done(reused)` reports which of the two happened, because only this function knows: `ran`
+    is a set of stage *names* shared across every reading, so on a composed review it says "the
+    extractor ran at some point", never "the extractor ran for this unit". A caller counting
+    launches off `ran` would report reuse as a launch from the second unit onwards.
 
     A hit is put back through `run`, so it is validated exactly as a fresh answer would be —
     anchors re-checked against the commit, never-lists applied. A miss records the raw answer, but
@@ -763,13 +769,67 @@ def cached_stage(
             cache.drop(stage, key)
         else:
             reused.add(role, stored.usage)
+            on_done(True)
             return result
-    recorder = review_cache.Recorder(reviewers.for_role(role))
-    result = run(recorder)
+    result = _run_once_more_if_refused(stage, run, reviewers.for_role(role), cache, key)
     ran.add(stage)
-    if recorder.reply is not None:
-        cache.write(stage, key, recorder.reply.text, recorder.reply.usage)
+    on_done(False)
     return result
+
+
+#: How many extra launches one stage gets when the validator refuses the answer's *shape*.
+#:
+#: Small and finite on purpose. One malformed answer is the shape of a model, and relaunching is
+#: the repair; two in a row is the shape of the *request* — a contract the reviewer cannot meet, a
+#: never-list it keeps tripping — and no number of further launches fixes that. Unlike a capacity
+#: stop, every one of these is paid for in full.
+_RELAUNCH_ON_REFUSED = 1
+
+
+def _run_once_more_if_refused(
+    stage: str,
+    run: Callable[[review_policy.Reviewer], T],
+    reviewer: review_policy.Reviewer,
+    cache: review_cache.StageCache,
+    key: str,
+) -> T:
+    """Launch the stage, and launch it again if the validator refuses what came back.
+
+    A launch that *succeeded* and returned a shape the validator rejects used to end the whole
+    generation: `ReviewPolicyError` was the one failure class nothing classified, so on one
+    measured cycle a single malformed security review discarded eight hours of accumulated
+    per-unit reuse. But a model's answer shape is non-deterministic in a way a launch failure is
+    not, and the rest of the pipeline budgets retries everywhere it meets that.
+
+    **Here, and not around the pipeline**, because here is where an answer is judged. Retrying at
+    the `--supervise` level would re-enter `generate` for one bad answer — replaying every stage
+    that already landed — and would budget *the run* rather than the stage, so a second malformed
+    answer eighteen readings later would find the allowance already spent by the first.
+
+    Deliberately not conditional on `--supervise`. That flag is for failures time fixes, and
+    nothing about waiting makes the next answer parse; this is worth doing whether or not anyone
+    is supervising, and it is bounded and priced either way.
+
+    `AdapterFailure` is re-raised untouched even though it is a `ReviewPolicyError`: a launch that
+    never produced output is `--supervise`'s question, and relaunching a capacity refusal on the
+    spot burns the quota that would have paid for the answer.
+    """
+    for attempt in range(_RELAUNCH_ON_REFUSED + 1):
+        # A fresh recorder per launch — the previous one is holding the reply that was refused.
+        recorder = review_cache.Recorder(reviewer)
+        try:
+            result = run(recorder)
+        except review_policy.AdapterFailure:
+            raise
+        except review_policy.ReviewPolicyError as refused:
+            if attempt == _RELAUNCH_ON_REFUSED:
+                raise
+            logger.warning(f"the {stage} answer was refused ({refused}) — launching it once more")
+            continue
+        if recorder.reply is not None:
+            cache.write(stage, key, recorder.reply.text, recorder.reply.usage)
+        return result
+    raise AssertionError("unreachable: the loop either returns or raises")  # pragma: no cover
 
 
 def reviewer_identity(config: models.Config | None, role: str) -> dict[str, str]:
@@ -1361,8 +1421,15 @@ def read_one(
     ran: set[str],
     reused: usage_mod.Ledger,
     cancel: common.Cancellation,
+    on_progress: Callable[[str, str, bool], None] = lambda _unit, _stage, _reused: None,
 ) -> ReadOut:
     """The two stages that read code, run over one reading of the change.
+
+    `on_progress` is called as each stage lands, with `(unit, stage, was it reused)`. Distinct
+    from `on_stage`, which says what the pipeline has *entered* so a failure can name where it
+    happened: this says what has *finished*, which is the only thing that can be counted. A
+    composed review printed nothing between its first line and its last — thirteen hours on one
+    measured run — and a run that says nothing is indistinguishable from a run that has hung.
 
     The security review reads the same bytes the extractor does and consumes nothing the extractor
     produces, so it does not wait behind it — and when both are configured on one adapter they
@@ -1384,6 +1451,7 @@ def read_one(
     order, and reporting whichever thread lost a race would make the error a reader sees depend on
     timing.
     """
+    unit = measured.reading.unit
     security_req = security_request(
         measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking, discipline=discipline
     )
@@ -1400,6 +1468,7 @@ def read_one(
                 lambda ask: security_review.run_security_review(security_req, ask, repo=repo, commit=head),
                 reviewers,
                 reused=reused,
+                on_done=lambda was_reused: on_progress(unit, "security_review", was_reused),
             )
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1421,6 +1490,7 @@ def read_one(
                 ),
                 reviewers,
                 reused=reused,
+                on_done=lambda was_reused: on_progress(unit, "actual_extraction", was_reused),
             )
         except BaseException:
             cancel.cancel()

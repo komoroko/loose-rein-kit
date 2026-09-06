@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from rein import events as events_mod
 from rein import models, status_api
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -433,6 +434,37 @@ def test_an_unprobed_gate_is_not_a_clean_gate() -> None:
     assert unprobed == []
     assert [item["kind"] for item in clean] == ["gate_ready"]
     assert clean[0]["action"] == "rein approve build"
+
+
+def test_a_repeated_escalation_is_one_decision_however_often_it_was_recorded() -> None:
+    """The headline count is what an operator reads first, and it was counting attempts.
+
+    Eight supervised attempts against one session limit put sixteen rows on a board that also
+    carried the one blocker that mattered, so "39 item(s) waiting on you" and "1 item waiting on
+    you" looked the same. The chain still holds every occurrence; this is the view over it.
+    """
+    repeated = _chain_with_subjects(
+        ("review_failed", ()),
+        ("review_failed", ()),
+        ("actual_extraction_failed", ()),
+        ("task_failed", ("T-004",)),
+    )
+    # Through the one rule every surface reads, so this board and `rein events --summary` cannot
+    # be shown reporting different numbers for the same question.
+    queue = status_api.pending_queue(**{**QUEUE_BASE, "attention": events_mod.open_conditions(repeated)})
+    headlines = [item["headline"] for item in queue]
+    assert len(queue) == 3, headlines
+    assert any(h.startswith("review_failed (-) \u00d72, latest #") for h in headlines), headlines
+    assert any(h.startswith("task_failed (T-004) #") for h in headlines), headlines
+    assert all("\u00d7" not in h for h in headlines if h.startswith("task_failed")), headlines
+
+
+def test_a_collapsed_row_names_the_record_worth_reading() -> None:
+    """The newest occurrence, because that is the one whose `detail` describes what is true now."""
+    first, latest = _chain_with_subjects(("review_failed", ()), ("review_failed", ()))
+    queue = status_api.pending_queue(**{**QUEUE_BASE, "attention": events_mod.open_conditions([first, latest])})
+    assert f"#{latest.seq}" in queue[0]["headline"]
+    assert f"#{first.seq}" not in queue[0]["headline"]
 
 
 def test_a_queue_row_keeps_its_identity_until_what_it_says_changes() -> None:

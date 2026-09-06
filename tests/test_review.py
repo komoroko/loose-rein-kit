@@ -34,6 +34,7 @@ from rein import (
     review,
     review_cache,
     review_policy,
+    review_reading,
     review_transport,
     security_review,
 )
@@ -1467,6 +1468,236 @@ def test_without_supervise_the_first_failure_is_the_answer(review_repo: Path) ->
             interval_sec=1,
             make_reviewers=lambda: _reviewers(fail),
         )
+
+
+def test_a_transient_launch_failure_is_recorded_as_a_re_run_not_a_decision(review_repo: Path) -> None:
+    """Eight supervised attempts against one session limit filed sixteen "awaits a human decision"
+    rows that no verb could clear — beside the one blocker that mattered.
+
+    `_worth_waiting_for` is the code that already knew: the machine had taken the only available
+    action by retrying. `review_aborted` is that answer in the vocabulary, outside
+    `ATTENTION_EVENTS` exactly as `run_aborted` is.
+    """
+
+    def refused(role: str, request: Mapping[str, Any]) -> str:
+        raise _adapter_failure("You've hit your session limit \u00b7 resets 3pm")
+
+    repo = repo_mod.Repo(review_repo)
+    with pytest.raises(review_policy.AdapterFailure):
+        review.generate(repo, _reviewers(refused))
+
+    events, defects = event_chain.scan(repo.events)
+    assert not defects, defects
+    kinds = [e.event for e in events if e.event != "run_measured"]
+    assert kinds[-1] == "review_aborted"
+    assert "review_failed" not in kinds
+    assert "actual_extraction_failed" not in kinds
+    assert "review_aborted" not in events_mod.ATTENTION_EVENTS
+    assert events_mod.open_attention(events) == []
+
+
+@pytest.mark.integration
+def test_a_failure_time_cannot_fix_still_asks_for_a_human(review_repo: Path) -> None:
+    """The distinction is the failure, not the flag: an adapter that is not installed will not be
+    installed by waiting, so it stays a decision somebody has to make."""
+
+    def refused(role: str, request: Mapping[str, Any]) -> str:
+        raise _adapter_failure("could not run 'claude': No such file or directory", rc=127)
+
+    repo = repo_mod.Repo(review_repo)
+    with pytest.raises(review_policy.AdapterFailure):
+        review.generate(repo, _reviewers(refused))
+
+    kinds = [e.event for e in event_chain.scan(repo.events)[0] if e.event != "run_measured"]
+    assert kinds[-2:] == ["actual_extraction_failed", "review_failed"]
+
+
+def test_a_stage_whose_answer_would_not_parse_is_launched_once_more(review_repo: Path) -> None:
+    """A launch that *succeeded* and returned a shape the validator rejects raised
+    `ReviewPolicyError`, which nothing classified — so it ended the run and discarded eight hours
+    of accumulated per-unit reuse over one malformed answer.
+
+    Not conditional on `--supervise`: that flag is for failures time fixes, and nothing about
+    waiting makes the next answer parse.
+    """
+    seen: list[str] = []
+
+    def malformed_once(role: str, request: Mapping[str, Any]) -> str:
+        seen.append(role)
+        if role == "security_reviewer" and seen.count("security_reviewer") == 1:
+            return "Sure! Here is the review:\n```json\n{}\n```"
+        return _fake_reviewer(role, request)
+
+    machine = review.generate(repo_mod.Repo(review_repo), _reviewers(malformed_once))
+    assert machine["status"] == "generated"
+    assert seen.count("security_reviewer") == 2, seen
+
+
+def test_an_answer_that_will_not_parse_twice_is_a_verdict(review_repo: Path) -> None:
+    """The budget is small and finite. One bad answer is the shape of a model and relaunching is
+    the repair; two in a row is the shape of the request, and no further launch fixes that."""
+    seen: list[str] = []
+
+    def always_malformed(role: str, request: Mapping[str, Any]) -> str:
+        seen.append(role)
+        if role == "security_reviewer":
+            return ""
+        return _fake_reviewer(role, request)
+
+    with pytest.raises(review_policy.ReviewPolicyError):
+        review.generate(repo_mod.Repo(review_repo), _reviewers(always_malformed))
+    assert seen.count("security_reviewer") == review_reading._RELAUNCH_ON_REFUSED + 1, seen
+
+
+def test_the_relaunch_budget_belongs_to_the_stage_and_not_to_the_run(tmp_path: Path) -> None:
+    """A per-run budget spends itself on the first bad answer, so a composed review's eighteenth
+    reading would find nothing left — the very failure #50 reported, one layer up.
+
+    Two independent stages, each malformed once: both must recover.
+    """
+    from rein import review_cache
+
+    cache = review_cache.StageCache(tmp_path)
+    refused: dict[str, int] = {}
+
+    def run_for(stage: str) -> Any:
+        def run(reviewer: Any) -> str:
+            text: str = reviewer({"ask": stage}).text
+            refused[stage] = refused.get(stage, 0) + 1
+            if refused[stage] == 1:
+                raise review_policy.ReviewPolicyError(f"{stage}: unparseable")
+            return text
+
+        return run
+
+    class _Reviewers:
+        def for_role(self, role: str) -> Any:
+            return lambda request: review_policy.Answer("{}")
+
+        def spend(self) -> dict[str, usage_mod.Usage]:
+            return {}
+
+    for stage, key in (("actual_extraction", "k1"), ("security_review", "k2")):
+        assert (
+            review_reading.cached_stage(
+                cache, stage, key, set(), run_for(stage), _Reviewers(), reused=usage_mod.Ledger()
+            )
+            == "{}"
+        )
+    assert refused == {"actual_extraction": 2, "security_review": 2}
+
+
+def test_a_launch_that_produced_no_output_is_left_to_supervise(tmp_path: Path) -> None:
+    """`AdapterFailure` is a `ReviewPolicyError`, and relaunching a capacity refusal on the spot
+    burns the quota that would have paid for the answer. It is waited out, not repeated."""
+    from rein import review_cache
+
+    attempts: list[int] = []
+
+    def run(reviewer: Any) -> str:
+        attempts.append(1)
+        raise _adapter_failure("429 rate limit exceeded")
+
+    class _Reviewers:
+        def for_role(self, role: str) -> Any:
+            return lambda request: review_policy.Answer("{}")
+
+        def spend(self) -> dict[str, usage_mod.Usage]:
+            return {}
+
+    with pytest.raises(review_policy.AdapterFailure):
+        review_reading.cached_stage(
+            review_cache.StageCache(tmp_path),
+            "actual_extraction",
+            "k",
+            set(),
+            run,
+            _Reviewers(),
+            reused=usage_mod.Ledger(),
+        )
+    assert attempts == [1], "a refusal that produced no output is --supervise's question, not a relaunch"
+
+
+def test_the_execution_plan_reports_counts_and_names_only_what_will_launch() -> None:
+    """It was every row on one line — 36 stage decisions, reuses included, ~3,600 characters
+    printed once per attempt. The full listing still goes to `run_measured.detail.plan`."""
+    plan = {
+        "stages": [
+            {"stage": "actual_extraction", "unit": "T-001", "decision": "run", "adapter": "", "model": "opus"},
+            {"stage": "security_review", "unit": "T-001", "decision": "reuse", "adapter": "", "model": "opus"},
+            {"stage": "actual_extraction", "unit": "T-002", "decision": "reuse", "adapter": "", "model": "opus"},
+            {"stage": "security_review", "unit": "T-002", "decision": "reuse", "adapter": "", "model": "opus"},
+            {"stage": "comparison", "unit": "T-001", "decision": "undecided", "adapter": "", "model": "opus"},
+        ],
+        "shared_reading": True,
+    }
+    rendered = review._render_execution_plan(plan)
+    head, *rest = rendered.splitlines()
+    assert head.startswith("review plan: 2 reading(s), 5 stage decision(s) —")
+    assert "3 reuse" in head and "1 run" in head and "1 undecided" in head
+    assert head.endswith("shared reading: yes")
+    assert rest == ["  to run: actual_extraction ×1 (opus) — T-001"], rest
+    assert "reuse" not in "".join(rest), "the console names launches; reuses are counted, not listed"
+
+
+@pytest.mark.parametrize("reused", [True, False])
+def test_a_landed_stage_prints_one_line(capsys: pytest.CaptureFixture[str], reused: bool) -> None:
+    """A composed review printed nothing between its plan and its result — four lines in eight
+    hours on one measured run — while nine of eighteen readings were being served from cache and
+    nine were being read. The count existed only in `events.ndjson`."""
+
+    class _Spending:
+        def for_role(self, role: str) -> Any:  # pragma: no cover - never asked here
+            raise AssertionError
+
+        def spend(self) -> dict[str, usage_mod.Usage]:
+            return {
+                "actual_extractor": usage_mod.Usage(
+                    available=True, launches=1, input_tokens=40_000, output_tokens=900, cost_usd=1.25
+                )
+            }
+
+    review._Progress(_Spending(), total=18).landed("T-001", "actual_extraction", reused)
+    line = capsys.readouterr().out
+    assert "[review] 1/18 actual_extraction[T-001]:" in line
+    if reused:
+        assert "reuse" in line and "USD" not in line, "a reuse is not a launch and has no bill"
+    else:
+        assert "run (40,000 in / 900 out, USD 1.25)" in line
+
+
+@pytest.mark.integration
+def test_the_run_counts_every_stage_it_will_take_including_the_comparison(
+    review_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`reading_keys` mints no comparison key — the Actual it takes as an input does not exist yet
+    — so a total counted off `keys_by_unit` alone ends the run at "19/18"."""
+    review.generate(repo_mod.Repo(review_repo), _reviewers(_fake_reviewer))
+
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines() if "[review]" in line]
+    total = len(lines)
+    assert [line.split()[1] for line in lines] == [f"{n}/{total}" for n in range(1, total + 1)], lines
+    assert lines[-1].split()[2] == "comparison:", lines[-1]
+
+
+def test_a_launch_whose_cost_the_adapter_does_not_report_is_not_priced_at_zero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`USD 0.00` beside a launch that was certainly paid for reads as free."""
+
+    class _Silent:
+        def for_role(self, role: str) -> Any:  # pragma: no cover - never asked here
+            raise AssertionError
+
+        def spend(self) -> dict[str, usage_mod.Usage]:
+            return {"actual_extractor": usage_mod.Usage.unavailable()}
+
+    review._Progress(_Silent(), total=1).landed(review_reading.WHOLE, "actual_extraction", False)
+    out = capsys.readouterr().out
+    assert "cost not reported" in out
+    assert "USD" not in out
+    # A review that was not composed has one reading, so naming it says nothing.
+    assert "actual_extraction: run" in out and "[" not in out.split("actual_extraction")[1]
 
 
 def test_what_each_stage_cost_is_reported_in_tokens_not_in_bytes_on_stdin() -> None:

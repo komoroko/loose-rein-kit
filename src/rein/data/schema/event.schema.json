@@ -41,6 +41,7 @@
         "security_finding_resolved",
         "review_generated",
         "review_failed",
+        "review_aborted",
         "decision_recorded",
         "expertise_declared",
         "expert_requested",
