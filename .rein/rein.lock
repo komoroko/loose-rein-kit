@@ -31,7 +31,7 @@ prompts:
     schema/state.schema.json: sha256:c3d908de6b54d140202b12d784b201e77a735c3261308dceb4ab43376236d1c2
 integrations:
   claude:
-    version: 0.4.3
+    version: 0.4.4
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:d420f000ac6892cba6f1d753f5a3894018c0e334ad1df77cf2b0904b237ad430
@@ -51,7 +51,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.4.3
+    version: 0.4.4
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:fe72706426bcbb74f939842df53b792ca5c1bba52d3bf1909cb74b0e0ed0f09c
@@ -69,7 +69,7 @@ integrations:
       .codex/hooks.json: sha256:7b64f50c947287ac882d04f0816a79df4d8c7c6b3060137cfb9014d274af0909
       .codex/rein.md: sha256:c1368f428f56fe4b8de861a657d2d0be6863eed44db136da79d68798300141e6
   copilot:
-    version: 0.4.3
+    version: 0.4.4
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:6a9126f67cd68da0494217e0b47a2c2344031ec0573e04d45d70feb250c7c68d
@@ -87,7 +87,7 @@ integrations:
       .github/prompts/tasks.prompt.md: sha256:73713a15f2a2f683dc6212d466a90e16fb0a14518f1f8b5d0d37eac0a4f2520e
       .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
   gemini:
-    version: 0.4.3
+    version: 0.4.4
     installed_at: '2026-09-03'
     files:
       .gemini/commands/build.toml: sha256:106963f31be528aa749819ba4c915d81871496e27bd4c606e0abc979874b21a6

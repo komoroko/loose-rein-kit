@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -401,7 +402,8 @@ def test_the_reviewers_get_the_code_around_the_hunk_not_only_the_hunk(review_rep
 
     A file the detector matched nothing in still gets the ladder's narrow half, which is wider than
     git's default and is the floor this ever sends. The wide half is bought where there is a signal
-    to look at — see the test below.
+    to look at — see the test below — and a reading with no signal in it says the narrow half is
+    what it got.
     """
     body = "".join(f"def before_{i}():\n    return {i}\n\n" for i in range(12))
     (review_repo / "src.py").write_text(body, encoding="utf-8")
@@ -419,7 +421,12 @@ def test_the_reviewers_get_the_code_around_the_hunk_not_only_the_hunk(review_rep
     # git's default three lines would stop at before_11; the narrow half reaches further back.
     assert "def before_9" in extract["diff"]
     context = extract["deterministic_facts"]["context"]
-    assert context["context_lines_unsignalled"] == review.CONTEXT_LADDER[0][1]
+    # And the facts name the width that was *sent*. Nothing here is signalled, so there is one
+    # width in the payload; naming the rung's wide half would tell the reviewer its window is three
+    # times what it is, which is the one thing this field exists to prevent.
+    assert context["context_lines"] == review.CONTEXT_LADDER[0][1]
+    assert "context_lines_unsignalled" not in context, "one width sent is one width reported"
+    assert context["narrowed_from"] == list(review.CONTEXT_LADDER[0])
 
 
 @pytest.mark.integration
@@ -485,8 +492,39 @@ def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None
     assert len(narrowed.text.encode("utf-8")) < len(widest.text.encode("utf-8"))
 
 
+def test_a_reading_with_no_signal_reports_the_width_it_was_actually_sent(review_repo: Path) -> None:
+    """The rung asked for is not the rung sent. With nothing signalled, `_widened` buys the narrow
+    half for every file — and the facts must say 10, not 30, because `context_lines` is the one
+    field a reviewer uses to decide whether "the code around this is unchanged" is a thing it can
+    read out of its window."""
+    repo = repo_mod.Repo(review_repo)
+    body = "".join(f"def before_{i}():\n    return {i}\n\n" for i in range(40))
+    (review_repo / "src.py").write_text(body, encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add src")
+    (review_repo / "src.py").write_text(body + "def charge():\n    return 1\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add charge")
+    base = _git(review_repo, "rev-parse", "HEAD~1")
+    files = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,))).files
+
+    quiet = review._reviewable(
+        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9, signalled=frozenset()
+    )
+    narrow = review.CONTEXT_LADDER[0][1]
+    assert quiet.context_lines == (narrow, narrow)
+    facts = quiet.as_facts()
+    assert facts["context_lines"] == narrow
+    assert "context_lines_unsignalled" not in facts, "one width sent is one width reported"
+    assert facts["narrowed_from"] == list(review.CONTEXT_LADDER[0])
+    # 40 defs of 3 lines each, two appended at the end: the old side is the last `narrow` lines of
+    # a 120-line file, which is what the reported width has to be the width of.
+    hunk = next(line for line in quiet.text.splitlines() if line.startswith("@@"))
+    assert hunk.split()[1] == f"-{120 - narrow + 1},{narrow}"
+
+
 def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: Path) -> None:
-    """`_refuse_over_budget` already passed on this diff; a second, quieter refusal here would
+    """`review_reading.refuse_over_budget` already passed on this diff; a second, quieter refusal here would
     leave the operator with a review that cannot be taken and no sentence saying why."""
     repo = repo_mod.Repo(review_repo)
     (review_repo / "src.py").write_text("x = 1\n", encoding="utf-8")
@@ -847,6 +885,56 @@ def test_two_readings_are_two_sessions_and_never_one(monkeypatch: pytest.MonkeyP
     # The same reading, asked for again, is still the session it already primed.
     assert reading.branch_flags(_a_security_request("one change")) == first
     assert len(sent) == 2
+
+
+def test_two_readings_prime_at_the_same_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rein review generate --readers N` is bought to overlap the readings, and the priming turn
+    *is* the payload — one launch over the whole slice, minutes of it. A lock held across that
+    launch let one reading prime at a time and handed back most of what the flag buys.
+
+    The barrier is the assertion: it only passes if both primes are in flight together, so a
+    serialising lock fails this rather than merely making it slow.
+    """
+    both_in_flight = threading.Barrier(2, timeout=10)
+    sent: list[dict[str, Any]] = []
+
+    capture = _capturing_run(sent)
+
+    def run(cmd: list[str], cwd: str | None = None, **kwargs: Any) -> tuple[int, str]:
+        both_in_flight.wait()
+        answered: tuple[int, str] = capture(cmd, cwd, **kwargs)
+        return answered
+
+    monkeypatch.setattr(common, "run", run)
+    reading = _reading()
+    requests = [_a_reading_request("one change"), _a_reading_request("another change")]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sessions = [f.result() for f in [pool.submit(reading.branch_flags, r) for r in requests]]
+
+    assert len(sent) == 2
+    assert sessions[0] != sessions[1], "two readings must never share a context"
+
+
+def test_the_two_stages_of_one_reading_still_prime_it_once_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Priming per reading rather than one at a time must not become priming per *caller*: the
+    whole saving is that the extractor and the security reviewer branch one turn, and two threads
+    arriving on the same reading together is exactly when a double launch would appear."""
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    reading = _reading()
+    ready = threading.Barrier(2, timeout=10)
+
+    def ask(request: Mapping[str, Any]) -> tuple[str, ...]:
+        ready.wait()
+        return reading.branch_flags(request)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        flags = [f.result() for f in [pool.submit(ask, r) for r in (_a_reading_request(), _a_security_request())]]
+
+    assert len(sent) == 1, "one reading, one priming turn, however many threads asked for it"
+    assert flags[0] == flags[1]
 
 
 def test_the_priming_turn_is_held_to_the_same_blindness_as_the_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2536,6 +2624,46 @@ def test_the_outlook_says_what_gate_4_would_be_asked_to_read(review_repo: Path) 
     assert "change under review:" in view.line() and "coverage insufficient" in view.line()
 
 
+def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -> None:
+    """A plan scopes every task; a cycle in progress has touched some of them. `take_readings`
+    drops the empty slices before it launches anything, so a board that counted all of them would
+    say "in 18 readings" for a review that is going to take four."""
+    seed_repo(
+        tmp_path,
+        state=make_state(project="rv", phase="build"),
+        plan=make_plan(
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], scope_include=["beta/"]),
+                make_task("T-003", claim_ids=["C-001"], scope_include=["gamma/"]),
+            ]
+        ),
+        config=make_config(),
+    )
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "alpha" / "mod.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "only alpha so far")
+
+    repo = repo_mod.Repo(tmp_path)
+    view = review.outlook(repo, base=base)
+    assert view is not None
+    assert view.unit == "T-001"
+    taken = review_reading.take_readings(
+        repo,
+        review_reading.plan_readings(store_mod.Store(repo).read_plan(), ["alpha/mod.py"]),
+        base=base,
+        head="HEAD",
+        exclude=review.not_the_product(repo, store_mod.Store(repo).read_state()),
+        limits={"max_diff_bytes": 524_288},
+    )
+    assert view.readings == len(taken) == 1, "the board counts what the pipeline will take"
+
+
 def test_an_over_budget_reading_names_the_task_whose_scope_is_too_broad(review_repo: Path) -> None:
     """`max_diff_bytes` bounds one launch, so what is over it is a reading — and the reading has a
     name. "Split the scope" pointed at the cycle, which at gate ④ is merged; the task's scope is
@@ -2716,12 +2844,14 @@ def test_a_run_that_stopped_reporting_is_not_read_as_live(tmp_path: Path) -> Non
         json.dumps({"outcome": "running", "updated_at": quiet.isoformat(timespec="seconds"), "done": 3, "total": 9}),
         encoding="utf-8",
     )
-    assert run_progress.read(tmp_path)["stale"] is True
+    gone_quiet = run_progress.read(tmp_path)
+    assert gone_quiet is not None and gone_quiet["stale"] is True
 
     # An unparseable stamp rounds the same way: a spinner in front of a process nobody can see is
     # the one reading this must not allow.
     run_progress.path(tmp_path).write_text(json.dumps({"outcome": "running", "updated_at": "?"}), encoding="utf-8")
-    assert run_progress.read(tmp_path)["stale"] is True
+    unreadable = run_progress.read(tmp_path)
+    assert unreadable is not None and unreadable["stale"] is True
 
 
 def test_an_unreadable_progress_file_is_nothing_to_show(tmp_path: Path) -> None:

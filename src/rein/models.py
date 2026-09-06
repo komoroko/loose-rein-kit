@@ -1041,7 +1041,7 @@ class Review:
 
         One, because the detector reads the whole diff or says which parts of it it could not.
         This used to be a list, for a partitioning nothing ever performed: a change too large to
-        read in one sitting is refused by `review._refuse_over_budget` before a model is launched.
+        read in one sitting is refused by `review_reading.refuse_over_budget` before a model is launched.
         """
         manifest = self.machine.get("coverage")
         return manifest if isinstance(manifest, Mapping) else {}

@@ -24,7 +24,9 @@ each reading, which is the same wall for an uncomposed review and the right one 
 `ChangeOutlook` gains `unit`, `readings` and `total_bytes`, so `doctor`, `build` and the status
 board say *which reading* is too big and point at the lever that still works: narrow that task's
 scope, or split the task, at gate ③. The readings are attributed out of the one `git diff` the
-outlook already takes (`bytes_by_reading`), because that object is read on every stream tick.
+outlook already takes (`bytes_by_reading`), because that object is read on every stream tick, and it
+counts the readings the pipeline will actually take — a plan scopes every task, and the slices this
+cycle has not touched are dropped the way `take_readings` drops them.
 
 `human_review.budget_actuals` loses `max_critical_modules` and `max_scenarios`, which no budget
 name has ever read, along with `_critical_modules` and `_critical_claim_ids` behind them.
@@ -37,7 +39,9 @@ against 94,951 at git's default, 2.2×. `CONTEXT_LADDER` is now `((30, 10), (15,
 `(signalled, everything else)` — and the wide half goes only to the paths `diff_facts` matched a
 signal inside, which is the line `fold_bodies` already draws for the same reason. Nothing is read
 at less than the ladder's own bottom rung, and the `PLAIN_CONTEXT` fallback is unchanged.
-`Reviewable.context_lines` is a pair, and the request carries both widths.
+`Reviewable.context_lines` is a pair, and the request carries the widths that were actually
+*sent*: a reading the detector found no signal in is one width for every file, and says that width
+rather than naming a wide half nothing was read at.
 
 **`rein review generate --readers N` takes N readings at once.** They are independent by
 construction — different slices, each primed into its own session keyed by its own bytes, none
@@ -49,7 +53,10 @@ inside gate ③'s frozen digest. `--readers 1` runs the serial code path, not a 
 parallel the first failure trips the shared `Cancellation`, which kills every launch in flight and
 refuses every later one, so queued readings die on arrival instead of each paying for a pair of
 stages nobody will read; results are collected in reading order, so which failure a reader is shown
-does not depend on which thread lost a race. Each reading carries its own "which stage" cell — a
+does not depend on which thread lost a race. The priming turns overlap too: `SharedReading` gates
+each reading on a lock of its own instead of holding one across the launch, so two readings prime at
+the same time while the two stages of *one* still branch the single turn it primed. Each reading
+carries its own "which stage" cell — a
 shared one named whichever stage some *other* reading had just entered — and `review_failed` /
 `actual_extraction_failed` now carry `unit` beside `stage`.
 

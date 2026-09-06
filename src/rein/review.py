@@ -75,7 +75,6 @@ PLAIN_CONTEXT = review_reading.PLAIN_CONTEXT
 _diff = review_reading.diff_of
 _file_facts = review_reading.file_facts
 _reviewable = review_reading.reviewable_of
-_refuse_over_budget = review_reading.refuse_over_budget
 _cached_stage = review_reading.cached_stage
 _reviewer_identity = review_reading.reviewer_identity
 _stage_keys = review_reading.reading_keys
@@ -345,8 +344,13 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         mode=config.composition if config is not None else "auto",
         risk=effective,
     )
+    # Minus the slices this cycle has not touched, which is the same subtraction `take_readings`
+    # makes before it launches anything: a plan scopes every task, and at task 3 of 18 the other
+    # fifteen readings have nothing in them to read. Counting them would put "in 18 readings" on
+    # the board for a review that is going to take four.
     sizes = review_reading.bytes_by_reading(diff_text, readings)
-    unit, largest = max(sizes.items(), key=lambda item: item[1]) if sizes else (review_reading.WHOLE, 0)
+    taken = {r.unit: sizes.get(r.unit, 0) for r in readings if r.whole or sizes.get(r.unit)}
+    unit, largest = max(taken.items(), key=lambda item: item[1]) if taken else (review_reading.WHOLE, 0)
     return ChangeOutlook(
         diff_bytes=largest,
         total_bytes=facts.coverage.analyzed_bytes,
@@ -355,7 +359,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         effective_risk=effective,
         composition=tuple(bytes_by_kind(diff_text).items()),
         unit=unit,
-        readings=len(readings),
+        readings=len(taken) or 1,
     )
 
 

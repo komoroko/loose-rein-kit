@@ -253,7 +253,7 @@ def test_dependency_change_leaves_semantics_unanalyzed() -> None:
 def test_a_huge_diff_is_read_whole_and_says_so() -> None:
     """The detector neither splits nor truncates: it reads all of it, or names what it could not.
 
-    A change too big to review in one sitting is refused by `review._refuse_over_budget` before a
+    A change too big to review in one sitting is refused by `review_reading.refuse_over_budget` before a
     model is launched. There is no size at which the manifest starts describing a fragment.
     """
     added = [f"    x{i} = {i}" for i in range(4000)]

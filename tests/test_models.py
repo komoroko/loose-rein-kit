@@ -456,7 +456,7 @@ def test_a_list_of_coverage_manifests_is_rejected_outright() -> None:
 
     The list shape existed for a partitioning nothing ever performed. A review that read only part
     of a change must not be storable at all (plan §13.4) — the answer to a change too large to read
-    is `/revise`, and `review._refuse_over_budget` says so before a model is launched.
+    is `/revise`, and `review_reading.refuse_over_budget` says so before a model is launched.
     """
     listed = REVIEW.replace(
         """  coverage:

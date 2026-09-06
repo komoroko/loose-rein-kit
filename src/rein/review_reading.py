@@ -436,7 +436,9 @@ class Reviewable:
     """
 
     text: str
-    #: The rung this landed on, as `(signalled, everything else)` — the two widths in `text`.
+    #: The two widths actually in `text`, as `(signalled, everything else)`. What was *sent*, never
+    #: the rung that was asked for: a reading the detector found no signal in is one width for
+    #: every file, and both halves are then that width.
     context_lines: tuple[int, int]
     folded: tuple[str, ...] = ()
     #: The two halves of `text`, split by `split_tests`: what every reading stage gets, and what
@@ -448,7 +450,12 @@ class Reviewable:
 
     def as_facts(self) -> dict[str, Any]:
         signalled, plain = self.context_lines
-        facts: dict[str, Any] = {"unit": "diff", "context_lines": signalled, "context_lines_unsignalled": plain}
+        facts: dict[str, Any] = {"unit": "diff", "context_lines": signalled}
+        # One number when one width was sent. Naming a second, equal one would invite the reading
+        # that some files got something else — and the file that got the wide half is exactly what
+        # `context_lines_unsignalled` is here to distinguish it from.
+        if plain != signalled:
+            facts["context_lines_unsignalled"] = plain
         if self.context_lines < CONTEXT_LADDER[0]:
             facts["narrowed_from"] = list(CONTEXT_LADDER[0])
         if self.folded:
@@ -505,8 +512,8 @@ def _widened(
     include: Sequence[str],
     signalled: Collection[str],
     rung: tuple[int, int],
-) -> str:
-    """One rung of the ladder: the signalled files at the wide width, everything else at the narrow.
+) -> tuple[str, tuple[int, int]]:
+    """One rung of the ladder, and **the widths it actually applied**.
 
     Two `git diff` calls spliced by file rather than one call per width per file — git widens the
     whole diff or none of it, and `_sections` is already the one walk that says which bytes belong
@@ -516,16 +523,25 @@ def _widened(
 
     When both widths are equal (the ladder's bottom rung) there is nothing to splice and this is
     one `git diff`, which is what it was before signalled files were widened separately.
+
+    **The rung asked for is not always the rung sent.** A reading the detector found no signal in
+    — or one whose signalled paths are not in this slice — gets the narrow width for every file,
+    and the widths that come back say so. They go on to `Reviewable.context_lines` and from there
+    into the request the reviewers read, which is the one place a window may never be described as
+    wider than it is: the whole reason that field exists is so "the code around this is unchanged"
+    cannot be read out of a window that was narrowed.
     """
     wide_lines, plain_lines = rung
+    narrow = (plain_lines, plain_lines)
     plain = diff_of(repo, base, head, exclude, context=plain_lines, include=include)
     if wide_lines == plain_lines or not signalled:
-        return plain
+        return plain, narrow
     sections = _sections(plain)
     if not any(path in signalled for path, _ in sections):
-        return plain
+        return plain, narrow
     wide = dict(_sections(diff_of(repo, base, head, exclude, context=wide_lines, include=include)))
-    return "".join(wide.get(path, section) if path in signalled else section for path, section in sections)
+    spliced = "".join(wide.get(path, section) if path in signalled else section for path, section in sections)
+    return spliced, rung
 
 
 def reviewable_of(
@@ -551,7 +567,9 @@ def reviewable_of(
     ladder pays a few more `git diff` calls, which is cheap next to the model launch it is sizing.
     The width is bought per file: `signalled` gets the wide half of the rung and everything else
     the narrow half (:data:`CONTEXT_LADDER`), so the payload is sized by what the detector found
-    rather than by how much room the ceiling happens to leave.
+    rather than by how much room the ceiling happens to leave. What is recorded on the `Reviewable`
+    is the width that was *sent*, not the rung that was asked for — a reading with no signal in it
+    is every file at the narrow half, and it says so.
     """
 
     def made(text: str, folded: Sequence[str], rung: tuple[int, int]) -> Reviewable:
@@ -559,10 +577,10 @@ def reviewable_of(
         return Reviewable(text=text, context_lines=rung, folded=tuple(folded), source=source, tests=tests)
 
     for rung in CONTEXT_LADDER:
-        widened = _widened(repo, base, head, exclude, include=include, signalled=signalled, rung=rung)
+        widened, applied = _widened(repo, base, head, exclude, include=include, signalled=signalled, rung=rung)
         text, folded = fold_bodies(widened, files, signalled=signalled)
         if len(text.encode("utf-8")) <= ceiling:
-            return made(text, folded, rung)
+            return made(text, folded, applied)
     # Over the ceiling even at git's default width. Refusing here would be a second budget nobody
     # approved: `refuse_over_budget` has already passed on this diff, and the answer to a reading
     # too big to read is a narrower scope at gate ③, not a narrower window onto it.
