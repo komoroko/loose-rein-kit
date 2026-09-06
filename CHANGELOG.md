@@ -4,6 +4,74 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.3] - 2026-09-06
+
+**A review run that the machine stopped asks for a re-run, not a decision.** Every failure of the
+gate ④ pipeline recorded `review_failed` plus the stage's own `*_failed`, both in
+`events.ATTENTION_EVENTS` — so eight supervised attempts waiting out one session limit filed
+sixteen "awaits a human decision" rows that no verb could clear, beside the single blocker that
+mattered. `_worth_waiting_for` is the code that already knew the difference: a launch that failed
+for a machine reason time alone fixes has had the only available action taken by the retry. That
+is now `review_aborted`, outside `ATTENTION_EVENTS`, exactly the line `run_aborted` draws for the
+build loop — and it gets `resume`'s headline for the same reason, because a returning operator
+cannot otherwise tell that everything already read is still cached. Nothing else changes: an
+unparseable answer, a budget refusal, an unreadable SSOT all still sit on the board.
+
+**And a repeated escalation is one decision, however often it was recorded.** The count at the top
+of `rein start` is what an operator reads first, and it was counting attempts — "39 item(s)
+waiting on you" and "1 item waiting on you" looked the same. `events.open_conditions` groups by
+the condition (`review_failed (-) ×8, latest #281`) and names the newest record, and it is **one
+rule three surfaces read** — the board's rows, the recommendation's number, and `rein events
+--summary` — because a grouping that lived in the status board alone would have made `rein start`
+say three and the summary say thirty-nine about one question. The chain is untouched: every
+occurrence is still in `events.ndjson`, which is where the row sends you, and the collapsed count
+is stated rather than hidden.
+
+**A review run the machine stopped is now something `rein doctor` says out loud.** Moving those
+failures out of `ATTENTION_EVENTS` creates exactly the state `check_last_run` exists for — no
+escalation open, the board reading as it did before, and nothing saying a thirteen-hour run died
+at 3am on a session limit. The rows it used to leave were unactionable; their absence must not be
+silence. `check_last_review_run` is that check for gate ④, escalating to WARN once nothing has
+re-run it for hours, and it carries the fact a static board cannot: every reading already taken is
+cached, so re-running resumes rather than re-reads.
+
+**A stage answer that will not parse gets one more launch, and its bytes are kept.** `unparseable
+(Expecting value: line 1 column 1 (char 0))` was the identical message for an empty answer, a
+```json fence, a prose preamble, and a refusal — four different repairs — and the raw output was
+discarded at the raise. It now travels with the refusal, `repr`-quoted and excerpted; leniency is
+still refused, because what was missing was the diagnosis and not the tolerance. Separately,
+`ReviewPolicyError` was the one failure class `--supervise` was never consulted about: a launch
+that *succeeded* and returned a shape the validator rejects ended the run, on one measured cycle
+discarding eight hours of accumulated per-unit reuse over a single malformed security review. It
+now gets one fresh relaunch, **taken where the answer is judged** (`cached_stage`) rather than
+around the pipeline: that is what makes the budget the *stage's* — a second malformed answer
+eighteen readings later must not find the allowance spent by the first — and it means one bad
+answer no longer re-enters `generate` to replay every stage that already landed. Deliberately not
+conditional on `--supervise`: that flag is for failures time fixes, and nothing about fifteen
+minutes makes the next answer parse. `AdapterFailure` is excluded even though it is a
+`ReviewPolicyError`, because relaunching a capacity refusal on the spot burns the quota that would
+have paid for the answer. An answer that will not parse twice is a verdict about the request.
+
+**`rein review generate` says what it is doing while it does it.** A composed run printed its
+execution plan and then nothing — four lines in eight hours on one measured run, while nine of
+eighteen readings were being served from cache and nine were being read. That number existed only
+in `events.ndjson`, recoverable by pulling the last `run_measured` and counting `decision` fields.
+Each stage now says it landed as it lands, with its place in the run and its bill
+(`[review] 9/18 actual_extraction[T-016]: run (727,272 in / 12,501 out, USD 7.59)`), taken from
+the ledger's movement across that stage because that is where it is attributable. The one-line
+`review plan:` dump — 36 stage decisions, reuses included, ~3,600 characters per attempt — is now
+counts plus the units that will actually launch; the full listing still goes to
+`run_measured.detail.plan`, which is where a question about a past run is answered anyway.
+
+**The `[waiting]` heartbeat is the CLI's, not the build loop's.** It was written in `build_loop`
+and had one caller there, while the property it defends belongs to any command that spends minutes
+inside one captured launch — a host caps by *silence*, not by runtime. Gate ④'s composed review is
+now the longer of the two, and one measured run was killed twice by a host resource heuristic
+while it was in fact progressing. Moved to `common.Heartbeat`, one implementation, and wrapped
+around each reading and the comparison. `gate-workflow.md` now says to wait out `rein review
+generate --supervise` the way build.md says to wait out `rein build`, and never to re-run it to
+check on it.
+
 ## [0.4.2] - 2026-09-04
 
 **A serial task is isolated from the working tree the way a parallel leaf already was.** A leaf is

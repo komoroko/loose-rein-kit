@@ -98,6 +98,32 @@ def open_attention(events: Sequence[models.Event], task_status: Mapping[str, str
     ]
 
 
+def open_conditions(
+    events: Sequence[models.Event], task_status: Mapping[str, str] | None = None
+) -> list[tuple[models.Event, int]]:
+    """The distinct conditions still waiting on a human: `(the newest record of each, how many)`.
+
+    A repeated escalation is one thing to decide, however many attempts recorded it. Eight
+    supervised attempts against one session limit filed sixteen rows, so "39 item(s) waiting on
+    you" and "1 item waiting on you" read the same — and the number at the top of a board is what
+    an operator reads first.
+
+    **One rule, so every surface narrows the list the same way.** `task_status` is threaded through
+    :func:`open_attention` for exactly this reason already; a grouping that lived in the status
+    board alone would make `rein start` say three and `rein events --summary` say thirty-nine about
+    the same question, which is the failure that comment was written against.
+
+    Grouped by `(kind, subjects)` — the pair that identifies the condition — and the newest `seq`
+    is the one returned, because that is the record whose `detail` describes what is true now.
+    Insertion-ordered, so a condition keeps the position of its first occurrence. `events.ndjson`
+    is untouched: every occurrence is still in the chain, and still in `render`.
+    """
+    grouped: dict[tuple[str, tuple[str, ...]], list[models.Event]] = {}
+    for event in open_attention(events, task_status):
+        grouped.setdefault((event.event, tuple(event.subject_ids)), []).append(event)
+    return [(max(group, key=lambda e: e.seq), len(group)) for group in grouped.values()]
+
+
 def render(events: list[models.Event]) -> str:
     """The chain as a table, newest last (reading order matches append order)."""
     if not events:
@@ -110,19 +136,21 @@ def render(events: list[models.Event]) -> str:
 
 
 def render_summary(events: list[models.Event], task_status: Mapping[str, str] | None = None) -> str:
-    """Counts per kind plus the events still awaiting a human decision.
+    """Counts per kind plus the conditions still awaiting a human decision.
 
     `task_status` is passed so this and the status board narrow the same list by the same rule; without
-    it a task's later success retires its `task_failed` on one screen and not the other.
+    it a task's later success retires its `task_failed` on one screen and not the other. Repeats are
+    collapsed by :func:`open_conditions` for the same reason — one rule, or the two screens report
+    different numbers for one question.
     """
     counts = event_chain.summarize(events)
     lines = ["### Aggregates", f"- events: {len(events)}", f"- chain root: {event_chain.chain_root(events)}"]
     lines.append("- by kind: " + (", ".join(f"{k}×{n}" for k, n in counts.items()) or "(none)"))
-    attention = open_attention(events, task_status)
-    lines.append(f"- needing a human decision: {len(attention)}")
-    for e in attention:
+    conditions = open_conditions(events, task_status)
+    lines.append(f"- needing a human decision: {len(conditions)}")
+    for e, seen in conditions:
         subjects = ", ".join(e.subject_ids) or "-"
-        lines.append(f"  - #{e.seq} {e.event} ({subjects})")
+        lines.append(f"  - #{e.seq} {e.event} ({subjects})" + (f" \u00d7{seen}" if seen > 1 else ""))
     return "\n".join(lines)
 
 

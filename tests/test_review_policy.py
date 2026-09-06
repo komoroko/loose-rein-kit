@@ -98,6 +98,41 @@ def test_parse_reviewer_output_rejects_non_json() -> None:
         review_policy.parse_reviewer_output("not json at all")
 
 
+def test_a_refused_answer_carries_the_bytes_that_were_refused() -> None:
+    """`Expecting value: line 1 column 1 (char 0)` is the same message for an empty answer, a
+    fenced one, a prose preamble, and a refusal — four different repairs.
+
+    A field run paid for 1,929 output tokens of security review and threw every byte away under
+    that sentence, leaving the failure undiagnosable.
+    """
+    for raw, expected in [
+        ("", "''"),
+        ("   ", "'   '"),
+        ("```json\n{}\n```", "```json"),
+        ("I'm sorry, I can't help with that.", "I'm sorry"),
+    ]:
+        with pytest.raises(review_policy.ReviewPolicyError) as caught:
+            review_policy.parse_reviewer_output(raw)
+        assert expected in str(caught.value), (raw, str(caught.value))
+
+
+def test_a_long_answer_is_excerpted_and_says_so() -> None:
+    """The excerpt travels into a console line and an `events.ndjson` `detail.reason`; neither is
+    the place for a model's whole answer."""
+    with pytest.raises(review_policy.ReviewPolicyError) as caught:
+        review_policy.parse_reviewer_output("x" * 5000)
+    message = str(caught.value)
+    assert f"first {review_policy.UNPARSEABLE_EXCERPT_CHARS} of 5000 chars" in message
+    assert len(message) < 5000
+
+
+def test_leniency_is_not_the_repair() -> None:
+    """A fence is named in the error, never parsed through: a reviewer that cannot speak the
+    contract has said nothing, and crediting it with something is how that stops being true."""
+    with pytest.raises(review_policy.ReviewPolicyError):
+        review_policy.parse_reviewer_output('```json\n{"findings": []}\n```')
+
+
 def test_parse_reviewer_output_rejects_duplicate_keys() -> None:
     with pytest.raises(review_policy.ReviewPolicyError):
         review_policy.parse_reviewer_output('{"a": 1, "a": 2}')

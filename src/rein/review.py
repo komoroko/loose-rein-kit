@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -489,39 +490,51 @@ def generate(
         plan_of_run = _execution_plan(config, cache, keys_by_unit)
         print(_render_execution_plan(plan_of_run))
 
-        readouts = [
-            review_reading.read_one(
+        # Every reading's two stages, plus the one comparison over the merged Actual. `keys_by_unit`
+        # holds only the two — `reading_keys` mints no comparison key, because the Actual it takes
+        # as an input does not exist yet — so counting it alone would end the run at "19/18".
+        progress = _Progress(reviewers, total=sum(len(k) for k in keys_by_unit.values()) + 1)
+        readouts = []
+        for m in measures:
+            # A heartbeat around each reading, not around the pipeline: what the host's inactivity
+            # timeout measures is the gap between two lines, and the gap that matters is one
+            # launch. `_Progress` closes each stage; this fills the silence inside one.
+            with common.Heartbeat(f"reading{_named(m.reading.unit)}"):
+                readouts.append(
+                    review_reading.read_one(
+                        repo,
+                        reviewers,
+                        measured=m,
+                        trusted_base=trusted_base,
+                        head=head,
+                        risk_floor=facts.risk_floor,
+                        prior_blocking=prior_by_unit[m.reading.unit],
+                        discipline=review_reading.security_discipline(config),
+                        on_stage=entered,
+                        cache=cache,
+                        keys=keys_by_unit[m.reading.unit],
+                        ran=ran,
+                        reused=reused,
+                        cancel=cancel,
+                        on_progress=progress.landed,
+                    )
+                )
+        composed = review_reading.merge(readouts, coverage=coverage)
+        with common.Heartbeat("comparison"):
+            comparison = _compare(
                 repo,
                 reviewers,
-                measured=m,
-                trusted_base=trusted_base,
+                plan=plan,
+                config=config,
                 head=head,
-                risk_floor=facts.risk_floor,
-                prior_blocking=prior_by_unit[m.reading.unit],
-                discipline=review_reading.security_discipline(config),
+                composed=composed,
+                effective=effective,
                 on_stage=entered,
                 cache=cache,
-                keys=keys_by_unit[m.reading.unit],
                 ran=ran,
                 reused=reused,
-                cancel=cancel,
             )
-            for m in measures
-        ]
-        composed = review_reading.merge(readouts, coverage=coverage)
-        comparison = _compare(
-            repo,
-            reviewers,
-            plan=plan,
-            config=config,
-            head=head,
-            composed=composed,
-            effective=effective,
-            on_stage=entered,
-            cache=cache,
-            ran=ran,
-            reused=reused,
-        )
+        progress.landed(review_reading.WHOLE, "comparison", "comparison" not in ran)
 
         entered("assembly")
         binding: dict[str, Any] = {
@@ -606,7 +619,7 @@ def generate(
         # `Exception`, not `BaseException`: a Ctrl-C is a human deciding to stop, and filing that
         # as a review failure would put a decision in the log as a defect. Same line the signal
         # classifier draws (faults._EXTERNAL_SIGNALS leaves SIGINT out).
-        _record_failure(store, cycle, actor, stage=stage, reason=str(exc))
+        _record_failure(store, cycle, actor, stage=stage, failure=exc)
         raise
     finally:
         run_record.record(
@@ -660,6 +673,78 @@ def _comparison_key(
             "independence": independence,
         },
     )
+
+
+def _named(unit: str) -> str:
+    """`[T-016]` for a composed review's reading, and nothing at all otherwise.
+
+    A review that was not composed has exactly one reading, so naming it says nothing; and the
+    comparison is not a reading at all — it is handed statements, never code — so a unit beside it
+    would name something it never read.
+    """
+    return "" if unit in ("", review_reading.WHOLE) else f"[{unit}]"
+
+
+class _Progress:
+    """Prints one line per stage as it lands: what finished, out of how many, and what it cost.
+
+    A composed review's console output was its execution plan and then nothing at all — four lines
+    in eight hours on one measured run, while nine of eighteen readings were in fact being served
+    from cache and nine were being read. The number existed only in `events.ndjson`, recoverable by
+    pulling the last `run_measured` and counting `decision` fields in `detail.plan.stages`. There
+    is no reason a run cannot say it as it happens.
+
+    The cost is taken here because here is where it is attributable: the ledger is per role, each
+    stage has exactly one role (`review_policy.STAGE_ROLE`), and the delta across one stage is
+    therefore that stage's bill. Otherwise it surfaces only in `run_measured`, after the fact, for
+    the whole run at once.
+
+    Written from two threads — `read_one` runs its security stage on a worker — so the counter and
+    the ledger snapshot are taken under a lock. A miscounted line is a small thing; a torn read of
+    the totals would put a wrong number in front of somebody deciding whether to keep waiting.
+    """
+
+    def __init__(self, reviewers: review_policy.Reviewers, *, total: int) -> None:
+        self._reviewers = reviewers
+        self._total = total
+        self._done = 0
+        self._lock = threading.Lock()
+        self._seen: dict[str, usage_mod.Usage] = {}
+
+    def landed(self, unit: str, stage: str, was_reused: bool) -> None:
+        role = review_policy.STAGE_ROLE[stage]
+        with self._lock:
+            self._done += 1
+            done = self._done
+            spent = self._reviewers.spend().get(role, usage_mod.Usage())
+            before = self._seen.get(role, usage_mod.Usage())
+            self._seen[role] = spent
+        what = "reuse" if was_reused else "run"
+        bill = "" if was_reused else _billed(before, spent)
+        print(f"    [review] {done}/{self._total} {stage}{_named(unit)}: {what}{bill}", flush=True)
+
+
+def _billed(before: usage_mod.Usage, after: usage_mod.Usage) -> str:
+    """What one stage's launch cost — the ledger's movement across it.
+
+    Three fields differenced rather than a `Usage.__sub__`: the ledger's totals also carry
+    `launches` and the set of `models` that answered, and neither has a meaningful difference. A
+    subtraction operator would have to invent one, and an invented number in a cost report is
+    exactly the thing this codebase refuses elsewhere.
+
+    A zero is not printed as a price: an adapter that reports no usage is unmeasured, and
+    `USD 0.00` beside a launch that was certainly paid for is the one reading this must not allow.
+
+    It is this stage's launch and not the run's share of everything: a `SharedReading`'s priming
+    turn is billed to its own role (`review_transport._SHARED_READING_ROLE`), so these lines do not
+    sum to the total. The total is the one `usage.summarize` prints when the run ends, and the
+    breakdown by role is in `run_measured`.
+    """
+    if not after.available:
+        return " (cost not reported)"
+    read = after.total_input_tokens - before.total_input_tokens
+    wrote = after.output_tokens - before.output_tokens
+    return f" ({read:,} in / {wrote:,} out, USD {after.cost_usd - before.cost_usd:.2f})"
 
 
 def _execution_plan(
@@ -725,29 +810,103 @@ def _shares_reading(config: models.Config | None) -> bool | None:
 
 
 def _render_execution_plan(plan: dict[str, Any]) -> str:
-    """The plan, in one line, before the launches it describes."""
-    parts = []
-    for row in plan.get("stages", []):
-        where = row["model"] or row["adapter"] or "cli default"
-        unit = row.get("unit", "")
-        named = row["stage"] if unit in ("", review_reading.WHOLE) else f"{row['stage']}[{unit}]"
-        parts.append(f"{named}={row['decision']} ({where})")
+    """What this run is about to do — the counts, and the units it will actually read.
+
+    It was every row on one line: 36 stage decisions on a composed review, reused ones included,
+    ~3,600 characters printed once per attempt. Nothing about a terminal makes that readable, and
+    it named the reuses — the decisions that cost nothing and change nothing — at the same weight
+    as the launches.
+
+    The full listing is not lost: `run_measured.detail.plan` records every row, which is where a
+    question about a past run is answered anyway. This is the console's version, and the console's
+    question is "how much of this run is going to be paid for, and against what".
+    """
+    rows = list(plan.get("stages", []))
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[str(row["decision"])] = counts.get(str(row["decision"]), 0) + 1
+    readings = len({row.get("unit", "") for row in rows})
     shared = plan.get("shared_reading")
     tail = "" if shared is None else f"; shared reading: {'yes' if shared else 'no'}"
-    return "review plan: " + ", ".join(parts) + tail
+    head = (
+        f"review plan: {readings} reading(s), {len(rows)} stage decision(s) — "
+        + ", ".join(f"{n} {decision}" for decision, n in sorted(counts.items()))
+        + tail
+    )
+    return "\n".join([head, *_to_run_lines(rows)])
 
 
-def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: str, reason: str) -> None:
-    """Append the failure events for a review that could not be produced. Never raises.
+def _to_run_lines(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One line per stage that will launch, naming the units and where they go.
+
+    Grouped by stage rather than listed per row: a reader deciding whether to wait wants "the
+    extractor has nine readings left, on opus", and the per-unit rows say that nine times.
+    """
+    by_stage: dict[tuple[str, str], list[str]] = {}
+    for row in rows:
+        if row["decision"] != "run":
+            continue
+        where = str(row["model"] or row["adapter"] or "cli default")
+        unit = str(row.get("unit", ""))
+        by_stage.setdefault((str(row["stage"]), where), []).append("" if unit in ("", review_reading.WHOLE) else unit)
+    lines = []
+    for (stage, where), units in by_stage.items():
+        named = ", ".join(u for u in units if u)
+        lines.append(f"  to run: {stage} ×{len(units)} ({where})" + (f" — {named}" if named else ""))
+    return lines
+
+
+def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
+    """Would running this again, unchanged, plausibly do better?
+
+    Only a *launch* the machine failed and time can fix — the same narrow licence `rein build
+    --supervise` takes. And not a request that did not fit: that classifies as transient (a
+    resumed session which outgrew its window is fixed by relaunching cold, so the classifier is
+    right to), but this pipeline has no session to reset. The same request will be the same size
+    in fifteen minutes, and a supervisor spinning on it burns the quota that would have paid for
+    the smaller review.
+    """
+    if faults.is_context_overflow(failure.output):
+        return False
+    # The CLI's own status code when it named one: 429 is capacity and 401/403 is a credential,
+    # and both used to be decided by matching English inside a byte slice of stream-JSON.
+    status = faults.status_code(failure.output)
+    if status is not None:
+        return status == 429 or status >= 500
+    return faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT
+
+
+def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: str, failure: BaseException) -> None:
+    """Append the events for a review that could not be produced. Never raises.
 
     Append-only: nothing was written, so there is no document to stage, and a transaction that
     appends without writing is exactly what `store.Transaction` permits (the refusal runs the other
     way — a write with no event).
 
+    **Which events depends on what failed, and it did not.** Every failure recorded
+    `review_failed` plus the stage's own `*_failed`, both of them in `events.ATTENTION_EVENTS`, so
+    a supervised run waiting out a session limit filed two "awaits a human decision" rows per
+    attempt against a condition the machine had already answered by retrying. Eight attempts on
+    one cycle left sixteen of them on a board beside the one blocker that mattered, with no verb
+    that could clear one.
+
+    :func:`_worth_waiting_for` is the code that already knows the difference: a launch that failed
+    for a machine reason time alone fixes asks for a re-run, not a judgement. That is
+    `review_aborted`, outside `ATTENTION_EVENTS` — the same distinction `run_aborted` draws in the
+    build loop. Everything else is unchanged: an unparseable answer, a coverage gap, a budget
+    refusal, an unreadable SSOT all still sit on the board until somebody answers them.
+
+    Classified from the failure itself rather than from whether `--supervise` was passed. What
+    makes a capacity refusal not-a-decision is the refusal, not the flag: without the flag the run
+    stops, and what is then waiting on the human is "there is no machine review", which the board
+    already says as a blocker.
+
     Swallowing the store's own errors is deliberate. This runs inside an `except` block whose job
     is to re-raise the real failure; a store problem here would replace the error a human needs to
     read with one about bookkeeping, and the log being unwritable is what `rein doctor` is for.
     """
+    reason = str(failure)
+    transient = isinstance(failure, review_policy.AdapterFailure) and _worth_waiting_for(failure)
     if not cycle:
         # There is no cycle to file it under, and an event that cannot name one is refused by
         # `event_chain.make`. Say where the account went instead of leaving the reader to notice
@@ -758,6 +917,9 @@ def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: st
     try:
         with store.transaction() as tx:
             detail = {"stage": stage, "reason": reason[:1000]}
+            if transient:
+                tx.append("review_aborted", cycle_id=cycle, actor=actor, detail=detail)
+                return
             if stage in _STAGE_EVENT:
                 tx.append(_STAGE_EVENT[stage], cycle_id=cycle, actor=actor, detail=detail)
             tx.append("review_failed", cycle_id=cycle, actor=actor, detail=detail)
@@ -1044,26 +1206,6 @@ def complete(repo: repo_mod.Repo, *, actor: str = "") -> None:
 # -- CLI ----------------------------------------------------------------------
 
 
-def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
-    """Would running this again, unchanged, plausibly do better?
-
-    Only a *launch* the machine failed and time can fix — the same narrow licence `rein build
-    --supervise` takes. And not a request that did not fit: that classifies as transient (a
-    resumed session which outgrew its window is fixed by relaunching cold, so the classifier is
-    right to), but this pipeline has no session to reset. The same request will be the same size
-    in fifteen minutes, and a supervisor spinning on it burns the quota that would have paid for
-    the smaller review.
-    """
-    if faults.is_context_overflow(failure.output):
-        return False
-    # The CLI's own status code when it named one: 429 is capacity and 401/403 is a credential,
-    # and both used to be decided by matching English inside a byte slice of stream-JSON.
-    status = faults.status_code(failure.output)
-    if status is not None:
-        return status == 429 or status >= 500
-    return faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT
-
-
 #: The longest `--supervise` will wait on one refusal, however far off the reset it was told about.
 #: A session limit that lifts tomorrow is not something to hold a terminal open for, and a CLI that
 #: names a time this far out is likelier to have been misread than to be right.
@@ -1099,9 +1241,17 @@ def _generate_cli(
 ) -> tuple[dict[str, Any], dict[str, usage_mod.Usage]]:
     """`(the machine review, what the attempts cost)`, waiting out a machine failure time can fix.
 
-    The same shape as `rein build --supervise`: only what :func:`_worth_waiting_for` allows is
-    retried. Everything else — a reviewer whose output could not be parsed, a budget refusal, an
-    unreadable SSOT — is a real answer, and sleeping on it would turn a verdict into a loop.
+    Only a **launch** that failed for a machine reason (:func:`_worth_waiting_for`) is waited out
+    — the same narrow licence `rein build --supervise` takes. Capacity comes back; the only cost
+    of waiting is the wait. Everything else — a budget refusal, an unreadable SSOT, a coverage
+    gap — is a real answer, and sleeping on it would turn a verdict into a loop.
+
+    **An answer the validator refuses is not retried here, and deliberately so.** It is retried
+    where it is judged (`review_reading._run_once_more_if_refused`), which is what makes the
+    budget the stage's rather than the run's: a second malformed answer eighteen readings later
+    must not find the allowance spent by the first, and one bad answer must not re-enter the whole
+    pipeline. By the time a `ReviewPolicyError` reaches here, the stage has already had its extra
+    launch, so this is the verdict.
 
     A retry costs only the stages that have not answered yet: `review_cache` keeps each stage's
     answer as it validates, so waiting out a capacity stop no longer re-reads the whole change.

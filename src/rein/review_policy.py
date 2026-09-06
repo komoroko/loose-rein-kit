@@ -129,21 +129,49 @@ class Reviewers(Protocol):
     def spend(self) -> dict[str, usage_mod.Usage]: ...
 
 
+#: How much of a refused answer travels in the error. Enough to tell the four repairs apart — an
+#: empty string, a ```json fence, a prose preamble, a refusal — and short enough that a console
+#: line and an `events.ndjson` `detail.reason` both still read as one message.
+UNPARSEABLE_EXCERPT_CHARS = 500
+
+
 def parse_reviewer_output(raw: str, *, what: str = "reviewer output") -> dict[str, Any]:
     """Parse a reviewer's raw output strictly, then enforce the shape caps (plan §12.7).
 
     Strict JSON only — duplicate keys, NaN, and Infinity are refused at the parser (the same
     boundary every document crosses). A parse failure or an over-cap shape is a hard
     error: a reviewer that cannot speak the contract has said nothing, not something lenient.
+
+    **The refused bytes travel with the refusal.** This raise had `raw` in hand and dropped it, so
+    a stage answer nobody could read was reported as `unparseable (Expecting value: line 1 column
+    1 (char 0))` — the identical message for an empty answer, a fenced one, one with a preamble,
+    and a refusal, which are four different repairs. A field run paid for 1,929 output tokens of
+    security review and threw every byte away under that sentence.
+
+    An excerpt, `repr`-quoted, and deliberately not a lenient parse: leniency here is how a
+    reviewer that cannot speak the contract starts being credited with having said something. What
+    was missing was the diagnosis, not the tolerance.
     """
     try:
         document = strict_yaml.load_json_mapping(raw, what=what)
     except strict_yaml.StrictParseError as exc:
-        raise ReviewPolicyError(f"{what}: unparseable ({exc})") from None
+        raise ReviewPolicyError(f"{what}: unparseable ({exc}); {_excerpt(raw)}") from None
     problems = validate_shape(document, what=what)
     if problems:
         raise ReviewPolicyError("; ".join(problems))
     return document
+
+
+def _excerpt(raw: str) -> str:
+    """The head of a refused answer, quoted, with its true length beside it.
+
+    `repr` rather than the bytes themselves: an answer that is empty, or whitespace, or a fence is
+    exactly the case where the difference is invisible unquoted, and that difference is the whole
+    reason this is here.
+    """
+    head = raw[:UNPARSEABLE_EXCERPT_CHARS]
+    tail = "" if len(raw) <= UNPARSEABLE_EXCERPT_CHARS else f" (first {UNPARSEABLE_EXCERPT_CHARS} of {len(raw)} chars)"
+    return f"the answer began {head!r}{tail}"
 
 
 # --- effective risk (plan §13.5) ----------------------------------------------

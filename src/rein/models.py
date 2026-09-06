@@ -397,6 +397,17 @@ EVENT_ORDER: tuple[str, ...] = (
     "security_finding_resolved",
     "review_generated",
     "review_failed",
+    # The review pipeline stopped because a *launch* failed for a machine reason time alone fixes
+    # — capacity exhausted, a signal, a 5xx — and not because anything about the change needs
+    # judging. Deliberately outside `events.ATTENTION_EVENTS`, for the same reason `run_aborted`
+    # is: it asks nobody to decide anything, it asks for a re-run, and `rein review generate
+    # --supervise` is already the thing that performs it.
+    #
+    # It was `review_failed` (plus the stage's own `*_failed`), so eight supervised attempts
+    # waiting out one session limit put sixteen rows on the board that no verb could clear and no
+    # human could act on — beside the single blocker that actually mattered. A queue where "39
+    # waiting on you" and "1 waiting on you" look the same is a queue people stop reading.
+    "review_aborted",
     "decision_recorded",
     "expertise_declared",
     "expert_requested",

@@ -59,6 +59,11 @@ HEADLINE_EVENTS: dict[str, str] = {
     # fresh terminal after a session limit needs to know the build stopped for the machine's
     # reasons and left every task where it was, not that something went wrong with the work.
     "run_aborted": "build runs stopped by the machine (re-runnable)",
+    # The same sentence for gate ④'s pipeline, and worth a headline for the same reason: a
+    # composed review that stopped on a session limit kept every reading it had already taken
+    # (`review_cache`), so what a returning operator has to know is that re-running is cheap, not
+    # that eight hours were lost.
+    "review_aborted": "review runs stopped by the machine (re-runnable)",
     "knowledge_gap": "knowledge gaps recorded",
 }
 

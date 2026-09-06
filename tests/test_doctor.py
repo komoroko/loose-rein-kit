@@ -988,6 +988,52 @@ def test_a_retryable_stop_still_within_the_window_stays_informational(tmp_path: 
     assert [f.level for f in results] == ["INFO"]
 
 
+def review_aborted_chain(*, hours_ago: float = 0.0, then: tuple[str, ...] = ()) -> list[models.Event]:
+    """A gate-④ generation that stopped for a machine reason, optionally backdated."""
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+
+    from rein import event_chain
+
+    detail: dict[str, object] = {"stage": "security_review", "reason": "session limit \u00b7 resets 3:30am"}
+    built: list[models.Event] = []
+    previous: models.Event | None = None
+    for name in ("cycle_initialized", "review_aborted", *then):
+        made = event_chain.make(name, DEMO_CYCLE, detail=detail if name == "review_aborted" else None)
+        if name == "review_aborted" and hours_ago:
+            old = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat(timespec="seconds")
+            made = replace(made, ts=old)
+        previous = event_chain.link(previous, made)
+        built.append(previous)
+    return built
+
+
+def test_a_review_run_the_machine_stopped_is_surfaced_because_nothing_else_shows_it(tmp_path: Path) -> None:
+    """Moving a transient review failure out of `ATTENTION_EVENTS` is what creates the state this
+    check exists for: no escalation open, the board unchanged, and nothing saying a thirteen-hour
+    run died at 3am. The rows it used to leave were unactionable; their absence must not be silence.
+    """
+    results = doctor.check_last_review_run(healthy(tmp_path, events=review_aborted_chain()))
+    assert [f.level for f in results] == ["INFO"]
+    assert "security_review" in results[0].message
+    assert "cached" in results[0].message, "the fact that makes a re-run cheap is the point"
+
+
+def test_a_review_that_was_regenerated_since_says_nothing(tmp_path: Path) -> None:
+    repo = healthy(tmp_path, events=review_aborted_chain(then=("review_generated",)))
+    assert doctor.check_last_review_run(repo) == []
+
+
+def test_a_review_stop_nobody_has_re_run_in_hours_is_escalated(tmp_path: Path) -> None:
+    results = doctor.check_last_review_run(healthy(tmp_path, events=review_aborted_chain(hours_ago=4)))
+    assert [f.level for f in results] == ["WARN"]
+    assert "--supervise" in results[0].message
+
+
+def test_a_repository_whose_review_never_stopped_says_nothing(tmp_path: Path) -> None:
+    assert doctor.check_last_review_run(healthy(tmp_path, events=chain("cycle_initialized"))) == []
+
+
 # --- what the *plan* needs, versus what the config declares ----------------------
 
 

@@ -47,6 +47,16 @@ the human half is worked through in `rein ui` — a rail of
 **scope → orient → decision → diff → freeze** — and frozen with `rein review complete`. Freezing is
 a precondition of `rein approve build` — it is **not** the approval.
 
+**`rein review generate --supervise` is a long run, and it is `background-wait`'s, not a poll's.**
+A composed review reads each task's slice on its own launch — eighteen of them on one measured
+cycle, thirteen hours end to end — and `--supervise` sleeps out a session limit rather than losing
+what it has already read. It talks while it works: a `[waiting]` line every minute inside a
+launch, and a `[review] 9/18 actual_extraction[T-016]: run …` line as each stage lands, so a
+foreground wait that counts *silence* can hold it. Wait it out the way build.md says to wait out
+`rein build` — host re-entry first, a foreground wait second, `nohup … > .rein/review.log 2>&1 &`
+only when neither can — and **never re-run it to check on it**: each stage it already answered is
+cached, but a second process is a second bill and a second lock.
+
 The first two stages ask for nothing: a reviewer who has to reconstruct the change before every
 card spends their attention on reconstruction.
 

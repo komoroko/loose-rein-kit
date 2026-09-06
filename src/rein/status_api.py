@@ -114,6 +114,9 @@ def next_action(
     current_phase: str,
     gates: dict[str, str],
     counts: dict[str, int] | None,
+    #: How many distinct conditions await a decision (`events.open_conditions`), never how many
+    #: times they were recorded: eight supervised attempts against one session limit are one thing
+    #: to decide, and a number that counts attempts is not a number about decisions.
     attention_count: int,
     chain_defects: int,
     uninitialized: bool,
@@ -188,8 +191,8 @@ def next_action(
         return Recommendation(
             command="rein events --summary",
             kind="resolve",
-            reason=f"{attention_count} event(s) await a human decision; record a disposition for each before "
-            "the gate 5 release decision.",
+            reason=f"{attention_count} condition(s) await a human decision; record a disposition for each "
+            "before the gate 5 release decision.",
         )
     # 7. Before the lifecycle starts, the human writes the brief.
     if current_phase == "brief":
@@ -445,7 +448,7 @@ def pending_queue(
     chain_defects: int,
     unsandboxed_profiles: Sequence[str],
     unsandboxed_build_targets: Sequence[str],
-    attention: Sequence[models.Event],
+    attention: Sequence[tuple[models.Event, int]],
     task_rows: Sequence[Mapping[str, object]],
 ) -> list[dict[str, str]]:
     """Everything standing between this repository and its next gate, worst first.
@@ -499,17 +502,7 @@ def pending_queue(
                 )
             )
 
-    for event in attention:
-        subjects = ", ".join(event.subject_ids) or "-"
-        items.append(
-            _pending_item(
-                "attention",
-                "escalation",
-                subjects,
-                f"#{event.seq} {event.event} ({subjects}) awaits a human decision",
-                "rein events --summary",
-            )
-        )
+    items += _escalation_items(attention)
     for row in task_rows:
         kind = _STUCK_TASK_STATUS.get(str(row.get("status")))
         if kind is None:
@@ -530,6 +523,28 @@ def pending_queue(
 
     # Stable: within a severity the emission order above is the reading order.
     return sorted(items, key=lambda item: PENDING_SEVERITY_ORDER.index(item["severity"]))
+
+
+def _escalation_items(attention: Sequence[tuple[models.Event, int]]) -> list[dict[str, str]]:
+    """One row per condition awaiting a decision, as `events.open_conditions` grouped them.
+
+    Grouped there and not here, so this board and `rein events --summary` cannot report different
+    numbers for one question. What is left here is the row's wording.
+    """
+    items = []
+    for event, seen in attention:
+        subjects = ", ".join(event.subject_ids) or "-"
+        repeats = f" \u00d7{seen}, latest" if seen > 1 else ""
+        items.append(
+            _pending_item(
+                "attention",
+                "escalation",
+                subjects,
+                f"{event.event} ({subjects}){repeats} #{event.seq} awaits a human decision",
+                "rein events --summary",
+            )
+        )
+    return items
 
 
 def _default_readiness(repo: repo_mod.Repo, gate: str) -> list[str]:
@@ -710,7 +725,9 @@ def collect_status(
     if defects:
         warnings.append(f"the audit chain has {len(defects)} defect(s)")
     task_status = state.task_status if state else {}
-    attention = events_mod.open_attention(events, task_status)
+    # The one rule for "what is still waiting", grouped once: the recommendation's count, the
+    # queue's rows and `rein events --summary` all read this, so they cannot disagree.
+    attention = events_mod.open_conditions(events, task_status)
 
     template_mode = config.template_mode if config else False
     uninitialized = is_uninitialized(config, state)
@@ -818,8 +835,12 @@ def collect_status(
             "events": len(events),
             "defects": [str(d) for d in defects],
         },
+        # One row per condition, not per occurrence — the same grouping every other surface reads
+        # (`events.open_conditions`). `recorded` is how many times it was filed, so a consumer can
+        # tell "this happened once" from "this happened eight times" without walking the chain.
         "attention": [
-            {"seq": e.seq, "ts": e.ts, "event": e.event, "subject_ids": list(e.subject_ids)} for e in attention
+            {"seq": e.seq, "ts": e.ts, "event": e.event, "subject_ids": list(e.subject_ids), "recorded": seen}
+            for e, seen in attention
         ],
         "next": asdict(recommendation),
         "decision": pending_decision(

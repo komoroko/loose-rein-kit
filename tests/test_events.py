@@ -176,6 +176,56 @@ def test_a_review_failure_is_not_retired_by_a_task_it_happened_to_name() -> None
     assert [e.event for e in events.open_attention(chain, {"T-001": "done"})] == ["review_failed"]
 
 
+def test_an_aborted_review_asks_for_a_re_run_and_never_for_a_decision() -> None:
+    """A supervised run waiting out a session limit filed two attention rows per attempt against
+    a condition it was itself already answering. `run_aborted` had drawn this line for the build
+    loop; the review pipeline recorded every failure as a decision."""
+    chain = _chain(("review_aborted", ()), ("review_aborted", ()))
+    assert events.open_attention(chain) == []
+    assert "review_aborted" not in events.ATTENTION_EVENTS
+
+
+def test_one_condition_is_one_row_however_many_times_it_was_recorded() -> None:
+    chain = _chain(("review_failed", ()), ("review_failed", ()), ("task_failed", ("T-004",)))
+    conditions = events.open_conditions(chain)
+    assert [(e.event, seen) for e, seen in conditions] == [("review_failed", 2), ("task_failed", 1)]
+    # The newest record of each, because that is the one whose `detail` describes what is true now.
+    assert conditions[0][0].seq == max(e.seq for e in chain if e.event == "review_failed")
+
+
+def test_the_grouping_narrows_the_same_list_open_attention_does() -> None:
+    """A condition every occurrence of which has been answered is not a condition."""
+    chain = _chain(("review_failed", ()), ("review_failed", ()), ("review_generated", ()))
+    assert events.open_attention(chain) == []
+    assert events.open_conditions(chain) == []
+
+
+def test_every_surface_counts_the_same_conditions(tmp_path: Path) -> None:
+    """`rein start`'s board said three and `rein events --summary` said thirty-nine about one
+    question, because the grouping lived in the status board alone.
+
+    The rule is `open_conditions` and nothing derives its own: the summary's count, the queue's
+    rows, and the recommendation's number are the same number or this is a bug.
+    """
+    from rein import status_api
+
+    chain = _chain(*[("review_failed", ())] * 8, ("task_failed", ("T-004",)))
+    conditions = events.open_conditions(chain)
+    summary = events.render_summary(list(chain))
+    rows = status_api.pending_queue(
+        probe_gate=None,
+        gate_blockers=None,
+        chain_defects=0,
+        unsandboxed_profiles=[],
+        unsandboxed_build_targets=[],
+        attention=conditions,
+        task_rows=[],
+    )
+    assert f"needing a human decision: {len(conditions)}" in summary
+    assert len([r for r in rows if r["kind"] == "escalation"]) == len(conditions) == 2
+    assert "\u00d78" in summary, "the count that was collapsed is still stated, not hidden"
+
+
 # --- what a cycle cost --------------------------------------------------------
 #
 # `run_measured` carries what the provider billed each role. Nothing read it, so "where did the
