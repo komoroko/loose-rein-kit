@@ -114,7 +114,7 @@ def _measured(unit: str, paths: list[str], *, digest: str = "sha256:" + "9" * 64
         reading=review_reading.Reading(unit=unit, include=tuple(paths)),
         diff_text="",
         facts=diff_facts.DiffFacts(**{**facts.__dict__, "files": files}),
-        reviewable=review_reading.Reviewable(text="", context_lines=3),
+        reviewable=review_reading.Reviewable(text="", context_lines=(3, 3)),
         anchorable=(),
         coverage={"diff_digest": digest, "analyzed_bytes": 10},
         content_digest=digest,

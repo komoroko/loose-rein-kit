@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from rein import models, review_policy
+from rein import models, review_policy, review_reading
 
 # The standard review budget (plan §14.10). A machine review may carry its own measured
 # `review_budget`, but these are the limits the loop enforces when the config does not override
@@ -173,33 +173,6 @@ def expertise_gaps(review: models.Review, human: Mapping[str, Any]) -> list[dict
 # -- review budget (plan §14.10, E2E-30) --------------------------------------
 
 
-def _critical_claim_ids(review: models.Review) -> set[str]:
-    """The claims every critical Decision Card is about.
-
-    Every card, not a capped subset. This used to walk the challenge set — the three hardest cards
-    the challenge-first screen asked about — so a review with five critical cards measured its own
-    `max_critical_decisions` budget against three of them. A budget computed over part of its
-    subject is not a budget.
-    """
-    ids: set[str] = set()
-    for card in _machine_list(review, "decision_cards"):
-        if _risk(card) == "critical":
-            claim_ids = card.get("claim_ids")
-            if isinstance(claim_ids, list):
-                ids.update(str(c) for c in claim_ids)
-    return ids
-
-
-def _critical_modules(review: models.Review) -> int:
-    critical = _critical_claim_ids(review)
-    count = 0
-    for module in _machine_list(review, "module_deltas"):
-        invariants = module.get("changed_invariants")
-        if isinstance(invariants, list) and any(str(c) in critical for c in invariants):
-            count += 1
-    return count
-
-
 def _unresolved_low_medium_unknowns(review: models.Review, human: Mapping[str, Any]) -> int:
     """Low/medium non-blocking gaps with no human disposition — the ones a budget bounds."""
     disposed = {str(d.get("subject_id")) for d in _human_list(human, "dispositions")}
@@ -212,15 +185,17 @@ def _unresolved_low_medium_unknowns(review: models.Review, human: Mapping[str, A
 
 
 def _diff_bytes(review: models.Review) -> int:
-    """How large the change this review covers is, in bytes.
+    """The largest single reading in this review, in bytes — what one launch was asked to hold.
 
-    `analyzed_bytes` is required by the schema, so there is no absent case to default. It used to be
-    optional and read as 0 here — an unmeasured manifest passing a size check it was never held to,
-    which is the one direction this file must never round towards. A review written before the
-    measure is regenerated rather than tolerated.
+    Not the whole change. `max_diff_bytes` bounds what a *reviewer* can read in one launch, and
+    under a composed review no reviewer ever reads the whole change: each reading is measured,
+    widened and refused on its own (`review_reading.read_facts`). Measuring the whole here made the
+    budget a function of how much a cycle shipped, and its own instruction — split the scope — is
+    not a move that exists at gate ④, where every task is implemented, merged and `done`. Measured
+    on this repository, two consecutive release cycles came to 662 KB and 754 KB against a 512 KiB
+    ceiling, so the only exit was raising the number.
     """
-    manifest = review.coverage
-    return int(manifest["analyzed_bytes"]) if manifest else 0
+    return review_reading.largest_reading_bytes(review.coverage)
 
 
 def budget_actuals(review: models.Review, human: Mapping[str, Any]) -> dict[str, int]:
@@ -228,14 +203,13 @@ def budget_actuals(review: models.Review, human: Mapping[str, Any]) -> dict[str,
 
     `max_diff_bytes` is measured from the coverage manifest, not assumed enforced upstream: a
     constant actual here would make the one byte-denominated budget impossible to exceed by a
-    change of any size — and "a blown budget splits the scope" (config.yaml, gate-workflow.md,
-    review.schema.json) something that could never happen.
+    change of any size. It is the *largest reading* (`_diff_bytes`), which is what that budget
+    bounds — so it is a backstop over the document rather than the wall, and the wall is
+    `review_reading.read_facts`, which refuses a reading before anything is launched.
     """
     return {
         "max_critical_decisions": sum(1 for c in _machine_list(review, "decision_cards") if _risk(c) == "critical"),
-        "max_critical_modules": _critical_modules(review),
         "max_human_statements": len(_machine_list(review, "statements")),
-        "max_scenarios": len(_machine_list(review, "scenarios")),
         "max_unresolved_low_medium_unknowns": _unresolved_low_medium_unknowns(review, human),
         "max_diff_bytes": _diff_bytes(review),
     }

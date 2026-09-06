@@ -278,11 +278,14 @@ is the point; never fold them into the implementer's session.
    refused outright at critical risk. Set `review_policy.composition: whole` to pay for one reading
    of everything instead. What it reads is the **product**: not `.rein/`, not the plan's own prose
    (the documents gate ③ froze, `docs/tasks/`, the ADRs), not the surfaces `rein install` wrote,
-   and — for the blind extractor alone — not the tests. The diff is measured
-   against `review_policy.budgets.max_diff_bytes` *before* a model is launched — over
-   it the answer is to split the scope (`/revise`), never to grow the request. **Do not wait for
+   and — for the blind extractor alone — not the tests. **Each reading** is measured
+   against `review_policy.budgets.max_diff_bytes` *before* a model is launched — that budget bounds
+   one launch, not one cycle, so a reading over it is a task whose scope is too broad to read, and
+   the answer is to narrow it at gate ③, never to grow the request. **Do not wait for
    gate ④ to find that out**: `rein start --full` carries the outlook, `rein doctor` names it, and
    `rein build` says so as each task lands, which is while splitting is still possible.
+   A run is dozens of launches over hours: it prints `[review] N/M <stage>[T-NNN]` as each stage
+   lands, and `rein ui` shows the same figure live, so a human need not watch the terminal.
    Findings sit on three separate axes (integrity / semantic support / conformance); there is no
    single `verified`, and "extra behaviours: 0" appears only with the Coverage Manifest that
    earned it. **Triage it**: a blocking security finding, a diverged high/critical claim, an ungrounded

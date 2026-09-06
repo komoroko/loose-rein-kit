@@ -4,6 +4,68 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.4] - 2026-09-06
+
+**`max_diff_bytes` bounds one launch, not one cycle.** One number was doing three jobs: the wall in
+front of the whole change before anything launched, the ceiling each reading's context was widened
+up to, and the "how much can one person hold" budget checked again at the freeze. Only the middle
+one is what it means. Under `composition: auto` no reviewer ever reads the whole change — each
+reading is one task's scope, measured, widened and refused on its own — so the whole-change wall
+stood in front of a quantity nobody is sent, and its own instruction ("split the scope, `/revise`")
+is not a move that exists at gate ④, where every task is implemented, merged and `done`. It was not
+a hypothetical: two consecutive release cycles of this repository come to 662 KB and 754 KB at
+git's default width against a 512 KiB ceiling, so every real cycle hit it and the only exit was
+raising the number.
+
+Now the budget is measured against **the largest single reading**, and that measure has one address
+(`review_reading.largest_reading_bytes`) that both the recorded snapshot and the live recomputation
+read. `review.generate` no longer checks the whole change at all — `read_facts` already refuses
+each reading, which is the same wall for an uncomposed review and the right one for a composed one.
+`ChangeOutlook` gains `unit`, `readings` and `total_bytes`, so `doctor`, `build` and the status
+board say *which reading* is too big and point at the lever that still works: narrow that task's
+scope, or split the task, at gate ③. The readings are attributed out of the one `git diff` the
+outlook already takes (`bytes_by_reading`), because that object is read on every stream tick.
+
+`human_review.budget_actuals` loses `max_critical_modules` and `max_scenarios`, which no budget
+name has ever read, along with `_critical_modules` and `_critical_claim_ids` behind them.
+
+**Context is bought where the detector found something.** `reviewable_of` bought the widest rung
+that fit the ceiling, for every file — so the payload was sized by whatever ceiling happened to be
+in force rather than by what the reading needed, and every byte of it is paid again in each
+reading's priming turn. Measured on one branch of this repository: 210,408 bytes at 30 lines
+against 94,951 at git's default, 2.2×. `CONTEXT_LADDER` is now `((30, 10), (15, 10), (10, 10))` —
+`(signalled, everything else)` — and the wide half goes only to the paths `diff_facts` matched a
+signal inside, which is the line `fold_bodies` already draws for the same reason. Nothing is read
+at less than the ladder's own bottom rung, and the `PLAIN_CONTEXT` fallback is unchanged.
+`Reviewable.context_lines` is a pair, and the request carries both widths.
+
+**`rein review generate --readers N` takes N readings at once.** They are independent by
+construction — different slices, each primed into its own session keyed by its own bytes, none
+consuming what another produced — so this buys wall-clock and costs the same tokens; a composed
+review measured at thirteen hours stops being thirteen sequential ones. It defaults to 1, and it is
+a flag rather than a `config.yaml` setting because concurrent launches spend a provider's session
+and rate limits: that is a judgement about an account, not about the change, and `review_policy` is
+inside gate ③'s frozen digest. `--readers 1` runs the serial code path, not a pool of one. In
+parallel the first failure trips the shared `Cancellation`, which kills every launch in flight and
+refuses every later one, so queued readings die on arrival instead of each paying for a pair of
+stages nobody will read; results are collected in reading order, so which failure a reader is shown
+does not depend on which thread lost a race. Each reading carries its own "which stage" cell — a
+shared one named whichever stage some *other* reading had just entered — and `review_failed` /
+`actual_extraction_failed` now carry `unit` beside `stage`.
+
+**A generation in flight says so on the dashboard.** `rein review generate` said everything on its
+console and nothing anywhere else, so a human watching `rein ui` through a composed run saw "no
+machine review has been generated" for all of it, with no way to tell a run in flight from a run
+that never started. `run_progress` writes the live figure to `.rein/work/review-run.json` as each
+stage lands — gitignored, dying with its worktree, binding nothing — and `ui._WATCHED` stats it, so
+the SSE `status` push carries it to every open tab with no new endpoint, fetch or timer. It appears
+in **Now**, under the next command (never in "In the way of": that pane is what waits on the human,
+and a running command is the opposite), and in the **gate ④ reading room**, which otherwise falls
+back to the deliverable list in silence. Staleness is decided on the server against this machine's
+clock, so a run killed outright is drawn as stopped rather than as live. The file is left behind
+when a run ends: "the last run failed" is worth as much as "a run is in flight".
+`doctor._seconds_since` moves to `common.seconds_since`, which is where both callers read it from.
+
 ## [0.4.3] - 2026-09-06
 
 **A review run that the machine stopped asks for a re-run, not a decision.** Every failure of the

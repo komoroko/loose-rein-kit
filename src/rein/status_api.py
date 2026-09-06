@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from rein import adapters, agent_cli, common, dag, dag_trace, event_chain, findings, models, strict_yaml
+from rein import adapters, agent_cli, common, dag, dag_trace, event_chain, findings, models, run_progress, strict_yaml
 from rein import events as events_mod
 from rein import lock as lock_mod
 from rein import repo as repo_mod
@@ -784,6 +784,9 @@ def collect_status(
             outlook = {
                 "line": view.line(),
                 "diff_bytes": view.diff_bytes,
+                "total_bytes": view.total_bytes,
+                "unit": view.unit,
+                "readings": view.readings,
                 "ceiling": view.ceiling,
                 "over_budget": view.over_budget,
                 "unreadable": list(view.unreadable),
@@ -791,6 +794,12 @@ def collect_status(
                 "made_of": view.made_of(),
                 "composition": dict(view.composition),
             }
+
+    # What a gate-④ generation is doing right now, when one is (or was last) running. No phase
+    # condition: a review is regenerated after a fix and after `changes_requested`, and a run in
+    # flight is worth seeing whenever there is one. One small JSON read — cheaper than the outlook
+    # above, which takes a `git diff`.
+    review_run = run_progress.read(repo.root)
 
     plan_block = _plan_block(plan) if plan is not None else None
     task_rows = tasks_block["rows"] if tasks_block else []
@@ -825,6 +834,7 @@ def collect_status(
         "plan_status": state.plan_status if state else "draft",
         "review": _review_block(review),
         "review_outlook": outlook,
+        "review_run": review_run,
         "tasks": tasks_block,
         "trace": trace_block,
         "agents": _agents_block(config),

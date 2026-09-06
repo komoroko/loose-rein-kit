@@ -73,3 +73,28 @@ export function paths(list) {
 }
 
 export const short = (sha) => (sha ? String(sha).slice(0, 12) : "");
+
+// What a gate-④ generation is doing right now (`run_progress`, on `status.review_run`). It reaches
+// the page through the SSE `status` push and nothing else: the gate pane fetches
+// `/api/review/session` once per gate and never polls, so a progress line hung off that payload
+// would never move. Both places that draw it — Now and the gate ④ reading room, which otherwise
+// says "no machine review has been generated" for however long a run takes — already have `status`
+// in hand, so this needs no new endpoint, fetch, or timer.
+//
+// A run whose file has gone quiet is drawn as stale rather than as live. Whether it has is decided
+// on the server (`run_progress.read`), because the clock a browser compares against is not the one
+// that wrote the timestamp.
+export function ReviewRun({ run }) {
+  if (!run || run.outcome !== "running") return null;
+  const last = run.last || {};
+  const where = last.stage ? `${last.stage}${last.unit && last.unit !== "whole" ? ` [${last.unit}]` : ""}` : "starting";
+  const count = run.total ? `${run.done || 0}/${run.total} stages` : `${run.done || 0} stages`;
+  return (
+    <div className={"runline" + (run.stale ? " stale" : "")}>
+      <span className="prompt">{run.stale ? "!" : "…"}</span>
+      {run.stale
+        ? `grounded review: the run stopped reporting at ${count} — the process is gone or wedged`
+        : `generating the grounded review · ${count} · ${where}`}
+    </div>
+  );
+}

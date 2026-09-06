@@ -29,6 +29,7 @@ import re
 import sys
 import threading
 from collections.abc import Iterable, Iterator
+from datetime import datetime, timezone
 from typing import Any
 
 # --- diagnostics logging ------------------------------------------------------
@@ -115,6 +116,26 @@ def ask_yes_no(prompt: str) -> bool:
 #: minute is what makes the host's own wait usable, and it costs no tokens: the CLI prints it, not
 #: a model.
 HEARTBEAT_SEC = 60.0
+
+
+def seconds_since(ts: str) -> float | None:
+    """Wall-clock seconds between `ts` (an ISO-8601 timestamp with an offset) and now.
+
+    None when it cannot be answered — unparseable, or offset-naive, which is ambiguous across
+    machines and so is not a time this can subtract. Both callers round the same way on a None:
+    `doctor` reports "cannot say", and `run_progress` treats an unreadable stamp as stale rather
+    than putting a spinner in front of a process nobody can see.
+
+    In `common` because two modules ask it and a second spelling of "how long ago was that" is how
+    two answers about one timestamp get into one tool.
+    """
+    try:
+        when = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None
+    return (datetime.now(timezone.utc) - when).total_seconds()
 
 
 class Heartbeat:

@@ -698,3 +698,23 @@ def test_a_repo_with_no_config_reports_no_agents(tmp_path: Path) -> None:
     every role is on the default."""
     (tmp_path / ".rein").mkdir(parents=True)
     assert status_api.collect_status(tmp_path)["agents"] is None
+
+
+def test_the_status_carries_a_generation_in_flight(tmp_path: Path) -> None:
+    """The dashboard's only path to it. `ui._WATCHED` stats the progress file, so the stream pushes
+    a status the moment a stage lands — the gate pane fetches its session once per gate and never
+    polls, and a figure hung off that payload would never move.
+
+    No phase condition, unlike the outlook beside it: a review is regenerated after a fix and after
+    `changes_requested`, and a run in flight is worth seeing whenever there is one.
+    """
+    from rein import run_progress
+
+    root = seed_repo(tmp_path)
+    assert status_api.collect_status(root)["review_run"] is None
+
+    run_progress.Writer(Path(root), run_id="r-1", total=5, stages=[{"stage": "comparison", "decision": "run"}])
+    live = status_api.collect_status(root)["review_run"]
+    assert isinstance(live, dict)
+    assert live["outcome"] == "running" and live["total"] == 5 and live["done"] == 0
+    assert live["stale"] is False, "a file written a moment ago is not stale"

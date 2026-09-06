@@ -259,6 +259,7 @@
               "maximum": 100
             },
             "max_diff_bytes": {
+              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one task's scope, so a large cycle passes and a task too broad to read in one launch is refused by name, at gate 3, while splitting it is still possible.",
               "type": "integer",
               "minimum": 4096,
               "maximum": 8388608

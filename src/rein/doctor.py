@@ -29,7 +29,6 @@ import re
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 import rein
@@ -1373,19 +1372,6 @@ def check_chain(repo: repo_mod.Repo) -> list[Finding]:
 _STALE_ABORT_AFTER_SEC = 3 * 60 * 60
 
 
-def _seconds_since(ts: str) -> float | None:
-    """Wall-clock seconds between `ts` (an event's ISO-8601 timestamp) and now, or None if
-    unparseable. Never touches the fault's own free-text `reported` field — that stays quoted,
-    never parsed (see `faults.reset_hint`); this only compares event timestamps."""
-    try:
-        when = datetime.fromisoformat(ts)
-    except ValueError:
-        return None
-    if when.tzinfo is None:
-        return None
-    return (datetime.now(timezone.utc) - when).total_seconds()
-
-
 def check_last_run(repo: repo_mod.Repo) -> list[Finding]:
     """Did the last build run stop because the machine failed, and has nothing succeeded since?
 
@@ -1405,7 +1391,7 @@ def check_last_run(repo: repo_mod.Repo) -> list[Finding]:
     where = str(detail.get("where", "a launch"))
     reported = str(detail.get("reported", ""))
     retryable = str(detail.get("fault", "")) == "environment_transient"
-    idle_sec = _seconds_since(last_abort.ts)
+    idle_sec = common.seconds_since(last_abort.ts)
     stale = retryable and idle_sec is not None and idle_sec >= _STALE_ABORT_AFTER_SEC
     if stale:
         assert idle_sec is not None  # `stale` is only True when the check above already held
@@ -1452,7 +1438,7 @@ def check_last_review_run(repo: repo_mod.Repo) -> list[Finding]:
         return []
     stage = str(last_abort.detail.get("stage", "a stage"))
     reason = str(last_abort.detail.get("reason", ""))
-    idle_sec = _seconds_since(last_abort.ts)
+    idle_sec = common.seconds_since(last_abort.ts)
     stale = idle_sec is not None and idle_sec >= _STALE_ABORT_AFTER_SEC
     advice = (
         f"Nothing has re-run it in over {int(idle_sec // 3600)}h — well past any capacity limit "
@@ -1510,10 +1496,11 @@ def check_review(review: models.Review | None, head: str = "") -> list[Finding]:
 def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
     """Can gate ④ be produced at all for the change as it stands? (`review.outlook`)
 
-    Both answers were being given at gate ④, where nothing can be done about either: a diff over
-    `max_diff_bytes` is told to "split the scope" after every task is merged and `done`, and a
-    single committed binary makes coverage `insufficient` — a gate-④ block at high risk — after
-    the whole reading pipeline has been paid for. Neither needs a model. Both are `git diff`.
+    Both answers were being given at gate ④, where nothing can be done about either: a reading over
+    `max_diff_bytes` is a task whose scope is too broad to read in one launch, told about after
+    every task is merged and `done`, and a single committed binary makes coverage `insufficient` —
+    a gate-④ block at high risk — after the whole reading pipeline has been paid for. Neither needs
+    a model. Both are `git diff`.
 
     Reported as WARN rather than FAIL: this is an outlook on a cycle still being built, and a
     change that is over budget at task 9 of 17 is a thing to know, not a broken invariant.
@@ -1529,8 +1516,8 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
             Finding(
                 "WARN",
                 "review",
-                f"{view.line()} — the budget's own instruction is to split the scope, and at gate ④ "
-                "that is no longer a move that exists. Split it now, or raise "
+                f"{view.line()} — `max_diff_bytes` bounds what one launch may read, and no launch "
+                f"can read {view.unit}. Narrow its scope or split the task at gate ③, or raise "
                 "`review_policy.budgets.max_diff_bytes` as a deliberate decision."
                 + (f"\n  {view.made_of()}" if view.made_of() else ""),
             )

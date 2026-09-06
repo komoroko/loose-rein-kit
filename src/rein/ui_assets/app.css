@@ -226,6 +226,14 @@ main { min-width: 0; padding: 1.5rem 1.6rem 5rem; }
   border-left: 2px solid var(--brass); background: var(--brass-soft);
   padding: .5rem .7rem; margin: .5rem 0; font-family: var(--doc); font-size: .95rem; line-height: 1.55;
 }
+/* a run in flight: informational, so it takes none of the warning blocks' weight. A run that has
+   gone quiet is the same line in brass — something to look at, not a verdict about the review. */
+.runline {
+  color: var(--ink-2); font-size: .82rem; margin: .4rem 0;
+  display: flex; gap: .5rem; align-items: baseline;
+}
+.runline.stale { color: var(--brass); }
+
 .bad {
   border-left: 2px solid var(--blk-bd); background: var(--blk-bg); color: var(--blk-ink);
   padding: .45rem .7rem; margin: .4rem 0; font-size: .82rem;

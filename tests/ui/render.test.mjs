@@ -107,3 +107,55 @@ test("the Record screen fetches only when the log moved and someone is looking",
   await app.push("record", { revision: "3-3" });
   assert.equal(feeds(), 2, "a log that moves while nobody is looking asks for nothing");
 });
+
+// --- a gate-④ generation in flight -------------------------------------------
+//
+// The line reaches the page on the SSE `status` push and nowhere else. The gate pane fetches
+// `/api/review/session` once per gate and never polls, so a progress figure hung off that payload
+// would render once and then sit still for the thirteen hours a composed review can take.
+
+const running = (over = {}) => ({ ...STATUS, review_run: { ...STATUS.review_run, ...over } });
+
+test("Now says a review is being generated, and says how far in", async () => {
+  const app = await boot({ routes: baseRoutes((url) => (url.startsWith("/api/review/") ? REVIEW : undefined)) });
+  await app.open();
+  await app.push("status", running());
+  const next = app.html("next");
+  assert.match(next, /generating the grounded review/);
+  assert.match(next, /7\/19 stages/);
+  assert.match(next, /actual_extraction \[T-003\]/);
+  // Not in "In the way of": that pane lists what waits on the human, and a command already running
+  // is what the human is waiting on.
+  assert.doesNotMatch(app.html("attention"), /generating the grounded review/);
+});
+
+test("a run that stopped reporting is drawn as stopped, not as live", async () => {
+  const app = await boot({ routes: baseRoutes((url) => (url.startsWith("/api/review/") ? REVIEW : undefined)) });
+  await app.open();
+  await app.push("status", running({ stale: true }));
+  const next = app.html("next");
+  assert.match(next, /stopped reporting/);
+  assert.doesNotMatch(next, /generating the grounded review/);
+});
+
+test("a finished run leaves no line behind", async () => {
+  const app = await boot({ routes: baseRoutes((url) => (url.startsWith("/api/review/") ? REVIEW : undefined)) });
+  await app.open();
+  await app.push("status", running({ outcome: "generated" }));
+  assert.doesNotMatch(app.html("next"), /grounded review/);
+  await app.push("status", { ...STATUS, review_run: null });
+  assert.doesNotMatch(app.html("next"), /grounded review/);
+});
+
+test("gate ④ with no review says a generation is running instead of falling back in silence", async () => {
+  const app = await boot({
+    hash: "#gate/build",
+    routes: baseRoutes((url) => {
+      if (url === "/api/review/session") return { generated: false, reason: "no machine review has been generated" };
+      return url.startsWith("/api/review/") ? REVIEW : undefined;
+    }),
+  });
+  await app.open();
+  await app.push("status", running());
+  assert.match(app.html("rvBar"), /generating the grounded review/);
+});
