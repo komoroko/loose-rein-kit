@@ -29,6 +29,8 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor
+from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -49,6 +51,7 @@ from rein import (
     review_policy,
     review_reading,
     review_transport,
+    run_progress,
     run_record,
 )
 from rein import repo as repo_mod
@@ -72,7 +75,6 @@ PLAIN_CONTEXT = review_reading.PLAIN_CONTEXT
 _diff = review_reading.diff_of
 _file_facts = review_reading.file_facts
 _reviewable = review_reading.reviewable_of
-_refuse_over_budget = review_reading.refuse_over_budget
 _cached_stage = review_reading.cached_stage
 _reviewer_identity = review_reading.reviewer_identity
 _stage_keys = review_reading.reading_keys
@@ -204,7 +206,7 @@ def assemble(
     if budget_limits:
         machine["review_budget"] = decision_cards.derive_review_budget(
             limits=budget_limits,
-            diff_bytes=int(coverage["analyzed_bytes"]),
+            diff_bytes=review_reading.largest_reading_bytes(coverage),
             decision_cards=cards,
             statements=statements,
             gaps=gaps,
@@ -222,10 +224,14 @@ class ChangeOutlook:
     Two constraints refuse a review, and both were being enforced at gate ④, where the only move
     left is to raise the number the tool's own documentation calls the wrong answer:
 
-    - **`max_diff_bytes`.** "Exceeding a budget SPLITS THE SCOPE. It never lengthens the review
-      screen" — and at gate ④ the tasks are implemented, merged and `done`, so splitting the scope
-      is not a move that exists. One field cycle met it at 2,141,194 bytes against 524,288, and
-      the operator's only option was a gate-③ rollback to raise the limit to 1,584,559.
+    - **`max_diff_bytes`.** It bounds what one reviewer is asked to read in **one launch**, and one
+      launch holds one reading — so what it is measured against here is the largest reading, named.
+      Measured over the whole change instead, it was a wall in front of a quantity nobody reads:
+      two consecutive release cycles of this repository came to 662 KB and 754 KB against a 512 KiB
+      ceiling, and one field cycle met it at 2,141,194 bytes, whose only exit was a gate-③ rollback
+      to raise the limit to 1,584,559. Per reading the lever is a real one and it is upstream —
+      a task whose scope is too broad to read is a task to split at gate ③, while splitting is
+      still a move that exists.
     - **Coverage.** A single tracked binary — smoke-test output somebody committed months ago —
       makes the Coverage Manifest `insufficient`, which at `high` risk blocks gate ④. Nothing said
       so: not `doctor`, not `status`, and not `build` while it landed seventeen tasks.
@@ -235,13 +241,23 @@ class ChangeOutlook:
     three readers of one answer rather than three spellings of it.
     """
 
+    #: The largest single reading — what one launch would be asked to hold, and what `ceiling`
+    #: bounds. For an uncomposed review this is the whole change, which is what it has always been.
     diff_bytes: int
+    #: The whole change, which is what `composition` is a breakdown of and what a reader compares
+    #: the largest reading against. Required, and not defaulted to `diff_bytes`: an outlook that
+    #: does not know how big the change is has nothing to say about what to remove from it.
+    total_bytes: int
     ceiling: int
     unreadable: tuple[str, ...]
     effective_risk: str
     #: What the payload is made of, by `diff_facts` kind, largest first. The number alone says a
     #: review cannot be run; this says which lever to reach for.
     composition: tuple[tuple[str, int], ...] = ()
+    #: Which reading `diff_bytes` is, and how many there are. `unit` is `WHOLE` when the change is
+    #: read whole, and then `readings` is 1 — the shape every outlook had before composition.
+    unit: str = review_reading.WHOLE
+    readings: int = 1
 
     @property
     def over_budget(self) -> bool:
@@ -254,8 +270,19 @@ class ChangeOutlook:
 
     def line(self) -> str:
         """One line for a status board: what the reading stages would be asked to hold."""
-        over = " — OVER, split the scope (`/revise`)" if self.over_budget else ""
-        text = f"change under review: {self.diff_bytes / 1_000_000:.2f} MB / {self.ceiling / 1_000_000:.2f} MB{over}"
+        # An uncomposed change *is* the one reading, so naming it and printing its size beside the
+        # change's own would be one number twice under two labels — and that shape, `N MB / ceiling`,
+        # is the line this has always printed.
+        composed = self.unit != review_reading.WHOLE
+        over = f" — OVER, narrow {self.unit}'s scope at gate ③" if self.over_budget else ""
+        ceiling = f"{self.ceiling / 1_000_000:.2f} MB"
+        whole = f"{self.total_bytes / 1_000_000:.2f} MB"
+        if composed:
+            largest = f"{self.diff_bytes / 1_000_000:.2f} MB"
+            text = f"change under review: {whole} in {self.readings} readings; "
+            text += f"largest reading {self.unit} {largest} / {ceiling}{over}"
+        else:
+            text = f"change under review: {whole} / {ceiling}{over}"
         if self.unreadable:
             verdict = "blocks gate ④" if self.coverage_blocks_gate else "recorded, not blocking below high risk"
             text += f"; {len(self.unreadable)} unreadable file(s) make coverage insufficient ({verdict})"
@@ -273,12 +300,12 @@ class ChangeOutlook:
         the answer is most obvious and most worth printing, and it was the one case that printed
         nothing.
         """
-        if not self.composition or not self.diff_bytes:
+        if not self.composition or not self.total_bytes:
             return ""
         if len(self.composition) == 1 and self.composition[0][0] == "source":
             return ""  # "it is all product code" is the null answer: there is nothing to remove.
         parts = [
-            f"{kind} {size / 1000:.1f} KB ({round(size * 100 / self.diff_bytes)}%)" for kind, size in self.composition
+            f"{kind} {size / 1000:.1f} KB ({round(size * 100 / self.total_bytes)}%)" for kind, size in self.composition
         ]
         return "made of: " + ", ".join(parts)
 
@@ -286,7 +313,11 @@ class ChangeOutlook:
 def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | None:
     """What gate ④ would be asked to read, right now. None when the repo cannot answer yet.
 
-    Cheap enough to run from `status`: one `git diff` and the deterministic analysis, no launches.
+    Cheap enough to run from `status`: **one** `git diff` and the deterministic analysis, no
+    launches. The readings are derived from the plan and attributed out of that one diff
+    (`review_reading.bytes_by_reading`) rather than each taking a `git diff` of its own — this is
+    read on every stream tick, and eighteen `git diff` calls on a WSL mount is the cost the
+    fingerprint exists to avoid.
     """
     store = store_mod.Store(repo)
     try:
@@ -303,12 +334,32 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
     unreadable = [
         str(entry.get("path", "")) for entry in (*facts.coverage.unsupported_files, *facts.coverage.generated_files)
     ]
+    effective = review_reading.effective_risk(facts, plan)
+    # The same readings gate ④ will take, decided by the same function on the same inputs — a board
+    # that showed a different split from the one the pipeline runs would be reporting on a review
+    # nobody is going to generate.
+    readings = review_reading.plan_readings(
+        plan,
+        [f.path for f in facts.files],
+        mode=config.composition if config is not None else "auto",
+        risk=effective,
+    )
+    # Minus the slices this cycle has not touched, which is the same subtraction `take_readings`
+    # makes before it launches anything: a plan scopes every task, and at task 3 of 18 the other
+    # fifteen readings have nothing in them to read. Counting them would put "in 18 readings" on
+    # the board for a review that is going to take four.
+    sizes = review_reading.bytes_by_reading(diff_text, readings)
+    taken = {r.unit: sizes.get(r.unit, 0) for r in readings if r.whole or sizes.get(r.unit)}
+    unit, largest = max(taken.items(), key=lambda item: item[1]) if taken else (review_reading.WHOLE, 0)
     return ChangeOutlook(
-        diff_bytes=facts.coverage.analyzed_bytes,
+        diff_bytes=largest,
+        total_bytes=facts.coverage.analyzed_bytes,
         ceiling=int(limits["max_diff_bytes"]),
         unreadable=tuple(sorted(p for p in unreadable if p)),
-        effective_risk=review_reading.effective_risk(facts, plan),
+        effective_risk=effective,
         composition=tuple(bytes_by_kind(diff_text).items()),
+        unit=unit,
+        readings=len(taken) or 1,
     )
 
 
@@ -319,6 +370,7 @@ def generate(
     base: str | None = None,
     actor: str = "",
     force: bool = False,
+    readers: int = 1,
 ) -> dict[str, Any]:
     """Run the whole pipeline and write `review.yaml`'s machine half; return the assembled machine.
 
@@ -342,6 +394,11 @@ def generate(
     nothing touched. A field run recorded `review_generated` fifteen times in one cycle for
     exactly that. Nothing is written and no event is appended when the machine half is unchanged.
 
+    `readers` is how many readings are taken at once (:func:`_read_all`). It buys wall-clock and
+    nothing else — the readings are the same readings and cost the same tokens — and it defaults to
+    one because concurrent launches spend a provider's session and rate limits, which is an
+    operator's judgement about their account rather than a property of the change.
+
     **A failure records itself.** Every `raise` below used to leave the audit chain with nothing in
     it: `events.ATTENTION_EVENTS` listed `review_failed` and `actual_extraction_failed` as things
     needing a human decision and no code path anywhere emitted either, so a gate ④ that could not
@@ -359,6 +416,10 @@ def generate(
     # outside the recording block that failure was the one kind still going unrecorded. `cycle` is
     # read *from* those documents, so it is bound before them and stays "" when they are what broke.
     stage = "inputs"
+    #: Which reading the failed stage belonged to, when it belonged to one. Empty for the phases
+    #: that are not per-reading (inputs, coverage, comparison, assembly, write) and for a review
+    #: read whole, which is the only shape a failure could name before composition existed.
+    unit = ""
     cycle = ""
     #: How this run ended, for the measurement below. It starts at the pessimistic value so that a
     #: raise anywhere — including one from a line that has not been written yet — is recorded as
@@ -367,6 +428,7 @@ def generate(
     run_id = str(uuid.uuid4())
     reused = usage_mod.Ledger()
     plan_of_run: dict[str, Any] = {}
+    live: run_progress.Writer | None = None
 
     def entered(name: str) -> None:
         nonlocal stage
@@ -406,15 +468,19 @@ def generate(
         # the freeze, and the snapshot recorded on the assembled review below.
         limits = {**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})}
 
-        # The manifest and the byte budget are about the **whole** change, whatever readings it
-        # is then taken in: measuring either over the readings would make the measure a function of
-        # how the reading happened to be split. The manifest reads the whole diff, always — folding
-        # a file before counting it would be measuring the fold — and `change_digest` above is over
-        # the committed tree, so neither the widening nor the folding can move what the review is
-        # bound to.
+        # The manifest is about the **whole** change, whatever readings it is then taken in:
+        # measuring it over the readings would make the measure a function of how the reading
+        # happened to be split. It reads the whole diff, always — folding a file before counting it
+        # would be measuring the fold — and `change_digest` above is over the committed tree, so
+        # neither the widening nor the folding can move what the review is bound to.
+        #
+        # The byte budget is **not** measured here. `max_diff_bytes` bounds what one reviewer is
+        # asked to read in one launch, and under a composed review no reviewer ever reads the whole
+        # change; `read_facts` refuses each reading against it as that reading is measured. Checking
+        # the whole here was a wall in front of a quantity nobody reads, and its own instruction —
+        # split the scope — is not a move that exists at gate ④.
         whole_diff = review_reading.diff_of(repo, trusted_base, head, exclude)
         facts = diff_facts.analyze(whole_diff)
-        review_reading.refuse_over_budget(facts.coverage.analyzed_bytes, limits)
         effective = review_reading.effective_risk(facts, plan)
         changed = [f.path for f in facts.files]
 
@@ -489,36 +555,66 @@ def generate(
         ran: set[str] = set()
         plan_of_run = _execution_plan(config, cache, keys_by_unit)
         print(_render_execution_plan(plan_of_run))
+        # The same plan the console prints, in the one place the dashboard can see it. Opened here
+        # rather than at the top of the run because this is the first moment there is a figure to
+        # report: before it, the run has read documents and taken a diff, and "0 of unknown" is not
+        # progress. `outcome` is settled in the `finally` below, whatever the ending.
+        live = run_progress.Writer(
+            repo.root,
+            run_id=run_id,
+            total=sum(len(k) for k in keys_by_unit.values()) + 1,
+            stages=plan_of_run.get("stages", ()),
+        )
 
         # Every reading's two stages, plus the one comparison over the merged Actual. `keys_by_unit`
         # holds only the two — `reading_keys` mints no comparison key, because the Actual it takes
         # as an input does not exist yet — so counting it alone would end the run at "19/18".
-        progress = _Progress(reviewers, total=sum(len(k) for k in keys_by_unit.values()) + 1)
-        readouts = []
-        for m in measures:
-            # A heartbeat around each reading, not around the pipeline: what the host's inactivity
-            # timeout measures is the gap between two lines, and the gap that matters is one
-            # launch. `_Progress` closes each stage; this fills the silence inside one.
-            with common.Heartbeat(f"reading{_named(m.reading.unit)}"):
-                readouts.append(
-                    review_reading.read_one(
-                        repo,
-                        reviewers,
-                        measured=m,
-                        trusted_base=trusted_base,
-                        head=head,
-                        risk_floor=facts.risk_floor,
-                        prior_blocking=prior_by_unit[m.reading.unit],
-                        discipline=review_reading.security_discipline(config),
-                        on_stage=entered,
-                        cache=cache,
-                        keys=keys_by_unit[m.reading.unit],
-                        ran=ran,
-                        reused=reused,
-                        cancel=cancel,
-                        on_progress=progress.landed,
-                    )
+        progress = _Progress(reviewers, total=sum(len(k) for k in keys_by_unit.values()) + 1, live=live)
+        discipline = review_reading.security_discipline(config)
+
+        def read(m: review_reading.ReadingFacts) -> review_reading.ReadOut:
+            # This reading's own stage cell, never the run's: with more than one reading in flight a
+            # shared one would name whichever stage some *other* reading had just entered, and the
+            # failure event would be filed against a stage that did not fail.
+            here = _Stage(unit=m.reading.unit)
+            try:
+                return review_reading.read_one(
+                    repo,
+                    reviewers,
+                    measured=m,
+                    trusted_base=trusted_base,
+                    head=head,
+                    risk_floor=facts.risk_floor,
+                    prior_blocking=prior_by_unit[m.reading.unit],
+                    discipline=discipline,
+                    on_stage=here.entered,
+                    cache=cache,
+                    keys=keys_by_unit[m.reading.unit],
+                    ran=ran,
+                    reused=reused,
+                    cancel=cancel,
+                    on_progress=progress.landed,
                 )
+            except BaseException:
+                failed.append(here)
+                raise
+
+        failed: list[_Stage] = []
+        # One heartbeat around the whole reading phase rather than one per reading: what the host's
+        # inactivity timeout measures is the gap between two lines, and with several readings in
+        # flight one line per reading is several timers saying the same thing. `_Progress` closes
+        # each stage; this fills the silence between them.
+        with common.Heartbeat(_reading_phase(measures, readers)):
+            try:
+                readouts = _read_all(measures, readers=readers, cancel=cancel, read=read)
+            except BaseException:
+                # The earliest failure in reading order, so which stage a reader is told about does
+                # not depend on which thread lost a race.
+                if failed:
+                    order = {m.reading.unit: i for i, m in enumerate(measures)}
+                    first = min(failed, key=lambda w: order.get(w.unit, 0))
+                    stage, unit = first.stage, first.unit
+                raise
         composed = review_reading.merge(readouts, coverage=coverage)
         with common.Heartbeat("comparison"):
             comparison = _compare(
@@ -619,9 +715,11 @@ def generate(
         # `Exception`, not `BaseException`: a Ctrl-C is a human deciding to stop, and filing that
         # as a review failure would put a decision in the log as a defect. Same line the signal
         # classifier draws (faults._EXTERNAL_SIGNALS leaves SIGINT out).
-        _record_failure(store, cycle, actor, stage=stage, failure=exc)
+        _record_failure(store, cycle, actor, stage=stage, unit=unit, failure=exc)
         raise
     finally:
+        if live is not None:
+            live.ended(outcome)
         run_record.record(
             store,
             kind="review",
@@ -634,6 +732,69 @@ def generate(
             reused=reused.totals(),
         )
     return machine
+
+
+@dataclass
+class _Stage:
+    """Which stage of one reading is in flight — the failure's own address, not the run's."""
+
+    unit: str
+    stage: str = "reading"
+
+    def entered(self, name: str) -> None:
+        self.stage = name
+
+
+def _reading_phase(measures: Sequence[review_reading.ReadingFacts], readers: int) -> str:
+    """What the heartbeat calls the phase: one reading names itself, several say how many."""
+    if len(measures) == 1:
+        return f"reading{_named(measures[0].reading.unit)}"
+    at_once = min(readers, len(measures))
+    return f"{len(measures)} readings, {at_once} at a time" if at_once > 1 else f"{len(measures)} readings"
+
+
+def _read_all(
+    measures: Sequence[review_reading.ReadingFacts],
+    *,
+    readers: int,
+    cancel: common.Cancellation,
+    read: Callable[[review_reading.ReadingFacts], review_reading.ReadOut],
+) -> list[review_reading.ReadOut]:
+    """Every reading, `readers` at a time. Buys wall-clock and nothing else.
+
+    The readings are independent by construction: each is a different slice of the change, each is
+    primed into its own session keyed by its own bytes (`review_transport.SharedReading`), and none
+    consumes what another produced. So this costs exactly the same tokens as running them one after
+    another — what it changes is that a composed review measured at thirteen hours on one run stops
+    being thirteen sequential hours.
+
+    **A serial run is the serial code path**, not a pool of one: submitting every reading to a
+    single worker would queue them all, so a failure in the first would still be followed by the
+    rest starting. One reading at a time means one reading at a time.
+
+    In parallel, the first failure trips `cancel`, which kills every launch in flight *and* refuses
+    every launch bound to it afterwards (`common.Cancellation`) — so the readings still queued die
+    on arrival rather than each paying for a full pair of stages nobody will read. The results are
+    then collected in submission order, so which failure a reader is shown does not depend on which
+    thread lost a race. `pool.shutdown` still joins its workers on the way out; what makes that
+    quick is the killing, which is the only thing that ends a launch early.
+    """
+    if readers <= 1:
+        return [read(m) for m in measures]
+
+    def bound(m: review_reading.ReadingFacts) -> review_reading.ReadOut:
+        # Bound on the worker, because that is the thread whose launches have to be killable from
+        # another reading's failure. `read_one` binds the same token again around its own security
+        # stage; `cancelling` saves and restores, so the two nest without fighting.
+        with common.cancelling(cancel):
+            return read(m)
+
+    with ThreadPoolExecutor(max_workers=readers) as pool:
+        futures = [pool.submit(bound, m) for m in measures]
+        futures_wait(futures, return_when=FIRST_EXCEPTION)
+        if any(f.done() and f.exception() is not None for f in futures):
+            cancel.cancel()
+        return [f.result() for f in futures]
 
 
 #: Reviewer stages, by the name `generate` tracks them under. `actual_extraction` is the one with
@@ -704,12 +865,20 @@ class _Progress:
     the totals would put a wrong number in front of somebody deciding whether to keep waiting.
     """
 
-    def __init__(self, reviewers: review_policy.Reviewers, *, total: int) -> None:
+    def __init__(
+        self,
+        reviewers: review_policy.Reviewers,
+        *,
+        total: int,
+        live: run_progress.Writer | None = None,
+    ) -> None:
         self._reviewers = reviewers
         self._total = total
         self._done = 0
         self._lock = threading.Lock()
         self._seen: dict[str, usage_mod.Usage] = {}
+        #: The same figure, written where something other than this terminal can read it.
+        self._live = live
 
     def landed(self, unit: str, stage: str, was_reused: bool) -> None:
         role = review_policy.STAGE_ROLE[stage]
@@ -722,6 +891,9 @@ class _Progress:
         what = "reuse" if was_reused else "run"
         bill = "" if was_reused else _billed(before, spent)
         print(f"    [review] {done}/{self._total} {stage}{_named(unit)}: {what}{bill}", flush=True)
+        if self._live is not None:
+            billed = {name: row.to_detail() for name, row in self._reviewers.spend().items() if row.launches}
+            self._live.landed(unit, stage, reused=was_reused, billed=billed)
 
 
 def _billed(before: usage_mod.Usage, after: usage_mod.Usage) -> str:
@@ -876,7 +1048,9 @@ def _worth_waiting_for(failure: review_policy.AdapterFailure) -> bool:
     return faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT
 
 
-def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: str, failure: BaseException) -> None:
+def _record_failure(
+    store: store_mod.Store, cycle: str, actor: str, *, stage: str, failure: BaseException, unit: str = ""
+) -> None:
     """Append the events for a review that could not be produced. Never raises.
 
     Append-only: nothing was written, so there is no document to stage, and a transaction that
@@ -912,11 +1086,18 @@ def _record_failure(store: store_mod.Store, cycle: str, actor: str, *, stage: st
         # `event_chain.make`. Say where the account went instead of leaving the reader to notice
         # the log is silent — this is reachable only in the `inputs` stage, where the cycle is read
         # out of the very documents that failed.
-        logger.warning(f"the review failed at stage '{stage}' and no cycle is established to record it under: {reason}")
+        logger.warning(
+            f"the review failed at stage '{stage}'{_named(unit)} and no cycle is established to "
+            f"record it under: {reason}"
+        )
         return
     try:
         with store.transaction() as tx:
-            detail = {"stage": stage, "reason": reason[:1000]}
+            detail: dict[str, Any] = {"stage": stage, "reason": reason[:1000]}
+            if unit:
+                # Which reading it was. A composed review runs the same stage once per slice, so
+                # "actual_extraction failed" without it names three of eighteen launches at once.
+                detail["unit"] = unit
             if transient:
                 tx.append("review_aborted", cycle_id=cycle, actor=actor, detail=detail)
                 return
@@ -1237,6 +1418,7 @@ def _generate_cli(
     force: bool,
     supervise: bool,
     interval_sec: int,
+    readers: int = 1,
     make_reviewers: Callable[[], review_policy.Reviewers] | None = None,
 ) -> tuple[dict[str, Any], dict[str, usage_mod.Usage]]:
     """`(the machine review, what the attempts cost)`, waiting out a machine failure time can fix.
@@ -1268,7 +1450,7 @@ def _generate_cli(
         attempt += 1
         reviewers = build_reviewers()
         try:
-            return generate(repo, reviewers, force=force), spend
+            return generate(repo, reviewers, force=force, readers=readers), spend
         except review_policy.AdapterFailure as failure:
             if not supervise or not _worth_waiting_for(failure):
                 raise
@@ -1293,6 +1475,19 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "ignore the stored stage answers and read the change again (a re-reading that says "
             "the same thing leaves the human answers standing)"
+        ),
+    )
+    gen.add_argument(
+        "--readers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "take up to N of the change's readings at once (default: 1). A composed review is one "
+            "reading per scoped task, each independent of the others, so this buys wall-clock and "
+            "costs the same tokens — but concurrent launches spend your provider's session and "
+            "rate limits, which is why it is a flag and not a setting: it is a judgement about "
+            "the account, not about the change, and gate ③'s frozen config is no place for it"
         ),
     )
     gen.add_argument(
@@ -1325,11 +1520,15 @@ def main(argv: list[str] | None = None) -> int:
             if args.supervise and args.supervise_interval_sec < 1:
                 logger.error("--supervise-interval-sec must be at least 1")
                 return 2
+            if args.readers < 1:
+                logger.error("--readers must be at least 1")
+                return 2
             _, spend = _generate_cli(
                 repo,
                 force=args.force,
                 supervise=args.supervise,
                 interval_sec=args.supervise_interval_sec,
+                readers=args.readers,
             )
             if measured := usage_mod.summarize(spend, what="review"):
                 print(measured)

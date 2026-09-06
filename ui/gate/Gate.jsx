@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { READ_ONLY, circled, getJson, postJson, record, toast } from "../api.js";
-import { Empty, Warn } from "../parts.jsx";
+import { Empty, ReviewRun, Warn } from "../parts.jsx";
 import { DeliverableBody, DeliverableList, mainEntries } from "./Deliverables.jsx";
 import { StageBody, StageList } from "./stages.jsx";
 
@@ -331,6 +331,11 @@ export default function Gate({ status, gate }) {
       <div className="block">
         <div id="rvBar">
           <GateHead status={status} gate={gate} review={review} />
+          {/* Gate ④ with no machine review falls back to the deliverable list, silently. While a
+              generation is in flight that silence is a lie — the stages this room is *for* are
+              being read right now. The line comes off the SSE `status` push, because the session
+              payload below is fetched once per gate and never polls. */}
+          {isBuild && !buildMode ? <ReviewRun run={status ? status.review_run : null} /> : null}
         </div>
         <div id="rvMain">{body}</div>
         <div id="rvFoot">

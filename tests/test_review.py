@@ -17,6 +17,8 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,13 +38,14 @@ from rein import (
     review_policy,
     review_reading,
     review_transport,
+    run_progress,
     security_review,
 )
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
-from tests._support import agent_envelope, make_config, make_plan, make_state, seed_repo
+from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
 
 
 def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
@@ -395,7 +398,13 @@ def _extract_request(seen: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
 
 @pytest.mark.integration
 def test_the_reviewers_get_the_code_around_the_hunk_not_only_the_hunk(review_repo: Path) -> None:
-    """A hunk without its surrounding code cannot answer "was this guard removed or moved?"."""
+    """A hunk without its surrounding code cannot answer "was this guard removed or moved?".
+
+    A file the detector matched nothing in still gets the ladder's narrow half, which is wider than
+    git's default and is the floor this ever sends. The wide half is bought where there is a signal
+    to look at — see the test below — and a reading with no signal in it says the narrow half is
+    what it got.
+    """
     body = "".join(f"def before_{i}():\n    return {i}\n\n" for i in range(12))
     (review_repo / "src.py").write_text(body, encoding="utf-8")
     _git(review_repo, "add", "-A")
@@ -409,9 +418,42 @@ def test_the_reviewers_get_the_code_around_the_hunk_not_only_the_hunk(review_rep
     review.generate(repo_mod.Repo(review_repo), _reviewers(_capturing_reviewer(seen)), base=base)
     extract = _extract_request(seen)
     assert "def charge" in extract["diff"]
-    # git's default three lines would stop at before_11; the widened one reaches further back.
-    assert "def before_5" in extract["diff"]
-    assert extract["deterministic_facts"]["context"]["context_lines"] == review.CONTEXT_LADDER[0]
+    # git's default three lines would stop at before_11; the narrow half reaches further back.
+    assert "def before_9" in extract["diff"]
+    context = extract["deterministic_facts"]["context"]
+    # And the facts name the width that was *sent*. Nothing here is signalled, so there is one
+    # width in the payload; naming the rung's wide half would tell the reviewer its window is three
+    # times what it is, which is the one thing this field exists to prevent.
+    assert context["context_lines"] == review.CONTEXT_LADDER[0][1]
+    assert "context_lines_unsignalled" not in context, "one width sent is one width reported"
+    assert context["narrowed_from"] == list(review.CONTEXT_LADDER[0])
+
+
+@pytest.mark.integration
+def test_the_wide_context_is_bought_where_the_detector_found_something(review_repo: Path) -> None:
+    """The payload used to be sized by whatever ceiling was in force: every file got the widest rung
+    that fit, and on one branch of this repository that is 210 KB against 95 KB at git's default —
+    2.2×, paid again in every reading's priming turn. Context is bought where the deterministic
+    scan says there is something to look at, which is the line `fold_bodies` already draws."""
+    body = "".join(f"def before_{i}():\n    return {i}\n\n" for i in range(12))
+    for name in ("quiet.py", "guard.py"):
+        (review_repo / name).write_text(body, encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add both")
+    (review_repo / "quiet.py").write_text(body + "def charge():\n    return 1\n", encoding="utf-8")
+    # `permission` is the `security_boundary` signal's own keyword: this file is signalled, the
+    # other is not, and the two are otherwise identical.
+    (review_repo / "guard.py").write_text(body + "def check_permission():\n    return 1\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "change both")
+
+    seen: list[Mapping[str, Any]] = []
+    base = _git(review_repo, "rev-parse", "HEAD~1")
+    review.generate(repo_mod.Repo(review_repo), _reviewers(_capturing_reviewer(seen)), base=base)
+    sections = dict(review_reading._sections(_extract_request(seen)["diff"]))
+    assert "def before_2" in sections["guard.py"], "the signalled file gets the wide half"
+    assert "def before_2" not in sections["quiet.py"], "the rest gets the narrow half"
+    assert len(sections["guard.py"]) > len(sections["quiet.py"]), "identical files, one signalled"
 
 
 def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None:
@@ -427,7 +469,10 @@ def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None
     base = _git(review_repo, "rev-parse", "HEAD~1")
     files = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,))).files
 
-    widest = review._reviewable(repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9, signalled=())
+    signalled = frozenset(f.path for f in files)
+    widest = review._reviewable(
+        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9, signalled=signalled
+    )
     assert widest.context_lines == review.CONTEXT_LADDER[0]
     assert "narrowed_from" not in widest.as_facts()
 
@@ -440,15 +485,46 @@ def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None
         (repo_mod.SSOT_DIR,),
         plain="",
         ceiling=len(widest.text.encode("utf-8")) - 1,
-        signalled=(),
+        signalled=signalled,
     )
     assert narrowed.context_lines < review.CONTEXT_LADDER[0]
-    assert narrowed.as_facts()["narrowed_from"] == review.CONTEXT_LADDER[0]
+    assert narrowed.as_facts()["narrowed_from"] == list(review.CONTEXT_LADDER[0])
     assert len(narrowed.text.encode("utf-8")) < len(widest.text.encode("utf-8"))
 
 
+def test_a_reading_with_no_signal_reports_the_width_it_was_actually_sent(review_repo: Path) -> None:
+    """The rung asked for is not the rung sent. With nothing signalled, `_widened` buys the narrow
+    half for every file — and the facts must say 10, not 30, because `context_lines` is the one
+    field a reviewer uses to decide whether "the code around this is unchanged" is a thing it can
+    read out of its window."""
+    repo = repo_mod.Repo(review_repo)
+    body = "".join(f"def before_{i}():\n    return {i}\n\n" for i in range(40))
+    (review_repo / "src.py").write_text(body, encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add src")
+    (review_repo / "src.py").write_text(body + "def charge():\n    return 1\n", encoding="utf-8")
+    _git(review_repo, "add", "-A")
+    _git(review_repo, "commit", "-qm", "add charge")
+    base = _git(review_repo, "rev-parse", "HEAD~1")
+    files = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,))).files
+
+    quiet = review._reviewable(
+        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9, signalled=frozenset()
+    )
+    narrow = review.CONTEXT_LADDER[0][1]
+    assert quiet.context_lines == (narrow, narrow)
+    facts = quiet.as_facts()
+    assert facts["context_lines"] == narrow
+    assert "context_lines_unsignalled" not in facts, "one width sent is one width reported"
+    assert facts["narrowed_from"] == list(review.CONTEXT_LADDER[0])
+    # 40 defs of 3 lines each, two appended at the end: the old side is the last `narrow` lines of
+    # a 120-line file, which is what the reported width has to be the width of.
+    hunk = next(line for line in quiet.text.splitlines() if line.startswith("@@"))
+    assert hunk.split()[1] == f"-{120 - narrow + 1},{narrow}"
+
+
 def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: Path) -> None:
-    """`_refuse_over_budget` already passed on this diff; a second, quieter refusal here would
+    """`review_reading.refuse_over_budget` already passed on this diff; a second, quieter refusal here would
     leave the operator with a review that cannot be taken and no sentence saying why."""
     repo = repo_mod.Repo(review_repo)
     (review_repo / "src.py").write_text("x = 1\n", encoding="utf-8")
@@ -467,7 +543,7 @@ def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: 
         ceiling=1,
         signalled=frozenset(h.path for h in facts.signals),
     )
-    assert reviewable.context_lines == review.PLAIN_CONTEXT
+    assert reviewable.context_lines == (review.PLAIN_CONTEXT, review.PLAIN_CONTEXT)
     assert reviewable.text == "the plain one"
 
 
@@ -809,6 +885,56 @@ def test_two_readings_are_two_sessions_and_never_one(monkeypatch: pytest.MonkeyP
     # The same reading, asked for again, is still the session it already primed.
     assert reading.branch_flags(_a_security_request("one change")) == first
     assert len(sent) == 2
+
+
+def test_two_readings_prime_at_the_same_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rein review generate --readers N` is bought to overlap the readings, and the priming turn
+    *is* the payload — one launch over the whole slice, minutes of it. A lock held across that
+    launch let one reading prime at a time and handed back most of what the flag buys.
+
+    The barrier is the assertion: it only passes if both primes are in flight together, so a
+    serialising lock fails this rather than merely making it slow.
+    """
+    both_in_flight = threading.Barrier(2, timeout=10)
+    sent: list[dict[str, Any]] = []
+
+    capture = _capturing_run(sent)
+
+    def run(cmd: list[str], cwd: str | None = None, **kwargs: Any) -> tuple[int, str]:
+        both_in_flight.wait()
+        answered: tuple[int, str] = capture(cmd, cwd, **kwargs)
+        return answered
+
+    monkeypatch.setattr(common, "run", run)
+    reading = _reading()
+    requests = [_a_reading_request("one change"), _a_reading_request("another change")]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sessions = [f.result() for f in [pool.submit(reading.branch_flags, r) for r in requests]]
+
+    assert len(sent) == 2
+    assert sessions[0] != sessions[1], "two readings must never share a context"
+
+
+def test_the_two_stages_of_one_reading_still_prime_it_once_under_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Priming per reading rather than one at a time must not become priming per *caller*: the
+    whole saving is that the extractor and the security reviewer branch one turn, and two threads
+    arriving on the same reading together is exactly when a double launch would appear."""
+    sent: list[dict[str, Any]] = []
+    monkeypatch.setattr(common, "run", _capturing_run(sent))
+    reading = _reading()
+    ready = threading.Barrier(2, timeout=10)
+
+    def ask(request: Mapping[str, Any]) -> tuple[str, ...]:
+        ready.wait()
+        return reading.branch_flags(request)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        flags = [f.result() for f in [pool.submit(ask, r) for r in (_a_reading_request(), _a_security_request())]]
+
+    assert len(sent) == 1, "one reading, one priming turn, however many threads asked for it"
+    assert flags[0] == flags[1]
 
 
 def test_the_priming_turn_is_held_to_the_same_blindness_as_the_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2498,10 +2624,242 @@ def test_the_outlook_says_what_gate_4_would_be_asked_to_read(review_repo: Path) 
     assert "change under review:" in view.line() and "coverage insufficient" in view.line()
 
 
-def test_an_over_budget_change_says_split_rather_than_raise(review_repo: Path) -> None:
-    outlook = review.ChangeOutlook(diff_bytes=2_141_194, ceiling=524_288, unreadable=(), effective_risk="high")
+def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -> None:
+    """A plan scopes every task; a cycle in progress has touched some of them. `take_readings`
+    drops the empty slices before it launches anything, so a board that counted all of them would
+    say "in 18 readings" for a review that is going to take four."""
+    seed_repo(
+        tmp_path,
+        state=make_state(project="rv", phase="build"),
+        plan=make_plan(
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], scope_include=["beta/"]),
+                make_task("T-003", claim_ids=["C-001"], scope_include=["gamma/"]),
+            ]
+        ),
+        config=make_config(),
+    )
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "alpha" / "mod.py").write_text("def alpha():\n    return 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "only alpha so far")
+
+    repo = repo_mod.Repo(tmp_path)
+    view = review.outlook(repo, base=base)
+    assert view is not None
+    assert view.unit == "T-001"
+    taken = review_reading.take_readings(
+        repo,
+        review_reading.plan_readings(store_mod.Store(repo).read_plan(), ["alpha/mod.py"]),
+        base=base,
+        head="HEAD",
+        exclude=review.not_the_product(repo, store_mod.Store(repo).read_state()),
+        limits={"max_diff_bytes": 524_288},
+    )
+    assert view.readings == len(taken) == 1, "the board counts what the pipeline will take"
+
+
+def test_an_over_budget_reading_names_the_task_whose_scope_is_too_broad(review_repo: Path) -> None:
+    """`max_diff_bytes` bounds one launch, so what is over it is a reading — and the reading has a
+    name. "Split the scope" pointed at the cycle, which at gate ④ is merged; the task's scope is
+    still a thing a human can narrow at gate ③."""
+    outlook = review.ChangeOutlook(
+        diff_bytes=600_000,
+        total_bytes=2_141_194,
+        ceiling=524_288,
+        unreadable=(),
+        effective_risk="high",
+        unit="T-004",
+        readings=7,
+    )
     assert outlook.over_budget
-    assert "OVER, split the scope" in outlook.line()
+    assert "largest reading T-004" in outlook.line()
+    assert "OVER, narrow T-004's scope at gate ③" in outlook.line()
+    assert "in 7 readings" in outlook.line()
+
+
+def test_a_big_cycle_read_in_slices_is_not_over_budget(review_repo: Path) -> None:
+    """The whole point: two release cycles of this repository came to 662 KB and 754 KB against a
+    512 KiB ceiling, and every one of their readings fits. Measured over the change, that was a
+    wall in front of a quantity no reviewer is ever sent."""
+    outlook = review.ChangeOutlook(
+        diff_bytes=90_000,
+        total_bytes=754_000,
+        ceiling=524_288,
+        unreadable=(),
+        effective_risk="high",
+        unit="T-004",
+        readings=9,
+    )
+    assert not outlook.over_budget
+
+
+# --- readings taken at once ---------------------------------------------------
+
+
+def _composed_repo(root: Path) -> str:
+    """A repo whose plan scopes two tasks, so gate ④ composes. Returns the base commit."""
+    seed_repo(
+        root,
+        state=make_state(project="rv", phase="build"),
+        plan=make_plan(
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], scope_include=["beta/"]),
+            ]
+        ),
+        config=make_config(),
+    )
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "seed")
+    base = _git(root, "rev-parse", "HEAD")
+    for name in ("alpha", "beta"):
+        (root / name).mkdir()
+        (root / name / "mod.py").write_text(f"def {name}():\n    return 1\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "two scoped slices")
+    return base
+
+
+@pytest.mark.integration
+def test_readings_are_taken_at_once_and_say_the_same_thing(tmp_path: Path) -> None:
+    """The readings are independent by construction — different slices, different primed sessions,
+    neither consuming what the other produced — so taking them at once buys wall-clock and changes
+    nothing about the answer. A composed review measured at thirteen hours on one run is what this
+    is for."""
+    base = _composed_repo(tmp_path)
+    repo = repo_mod.Repo(tmp_path)
+
+    live = threading.Semaphore(0)
+    overlapped = threading.Event()
+    inflight = [0]
+    guard = threading.Lock()
+
+    def slow(role: str, request: Mapping[str, Any]) -> str:
+        if role == "actual_extractor":
+            with guard:
+                inflight[0] += 1
+                if inflight[0] > 1:
+                    overlapped.set()
+            live.release()
+            overlapped.wait(timeout=5)
+            with guard:
+                inflight[0] -= 1
+        return _fake_reviewer(role, request)
+
+    machine = review.generate(repo, _reviewers(slow), base=base, readers=2)
+    assert overlapped.is_set(), "two readings never ran at the same time"
+    assert [r["unit"] for r in machine["coverage"]["composition"]["readings"]] == ["T-001", "T-002"]
+
+    serial = review.generate(repo, _reviewers(_fake_reviewer), base=base, force=True, readers=1)
+    assert serial["coverage"] == machine["coverage"]
+
+
+@pytest.mark.integration
+def test_a_failed_reading_is_filed_against_its_own_reading(tmp_path: Path) -> None:
+    """A shared "which stage are we in" cell names whichever stage some *other* reading had just
+    entered, so the failure event would be filed against a stage that did not fail. With several
+    readings in flight the address of a failure is `(stage, unit)`, and the earliest failure in
+    reading order is the one reported — never whichever thread lost a race."""
+    base = _composed_repo(tmp_path)
+    repo = repo_mod.Repo(tmp_path)
+
+    def breaks_on_beta(role: str, request: Mapping[str, Any]) -> str:
+        if role == "actual_extractor" and "beta" in str(request.get("diff", "")):
+            raise review_policy.ReviewPolicyError("the extractor said nothing about beta")
+        return _fake_reviewer(role, request)
+
+    with pytest.raises(review_policy.ReviewPolicyError):
+        review.generate(repo, _reviewers(breaks_on_beta), base=base, readers=2)
+
+    events = store_mod.Store(repo).read_events()
+    failed = [e for e in events if e.event == "actual_extraction_failed"]
+    assert failed, "the stage that failed records its own event"
+    assert failed[-1].detail["unit"] == "T-002", "the reading that failed, not the one beside it"
+    assert failed[-1].detail["stage"] == "actual_extraction"
+
+
+# --- the live figure a dashboard reads ----------------------------------------
+
+
+@pytest.mark.integration
+def test_a_generation_says_what_it_is_doing_where_something_can_read_it(tmp_path: Path) -> None:
+    """`rein review generate` said everything on its console and nothing anywhere else, so a human
+    watching the dashboard through a run saw "no machine review has been generated" for however
+    long it took. The figure is written as each stage lands, under gitignored `.rein/work/` beside
+    the stage cache — never into the hash-chained audit log, which is for changes made."""
+    base = _composed_repo(tmp_path)
+    repo = repo_mod.Repo(tmp_path)
+    seen: list[dict[str, Any]] = []
+
+    def watching(role: str, request: Mapping[str, Any]) -> str:
+        live = run_progress.read(tmp_path)
+        if live is not None:
+            seen.append(live)
+        return _fake_reviewer(role, request)
+
+    review.generate(repo, _reviewers(watching), base=base)
+
+    assert seen and seen[0]["outcome"] == "running", "a run in flight says so while it is in flight"
+    assert seen[0]["total"] == 5, "two readings' two stages, plus the one comparison"
+    assert [s["done"] for s in seen] == sorted(s["done"] for s in seen), "the count only ever moves up"
+    assert any(s.get("last", {}).get("unit") == "T-001" for s in seen), "which reading, not only which stage"
+
+    ended = run_progress.read(tmp_path)
+    assert ended is not None
+    assert ended["outcome"] == "generated" and ended["done"] == ended["total"]
+    assert ended["stale"] is False
+
+
+@pytest.mark.integration
+def test_a_failed_generation_leaves_its_outcome_behind(tmp_path: Path) -> None:
+    """The file is not deleted when a run ends: "the last run failed" is worth as much to a reader
+    as "a run is in flight", and it is the one place either is said outside the terminal."""
+    base = _composed_repo(tmp_path)
+    repo = repo_mod.Repo(tmp_path)
+
+    def breaks(role: str, request: Mapping[str, Any]) -> str:
+        if role == "comparator":
+            raise review_policy.ReviewPolicyError("the comparator said nothing")
+        return _fake_reviewer(role, request)
+
+    with pytest.raises(review_policy.ReviewPolicyError):
+        review.generate(repo, _reviewers(breaks), base=base)
+    live = run_progress.read(tmp_path)
+    assert live is not None and live["outcome"] == "failed"
+
+
+def test_a_run_that_stopped_reporting_is_not_read_as_live(tmp_path: Path) -> None:
+    """A process killed outright leaves its last line saying `running`. Whether to believe it is
+    decided here, against this machine's clock — never handed to a browser whose clock is not."""
+    (tmp_path / ".rein" / "work").mkdir(parents=True)
+    quiet = datetime.now(timezone.utc) - timedelta(seconds=run_progress.STALE_AFTER_SEC + 60)
+    run_progress.path(tmp_path).write_text(
+        json.dumps({"outcome": "running", "updated_at": quiet.isoformat(timespec="seconds"), "done": 3, "total": 9}),
+        encoding="utf-8",
+    )
+    gone_quiet = run_progress.read(tmp_path)
+    assert gone_quiet is not None and gone_quiet["stale"] is True
+
+    # An unparseable stamp rounds the same way: a spinner in front of a process nobody can see is
+    # the one reading this must not allow.
+    run_progress.path(tmp_path).write_text(json.dumps({"outcome": "running", "updated_at": "?"}), encoding="utf-8")
+    unreadable = run_progress.read(tmp_path)
+    assert unreadable is not None and unreadable["stale"] is True
+
+
+def test_an_unreadable_progress_file_is_nothing_to_show(tmp_path: Path) -> None:
+    """Tolerant like every other read behind the dashboard: half-written is "no run", never a 500."""
+    assert run_progress.read(tmp_path) is None
+    (tmp_path / ".rein" / "work").mkdir(parents=True)
+    run_progress.path(tmp_path).write_text('{"outcome": "runn', encoding="utf-8")
+    assert run_progress.read(tmp_path) is None
 
 
 # --- what the payload is made of ----------------------------------------------
@@ -2523,6 +2881,28 @@ def test_the_payload_is_broken_down_by_the_kinds_the_levers_are_denominated_in()
     made = review.bytes_by_kind(_diff_of(("src/app.py", 400), ("tests/test_app.py", 200), ("uv.lock", 100)))
     assert list(made) == ["source", "test", "dependency"], "largest first"
     assert made["source"] > made["test"] > made["dependency"]
+
+
+def test_a_reading_is_measured_by_every_path_its_pathspec_covers() -> None:
+    """What `max_diff_bytes` bounds is one launch, and a launch holds one reading — so the board's
+    number is per reading, attributed out of the one diff `outlook` already has rather than by a
+    `git diff` per reading (it is read on every stream tick).
+
+    A path two scopes both cover counts toward **both**, because both are sent it. That is not
+    `_prior_owner`, which answers which single reading may be *held to* a finding.
+    """
+    diff = _diff_of(("src/a.py", 400), ("src/b.py", 200), ("docs/README.md", 100))
+    readings = [
+        review_reading.Reading(unit="T-001", include=("src/a.py",)),
+        review_reading.Reading(unit="T-002", include=("src/",)),
+        review_reading.Reading(unit=review_reading.SEAM, include=("docs/README.md",)),
+    ]
+    sizes = review_reading.bytes_by_reading(diff, readings)
+    assert sizes["T-001"] < sizes["T-002"], "T-002's scope covers both source files, T-001's one"
+    assert sizes["T-001"] > 0 and sizes[review_reading.SEAM] > 0
+    assert max(sizes.values()) < len(diff.encode("utf-8")), "no reading holds the whole change"
+    whole = review_reading.bytes_by_reading(diff, [review_reading.WHOLE_READING])
+    assert whole[review_reading.WHOLE] == sum(review.bytes_by_kind(diff).values())
 
 
 def test_no_byte_of_the_payload_escapes_the_breakdown() -> None:
@@ -2547,11 +2927,16 @@ def test_all_product_code_names_nothing() -> None:
     """`made_of` answers "what would I remove", and "it is all product code" is the null answer to
     that. A board line that always ended in "made of: source 100%" would be noise."""
     one = review.ChangeOutlook(
-        diff_bytes=100, ceiling=10, unreadable=(), effective_risk="low", composition=(("source", 100),)
+        diff_bytes=100, total_bytes=100, ceiling=10, unreadable=(), effective_risk="low", composition=(("source", 100),)
     )
     assert one.made_of() == ""
     two = review.ChangeOutlook(
-        diff_bytes=100, ceiling=10, unreadable=(), effective_risk="low", composition=(("source", 75), ("test", 25))
+        diff_bytes=100,
+        total_bytes=100,
+        ceiling=10,
+        unreadable=(),
+        effective_risk="low",
+        composition=(("source", 75), ("test", 25)),
     )
     assert two.made_of() == "made of: source 0.1 KB (75%), test 0.0 KB (25%)"
 
@@ -2601,7 +2986,7 @@ def test_a_path_git_quoted_still_reaches_the_test_half(tmp_path: Path) -> None:
 def test_a_change_that_is_all_lockfile_says_so(tmp_path: Path) -> None:
     """Silence on a single non-source kind was the bug with its sign reversed: 900 KB of lockfile
     and nothing else is where the answer to "what would I remove" is most obvious."""
-    lockfile = review.ChangeOutlook(900_000, 500_000, (), "low", (("dependency", 900_000),))
+    lockfile = review.ChangeOutlook(900_000, 900_000, 500_000, (), "low", (("dependency", 900_000),))
     assert lockfile.made_of() == "made of: dependency 900.0 KB (100%)"
     # "It is all product code" stays silent: there is nothing to remove.
-    assert review.ChangeOutlook(900_000, 500_000, (), "low", (("source", 900_000),)).made_of() == ""
+    assert review.ChangeOutlook(900_000, 900_000, 500_000, (), "low", (("source", 900_000),)).made_of() == ""

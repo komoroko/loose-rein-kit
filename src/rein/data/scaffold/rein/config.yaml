@@ -180,6 +180,12 @@ review_policy:
   composition: auto
   # Exceeding a budget SPLITS THE SCOPE. It never lengthens the review screen: a reviewer
   # asked to hold 80 statements in their head is not reviewing, they are skimming.
+  #
+  # The first three bound what one PERSON holds at gate 4, and are measured over the whole
+  # review. `max_diff_bytes` bounds what one LAUNCH reads, so it is measured against a single
+  # reading — under `composition: auto` that is one task's slice, never the cycle. A change too
+  # big for one reading is a task whose scope is too broad, which is a thing to fix at gate 3
+  # while splitting is still a move that exists.
   budgets:
     max_critical_decisions: 5
     max_human_statements: 30

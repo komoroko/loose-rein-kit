@@ -3134,10 +3134,10 @@ class Orchestrator:
     def _warn_on_review_outlook(self) -> None:
         """Say it at task 9 of 17, not at gate ④, when the change outgrows what a review can read.
 
-        The loop already knows the diff after each task lands, and it said nothing: a cycle that
-        crossed its own `max_diff_bytes` and a cycle carrying a committed binary both went the
-        whole way to gate ④ before anyone heard, and at gate ④ the budget's instruction ("split the
-        scope") is not a move that exists — every task is merged and `done`.
+        The loop already knows the diff after each task lands, and it said nothing: a cycle with a
+        reading past `max_diff_bytes` and a cycle carrying a committed binary both went the whole
+        way to gate ④ before anyone heard, and by gate ④ narrowing the scope of the task that
+        reading covers is not a move that exists — every task is merged and `done`.
 
         A warning, never a stop. A task that passed its gate has earned its merge; what this
         changes is who knows what, and when.
@@ -3152,8 +3152,8 @@ class Orchestrator:
         if view.over_budget:
             print(
                 f"    [outlook] {view.line()}\n"
-                "              gate ④ refuses a change over the budget, and its answer is to split "
-                "the scope — which stops being possible once every task is merged. Now is when."
+                f"              no single launch can read {view.unit} — narrow its scope, or split "
+                "the task, at gate ③. Once every task is merged that stops being possible."
                 + (f"\n              {view.made_of()}" if view.made_of() else "")
             )
         if view.unreadable:

@@ -2,7 +2,7 @@
 // next gate.
 
 import { awaitingGate, circled, copyCmd } from "./api.js";
-import { Chip, Empty, Scroll, Warn } from "./parts.jsx";
+import { Chip, Empty, ReviewRun, Scroll, Warn } from "./parts.jsx";
 
 function NextCommand({ status }) {
   const n = status.next || {};
@@ -116,6 +116,11 @@ export default function Now({ status }) {
         <h2>Do this next</h2>
         <div id="next">
           <NextCommand status={status} />
+          {/* A run in flight belongs here and not in "In the way of": that pane is the list of
+              things waiting on the human, and a command already running is the opposite — it is
+              what the human is waiting on. `status.next` says `/build` through the whole build
+              phase, so it never tells anybody to start a generation that is already going. */}
+          <ReviewRun run={status.review_run} />
         </div>
       </div>
       <div className="block">

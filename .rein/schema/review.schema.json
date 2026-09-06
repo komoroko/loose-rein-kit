@@ -472,7 +472,7 @@
               "minimum": 0
             },
             "analyzed_bytes": {
-              "description": "Size in bytes of the diff this manifest covers. Required: the `max_diff_bytes` budget is denominated in bytes, so a manifest without a measured value gives that budget no actual and it can never be exceeded. A review generated before the measure is regenerated, not tolerated.",
+              "description": "Size in bytes of the diff this manifest covers — the WHOLE change, whatever readings it was taken in. Required: a manifest without a measured value can never be held to a size, and a review generated before the measure is regenerated, not tolerated. The `max_diff_bytes` budget is NOT measured against this: it bounds one launch, so its actual is the largest `composition.readings[].analyzed_bytes`.",
               "type": "integer",
               "minimum": 0
             },
@@ -597,6 +597,7 @@
                         "$ref": "#/$defs/digest"
                       },
                       "analyzed_bytes": {
+                        "description": "Size in bytes of this reading's own diff — what one launch was asked to hold. The largest of these is the actual the `max_diff_bytes` budget is measured against.",
                         "type": "integer",
                         "minimum": 0
                       }
@@ -1220,7 +1221,7 @@
           }
         },
         "review_budget": {
-          "description": "Exceeding a budget splits the scope; it never lengthens the screen (plan 14.10).",
+          "description": "Exceeding a budget splits the scope; it never lengthens the screen (plan 14.10). The first three bound what one person holds at gate 4 and are measured over the whole review; `max_diff_bytes` bounds what one launch reads and is measured against the largest single reading.",
           "type": "array",
           "maxItems": 32,
           "items": {

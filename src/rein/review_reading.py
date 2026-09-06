@@ -355,6 +355,35 @@ def bytes_by_kind(diff_text: str) -> dict[str, int]:
     return dict(sorted(totals.items(), key=lambda item: -item[1]))
 
 
+def bytes_by_reading(diff_text: str, readings: Sequence[Reading]) -> dict[str, int]:
+    """How many bytes of the whole diff each of `readings` would be asked to hold.
+
+    The budget `max_diff_bytes` bounds one launch, and one launch holds one reading — so the number
+    a board has to show is the largest reading, not the change. Answered from the diff already in
+    hand rather than by re-running `git diff` once per reading: `review.outlook` is read on every
+    status tick, and a per-reading `git diff` on a WSL mount is exactly the cost the stream's
+    fingerprint exists to avoid.
+
+    A path counts toward **every** reading whose pathspec covers it, because that is what each
+    reading is actually sent: two scopes that both cover a file each receive it, and the seam
+    receives it again. This is not `_prior_owner`, which answers a different question — which
+    single reading may be *held to* a finding — and would understate a shared path by attributing
+    it once.
+
+    Sizes only, so this is the *plain* diff each reading carries; the widening and the folding move
+    it, and both happen after the budget is checked (`read_facts`).
+    """
+    sections = [
+        (path, len(section.encode("utf-8", errors="replace"))) for path, section in _sections(diff_text) if path
+    ]
+    return {
+        reading.unit: sum(
+            size for path, size in sections if reading.whole or common.longest_cover(path, reading.include) is not None
+        )
+        for reading in readings
+    }
+
+
 # -- the change the reviewers are allowed to read -----------------------------
 
 #: Git's own default context width, and the floor of the ladder below: the plain diff is what the
@@ -362,10 +391,20 @@ def bytes_by_kind(diff_text: str) -> dict[str, int]:
 #: change itself.
 PLAIN_CONTEXT = 3
 
-#: How much context around each hunk to ask git for, widest first. A hunk without its surroundings
-#: is often unreadable — "was this guard removed, or moved?" cannot be answered from the hunk alone
-#: — so the request buys as much of them as the budget allows and says which rung it landed on.
-CONTEXT_LADDER: tuple[int, ...] = (30, 15, 10)
+#: How much context around each hunk to ask git for, widest first, as `(signalled, everything
+#: else)`. A hunk without its surroundings is often unreadable — "was this guard removed, or
+#: moved?" cannot be answered from the hunk alone — so the request buys as much of them as the
+#: budget allows and says which rung it landed on.
+#:
+#: **The wide half is bought only where the detector found something.** One number for every file
+#: meant the payload was sized by whatever ceiling happened to be in force rather than by what the
+#: reading needed: measured on one branch of this repository, the whole diff is 94,951 bytes at
+#: git's default width and 210,408 at 30 lines — 2.2× — and every byte of that is paid again in
+#: each reading's priming turn. `signalled` is the set of paths `diff_facts` matched a signal
+#: inside, which is the same line `fold_bodies` already draws for the same reason: context is worth
+#: buying where the deterministic scan says there is something to look at. Everything else gets the
+#: ladder's own bottom rung, so no file is read at less than the narrowest width this ever sent.
+CONTEXT_LADDER: tuple[tuple[int, int], ...] = ((30, 10), (15, 10), (10, 10))
 
 
 @dataclass(frozen=True)
@@ -397,7 +436,10 @@ class Reviewable:
     """
 
     text: str
-    context_lines: int
+    #: The two widths actually in `text`, as `(signalled, everything else)`. What was *sent*, never
+    #: the rung that was asked for: a reading the detector found no signal in is one width for
+    #: every file, and both halves are then that width.
+    context_lines: tuple[int, int]
     folded: tuple[str, ...] = ()
     #: The two halves of `text`, split by `split_tests`: what every reading stage gets, and what
     #: only the security reviewer does. `text` stays whole because it is what the ceiling and the
@@ -407,9 +449,15 @@ class Reviewable:
     tests: str = ""
 
     def as_facts(self) -> dict[str, Any]:
-        facts: dict[str, Any] = {"unit": "diff", "context_lines": self.context_lines}
+        signalled, plain = self.context_lines
+        facts: dict[str, Any] = {"unit": "diff", "context_lines": signalled}
+        # One number when one width was sent. Naming a second, equal one would invite the reading
+        # that some files got something else — and the file that got the wide half is exactly what
+        # `context_lines_unsignalled` is here to distinguish it from.
+        if plain != signalled:
+            facts["context_lines_unsignalled"] = plain
         if self.context_lines < CONTEXT_LADDER[0]:
-            facts["narrowed_from"] = CONTEXT_LADDER[0]
+            facts["narrowed_from"] = list(CONTEXT_LADDER[0])
         if self.folded:
             facts["bodies_withheld"] = list(self.folded)
         return facts
@@ -455,6 +503,47 @@ def file_facts(repo: repo_mod.Repo, head: str, files: Sequence[diff_facts.DiffFi
     return facts
 
 
+def _widened(
+    repo: repo_mod.Repo,
+    base: str,
+    head: str,
+    exclude: Sequence[str],
+    *,
+    include: Sequence[str],
+    signalled: Collection[str],
+    rung: tuple[int, int],
+) -> tuple[str, tuple[int, int]]:
+    """One rung of the ladder, and **the widths it actually applied**.
+
+    Two `git diff` calls spliced by file rather than one call per width per file — git widens the
+    whole diff or none of it, and `_sections` is already the one walk that says which bytes belong
+    to which path. The narrow diff decides the order, so the result is the diff git would have
+    emitted with the files in their own places; only the bytes of the signalled ones are swapped
+    for their wider reading.
+
+    When both widths are equal (the ladder's bottom rung) there is nothing to splice and this is
+    one `git diff`, which is what it was before signalled files were widened separately.
+
+    **The rung asked for is not always the rung sent.** A reading the detector found no signal in
+    — or one whose signalled paths are not in this slice — gets the narrow width for every file,
+    and the widths that come back say so. They go on to `Reviewable.context_lines` and from there
+    into the request the reviewers read, which is the one place a window may never be described as
+    wider than it is: the whole reason that field exists is so "the code around this is unchanged"
+    cannot be read out of a window that was narrowed.
+    """
+    wide_lines, plain_lines = rung
+    narrow = (plain_lines, plain_lines)
+    plain = diff_of(repo, base, head, exclude, context=plain_lines, include=include)
+    if wide_lines == plain_lines or not signalled:
+        return plain, narrow
+    sections = _sections(plain)
+    if not any(path in signalled for path, _ in sections):
+        return plain, narrow
+    wide = dict(_sections(diff_of(repo, base, head, exclude, context=wide_lines, include=include)))
+    spliced = "".join(wide.get(path, section) if path in signalled else section for path, section in sections)
+    return spliced, rung
+
+
 def reviewable_of(
     repo: repo_mod.Repo,
     base: str,
@@ -469,29 +558,34 @@ def reviewable_of(
 ) -> Reviewable:
     """The widest context that fits `ceiling`, falling back to the plain diff already in hand.
 
-    The ceiling is `max_diff_bytes` — not a second limit invented here, but the one byte budget a
-    human already approves the review against (`_refuse_over_budget`). That is the
-    property worth having: **what a reviewer is sent cannot exceed what was approved**, where
-    before it was the approved diff *plus* an unbounded-by-anyone 240 KB of file bodies.
+    The ceiling is `max_diff_bytes` — the budget this reading was already refused against
+    (`refuse_over_budget`), which is what makes the property worth having: **what a reviewer is
+    sent cannot exceed what that reading was approved to be**, where before it was the approved
+    diff *plus* an unbounded-by-anyone 240 KB of file bodies.
 
-    Ordered widest-first so the common case costs one `git diff`; a change large enough to need the
-    ladder pays a few more, which is cheap next to the model launch it is sizing.
+    Ordered widest-first so the common case costs one rung; a change large enough to need the
+    ladder pays a few more `git diff` calls, which is cheap next to the model launch it is sizing.
+    The width is bought per file: `signalled` gets the wide half of the rung and everything else
+    the narrow half (:data:`CONTEXT_LADDER`), so the payload is sized by what the detector found
+    rather than by how much room the ceiling happens to leave. What is recorded on the `Reviewable`
+    is the width that was *sent*, not the rung that was asked for — a reading with no signal in it
+    is every file at the narrow half, and it says so.
     """
 
-    def made(text: str, folded: Sequence[str], lines: int) -> Reviewable:
+    def made(text: str, folded: Sequence[str], rung: tuple[int, int]) -> Reviewable:
         source, tests = split_tests(text, files)
-        return Reviewable(text=text, context_lines=lines, folded=tuple(folded), source=source, tests=tests)
+        return Reviewable(text=text, context_lines=rung, folded=tuple(folded), source=source, tests=tests)
 
-    for lines in CONTEXT_LADDER:
-        widened = diff_of(repo, base, head, exclude, context=lines, include=include)
+    for rung in CONTEXT_LADDER:
+        widened, applied = _widened(repo, base, head, exclude, include=include, signalled=signalled, rung=rung)
         text, folded = fold_bodies(widened, files, signalled=signalled)
         if len(text.encode("utf-8")) <= ceiling:
-            return made(text, folded, lines)
+            return made(text, folded, applied)
     # Over the ceiling even at git's default width. Refusing here would be a second budget nobody
-    # approved: `_refuse_over_budget` has already passed on this diff, and the answer to a change
-    # too big to review is `/revise`, not a narrower window onto it.
+    # approved: `refuse_over_budget` has already passed on this diff, and the answer to a reading
+    # too big to read is a narrower scope at gate ③, not a narrower window onto it.
     text, folded = fold_bodies(plain, files, signalled=signalled)
-    return made(text, folded, PLAIN_CONTEXT)
+    return made(text, folded, (PLAIN_CONTEXT, PLAIN_CONTEXT))
 
 
 def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str = "") -> None:
@@ -964,6 +1058,29 @@ def compose_coverage(
     if unread:
         manifest["coverage_status"] = "insufficient"
     return manifest
+
+
+def largest_reading_bytes(manifest: Mapping[str, Any]) -> int:
+    """The biggest single reading a manifest records — what one launch was asked to hold.
+
+    The read side of what :func:`compose_coverage` writes, here so that the two places asking it —
+    the budget snapshot recorded with the review (`review.assemble`) and the live recomputation
+    behind the freeze (`human_review._diff_bytes`) — cannot come to two answers about one field.
+
+    `max_diff_bytes` bounds a launch, not a cycle, so this and not `analyzed_bytes` is what it is
+    measured against. A manifest written before composition existed has no `composition` and falls
+    back to the whole change, which is what it was read as then and is still the truth for it:
+    that review was taken in one reading.
+    """
+    if not manifest:
+        return 0
+    composition = manifest.get("composition")
+    readings = composition.get("readings") if isinstance(composition, Mapping) else None
+    if isinstance(readings, list):
+        sizes = [int(r["analyzed_bytes"]) for r in readings if isinstance(r, Mapping) and "analyzed_bytes" in r]
+        if sizes:
+            return max(sizes)
+    return int(manifest.get("analyzed_bytes", 0))
 
 
 # -- which readings a review is taken in --------------------------------------

@@ -197,6 +197,12 @@ class SharedReading:
         #: different changes that must never share a context. Keyed by the reading itself rather
         #: than counted, so the pipeline cannot accidentally hand one reading's session to another.
         self._sessions: dict[str, str] = {}
+        #: One gate per reading, so "primed once" costs no more serialisation than that. The
+        #: priming turn *is* the payload — the whole reading, in one launch that can run for
+        #: minutes — and holding `_lock` across it made every reading of a composed review prime
+        #: one at a time, which is the one thing `rein review generate --readers N` is bought to
+        #: stop. `_lock` now only guards these two dicts.
+        self._priming: dict[str, threading.Lock] = {}
 
     def branch_flags(self, request: Mapping[str, Any]) -> tuple[str, ...]:
         """The flags that put this request on its own branch of the shared reading.
@@ -238,6 +244,16 @@ class SharedReading:
         with self._lock:
             if primed := self._sessions.get(digest):
                 return primed
+            gate = self._priming.setdefault(digest, threading.Lock())
+        # Held per reading, never across all of them: two stages of *one* reading still queue here
+        # so the second finds the session the first made, while two *different* readings prime at
+        # the same time. The launch below is a full model turn over the whole reading, so a lock
+        # around every one of them would have made `--readers N` buy the stages' wall-clock and
+        # give the priming's back.
+        with gate:
+            with self._lock:
+                if primed := self._sessions.get(digest):
+                    return primed
             session = str(uuid.uuid4())
             # The instruction and the reading, and deliberately nothing else. The two shas used
             # to sit here, between them: duplicated out of a request that keeps them anyway
@@ -254,8 +270,11 @@ class SharedReading:
             # The same guard the extractor's own request gets. This is a new path into the
             # extractor's context, and a new path without the guard is how priming comes back.
             actual_extraction.assert_blind(payload)
+            # Recorded only once the launch returned: a prime that raised has no session to hand
+            # anybody, and a failed one stored here would resume a session that was never made.
             self._launch(session, payload)
-            self._sessions[digest] = session
+            with self._lock:
+                self._sessions[digest] = session
             return session
 
     def _launch(self, session: str, payload: Mapping[str, Any]) -> None:

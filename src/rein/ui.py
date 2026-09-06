@@ -90,6 +90,7 @@ from rein import (
     models,
     review_api,
     revise,
+    run_progress,
     status_api,
 )
 from rein import events as events_mod
@@ -243,6 +244,12 @@ _WATCHED = (
     ".rein/config.yaml",
     ".rein/events.ndjson",
     ".rein/rein.lock",
+    # A gate-④ generation writes here as each stage lands (`run_progress`), and nothing else in
+    # this list moves while it runs — a composed review measured at thirteen hours would otherwise
+    # be a dashboard saying "no machine review has been generated" for all of it. It is the one
+    # path here that is not SSOT: it is a live figure, not a document, which is why it lives under
+    # gitignored `.rein/work/` and why nothing binds it.
+    run_progress.FILE,
     ".git/HEAD",
     ".git/index",
 )

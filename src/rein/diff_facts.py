@@ -16,7 +16,7 @@ two must never render the same (plan §2.4).
 
 **One manifest, one whole diff.** The detector never cuts the change up: it reads all of it or
 says which parts it could not. A change too large to be read in one sitting is refused outright
-by `review._refuse_over_budget`, before a model is launched, because the answer to it is
+by `review_reading.refuse_over_budget`, before a model is launched, because the answer to it is
 `/revise` and not a narrower window onto the same change.
 
 The detector reports a `risk_floor`: the highest risk implied by the signals it matched. An AI
