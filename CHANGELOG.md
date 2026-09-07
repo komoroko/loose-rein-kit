@@ -4,6 +4,62 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.6] - 2026-09-08
+
+**The policy prices a finding; the reviewer only describes it.** All three reviewer stages were
+asked for `"blocking": <bool>`, so the author of a finding also set what it cost — a `critical`
+security finding the model marked `false` blocked nothing, and `review_policy`'s own first line
+("it decides risk, coverage, and blocking") was not true of any finding the review had newly
+found. The field is gone from the security and comparator contracts. A reviewer states a
+severity, which is a description of the attack scenario it just wrote down, and
+`review_policy.blocks` turns that into the flag: at `high` and above a finding holds gate ④ shut,
+below it the finding is a Decision Card — the same line `unanswered_decisions` already drew, so
+the two thresholds are one threshold. A grounded extra behaviour never blocks at any risk, and a
+risk the ladder does not have blocks, because a policy engine's default is the closed one.
+
+`reject_blocking_removal` is deleted with the field it guarded. The door a re-statement could
+walk through moved to the severity, so `reject_risk_downgrade` stands in it — the same function
+that stops an AI lowering any other risk in this pipeline. That closes the wider half of the hole
+it was written for: the old check compared flags, so re-listing `SEC-001` as non-blocking
+satisfied it exactly as well as fixing the code did. `stage_output_schema` strips `blocking` from
+what a schema-constrained CLI is asked to answer, on a copy of the schema, so the *document* still
+requires the field the policy writes.
+
+**The reading the build paid for gets read.** `rein build` launches a security reviewer over each
+task's slice as it lands — that is what warms gate ④'s cache — and threw the answer away: the
+finding was paid for at the task boundary and first *seen* at gate ④, after every later task had
+been built on the code it names, and after the implementer that wrote it was long gone. The
+warm-up hands its `ReadOut` back now, and a blocking finding the task's own declared scope owns
+goes to an implementer there: one round, through the same `_repair` gate ④ uses, with whatever
+still stands left to `review_policy.repair_rounds`. Attribution is `findings.owner_of_path` — the
+function gate ④ routes by — so a finding no declared scope owns is not guessed at; it travels to
+the gate where a human can see the whole picture. The slice is then read again from cold, which is
+what decides whether the finding closed. No new configuration, and no extra reading: the answer
+was already bought.
+
+**The gate-④ verdict is written once.** `human_review.completion_blockers` carried its own copies
+of four of `review_policy.blocking_reasons`' rules — coverage, blocking gaps, blocking extra
+behaviours, standing security findings — phrased differently from the originals. The copies had
+already drifted: only `blocking_reasons` looked at `independence_observed`, so a review whose two
+halves came off one model could be frozen and then refused at the gate, for a reason the freeze
+screen never mentioned. The freeze now reads the machine half through that one function and adds
+only what is its own: the unanswered high/critical cards, the expertise gaps, and the budget.
+
+**A decision is never dropped to make the document fit.** `decision_cards.derive_cards` wrote
+`subjects[:64]` under a docstring saying the review budget would catch a run that produced more —
+which it could not, because the budget counts the cards that function *returns*. Sixty-five
+findings produced a review that said sixty-four, silently, in the artefact a human signs. It
+refuses now, the way `review_reading.merge` already refuses for statements and findings, against
+a ceiling read from the schema rather than restated beside it.
+
+**Risk reaches the execution plan.** Each reading's own detector floor was measured and used for
+nothing: risk decided whether the change composed at all and then stopped, so the readings were
+taken in plan order and a run cut short by a session limit or a Ctrl-C left the cache holding the
+tasks with the lowest ids. They are ordered highest-risk first, and every row of the recorded
+execution plan carries the risk it was ordered by, so the sequence is a decision that can be
+argued with rather than an accident of numbering. Ordering is the one use of a per-reading risk
+that cannot lower anything — the floor every request carries is still the whole change's.
+
 ## [0.4.5] - 2026-09-07
 
 **Gate ④ repairs the findings it can, and asks about the rest.** Inside a task, judging and
