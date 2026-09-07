@@ -753,3 +753,23 @@ def test_a_missing_document_is_not_this_check_to_report(tmp_path: Path) -> None:
     repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
     assert not repo.path("docs/10-requirements.md").exists()
     assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+
+
+def test_a_freshness_nobody_could_measure_holds_the_gate_shut(tmp_path: Path) -> None:
+    """ "We could not tell" is not "it is current". `freshness` reports the unmeasurable case with
+    `fresh=False`, and reading only its `reason` meant `approve` added no blocker at all and
+    `doctor` reported nothing — so a review that could not be shown to speak for the code opened
+    gate ④ on silence. An unreadable gate fails closed.
+    """
+    repo, head, change = _reviewed_repo(tmp_path)
+    review = make_review(generated=True, human_status="frozen", effective_risk="low")
+    review["machine"]["binding"]["subject_head_sha"] = head
+    review["machine"]["binding"]["change_digest"] = change
+    seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=review)
+    assert not [b for b in approve.readiness(repo, "build") if "could not be measured" in b]
+
+    # The one input every measurement here rests on, gone.
+    import shutil
+
+    shutil.rmtree(tmp_path / ".git")
+    assert any("could not be measured" in b for b in approve.readiness(repo, "build"))

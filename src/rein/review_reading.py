@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 
 from rein import (
@@ -161,22 +161,38 @@ def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.S
     `subject_head_sha` keeps its own job: it is the commit every anchor and blob in the document
     is resolved against. It is reported here so a reader can go and look at it.
 
-    Unmeasurable — no review, an ungenerated one, or no git to ask — is reported as `fresh=False`
-    with an empty `reason`: "we could not tell" is not "it is current", and the callers each say
-    what their own silence means rather than inheriting a guess from here. There is no case for a
-    generated review that records no digest: the schema requires `binding.change_digest` and
-    `store.read_review` refuses a document that fails it.
+    **Unmeasurable is a blocker, not a silence.** No review at all — absent, or never generated —
+    carries no `reason`, because every caller already says that in its own words. But a review that
+    *is* generated and cannot be checked against the tree is reported with a reason and
+    `fresh=False`: "we could not tell" is not "it is current", and an unreadable gate fails closed.
+    Without that, `approve` added no blocker and `doctor` reported nothing at all, so a git that
+    could not answer opened gate ④ over a review nobody could show still spoke for the code. There
+    is no case for a generated review that records no digest — the schema requires
+    `binding.change_digest` and `store.read_review` refuses a document that fails it — so reaching
+    that branch means the repository, not the document, is what could not be read.
     """
     reviewed_head = review.subject_head_sha if review is not None else ""
     rc, out = repo._git_rc("rev-parse", "HEAD")
     head = out.strip() if rc == 0 else ""
     recorded = review.change_digest if review is not None else ""
-    if review is None or not review.is_generated or not recorded or not head:
+    if review is None or not review.is_generated:
         return Freshness(fresh=False, reviewed_head=reviewed_head, head=head, reason="")
+    unmeasurable = Freshness(
+        fresh=False,
+        reviewed_head=reviewed_head,
+        head=head,
+        reason=(
+            "whether the machine review still speaks for this tree could not be measured — "
+            + ("git cannot resolve HEAD" if not head else "the review records no change digest")
+            + ". Nothing here may read that as current; run `rein doctor`."
+        ),
+    )
+    if not recorded or not head:
+        return unmeasurable
     try:
         current = change_digest(repo, head, not_the_product(repo, state))
-    except ReviewError:
-        return Freshness(fresh=False, reviewed_head=reviewed_head, head=head, reason="")
+    except ReviewError as exc:
+        return replace(unmeasurable, reason=f"the review's freshness could not be measured: {exc}. Run `rein doctor`.")
     if current == recorded:
         return Freshness(fresh=True, reviewed_head=reviewed_head, head=head, reason="")
     return Freshness(

@@ -1465,7 +1465,9 @@ def check_review(review: models.Review | None, fresh: review_reading.Freshness |
         return [Finding("INFO", "review", "no machine review generated yet")]
     findings: list[Finding] = []
     if fresh is not None and fresh.reason:
-        findings.append(Finding("FAIL", "review", f"the machine review is stale: {fresh.reason}"))
+        # The reason says which of the two it is — the product moved, or nothing could be measured
+        # — so it is reported as written rather than announced as staleness it may not be.
+        findings.append(Finding("FAIL", "review", fresh.reason))
     elif fresh is not None and fresh.fresh:
         findings.append(
             Finding("PASS", "review", f"the machine review speaks for the product at HEAD ({fresh.head[:12]})")
