@@ -91,6 +91,9 @@ from rein import (
     run_record,
     strict_yaml,
 )
+from rein import (
+    repair as repair_mod,
+)
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
@@ -2925,7 +2928,7 @@ class Orchestrator:
             counts = graph.counts()
             unfinished = len(graph.tasks) - counts["done"]
             if unfinished == 0:
-                return self._present_gate4(graph)
+                return self._close_gate4(graph)
 
             batch = plan_batch(graph, self.config.max_parallel)
             if batch is None:
@@ -3192,34 +3195,181 @@ class Orchestrator:
 
     # -- handing over to the review pipeline -----------------------------------
 
-    def _present_gate4(self, graph: dag.Graph) -> int:
-        """All tasks done. Say what still has to happen — and what has NOT been established.
+    def _close_gate4(self, graph: dag.Graph) -> int:
+        """All tasks done: read the change, repair what this loop may, present the rest.
 
-        (There is no "you left a step empty" nudge here any more: the config schema requires a
-        `command` for every command step, so an empty one cannot reach this code. The scaffold
-        ships a placeholder `["true"]` instead, which `doctor.check_quality_gate` reports and a
-        silent skip cannot.)
+        **Inside a task, judging and repairing were both automated; at gate ④ only judging was.**
+        `_run_agent_step` runs a reviewer, hands its `must_fix` findings to an implementer, and
+        has the reviewer look again — no human in it. Gate ④ produced findings and printed three
+        commands for somebody to type, and the only route back into the code was `rein revise
+        --to build --from-review`, which marks the task *and its whole dependent closure*
+        `needs-revision` — the status reserved for a defect in the specification. `status_api`
+        then demanded a `/tasks` reconcile and a re-approval of gate ③, for a repair that changes
+        no requirement, no claim and no plan. Reset, salvage, re-approve, round again.
 
-        This deliberately does not invite an approval. Green tests plus an AI's summary is not
-        evidence that the code does what the plan says: gate ④ approves a grounded review — a
-        blind extraction of actual behaviour, compared against the frozen plan, with a coverage
-        manifest saying what could not be analysed — and this loop has produced none of that.
+        So the same shape runs here: read, repair what a task's declared scope owns, read again
+        from cold. What reaches a human is what a human is actually for — deciding whether a
+        `diverged` claim means the code is wrong or the plan is, and whether an extra behaviour
+        nobody asked for is unwanted (`repair.route`).
+
+        Four things keep this from being an agent marking its own work, and none of them is new:
+
+        * The fixer is an implementer, never a reviewer. Whoever judges does not repair.
+        * A repair that reaches outside the task's declared scope blocks rather than lands, by the
+          same check every task's work goes through.
+        * A repair cannot become a plan change: `gate_guard` denies a write to `plan.yaml` or
+          `config.yaml` while the plan is frozen, which it is from gate ③ onward.
+        * Whether a finding closed is decided by the *next* round's review — a blind reading with
+          no memory of having raised it — never by the fixer's account of its own work.
+
+        And it is bounded. The failure this has to survive is a false positive, where repairing
+        converges on nothing; `review_policy.repair_rounds` is the ceiling, after which what still
+        stands goes to the human with the record of what was tried.
+
+        It still cannot open the gate, and neither can anything else: a gate opens only on the
+        gate name typed at an interactive terminal, recorded by `rein approve` itself.
         """
         print("\n========== all tasks done ==========")
         print(dag.render(graph))
         for measured in (self.ledger.summary(), self.spend_summary()):
             if measured:
                 print(measured)
-
         print(
-            "\nWhat this run established: every task's code passed the configured quality gate.\n"
-            "What it did NOT establish: that the code does what the plan claims.\n"
-            "\nNext:\n"
-            "  1. rein review generate   — coverage manifest, blind actual extraction,\n"
-            "                                   conformance comparison, security and maintainability review\n"
-            "  2. rein ui                — read the scope and the orient brief, then answer the\n"
+            "\nWhat the tasks established: every task's code passed the configured quality gate.\n"
+            "What that did NOT establish: that the code does what the plan claims. Green tests plus\n"
+            "an agent's summary is not evidence of conformance — the grounded review below is what\n"
+            "asks that question, and a human is what answers what it cannot."
+        )
+        rounds = self.config.raw.repair_rounds
+        routing = repair_mod.Routing()
+        if self.dry_run:
+            print("\n[dry-run] the grounded review and its repair rounds are not run.")
+            return self._present_gate4(routing, rounds)
+        if rounds == 0:
+            # `repair_rounds: 0` says this loop does not repair its own findings, and reading the
+            # change here would then buy nothing it could act on — the human runs `rein review
+            # generate` and reads it in the dashboard, exactly as before this loop existed.
+            print("\n[gate 4] `review_policy.repair_rounds` is 0 — this run takes no reading.")
+            return self._present_gate4(routing, rounds)
+
+        for round_no in range(rounds + 1):
+            print(f"\n[gate 4] reading the change ({'first reading' if not round_no else f'round {round_no}'})")
+            if not self._generate_review():
+                break
+            routing = repair_mod.route(self._plan or models.Plan({}), self.store.read_review())
+            print(routing.render())
+            if not routing.repairable or round_no == rounds:
+                break
+            for item in routing.code:
+                self._repair(graph, item)
+        return self._present_gate4(routing, rounds)
+
+    def _generate_review(self) -> bool:
+        """Take the grounded review. False when it could not be taken, and why is printed.
+
+        **A reading that fails does not un-finish the build.** The tasks are done, their evidence
+        is recorded, and the review is a separate question asked afterwards — so anything but a
+        capacity stop is reported and handed over exactly as it was before this loop existed. The
+        gate stays shut either way: `approve.readiness` refuses a gate ④ with no generated review,
+        so nothing here can turn a failed reading into an approval.
+
+        A capacity stop is the one thing worth waiting for, and it is `main`'s to wait on:
+        `EXIT_RETRY_LATER` is what `--supervise` retries, and every stage that did answer is
+        already in the review cache, so the retry re-reads only what is missing.
+        """
+        from rein import review as review_mod
+
+        try:
+            review_mod.generate(self.repo, review_transport.StagedReviewers(self.repo), actor="rein build")
+            return True
+        except review_policy.AdapterFailure as failure:
+            if faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT:
+                raise StopLoop(
+                    f"the grounded review could not be taken: {failure}. Nothing is lost — every stage that "
+                    "answered is cached. Re-run `rein build` (or `rein review generate --supervise`).",
+                    code=common.EXIT_RETRY_LATER,
+                ) from None
+            print(f"\n[gate 4] the reading could not be taken: {failure}")
+        except (
+            review_reading.ReviewError,
+            review_policy.ReviewPolicyError,
+            review_transport.TransportError,
+            adapters.LaunchRefused,
+            models.DocumentError,
+            store_mod.StoreError,
+        ) as exc:
+            print(f"\n[gate 4] the reading could not be taken: {exc}")
+        print("Run `rein review generate` yourself once that is repaired — the gate needs one either way.")
+        return False
+
+    def _repair(self, graph: dag.Graph, item: repair_mod.Repair) -> None:
+        """One implementer launch against one task's share of gate ④'s findings, then the DoD.
+
+        Runs on the work branch rather than in a worktree: every task is merged by now, and the
+        findings are about the merged tree — which is the only tree that exists to repair.
+        """
+        task = next((t for t in graph.tasks if t.id == item.task_id), None)
+        if task is None:  # a finding attributed to a task the graph no longer has
+            print(f"    [gate 4] {item.task_id} is not in the plan any more — leaving its findings to the human")
+            return
+        before = self.ws.head()
+        print(f"    [gate 4] {task.id}: {len(item.items)} finding(s) → the implementer")
+        self._launch(
+            adapters.command(
+                self.config.adapter_argv,
+                build_prompts.gate_four_fix_prompt(task, item.render(), gate_cmds=self.config.gate_cmds),
+                access=adapters.WRITE,
+            ),
+            cwd=self.root,
+            where=f"{task.id}: the gate-4 repair",
+            task_id=task.id,
+            role="implementer",
+        )
+        changed, _ = self._review_scope(task, self.root, before)
+        if violations := self._gate_violations(changed):
+            raise GateViolationFault(violations)
+        if outside := dossier.scope_violations(task, changed):
+            raise StopLoop(
+                f"{task.id}: the gate-4 repair changed {', '.join(outside)}, which its declared scope does "
+                "not cover. A repair that reaches into another task's territory is a scope change, and a "
+                "scope change to an approved plan is a human's decision.",
+                code=common.EXIT_HUMAN_NEEDED,
+            )
+        for step in self._steps_at("task"):
+            if step.kind != "command" or not step.command:
+                continue
+            if failure := self._run_cmd_step(step, self.root):
+                if futile := self._baseline_red.get(step.name, ""):
+                    print(f"    [gate 4] '{step.name}' is red, and was already red at gate ③ — not this repair's")
+                    _ = futile
+                    continue
+                raise StopLoop(
+                    f"{task.id}: the gate-4 repair left '{step.name}' red:\n{failure}",
+                    code=common.EXIT_HUMAN_NEEDED,
+                )
+
+    def _present_gate4(self, routing: repair_mod.Routing, rounds: int) -> int:
+        """What is left after the repair rounds, and what a human has to do about it.
+
+        This deliberately does not invite an approval. The review is read in the dashboard, the
+        Decision Cards are answered there, and the gate is opened at a terminal by a person.
+        """
+        print("\n========== gate 4 ==========")
+        print(routing.render())
+        if routing.repairable:
+            print(
+                f"\n{rounds} repair round(s) are spent and findings still stand. A finding that survives "
+                "being repaired and re-read is either real and harder than it looked, or was never true — "
+                "and this loop cannot tell those apart. Read them, and dispute the ones that are wrong.\n"
+            )
+        print(
+            "Next:\n"
+            "  1. rein ui                — read the scope and the orient brief, then answer the\n"
             "                                   Decision Cards and freeze the review\n"
-            "  3. rein approve build     — readiness check, then your confirmation at the terminal\n"
+            "  2. rein approve build     — readiness check, then your confirmation at the terminal\n"
+            "\nAn answer of `revise_implementation` on a card hands that subject back to this loop: it\n"
+            "says the code is what is wrong, which is the one thing the review cannot decide for itself.\n"
+            "Re-run `rein build` afterwards and it will be repaired like any other finding.\n"
             "\nThis loop cannot open gate 4, and neither can anything but a human: a gate opens only on\n"
             "the gate name typed at an interactive terminal, recorded by `rein approve` itself."
         )

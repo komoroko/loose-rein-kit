@@ -48,6 +48,7 @@ from tests._support import (
     fake_git,
     make_config,
     make_plan,
+    make_review,
     make_state,
     make_task,
     seed_repo,
@@ -679,12 +680,13 @@ def test_a_dry_run_walks_the_whole_graph(tmp_path: Path, capsys: pytest.CaptureF
 
 def test_the_handover_says_what_was_not_established(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Green tests plus an AI's summary is not evidence that the code does what the plan says,
-    and the loop must not let the phrasing imply otherwise."""
+    and the loop must not let the phrasing imply otherwise — least of all now that it goes on to
+    take the review itself."""
     root = build_repo(tmp_path)
     build_loop.main(["--dry-run", "--repo", str(root)])
     out = capsys.readouterr().out
     assert "did NOT establish" in out
-    assert "rein review generate" in out
+    assert "grounded review" in out
     assert "cannot open gate 4" in out
 
 
@@ -2881,3 +2883,101 @@ def test_the_lock_answers_before_the_working_tree_does(tmp_path: Path, caplog: p
     assert rc == common.EXIT_RETRY_LATER
     assert "holds the lock" in caplog.text
     assert "package-lock.json" not in caplog.text
+
+
+# --- gate 4 repairs what a task's scope owns ----------------------------------
+
+
+def _scoped_repo(tmp_path: Path, rounds: int) -> build_loop.Orchestrator:
+    task = make_task("T-001", claim_ids=["C-001"])
+    task["scope"] = {"include": ["src/api/"]}
+    root = build_repo(
+        tmp_path,
+        plan=make_plan(tasks=[task]),
+        config=make_config(repair_rounds=rounds),
+    )
+    repo = repo_mod.Repo(root)
+    return build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
+
+
+def _blocking(fid: str = "SEC-001", path: str = "src/api/client.py") -> dict[str, Any]:
+    return {
+        "id": fid,
+        "severity": "high",
+        "category": "credential_exposure",
+        "attack_scenario": "a caller reaches a host credential",
+        "blocking": True,
+        "code_anchors": [{"path": path, "blob": "git-blob:" + "a" * 40, "start_line": 1, "end_line": 2}],
+    }
+
+
+def test_gate_four_reads_repairs_and_reads_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half that was missing. Inside a task the reviewer's must-fix findings go to an
+    implementer and the reviewer looks again; at gate ④ the findings were printed and the human
+    typed `rein revise --to build --from-review`, which marked the task and its whole dependent
+    closure `needs-revision` and demanded a re-approval of gate ③ for a repair that changed no
+    plan.
+
+    The second reading is the judge, not the fixer: it is a blind reading with no memory of having
+    raised the finding, which is the only thing that can say whether it closed.
+    """
+    loop = _scoped_repo(tmp_path, rounds=2)
+    readings: list[int] = []
+    repaired: list[str] = []
+
+    def read() -> bool:
+        readings.append(1)
+        findings = [] if len(readings) > 1 else [_blocking()]
+        seed_repo(tmp_path, review=make_review(generated=True, security_findings=findings))
+        loop.store = store_mod.Store(loop.repo)
+        return True
+
+    monkeypatch.setattr(loop, "_generate_review", read)
+    monkeypatch.setattr(loop, "_repair", lambda graph, item: repaired.append(item.task_id))
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert repaired == ["T-001"], "the task whose declared scope owns the anchor"
+    assert len(readings) == 2, "read, repair, read again — the second reading decides"
+
+
+def test_a_finding_that_survives_the_rounds_reaches_the_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The failure this is bounded for is a false positive: repairing something that was never
+    true converges on nothing, and an unbounded loop would spend a session limit finding out."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    seed_repo(tmp_path, review=make_review(generated=True, security_findings=[_blocking()]))
+    attempts: list[str] = []
+    monkeypatch.setattr(loop, "_generate_review", lambda: True)
+    monkeypatch.setattr(loop, "_repair", lambda graph, item: attempts.append(item.task_id))
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert attempts == ["T-001", "T-001"], "two rounds, and then it stops"
+    out = capsys.readouterr().out
+    assert "repair round(s) are spent" in out
+    assert "dispute the ones that are wrong" in out
+
+
+def test_repair_rounds_zero_takes_no_reading_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A review this loop cannot act on is one the human generates and reads in the dashboard —
+    launching three reviewers to produce it here would be paying for an answer nobody uses."""
+    loop = _scoped_repo(tmp_path, rounds=0)
+    monkeypatch.setattr(loop, "_generate_review", lambda: pytest.fail("no reading should be taken"))
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert "takes no reading" in capsys.readouterr().out
+
+
+def test_a_reading_that_cannot_be_taken_does_not_un_finish_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tasks are done and their evidence is recorded. Anything but a capacity stop is reported
+    and handed over — and the gate stays shut either way, because `approve.readiness` refuses a
+    gate 4 with no generated review."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    monkeypatch.setattr(loop, "_generate_review", lambda: False)
+    monkeypatch.setattr(loop, "_repair", lambda graph, item: pytest.fail("nothing was read to repair"))
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE

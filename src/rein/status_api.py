@@ -270,18 +270,18 @@ def next_action(
                     "run this yourself at a terminal; an agent never runs it for you.",
                     also=("rein ui", f"rein approve {gate} --check"),
                 )
-            # 8b. The machine review found blocking things and the plan already says which task
-            # answers each. Typing those ids in by hand is the clerical half of a decision that is
-            # otherwise fully derived — and doing it before re-running the build is what makes the
-            # re-run land the fix on the right pull request.
+            # 8b. The machine review found blocking things the loop can repair on its own — a
+            # task's declared scope owns the code they anchored to, and the repair changes no
+            # claim and no plan. `rein build` reads the review, repairs them and reads again;
+            # this row exists because that is not what "phase in progress" would suggest.
             if current_phase == "build" and attributed_findings:
                 return Recommendation(
-                    command="rein revise --to build --from-review --reason <what the review found>",
+                    command="rein build",
                     kind="fix",
                     reason=f"The machine review has {attributed_findings} blocking finding(s) whose task the "
-                    "plan already names. Mark them, re-run the build — a task whose pull request is open has "
-                    "its fix land there — then carry the fixes up the stack.",
-                    also=("rein build", "rein pr-stack --restack"),
+                    "plan already names. The build repairs those itself and reads the change again — no gate "
+                    "moves, and what it cannot decide reaches you as a Decision Card.",
+                    also=("rein ui", "rein pr-stack --restack"),
                 )
             also: tuple[str, ...] = (f"rein approve {gate} --check",)
             if current_phase == "build":

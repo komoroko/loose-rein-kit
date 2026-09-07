@@ -389,7 +389,15 @@ def make_config(
     profiles: dict[str, dict[str, Any]] | None = None,
     max_parallel: int = 3,
     launch_retries: int | None = None,
+    repair_rounds: int = 0,
 ) -> dict[str, Any]:
+    """A config document. `repair_rounds` defaults to **0**, unlike the product's own default of 2.
+
+    A build that ends by reading the change launches the gate-④ reviewers, and a test about task
+    consumption has no business paying for that — the PATH stub would refuse it anyway, which
+    would make every such test fail for a reason it is not about. Tests that *are* about the
+    repair loop ask for rounds explicitly, which also makes it visible which ones those are.
+    """
     execution: dict[str, Any] = {"max_parallel": max_parallel, "worktree_dir": ".worktrees"}
     if launch_retries is not None:
         execution["launch_retries"] = launch_retries
@@ -435,6 +443,7 @@ def make_config(
                 "required": True,
             },
         ],
+        "review_policy": {"repair_rounds": repair_rounds},
         "guard": {
             "template_mode": template_mode,
             # `is None` rather than falsy: a test that asks for *no* guarded paths must get

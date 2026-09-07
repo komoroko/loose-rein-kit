@@ -1463,6 +1463,23 @@ class Config:
         return {k: v for k, v in raw.items() if isinstance(v, int) and k in BUDGET_NAME_VALUES}
 
     @property
+    def repair_rounds(self) -> int:
+        """How many times gate ④ may repair its own findings before it stops and asks a human.
+
+        Bounded because the failure this has to survive is a *false positive*: repairing a finding
+        that was never true converges on nothing, and an unbounded loop would spend a session
+        limit discovering that. Two rounds is enough for the case it exists for — a real defect,
+        fixed, and re-read by a reviewer that has no memory of having raised it.
+
+        `0` says this loop does not repair, and then it takes no reading either: a review it
+        cannot act on is one the human runs `rein review generate` for and reads in the dashboard,
+        which is what happened before the repair loop existed.
+        """
+        policy = self.raw.get("review_policy")
+        value = policy.get("repair_rounds") if isinstance(policy, dict) else None
+        return common.as_int(value, 2)
+
+    @property
     def composition(self) -> str:
         """How gate ④ takes its reading: `auto` composes from the plan's tasks, `whole` never does.
 

@@ -233,7 +233,7 @@
       "additionalProperties": false,
       "properties": {
         "composition": {
-          "description": "How gate 4 takes its reading. `auto` composes it from the plan's task scopes \u2014 one reading per task plus the seam between them \u2014 so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
+          "description": "How gate 4 takes its reading. `auto` composes it from the plan's task scopes — one reading per task plus the seam between them — so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
           "enum": [
             "auto",
             "whole"
@@ -265,6 +265,12 @@
               "maximum": 8388608
             }
           }
+        },
+        "repair_rounds": {
+          "description": "How many times gate 4 may repair its own blocking findings and read the change again before it stops and asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
         }
       }
     },

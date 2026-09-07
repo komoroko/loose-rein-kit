@@ -69,7 +69,7 @@ VERBS: dict[str, Verb] = {
     # gates and shipping
     "approve": Verb("approve", "readiness check, then the human's confirmation at this terminal"),
     "changes": Verb("change_request", "ask for changes instead of approving (holds the gate shut)"),
-    "revise": Verb("revise", "roll back upstream (gates reset in a chain; --from-review derives the tasks)"),
+    "revise": Verb("revise", "roll back upstream on a specification defect (gates reset in a chain)"),
     "review": Verb("review", "the grounded machine review (generate --supervise waits out a capacity stop)"),
     "build": Verb("build_loop", "the deterministic /build orchestrator (--supervise: retry in-process on exit 3)"),
     "baseline": Verb(

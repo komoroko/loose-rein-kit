@@ -603,8 +603,10 @@ def test_the_gate_and_phase_maps_agree_with_the_vocabulary() -> None:
     assert set(status_api.PHASE_COMMAND) <= set(models.PHASE_ORDER)
 
 
-def test_a_blocking_finding_the_plan_owns_is_recommended_before_the_phase_command() -> None:
-    """Typing the ids in by hand is the clerical half of a decision the plan already made."""
+def test_a_blocking_finding_the_plan_owns_sends_the_build_back_rather_than_a_roll_back() -> None:
+    """A code defect gate ④ found is not a defect in the specification, and routing it through
+    `rein revise` made it one — the task and its dependent closure went `needs-revision`, which
+    demanded a `/tasks` reconcile and a re-approval of gate ③ for a repair that changed no plan."""
     rec = status_api.next_action(
         current_phase="build",
         gates={
@@ -624,7 +626,8 @@ def test_a_blocking_finding_the_plan_owns_is_recommended_before_the_phase_comman
         attributed_findings=2,
     )
 
-    assert rec.command.startswith("rein revise --to build --from-review")
+    assert rec.command == "rein build"
+    assert "no gate moves" in rec.reason
     assert "rein pr-stack --restack" in rec.also
 
 
