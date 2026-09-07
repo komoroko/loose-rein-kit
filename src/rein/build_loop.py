@@ -89,6 +89,7 @@ from rein import (
     review_reading,
     review_transport,
     run_record,
+    status_api,
     strict_yaml,
 )
 from rein import (
@@ -2933,10 +2934,15 @@ class Orchestrator:
             batch = plan_batch(graph, self.config.max_parallel)
             if batch is None:
                 # frontier empty & there are unfinished ones = all blocked/needs-revision. To the human.
+                # With the one command that moves it, taken from the same table `rein next` reads:
+                # "help needed" and nothing else is what sent a reported cycle round reset, salvage
+                # and re-approval until one of them happened to be the right move.
                 blocked = [t.id for t in graph.tasks if t.status in ("blocked", "needs-revision")]
+                recovery = status_api.blocked_recovery(self.store.read_state())
                 self._escalate(
                     "no_runnable",
-                    f"No runnable tasks and {unfinished} unfinished ({', '.join(blocked)}). Help needed.",
+                    f"No runnable tasks and {unfinished} unfinished ({', '.join(blocked)})."
+                    + (f"\n{recovery.reason}\n  {recovery.command}" if recovery else " Help needed."),
                 )
                 return common.EXIT_HUMAN_NEEDED
 

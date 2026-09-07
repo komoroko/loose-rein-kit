@@ -32,8 +32,21 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
-from rein import adapters, agent_cli, common, dag, dag_trace, event_chain, findings, models, run_progress, strict_yaml
+from rein import (
+    adapters,
+    agent_cli,
+    common,
+    dag,
+    dag_trace,
+    event_chain,
+    faults,
+    findings,
+    models,
+    run_progress,
+    strict_yaml,
+)
 from rein import events as events_mod
 from rein import lock as lock_mod
 from rein import repo as repo_mod
@@ -128,6 +141,7 @@ def next_action(
     open_change_requests: int = 0,
     attributed_findings: int = 0,
     baseline: str = "",
+    blocked: Recommendation | None = None,
 ) -> Recommendation:
     """The deterministic decision table (first match wins).
 
@@ -137,6 +151,10 @@ def next_action(
 
     `baseline` is "" (fine), "missing", or "red" — what the work branch's quality gate said before
     any task ran, which gate ③ has to know before it can decide this plan is implementable.
+
+    `blocked` is :func:`blocked_recovery`'s answer, derived rather than decided here for the same
+    reason: reading `state.yaml` inside the table would make the same arguments yield different
+    recommendations.
     """
     # 1. The audit chain is the substrate every receipt binds. Nothing else matters until it is intact.
     if chain_defects:
@@ -162,6 +180,12 @@ def next_action(
             reason="A downstream gate is approved while an upstream one is pending: an approval survived a "
             "roll back, so downstream work is standing on a decision that was withdrawn.",
         )
+    # 3b. A blocked task takes the loop off the frontier, and there was no row for it: `rein build`
+    # escalated `no_runnable` and stopped while this went on recommending `/build`, which re-ran
+    # into the same wall. Before `needs-revision` because a task can be both and the blocked one
+    # names a command; after the chain and the gate ladder, which are about the repository itself.
+    if blocked is not None and counts is not None and counts.get("blocked", 0) > 0:
+        return blocked
     # 4. needs-revision tasks park everything until the /tasks reconcile reclassifies them.
     if counts is not None and counts.get("needs-revision", 0) > 0:
         return Recommendation(
@@ -312,6 +336,112 @@ def next_action(
         kind="fix",
         reason=f"current_phase '{current_phase}' is not in the lifecycle vocabulary; diagnose the SSOT.",
     )
+
+
+#: How a blocked task's recorded reason maps to the one command that moves it. First match wins,
+#: and every branch names a command a human can actually run — "it is blocked" with no next step
+#: is what sent operators round reset → salvage → re-approve until something changed.
+#:
+#: The material is already recorded: `handoff.escalation.kind` is the verdict the attempt reached
+#: before the quality gate was asked anything, `handoff.futile` says the loop stopped rather than
+#: spending another send-back, and `handoff.last_fault` is the machine failure that reached no
+#: verdict at all. None of it was read by anything that recommends.
+_BLOCKED_RECOVERY: tuple[tuple[str, str, str], ...] = (
+    (
+        "scope_violation",
+        "rein revise --to tasks --impacted {task} --reason <what the scope has to cover>",
+        "{task} tried to change code its declared scope does not cover. Either the work belongs to "
+        "another task, or the plan drew this one's scope too small — the second is a scope change to "
+        "an approved plan, which is yours to make.",
+    ),
+    (
+        "agent_blocked",
+        "rein task reset {task} --fresh --reason <what you repaired>",
+        "{task}'s implementer reported that it could not do this, and said why. Read that, repair "
+        "what it names, then reset — `--fresh` discards the record of the attempt so the next one is "
+        "not refused as a question already answered.",
+    ),
+    (
+        "no_implementation",
+        "rein task reset {task} --fresh --reason <what you repaired>",
+        "{task}'s implementer produced no change at all. A quality gate green over an unchanged tree "
+        "is a fact about code that was already there, so the loop refused it — and it will refuse the "
+        "same tree again until something outside it is repaired.",
+    ),
+    (
+        "report_mismatch",
+        "rein task reset {task} --fresh --reason <what you repaired>",
+        "{task}'s implementer named paths it did not change. Its account of its own work is wrong, "
+        "which is a finding whatever the tests said.",
+    ),
+)
+
+
+def _mapping(entry: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    """`entry[key]` when it is a mapping, else {} — every field below is read defensively."""
+    value = entry.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def blocked_recovery(state: models.State | None) -> Recommendation | None:
+    """The one command that moves the first blocked task, or None when none is blocked.
+
+    A blocked task had no row in the decision table at all. `rein build` escalated `no_runnable`
+    and stopped; `rein next` went on answering "the build phase is in progress — run /build",
+    which re-ran the loop into the same wall. Whether the right move was a retry, a fix to the
+    machine, or a change to the plan was left to be guessed, and the reported cycle guessed it by
+    trying all three in turn.
+    """
+    if state is None:
+        return None
+    tasks = state.raw.get("tasks")
+    if not isinstance(tasks, dict):
+        return None
+    for task_id in sorted(tasks):
+        entry = tasks[task_id]
+        if not isinstance(entry, dict) or entry.get("status") != "blocked":
+            continue
+        handoff = _mapping(entry, "handoff")
+        kind = str(_mapping(handoff, "escalation").get("kind", ""))
+        for known, command, reason in _BLOCKED_RECOVERY:
+            if kind == known:
+                return Recommendation(
+                    command=command.format(task=task_id),
+                    kind="fix",
+                    reason=reason.format(task=task_id),
+                    also=("rein status", "rein events --summary"),
+                )
+        fault = _mapping(handoff, "last_fault")
+        # The name the enum member carries, read from it rather than spelled again — the
+        # stored value is `fault.fault.name` (`build_loop.fault_note`), and a literal here
+        # would be a second spelling of one vocabulary that nothing checks.
+        if str(fault.get("kind", "")) == faults.Fault.ENV_PERMANENT.name:
+            return Recommendation(
+                command="rein doctor",
+                kind="fix",
+                reason=f"{task_id} stopped on a machine failure a re-run cannot fix "
+                f"({fault.get('where', 'a launch')} exited {fault.get('rc', '?')}). Nothing about the code "
+                "was judged, so there is nothing to reset until the machine is repaired.",
+                also=("rein events --summary",),
+            )
+        if futile := str(handoff.get("futile", "")):
+            return Recommendation(
+                command=f"rein task reset {task_id} --fresh --reason <what you repaired>",
+                kind="fix",
+                reason=f"{task_id} stopped rather than spending another send-back: {futile[:200]}. The break "
+                "is outside what this task can reach, so another attempt buys the same answer.",
+                also=("rein status",),
+            )
+        step = str(handoff.get("failed_step", "")) or "a quality-gate step"
+        return Recommendation(
+            command=f"rein task reset {task_id} --reason <what changed>",
+            kind="fix",
+            reason=f"{task_id} spent its send-back budget on '{step}' and it is still red. Read what it "
+            "said, decide whether the code or the plan is wrong, and reset it for another attempt — or "
+            "roll back with `/revise` if the plan is the thing that has to change.",
+            also=("rein status", f"rein task reset {task_id} --fresh --reason <what you repaired>"),
+        )
+    return None
 
 
 def _baseline_state(state: models.State | None) -> str:
@@ -801,6 +931,7 @@ def collect_status(
         open_change_requests=len(state.change_requests_for(probe_gate, "open")) if state and probe_gate else 0,
         attributed_findings=len(findings.seeds(findings.attribute(plan, review))) if plan else 0,
         baseline=_baseline_state(state),
+        blocked=blocked_recovery(state),
     )
     # A /-command only exists inside an agent whose surface was installed; recommending one in a
     # repo with no integration would send the user to a command their agent has never heard of.

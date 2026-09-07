@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from rein import events as events_mod
-from rein import models, status_api
+from rein import faults, models, status_api
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import (
@@ -756,3 +756,62 @@ def test_a_red_baseline_asks_for_a_decision_not_a_re_measurement() -> None:
 
 def test_a_measured_baseline_does_not_stand_in_the_way() -> None:
     assert status_api.next_action(**_tasks_phase(baseline="")).command == "/tasks"  # type: ignore[arg-type]
+
+
+# --- a blocked task names the one command that moves it -----------------------
+
+
+def _blocked(handoff: dict[str, object]) -> models.State:
+    return models.State({**make_state(), "tasks": {"T-001": {"status": "blocked", "handoff": handoff}}})
+
+
+def test_a_scope_violation_is_the_plans_to_widen_not_a_retry() -> None:
+    """The task did what it was asked and the plan drew its boundary too small. Resetting it buys
+    the same refusal; widening an approved scope is a human's decision."""
+    rec = status_api.blocked_recovery(_blocked({"escalation": {"kind": "scope_violation"}}))
+    assert rec is not None and rec.command.startswith("rein revise --to tasks --impacted T-001")
+
+
+def test_an_attempt_that_produced_nothing_needs_a_fresh_reset() -> None:
+    """The record of the answered question is what stops the next launch, so discarding it is the
+    move — and `--fresh` is the flag that says something outside the tree was repaired."""
+    rec = status_api.blocked_recovery(_blocked({"escalation": {"kind": "no_implementation"}}))
+    assert rec is not None and rec.command == "rein task reset T-001 --fresh --reason <what you repaired>"
+
+
+def test_a_machine_failure_is_diagnosed_rather_than_retried() -> None:
+    """Nothing about the code was judged, so there is nothing to reset until the machine is fixed."""
+    fault = {"kind": faults.Fault.ENV_PERMANENT.name, "where": "test", "rc": 127}
+    rec = status_api.blocked_recovery(_blocked({"last_fault": fault}))
+    assert rec is not None and rec.command == "rein doctor"
+
+
+def test_a_spent_send_back_budget_asks_which_half_is_wrong() -> None:
+    """The one case the loop genuinely cannot classify: a real failure it could not fix. It says
+    so, and names both exits, rather than recommending one it cannot justify."""
+    rec = status_api.blocked_recovery(_blocked({"failed_step": "check"}))
+    assert rec is not None
+    assert rec.command == "rein task reset T-001 --reason <what changed>"
+    assert "the code or the plan" in rec.reason
+
+
+def test_a_blocked_task_is_recommended_before_the_phase_command() -> None:
+    """There was no row for it at all: `rein build` escalated and stopped while this went on
+    saying "the build phase is in progress — run /build", which re-ran into the same wall."""
+    rec = status_api.next_action(
+        current_phase="build",
+        gates={"requirements": "approved", "design": "approved", "tasks": "approved", "build": "pending"},
+        counts={"todo": 0, "blocked": 1, "done": 1},
+        attention_count=0,
+        chain_defects=0,
+        uninitialized=False,
+        gate_chain_broken=False,
+        plan_missing=False,
+        unsandboxed_profiles=[],
+        blocked=status_api.blocked_recovery(_blocked({"escalation": {"kind": "agent_blocked"}})),
+    )
+    assert rec.command == "rein task reset T-001 --fresh --reason <what you repaired>"
+
+
+def test_nothing_blocked_recommends_nothing() -> None:
+    assert status_api.blocked_recovery(models.State(make_state())) is None

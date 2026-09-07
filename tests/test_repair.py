@@ -23,9 +23,7 @@ def _plan_with_scopes() -> models.Plan:
     api["scope"] = {"include": ["src/api/"]}
     ui = make_task("T-002", claim_ids=["C-002"])
     ui["scope"] = {"include": ["src/ui/"]}
-    return models.Plan(
-        make_plan(claims=[make_claim("C-001"), make_claim("C-002")], tasks=[api, ui])
-    )
+    return models.Plan(make_plan(claims=[make_claim("C-001"), make_claim("C-002")], tasks=[api, ui]))
 
 
 def _finding(fid: str, path: str) -> dict[str, Any]:
@@ -76,7 +74,7 @@ def test_findings_are_grouped_by_task_in_plan_order() -> None:
 
 
 def test_a_finding_no_declared_scope_owns_is_never_guessed_at() -> None:
-    """"No task covers this path" means the plan does not say, and picking the nearest task would
+    """ "No task covers this path" means the plan does not say, and picking the nearest task would
     be inventing the answer the attribution exists to derive."""
     routing = repair.route(
         _plan_with_scopes(),
@@ -123,6 +121,6 @@ def test_any_other_card_answer_keeps_the_subject_with_the_human() -> None:
 
 
 def test_an_ungenerated_review_routes_nothing() -> None:
-    """"It did not say" must never read as "it found nothing"."""
+    """ "It did not say" must never read as "it found nothing"."""
     assert repair.route(_plan_with_scopes(), None) == repair.Routing()
     assert repair.route(_plan_with_scopes(), models.Review(make_review())) == repair.Routing()
