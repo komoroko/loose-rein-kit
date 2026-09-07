@@ -137,15 +137,3 @@ def route(plan: models.Plan, review: models.Review | None, human: Mapping[str, o
         for task_id in sorted(by_task, key=lambda tid: order.index(tid) if tid in order else len(order))
     )
     return Routing(code=code, judgement=tuple(judgement), unowned=tuple(unowned))
-
-
-def next_step(routing: Routing, rounds_left: int) -> str:
-    """What a human should be told is happening, or has to happen. "" when nothing is blocking."""
-    if routing.repairable and rounds_left > 0:
-        subjects = sum(len(r.items) for r in routing.code)
-        return f"repairing {subjects} finding(s) across {len(routing.code)} task(s); {rounds_left} round(s) left"
-    if routing.repairable:
-        return "the repair rounds are spent and findings still stand — read them in `rein ui`"
-    if routing.judgement or routing.unowned:
-        return "what is left is a decision, not a repair — answer the cards in `rein ui`"
-    return ""

@@ -937,8 +937,14 @@ class State:
         to hit it, which then spent its whole send-back budget on a failure it had not caused and
         could not have fixed inside its own scope.
 
-        `tree_digest` binds it to the tree it was measured on, so it lapses when that tree moves —
-        the same discipline as acceptance evidence and a dispute.
+        `tree_digest` records the tree it was measured on. It is **not** a lapse-binding the way
+        acceptance evidence and a dispute are, and saying so is the point: the fingerprint is over
+        the working tree, and committing content it already covered moves it (measured — an
+        untracked file, the same file staged, and the same file committed produce three different
+        digests). Binding gate ③ to equality would refuse an approval after the commit that changed
+        no byte, and charge a full quality-gate run to get it back. What it is for is the reader and
+        the loop: `build_loop._load_baseline` says out loud when the branch has moved past the tree
+        the frozen red steps were measured on.
         """
         value = self.raw.get("baseline")
         return value if isinstance(value, dict) else {}
