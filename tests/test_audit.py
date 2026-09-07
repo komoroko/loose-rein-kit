@@ -103,7 +103,7 @@ def test_the_dependency_digest_is_over_manifests_and_nothing_else(tmp_path: Path
 
 
 def test_a_project_that_declares_no_audit_is_told_so() -> None:
-    """"We have no way to ask" is not "there is nothing wrong"."""
+    """ "We have no way to ask" is not "there is nothing wrong"."""
     assert audit.configured(models.Config(make_config())) == {}
     with pytest.raises(audit.AuditError, match="declares no"):
         audit.run(repo_mod.Repo(Path(".")), models.Config(make_config()))

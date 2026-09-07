@@ -348,8 +348,11 @@ is decided on. What is:
 - **A claim with no evidence is `unknown`, never prose.** `.rein/plan.yaml` freezes one claim per
   requirement (`R-N`/`NFR-N`) — the **Expected Model** — and `claim_ids` threads each task back to
   the claim it answers, cross-checked by `rein dag --trace`.
-- **Gate ④ compares Expected against Actual.** `rein review generate` (bound to the reviewed HEAD)
-  runs a deterministic Coverage Manifest, a **blind** extraction of what the code actually does —
+- **Gate ④ compares Expected against Actual, and repairs what it may.** `rein build` ends by
+  reading the change, fixing every blocking finding a task's declared scope owns, and reading it
+  again from cold — no gate moves, and what reaches you is what a machine cannot decide: whether a
+  `diverged` claim means the code is wrong or the plan is. The reading (`rein review generate` on
+  its own) runs a deterministic Coverage Manifest, a **blind** extraction of what the code actually does —
   that extractor is never given the plan, and is launched outside the repository so it cannot go and
   read one — the structured security review, and the Expected/Actual comparison. What it reads is
   the product: not `.rein/`, not the plan's own prose (`docs/tasks/`, the ADRs, the documents

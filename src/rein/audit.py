@@ -84,9 +84,8 @@ def staleness(record: object, *, dependencies: str, now: datetime, max_age: int)
     if not isinstance(record, dict) or not record.get("ran_at"):
         return "no dependency audit has been run — `rein audit run`"
     if record.get("passed") is not True:
-        return (
-            "the last dependency audit failed: "
-            + (str(record.get("summary", "")).strip()[:400] or "(it recorded no summary)")
+        return "the last dependency audit failed: " + (
+            str(record.get("summary", "")).strip()[:400] or "(it recorded no summary)"
         )
     bound = str(record.get("dependencies", ""))
     if dependencies and bound and bound != dependencies:
