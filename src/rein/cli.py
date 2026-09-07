@@ -69,9 +69,14 @@ VERBS: dict[str, Verb] = {
     # gates and shipping
     "approve": Verb("approve", "readiness check, then the human's confirmation at this terminal"),
     "changes": Verb("change_request", "ask for changes instead of approving (holds the gate shut)"),
-    "revise": Verb("revise", "roll back upstream (gates reset in a chain; --from-review derives the tasks)"),
+    "revise": Verb("revise", "roll back upstream on a specification defect (gates reset in a chain)"),
     "review": Verb("review", "the grounded machine review (generate --supervise waits out a capacity stop)"),
     "build": Verb("build_loop", "the deterministic /build orchestrator (--supervise: retry in-process on exit 3)"),
+    "baseline": Verb(
+        "build_loop:baseline_main",
+        "measure which quality-gate steps are already red on the work branch (gate 3 freezes it)",
+    ),
+    "audit": Verb("audit", "run and record the dependency audit gate 5 requires (it expires; the tree does not)"),
     "doctor": Verb("doctor", "read-only diagnosis: format, integrations, sandbox, plan, review"),
     "cycle-close": Verb("cycle", "archive the finished delta cycle and reset"),
     "pr-draft": Verb("pr_draft", "assemble a PR body from the SSOT (read-only)"),

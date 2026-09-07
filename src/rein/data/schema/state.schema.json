@@ -97,7 +97,7 @@
           "type": "object",
           "maxProperties": 1024,
           "propertyNames": {
-            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+            "$ref": "#/$defs/repoPath"
           },
           "additionalProperties": {
             "$ref": "#/$defs/digest"
@@ -573,6 +573,126 @@
           }
         }
       }
+    },
+    "disputed_findings": {
+      "description": "Security findings a human has contradicted, with the reason, and bound to the code the finding named. This is the durable half of `dispute_finding`: the review's own `human.dispositions` entry records that a decision card was answered and is discarded when the machine review is regenerated, which left a disputed false positive with no exit at all — the regeneration carried it forward as a prior blocker, the reviewer honestly did not re-emit it, and `security_review.resolution_of` could not close it because the code it named was correct and still there. Kept here it survives the regeneration, and it retires the way acceptance evidence does: `anchors_digest` binds the anchored text, so editing the code the dispute was about revives the finding rather than silencing it forever.",
+      "type": "object",
+      "maxProperties": 500,
+      "propertyNames": {
+        "pattern": "^SEC-[0-9]{3,}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "anchors_digest",
+          "recorded_at"
+        ],
+        "properties": {
+          "reason": {
+            "description": "Why the finding is not true. A dispute with no reason makes the review infallible in the other direction.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "anchors_digest": {
+            "description": "Digest over the finding's anchored text — each anchor's path and the exact lines it named, read from the blob it recorded. The dispute holds only while this still matches, so it is a statement about code and not about an id.",
+            "$ref": "#/$defs/digest"
+          },
+          "recorded_at": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "subject_head_sha": {
+            "description": "The commit the disputed review was taken against, so a reader can go and look at what was disputed.",
+            "$ref": "#/$defs/commit"
+          }
+        }
+      }
+    },
+    "baseline": {
+      "description": "Which quality-gate steps were already red on the work branch before any task ran, measured over the tree gate 3 was approved for. It used to be taken inside `rein build`, just before the first batch — after the approval that decided the plan was implementable — so a cycle could be approved and started against a tree that had been red for weeks, and the first task to hit the step spent its whole send-back budget on a failure it had not caused. Measured at the gate instead, a red step is something a human freezes deliberately or fixes first. `tree_digest` binds it: a baseline is a statement about one tree, and it lapses when that tree moves.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "measured_at",
+        "tree_digest",
+        "red_steps"
+      ],
+      "properties": {
+        "measured_at": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "tree_digest": {
+          "description": "The content fingerprint of the work branch the measurement was taken on.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "red_steps": {
+          "description": "The steps that failed, and what they said. Empty means the work branch was green — which is the fact the gate wants recorded, not an absence of one.",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "failure"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "failure": {
+                "description": "A compact excerpt of what the step said, so a task blocked on it can be told what the baseline already knew.",
+                "type": "string",
+                "maxLength": 4000
+              }
+            }
+          }
+        },
+        "frozen": {
+          "description": "Whether a human approved gate 3 knowing these steps were red. Absent or false with a non-empty `red_steps` holds gate 3 shut: a known-red baseline is a decision, not a discovery.",
+          "type": "boolean"
+        }
+      }
+    },
+    "dependency_audit": {
+      "description": "The last dependency audit: when it ran, against which commit, and what it said. Gate 5's one security answer that is not carried from gate 4's review, because it is the one that is not a function of the tree — so it records a date as well as a commit, and expires.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ran_at",
+        "passed",
+        "dependencies"
+      ],
+      "properties": {
+        "ran_at": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "commit": {
+          "description": "The commit it ran over, for a reader who wants to look. Not what it is bound to.",
+          "$ref": "#/$defs/commit"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "summary": {
+          "description": "What the audit said, as the human reads it beside the release decision.",
+          "type": "string",
+          "maxLength": 4000
+        },
+        "dependencies": {
+          "description": "A digest over this tree's dependency manifests and lockfiles. What the audit is about, and so what retires it — binding to the commit would retire the answer on every source edit, which is a re-run bought for nothing.",
+          "$ref": "#/$defs/digest"
+        }
+      }
     }
   },
   "$defs": {
@@ -700,6 +820,12 @@
           "$ref": "#/$defs/digest"
         }
       }
+    },
+    "repoPath": {
+      "description": "A repo-relative POSIX path. Checked for what it must not be rather than for which characters it may contain: no absolute form, no `..` segment, no empty segment, no backslash, no control character. A leading `-` is refused as well, which is not about escaping: a path that begins with one can be read as an option by any command it is handed to, and refusing it here covers every call site at once.",
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!-)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000-\\u001f]+$"
     }
   }
 }

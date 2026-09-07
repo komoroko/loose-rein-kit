@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from rein import data, diff_facts
 
 
@@ -80,8 +82,10 @@ def test_python_is_analyzed_with_ast() -> None:
     assert facts.coverage.coverage_status == "sufficient"
 
 
-def test_unsupported_language_makes_coverage_insufficient() -> None:
-    facts = diff_facts.analyze(_diff("native/module.zig", added=["const x = 1;"]))
+def test_content_nothing_can_read_makes_coverage_insufficient() -> None:
+    """An extension the table cannot name is no longer the test — text is read as text whatever it
+    is called (`_analysis_for`). What still cannot be read is content nothing can tokenize."""
+    facts = diff_facts.analyze(_diff("native/module.zig", added=["\x00\x01payload"]))
     assert facts.coverage.coverage_status == "insufficient"
     assert facts.coverage.unsupported_files[0]["path"] == "native/module.zig"
 
@@ -99,7 +103,7 @@ def test_plain_text_formats_are_scanned_not_declared_unreadable() -> None:
 
 
 def test_a_format_nothing_here_can_tokenize_is_still_unsupported() -> None:
-    facts = diff_facts.analyze(_diff("design/logo.psd", added=["\\x00binaryish"]))
+    facts = diff_facts.analyze(_diff("design/logo.psd", added=["\x00binaryish"]))
     assert facts.coverage.unsupported_files[0]["path"] == "design/logo.psd"
 
 
@@ -109,7 +113,7 @@ def test_a_manifest_naming_an_unread_file_can_actually_be_written() -> None:
     it was writable at all. The extension survives in `detail`, which is what makes it fixable."""
     from rein import models
 
-    facts = diff_facts.analyze(_diff("design/logo.psd", added=["x"]))
+    facts = diff_facts.analyze(_diff("design/logo.psd", added=["\x00x"]))
     entry = facts.coverage.to_manifest()
     assert entry["unsupported_files"] == [
         {"path": "design/logo.psd", "reason": "unsupported_language", "detail": "no analyzer for .psd"}
@@ -293,3 +297,43 @@ def test_parse_handles_multiple_files() -> None:
     diff = _diff("a.py", added=["x = 1"]) + _diff("b.py", added=["y = 2"])
     files = diff_facts.parse_diff(diff)
     assert {f.path for f in files} == {"a.py", "b.py"}
+
+
+# --- what "unsupported" is actually for ---------------------------------------
+
+
+def _one_file(path: str, *lines: str) -> str:
+    body = "".join(f"+{line}\n" for line in lines)
+    return (
+        f"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n{body}"
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["src/x.mts", "src/x.cts", "infra/Lambda.Dockerfile", "Dockerfile.prod", "LICENSE", "CODEOWNERS"],
+)
+def test_text_the_table_cannot_name_is_read_rather_than_refused(path: str) -> None:
+    """The extension is how the language is *named*, not how readability is *decided*.
+
+    It was both, so `.mts` and `Lambda.Dockerfile` came back `unsupported_language` — which makes
+    coverage `insufficient`, which shuts gate ④, whose stated remedy ("split the unreadable part
+    out of this scope") cannot be carried out on the TypeScript module the change is about.
+    """
+    manifest = diff_facts.analyze(_one_file(path, "export const a = 1;")).coverage
+    assert manifest.unsupported_files == ()
+    assert manifest.analyzed_files == 1
+
+
+def test_bytes_nothing_can_tokenize_are_still_unsupported() -> None:
+    """`unsupported` keeps its meaning. A control character that is not whitespace is what
+    separates text this could not name from bytes no source file carries on purpose."""
+    manifest = diff_facts.analyze(_one_file("assets/blob.dat", "\x00\x01payload")).coverage
+    assert [u["path"] for u in manifest.unsupported_files] == ["assets/blob.dat"]
+
+
+def test_a_named_language_still_wins_over_the_fallback() -> None:
+    """The fallback answers `text`; the table is what can say `python` and `ast`."""
+    manifest = diff_facts.analyze(_one_file("src/app.py", "x = 1")).coverage
+    assert manifest.languages == {"python": "ast"}

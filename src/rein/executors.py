@@ -31,11 +31,12 @@ sandbox a review runs in is reproducible from the repository, not fetched.
 
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rein import common, data, digests, models
+from rein import common, data, digests, faults, models
 
 # Prefer docker; podman is a drop-in for the flags used here.
 _RUNTIMES = ("docker", "podman")
@@ -105,6 +106,11 @@ class HostExecutor(Executor):
         return ExecutionResult(exit_code=rc, output=out, image_digest="host", timed_out=rc == common.RC_TIMEOUT)
 
 
+#: What a container the kernel killed exits with (128 + SIGKILL). The cgroup OOM killer is the
+#: overwhelmingly common cause under `--memory`, and it is the one this names.
+_RC_SIGKILL = 137
+
+
 @dataclass(frozen=True)
 class OciExecutor(Executor):
     """Runs inside a digest-pinned container, hardened per the module docstring."""
@@ -146,6 +152,15 @@ class OciExecutor(Executor):
 
         argv = self._argv(spec, reference)
         rc, out = common.run(argv, timeout=spec.timeout_sec)
+        if rc == _RC_SIGKILL:
+            # The kernel's OOM killer, in all but name: a container that exceeds its cgroup limit
+            # is SIGKILLed, and rc alone cannot say so. Saying it here is what turns "the step
+            # exited 137" into something a person can act on — and what lets `faults` stop reading
+            # a memory ceiling as a fact about the code (`faults.is_sandbox_oom`).
+            out += (
+                f"\n{faults.OOM_NOTE} {common.as_int(profile.raw.get('memory_mb'), 1024)} MiB "
+                f"(profile {profile.name!r}, `executors.executor_profiles.{profile.name}.memory_mb`)."
+            )
         return ExecutionResult(exit_code=rc, output=out, image_digest=digest, timed_out=rc == common.RC_TIMEOUT)
 
     def _argv(self, spec: ExecutionSpec, reference: str | None = None) -> list[str]:
@@ -175,7 +190,13 @@ class OciExecutor(Executor):
         tmp_mb = profile.raw.get("writable_tmp_mb", 512)
         argv += ["--tmpfs", f"/tmp:size={int(tmp_mb) if isinstance(tmp_mb, int) else 512}m,mode=1777"]
         argv += ["--pids-limit", str(common.as_int(profile.raw.get("pids_limit"), 256))]
-        argv += ["--memory", f"{common.as_int(profile.raw.get('memory_mb'), 1024)}m"]
+        memory_mb = common.as_int(profile.raw.get("memory_mb"), 1024)
+        argv += ["--memory", f"{memory_mb}m"]
+        # Stated, because the engine's default is not what the profile says. Docker gives a
+        # container twice its `--memory` in memory+swap unless told otherwise, so a step declared
+        # to have 1 GiB could reach 2 — and a run that survives on swap is not the run the
+        # measurement was about. Equal values mean no swap at all: the limit is the limit.
+        argv += ["--memory-swap", f"{memory_mb}m"]
         argv += ["--cpus", str(common.as_int(profile.raw.get("cpu_count"), 2))]
         # An empty, ephemeral HOME: the container cannot read the host's ~/.ssh, ~/.aws, etc.
         argv += ["--env", "HOME=/tmp"]
@@ -197,6 +218,28 @@ class OciExecutor(Executor):
         argv.append(reference or profile.image)
         argv += list(spec.command)
         return argv
+
+
+def engine_memory_mb(runtime: str) -> int:
+    """How much memory the container engine reports it can hand out, or 0 when it does not say.
+
+    `docker info` / `podman info` carry it; a Docker Desktop VM's ceiling is what this is actually
+    about, because that is the number an operator has to raise and the one nothing in the
+    repository can see. 0 means "not measured", which the caller must not read as "not enough".
+    """
+    rc, out = common.run([runtime, "info", "--format", "{{json .}}"], timeout=15)
+    if rc != 0:
+        return 0
+    try:
+        info = json.loads(out)
+    except (json.JSONDecodeError, ValueError):
+        return 0
+    # docker: `MemTotal` in bytes. podman: `host.memTotal`.
+    total = info.get("MemTotal")
+    if not isinstance(total, int):
+        host = info.get("host")
+        total = host.get("memTotal") if isinstance(host, dict) else None
+    return int(total) // (1024 * 1024) if isinstance(total, int) and total > 0 else 0
 
 
 def for_profile(profile: models.ExecutorProfile) -> Executor:

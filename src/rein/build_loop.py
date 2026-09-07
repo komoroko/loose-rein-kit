@@ -61,6 +61,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -82,19 +83,29 @@ from rein import (
     gate_guard,
     human_review,
     models,
+    pr_stack,
     preflight,
     review_cache,
     review_policy,
     review_reading,
     review_transport,
     run_record,
+    status_api,
     strict_yaml,
+)
+from rein import (
+    repair as repair_mod,
 )
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
 
 logger = logging.getLogger(__name__)
+
+#: Where a gate-④ repair stands when this cycle ships as a stack: a throwaway worktree on the slice
+#: branch that introduced the code. Its own name rather than `pr_stack.RESTACK_WORKTREE`, because
+#: the propagation that follows creates that one and git refuses the same path twice.
+_GATE4_WORKTREE = "_gate4"
 
 #: What the integration reviewer's findings file is named after. Not a task id — the subject is the
 #: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
@@ -805,7 +816,8 @@ class Orchestrator:
         # that with `blocked` would file a defect in the plan as a defect in the code.
         self._stops: dict[str, str] = {}
         # DoD steps already red on the work branch before any task ran, and what they said. A task
-        # that fails one of these is not sent back to an implementer: `_establish_baseline`.
+        # that fails one of these is not sent back to an implementer: `_load_baseline` reads the
+        # record gate ③ froze.
         self._baseline_red: dict[str, str] = {}
         self._baseline_taken = False
 
@@ -2094,7 +2106,7 @@ class Orchestrator:
         is the *observation* instead, which is tool-agnostic and exact:
 
           **It was already red.** The step failed on the work branch before any task ran
-          (`_establish_baseline`). Sending an implementer back to fix a break it did not cause, in
+          (the baseline gate ③ froze). Sending an implementer back to fix a break it did not cause, in
           a scope that does not contain it, is three launches spent on a question nobody asked.
 
           **Nothing moved.** The same step failed with byte-identical output over a tree with the
@@ -2847,8 +2859,8 @@ class Orchestrator:
             promoted = True
         return promoted
 
-    def _establish_baseline(self) -> None:
-        """Which DoD steps are already red on the tree no task has touched yet.
+    def measure_baseline(self) -> dict[str, Any]:
+        """Run the task-stage DoD over the work branch's tip and return the record to freeze.
 
         The reported case: a run's tasks stopped, one after another, on a `check` that a
         dependency drift had broken weeks earlier. Each one spent its whole send-back budget —
@@ -2858,39 +2870,84 @@ class Orchestrator:
 
         The loop could not tell those apart from a real regression because it had never asked the
         one question that separates them: *was this step red before the task touched anything?*
-        Asked once here, against the work branch's tip, and answered by the same runner and the
-        same evidence ledger the gate itself uses — so on an unmoved tree it is a cache hit and
-        costs nothing.
 
-        Taken once, and only when a batch is actually about to run: a `rein build` that finds every
-        task done goes straight to gate ④, and paying a full gate run there answers nothing.
+        It is asked here, and **at gate ③ rather than inside the build**. Taken just before the
+        first batch, it was taken after the approval that had already decided this plan was
+        implementable against this tree — so a cycle could be approved and started on a tree that
+        had been red for weeks, and the discovery was the first task's to make and to pay for. The
+        gate is where a red step is either fixed or frozen as a deliberate, recorded decision.
+
+        Answered by the same runner and the same evidence ledger the gate itself uses, so on an
+        unmoved tree it is a cache hit and costs nothing.
 
         Recording, not refusing. A cycle whose first task is "fix the failing tests" is a
         legitimate thing to start, and the implementer runs *before* the gate: if it fixed the
-        step, the step goes green and none of this applies. What changes is only what happens when
-        it is still red — `_run_task_to_done` stops rather than buying the same failure three more
-        times.
+        step, the step goes green and none of this applies. What a frozen red changes is only what
+        happens when it is still red — the loop stops rather than buying the same failure three
+        more times.
+        """
+        red: list[dict[str, str]] = []
+        for step in self._steps_at("task"):
+            if step.kind != "command" or not step.command:
+                continue
+            failure = self._run_cmd_step(step, self.root)
+            if failure:
+                red.append({"name": step.name, "failure": failure[:4000]})
+        return {
+            "measured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "tree_digest": self._fingerprint(self.root),
+            "red_steps": red,
+        }
+
+    def _load_baseline(self) -> None:
+        """Read the baseline gate ③ froze. Refuse the run when there is none to read.
+
+        A pure read: the measurement belongs to the gate, and re-taking it here would measure
+        whatever tree this run happens to be resuming into — a tree with tasks already landed in
+        it, which is not a baseline at all.
         """
         if self.dry_run or self._baseline_taken:
             return
         self._baseline_taken = True
-        steps = [s for s in self._steps_at("task") if s.kind == "command" and s.command]
-        for step in steps:
-            try:
-                failure = self._run_cmd_step(step, self.root)
-            except EnvironmentFault:
-                # Not a fact about the code either way, and the run is about to hit it again for
-                # real. Leave it to the batch, which knows how to abort without marking anything.
-                return
-            if failure:
-                self._baseline_red[step.name] = failure
+        recorded = self.state.baseline if self.state else {}
+        if not recorded:
+            raise StopLoop(
+                "no baseline is recorded for this work branch, so a step that was already red "
+                "cannot be told apart from one this run broke. Measure it with "
+                "`rein baseline measure` — gate ③ is what it belongs to.",
+                code=common.EXIT_HUMAN_NEEDED,
+            )
+        self._baseline_red = dict(self.state.baseline_red() if self.state else {})
+        tree = self._fingerprint(self.root)
+        moved = tree and recorded.get("tree_digest") and tree != recorded["tree_digest"]
         if self._baseline_red:
             print(
-                f"    [baseline] already red on the work branch before any task ran: "
-                f"{', '.join(sorted(self._baseline_red))}"
+                f"    [baseline] frozen red at gate ③: {', '.join(sorted(self._baseline_red))}"
+                + (" (measured over a tree this branch has since moved past)" if moved else "")
             )
 
     def _run_loop(self) -> int:
+        """Consume the DAG, then close gate ④. One handler for both, which is the point.
+
+        `StopLoop` and `EnvironmentFault` used to be caught per batch, inside the `while` — so the
+        two calls that are *not* in a batch, `_load_baseline` and `_close_gate4`, had nowhere to
+        land. `common.StopLoop` is not a `common.ReinError`, so `cli.main` does not catch it
+        either: a build with no recorded baseline reported the sentence it had been given to say
+        as a traceback and exit 1, instead of that sentence and `EXIT_HUMAN_NEEDED`. The boundary
+        belongs where the run ends, not where one batch does.
+        """
+        try:
+            return self._consume()
+        except StopLoop as exc:
+            logger.error(str(exc))
+            return exc.code
+        except EnvironmentFault as fault:
+            # Never start the next batch into the same broken environment: whatever stopped this
+            # launch would stop the next one, one wasted task at a time. The same answer serves
+            # gate ④, where no task is running and there is nothing to mark either way.
+            return self._abort_run(fault)
+
+    def _consume(self) -> int:
         self._recover_in_progress()
         while True:
             graph = self._load_graph()
@@ -2899,15 +2956,20 @@ class Orchestrator:
             counts = graph.counts()
             unfinished = len(graph.tasks) - counts["done"]
             if unfinished == 0:
-                return self._present_gate4(graph)
+                return self._close_gate4(graph)
 
             batch = plan_batch(graph, self.config.max_parallel)
             if batch is None:
                 # frontier empty & there are unfinished ones = all blocked/needs-revision. To the human.
+                # With the one command that moves it, taken from the same table `rein next` reads:
+                # "help needed" and nothing else is what sent a reported cycle round reset, salvage
+                # and re-approval until one of them happened to be the right move.
                 blocked = [t.id for t in graph.tasks if t.status in ("blocked", "needs-revision")]
+                recovery = status_api.blocked_recovery(self.store.read_state())
                 self._escalate(
                     "no_runnable",
-                    f"No runnable tasks and {unfinished} unfinished ({', '.join(blocked)}). Help needed.",
+                    f"No runnable tasks and {unfinished} unfinished ({', '.join(blocked)})."
+                    + (f"\n{recovery.reason}\n  {recovery.command}" if recovery else " Help needed."),
                 )
                 return common.EXIT_HUMAN_NEEDED
 
@@ -2915,20 +2977,12 @@ class Orchestrator:
             # Here rather than at the top of the run: a `rein build` that finds every task done goes
             # straight to gate ④, and a full gate run at the root to answer a question no task is
             # going to ask is exactly the waste this exists to end.
-            self._establish_baseline()
+            self._load_baseline()
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
-            try:
-                if mode == "serial" or not self.config.worktree_enabled:
-                    self._consume_serial(tasks)
-                else:
-                    self._consume_parallel(tasks)
-            except StopLoop as exc:
-                logger.error(str(exc))
-                return exc.code
-            except EnvironmentFault as fault:
-                # Never start the next batch into the same broken environment: whatever stopped
-                # this launch would stop the next one, one wasted task at a time.
-                return self._abort_run(fault)
+            if mode == "serial" or not self.config.worktree_enabled:
+                self._consume_serial(tasks)
+            else:
+                self._consume_parallel(tasks)
             # Recompute at the top of the loop after each batch (reassemble the chain).
 
     def _consume_serial(self, tasks: list[dag.Task]) -> None:
@@ -3166,34 +3220,321 @@ class Orchestrator:
 
     # -- handing over to the review pipeline -----------------------------------
 
-    def _present_gate4(self, graph: dag.Graph) -> int:
-        """All tasks done. Say what still has to happen — and what has NOT been established.
+    def _close_gate4(self, graph: dag.Graph) -> int:
+        """All tasks done: read the change, repair what this loop may, present the rest.
 
-        (There is no "you left a step empty" nudge here any more: the config schema requires a
-        `command` for every command step, so an empty one cannot reach this code. The scaffold
-        ships a placeholder `["true"]` instead, which `doctor.check_quality_gate` reports and a
-        silent skip cannot.)
+        **Inside a task, judging and repairing were both automated; at gate ④ only judging was.**
+        `_run_agent_step` runs a reviewer, hands its `must_fix` findings to an implementer, and
+        has the reviewer look again — no human in it. Gate ④ produced findings and printed three
+        commands for somebody to type, and the only route back into the code was `rein revise
+        --to build --from-review`, which marks the task *and its whole dependent closure*
+        `needs-revision` — the status reserved for a defect in the specification. `status_api`
+        then demanded a `/tasks` reconcile and a re-approval of gate ③, for a repair that changes
+        no requirement, no claim and no plan. Reset, salvage, re-approve, round again.
 
-        This deliberately does not invite an approval. Green tests plus an AI's summary is not
-        evidence that the code does what the plan says: gate ④ approves a grounded review — a
-        blind extraction of actual behaviour, compared against the frozen plan, with a coverage
-        manifest saying what could not be analysed — and this loop has produced none of that.
+        So the same shape runs here: read, repair what a task's declared scope owns, read again
+        from cold. What reaches a human is what a human is actually for — deciding whether a
+        `diverged` claim means the code is wrong or the plan is, and whether an extra behaviour
+        nobody asked for is unwanted (`repair.route`).
+
+        Four things keep this from being an agent marking its own work, and none of them is new:
+
+        * The fixer is an implementer, never a reviewer. Whoever judges does not repair.
+        * A repair that reaches outside the task's declared scope blocks rather than lands, by the
+          same check every task's work goes through.
+        * A repair cannot become a plan change: `gate_guard` denies a write to `plan.yaml` or
+          `config.yaml` while the plan is frozen, which it is from gate ③ onward.
+        * Whether a finding closed is decided by the *next* round's review — a blind reading with
+          no memory of having raised it — never by the fixer's account of its own work.
+
+        And it is bounded. The failure this has to survive is a false positive, where repairing
+        converges on nothing; `review_policy.repair_rounds` is the ceiling, after which what still
+        stands goes to the human with the record of what was tried.
+
+        It still cannot open the gate, and neither can anything else: a gate opens only on the
+        gate name typed at an interactive terminal, recorded by `rein approve` itself.
         """
         print("\n========== all tasks done ==========")
         print(dag.render(graph))
         for measured in (self.ledger.summary(), self.spend_summary()):
             if measured:
                 print(measured)
-
         print(
-            "\nWhat this run established: every task's code passed the configured quality gate.\n"
-            "What it did NOT establish: that the code does what the plan claims.\n"
-            "\nNext:\n"
-            "  1. rein review generate   — coverage manifest, blind actual extraction,\n"
-            "                                   conformance comparison, security and maintainability review\n"
-            "  2. rein ui                — read the scope and the orient brief, then answer the\n"
+            "\nWhat the tasks established: every task's code passed the configured quality gate.\n"
+            "What that did NOT establish: that the code does what the plan claims. Green tests plus\n"
+            "an agent's summary is not evidence of conformance — the grounded review below is what\n"
+            "asks that question, and a human is what answers what it cannot."
+        )
+        rounds = self.config.raw.repair_rounds
+        routing = repair_mod.Routing()
+        if self.dry_run:
+            print("\n[dry-run] the grounded review and its repair rounds are not run.")
+            return self._present_gate4(routing, rounds, read=False)
+        if rounds == 0:
+            # `repair_rounds: 0` says this loop does not repair its own findings, and reading the
+            # change here would then buy nothing it could act on — the human runs `rein review
+            # generate` and reads it in the dashboard, exactly as before this loop existed.
+            print("\n[gate 4] `review_policy.repair_rounds` is 0 — this run takes no reading.")
+            return self._present_gate4(routing, rounds, read=False)
+
+        # The same frozen baseline every task ran against. `_consume` reads it before a batch, and
+        # a run that finds every task already done never reaches that line — which is exactly the
+        # run that repairs here. Without it `_repair` has no record of which steps gate ③ approved
+        # as already red, and it stops the loop over a failure the plan was approved on top of.
+        self._load_baseline()
+        repaired, read = 0, False
+        for round_no in range(rounds + 1):
+            print(f"\n[gate 4] reading the change ({'first reading' if not round_no else f'round {round_no}'})")
+            if not self._generate_review():
+                break
+            read = True
+            routing = repair_mod.route(self._plan or models.Plan({}), self.store.read_review())
+            print(routing.render())
+            if not routing.repairable or round_no == rounds:
+                break
+            for item in routing.code:
+                self._repair(graph, item)
+                repaired += len(item.items)
+        return self._present_gate4(routing, rounds, repaired, read=read)
+
+    def _generate_review(self) -> bool:
+        """Take the grounded review. False when it could not be taken, and why is printed.
+
+        **A reading that fails does not un-finish the build.** The tasks are done, their evidence
+        is recorded, and the review is a separate question asked afterwards — so anything but a
+        capacity stop is reported and handed over exactly as it was before this loop existed. The
+        gate stays shut either way: `approve.readiness` refuses a gate ④ with no generated review,
+        so nothing here can turn a failed reading into an approval.
+
+        A capacity stop is the one thing worth waiting for, and it is `main`'s to wait on:
+        `EXIT_RETRY_LATER` is what `--supervise` retries, and every stage that did answer is
+        already in the review cache, so the retry re-reads only what is missing.
+        """
+        from rein import review as review_mod
+
+        try:
+            review_mod.generate(self.repo, review_transport.StagedReviewers(self.repo), actor="rein build")
+            return True
+        except review_policy.AdapterFailure as failure:
+            if faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT:
+                raise StopLoop(
+                    f"the grounded review could not be taken: {failure}. Nothing is lost — every stage that "
+                    "answered is cached. Re-run `rein build` (or `rein review generate --supervise`).",
+                    code=common.EXIT_RETRY_LATER,
+                ) from None
+            print(f"\n[gate 4] the reading could not be taken: {failure}")
+        except (
+            review_reading.ReviewError,
+            review_policy.ReviewPolicyError,
+            review_transport.TransportError,
+            adapters.LaunchRefused,
+            models.DocumentError,
+            store_mod.StoreError,
+        ) as exc:
+            print(f"\n[gate 4] the reading could not be taken: {exc}")
+        print("Run `rein review generate` yourself once that is repaired — the gate needs one either way.")
+        return False
+
+    def _repair(self, graph: dag.Graph, item: repair_mod.Repair) -> None:
+        """One implementer launch against one task's share of gate ④'s findings, then the DoD.
+
+        **Where the fix is committed is decided by whether this cycle is shipping as a stack.**
+
+        A single pull request has one place for it: the work branch, where every task is already
+        merged and where the findings are about the only tree that exists.
+
+        A stack does not. Its slices are cut along the tasks' `completed_commit`s, so a commit made
+        at the tip belongs to the tail — a pull request that is not the one holding the code the
+        finding is about, which is where a reviewer looking at that pull request would go to see
+        whether it was answered. `AGENTS.md` says what to do instead, and it is what `--restack`
+        exists for: **the fix is committed onto the slice that introduced the code, and carried
+        upward by merging.** Nothing is rewritten, so no open pull request is force-pushed and no
+        `completed_commit` is stranded.
+
+        So the slice's branch is checked out in a scratch worktree, the implementer runs *there*,
+        and `pr_stack.restack` walks it up the chain into the work branch. The DoD then runs at the
+        root, over the merged result — because what the quality gate is asked about is the tree the
+        gate ④ reading will read, never the slice in isolation.
+        """
+        task = next((t for t in graph.tasks if t.id == item.task_id), None)
+        if task is None:  # a finding attributed to a task the graph no longer has
+            print(f"    [gate 4] {item.task_id} is not in the plan any more — leaving its findings to the human")
+            return
+        print(f"    [gate 4] {task.id}: {len(item.items)} finding(s) → the implementer")
+        slice_branch = self._slice_branch(task.id)
+        if slice_branch:
+            self._repair_on_slice(task, item, slice_branch)
+        else:
+            self._repair_on_work_branch(task, item)
+        self._gate_after_repair(task)
+
+    def _slice_branch(self, task_id: str) -> str:
+        """The stack branch that introduced this task's code, or "" when this is not a stack.
+
+        Read from the same `pr_stack.derive` the stack itself is cut with, and only counting a
+        branch that actually exists: before `rein pr-stack` materialises them, `derive` still names
+        branches, and committing onto a name nothing points at would be inventing the stack rather
+        than joining it. Any refusal `derive` makes — no plan, no base commit, a work branch that
+        does not resolve — means the same thing here: there is no stack, so the work branch is the
+        place.
+        """
+        if self.dry_run:
+            return ""
+        try:
+            docs = pr_stack.Documents.read(self.repo)
+            slices = pr_stack.derive(self.repo, docs)
+        except (pr_stack.StackError, dag.DagError, models.DocumentError, store_mod.StoreError) as exc:
+            print(f"    [gate 4] no stack to place this on ({exc}) — the work branch it is")
+            return ""
+        found = next((s for s in slices if s.task_id == task_id), None)
+        if found is None or found.branch == self.branch:
+            return ""
+        return found.branch if review_reading.commit_exists(self.repo, found.branch) else ""
+
+    def _repair_on_work_branch(self, task: dag.Task, item: repair_mod.Repair) -> None:
+        """The single-pull-request case: repair where everything is already merged."""
+        before = self.ws.head()
+        self._launch(
+            adapters.command(
+                self.config.adapter_argv,
+                build_prompts.gate_four_fix_prompt(task, item.render(), gate_cmds=self.config.gate_cmds),
+                access=adapters.WRITE,
+            ),
+            cwd=self.root,
+            where=f"{task.id}: the gate-4 repair",
+            task_id=task.id,
+            role="implementer",
+        )
+        self._accept_repair(task, self.root, before)
+
+    def _repair_on_slice(self, task: dag.Task, item: repair_mod.Repair, branch: str) -> None:
+        """The stacked case: repair on the slice that introduced the code, then merge it upward."""
+        print(f"    [gate 4] {task.id}: on its own slice {branch}, then up the stack")
+        with build_git.scratch_worktree(self.repo, self.config.worktree_dir, _GATE4_WORKTREE, branch, common.run) as (
+            path
+        ):
+            before = self.ws.head(cwd=path)
+            self._launch(
+                adapters.command(
+                    self.config.adapter_argv,
+                    build_prompts.gate_four_fix_prompt(task, item.render(), gate_cmds=self.config.gate_cmds),
+                    access=adapters.WRITE,
+                ),
+                cwd=path,
+                where=f"{task.id}: the gate-4 repair on {branch}",
+                task_id=task.id,
+                role="implementer",
+            )
+            self._accept_repair(task, path, before)
+        self._propagate(task)
+
+    def _accept_repair(self, task: dag.Task, cwd: str, before: str) -> None:
+        """Check what the repair touched, then commit it. Raises rather than letting either slide.
+
+        **The next reading is over committed history**, so an uncommitted repair is one that never
+        happened: `review.generate` resolves HEAD and digests the committed tree, the machine half
+        comes out byte-identical, and "nothing this review is made of has moved" reads as the
+        finding still standing. The implementer is told to commit; that is an instruction, not
+        evidence, which is why every task finalizes its own diff (`build_git.finalize_commit`).
+        """
+        changed = self.ws.changed_since(before, cwd=cwd) if before else []
+        if violations := self._gate_violations(changed):
+            raise StopLoop(
+                f"{task.id}: the gate-4 repair changed gate-guarded paths while their gate is pending:\n"
+                + "\n".join(f"  - {path}: {why}" for path, why in violations),
+                code=common.EXIT_HUMAN_NEEDED,
+            )
+        if outside := dossier.scope_violations(task, changed):
+            raise StopLoop(
+                f"{task.id}: the gate-4 repair changed {', '.join(outside)}, which its declared scope does "
+                "not cover. A repair that reaches into another task's territory is a scope change, and a "
+                "scope change to an approved plan is a human's decision.",
+                code=common.EXIT_HUMAN_NEEDED,
+            )
+        if not self.ws.finalize_commit(cwd, f"{task.id}: gate-4 repair"):
+            raise StopLoop(
+                f"{task.id}: the gate-4 repair could not be committed. The fix is in the tree and nothing "
+                "has been lost; commit it yourself, then re-run `rein build`.",
+                code=common.EXIT_HUMAN_NEEDED,
+            )
+
+    def _propagate(self, task: dag.Task) -> None:
+        """Carry a slice's repair up the stack by merging, never by rewriting.
+
+        The same walk `rein pr-stack --restack` performs, run here because the repair is only half
+        done while the work branch does not have it: the DoD, the next reading and the gate receipt
+        are all about the work branch. A conflict is classified before it is resolved and only the
+        mechanical kind is carried through — the rest stops the run, exactly as it does for a human
+        who runs `--restack` by hand.
+        """
+        docs = pr_stack.Documents.read(self.repo)
+        result = pr_stack.restack(
+            self.repo,
+            docs,
+            pr_stack.derive(self.repo, docs),
+            implement=self.resolve_conflict,
+            quality_gate=self.task_gate,
+        )
+        if not result.ok:
+            resolution = result.resolution
+            raise StopLoop(
+                f"{task.id}: the repair is committed on its own slice, and carrying it up the stack stopped at "
+                f"{result.stopped_at}: {resolution.escalation if resolution else 'the merge did not complete'}. "
+                "Nothing is lost and nothing was rewritten — resolve it and run `rein pr-stack --restack`.",
+                code=common.EXIT_HUMAN_NEEDED,
+            )
+        print(f"    [gate 4] {task.id}: {len(result.merged)} branch(es) advanced to carry the repair up the stack")
+
+    def _gate_after_repair(self, task: dag.Task) -> None:
+        """The task-stage DoD over the work branch, which is where the repair has now landed.
+
+        A step the baseline froze red at gate ③ is not this repair's to answer: it was red before
+        any task ran, a human approved the plan over it on the record, and stopping the run here
+        would re-stage the discovery that the frozen baseline exists to prevent.
+        """
+        for step in self._steps_at("task"):
+            if step.kind != "command" or not step.command:
+                continue
+            if failure := self._run_cmd_step(step, self.root):
+                if step.name in self._baseline_red:
+                    print(f"    [gate 4] '{step.name}' is red, and was already red at gate ③ — not this repair's")
+                    continue
+                raise StopLoop(
+                    f"{task.id}: the gate-4 repair left '{step.name}' red:\n{failure}",
+                    code=common.EXIT_HUMAN_NEEDED,
+                )
+
+    def _present_gate4(self, routing: repair_mod.Routing, rounds: int, repaired: int = 0, *, read: bool = True) -> int:
+        """What is left after the repair rounds, and what a human has to do about it.
+
+        This deliberately does not invite an approval. The review is read in the dashboard, the
+        Decision Cards are answered there, and the gate is opened at a terminal by a person.
+        """
+        print("\n========== gate 4 ==========")
+        # An empty routing means two different things and only one of them is "nothing blocking":
+        # a reading that was taken and found nothing, and a reading that could not be taken at all.
+        # Printing the first over the second put the reassurance two lines under the failure.
+        print(routing.render() if read else "  no reading was taken, so nothing here has been judged.")
+        if repaired:
+            print(
+                f"\n{repaired} finding(s) repaired. Each fix is committed where a review fix belongs: on the "
+                "slice that introduced the code when this cycle is a stack — carried up by merging, so nothing "
+                f"is rewritten — and on {self.branch or 'the work branch'} when it is a single pull request."
+            )
+        if routing.repairable:
+            print(
+                f"\n{rounds} repair round(s) are spent and findings still stand. A finding that survives "
+                "being repaired and re-read is either real and harder than it looked, or was never true — "
+                "and this loop cannot tell those apart. Read them, and dispute the ones that are wrong.\n"
+            )
+        print(
+            "Next:\n"
+            "  1. rein ui                — read the scope and the orient brief, then answer the\n"
             "                                   Decision Cards and freeze the review\n"
-            "  3. rein approve build     — readiness check, then your confirmation at the terminal\n"
+            "  2. rein approve build     — readiness check, then your confirmation at the terminal\n"
+            "\nAn answer of `revise_implementation` on a card hands that subject back to this loop: it\n"
+            "says the code is what is wrong, which is the one thing the review cannot decide for itself.\n"
+            "Re-run `rein build` afterwards and it will be repaired like any other finding.\n"
             "\nThis loop cannot open gate 4, and neither can anything but a human: a gate opens only on\n"
             "the gate name typed at an interactive terminal, recorded by `rein approve` itself."
         )
@@ -3275,6 +3616,83 @@ def _supervise(config: Config, repo: repo_mod.Repo, interval_sec: int) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def baseline_main(argv: list[str] | None = None) -> int:
+    """`rein baseline measure` — what the work branch's quality gate says before any task runs.
+
+    Its own verb, and gate ③'s rather than the build's, because the question is about the *tree*:
+    is this plan implementable against what is here now? Taken inside `rein build` it was taken
+    after the approval that had already answered that, so a cycle could start on a tree that had
+    been red for weeks and the first task paid three implementer launches to find out.
+
+    Runs the DoD, so it takes the build lock and goes through the executor profiles like any other
+    step — this runs repository code, and it does not get a pass for being a measurement.
+    """
+    parser = argparse.ArgumentParser(description="measure the work branch's quality gate before any task runs")
+    sub = parser.add_subparsers(dest="action", required=True)
+    measure = sub.add_parser("measure", help="run the task-stage DoD over the work branch and record the result")
+    measure.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    measure.add_argument(
+        "--freeze",
+        action="store_true",
+        help="approve the red steps as known and expected — without it a red baseline holds gate 3 shut",
+    )
+    args = parser.parse_args(argv)
+    common.configure_logging()
+
+    try:
+        repo = repo_mod.get(args.repo)
+    except repo_mod.RepoNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+    try:
+        config = Config.load(repo)
+    except (OSError, ValueError, adapters.LaunchRefused, models.DocumentError, strict_yaml.StrictParseError) as exc:
+        logger.error(f"cannot load .rein/config.yaml: {exc} — `rein doctor` validates it")
+        return 1
+
+    orchestrator = Orchestrator(config, dry_run=False, repo=repo)
+    store = store_mod.Store(repo)
+    try:
+        with build_lock(repo):
+            record = orchestrator.measure_baseline()
+    except EnvironmentFault as fault:
+        logger.error(f"the baseline could not be measured: {fault}")
+        return 1
+    record["frozen"] = bool(args.freeze)
+
+    # Checked before the transaction opens rather than inside it: a `return` out of the `with`
+    # leaves the block without an exception, which commits the empty transaction it was refusing
+    # to fill.
+    if (existing := store.read_state()) is None or not existing.cycle_id:
+        logger.error("no .rein/state.yaml — run `rein init` first")
+        return 1
+    with store.transaction() as tx:
+        state = tx.store.read_state()
+        assert state is not None
+        tx.write("state", {**state.raw, "baseline": record})
+        tx.append(
+            "baseline_measured",
+            cycle_id=state.cycle_id,
+            detail={"red_steps": [row["name"] for row in record["red_steps"]], "frozen": record["frozen"]},
+        )
+
+    red = record["red_steps"]
+    if not red:
+        print(f"baseline: the work branch is green on every task-stage step ({record['tree_digest'][:12]})")
+        return 0
+    names = ", ".join(row["name"] for row in red)
+    if record["frozen"]:
+        print(f"baseline: {names} already red, frozen as known. Gate 3 may be approved over this.")
+        return 0
+    print(
+        f"baseline: {names} already red on the work branch.\n"
+        "Gate 3 stays shut until this is a decision rather than a discovery: fix it, or re-run "
+        "with `--freeze` to approve it as known — a task that then fails one of these is stopped "
+        "instead of being sent back to an implementer whose scope does not contain the break."
+    )
+    return 0
 
 
 @contextlib.contextmanager

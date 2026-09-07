@@ -25,6 +25,16 @@ A roll back has three consequences beyond the gate lines themselves:
 Missing an impacted task is the dangerous direction, so the whole closure is marked
 mechanically; "this one is actually fine" is a deliberate human reclassification during the
 `/tasks` reconcile, never a silent default.
+
+**This is for a defect in the specification, and nothing else.** There used to be a
+`--from-review` that derived the impacted tasks from gate ④'s blocking findings, which was the
+only route a machine-found *code* defect had back into the code. It marked the task and its whole
+dependent closure `needs-revision` — a status about the plan — so `status_api` then demanded a
+`/tasks` reconcile and a re-approval of gate ③, for a repair that changed no requirement, no claim
+and no plan. Reset, salvage, re-approve, round again. Gate ④ repairs its own findings now
+(`repair.route`, `build_loop._close_gate4`), and what reaches here is what a human decided *is* a
+specification defect — answering a Decision Card with `revise_design` or `revise_requirement`,
+which is a different sentence from "the code is wrong".
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ import argparse
 import json
 import logging
 
-from rein import approve, common, dag, event_chain, findings, models
+from rein import approve, common, dag, event_chain, models
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -216,44 +226,11 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
             tx.append("plan_invalidated", cycle_id=state.cycle_id, detail={"reason": reason})
 
 
-def _seeds_from_review(repo: repo_mod.Repo) -> list[str]:
-    """The tasks the machine review's blocking findings belong to, derived rather than typed.
-
-    Refused once gate ④ is approved. Marking tasks then is the front half of rewinding an
-    approval, and AGENTS.md keeps that a human's privilege — they may still name the ids
-    themselves with `--impacted`, which is the point: the decision stays theirs, only the
-    clerical part is automated.
-    """
-    store = store_mod.Store(repo)
-    state, plan = store.read_state(), store.read_plan()
-    if state is None or plan is None:
-        raise ReviseError("--from-review needs state.yaml and plan.yaml")
-    if state.gate_status("build") == "approved":
-        raise ReviseError(
-            "gate 4 (build) is approved, so deriving the impacted tasks from its review would begin "
-            "rewinding an approval on its own. Name the tasks with --impacted: the decision is yours."
-        )
-    attributions = findings.attribute(plan, store.read_review())
-    print(findings.render(attributions))
-    derived = findings.seeds(attributions)
-    if not derived:
-        raise ReviseError(
-            "no blocking finding maps to a task with a declared scope — there is nothing to derive. "
-            "Name the tasks with --impacted."
-        )
-    return derived
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="roll back: reset gates from a target phase onward, in a chain")
     parser.add_argument("--to", required=True, metavar="PHASE", help=f"one of: {', '.join(PHASE_GATE)}")
     parser.add_argument("--reason", default="", help="why (recorded in the audit chain)")
     parser.add_argument("--impacted", default="", help="comma-separated task ids directly affected")
-    parser.add_argument(
-        "--from-review",
-        action="store_true",
-        help="derive the impacted tasks from the machine review's blocking findings (gate 4 must be pending)",
-    )
     parser.add_argument("--dry-run", action="store_true", help="print what would change; write nothing")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
@@ -266,13 +243,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     seeds = [s.strip() for s in args.impacted.split(",") if s.strip()]
-    if args.from_review:
-        try:
-            derived = _seeds_from_review(repo)
-        except ReviseError as exc:
-            logger.error(str(exc))
-            return 2
-        seeds = sorted(set(seeds) | set(derived))
     try:
         revision = plan_revision(repo, args.to, seeds)
     except (ReviseError, dag.DagError, models.DocumentError) as exc:

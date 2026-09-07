@@ -457,14 +457,21 @@ class GitWorkspace:
             paths.add(path.strip('"'))
         return sorted(paths)
 
-    def changed_since(self, base: str) -> list[str]:
-        """Paths a serial task changed on the work branch: commits since `base` plus the dirty tree."""
+    def changed_since(self, base: str, cwd: str = "") -> list[str]:
+        """Paths changed since `base` in `cwd` (the root by default): commits plus the dirty tree.
+
+        `cwd` is for a checkout that is not the root and is not a leaf either — gate ④'s repair
+        stands in a scratch worktree on the slice branch that introduced the code, and asking
+        `branch_changed_paths` there would answer a different question (everything since that
+        branch forked), which is the whole slice rather than what this launch did to it.
+        """
+        where = cwd or self.root
         paths = set(
             self._lines_of(
-                ["diff", "--name-only", f"{base}..HEAD"], self.root, what=f"what was committed since {base[:12]}"
+                ["diff", "--name-only", f"{base}..HEAD"], where, what=f"what was committed since {base[:12]}"
             )
         )
-        paths.update(self.dirty_paths(self.root))
+        paths.update(self.dirty_paths(where))
         return sorted(paths)
 
     def fork_point(self, ref: str, cwd: str) -> str:

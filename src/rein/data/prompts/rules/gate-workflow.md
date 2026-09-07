@@ -42,10 +42,18 @@ log" (per-phase specifics: each procedure file's "While waiting for approval" se
 ## The gate ④ human review
 
 Gate ④ does not review a document, it reviews a **generated grounded review**, and what it asks the
-human for is a **judgement**, not a reading. `rein review generate` writes the machine half;
-the human half is worked through in `rein ui` — a rail of
-**scope → orient → decision → diff → freeze** — and frozen with `rein review complete`. Freezing is
-a precondition of `rein approve build` — it is **not** the approval.
+human for is a **judgement**, not a reading. `rein build` writes the machine half and repairs what
+it may of its own blocking findings — every one a task's declared scope owns — reading the change
+again from cold after each round, so what survives to the screen is what a machine cannot decide.
+`rein review generate` writes it on request. The human half is worked through in `rein ui` — a
+rail of **scope → orient → decision → diff → freeze** — and frozen with `rein review complete`.
+Freezing is a precondition of `rein approve build` — it is **not** the approval.
+
+**A Decision Card answer is an instruction, not a note.** `revise_implementation` says the code is
+the mistaken half of a `diverged` claim, and the next `rein build` repairs that subject like any
+other finding; `revise_design` / `revise_requirement` say the plan is, and go through `/revise`;
+`dispute_finding` says the reviewer is wrong, needs a reason, and is recorded against the code it
+was about so it survives the next regeneration.
 
 **`rein review generate --supervise` is a long run, and it is `background-wait`'s, not a poll's.**
 A composed review reads each task's slice on its own launch — eighteen of them on one measured

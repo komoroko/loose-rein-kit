@@ -4,6 +4,188 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.5] - 2026-09-07
+
+**Gate ④ repairs the findings it can, and asks about the rest.** Inside a task, judging and
+repairing were both automated: the reviewer writes findings, an implementer resolves the must-fix
+ones, the reviewer looks again. At gate ④ only judging was — `review.assemble` produced findings
+and the loop printed three commands for somebody to type. So a code defect gate ④ found had exactly
+one route back into the code: `rein revise --to build --from-review`, which marks the task *and its
+whole dependent closure* `needs-revision` — the status reserved for a defect in the specification —
+and `status_api` then demanded a `/tasks` reconcile and a re-approval of gate ③, for a repair that
+changes no requirement, no claim and no plan. Reset, salvage, re-approve, round again.
+
+A finding is now routed by what repairing it would change, not by who found it (`repair.route`).
+**code** — one task's declared scope owns the code it anchored to, and the fix touches no claim,
+criterion or requirement — is the loop's: it repairs, then reads the change again from cold, up to
+`review_policy.repair_rounds` (default 2). **plan** — a claim, criterion, requirement or the frozen
+environment has to change — is a human's, through `/revise`. **judgement** — deciding which of
+those two it *is*, which is what a `diverged` claim and an ungrounded extra behaviour actually pose
+— is a human's, on a Decision Card.
+
+That third class feeds back. `decision_cards.OPTION_DISPOSITION` had always named the repair each
+option means and nothing read it: every card was answered and no answer did anything. Answering
+`revise_implementation` now says the code is the mistaken half, and the next `rein build` repairs
+that subject like any other finding. The human decides *whether*; the loop does the work.
+
+Four things keep this from being an agent marking its own work, and none is new: the fixer is an
+implementer and never a reviewer; a repair outside the task's declared scope blocks rather than
+lands; `gate_guard` denies a write to `plan.yaml` or `config.yaml` while the plan is frozen, so a
+code repair cannot become a plan change; and whether a finding closed is decided by the next
+round's reading — blind, with no memory of having raised it — never by the fixer's account of
+itself. Bounded, because the failure it must survive is a false positive, where repairing converges
+on nothing. `repair_rounds: 0` turns it off and the build then takes no reading at all.
+
+`rein revise --from-review` is gone rather than deprecated, along with the `rein next` row that
+recommended it: it was the wrong routing, and leaving it beside the right one would be two answers
+to one question.
+
+**A reviewer that is shown a different tree than the one under review.** The security stage stands
+in a checkout so the host's own security discipline has something to read, and every host-config
+path in it — `.claude/`, `.agents/`, `.github/instructions/`, `CLAUDE.md`, `.mcp.json` and their
+equivalents — was put back to the trusted base. The property that bought was right: at `head` those
+files *are* the change, and a CLI reads them before it reads its prompt. The means were wrong. A
+rules file the change *added* was not in the base index and so was not in the directory at all, and
+the reviewer reported that it did not exist — a false statement about the change, made because we
+had made it true of the directory.
+
+The guarantee moves to the launch. `Adapter.config_isolation` declares what keeps a CLI from
+loading the working directory's settings, hooks and MCP servers; for `claude` that is
+`--setting-sources user --strict-mcp-config`. The checkout is handed out only to an adapter that
+has one — a CLI this release cannot isolate reads the diff from the empty directory, which is what
+its contract already asks of it. `adapters.PROJECT_CONFIG` went with the function that read it.
+
+**Recording a review no longer invalidates it.** Staleness was `binding.subject_head_sha != git
+rev-parse HEAD`, which is a question about the repository rather than about the code. The workflow
+commits each phase's deliverables at its gate, so committing `.rein/review.yaml` moved HEAD and the
+review went stale the moment it was recorded: generate, commit, and `rein approve build` reported
+that the review "says nothing about the commits since" — about the very commit that recorded it.
+There was no order that worked. `review_reading.freshness` compares `binding.change_digest` — the
+committed tree minus `not_the_product` — against the same digest taken now, and the four places
+that asked this question separately now share it.
+
+**A false positive a human has contradicted has an exit.** `dispute_finding` worked exactly once:
+it lived in the review's `human.dispositions`, and regenerating the machine review discards the
+human half by design. The next regeneration carried the finding forward as a prior blocker with
+nothing recording that anybody had answered it, the reviewer honestly did not re-emit a finding it
+did not believe, `resolution_of` could not close it because the code it named was correct and still
+there, and the drop was refused as "a reviewer cannot clear its own block" — for the rest of the
+cycle, on a finding that was never true. `state.disputed_findings` holds the reason and a digest
+over the finding's anchored text: it survives regeneration, it is re-applied by `apply_disputes` to
+a finding found again from the same code, and it lapses the moment that code is edited. `disputed`
+joins `resolved` as the second way a finding closes, and both are facts rather than opinions.
+
+**Gate ③ measures the tree it is approving a plan against.** The baseline — which quality-gate
+steps are already red before any task runs — was measured inside `rein build`, just before the
+first batch, which is after the approval that had already decided this plan was implementable
+against this tree. A cycle could be approved and started on a work branch whose `check` had been
+broken for weeks, and the discovery belonged to the first task to hit it: three implementer
+launches on a failure it had not caused, and three `task_failed` verdicts about the code each of
+them wrote. `rein baseline measure` takes it, gate ③ requires it, and `rein build` only reads what
+was frozen. A red baseline is not refused; it is required to be a decision (`--freeze`).
+
+**A blocked task names the one command that moves it.** The decision table had rows for
+`needs-revision` and `awaiting-evidence` and none for `blocked`, so `rein build` escalated
+`no_runnable` and stopped while `rein next` went on recommending `/build`, which re-ran into the
+same wall. Everything needed to decide it was already recorded and nothing read it:
+`handoff.escalation.kind`, `handoff.futile`, `handoff.last_fault`. `blocked_recovery` maps them to
+one command each, and `_escalate` reads the same table so the console and the board cannot name two
+different next steps.
+
+**What a path may not be, rather than which characters it may contain.** `REPO_PATH_RE` was an
+ASCII allow-list, so `app/[[...path]]/page.tsx` was not a safe repo-relative path — nor
+`app/(group)/layout.tsx`, nor any filename outside ASCII. A reference to real code read as an
+attempt to escape the repository. The rule is about escaping and now says that: no absolute form,
+no `..` segment, no empty segment, no backslash, no control character, plus a leading `-`, which
+any command it is handed to can read as an option. It is also written once — the same regex was
+copied five times across `models.py` and three schemas — with `plan.schema` holding it and
+everything else reading or `$ref`ing it.
+
+**`unsupported` means bytes nothing can tokenize.** `diff_facts._analysis_for` decided readability
+from the extension table, so `.mts`, `.cts` and `Lambda.Dockerfile` came back
+`unsupported_language` — which makes the Coverage Manifest `insufficient`, which shuts gate ④,
+whose stated remedy ("split the unreadable part out of this scope") cannot be carried out on the
+TypeScript module the change is about. The table now only names the *language*; a file it cannot
+place whose diff carries no non-whitespace control character is `("text", "token_only")`, a real
+declared method whose lines the signal detector reads.
+
+**The reviewer is told the shape, and a frame around a right answer is not a wrong answer.** The
+output contract was a sentence in the prompt and nothing else, and a field run lost several
+launches to a comparator returning correct JSON inside a ```json frame.
+`Adapter.output_schema_flags` is where a CLI that can be told the shape is told it — for `claude`,
+`--json-schema` — and the schema is derived from `review.schema.json`'s own `$defs`, so it cannot
+drift from the validator that refuses the answer. For every CLI, one enclosing code fence is
+removed before the strict parse: the bytes between the fences are the whole answer and are parsed
+exactly as before, while a preamble, a trailing remark, two objects or a frame around something
+unparseable are all still refused.
+
+**The review budget counts the reviewer's workload.** `max_human_statements` measured
+`len(machine.statements)` — one per *option* of every card at every risk — while only high and
+critical cards must be answered. Two decisions somebody owed could arrive over the 30-statement
+ceiling behind five low-risk cards nobody was obliged to read, and the instruction attached to that
+ceiling ("split the scope") is not a move that exists at gate ④. It counts the statements attached
+to the cards the floor makes mandatory, in one function the recorded snapshot and the live screen
+both call.
+
+**A memory ceiling is a fact about the machine.** A container the kernel kills for exceeding
+`--memory` exits 137, the same as every SIGKILL, so `classify_step` read it as worth another try —
+and the next try has the same ceiling. A Next/Chromium suite under a 1024 MiB profile spent every
+retry rediscovering a number nobody had raised. The executor says so in the output (the rc cannot
+carry it), `faults.is_sandbox_oom` reads that, and the classification is ENV_PERMANENT for the same
+reason a network failure inside `network: none` is. `--memory-swap` is stated equal to `--memory`,
+because Docker's default gives a container twice its limit; and `preflight` compares each sandboxed
+profile's `memory_mb` against what the engine reports before the run.
+
+**The dependency audit exists, is bound, and expires.** `verify.md` had said since it existed that
+this is the one thing gate ⑤ must actually run, because it is the only security answer that is not
+a function of the tree. Nothing ran it: the instruction lived in a prompt, no code executed it, no
+document held the answer, and no readiness check asked for one — so a release could be signed with
+the audit having been "done" in a chat window. `rein audit run` runs
+`security.dependency_audit.command` and records what it said, bound to a digest over this tree's
+manifests and lockfiles, so editing source does not retire it and changing a lockfile does. It
+expires after `max_age_days` anyway, which is the property that separates it from every other piece
+of evidence here. Its findings are deliberately not the loop's to repair: a dependency bump changes
+the closure the gate-③ pinned image was built from, which makes it a plan-class change.
+
+The audit runs **on the host and only there**, and a machine that could not answer records nothing.
+Egress is denied from every sandbox here (`network_profile` may only be `none`), so a scanner that
+has to reach a published database cannot run in one — pointing at the quality gate's profile made
+the release gate's one unrunnable requirement unrunnable the moment anybody followed `doctor`'s
+advice to sandbox it, and every attempt was recorded as a *failed audit*, which holds gate ⑤ shut
+with no dispute route. A sandboxed profile is refused before it launches, a named profile that is
+not declared is refused rather than quietly becoming the host, and a machine failure raises instead
+of being written down as a fact about the dependencies.
+
+**A gate-④ repair is committed, and onto the slice that introduced the code.** The next reading is
+over committed history — `review.generate` resolves HEAD and digests the committed tree — so a fix
+left in the working tree left the machine half byte-identical, which reads as "nothing this review
+is made of has moved": the finding stood, the round was spent, and the tree the gate receipt binds
+did not contain the repair. Every task finalizes its own diff for exactly this reason; this launch
+did not. Where it lands now follows the rule every other review fix follows: a slice is cut along
+its task's `completed_commit`, so a commit at the work branch's tip belongs to the tail — a pull
+request that is not the one holding the code the finding is about. The repair runs in a worktree on
+the owning slice's branch and is carried up by merging (`pr_stack.restack`), so no open pull request
+is force-pushed and no `completed_commit` is stranded. A cycle shipping as one pull request has one
+place for it and still uses the work branch.
+
+**One fault boundary for the whole run, gate ④ included.** `StopLoop` and `EnvironmentFault` were
+caught per batch, inside the `while` — so `_load_baseline` and `_close_gate4`, the two calls that
+are not in a batch, had nowhere to land, and `common.StopLoop` is not a `common.ReinError`, so
+`cli.main` does not catch it either. A build with no recorded baseline reported the sentence it had
+been given to say as a traceback and exit 1. Gate ④'s repair also reads the baseline gate ③ froze,
+which a run that finds every task already done never used to reach: a step frozen red stopped the
+repair over a failure the plan was approved on top of.
+
+**`rein next` distinguishes what the loop can repair from what only a human can decide.** Both were
+one count, so a `diverged` claim — which the loop may not decide — was answered with `rein build`,
+which read the change, said "what is left is a decision", and returned; the next recommendation was
+the same build again. The two halves of `repair.route` are two rows, and the second one says to
+answer the cards.
+
+**A freshness nobody could measure holds gate ④ shut.** `review_reading.freshness` reports the
+unmeasurable case as `fresh=False`, and `approve` and `doctor` read only its `reason` — which was
+empty, so neither said anything at all. "We could not tell" is not "it is current".
+
 ## [0.4.4] - 2026-09-06
 
 **`max_diff_bytes` bounds one launch, not one cycle.** One number was doing three jobs: the wall in

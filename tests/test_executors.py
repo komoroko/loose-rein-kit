@@ -253,3 +253,17 @@ def test_build_image_from_dockerfile_produces_a_pinned_digest(tmp_path: Path) ->
     profile = _oci_profile(image=f"localhost/rein-{tmp_path.name}@{digest}")
     ok, message = executors.verify_pinned(profile)
     assert ok, message
+
+
+# --- the limit is the limit ---------------------------------------------------
+
+
+def test_the_swap_ceiling_is_stated_rather_than_left_to_the_engine() -> None:
+    """Docker gives a container twice its `--memory` in memory+swap unless told otherwise, so a
+    step declared to have 1 GiB could reach 2 — and a run that survives on swap is not the run the
+    measurement was about."""
+    profile = models.ExecutorProfile("quality", {"kind": "oci", "image": "x@sha256:" + "a" * 64, "memory_mb": 2048})
+    spec = executors.ExecutionSpec(command=("true",), profile=profile, mounts=(), workdir="/work")
+    argv = executors.OciExecutor(runtime="docker")._argv(spec)
+    assert "--memory" in argv and argv[argv.index("--memory") + 1] == "2048m"
+    assert "--memory-swap" in argv and argv[argv.index("--memory-swap") + 1] == "2048m"

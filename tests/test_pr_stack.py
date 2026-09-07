@@ -1753,3 +1753,50 @@ def test_merge_links_the_stack_rather_than_trusting_push_to_have_done_it(
     merges = [cmd for cmd in calls if cmd[:3] == ["gh", "stack", "merge"]]
     assert len(links) == 1 and len(merges) == 1
     assert calls.index(links[0]) < calls.index(merges[0])  # linked before merged
+
+
+# --- gate ④'s repairs go where a review fix goes ------------------------------
+
+
+def test_a_gate_four_repair_is_committed_onto_the_slice_that_introduced_the_code(
+    cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`AGENTS.md`'s rule, and what `--restack` exists for. A slice is cut along its task's
+    `completed_commit`, so a repair committed at the work branch's tip belongs to the *tail* — a
+    pull request that is not the one holding the code the finding is about, which is where a
+    reviewer looking at that pull request would go to see whether it was answered.
+
+    Committing onto the slice and merging upward puts it where it belongs and rewrites nothing: no
+    open pull request is force-pushed and no `completed_commit` is stranded.
+    """
+    from rein import build_loop, dag, findings, repair
+
+    bundle = cycle(("T-001", "T-002"))
+    root, repo = bundle["root"], bundle["repo"]
+    slices = derive(bundle)
+    pr_stack.materialize(repo, slices)
+    owner = next(s for s in slices if s.task_id == "T-001")
+
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
+
+    def implement(argv: list[str], *, cwd: str, **_: Any) -> None:
+        # The implementer edits the file its own task landed — in whatever checkout it was given.
+        (Path(cwd) / "src" / "T-001.py").write_text("# T-001\n# repaired\n", encoding="utf-8")
+
+    monkeypatch.setattr(loop, "_launch", implement)
+    monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "")
+
+    found = findings.Attribution("SEC-001", "security", "T-001", "src/T-001.py")
+    loop._repair(dag.join(bundle_plan(repo), None), repair.Repair("T-001", (found,)))
+
+    assert "gate-4 repair" in git(root, "log", "--format=%s", owner.branch), "on the slice that owns the code"
+    assert "gate-4 repair" in git(root, "log", "--format=%s", WORK_BRANCH), "and carried up into the work branch"
+    # Nothing was rewritten: every commit the state recorded is still in the work branch's history.
+    for commit in bundle["landed"].values():
+        assert pr_stack.is_ancestor(repo, commit, git(root, "rev-parse", WORK_BRANCH))
+
+
+def bundle_plan(repo: repo_mod.Repo) -> models.Plan:
+    plan = store_mod.Store(repo).read_plan()
+    assert plan is not None
+    return plan

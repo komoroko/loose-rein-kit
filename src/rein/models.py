@@ -383,6 +383,15 @@ EVENT_ORDER: tuple[str, ...] = (
     # it was produced by a different agent than the one gate ③ saw.
     "agents_switched",
     "decision_declared",
+    # The work branch's quality gate, measured before any task ran. Its own name because it is a
+    # fact about the *tree* rather than about a run: gate ③ freezes it, `rein build` reads it, and
+    # a task that fails a step the baseline already knew about is stopped rather than sent back to
+    # an implementer whose scope does not contain the break.
+    "baseline_measured",
+    # The dependency audit ran. Its own name because it is gate ⑤'s one security answer that
+    # is not a function of the tree — it expires without anything in the repository moving, so
+    # "when it last ran" is a question the log has to be able to answer.
+    "dependency_audit_run",
     "coverage_generated",
     # No `actual_extraction_started`: the vocabulary carried one and nothing ever emitted it. A
     # closed vocabulary refuses unknown names precisely so the log stays aggregatable, which makes
@@ -424,11 +433,13 @@ EVENT_VALUES = frozenset(EVENT_ORDER)
 CONFIRMATION_CHANNELS: tuple[str, ...] = ("terminal", "ui-session")
 CONFIRMATION_CHANNEL_VALUES = frozenset(CONFIRMATION_CHANNELS)
 
-#: A security finding's life. `open` holds gate ④ shut; `resolved` is recorded only when the code
-#: the finding anchored to is no longer in the tree (`security_review.resolution_of`) — a fact
-#: about the change, never the reviewer's word for it. A finding is never deleted, so the document
-#: keeps the record of what closed it and against which head.
-SECURITY_FINDING_STATUS_ORDER: tuple[str, ...] = ("open", "resolved")
+#: A security finding's life. `open` holds gate ④ shut. The two ways out are both facts rather
+#: than opinions, and neither is the reviewer's: `resolved` is recorded only when the code the
+#: finding anchored to is no longer in the tree (`security_review.resolution_of`), and `disputed`
+#: only when a human contradicted it with a reason that `state.disputed_findings` binds to the
+#: anchored text (`security_review.apply_disputes`) — so a dispute lapses if that code is edited.
+#: A finding is never deleted, so the document keeps the record of what closed it and how.
+SECURITY_FINDING_STATUS_ORDER: tuple[str, ...] = ("open", "resolved", "disputed")
 SECURITY_FINDING_STATUS_VALUES = frozenset(SECURITY_FINDING_STATUS_ORDER)
 
 #: A change request's life. `open` holds the gate shut; `addressed` is the agent saying it has
@@ -481,9 +492,6 @@ ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "extra_behavior": re.compile(r"^EXTRA-\d{3,}$"),
 }
 
-#: Repo-relative POSIX paths only: no absolute path, no `..`, no backslash, no leading slash.
-REPO_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$")
-
 #: The cycle id, which `state.yaml` and every event carry. One spelling of a rule that had four:
 #: the schema's pattern (checked against it by a test), `cycle.py`'s `--name` predicate, which
 #: accepted a leading dash and any Unicode letter the schema rejects, and two `if state else ""`
@@ -494,8 +502,12 @@ CYCLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def is_repo_path(value: object) -> bool:
-    """True when `value` is a safe repo-relative POSIX path (no escape, no absolute form)."""
-    return isinstance(value, str) and bool(REPO_PATH_RE.match(value)) and "\\" not in value
+    """True when `value` is a safe repo-relative POSIX path (no escape, no absolute form).
+
+    The backslash test that used to sit here is in the pattern now: two places to state one rule is
+    how a validator and its code come to disagree about what a path is.
+    """
+    return isinstance(value, str) and bool(REPO_PATH_RE.match(value))
 
 
 def risk_at_least(risk: str, floor: str) -> bool:
@@ -553,6 +565,21 @@ def schema(name: str) -> Mapping[str, Any]:
         )
         _SCHEMA_CACHE[name] = loaded
     return _SCHEMA_CACHE[name]
+
+
+#: Repo-relative POSIX paths only, read from the schema that enforces it — the same direction
+#: `review_policy.review_schema_pattern` and `security_review.FINDING_ID_RE` already take, and for
+#: the same reason: this rule was written out five times (here, and `repoPath`/`pathGlob` in three
+#: schemas), which is five chances for the validator and the code to disagree about what a path is.
+#:
+#: It was an **allow-list of characters** — `[A-Za-z0-9._][A-Za-z0-9._/@+-]*` — so
+#: `app/[[...path]]/page.tsx` was not a safe repo-relative path, and neither was `app/(group)/` or
+#: any filename outside ASCII. A reference to real code read as an attempt to escape the
+#: repository. What the rule is about is escaping, so it now says that: no absolute form, no
+#: `..` segment, no empty segment, no backslash, no control character — plus one thing that is
+#: not about escaping at all, a leading `-`, which any command it is handed to can read as an
+#: option.
+REPO_PATH_RE = re.compile(schema("plan")["$defs"]["repoPath"]["pattern"])
 
 
 def schema_errors(document: Any, name: str) -> list[str]:
@@ -901,6 +928,57 @@ class State:
         return [cr for cr in self.change_requests if cr.get("gate") == gate and cr.get("status") in wanted]
 
     @property
+    def baseline(self) -> Mapping[str, Any]:
+        """What the work branch's quality gate said before any task ran, or {} when unmeasured.
+
+        Taken at gate ③ rather than inside `rein build`, because the question it answers — "is
+        this plan implementable against this tree?" — is the one the gate is deciding. Measured
+        after the approval, a step that had been red for weeks was discovered by the first task
+        to hit it, which then spent its whole send-back budget on a failure it had not caused and
+        could not have fixed inside its own scope.
+
+        `tree_digest` records the tree it was measured on. It is **not** a lapse-binding the way
+        acceptance evidence and a dispute are, and saying so is the point: the fingerprint is over
+        the working tree, and committing content it already covered moves it (measured — an
+        untracked file, the same file staged, and the same file committed produce three different
+        digests). Binding gate ③ to equality would refuse an approval after the commit that changed
+        no byte, and charge a full quality-gate run to get it back. What it is for is the reader and
+        the loop: `build_loop._load_baseline` says out loud when the branch has moved past the tree
+        the frozen red steps were measured on.
+        """
+        value = self.raw.get("baseline")
+        return value if isinstance(value, dict) else {}
+
+    def baseline_red(self) -> Mapping[str, str]:
+        """The already-red steps by name, with what each said. {} when green or unmeasured."""
+        rows = self.baseline.get("red_steps")
+        if not isinstance(rows, list):
+            return {}
+        return {
+            str(row.get("name", "")): str(row.get("failure", ""))
+            for row in rows
+            if isinstance(row, dict) and row.get("name")
+        }
+
+    @property
+    def disputed_findings(self) -> Mapping[str, Mapping[str, Any]]:
+        """Security findings a human contradicted, by id — the durable half of `dispute_finding`.
+
+        The review's own `human.dispositions` entry records that a decision card was answered, and
+        a regeneration discards it. That left a disputed false positive with no exit: the
+        regeneration carried it forward as a prior blocker, the reviewer honestly did not re-emit
+        a finding it did not believe, and `security_review.resolution_of` could not close it
+        because the code it named was correct and still there.
+
+        Each record binds the anchored text (`anchors_digest`), so it retires the way acceptance
+        evidence does: change the code the dispute was about and the finding is live again.
+        """
+        value = self.raw.get("disputed_findings")
+        if not isinstance(value, dict):
+            return {}
+        return {str(k): v for k, v in value.items() if isinstance(v, dict)}
+
+    @property
     def task_status(self) -> Mapping[str, str]:
         value = self.raw.get("tasks")
         if not isinstance(value, dict):
@@ -993,6 +1071,17 @@ class Review:
         return _str(self.binding, "subject_head_sha")
 
     @property
+    def change_digest(self) -> str:
+        """The digest of the code this review read: the committed tree minus `not_the_product`.
+
+        This, and not `subject_head_sha`, is what says whether the review still speaks for the
+        repository. A commit that touches only `.rein/` moves the sha and nothing this document is
+        about — and committing the review is exactly such a commit, which is how recording a review
+        came to invalidate it (`review_reading.freshness`).
+        """
+        return _str(self.binding, "change_digest")
+
+    @property
     def effective_risk(self) -> str:
         """The risk this review was generated against (plan §13.5).
 
@@ -1026,14 +1115,18 @@ class Review:
 
     @property
     def blocking_security_findings(self) -> tuple[Mapping[str, Any], ...]:
-        """Findings that still hold gate ④ shut: `blocking`, and not closed by the change itself.
+        """Findings that still hold gate ④ shut: `blocking`, and not already closed.
 
-        A `resolved` finding stays in the document — that is the record of what closed it and
-        against which head — but it is not a blocker any more. Filtering here rather than at each
-        reader is what keeps `doctor`, `findings`, `human_review`, `pr_draft`, `review_policy` and
-        `status_api` from having to agree about it separately.
+        A closed finding stays in the document — that is the record of what closed it and how —
+        but it is not a blocker any more. There are two ways to close, and this excludes both:
+        `resolved`, when the code the finding anchored to is gone, and `disputed`, when a human
+        contradicted it with a reason bound to the anchored text (`security_review.apply_disputes`
+        also clears `blocking`, so the flag and the status agree). Filtering here rather than at
+        each reader is what keeps `doctor`, `findings`, `human_review`, `pr_draft`,
+        `review_policy` and `status_api` from having to agree about it separately.
         """
-        return tuple(f for f in self.security_findings if f.get("blocking") is True and f.get("status") != "resolved")
+        closed = {"resolved", "disputed"}
+        return tuple(f for f in self.security_findings if f.get("blocking") is True and f.get("status") not in closed)
 
     @property
     def coverage(self) -> Mapping[str, Any]:
@@ -1394,6 +1487,23 @@ class Config:
         if not isinstance(raw, dict):
             return {}
         return {k: v for k, v in raw.items() if isinstance(v, int) and k in BUDGET_NAME_VALUES}
+
+    @property
+    def repair_rounds(self) -> int:
+        """How many times gate ④ may repair its own findings before it stops and asks a human.
+
+        Bounded because the failure this has to survive is a *false positive*: repairing a finding
+        that was never true converges on nothing, and an unbounded loop would spend a session
+        limit discovering that. Two rounds is enough for the case it exists for — a real defect,
+        fixed, and re-read by a reviewer that has no memory of having raised it.
+
+        `0` says this loop does not repair, and then it takes no reading either: a review it
+        cannot act on is one the human runs `rein review generate` for and reads in the dashboard,
+        which is what happened before the repair loop existed.
+        """
+        policy = self.raw.get("review_policy")
+        value = policy.get("repair_rounds") if isinstance(policy, dict) else None
+        return common.as_int(value, 2)
 
     @property
     def composition(self) -> str:

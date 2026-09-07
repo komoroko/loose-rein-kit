@@ -36,10 +36,12 @@ from rein import (
     faults,
     models,
     pr_stack,
+    repair,
     review_policy,
     review_reading,
 )
 from rein import events as events_mod
+from rein import findings as findings_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
@@ -48,6 +50,7 @@ from tests._support import (
     fake_git,
     make_config,
     make_plan,
+    make_review,
     make_state,
     make_task,
     seed_repo,
@@ -679,12 +682,13 @@ def test_a_dry_run_walks_the_whole_graph(tmp_path: Path, capsys: pytest.CaptureF
 
 def test_the_handover_says_what_was_not_established(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Green tests plus an AI's summary is not evidence that the code does what the plan says,
-    and the loop must not let the phrasing imply otherwise."""
+    and the loop must not let the phrasing imply otherwise — least of all now that it goes on to
+    take the review itself."""
     root = build_repo(tmp_path)
     build_loop.main(["--dry-run", "--repo", str(root)])
     out = capsys.readouterr().out
     assert "did NOT establish" in out
-    assert "rein review generate" in out
+    assert "grounded review" in out
     assert "cannot open gate 4" in out
 
 
@@ -2171,42 +2175,53 @@ def test_recording_an_escalation_appends_exactly_one_event(tmp_path: Path) -> No
     }
 
 
-def test_a_baseline_is_not_established_in_a_dry_run(tmp_path: Path) -> None:
+def test_a_dry_run_reads_no_baseline(tmp_path: Path) -> None:
     """A dry run enters no sandbox and runs no command — its job is to print the control flow."""
     root = build_repo(tmp_path)
     repo = repo_mod.Repo(root)
     loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=True, repo=repo)
-    loop._establish_baseline()
+    loop._load_baseline()
     assert loop._baseline_red == {}
 
 
-def test_the_baseline_is_taken_once_per_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One batch per layer, and the tree under it moves as tasks land — re-running the whole DoD at
-    the root before each batch would buy a number nothing reads."""
+def test_the_baseline_is_measured_once_for_the_gate_not_once_per_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measurement belongs to gate ③, and `rein build` only reads what it froze.
+
+    Taken inside the build it was taken after the approval that had already decided this plan was
+    implementable against this tree — and on a resumed run it would have measured a tree with
+    tasks already landed in it, which is not a baseline at all.
+    """
     loop = orchestrator(tmp_path)
     ran: list[str] = []
 
     def record(step: build_loop.GateStep, cwd: str) -> str:
         ran.append(step.name)
-        return ""
+        return "make: *** [check] Error 1" if step.name == "check" else ""
 
     monkeypatch.setattr(loop, "_run_cmd_step", record)
-    loop._establish_baseline()
-    loop._establish_baseline()
+    measured = loop.measure_baseline()
     assert ran == ["test", "check"]
+    assert [row["name"] for row in measured["red_steps"]] == ["check"]
+
+    # Reading it back runs nothing at all.
+    ran.clear()
+    loop.state = models.State({**loop.state.raw, "baseline": measured})  # type: ignore[union-attr]
+    loop._load_baseline()
+    assert ran == []
+    assert set(loop._baseline_red) == {"check"}
 
 
-def test_a_baseline_that_cannot_run_marks_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No container runtime, no pinned image — the machine failed, so nothing was learned about any
-    step. The batch about to start hits the same fault and aborts the run without marking a task."""
+def test_a_build_with_no_recorded_baseline_stops_rather_than_guessing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without it, a step that was already red cannot be told apart from one this run broke — and
+    the loop would spend a task's whole send-back budget finding that out."""
     loop = orchestrator(tmp_path)
-
-    def unrunnable(step: build_loop.GateStep, cwd: str) -> str:
-        raise faults.EnvironmentFault(faults.Fault.ENV_PERMANENT, where="test", rc=127, output="could not run make")
-
-    monkeypatch.setattr(loop, "_run_cmd_step", unrunnable)
-    loop._establish_baseline()
-    assert loop._baseline_red == {}
+    loop.state = models.State({k: v for k, v in loop.state.raw.items() if k != "baseline"})  # type: ignore[union-attr]
+    with pytest.raises(build_loop.StopLoop, match="rein baseline measure"):
+        loop._load_baseline()
 
 
 # --- where a task's work lands ------------------------------------------------
@@ -2870,3 +2885,207 @@ def test_the_lock_answers_before_the_working_tree_does(tmp_path: Path, caplog: p
     assert rc == common.EXIT_RETRY_LATER
     assert "holds the lock" in caplog.text
     assert "package-lock.json" not in caplog.text
+
+
+# --- gate 4 repairs what a task's scope owns ----------------------------------
+
+
+def _scoped_repo(tmp_path: Path, rounds: int) -> build_loop.Orchestrator:
+    task = make_task("T-001", claim_ids=["C-001"])
+    task["scope"] = {"include": ["src/api/"]}
+    root = build_repo(
+        tmp_path,
+        plan=make_plan(tasks=[task]),
+        config=make_config(repair_rounds=rounds),
+    )
+    repo = repo_mod.Repo(root)
+    return build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
+
+
+def _blocking(fid: str = "SEC-001", path: str = "src/api/client.py") -> dict[str, Any]:
+    return {
+        "id": fid,
+        "severity": "high",
+        "category": "credential_exposure",
+        "attack_scenario": "a caller reaches a host credential",
+        "blocking": True,
+        "code_anchors": [{"path": path, "blob": "git-blob:" + "a" * 40, "start_line": 1, "end_line": 2}],
+    }
+
+
+def test_gate_four_reads_repairs_and_reads_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The half that was missing. Inside a task the reviewer's must-fix findings go to an
+    implementer and the reviewer looks again; at gate ④ the findings were printed and the human
+    typed `rein revise --to build --from-review`, which marked the task and its whole dependent
+    closure `needs-revision` and demanded a re-approval of gate ③ for a repair that changed no
+    plan.
+
+    The second reading is the judge, not the fixer: it is a blind reading with no memory of having
+    raised the finding, which is the only thing that can say whether it closed.
+    """
+    loop = _scoped_repo(tmp_path, rounds=2)
+    readings: list[int] = []
+    repaired: list[str] = []
+
+    def read() -> bool:
+        readings.append(1)
+        findings = [] if len(readings) > 1 else [_blocking()]
+        seed_repo(tmp_path, review=make_review(generated=True, security_findings=findings))
+        loop.store = store_mod.Store(loop.repo)
+        return True
+
+    monkeypatch.setattr(loop, "_generate_review", read)
+    monkeypatch.setattr(loop, "_repair", lambda graph, item: repaired.append(item.task_id))
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert repaired == ["T-001"], "the task whose declared scope owns the anchor"
+    assert len(readings) == 2, "read, repair, read again — the second reading decides"
+
+
+def test_a_finding_that_survives_the_rounds_reaches_the_human(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The failure this is bounded for is a false positive: repairing something that was never
+    true converges on nothing, and an unbounded loop would spend a session limit finding out."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    seed_repo(tmp_path, review=make_review(generated=True, security_findings=[_blocking()]))
+    attempts: list[str] = []
+    monkeypatch.setattr(loop, "_generate_review", lambda: True)
+    monkeypatch.setattr(loop, "_repair", lambda graph, item: attempts.append(item.task_id))
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert attempts == ["T-001", "T-001"], "two rounds, and then it stops"
+    out = capsys.readouterr().out
+    assert "repair round(s) are spent" in out
+    assert "dispute the ones that are wrong" in out
+
+
+def test_repair_rounds_zero_takes_no_reading_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A review this loop cannot act on is one the human generates and reads in the dashboard —
+    launching three reviewers to produce it here would be paying for an answer nobody uses."""
+    loop = _scoped_repo(tmp_path, rounds=0)
+    monkeypatch.setattr(loop, "_generate_review", lambda: pytest.fail("no reading should be taken"))
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert "takes no reading" in capsys.readouterr().out
+
+
+def test_a_reading_that_cannot_be_taken_does_not_un_finish_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tasks are done and their evidence is recorded. Anything but a capacity stop is reported
+    and handed over — and the gate stays shut either way, because `approve.readiness` refuses a
+    gate 4 with no generated review."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    monkeypatch.setattr(loop, "_generate_review", lambda: False)
+    monkeypatch.setattr(loop, "_repair", lambda graph, item: pytest.fail("nothing was read to repair"))
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+
+
+def _repair_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_loop.Orchestrator, list[str]]:
+    """A gate-4 repair with everything around the commit stubbed out: one launch, in scope, green."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    committed: list[str] = []
+    monkeypatch.setattr(loop, "_launch", lambda *a, **k: None)
+    monkeypatch.setattr(loop.ws, "head", lambda: "0" * 40)
+    monkeypatch.setattr(loop.ws, "changed_since", lambda base, cwd="": ["src/api/client.py"])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "")
+
+    def record(cwd: str, message: str) -> bool:
+        committed.append(message)
+        return True
+
+    monkeypatch.setattr(loop.ws, "finalize_commit", record)
+    return loop, committed
+
+
+def test_a_gate_four_repair_is_committed_before_the_next_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The next reading is over committed history — `review.generate` resolves HEAD and digests the
+    committed tree — so a fix left in the working tree is a fix the reviewer cannot see. The machine
+    half comes out byte-identical, which reads as "nothing has moved", the finding stands, the round
+    is spent, and the tree the gate receipt binds does not contain the repair.
+
+    The implementer is told to commit; that is an instruction, not evidence. Every task finalizes
+    for the same reason (`build_git.finalize_commit`), and this is the one launch that did not.
+    """
+    loop, committed = _repair_loop(tmp_path, monkeypatch)
+    found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
+    loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+    assert committed == ["T-001: gate-4 repair"]
+
+
+def test_a_cycle_that_is_not_a_stack_repairs_on_the_work_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A single pull request has one place for the fix, and `derive` refusing to cut a stack out of
+    this repository means exactly that — not that the repair has nowhere to go."""
+    loop, committed = _repair_loop(tmp_path, monkeypatch)
+    found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
+    loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+
+    assert committed == ["T-001: gate-4 repair"]
+    assert "no stack to place this on" in capsys.readouterr().out
+
+
+def test_a_repair_that_cannot_be_committed_stops_the_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tree that could not be committed is the precursor of data loss, so the run says so and
+    leaves the work where it is rather than reading past it."""
+    loop, _ = _repair_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: False)
+    with pytest.raises(build_loop.StopLoop, match="could not be committed"):
+        found = findings_mod.Attribution("SEC-001", "security", "T-001", "x")
+        loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+
+
+def test_gate_four_reads_the_baseline_gate_three_froze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_consume` reads it before a batch, and a run that finds every task already done never
+    reaches that line — which is exactly the run that repairs here. Without it a step frozen red at
+    gate ③ stops the repair over a failure the plan was approved on top of."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    frozen = {
+        "measured_at": "2026-01-01T00:00:00+00:00",
+        "tree_digest": "t",
+        "frozen": True,
+        "red_steps": [{"name": "check", "failure": "ruff: 3 pre-existing errors"}],
+    }
+    loop.state = models.State({**loop.state.raw, "baseline": frozen})  # type: ignore[union-attr]
+    monkeypatch.setattr(loop, "_generate_review", lambda: False)
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert set(loop._baseline_red) == {"check"}
+
+
+def test_a_stop_loop_outside_a_batch_is_reported_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`_load_baseline` and `_close_gate4` are the two calls that are not in a batch, and the
+    handlers used to be inside the `while`. `common.StopLoop` is not a `common.ReinError`, so
+    `cli.main` does not catch it either: the sentence this was given to say reached the operator as
+    a traceback and exit 1."""
+    loop = orchestrator(tmp_path)
+    loop.state = models.State({k: v for k, v in loop.state.raw.items() if k != "baseline"})  # type: ignore[union-attr]
+    with caplog.at_level(logging.ERROR, logger="rein.build_loop"):
+        rc = loop._run_loop()
+    assert rc == common.EXIT_HUMAN_NEEDED
+    assert "rein baseline measure" in caplog.text
+
+
+def test_a_reading_that_could_not_be_taken_is_not_reported_as_nothing_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An empty routing means two different things: a reading that found nothing, and a reading
+    that never happened. Printing the first over the second put the reassurance two lines under
+    the failure that earned it."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    monkeypatch.setattr(loop, "_generate_review", lambda: False)
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    out = capsys.readouterr().out
+    assert "no reading was taken" in out
+    assert "nothing blocking" not in out

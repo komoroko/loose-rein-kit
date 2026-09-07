@@ -259,14 +259,29 @@ is the point; never fold them into the implementer's session.
    ships as a single pull request.
 
    From here, **a fix for a review finding is committed onto the slice that introduced the code, not
-   onto the work branch.** `rein revise --to build --from-review` derives which task answers each
-   blocking finding, `rein build` re-runs those tasks and lands each fix on the pull request that
-   owns it, and `rein pr-stack --restack` carries the fixes up the stack by merging. **Never rebase
-   a stack**: it strands every `completed_commit` and gate receipt on commits that no longer exist.
+   onto the work branch.** `rein build` reads the change, repairs the findings a task's declared
+   scope owns and commits each **where a review fix belongs**: on the slice that introduced the
+   code when this cycle is a stack — in a worktree on that slice's branch, then carried up into the
+   work branch by merging — and on the work branch itself when it is a single pull request. **Never
+   rebase a stack**: it strands every `completed_commit` and gate receipt on commits that no longer
+   exist, which is why the fix goes down to its slice and merges up rather than the history moving.
+   `rein pr-stack --restack` is the same walk, for a fix you commit onto a slice yourself.
 
 1. **Answer any open change requests first.** Run `rein changes list --gate build --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds gate ④ shut, and approving is what closes the addressed ones.
-2. **Generate the grounded review — the artefact gate ④ approves.** Run `rein review
-   generate` (bound to the current HEAD). It runs a deterministic Coverage Manifest, a **blind**
+2. **The grounded review is taken by the run itself, and the run repairs what it may.** `rein
+   build` ends by reading the change, repairing every blocking finding a task's declared scope
+   owns, and reading it again from cold — up to `review_policy.repair_rounds` (default 2). No gate
+   moves: a repair inside an approved scope changes no requirement, no claim and no plan, and
+   `rein guard` denies a write to `plan.yaml` or `config.yaml` while the plan is frozen, so it
+   cannot become one. Whether a finding closed is decided by the **next** reading — a blind one
+   with no memory of having raised it — never by the fixer's account of its own work. What reaches
+   you is what a machine cannot decide: whether a `diverged` claim means the code is wrong or the
+   plan is, and whether an extra behaviour nobody asked for is unwanted. **Answering such a card
+   `revise_implementation` hands that subject back to the loop** — it is you saying the code is
+   the mistaken half — and the next `rein build` repairs it like any other finding. Run `rein
+   review generate` yourself when the reading could not be taken, or when `repair_rounds` is 0.
+
+   The reading runs a deterministic Coverage Manifest, a **blind**
    actual-behaviour extraction (never given the plan), the structured security review, and the
    Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
    **The change is read in *readings*, not in one sitting**: one per task the plan scopes, plus the

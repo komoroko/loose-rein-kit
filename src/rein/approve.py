@@ -30,8 +30,21 @@ import logging
 import re
 import sys
 from collections.abc import Mapping
+from datetime import datetime, timezone
 
-from rein import change_request, common, dag, dag_trace, digests, event_chain, mdlite, models, review_policy
+from rein import (
+    audit,
+    change_request,
+    common,
+    dag,
+    dag_trace,
+    digests,
+    event_chain,
+    mdlite,
+    models,
+    review_policy,
+    review_reading,
+)
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -105,7 +118,9 @@ def _task_blockers(plan: models.Plan | None, state: models.State | None, gate: s
     return blockers
 
 
-def _review_blockers(review: models.Review | None, gate: str, head: str = "") -> list[str]:
+def _review_blockers(
+    repo: repo_mod.Repo, review: models.Review | None, state: models.State | None, gate: str
+) -> list[str]:
     """Gate ④/⑤ preconditions carried by the machine review (plan §16.8).
 
     A readiness check that passes because a stage has not been implemented yet is worse than
@@ -124,20 +139,81 @@ def _review_blockers(review: models.Review | None, gate: str, head: str = "") ->
             "Gate 4 approves a grounded review, not a green test run."
         ]
     blockers = review_policy.blocking_reasons(review, review.effective_risk)
-    reviewed = review.subject_head_sha
-    if head and reviewed and reviewed != head:
-        # Three documents say a later commit leaves the review stale. Only the UI pane had ever
-        # checked, so generate → commit → approve opened gate ④ over code no reviewer saw.
-        blockers.append(
-            f"the machine review was generated against {reviewed[:12]} and HEAD is now {head[:12]} — "
-            "it says nothing about the commits since. Re-run `rein review generate`."
-        )
+    # Three documents say a later commit leaves the review stale. Only the UI pane had ever
+    # checked, so generate → commit → approve opened gate ④ over code no reviewer saw. Asked on
+    # the product's content rather than on HEAD's id, because the workflow's own
+    # `review.yaml` commit is a later commit and must not invalidate the thing it records
+    # (`review_reading.freshness`).
+    if reason := review_reading.freshness(repo, review, state).reason:
+        blockers.append(reason)
     if review.human_status != "frozen":
         blockers.append(
             f"the human review is '{review.human_status}', not 'frozen' — "
             "complete it in the review UI (`rein review complete`)"
         )
     return blockers
+
+
+def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Config | None, gate: str) -> list[str]:
+    """Gate ⑤'s one security answer that is not carried from gate ④'s review.
+
+    Everything else it needs about security the review already holds, bound to the reviewed HEAD.
+    A dependency audit is different in kind: the same commit audited last month and today can
+    differ, because the database moved while the code did not. `verify.md` has said so since it
+    existed and nothing ran it — the instruction lived in a prompt, no document held the answer,
+    and no readiness check asked for one, so a release could be signed with the audit having been
+    "done" in a chat window.
+
+    A project that declares no audit command is told so rather than waved through: "we have no way
+    to ask" is not "there is nothing wrong".
+    """
+    if gate != "release":
+        return []
+    if not audit.configured(config):
+        return [
+            "no `security.dependency_audit.command` is configured, so this release has no "
+            "dependency answer at all. It is the one security question a review cannot answer once "
+            "— add the command (pip-audit, npm audit, cargo audit, `make audit`) and run "
+            "`rein audit run`."
+        ]
+    reason = audit.staleness(
+        state.raw.get("dependency_audit"),
+        dependencies=audit.dependency_digest(repo),
+        now=datetime.now(timezone.utc),
+        max_age=audit.max_age_days(config),
+    )
+    return [reason] if reason else []
+
+
+def _baseline_blockers(state: models.State, gate: str) -> list[str]:
+    """Gate ③ decides that this plan is implementable against this tree. It has to know the tree.
+
+    The measurement used to live inside `rein build`, taken just before the first batch — which is
+    after this approval. So a cycle could be approved and started on a work branch whose `check`
+    had been red for weeks, and the discovery was the first task's to make: three implementer
+    launches spent on a failure it had not caused, in a scope that did not contain it, and three
+    `task_failed` verdicts in a chain that never rotates.
+
+    A red baseline is not refused. It is required to be a *decision*: `rein baseline measure
+    --freeze` says a human looked at it and started anyway, and the loop then stops a task that
+    hits one of those steps rather than sending it back.
+    """
+    if gate != "tasks":
+        return []
+    baseline = state.baseline
+    if not baseline:
+        return [
+            "no baseline is recorded — gate 3 decides this plan is implementable against this tree, "
+            "and nothing has asked the tree. Run `rein baseline measure`."
+        ]
+    red = sorted(state.baseline_red())
+    if red and baseline.get("frozen") is not True:
+        return [
+            f"the work branch is already red on {', '.join(red)} and nobody has said so on the record. "
+            "Fix it, or `rein baseline measure --freeze` to approve it as known — a task that fails one "
+            "of these is then stopped rather than sent back to an implementer who cannot fix it."
+        ]
+    return []
 
 
 def _change_request_blockers(state: models.State, gate: str) -> list[str]:
@@ -221,18 +297,14 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
             "cannot be issued against a damaged log (see `rein events --verify`)"
         )
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
+    blockers += _baseline_blockers(state, gate)
+    blockers += _audit_blockers(repo, state, store.read_config(), gate)
     blockers += _change_request_blockers(state, gate)
     blockers += _clarification_blockers(repo, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
-    blockers += _review_blockers(review, gate, _head_sha(repo))
+    blockers += _review_blockers(repo, review, state, gate)
     return blockers
-
-
-def _head_sha(repo: repo_mod.Repo) -> str:
-    """The commit under review, or "" outside a git repository (nothing to compare against)."""
-    rc, out = repo._git_rc("rev-parse", "HEAD")
-    return out.strip() if rc == 0 else ""
 
 
 # --- what an approval covers -------------------------------------------------------

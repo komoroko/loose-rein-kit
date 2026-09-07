@@ -26,8 +26,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from rein import event_chain, human_review, mdlite, models, status_api, strict_yaml
+from rein import event_chain, human_review, mdlite, models, review_reading, status_api, strict_yaml
 from rein import events as events_mod
+from rein import repo as repo_mod
 
 _MAX_DELIVERABLE = 300_000  # bytes of one deliverable the pane will render
 _MAX_PATCH = 200_000  # bytes of unified diff for gate ④
@@ -216,35 +217,46 @@ def _diff_block(root: Path) -> dict[str, object]:
 
 
 def _review_meta(root: Path, head: str | None) -> dict[str, object]:
-    """Whether the generated machine review speaks for the commit actually under review.
+    """Whether the generated machine review speaks for the code actually under review.
 
-    Gate ④ approves the generated *review.yaml*, whose machine binding records the
-    `subject_head_sha` it was produced against. Freshness is that sha against the current HEAD —
-    a commit made after the review was generated leaves the review stale (plan §17.5, E2E-08),
-    and the pane must show it rather than imply currency.
+    Gate ④ approves the generated *review.yaml*, and a change to the product since it was
+    generated leaves it stale (plan §17.5, E2E-08) — the pane must show that rather than imply
+    currency. Measured by `review_reading.freshness` on the product's content, which is the same
+    question `rein approve` and `rein doctor` ask, so the pane and the gate cannot disagree; and
+    on content rather than on HEAD's id because committing `review.yaml` is itself a later commit
+    and must not make the review it records stale.
     """
     try:
         raw = strict_yaml.load_mapping((root / ".rein" / "review.yaml").read_text(encoding="utf-8"))
     except (OSError, strict_yaml.StrictParseError):
         return {"reviewed_head": None, "head": head, "fresh": False}
-    machine = raw.get("machine")
-    binding = machine.get("binding") if isinstance(machine, dict) else None
-    reviewed = str(binding.get("subject_head_sha", "")) if isinstance(binding, dict) else ""
-    reviewed_or_none = reviewed or None
-    return {"reviewed_head": reviewed_or_none, "head": head, "fresh": bool(reviewed and head and reviewed == head)}
+    # Wrapped without schema validation, like `_gate_statuses` does with state.yaml: a partial or
+    # invalid review must not take the pane down, and every field read below is read defensively.
+    fresh = review_reading.freshness(repo_mod.Repo(root), models.Review(raw), _raw_state(root))
+    return {"reviewed_head": fresh.reviewed_head or None, "head": head or fresh.head or None, "fresh": fresh.fresh}
+
+
+def _raw_state(root: Path) -> models.State | None:
+    """state.yaml wrapped without schema validation, or None when it cannot be read at all.
+
+    A broken SSOT must not take the review pane down, so nothing here raises on a document that
+    would fail its schema — every reader below asks for one field and copes with its absence.
+    """
+    try:
+        return models.State(strict_yaml.load_mapping((root / ".rein" / "state.yaml").read_text(encoding="utf-8")))
+    except (OSError, strict_yaml.StrictParseError):
+        return None
 
 
 def _gate_statuses(root: Path) -> dict[str, str]:
     """Gate statuses from state.yaml; {} when it cannot be read.
 
-    A broken SSOT must not take the review pane down — but an unreadable gate reads as
-    `pending`, never as approved, so the pane can only ever understate what has been decided.
+    An unreadable gate reads as `pending`, never as approved, so the pane can only ever
+    understate what has been decided.
     """
-    try:
-        raw = strict_yaml.load_mapping((root / ".rein" / "state.yaml").read_text(encoding="utf-8"))
-    except (OSError, strict_yaml.StrictParseError):
+    state = _raw_state(root)
+    if state is None:
         return {}
-    state = models.State(raw)
     return {gate: state.gate_status(gate) for gate in models.GATE_ORDER}
 
 

@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 
 from rein import (
@@ -126,6 +126,85 @@ def change_digest(repo: repo_mod.Repo, commit: str, exclude: Sequence[str], *, i
         raise ReviewError(f"cannot read the tree at {commit}: {out.strip()}")
     entries = digests.filter_tree(digests.parse_ls_tree(out), exclude_prefixes=exclude, include_prefixes=include)
     return digests.tree_digest(entries)
+
+
+@dataclass(frozen=True)
+class Freshness:
+    """Whether a generated review still speaks for the repository as it now stands."""
+
+    fresh: bool
+    #: The commit the review was generated against, for a reader who wants to look at it.
+    reviewed_head: str
+    #: The commit the repository is on now.
+    head: str
+    #: Why it does not speak for it. "" when it does, or when nothing could be measured.
+    reason: str
+
+
+def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.State | None) -> Freshness:
+    """Does `review` still describe this tree? Measured on content, never on the commit id.
+
+    **A review is about the product, and `.rein/` is not the product.** The question used to be
+    asked as `binding.subject_head_sha != git rev-parse HEAD`, which is a question about the
+    repository rather than about the code: any commit at all made the review stale. One of those
+    commits is unavoidable and self-inflicted — the workflow commits each phase's deliverables at
+    its gate, so committing `review.yaml` moved HEAD and the review went stale the moment it was
+    recorded. Generate, commit, and the gate could not be approved; approve first and the commit
+    made the receipt's own artefact stale behind it.
+
+    So this compares `binding.change_digest` — the committed tree minus `not_the_product`, which
+    `review.assemble` already records — against the same digest taken now. A commit that touches
+    only the SSOT, the frozen prose or the installed surfaces moves no byte the reviewers read,
+    and the review goes on speaking for exactly what it read. A commit that touches a line of the
+    product invalidates it, which is the whole point and is now the *only* thing that does.
+
+    `subject_head_sha` keeps its own job: it is the commit every anchor and blob in the document
+    is resolved against. It is reported here so a reader can go and look at it.
+
+    **Unmeasurable is a blocker, not a silence.** No review at all — absent, or never generated —
+    carries no `reason`, because every caller already says that in its own words. But a review that
+    *is* generated and cannot be checked against the tree is reported with a reason and
+    `fresh=False`: "we could not tell" is not "it is current", and an unreadable gate fails closed.
+    Without that, `approve` added no blocker and `doctor` reported nothing at all, so a git that
+    could not answer opened gate ④ over a review nobody could show still spoke for the code. There
+    is no case for a generated review that records no digest — the schema requires
+    `binding.change_digest` and `store.read_review` refuses a document that fails it — so reaching
+    that branch means the repository, not the document, is what could not be read.
+    """
+    reviewed_head = review.subject_head_sha if review is not None else ""
+    rc, out = repo._git_rc("rev-parse", "HEAD")
+    head = out.strip() if rc == 0 else ""
+    recorded = review.change_digest if review is not None else ""
+    if review is None or not review.is_generated:
+        return Freshness(fresh=False, reviewed_head=reviewed_head, head=head, reason="")
+    unmeasurable = Freshness(
+        fresh=False,
+        reviewed_head=reviewed_head,
+        head=head,
+        reason=(
+            "whether the machine review still speaks for this tree could not be measured — "
+            + ("git cannot resolve HEAD" if not head else "the review records no change digest")
+            + ". Nothing here may read that as current; run `rein doctor`."
+        ),
+    )
+    if not recorded or not head:
+        return unmeasurable
+    try:
+        current = change_digest(repo, head, not_the_product(repo, state))
+    except ReviewError as exc:
+        return replace(unmeasurable, reason=f"the review's freshness could not be measured: {exc}. Run `rein doctor`.")
+    if current == recorded:
+        return Freshness(fresh=True, reviewed_head=reviewed_head, head=head, reason="")
+    return Freshness(
+        fresh=False,
+        reviewed_head=reviewed_head,
+        head=head,
+        reason=(
+            f"the machine review was generated against {reviewed_head[:12] or 'an unnamed commit'} and the "
+            f"product has changed since — it says nothing about the code as it now stands. "
+            "Re-run `rein review generate`."
+        ),
+    )
 
 
 def commit_exists(repo: repo_mod.Repo, ref: str) -> bool:

@@ -26,12 +26,10 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import tempfile
 import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 from rein import actual_extraction, adapters, common, digests, faults, models, review_policy
@@ -364,28 +362,27 @@ def _pending_changes(repo: repo_mod.Repo, base: str, head: str) -> Iterator[str 
     change is not applied as a patch: the diff in the request was folded and widened for the
     reading (`review_reading.fold_bodies`) and would not apply. Git already has both trees.
 
-    **A clone and not a worktree, and the host's own configuration pinned to the trusted base** —
-    two separate holes, both of which turned "the reviewer gets a directory" into "the reviewer
-    gets the change's directory":
+    **The tree is `head`, whole.** It used to have every host-configuration path put
+    back to the trusted base — the settings, hooks, MCP servers and instruction files a CLI reads
+    before it reads its prompt — so that the stage which exists to catch a hostile change did not
+    run under whatever that change said about its own permissions. The property was right and the
+    means were not: rewriting the checkout made the reviewer's world differ from the reviewed one.
+    A file the change *added* under those paths was not at the base and so was not there at all,
+    and the reviewer reported that it did not exist. It said something false about the change, and
+    it said it because we had made it true of the directory.
 
-    * A worktree's `.git` is a pointer into the real repository's common directory. It shares the
-      object store, **the refs, and `.git/hooks`** — so a reviewer standing in one could move a
-      branch, delete a tag or push, and every git command it ran fired this repository's real
-      hooks. "Whoever judges does not repair" was a property of the prompt there and of nothing
-      else. A local clone has its own refs and git's own sample hooks; `origin` is removed, so
-      there is no longer anywhere to push. Whatever it writes dies with the temporary directory.
-    * A checkout carries `.claude/settings.json`, `.mcp.json`, `CLAUDE.md` and their equivalents
-      (:data:`adapters.PROJECT_CONFIG`) — the pre-authorized commands, the hooks, the MCP servers
-      and the instructions a CLI reads before it reads its prompt. At `head` those files *are the
-      change under review*, so the stage that exists to catch a hostile change was running under
-      whatever that change said about its own permissions. They are put back to `base` instead:
-      the reviewer runs under the configuration a human approved, which is the same configuration
-      every other rein launch in this repository already runs under.
+    The guarantee now sits on the launch instead (`adapters.Adapter.config_isolation`): the CLI is
+    told to load the operator's configuration and not the working directory's. The caller gives
+    this stage a checkout **only** for an adapter that declares such a mechanism, so an unisolable
+    CLI reads the diff from the empty directory exactly as the contract already tells it to.
 
-    The reviewer does not lose sight of them. Every one of those paths is in the diff the request
-    carries — `not_the_product` never excluded them — and the contract says out loud that they are
-    in the diff rather than on disk (`security_review.contract`). What changed is that reading a
-    hostile settings file is no longer the same act as obeying it.
+    **A clone and not a worktree.** A worktree's `.git` is a pointer into the real repository's
+    common directory. It shares the object store, **the refs, and `.git/hooks`** — so a reviewer
+    standing in one could move a branch, delete a tag or push, and every git command it ran fired
+    this repository's real hooks. "Whoever judges does not repair" was a property of the prompt
+    there and of nothing else. A local clone has its own refs and git's own sample hooks; `origin`
+    is removed, so there is no longer anywhere to push. Whatever it writes dies with the temporary
+    directory.
 
     None when it cannot be made, and the caller then uses the empty directory as before. This is a
     better reading, never a required one: the contract asks the reviewer to read the diff itself
@@ -411,38 +408,7 @@ def _pending_changes(repo: repo_mod.Repo, base: str, head: str) -> Iterator[str 
             if rc != 0:
                 yield None
                 return
-        yield tree if _pin_config_to_base(tree) else None
-
-
-def _pin_config_to_base(tree: str) -> bool:
-    """Put every :data:`adapters.PROJECT_CONFIG` path in `tree` back to the trusted base.
-
-    Called with the index already at the base and the working tree at the head, so the base's
-    content for a path is exactly what `git checkout -- <path>` restores. Each path is removed from
-    the working tree first, which is what handles the one `checkout` cannot: a file the change
-    *added*, which the base index has never heard of.
-
-    Afterwards the working tree and the index agree about these paths, so they do not show up in
-    `git status` as a change — least of all as a deletion. Saying "this change deletes
-    `.claude/settings.json`" would be a false statement about the change, and a security reviewer
-    is the last reader to hand one to.
-
-    A symlink is unlinked and never followed: `.claude` replaced by a link to somewhere else is
-    itself one of the things this is here to defuse, and resolving it would delete the target.
-    """
-    listed = common.run(["git", "-C", tree, "ls-files", "-z", "--", *adapters.PROJECT_CONFIG])
-    if listed[0] != 0:
-        return False
-    for rel in adapters.PROJECT_CONFIG:
-        path = Path(tree) / rel
-        if path.is_symlink() or path.is_file():
-            path.unlink()
-        elif path.is_dir():
-            shutil.rmtree(path)
-    at_base = [entry for entry in listed[1].split("\0") if entry]
-    if not at_base:
-        return True
-    return common.run(["git", "-C", tree, "checkout", "--", *at_base])[0] == 0
+        yield tree
 
 
 def _adapter_reviewer(
@@ -490,9 +456,10 @@ def _adapter_reviewer(
 
     What it does **not** cost is the two things a directory could have cost. The clone has its own
     refs and no remote, so the stage cannot reach anything the rest of the workflow will read
-    afterwards, and every :data:`adapters.PROJECT_CONFIG` path in it is pinned to the trusted base,
-    so nothing the change says about tool permissions, hooks or MCP servers governs the launch that
-    is reviewing it. Both are mechanical; neither asks the reviewer to behave.
+    afterwards, and the launch is told to load this machine's configuration rather than the
+    directory's (`adapters.Adapter.config_isolation`), so nothing the change says about tool
+    permissions, hooks or MCP servers governs the launch that is reviewing it — which is also what
+    lets the tree stay equal to `head`. Both are mechanical; neither asks the reviewer to behave.
 
     The rest is affordable *here and nowhere else*: this is the stage that is deliberately not blind
     (it is the only one sent the test half), and its input is still fully determined by
@@ -512,7 +479,22 @@ def _adapter_reviewer(
     role_argv = (*adapters.launch_argv(config, role), *record.access_flags(adapters.READ))
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
-    wants_checkout = role == _CHECKOUT_ROLE and bool(record.disciplines.get(adapters.SECURITY))
+    # Three conditions, and the third is what makes the second safe. A checkout of the change puts
+    # this launch inside a directory whose settings, hooks and MCP servers *are* the thing under
+    # review, so it is handed one only when the CLI can be told to ignore them
+    # (`adapters.Adapter.config_isolation`). A CLI with no such mechanism gets the empty directory
+    # and reads the diff, which is what `security_review.contract` already asks of it.
+    wants_checkout = (
+        role == _CHECKOUT_ROLE and bool(record.disciplines.get(adapters.SECURITY)) and bool(record.config_isolation)
+    )
+    if wants_checkout:
+        role_argv = (*role_argv, *record.config_isolation)
+    # Told the shape rather than asked for it, where the CLI can be. The prompt still states the
+    # contract in full — this is offered, never relied on, and a role this release has no schema
+    # for (or a CLI with no flag) is parsed and validated exactly as before.
+    if record.output_schema_flags and (schema := review_policy.stage_output_schema(role)):
+        payload = json.dumps(schema, ensure_ascii=False)
+        role_argv = (*role_argv, *(part.format(schema=payload) for part in record.output_schema_flags))
 
     def call(request: Mapping[str, Any]) -> review_policy.Answer:
         argv, stdin = prompt_call(

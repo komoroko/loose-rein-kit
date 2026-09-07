@@ -173,6 +173,42 @@ def expertise_gaps(review: models.Review, human: Mapping[str, Any]) -> list[dict
 # -- review budget (plan §14.10, E2E-30) --------------------------------------
 
 
+def answerable_statements(
+    decision_cards: Sequence[Mapping[str, Any]], statements: Sequence[Mapping[str, Any]], *, floor: str = "high"
+) -> int:
+    """How many statements belong to a card somebody actually has to answer.
+
+    `max_human_statements` is named for the reviewer's workload and was measured as
+    `len(machine.statements)` — every statement `decision_cards.derive` mints, which is one per
+    *option* of every card at every risk. A card carries four or five options, and only high and
+    critical cards must be answered (:func:`unanswered_decisions`), so two decisions a person owed
+    could arrive over the 30-statement ceiling behind five low-risk cards nobody was obliged to
+    read. The instruction attached to that ceiling is "split the scope", which is not a move that
+    exists at gate ④, so the only exit was to raise the number.
+
+    Counted here instead: the statements attached, through `applicability.subject_id`, to the
+    cards the floor makes mandatory. A low-risk card is still worth reading and still costs
+    nothing against a budget about what must be decided.
+
+    Shared by `human_review.budget_actuals` and `decision_cards.derive_review_budget` for the same
+    reason they already share `models.BUDGET_NAMES`: the snapshot recorded with the review and the
+    live figure on the screen have to be the same measurement.
+    """
+    wanted: set[str] = set()
+    for card in decision_cards:
+        if not models.risk_at_least(_risk(card), floor):
+            continue
+        options = card.get("options")
+        if not isinstance(options, list):
+            continue
+        wanted |= {
+            str(option.get("statement_id", ""))
+            for option in options
+            if isinstance(option, Mapping) and option.get("statement_id")
+        }
+    return sum(1 for statement in statements if str(statement.get("id", "")) in wanted)
+
+
 def _unresolved_low_medium_unknowns(review: models.Review, human: Mapping[str, Any]) -> int:
     """Low/medium non-blocking gaps with no human disposition — the ones a budget bounds."""
     disposed = {str(d.get("subject_id")) for d in _human_list(human, "dispositions")}
@@ -209,7 +245,9 @@ def budget_actuals(review: models.Review, human: Mapping[str, Any]) -> dict[str,
     """
     return {
         "max_critical_decisions": sum(1 for c in _machine_list(review, "decision_cards") if _risk(c) == "critical"),
-        "max_human_statements": len(_machine_list(review, "statements")),
+        "max_human_statements": answerable_statements(
+            _machine_list(review, "decision_cards"), _machine_list(review, "statements")
+        ),
         "max_unresolved_low_medium_unknowns": _unresolved_low_medium_unknowns(review, human),
         "max_diff_bytes": _diff_bytes(review),
     }

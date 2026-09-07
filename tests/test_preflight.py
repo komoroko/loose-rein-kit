@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from rein import adapters, models, preflight
+from rein import adapters, executors, models, preflight
 from tests import conftest
 
 _PINNED = {"kind": "oci", "image": "localhost/rein-python@sha256:" + "0" * 64, "network_profile": "none"}
@@ -168,3 +168,36 @@ def test_the_agent_cli_the_suite_preflights_is_the_stub_and_not_the_host_s() -> 
         found = shutil.which(name)
         assert found is not None, f"{name} is not on the suite's PATH"
         assert Path(found).parent.name.startswith("agent-cli"), f"{name} resolved to the host's {found}"
+
+
+# --- capacity is asked before the run, not discovered during it ----------------
+
+
+def _oci(memory_mb: int) -> dict[str, models.ExecutorProfile]:
+    return {
+        "quality": models.ExecutorProfile(
+            "quality", {"kind": "oci", "image": "x@sha256:" + "a" * 64, "memory_mb": memory_mb}
+        )
+    }
+
+
+def test_a_profile_the_engine_cannot_grant_is_refused_before_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The way this fact used to arrive was a container SIGKILLed partway through a browser test
+    suite, several retries deep, with an exit code that says only 137."""
+    monkeypatch.setattr(executors, "engine_memory_mb", lambda runtime: 2048)
+    problems = preflight._capacity_problems(_oci(8192), runtime="docker")
+    assert len(problems) == 1
+    assert "8192 MiB" in problems[0].what and "2048 MiB" in problems[0].what
+    assert "memory_mb" in problems[0].remedy
+
+
+def test_an_engine_that_does_not_say_produces_no_problem(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence is silence. Guessing "probably not enough" would refuse runs on a machine nobody
+    had measured."""
+    monkeypatch.setattr(executors, "engine_memory_mb", lambda runtime: 0)
+    assert preflight._capacity_problems(_oci(8192), runtime="docker") == []
+
+
+def test_a_profile_that_fits_is_not_a_problem(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(executors, "engine_memory_mb", lambda runtime: 8192)
+    assert preflight._capacity_problems(_oci(2048), runtime="docker") == []

@@ -264,6 +264,40 @@ def review_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str]
     )
 
 
+def gate_four_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str]) -> str:
+    """Hand gate ④'s blocking findings about one task back to an implementer.
+
+    Not `review_fix_prompt`: that one is a per-task reviewer looking at a change that has not
+    landed, inside its own worktree, with the task's own send-back budget. This is the *grounded*
+    review — a blind reading of the merged tree compared against the frozen plan — and its
+    findings arrive after everything is `done` and merged. What differs is not the tone: it is
+    what a finished fix looks like. The plan is frozen, the task's acceptance criteria are already
+    established, and this is a repair inside a scope somebody already approved. Widening it is not
+    an option the implementer has, and saying so is what keeps a security finding from turning
+    into a redesign.
+
+    The findings name their own code anchors, so the change is pointed at lines rather than at a
+    subject. And the reviewer that raised them has no memory of having done so: the next round
+    reads the code again from cold, which is what decides whether the finding closed — never this
+    launch's account of it.
+    """
+    return (
+        f'You are the implementer for task {task.id} "{task.title}". The grounded review at gate 4 read '
+        "the merged tree against the frozen plan and found the following in code your task's declared "
+        "scope owns:\n"
+        f"{findings}\n"
+        "Repair them, and nothing else. The plan is frozen and this task is already done and merged: "
+        "this is a fix inside a scope that was approved, not a second attempt at the task. Stay inside "
+        "the scope — a change outside it blocks rather than lands. If a finding is *wrong*, say so in "
+        "`rein report --summary` and change nothing for it; the review is taken again from cold "
+        "afterwards, by a reader with no memory of having raised it, and that is what decides whether "
+        "it closed.\n"
+        "Write or amend a test that would have caught it wherever the finding admits one — a repair no "
+        "test exercises is a claim about code nobody re-reads. Keep "
+        f'{_gate_list(gate_cmds)} green, and commit with the "{task.id}: " prefix.'
+    )
+
+
 def integration_review_fix_prompt(ids: str, findings: str, *, gate_cmds: Sequence[str], pathspec: Sequence[str]) -> str:
     """Hand the integration reviewer's must-fix findings back to an implementer.
 

@@ -349,8 +349,14 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 - **証拠のない claim は `unknown` であり、散文で埋めない。** `.rein/plan.yaml` は要件
   (`R-N`/`NFR-N`)1件につき claim を1つ凍結する。これが **Expected Model** である。`claim_ids` が
   各タスクを、それが答える claim へ紐づけ、`rein dag --trace` が突き合わせる。
-- **ゲート④は Expected と Actual を突き合わせる。** `rein review generate`(レビュー対象の HEAD に
-  束ねて実行)が実行するのは、決定論的な Coverage Manifest、コードが実際に何をしているかの
+- **ゲート④は Expected と Actual を突き合わせ、直せるものは直す。** `rein build` は全タスクの
+  完了後に変更を読み、あるタスクの宣言済み scope が所有するコードに対する blocking な指摘を
+  修正し、記憶を持たない読み手にもう一度読ませる。ゲートは1つも動かない。承認済みの scope の
+  内側での修正は要件も claim も計画も変えず、`rein guard` が凍結中の `plan.yaml` と
+  `config.yaml` への書き込みを拒否するので、それは約束ではなく機構である。人間に届くのは機械が
+  判断できないもの — `diverged` な claim について、誤っているのがコードなのか計画なのか — に
+  限られる。読解そのもの(`rein review generate` 単体)が実行するのは、決定論的な
+  Coverage Manifest、コードが実際に何をしているかの
   **ブラインド抽出**(この抽出器には計画を一切渡さず、自分で読みに行けないようリポジトリの外で
   起動する)、構造化されたセキュリティレビュー、そして Expected と Actual の比較である。
   読み取る対象はプロダクトに限られる —

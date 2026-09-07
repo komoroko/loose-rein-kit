@@ -53,6 +53,7 @@ from rein import (
     review_transport,
     run_progress,
     run_record,
+    security_review,
 )
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -488,7 +489,7 @@ def generate(
         # the top rather than re-read here, and before the calls below, which are about to move off
         # this thread — the store is not something to touch from two. It is needed this early
         # because it decides how the change may be read at all: see the re-take below.
-        prior_blocking = _prior_blocking(existing, trusted_base)
+        prior_blocking = _prior_blocking(repo, existing, trusted_base, state)
 
         # How the change is read: one reading of everything, or one per task the plan scopes plus
         # the seam between them. Each is measured and widened on its own, so one launch holds one
@@ -649,7 +650,10 @@ def generate(
             unanswered=comparison.unanswered,
             gaps=gaps,
             extra_behaviors=_extra_behaviors(comparison.extra_behaviors, gaps=gaps),
-            security={"findings": [dict(f) for f in composed.findings]},
+            # Disputes re-applied here rather than trusted to survive in the human half: the
+            # reviewer has no memory of the last review, so a deterministic false positive is
+            # found again, and a regeneration discards the human answers that had settled it.
+            security={"findings": security_review.apply_disputes(repo, state, composed.findings)},
             effective_risk=effective,
             plan=plan,
             # The orientation stage, derived here rather than inside `assemble` because it reads
@@ -1176,7 +1180,9 @@ def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str
     return ids
 
 
-def _prior_blocking(review: models.Review | None, trusted_base: str) -> list[dict[str, Any]]:
+def _prior_blocking(
+    repo: repo_mod.Repo, review: models.Review | None, trusted_base: str, state: models.State | None
+) -> list[dict[str, Any]]:
     """The blocking findings the previous review recorded **about the same base**, if any.
 
     Whole findings, anchors included: `security_review.resolution_of` decides whether a dropped one
@@ -1194,13 +1200,25 @@ def _prior_blocking(review: models.Review | None, trusted_base: str) -> list[dic
     absent or unequal base means no carry-over, which is the safe direction here: the new review
     is free to find what is actually there, and the *new* base's own findings will then carry
     forward normally.
+
+    **A finding a human has contradicted does not carry.** Holding the reviewer to a finding it
+    was right not to re-emit is what made a false positive unescapable: the human disputed it, the
+    regeneration discarded the human review that held the dispute, the reviewer honestly left the
+    finding out, and `resolution_of` could not close it because the code it named was correct and
+    still there — so the gate refused the drop as "a reviewer cannot clear its own block", every
+    time, for the rest of the cycle. Two responsibilities had been folded into one list: carrying
+    a blocker forward so a reviewer cannot quietly retract it, and re-deciding whether it is true.
+    The second is not the reviewer's to answer here, and the durable record of the human's answer
+    is `state.disputed_findings` — bound to the anchored text, so it retires if that code moves.
     """
     if review is None or not trusted_base:
         return []
     recorded = str(review.raw.get("machine", {}).get("binding", {}).get("trusted_base_sha", ""))
     if not recorded or recorded != trusted_base:
         return []
-    return [dict(f) for f in review.blocking_security_findings]
+    findings = [dict(f) for f in review.blocking_security_findings]
+    disputed = security_review.live_disputes(repo, state, findings)
+    return [f for f in findings if str(f.get("id", "")) not in disputed]
 
 
 def _independence_record(

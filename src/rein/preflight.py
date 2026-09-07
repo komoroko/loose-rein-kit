@@ -27,7 +27,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from rein import adapters, executors, models
+from rein import adapters, common, executors, models
 
 
 @dataclass(frozen=True)
@@ -104,6 +104,37 @@ def _sandbox_problems(used: dict[str, models.ExecutorProfile], *, runtime: str |
         if problem:
             problems.append(
                 Problem(f"profile {name!r} cannot be entered: {problem}", models.sandbox_setup_command([name]))
+            )
+    problems += _capacity_problems(sandboxed, runtime=runtime)
+    return problems
+
+
+def _capacity_problems(sandboxed: Mapping[str, models.ExecutorProfile], *, runtime: str) -> list[Problem]:
+    """Can the engine actually grant the memory these profiles ask for?
+
+    Asked before the run rather than discovered during it. A profile may declare any `memory_mb`
+    it likes; whether the engine can hand it out is a fact about the machine, and the way that
+    fact used to arrive was a container SIGKILLed partway through a browser test suite, several
+    retries deep, with an exit code that says only 137.
+
+    Silence is silence: an engine that does not report its total (`engine_memory_mb` returns 0)
+    produces no problem here. Guessing "probably not enough" would refuse runs on a machine
+    nobody had measured.
+    """
+    available = executors.engine_memory_mb(runtime)
+    if available <= 0:
+        return []
+    problems = []
+    for name, profile in sorted(sandboxed.items()):
+        wanted = common.as_int(profile.raw.get("memory_mb"), 1024)
+        if wanted > available:
+            problems.append(
+                Problem(
+                    f"profile {name!r} asks for {wanted} MiB and {runtime} reports {available} MiB in total — "
+                    "the kernel would kill the container partway through",
+                    f"lower `executor_profiles.{name}.memory_mb`, or raise what the engine may use "
+                    "(Docker Desktop: Settings → Resources)",
+                )
             )
     return problems
 

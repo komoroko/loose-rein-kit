@@ -52,11 +52,15 @@ def make_state(
     plan_status: str = "frozen",
     tasks: dict[str, str] | None = None,
     updated_at: str = "2026-07-23T10:00:00+09:00",
+    baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """A state document; `gates` overrides the mid-build baseline (approved through tasks).
+    """A state document; `gates` overrides the mid-build defaults (approved through tasks).
 
     An approved gate automatically gets a receipt, because the schema refuses one without —
-    which is the point: there is no such thing as an approval with nothing behind it.
+    which is the point: there is no such thing as an approval with nothing behind it. A green
+    quality-gate baseline is here for the same reason: gate 3 cannot be approved without one, so a
+    fixture approved through tasks that carried none would be a state the product cannot reach.
+    Pass `baseline={}` for a fixture that is deliberately about its absence.
     """
     resolved = {
         "requirements": "approved",
@@ -85,6 +89,11 @@ def make_state(
         "execution": {"status": "idle"},
         "tasks": {tid: {"status": status} for tid, status in (tasks or {}).items()},
     }
+    resolved_baseline = (
+        {"measured_at": updated_at, "tree_digest": "fixture-tree", "red_steps": []} if baseline is None else baseline
+    )
+    if resolved_baseline:
+        document["baseline"] = resolved_baseline
     return document
 
 
@@ -380,7 +389,15 @@ def make_config(
     profiles: dict[str, dict[str, Any]] | None = None,
     max_parallel: int = 3,
     launch_retries: int | None = None,
+    repair_rounds: int = 0,
 ) -> dict[str, Any]:
+    """A config document. `repair_rounds` defaults to **0**, unlike the product's own default of 2.
+
+    A build that ends by reading the change launches the gate-④ reviewers, and a test about task
+    consumption has no business paying for that — the PATH stub would refuse it anyway, which
+    would make every such test fail for a reason it is not about. Tests that *are* about the
+    repair loop ask for rounds explicitly, which also makes it visible which ones those are.
+    """
     execution: dict[str, Any] = {"max_parallel": max_parallel, "worktree_dir": ".worktrees"}
     if launch_retries is not None:
         execution["launch_retries"] = launch_retries
@@ -426,6 +443,7 @@ def make_config(
                 "required": True,
             },
         ],
+        "review_policy": {"repair_rounds": repair_rounds},
         "guard": {
             "template_mode": template_mode,
             # `is None` rather than falsy: a test that asks for *no* guarded paths must get

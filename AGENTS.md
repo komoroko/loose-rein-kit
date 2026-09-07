@@ -44,8 +44,13 @@ brief → requirements → design → tasks → build → verify → done
 ```
 
 `/req`→`docs/10-requirements.md` (gate① requirements) · `/design`→`docs/20-design.md`+ADRs
-(gate② design) · `/tasks`→`docs/tasks/T-*.md`+`plan.yaml` (gate③ tasks) · `/build`→code+tests
-then a **grounded review** (gate④ build) · `/verify`→`docs/test/test-plan.md` (gate⑤ release).
+(gate② design) · `/tasks`→`docs/tasks/T-*.md`+`plan.yaml`+a measured **baseline** (gate③ tasks) ·
+`/build`→code+tests then a **grounded review** it repairs what it can of (gate④ build) ·
+`/verify`→`docs/test/test-plan.md`+a **dependency audit** (gate⑤ release).
+
+Gate ③ measures the work branch's quality gate before it approves a plan against it
+(`rein baseline measure`): a step already red is fixed or frozen as a deliberate decision, never
+discovered by the first task to spend its send-back budget on it.
 
 `/status` shows progress; `rein next`/`ui` show the same board (a fixed safe-operations
 whitelist, never phase execution). At `done`, `/verify` records `docs/retrospective.md`. An
@@ -111,8 +116,21 @@ criteria, its scope, the changed paths split into source / tests / mechanical ch
 earlier attempts tried. The one deliberate exception is gate ④'s blind extractor: never give it
 the plan.
 
-**Whoever judges does not repair.** The per-task reviewer is launched read-only and writes
-findings; the implementer resolves them and the reviewer looks again.
+**Whoever judges does not repair — and both halves are the loop's.** The reviewer is launched
+read-only and writes findings; an implementer resolves them and the reviewer looks again. That
+holds at gate ④ as well as inside a task: the build reads the change, repairs every blocking
+finding a task's declared scope owns, and reads it again from cold, up to
+`review_policy.repair_rounds`. No gate moves — a repair inside an approved scope changes no
+requirement, no claim and no plan, and `rein guard` makes that mechanical rather than promised.
+Whether a finding closed is decided by the next reading, never by the fixer's account of itself.
+
+**A finding is routed by what repairing it would change, not by who found it** (`repair.route`).
+Three classes: **code** — one task's scope owns it and no claim, criterion or requirement moves —
+the loop repairs it. **plan** — a claim, criterion, requirement, or the frozen environment has to
+change — a human, through `/revise`. **judgement** — deciding which of those two it *is*: a
+`diverged` claim, an extra behaviour nobody asked for. That is what a Decision Card is for, and
+answering one `revise_implementation` hands the subject back to the loop as a code repair. The
+human decides *whether*; the loop does the work.
 
 ## Principles
 
@@ -168,11 +186,16 @@ findings; the implementer resolves them and the reviewer looks again.
 ## Security gate
 
 **gitleaks** at commit stage; a **structured security review** feeds the grounded review before
-gate ④ (bound to the reviewed HEAD; a later commit leaves it stale). Gate ⑤ **carries that review
-rather than re-reading the code** — its readiness refuses a review that is not about this HEAD, and
-its receipt binds the machine digest — and runs a **dependency audit**, the one security answer
-that is not a function of the tree and therefore the only one that must be taken again (detail:
-build.md, verify.md).
+gate ④. What "stale" means there is a change to the *product*, measured on content: committing
+`review.yaml` is itself a later commit and must not invalidate the review it records. A false
+positive is contradicted by a human with `dispute_finding`, and that record lives in `state.yaml`
+bound to the anchored text — so it survives the regeneration that discards the human review, and
+lapses if that code is edited. Gate ⑤ **carries the review rather than re-reading the code** — its
+receipt binds the machine digest — and runs `rein audit run`, the one security answer that is not
+a function of the tree and therefore the only one that expires without the repository moving. It
+runs on the host and nowhere else — an audit reads a published database and no sandbox here is
+granted egress — and a machine that could not answer records nothing, because "could not ask" is
+not "the answer is bad" (detail: build.md, verify.md).
 
 ## Branch / commit / permissions
 
@@ -192,7 +215,9 @@ build.md, verify.md).
   Merged atomically, nothing is rebased and the commits the build produced are the ones that land.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
-  `completed_commit` and gate receipt on commits that no longer exist.
+  `completed_commit` and gate receipt on commits that no longer exist. Gate ④'s own repairs follow
+  the same rule and the build loop does it for them: the fix is committed in a worktree on the
+  owning slice's branch and merged upward, never at the work branch's tip.
 - `command-preauthorization` of known-safe commands cuts repeated prompts **without touching
   gates** (generic commands in the installed settings; product-specific ones in the product's
   own) — never pre-authorize push / PR / **merge to main** / `cycle-close` / `pr-stack`, nor `rein

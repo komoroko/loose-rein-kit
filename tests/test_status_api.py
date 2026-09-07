@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from rein import events as events_mod
-from rein import models, status_api
+from rein import faults, models, status_api
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import (
@@ -603,8 +603,10 @@ def test_the_gate_and_phase_maps_agree_with_the_vocabulary() -> None:
     assert set(status_api.PHASE_COMMAND) <= set(models.PHASE_ORDER)
 
 
-def test_a_blocking_finding_the_plan_owns_is_recommended_before_the_phase_command() -> None:
-    """Typing the ids in by hand is the clerical half of a decision the plan already made."""
+def test_a_blocking_finding_the_plan_owns_sends_the_build_back_rather_than_a_roll_back() -> None:
+    """A code defect gate ④ found is not a defect in the specification, and routing it through
+    `rein revise` made it one — the task and its dependent closure went `needs-revision`, which
+    demanded a `/tasks` reconcile and a re-approval of gate ③ for a repair that changed no plan."""
     rec = status_api.next_action(
         current_phase="build",
         gates={
@@ -621,10 +623,11 @@ def test_a_blocking_finding_the_plan_owns_is_recommended_before_the_phase_comman
         gate_chain_broken=False,
         plan_missing=False,
         unsandboxed_profiles=[],
-        attributed_findings=2,
+        repairable_findings=2,
     )
 
-    assert rec.command.startswith("rein revise --to build --from-review")
+    assert rec.command == "rein build"
+    assert "no gate moves" in rec.reason
     assert "rein pr-stack --restack" in rec.also
 
 
@@ -645,7 +648,7 @@ def test_no_finding_leaves_the_build_recommendation_alone() -> None:
         gate_chain_broken=False,
         plan_missing=False,
         unsandboxed_profiles=[],
-        attributed_findings=0,
+        repairable_findings=0,
     )
 
     assert "--from-review" not in rec.command
@@ -718,3 +721,134 @@ def test_the_status_carries_a_generation_in_flight(tmp_path: Path) -> None:
     assert isinstance(live, dict)
     assert live["outcome"] == "running" and live["total"] == 5 and live["done"] == 0
     assert live["stale"] is False, "a file written a moment ago is not stale"
+
+
+# --- the tree gate 3 approves over --------------------------------------------
+
+
+def _tasks_phase(**over: object) -> dict[str, object]:
+    return {
+        "current_phase": "tasks",
+        "gates": {"requirements": "approved", "design": "approved", "tasks": "pending"},
+        "counts": {"todo": 1},
+        "attention_count": 0,
+        "chain_defects": 0,
+        "uninitialized": False,
+        "gate_chain_broken": False,
+        "plan_missing": False,
+        "unsandboxed_profiles": [],
+        **over,
+    }
+
+
+def test_an_unmeasured_baseline_is_named_rather_than_left_to_the_first_task() -> None:
+    """Gate 3 decides this plan is implementable against this tree. `/tasks` does not ask the tree,
+    so recommending it would send the human round a loop that cannot answer the blocker."""
+    rec = status_api.next_action(**_tasks_phase(baseline="missing"))  # type: ignore[arg-type]
+    assert rec.command == "rein baseline measure"
+
+
+def test_a_red_baseline_asks_for_a_decision_not_a_re_measurement() -> None:
+    """Recording it is not the point; a human saying "yes, start anyway" is."""
+    rec = status_api.next_action(**_tasks_phase(baseline="red"))  # type: ignore[arg-type]
+    assert rec.command == "rein baseline measure --freeze"
+
+
+def test_a_measured_baseline_does_not_stand_in_the_way() -> None:
+    assert status_api.next_action(**_tasks_phase(baseline="")).command == "/tasks"  # type: ignore[arg-type]
+
+
+# --- a blocked task names the one command that moves it -----------------------
+
+
+def _blocked(handoff: dict[str, object]) -> models.State:
+    return models.State({**make_state(), "tasks": {"T-001": {"status": "blocked", "handoff": handoff}}})
+
+
+def test_a_scope_violation_is_the_plans_to_widen_not_a_retry() -> None:
+    """The task did what it was asked and the plan drew its boundary too small. Resetting it buys
+    the same refusal; widening an approved scope is a human's decision."""
+    rec = status_api.blocked_recovery(_blocked({"escalation": {"kind": "scope_violation"}}))
+    assert rec is not None and rec.command.startswith("rein revise --to tasks --impacted T-001")
+
+
+def test_an_attempt_that_produced_nothing_needs_a_fresh_reset() -> None:
+    """The record of the answered question is what stops the next launch, so discarding it is the
+    move — and `--fresh` is the flag that says something outside the tree was repaired."""
+    rec = status_api.blocked_recovery(_blocked({"escalation": {"kind": "no_implementation"}}))
+    assert rec is not None and rec.command == "rein task reset T-001 --fresh --reason <what you repaired>"
+
+
+def test_a_machine_failure_is_diagnosed_rather_than_retried() -> None:
+    """Nothing about the code was judged, so there is nothing to reset until the machine is fixed."""
+    fault = {"kind": faults.Fault.ENV_PERMANENT.name, "where": "test", "rc": 127}
+    rec = status_api.blocked_recovery(_blocked({"last_fault": fault}))
+    assert rec is not None and rec.command == "rein doctor"
+
+
+def test_a_spent_send_back_budget_asks_which_half_is_wrong() -> None:
+    """The one case the loop genuinely cannot classify: a real failure it could not fix. It says
+    so, and names both exits, rather than recommending one it cannot justify."""
+    rec = status_api.blocked_recovery(_blocked({"failed_step": "check"}))
+    assert rec is not None
+    assert rec.command == "rein task reset T-001 --reason <what changed>"
+    assert "the code or the plan" in rec.reason
+
+
+def test_a_blocked_task_is_recommended_before_the_phase_command() -> None:
+    """There was no row for it at all: `rein build` escalated and stopped while this went on
+    saying "the build phase is in progress — run /build", which re-ran into the same wall."""
+    rec = status_api.next_action(
+        current_phase="build",
+        gates={"requirements": "approved", "design": "approved", "tasks": "approved", "build": "pending"},
+        counts={"todo": 0, "blocked": 1, "done": 1},
+        attention_count=0,
+        chain_defects=0,
+        uninitialized=False,
+        gate_chain_broken=False,
+        plan_missing=False,
+        unsandboxed_profiles=[],
+        blocked=status_api.blocked_recovery(_blocked({"escalation": {"kind": "agent_blocked"}})),
+    )
+    assert rec.command == "rein task reset T-001 --fresh --reason <what you repaired>"
+
+
+def test_nothing_blocked_recommends_nothing() -> None:
+    assert status_api.blocked_recovery(models.State(make_state())) is None
+
+
+def _build_phase(**extra: object) -> status_api.Recommendation:
+    return status_api.next_action(
+        current_phase="build",
+        gates={
+            "requirements": "approved",
+            "design": "approved",
+            "tasks": "approved",
+            "build": "pending",
+            "release": "pending",
+        },
+        counts={"todo": 0, "in-progress": 0, "done": 2, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
+        attention_count=0,
+        chain_defects=0,
+        uninitialized=False,
+        gate_chain_broken=False,
+        plan_missing=False,
+        unsandboxed_profiles=[],
+        **extra,  # type: ignore[arg-type]
+    )
+
+
+def test_a_finding_the_loop_may_not_decide_is_not_another_build() -> None:
+    """Counted as one number, a `diverged` claim went to `rein build` — which read the change, said
+    "what is left is a decision", and returned; `rein next` then recommended the same build again.
+    The two halves of `repair.route` are two different next moves."""
+    rec = _build_phase(repairable_findings=0, decidable_findings=2)
+
+    assert rec.command == "rein ui"
+    assert "Decision Cards" in rec.reason
+
+
+def test_a_finding_the_loop_owns_is_still_the_build_s() -> None:
+    rec = _build_phase(repairable_findings=1, decidable_findings=3)
+
+    assert rec.command == "rein build", "a repairable finding outranks a decidable one: it costs nobody anything"

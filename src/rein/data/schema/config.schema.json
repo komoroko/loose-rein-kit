@@ -228,12 +228,48 @@
         ]
       }
     },
+    "security": {
+      "description": "The security answers that are not a function of the tree. Everything else gate 5 carries from gate 4's review, bound to the reviewed HEAD; a dependency audit is the exception, because the same commit audited last month and today can differ — the vulnerability database moved while the code did not. That also means it expires without anything changing in the repository, which is what `max_age_days` is for.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dependency_audit": {
+          "description": "How to audit this project's dependencies. An argv array, never a shell string, run in an executor profile like any other command that touches the repository. Absent means gate 5 has no dependency answer and says so.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "command"
+          ],
+          "properties": {
+            "command": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            },
+            "executor_profile": {
+              "$ref": "#/$defs/profileName"
+            },
+            "max_age_days": {
+              "description": "How long a recorded audit still speaks for. Past it the answer is stale even though nothing in the repository moved, which is the whole difference between this and every other piece of evidence here.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 90
+            }
+          }
+        }
+      }
+    },
     "review_policy": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "composition": {
-          "description": "How gate 4 takes its reading. `auto` composes it from the plan's task scopes \u2014 one reading per task plus the seam between them \u2014 so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
+          "description": "How gate 4 takes its reading. `auto` composes it from the plan's task scopes — one reading per task plus the seam between them — so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
           "enum": [
             "auto",
             "whole"
@@ -265,6 +301,12 @@
               "maximum": 8388608
             }
           }
+        },
+        "repair_rounds": {
+          "description": "How many times gate 4 may repair its own blocking findings and read the change again before it stops and asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
         }
       }
     },
@@ -289,9 +331,7 @@
             ],
             "properties": {
               "path": {
-                "type": "string",
-                "maxLength": 512,
-                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*/?$"
+                "$ref": "#/$defs/repoPath"
               },
               "requires_gate": {
                 "enum": [
@@ -342,14 +382,16 @@
       "pattern": "^[a-z0-9][a-z0-9_-]*$"
     },
     "repoPath": {
+      "description": "A repo-relative POSIX path. Checked for what it must not be rather than for which characters it may contain: no absolute form, no `..` segment, no empty segment, no backslash, no control character. It was an ASCII allow-list, which rejected `app/[[...path]]/page.tsx`, `app/(group)/`, and every non-ASCII filename — a reference to real code read as an attempt to escape the repository. What the rule is actually about is escaping, and that is what it now says. A leading `-` is refused as well, which is not about escaping: a path that begins with one can be read as an option by any command it is handed to, and refusing it here covers every call site at once.",
       "type": "string",
       "maxLength": 512,
-      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+      "pattern": "^(?!/)(?!-)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000-\\u001f]+$"
     },
     "pathGlob": {
+      "description": "A repo-relative POSIX path. Checked for what it must not be rather than for which characters it may contain: no absolute form, no `..` segment, no empty segment, no backslash, no control character. It was an ASCII allow-list, which rejected `app/[[...path]]/page.tsx`, `app/(group)/`, and every non-ASCII filename — a reference to real code read as an attempt to escape the repository. What the rule is actually about is escaping, and that is what it now says. A glob may also carry `*` and `?`. A leading `-` is refused as well, which is not about escaping: a path that begins with one can be read as an option by any command it is handed to, and refusing it here covers every call site at once.",
       "type": "string",
       "maxLength": 512,
-      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._*?][A-Za-z0-9._/@+*?-]*$"
+      "pattern": "^(?!/)(?!-)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000-\\u001f]+$"
     },
     "envName": {
       "type": "string",
