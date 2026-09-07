@@ -59,37 +59,6 @@ REVIEW = "review"
 WRITE = "write"
 
 
-#: What an agent CLI reads out of a project directory *before* it reads the prompt it was sent:
-#: instruction files, and the settings, hooks, skills, sub-agents and MCP servers that decide which
-#: tools it may run without asking. Whoever writes these decides what the launch is allowed to do.
-#:
-#: Named here rather than per adapter because the point is the union: one launch may sit in a tree
-#: carrying another host's surfaces, and a directory is dangerous to hand a reviewer if *any* host
-#: would act on what is in it. Broader than `gate_guard.HOOK_REGISTRATION`, which answers a
-#: different question — what an agent may never edit — and is deliberately narrow so that a denial
-#: names something an agent actually did.
-#:
-#: `.github/workflows/` is deliberately absent: CI configuration is not read by a CLI at launch,
-#: and it is exactly the kind of change a security reviewer should be looking at.
-PROJECT_CONFIG: tuple[str, ...] = (
-    "CLAUDE.md",
-    "AGENTS.md",
-    "GEMINI.md",
-    ".cursorrules",
-    ".mcp.json",
-    ".claude/",
-    ".codex/",
-    ".agents/",
-    ".gemini/",
-    ".cursor/",
-    ".github/agents/",
-    ".github/hooks/",
-    ".github/instructions/",
-    ".github/prompts/",
-    ".github/copilot-instructions.md",
-)
-
-
 @dataclass(frozen=True)
 class Adapter:
     """What one agent CLI can do, as a declaration rather than as branches spread through the loop.
@@ -191,6 +160,24 @@ class Adapter:
     #: (`review_transport.prompt_call`). Asserting stdin here to dodge that refusal would be
     #: declaring a channel nobody has run, which is the same class of claim `model_flags` refuses.
     prompt_on_stdin: bool = False
+    #: What keeps a launch from reading the *working directory's* configuration — the settings,
+    #: hooks, pre-authorizations and MCP servers a CLI loads before it reads its prompt. Empty for
+    #: a CLI where this release has not verified such a mechanism, and that emptiness is load-
+    #: bearing: `review_transport` gives the security stage a checkout of the change only when the
+    #: launch can be isolated from it, and otherwise falls back to the empty directory.
+    #:
+    #: The security stage stands in a checkout of the change so the host's own security discipline
+    #: has something to read. At `head` the configuration under those paths *is the change under
+    #: review*, so without this the one stage that exists to catch a hostile change would run under
+    #: whatever that change said about its own permissions. The previous answer was to rewrite the
+    #: checkout — every host-configuration path put back to the trusted base — which bought the
+    #: property by making the reviewer's world differ from the reviewed one: a rules file the change
+    #: *added* was simply absent, and the reviewer reported, correctly, that it did not exist.
+    #:
+    #: Isolating the launch instead keeps the tree equal to `head` and moves the guarantee to where
+    #: it belongs. What the flags must achieve is that the project's own settings decide nothing
+    #: about what this launch may run.
+    config_isolation: tuple[str, ...] = ()
     #: How a human installs this CLI. **Never run** — printed by `doctor` and `preflight` when the
     #: binary is missing. Installing a third-party agent CLI on someone's behalf decides for them
     #: what lands on their PATH and what it is allowed to reach; naming the command is the whole
@@ -263,6 +250,12 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         usage_flags=usage_mod.CLAUDE_JSON_FLAGS,
         envelope=usage_mod.parse_claude_envelope,
         install_hint="curl -fsSL https://claude.ai/install.sh | bash",
+        # `--setting-sources user` loads the operator's own settings and neither the project's
+        # (`.claude/settings.json`) nor the local ones, and `--strict-mcp-config` with no
+        # `--mcp-config` beside it leaves every MCP configuration unread. Between them the
+        # permissions, hooks and servers this launch runs under are the machine owner's — the same
+        # ones every other rein launch here already runs under — rather than the reviewed change's.
+        config_isolation=("--setting-sources", "user", "--strict-mcp-config"),
         # Every level is empty: a `-p` launch carries the permissions the project already
         # configured, and there is no flag here that would narrow them per launch. So what keeps
         # this reviewer off the code is the prompt and the loop's before/after fingerprint, not
