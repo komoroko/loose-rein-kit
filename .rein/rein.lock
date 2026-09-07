@@ -7,7 +7,7 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.4.5
   files:
-    AGENTS.rein.md: sha256:fc43ce24f400c2d445c5561be47e55d704e009f73cb4272780dba81a59b07f75
+    AGENTS.rein.md: sha256:882df453a40815acaf9429beea7b8f7183e38c0794d7e3fa7542efbfffead2d9
     oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
     oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
     oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
@@ -15,14 +15,14 @@ prompts:
     prompts/agents/architect.md: sha256:01f47a9e7b0342ca76fae5a3aa4539b9fd82bca60e7435458e8cf34a66a17d12
     prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64
     prompts/agents/requirements-analyst.md: sha256:f856541626e80f3439a3681c70a9ab09f557b0e3dc5c4ddd229f214b5f8efab3
-    prompts/commands/build.md: sha256:57ae68bb3ae908425306729c1934929fa943fa497be1c26a19570b81a604ff75
+    prompts/commands/build.md: sha256:97d6d85150d271c4e6c7096125e616bad436b6a3b204a1e4e4c509a2a8fb2a3e
     prompts/commands/design.md: sha256:3990596267138462fb9864c3718f0b767171235287c71712add6cc38b9e1c470
     prompts/commands/onboard.md: sha256:47fd4093b4eda0b469312622f19b0152d2bde1374670976966fd7aa22495ce23
     prompts/commands/req.md: sha256:49f472fa26f5c91161a8edcd93eedf6f1e1fe95825a7e5e0b00be3e1eb54295b
     prompts/commands/revise.md: sha256:12fbca6d249dc7a63f3a6f522ead40249610769f609ff0c218221c5f7928a991
     prompts/commands/status.md: sha256:989c5bc65ae297332b350295aa98aa9eab3fc1d8c8d664765d5bb2fa8ede8159
     prompts/commands/tasks.md: sha256:e2d2d01b4413bae9e520eedabd90018c41fdc1d051ffbc0e5302fa87536966d5
-    prompts/commands/verify.md: sha256:4b12b95d29bca6f3cab5417beb78861fd936bb572b80eef01de6871af1713c9b
+    prompts/commands/verify.md: sha256:25eb60c6a107df14ec1a5f17535aad774fce44f82909b6917334b4d5b214593f
     prompts/rules/gate-workflow.md: sha256:0f10d7414d389c4e1a43c16dcd19cbff13830e31dc9d0cc6b541eae309384fdf
     schema/config.schema.json: sha256:170f9ffa4d990ef7707ee0a6923ccf8294279624b2ee5f9e344684e60c2fe88a
     schema/event.schema.json: sha256:3bbffbe976bdae34821314919d5a830e3bd978b04f98b0af6e75dde0e418c675

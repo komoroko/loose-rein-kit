@@ -147,6 +147,45 @@ expires after `max_age_days` anyway, which is the property that separates it fro
 of evidence here. Its findings are deliberately not the loop's to repair: a dependency bump changes
 the closure the gate-③ pinned image was built from, which makes it a plan-class change.
 
+The audit runs **on the host and only there**, and a machine that could not answer records nothing.
+Egress is denied from every sandbox here (`network_profile` may only be `none`), so a scanner that
+has to reach a published database cannot run in one — pointing at the quality gate's profile made
+the release gate's one unrunnable requirement unrunnable the moment anybody followed `doctor`'s
+advice to sandbox it, and every attempt was recorded as a *failed audit*, which holds gate ⑤ shut
+with no dispute route. A sandboxed profile is refused before it launches, a named profile that is
+not declared is refused rather than quietly becoming the host, and a machine failure raises instead
+of being written down as a fact about the dependencies.
+
+**A gate-④ repair is committed, and onto the slice that introduced the code.** The next reading is
+over committed history — `review.generate` resolves HEAD and digests the committed tree — so a fix
+left in the working tree left the machine half byte-identical, which reads as "nothing this review
+is made of has moved": the finding stood, the round was spent, and the tree the gate receipt binds
+did not contain the repair. Every task finalizes its own diff for exactly this reason; this launch
+did not. Where it lands now follows the rule every other review fix follows: a slice is cut along
+its task's `completed_commit`, so a commit at the work branch's tip belongs to the tail — a pull
+request that is not the one holding the code the finding is about. The repair runs in a worktree on
+the owning slice's branch and is carried up by merging (`pr_stack.restack`), so no open pull request
+is force-pushed and no `completed_commit` is stranded. A cycle shipping as one pull request has one
+place for it and still uses the work branch.
+
+**One fault boundary for the whole run, gate ④ included.** `StopLoop` and `EnvironmentFault` were
+caught per batch, inside the `while` — so `_load_baseline` and `_close_gate4`, the two calls that
+are not in a batch, had nowhere to land, and `common.StopLoop` is not a `common.ReinError`, so
+`cli.main` does not catch it either. A build with no recorded baseline reported the sentence it had
+been given to say as a traceback and exit 1. Gate ④'s repair also reads the baseline gate ③ froze,
+which a run that finds every task already done never used to reach: a step frozen red stopped the
+repair over a failure the plan was approved on top of.
+
+**`rein next` distinguishes what the loop can repair from what only a human can decide.** Both were
+one count, so a `diverged` claim — which the loop may not decide — was answered with `rein build`,
+which read the change, said "what is left is a decision", and returned; the next recommendation was
+the same build again. The two halves of `repair.route` are two rows, and the second one says to
+answer the cards.
+
+**A freshness nobody could measure holds gate ④ shut.** `review_reading.freshness` reports the
+unmeasurable case as `fresh=False`, and `approve` and `doctor` read only its `reason` — which was
+empty, so neither said anything at all. "We could not tell" is not "it is current".
+
 ## [0.4.4] - 2026-09-06
 
 **`max_diff_bytes` bounds one launch, not one cycle.** One number was doing three jobs: the wall in
