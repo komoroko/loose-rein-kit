@@ -750,6 +750,11 @@ class ReadingFacts:
     # there — and it is never the number to use: the floor is a property of the whole change, so a
     # slice holding no signal must not be where it drops (`whole_change_risk`). Offering it
     # on this class is how the only caller came to pass it.
+    #
+    # `facts.risk_floor` has exactly one legitimate use, and it is the one that cannot lower
+    # anything: `review.generate` orders the readings by it, highest first, so an interrupted run
+    # leaves the most consequential slices answered. Reaching for it to decide what to *send* is
+    # the mistake this comment is here to stop.
 
     @property
     def analyzed_bytes(self) -> int:

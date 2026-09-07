@@ -94,6 +94,9 @@ from rein import (
     strict_yaml,
 )
 from rein import (
+    findings as findings_mod,
+)
+from rein import (
     repair as repair_mod,
 )
 from rein import repo as repo_mod
@@ -1875,7 +1878,7 @@ class Orchestrator:
     def _note_acceptance(self, ac_id: str, kind: str, *, reused: bool) -> None:
         self._current_acceptance.append({"id": ac_id, "kind": kind, "reused": reused})
 
-    def _warm_reading(self, task: dag.Task) -> None:
+    def _warm_reading(self, task: dag.Task) -> review_reading.ReadOut | None:
         """Take gate ④'s reading of this task now, while its diff is one task wide.
 
         The gate reads the change in the readings the plan's task scopes describe
@@ -1899,11 +1902,17 @@ class Orchestrator:
         says, so every per-task reading warmed after that point is one nothing will ever look up.
         The risk is a property of the whole change and it only ever rises, so this stops the
         warming for the rest of the run the same way an unanswerable adapter does.
+
+        **The `ReadOut` is the point of the return type.** This launched a security reviewer over
+        the task's slice and then threw its answer away: the finding was paid for here and first
+        read at gate ④, several tasks later, by which time the code it names has been built on.
+        `_repair_warm_findings` reads it. `None` means no reading was taken — a skip, or an
+        adapter that would not answer — which is not the same as a reading that found nothing.
         """
         if self.dry_run or self._warming_off or self.config.raw.composition == review_reading.WHOLE:
-            return
+            return None
         if not task.scope_include:
-            return
+            return None
         try:
             # The same base the gate will resolve, not the plan's field: they differ whenever the
             # plan names a commit this checkout does not have, and a warm-up taken against a
@@ -1911,7 +1920,7 @@ class Orchestrator:
             base = review_reading.resolve_base(self.repo, self._plan, None)
             head = self.repo._git_rc("rev-parse", "HEAD")[1].strip()
             if not base or not head:
-                return
+                return None
             exclude = review_reading.not_the_product(self.repo, self.state)
             limits = {**human_review.DEFAULT_BUDGET, **self.config.raw.budgets}
             # One analysis of one whole diff answers both: the floor the gate will key on, and
@@ -1925,8 +1934,8 @@ class Orchestrator:
                     f"    [review] {task.id}: the change is {effective} — gate ④ reads it whole, "
                     "so no per-task reading is warmed from here on"
                 )
-                return
-            review_reading.warm(
+                return None
+            return review_reading.warm(
                 self.repo,
                 review_transport.StagedReviewers(self.repo, config=self.config.raw),
                 reading=review_reading.Reading(unit=task.id, include=tuple(task.scope_include)),
@@ -1946,6 +1955,62 @@ class Orchestrator:
         ) as exc:
             self._warming_off = True
             print(f"    [review] {task.id}: the gate-④ reading was not taken here ({exc}); the gate will take it")
+            return None
+
+    def _repair_warm_findings(self, task: dag.Task, readout: review_reading.ReadOut | None) -> bool:
+        """Hand this task the blocking security findings its own reading just produced.
+
+        **The reading was already taken and already paid for** (`_warm_reading`); until now its
+        answer was written to the stage cache and read by nobody. So a security finding about
+        code this task wrote was first seen at gate ④ — after every later task had been built on
+        top of it, and after the implementer that wrote it was long gone. Reading it here costs
+        nothing that was not already spent, and the judge is still a different one: the finding
+        comes from the security reviewer's own launch, validated by
+        `security_review.run_security_review`, and the fixer is an implementer.
+
+        **Only findings this task's declared scope owns.** Attribution is `findings.owner_of_path`
+        — the same function gate ④ routes by — so nothing is guessed: a finding anchored in
+        another task's territory, or in none, travels to gate ④ where a human can see the whole
+        picture. It would be refused here anyway, by the scope check every repair goes through
+        (`_accept_repair`).
+
+        **One round, and no new knob for it.** The failure this has to survive is a false
+        positive, where repairing converges on nothing; a single round at the task boundary is
+        cheap and bounded, and whatever still stands is exactly what `review_policy.repair_rounds`
+        is for. Whether the finding closed is not this launch's account of itself either: the
+        re-warm below reads the slice again from cold, and gate ④ reads it once more after that.
+
+        True when it repaired, which is the caller's cue to re-record `completed_commit`: the
+        repair put another commit on the branch and the task's recorded commit has to name the
+        tree that ends up there.
+        """
+        if readout is None or self.dry_run or self._plan is None:
+            return False
+        owned: list[findings_mod.Attribution] = []
+        for finding in readout.security.findings:
+            if finding.get("blocking") is not True:
+                continue
+            paths = [
+                str(anchor.get("path", ""))
+                for anchor in (finding.get("code_anchors") or [])
+                if isinstance(anchor, Mapping) and anchor.get("path")
+            ]
+            hit = next((p for p in paths if findings_mod.owner_of_path(self._plan, p) == task.id), "")
+            if hit:
+                owned.append(findings_mod.Attribution(str(finding.get("id", "SEC-?")), "security", task.id, hit))
+        if not owned:
+            return False
+        print(
+            f"    [review] {task.id}: the security review of this task found {len(owned)} blocking "
+            "finding(s) in its own scope — repairing them here rather than at gate ④"
+        )
+        self._repair(task, repair_mod.Repair(task.id, tuple(owned)))
+        # The repair moved this slice's content, so the answer just cached for it is about a tree
+        # that no longer exists and the gate would re-read it regardless. Reading it again here is
+        # what decides whether the finding closed — from cold, by a reader with no memory of
+        # having raised it — and it leaves the gate's cache warm rather than stale.
+        self._warm_reading(task)
+        return True
 
     def _completion_status(self, task: dag.Task) -> str:
         """`done`, or `awaiting-evidence` when a criterion nobody here can establish is still open.
@@ -3044,7 +3109,12 @@ class Orchestrator:
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
             self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
-            self._warm_reading(task)
+            # The task is done and recorded before this runs, and stays that way if it raises: the
+            # work passed the whole DoD and landed, and a repair that cannot be finished is a
+            # human's problem with a task that is *done*, not a reason to un-finish it. A repair
+            # that does land puts another commit on the branch, so the commit is re-recorded.
+            if self._repair_warm_findings(task, self._warm_reading(task)):
+                self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
 
     def _consume_parallel(self, tasks: list[dag.Task]) -> None:
         """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
@@ -3160,9 +3230,18 @@ class Orchestrator:
             ok, log = True, ""
         ids = ",".join(t.id for t in merged)
         if ok:
+            # Every leaf recorded first, in one pass. `landed` was captured per leaf as each one
+            # merged: `_landed` reads the branch tip, so asking it here would name the last merge
+            # for every member of the batch.
             for task in merged:
                 self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
-                self._warm_reading(task)
+            # Then the readings, which can raise — a repair that reaches outside its scope stops
+            # the run. Interleaved with the pass above, that would leave the leaves after it
+            # unrecorded, and they passed their gate and merged exactly like the rest.
+            for task in merged:
+                if self._repair_warm_findings(task, self._warm_reading(task)):
+                    # The repair *is* the tip now, and it is this task's.
+                    self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
         else:
             for task in merged:
                 self._set_status(task.id, "blocked")
@@ -3293,7 +3372,11 @@ class Orchestrator:
             if not routing.repairable or round_no == rounds:
                 break
             for item in routing.code:
-                self._repair(graph, item)
+                owner = next((t for t in graph.tasks if t.id == item.task_id), None)
+                if owner is None:  # a finding attributed to a task the graph no longer has
+                    print(f"    [gate 4] {item.task_id} is not in the plan any more — leaving its findings to a human")
+                    continue
+                self._repair(owner, item)
                 repaired += len(item.items)
         return self._present_gate4(routing, rounds, repaired, read=read)
 
@@ -3335,8 +3418,8 @@ class Orchestrator:
         print("Run `rein review generate` yourself once that is repaired — the gate needs one either way.")
         return False
 
-    def _repair(self, graph: dag.Graph, item: repair_mod.Repair) -> None:
-        """One implementer launch against one task's share of gate ④'s findings, then the DoD.
+    def _repair(self, task: dag.Task, item: repair_mod.Repair) -> None:
+        """One implementer launch against one task's share of the review's findings, then the DoD.
 
         **Where the fix is committed is decided by whether this cycle is shipping as a stack.**
 
@@ -3355,11 +3438,11 @@ class Orchestrator:
         and `pr_stack.restack` walks it up the chain into the work branch. The DoD then runs at the
         root, over the merged result — because what the quality gate is asked about is the tree the
         gate ④ reading will read, never the slice in isolation.
+
+        It takes the `dag.Task` rather than the graph because both callers already hold one: gate
+        ④ resolves the id against the graph before it calls this, and the task boundary
+        (`_repair_warm_findings`) has the task in hand. The graph was an argument for one lookup.
         """
-        task = next((t for t in graph.tasks if t.id == item.task_id), None)
-        if task is None:  # a finding attributed to a task the graph no longer has
-            print(f"    [gate 4] {item.task_id} is not in the plan any more — leaving its findings to the human")
-            return
         print(f"    [gate 4] {task.id}: {len(item.items)} finding(s) → the implementer")
         slice_branch = self._slice_branch(task.id)
         if slice_branch:

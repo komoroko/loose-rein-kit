@@ -515,6 +515,20 @@ def generate(
             measures = review_reading.take_readings(
                 repo, [review_reading.WHOLE_READING], base=trusted_base, head=head, exclude=exclude, limits=limits
             )
+        # **Highest-risk reading first.** Every reading is taken either way and none is priced
+        # differently for it — what the order decides is which answers exist when a run does not
+        # finish. A session limit, a capacity refusal or a Ctrl-C leaves the cache holding whatever
+        # landed, and plan order made that "the tasks with the lowest ids". The reading's own
+        # `risk_floor` is the deterministic detector's, so this is not a model's opinion about what
+        # matters, and it is the one use of a per-reading risk that cannot lower anything: the
+        # floor every request still carries is the whole change's (`extraction_request`).
+        in_plan_order = {r.unit: i for i, r in enumerate(readings)}
+        measures.sort(
+            key=lambda m: (
+                -models.RISK_ORDER.index(m.facts.risk_floor),
+                in_plan_order.get(m.reading.unit, len(in_plan_order)),
+            )
+        )
         coverage = review_reading.compose_coverage(facts.coverage.to_manifest(), measures, changed_paths=changed)
 
         subject = {
@@ -554,7 +568,8 @@ def generate(
             for m in measures
         }
         ran: set[str] = set()
-        plan_of_run = _execution_plan(config, cache, keys_by_unit)
+        risk_by_unit = {m.reading.unit: m.facts.risk_floor for m in measures}
+        plan_of_run = _execution_plan(config, cache, keys_by_unit, risk_by_unit)
         print(_render_execution_plan(plan_of_run))
         # The same plan the console prints, in the one place the dashboard can see it. Opened here
         # rather than at the top of the run because this is the first moment there is a figure to
@@ -927,6 +942,7 @@ def _execution_plan(
     config: models.Config | None,
     cache: review_cache.StageCache,
     keys_by_unit: Mapping[str, Mapping[str, str]],
+    risk_by_unit: Mapping[str, str],
 ) -> dict[str, Any]:
     """What this run intends to do, settled before it does any of it.
 
@@ -945,6 +961,11 @@ def _execution_plan(
     A row per reading per stage, because that is the unit that is decided: on a composed review one
     task's slice can be reused from the last generation while the task next to it has to be read
     again, and a plan that named only the stages would report that as one decision it does not have.
+
+    Each row carries the reading's own `risk`, which is what `generate` ordered them by. The rows
+    are in reading order, so the plan recorded on `run_measured` says both what the run intended to
+    do and why it intended to do it in that sequence — the ordering was a judgement nothing wrote
+    down. The comparison row's risk is the empty string: it reads the Actual, not a reading.
     """
     stages: list[dict[str, Any]] = []
     for stage in _STAGE_ORDER:
@@ -958,6 +979,7 @@ def _execution_plan(
                     "role": role,
                     "key": key,
                     "decision": ("reuse" if cache.has(stage, key) else "run") if key else "undecided",
+                    "risk": risk_by_unit.get(unit, "") if stage != "comparison" else "",
                     "adapter": config.adapter(role) if config is not None else "",
                     "model": config.model(role) if config is not None else "",
                 }
@@ -1005,7 +1027,8 @@ def _render_execution_plan(plan: dict[str, Any]) -> str:
     shared = plan.get("shared_reading")
     tail = "" if shared is None else f"; shared reading: {'yes' if shared else 'no'}"
     head = (
-        f"review plan: {readings} reading(s), {len(rows)} stage decision(s) — "
+        f"review plan: {readings} reading(s){', highest-risk first' if readings > 1 else ''}, "
+        f"{len(rows)} stage decision(s) — "
         + ", ".join(f"{n} {decision}" for decision, n in sorted(counts.items()))
         + tail
     )
@@ -1331,16 +1354,21 @@ def _environment_digest(config: models.Config | None) -> str:
 
 
 def _coverage_gaps(gaps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Comparator-reported actual-coverage gaps, shaped as review.yaml gap records where possible."""
+    """Comparator-reported actual-coverage gaps, shaped as review.yaml gap records where possible.
+
+    `blocking` is derived from the risk rather than read from the comparator: it is the gate's
+    price for the gap, and pricing is the policy's (`review_policy.blocks`).
+    """
     out: list[dict[str, Any]] = []
     for index, gap in enumerate(gaps, start=1):
+        risk = str(gap.get("risk", "medium"))
         out.append(
             {
                 "id": str(gap.get("id", f"GAP-{index:03d}")),
                 "kind": str(gap.get("kind", "actual_coverage_gap")),
                 "statement_id": str(gap.get("statement_id", f"STMT-{index:03d}")),
-                "risk": str(gap.get("risk", "medium")),
-                "blocking": bool(gap.get("blocking", False)),
+                "risk": risk,
+                "blocking": review_policy.blocks(risk),
             }
         )
     return out
@@ -1366,15 +1394,18 @@ def _extra_behaviors(
     first = decision_cards.next_statement_index(g.get("statement_id") for g in gaps)
     out: list[dict[str, Any]] = []
     for offset, extra in enumerate(extras):
+        risk = str(extra.get("risk", "medium"))
+        # `grounded` defaults to the answerable direction: it is what takes an extra behaviour off
+        # the human's list, so an omitted flag must not be the thing that does it. `blocking` is
+        # not the comparator's at all — the policy prices the risk it stated.
+        grounded = extra.get("grounded") is True
         record = {
             "id": str(extra.get("id", f"EXTRA-{offset + 1:03d}")),
             "statement_id": str(extra.get("statement_id", f"STMT-{first + offset:03d}")),
             "category": str(extra.get("category", "")),
-            "risk": str(extra.get("risk", "medium")),
-            # Both default to the answerable direction. `grounded: true` is what takes an extra
-            # behaviour off the human's list, so an omitted flag must not be the thing that does it.
-            "grounded": extra.get("grounded") is True,
-            "blocking": extra.get("blocking") is True,
+            "risk": risk,
+            "grounded": grounded,
+            "blocking": review_policy.blocks(risk, grounded=grounded),
         }
         anchors = [str(a) for a in extra.get("actual_statement_ids", ()) or ()]
         if anchors:

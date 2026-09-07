@@ -160,9 +160,23 @@ def test_a_stage_schema_is_derived_from_the_one_that_refuses_the_answer() -> Non
     schema = review_policy.stage_output_schema("security_reviewer")
     declared = models.schema("review")["$defs"]["machine"]["properties"]["security"]
     assert schema["required"] == ["findings"]
-    assert schema["properties"]["findings"] == declared["properties"]["findings"]
+    asked, holds = schema["properties"]["findings"]["items"], declared["properties"]["findings"]["items"]
+    assert asked["properties"] == holds["properties"]
+    # The one field the document requires and the reviewer is not asked for: `blocking` is written
+    # by `review_policy.blocks` from the severity, so a CLI constrained by this schema must not be
+    # made to invent it — that is the contract field this release removed, arriving by the back door.
+    assert "blocking" in holds["required"]
+    assert asked["required"] == [name for name in holds["required"] if name != "blocking"]
     assert "machine" not in schema["$defs"], "28 KB of the 35, and nothing a stage answers refs it"
     assert review_policy.stage_output_schema("code_reviewer") == {}, "a role with no declared shape"
+
+
+def test_deriving_a_stage_schema_does_not_edit_the_one_on_disk() -> None:
+    """The strip above is a copy. Mutating the loaded schema would make the *document* validator
+    stop requiring `blocking` too, for every caller in the process."""
+    review_policy.stage_output_schema("security_reviewer")
+    declared = models.schema("review")["$defs"]["machine"]["properties"]["security"]
+    assert "blocking" in declared["properties"]["findings"]["items"]["required"]
 
 
 def test_parse_reviewer_output_rejects_duplicate_keys() -> None:
@@ -191,9 +205,25 @@ def test_risk_downgrade_below_floor_is_rejected() -> None:
     assert review_policy.reject_risk_downgrade("critical", "high") == []
 
 
-def test_reviewer_cannot_clear_a_policy_blocking_flag() -> None:
-    assert review_policy.reject_blocking_removal("SEC-001", reviewer_blocking=False, policy_blocking=True)
-    assert review_policy.reject_blocking_removal("SEC-001", reviewer_blocking=True, policy_blocking=True) == []
+def test_blocking_is_priced_by_the_policy_and_not_by_a_reviewer() -> None:
+    """The `blocking` flag used to be a contract field, so the author of a finding also set what it
+    cost. It is a function of the severity now, and the severity is all a reviewer states."""
+    assert review_policy.blocks("critical")
+    assert review_policy.blocks("high")
+    assert not review_policy.blocks("medium")
+    assert not review_policy.blocks("low")
+
+
+def test_a_grounded_extra_behaviour_never_blocks() -> None:
+    """Behaviour a requirement already accounts for is not a finding about the change, at any risk."""
+    assert not review_policy.blocks("critical", grounded=True)
+
+
+def test_an_unrecognised_risk_blocks() -> None:
+    """A policy engine's default is the closed one. The stage validator refuses the answer that
+    produced it anyway, so what this settles is only which way the unreachable case falls."""
+    assert review_policy.blocks("")
+    assert review_policy.blocks("catastrophic")
 
 
 def _review(machine: dict[str, Any]) -> models.Review:

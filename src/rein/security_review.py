@@ -1,15 +1,22 @@
-"""The structured Security Reviewer (plan §12.5): findings, not prose, and a hard blocking flag.
+"""The structured Security Reviewer (plan §12.5): findings, not prose, priced by the policy.
 
-A security review is a list of `findings[]`, each with a severity, an attack scenario,
-optional code anchors, and a `blocking` flag. Structured so the gate can act on it mechanically:
-while any blocking finding stands, gate 4 does not open (plan §12.5), and no amount of reviewer
-prose can wave it through — the Policy Engine reads the flag, not the paragraph.
+A security review is a list of `findings[]`, each with a severity, an attack scenario and
+optional code anchors. Structured so the gate can act on it mechanically: while any blocking
+finding stands, gate 4 does not open (plan §12.5), and no amount of reviewer prose can wave it
+through.
+
+**Which findings those are is not the reviewer's to say.** The contract used to carry a
+`"blocking": <bool>` field, so the author of a finding also set its price, and a `critical` one
+marked `false` blocked nothing — in the one module whose job is to make a security answer
+mechanical. The reviewer states a severity, which is a description of the attack scenario it
+just wrote down, and `review_policy.blocks` turns that into the flag (plan §12.7, §24.2).
 
 Like every reviewer, the output is untrusted (plan §12.7): the severity must be a known value,
 each code anchor is validated against the committed blob, and a fabricated finding id or an
 oversize payload is refused. Because the previous review's blocking findings are carried in,
 this module also refuses a regeneration that quietly drops a blocking finding without it being
-resolved (a reviewer cannot clear its own block — plan §12.7).
+resolved, or that re-states one at a lower severity than it was carried at (a reviewer cannot
+clear its own block — plan §12.7).
 
 **A finding has a life, and it does not end because a reviewer stopped mentioning it.** Until it
 had one, a finding's only state was presence in the newest generated list, so "the change fixed
@@ -89,28 +96,31 @@ def contract(discipline: str = "") -> str:
     )
     return (
         "Review the change below for security and for the ways it could be attacked. Findings, "
-        "not prose: the gate reads the flag, never the paragraph.\n"
+        "not prose: the gate reads the severity, never the paragraph.\n"
         "\n"
         "Answer with one JSON object and no other text:\n"
         '{"findings": [{"id": "SEC-001", '
         f'"severity": "<one of {"|".join(sorted(SEVERITY_VALUES))}>", '
         f'"category": "<one of {"|".join(categories())}>", '
-        '"attack_scenario": "<who does what, and what they get>", "blocking": <bool>, '
+        '"attack_scenario": "<who does what, and what they get>", '
         '"code_anchors": [{"path": "<repo-relative path>", "start_line": <int>, '
         '"end_line": <int>, "blob": "<the blob deterministic_facts.files gives for that path>"}]}]}\n'
         "\n"
         "Every rule below is checked, not trusted:\n"
         "- A finding must state an attack scenario. A category on its own says nothing anybody "
         "can act on.\n"
-        "- `blocking` is an explicit boolean. While one blocking finding stands, gate 4 does not "
-        "open, and no amount of explanation waves it through.\n"
+        "- There is no `blocking` field, and you are not asked for one. Whether a finding holds "
+        f"gate 4 shut is decided from its severity by the policy engine (at {review_policy.BLOCKING_FLOOR} "
+        "and above), so state the severity the attack scenario actually carries — a finding you "
+        "re-state may not come back at a lower severity than the one it was carried forward at, "
+        "and that is checked.\n"
         "- Anchors are verified against the committed tree. `deterministic_facts.files` lists a "
         "blob and a line count for every path in the change; use them.\n"
         "- `prior_blocking`, when present, lists findings a previous review recorded as blocking "
-        "about this same base, each with the anchors it named. Re-state one while the code still "
-        "has it; leave it out once the change resolves it. Which of those two you did is not taken "
-        "on your word — the anchors are re-checked against the committed tree, and leaving out a "
-        "finding whose code is still there is refused as you clearing your own block.\n"
+        "about this same base, each with the anchors and the severity it named. Re-state one while "
+        "the code still has it; leave it out once the change resolves it. Which of those two you "
+        "did is not taken on your word — the anchors are re-checked against the committed tree, "
+        "and leaving out a finding whose code is still there is refused as you clearing your own block.\n"
         "- `tests_diff`, when present, is the test half of the same change, sent to you and to "
         "nobody else. Tests are code an agent wrote and they run with the operator's credentials, "
         "so review them as code: a fixture that reaches the network, a credential in a test "
@@ -374,10 +384,13 @@ def run_security_review(
     facts, which is how the enforcement came to be applied to a reviewer that had never been shown
     them. One source, or eventually one of them is wrong.
 
-    A regeneration that drops one, or that re-emits it with `blocking: false`, is a reviewer
-    clearing its own block, and the policy refuses both — the second was the wider door: the check
-    compared id sets, so re-listing `SEC-001` as non-blocking satisfied it exactly as well as
-    fixing the finding did.
+    A regeneration that drops one, or that re-emits it at a lower severity, is a reviewer clearing
+    its own block, and the policy refuses both. The second was the wider door for as long as the
+    reviewer set `blocking` itself: the check compared flags, so re-listing `SEC-001` as
+    non-blocking satisfied it exactly as well as fixing the finding did. The flag is derived now
+    (`review_policy.blocks`), so the door is where the reviewer's own words are — the severity —
+    and `reject_risk_downgrade` is what stands in it, the same function that stops an AI lowering
+    any other risk in this pipeline.
 
     What the refusal used to have no answer for is the finding the change *did* fix. Dropping it
     was refused just the same, so a blocking finding shut gate ④ for the rest of the cycle. A drop
@@ -410,11 +423,20 @@ def run_security_review(
             continue
         problems += _validate_finding(finding, repo=repo, commit=commit)
         fid = str(finding.get("id", ""))
-        problems += review_policy.reject_blocking_removal(fid, finding.get("blocking"), fid in prior_by_id)
-        if finding.get("blocking") is True:
+        severity = str(finding.get("severity", ""))
+        # A finding carried forward may be re-stated, never re-priced. The old check compared
+        # `blocking` flags, and the reviewer set those — so re-listing SEC-001 as non-blocking
+        # satisfied it exactly as well as fixing the finding did. Severity is what the policy
+        # reads now, so severity is where the floor belongs, and it is the floor this same module
+        # applies to every other risk an AI states.
+        carried_severity = str((prior_by_id.get(fid) or {}).get("severity", ""))
+        if severity in SEVERITY_VALUES and carried_severity in SEVERITY_VALUES:
+            problems += review_policy.reject_risk_downgrade(severity, carried_severity, subject=fid)
+        blocking = review_policy.blocks(severity)
+        if blocking:
             still_blocking.add(fid)
         seen = _first_seen(prior_by_id.get(fid), this_change)
-        findings.append({**dict(finding), "status": "open", "first_seen": seen})
+        findings.append({**dict(finding), "blocking": blocking, "status": "open", "first_seen": seen})
     unresolved: list[str] = []
     closed: list[dict[str, Any]] = []
     for fid, prior in prior_by_id.items():
@@ -465,8 +487,6 @@ def _validate_finding(finding: Mapping[str, Any], *, repo: repo_mod.Repo, commit
         problems.append(f"{fid}: severity {severity!r} is not one of {sorted(SEVERITY_VALUES)}")
     if not str(finding.get("attack_scenario", "")).strip():
         problems.append(f"{fid}: a finding must state an attack scenario, not just a category")
-    if not isinstance(finding.get("blocking"), bool):
-        problems.append(f"{fid}: `blocking` must be an explicit boolean")
     anchors = finding.get("code_anchors")
     if isinstance(anchors, list):
         for anchor in anchors:

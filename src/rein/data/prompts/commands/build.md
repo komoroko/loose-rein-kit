@@ -288,9 +288,15 @@ is the point; never fold them into the implementer's session.
    seam over what two scopes share and what none covers, each launched on its own so one launch
    holds one task's slice. Most of them are already answered — `rein build` takes each task's
    reading as it lands — so a regeneration after a review fix re-reads only the task whose code
-   moved. `coverage.composition` records every reading by name and `unread_paths` names any changed
+   moved. **A blocking security finding that reading turns up is repaired at the task boundary**,
+   by an implementer, in the scope that owns the code it anchored to — once per task, with whatever
+   still stands left to the repair rounds above. The reading was already taken and already paid
+   for; what changes is that the finding is answered before later tasks are built on top of it.
+   `coverage.composition` records every reading by name and `unread_paths` names any changed
    path none of them covered, which makes the manifest `insufficient`; a composed reading is
-   refused outright at critical risk. Set `review_policy.composition: whole` to pay for one reading
+   refused outright at critical risk. The readings are taken **highest-risk first**, by the
+   deterministic detector's own floor for each slice, so a run cut short leaves the most
+   consequential ones answered. Set `review_policy.composition: whole` to pay for one reading
    of everything instead. What it reads is the **product**: not `.rein/`, not the plan's own prose
    (the documents gate ③ froze, `docs/tasks/`, the ADRs), not the surfaces `rein install` wrote,
    and — for the blind extractor alone — not the tests. **Each reading** is measured

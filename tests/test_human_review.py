@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from rein import human_review, models
+from rein import human_review, models, review_policy
 from tests._support import make_review
 
 
@@ -394,6 +394,42 @@ def test_blocking_security_finding_blocks_completion() -> None:
     }
     review = _review(machine={"security": {"findings": [finding]}})
     assert any("security" in b for b in human_review.completion_blockers(review, dict(review.human)))
+
+
+def test_the_freeze_and_the_gate_read_the_machine_half_through_one_function() -> None:
+    """`completion_blockers` used to carry its own copies of four of `blocking_reasons`' rules,
+    phrased differently — and the copies had drifted: only `blocking_reasons` looked at
+    `independence_observed`, so a review could be frozen here and refused at the gate for a reason
+    the freeze screen never mentioned. Every machine-side blocker is the same sentence now."""
+    review = _review(
+        machine={
+            "effective_risk": "high",
+            "coverage": {
+                "diff_digest": "sha256:" + "d" * 64,
+                "analyzed_files": 1,
+                "analyzed_bytes": 1024,
+                "coverage_status": "insufficient",
+            },
+            "gaps": [
+                {"id": "GAP-001", "kind": "evidence_gap", "statement_id": "STMT-001", "risk": "high", "blocking": True}
+            ],
+            "security": {
+                "findings": [
+                    {
+                        "id": "SEC-001",
+                        "severity": "critical",
+                        "category": "authz_bypass",
+                        "attack_scenario": "x",
+                        "blocking": True,
+                    }
+                ]
+            },
+        }
+    )
+    human = dict(review.human)
+    machine_side = review_policy.blocking_reasons(review, review.effective_risk, human)
+    assert machine_side, "the fixture is meant to be blocked"
+    assert set(machine_side) <= set(human_review.completion_blockers(review, human))
 
 
 def test_a_diverged_high_risk_claim_blocks_completion_until_it_is_decided() -> None:

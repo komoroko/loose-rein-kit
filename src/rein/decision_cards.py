@@ -34,7 +34,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from rein import models
+from rein import models, review_policy
 
 #: The schema's `domain` shape, kept here because this is the only module that mints one.
 _DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -48,6 +48,11 @@ _SECURITY_DOMAIN = "security"
 
 #: Option ids are single upper-case letters (schema), so a card may not exceed 8 options anyway.
 _OPTION_LETTERS = "ABCDEFGH"
+
+#: How many cards one review may carry, read from the schema that enforces it — never restated,
+#: for the reason `review_reading.MAX_STATEMENTS` gives: a number written down twice makes the
+#: refusal fire at the wrong size.
+MAX_CARDS = review_policy.review_schema_max_items("decision_cards")
 
 
 def _risk_of(mapping: Mapping[str, Any], default: str = "low") -> str:
@@ -234,20 +239,32 @@ def derive_cards(
     plan_risk: Mapping[str, str] | None = None,
     plan_domains: Mapping[str, tuple[str, ...]] | None = None,
     first_statement: int = 1,
-    max_cards: int = 64,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return `(statements, decision_cards)` for everything the review left for a human to settle.
 
-    `max_cards` is the schema's ceiling, not a review budget: a run that produces more decisions than
-    a person can hold is caught by `review_policy` budgets, which split the scope rather than
-    truncate the list. Truncating here would hide decisions; the cap exists only so a pathological
-    review cannot produce a document the schema refuses to store.
+    **Past :data:`MAX_CARDS` this refuses rather than truncates.** It used to write
+    `subjects[:max_cards]` and say in its own docstring that truncating would hide decisions —
+    while the safety net it named could not have caught anything: `derive_review_budget` counts
+    the cards this function *returns*, so the decisions dropped here were dropped before the
+    budget that was supposed to notice them ever saw them. Sixty-five findings produced a review
+    that said sixty-four, silently, in the artefact a human signs.
+
+    So the answer is the one `review_reading.merge` already gives for statements and findings: a
+    list cut to fit is a review that says less than it read. The remedy is the budget's own —
+    reduce what this cycle claims and review the remainder in its own gate ④ round.
     """
     minter = _IdMinter(first_statement)
     statements: list[dict[str, Any]] = []
     cards: list[dict[str, Any]] = []
     subjects = _subjects(claims, gaps, extra_behaviors, security_findings, plan_risk or {}, plan_domains or {})
-    for subject in subjects[:max_cards]:
+    if len(subjects) > MAX_CARDS:
+        raise review_policy.ReviewPolicyError(
+            f"this review leaves {len(subjects)} decisions for a human, past the {MAX_CARDS} one "
+            "review may carry. Reduce what this cycle claims through `/revise` and review the "
+            "remainder in its own gate ④ round — a list cut to fit is a review that says less "
+            "than it read."
+        )
+    for subject in subjects:
         options = []
         for letter, token in zip(_OPTION_LETTERS, subject["options"], strict=False):
             statement_id = minter.statement()

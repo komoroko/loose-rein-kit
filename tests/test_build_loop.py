@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 
 from rein import (
+    actual_extraction,
     adapters,
     build_git,
     build_loop,
@@ -39,6 +40,7 @@ from rein import (
     repair,
     review_policy,
     review_reading,
+    security_review,
 )
 from rein import events as events_mod
 from rein import findings as findings_mod
@@ -2538,6 +2540,83 @@ def test_a_warm_up_that_cannot_be_taken_does_not_fail_the_build(
     loop._warm_reading(task)  # and the second one does not even try
 
 
+def _read_out(unit: str, *findings: dict[str, object]) -> review_reading.ReadOut:
+    """What a warm-up hands back: one reading's two stages. Only the security half matters here."""
+    return review_reading.ReadOut(
+        reading=review_reading.Reading(unit=unit, include=("alpha/",)),
+        extraction=actual_extraction.ExtractionResult(actual_statements=(), coverage={}, actual_digest=""),
+        security=security_review.SecurityResult(findings=tuple(findings)),
+    )
+
+
+def _sec(fid: str, path: str, *, blocking: bool = True) -> dict[str, object]:
+    return {
+        "id": fid,
+        "severity": "critical",
+        "category": "credential_exposure",
+        "attack_scenario": "reads a token out of the log",
+        "blocking": blocking,
+        "code_anchors": [{"path": path, "start_line": 1, "end_line": 2, "blob": "b" * 40}],
+    }
+
+
+def _warm_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_loop.Orchestrator, list[str]]:
+    """A loop whose T-001 owns `alpha/`, with `_repair` recorded rather than run."""
+    loop = orchestrator(
+        tmp_path,
+        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"])]),
+    )
+    repaired: list[str] = []
+    monkeypatch.setattr(loop, "_repair", lambda task, item: repaired.extend(a.finding_id for a in item.items))
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)  # the re-read after the repair
+    return loop, repaired
+
+
+def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The warm-up launched a security reviewer over this slice and the answer was written to the
+    stage cache and read by nobody: the finding was first *seen* at gate ④, after every later task
+    had been built on the code it names. Reading it here costs nothing that was not already spent.
+    """
+    loop, repaired = _warm_loop(tmp_path, monkeypatch)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    assert loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-001", "alpha/mod.py")))
+    assert repaired == ["SEC-001"]
+
+
+def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Attribution is `findings.owner_of_path` — the same function gate ④ routes by — so nothing
+    is guessed. A finding no declared scope owns means the plan does not say, and a human decides
+    with the whole picture in front of them."""
+    loop, repaired = _warm_loop(tmp_path, monkeypatch)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    assert not loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-001", "beta/mod.py")))
+    assert repaired == []
+
+
+def test_a_non_blocking_finding_is_not_repaired_at_the_task_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Below the policy's floor a finding is a Decision Card, not a wall — and spending an
+    implementer launch on one would make the floor mean nothing."""
+    loop, repaired = _warm_loop(tmp_path, monkeypatch)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    assert not loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-1", "alpha/mod.py", blocking=False)))
+    assert repaired == []
+
+
+def test_a_warm_up_that_was_never_taken_is_not_a_reading_that_found_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None` is a skip or an adapter that would not answer. Treating it as an empty finding list
+    would report "clean" about a slice nobody read."""
+    loop, repaired = _warm_loop(tmp_path, monkeypatch)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    assert not loop._repair_warm_findings(task, None)
+    assert repaired == []
+
+
 # --- the negative control -----------------------------------------------------
 #
 # The DoD is the only automated evidence a task's `done` rests on, and until this existed
@@ -3016,7 +3095,7 @@ def test_a_gate_four_repair_is_committed_before_the_next_reading(
     """
     loop, committed = _repair_loop(tmp_path, monkeypatch)
     found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
-    loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+    loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
     assert committed == ["T-001: gate-4 repair"]
 
 
@@ -3027,7 +3106,7 @@ def test_a_cycle_that_is_not_a_stack_repairs_on_the_work_branch(
     this repository means exactly that — not that the repair has nowhere to go."""
     loop, committed = _repair_loop(tmp_path, monkeypatch)
     found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
-    loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+    loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
 
     assert committed == ["T-001: gate-4 repair"]
     assert "no stack to place this on" in capsys.readouterr().out
@@ -3040,7 +3119,7 @@ def test_a_repair_that_cannot_be_committed_stops_the_loop(tmp_path: Path, monkey
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: False)
     with pytest.raises(build_loop.StopLoop, match="could not be committed"):
         found = findings_mod.Attribution("SEC-001", "security", "T-001", "x")
-        loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+        loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
 
 
 def test_gate_four_reads_the_baseline_gate_three_froze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

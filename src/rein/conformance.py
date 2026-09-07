@@ -57,10 +57,10 @@ def contract() -> str:
         '"assessment_basis": "machine_assessed"}, '
         '"conformance": {"status": "observed|partial|unknown"}, "unknowns": ["<optional>"]}], '
         '"actual_coverage_gaps": [{"id": "GAP-001", "kind": "actual_coverage_gap", '
-        '"risk": "low|medium|high|critical", "blocking": <bool>}], '
+        '"risk": "low|medium|high|critical"}], '
         '"extra_behaviors": [{"id": "EXTRA-001", "actual_statement_ids": ["AST-002"], '
         f'"category": "<one of {"|".join(sorted(EXTRA_CATEGORIES))}>", '
-        '"risk": "low|medium|high|critical", "grounded": <bool>, "blocking": <bool>}]}\n'
+        '"risk": "low|medium|high|critical", "grounded": <bool>}]}\n'
         "\n"
         "Every rule below is checked, not trusted:\n"
         "- A claim id you did not receive, or an Actual Statement id the extractor did not "
@@ -72,6 +72,9 @@ def contract() -> str:
         "one must cite the Actual Statement it was read from — that section is the only answer to "
         '"did this build something nobody asked for?", and an empty list is a finding, not a '
         "formality.\n"
+        "- Do not send a `blocking` field either. Whether a gap or an extra behaviour holds the "
+        "gate shut is derived from the `risk` you state, by the policy engine — say what the risk "
+        "is, not what it should cost.\n"
         "- Do not send an `integrity` field. The three axes are separate on purpose and integrity "
         "is the one that is not yours: it is derived from the anchors your citations rest on, "
         "re-checked against the committed blobs. semantic_support is your judgement, conformance "
