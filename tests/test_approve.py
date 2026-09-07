@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import approve, digests, models
+from rein import approve, digests, models, review_reading
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import chain, make_claim, make_config, make_plan, make_review, make_state, make_task, seed_repo
@@ -334,9 +334,8 @@ def test_gate_four_blocks_while_tasks_are_unfinished(tmp_path: Path) -> None:
     assert any("tasks not done: T-001" in b for b in approve.readiness(repo, "build"))
 
 
-def test_gate_four_refuses_a_review_of_an_older_commit(tmp_path: Path) -> None:
-    """Only the UI pane used to check this: none of the digests re-verified when code did, so
-    generate → commit → approve could open gate ④ over code no reviewer had seen."""
+def _reviewed_repo(tmp_path: Path) -> tuple[repo_mod.Repo, str, str]:
+    """A committed repo, and the (head, change_digest) a review taken over it would bind."""
     import subprocess
 
     def git(*args: str) -> str:
@@ -349,19 +348,68 @@ def test_gate_four_refuses_a_review_of_an_older_commit(tmp_path: Path) -> None:
         ).stdout.strip()
 
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}))
+    (tmp_path / "product.py").write_text("x = 1\n", encoding="utf-8")
     git("init", "-q", "-b", "main")
     git("add", "-A")
     git("commit", "-qm", "reviewed")
-    reviewed_head = git("rev-parse", "HEAD")
     repo = repo_mod.Repo(tmp_path)
+    head = git("rev-parse", "HEAD")
+    state = store_mod.Store(repo).read_state()
+    return repo, head, review_reading.change_digest(repo, head, review_reading.not_the_product(repo, state))
+
+
+def _commit(tmp_path: Path, *paths: str) -> None:
+    import subprocess
+
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", " ".join(paths) or "later"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_gate_four_refuses_a_review_of_code_that_has_since_moved(tmp_path: Path) -> None:
+    """Only the UI pane used to check this: none of the digests re-verified when code did, so
+    generate → commit → approve could open gate ④ over code no reviewer had seen."""
+    repo, head, change = _reviewed_repo(tmp_path)
 
     fresh = make_review(generated=True, human_status="frozen", effective_risk="low")
-    fresh["machine"]["binding"]["subject_head_sha"] = reviewed_head
+    fresh["machine"]["binding"]["subject_head_sha"] = head
+    fresh["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=fresh)
     assert not [b for b in approve.readiness(repo, "build") if "stale" in b or "says nothing" in b]
 
-    git("commit", "-q", "--allow-empty", "-m", "after the review")
-    assert any("says nothing about the commits since" in b for b in approve.readiness(repo, "build"))
+    (tmp_path / "product.py").write_text("x = 2\n", encoding="utf-8")
+    _commit(tmp_path, "the product moved")
+    assert any("says nothing about the code as it now stands" in b for b in approve.readiness(repo, "build"))
+
+
+def test_recording_a_review_does_not_make_it_stale(tmp_path: Path) -> None:
+    """The circle this closed. The workflow commits each phase's deliverables at its gate, so the
+    act of committing `review.yaml` moved HEAD — and a staleness test on the commit id read that
+    as "the review says nothing about the commits since", about the very commit that recorded it.
+    Generate, commit, and the gate could not be approved.
+
+    `.rein/` is not the product (`review_reading.not_the_product`), and the review already binds
+    the product's digest. So this commit moves nothing the review is about, and neither does one
+    that touches only the frozen prose or an installed agent surface.
+    """
+    repo, head, change = _reviewed_repo(tmp_path)
+    review = make_review(generated=True, human_status="frozen", effective_risk="low")
+    review["machine"]["binding"]["subject_head_sha"] = head
+    review["machine"]["binding"]["change_digest"] = change
+    seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=review)
+
+    _commit(tmp_path, "record the review")  # .rein/review.yaml and .rein/state.yaml
+    assert repo._git_rc("rev-parse", "HEAD")[1].strip() != head, "HEAD did move"
+    assert not [b for b in approve.readiness(repo, "build") if "says nothing" in b]
 
 
 # --- what gate 5 carries rather than re-reads -------------------------------------
@@ -378,17 +426,6 @@ def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tm
     a review taken against an older commit is refused rather than trusted. If either stops holding,
     gate 5 has no security evidence at all, so they are pinned here and not only at gate 4.
     """
-    import subprocess
-
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
-            cwd=tmp_path,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-
     finding = {
         "id": "SEC-001",
         "severity": "high",
@@ -396,26 +433,24 @@ def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tm
         "attack_scenario": "the reviewer container reaches a host credential",
         "blocking": True,
     }
-    seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}))
-    git("init", "-q", "-b", "main")
-    git("add", "-A")
-    git("commit", "-qm", "reviewed")
-    reviewed_head = git("rev-parse", "HEAD")
-    repo = repo_mod.Repo(tmp_path)
+    repo, head, change = _reviewed_repo(tmp_path)
 
     blocking = make_review(generated=True, human_status="frozen", security_findings=[finding])
-    blocking["machine"]["binding"]["subject_head_sha"] = reviewed_head
+    blocking["machine"]["binding"]["subject_head_sha"] = head
+    blocking["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=blocking)
     assert any("SEC-001" in b for b in approve.readiness(repo, "release")), "a blocking finding holds gate 5 shut"
 
     clean = make_review(generated=True, human_status="frozen", effective_risk="low")
-    clean["machine"]["binding"]["subject_head_sha"] = reviewed_head
+    clean["machine"]["binding"]["subject_head_sha"] = head
+    clean["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=clean)
     assert not [b for b in approve.readiness(repo, "release") if "says nothing" in b]
 
-    git("commit", "-q", "--allow-empty", "-m", "after the review")
-    assert any("says nothing about the commits since" in b for b in approve.readiness(repo, "release")), (
-        "a review about an earlier commit is not this release's security evidence"
+    (tmp_path / "product.py").write_text("x = 2\n", encoding="utf-8")
+    _commit(tmp_path, "the product moved")
+    assert any("says nothing about the code as it now stands" in b for b in approve.readiness(repo, "release")), (
+        "a review about earlier code is not this release's security evidence"
     )
 
 

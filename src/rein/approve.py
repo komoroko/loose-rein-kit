@@ -31,7 +31,18 @@ import re
 import sys
 from collections.abc import Mapping
 
-from rein import change_request, common, dag, dag_trace, digests, event_chain, mdlite, models, review_policy
+from rein import (
+    change_request,
+    common,
+    dag,
+    dag_trace,
+    digests,
+    event_chain,
+    mdlite,
+    models,
+    review_policy,
+    review_reading,
+)
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -105,7 +116,9 @@ def _task_blockers(plan: models.Plan | None, state: models.State | None, gate: s
     return blockers
 
 
-def _review_blockers(review: models.Review | None, gate: str, head: str = "") -> list[str]:
+def _review_blockers(
+    repo: repo_mod.Repo, review: models.Review | None, state: models.State | None, gate: str
+) -> list[str]:
     """Gate ④/⑤ preconditions carried by the machine review (plan §16.8).
 
     A readiness check that passes because a stage has not been implemented yet is worse than
@@ -124,14 +137,13 @@ def _review_blockers(review: models.Review | None, gate: str, head: str = "") ->
             "Gate 4 approves a grounded review, not a green test run."
         ]
     blockers = review_policy.blocking_reasons(review, review.effective_risk)
-    reviewed = review.subject_head_sha
-    if head and reviewed and reviewed != head:
-        # Three documents say a later commit leaves the review stale. Only the UI pane had ever
-        # checked, so generate → commit → approve opened gate ④ over code no reviewer saw.
-        blockers.append(
-            f"the machine review was generated against {reviewed[:12]} and HEAD is now {head[:12]} — "
-            "it says nothing about the commits since. Re-run `rein review generate`."
-        )
+    # Three documents say a later commit leaves the review stale. Only the UI pane had ever
+    # checked, so generate → commit → approve opened gate ④ over code no reviewer saw. Asked on
+    # the product's content rather than on HEAD's id, because the workflow's own
+    # `review.yaml` commit is a later commit and must not invalidate the thing it records
+    # (`review_reading.freshness`).
+    if reason := review_reading.freshness(repo, review, state).reason:
+        blockers.append(reason)
     if review.human_status != "frozen":
         blockers.append(
             f"the human review is '{review.human_status}', not 'frozen' — "
@@ -225,14 +237,8 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _clarification_blockers(repo, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
-    blockers += _review_blockers(review, gate, _head_sha(repo))
+    blockers += _review_blockers(repo, review, state, gate)
     return blockers
-
-
-def _head_sha(repo: repo_mod.Repo) -> str:
-    """The commit under review, or "" outside a git repository (nothing to compare against)."""
-    rc, out = repo._git_rc("rev-parse", "HEAD")
-    return out.strip() if rc == 0 else ""
 
 
 # --- what an approval covers -------------------------------------------------------

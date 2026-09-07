@@ -993,6 +993,17 @@ class Review:
         return _str(self.binding, "subject_head_sha")
 
     @property
+    def change_digest(self) -> str:
+        """The digest of the code this review read: the committed tree minus `not_the_product`.
+
+        This, and not `subject_head_sha`, is what says whether the review still speaks for the
+        repository. A commit that touches only `.rein/` moves the sha and nothing this document is
+        about — and committing the review is exactly such a commit, which is how recording a review
+        came to invalidate it (`review_reading.freshness`).
+        """
+        return _str(self.binding, "change_digest")
+
+    @property
     def effective_risk(self) -> str:
         """The risk this review was generated against (plan §13.5).
 

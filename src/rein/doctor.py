@@ -45,6 +45,7 @@ from rein import (
     gitignore,
     install,
     models,
+    review_reading,
     strict_yaml,
     upstream,
 )
@@ -1459,22 +1460,16 @@ def check_last_review_run(repo: repo_mod.Repo) -> list[Finding]:
     ]
 
 
-def check_review(review: models.Review | None, head: str = "") -> list[Finding]:
+def check_review(review: models.Review | None, fresh: review_reading.Freshness | None = None) -> list[Finding]:
     if review is None or not review.is_generated:
         return [Finding("INFO", "review", "no machine review generated yet")]
     findings: list[Finding] = []
-    reviewed = review.subject_head_sha
-    if head and reviewed and reviewed != head:
+    if fresh is not None and fresh.reason:
+        findings.append(Finding("FAIL", "review", f"the machine review is stale: {fresh.reason}"))
+    elif fresh is not None and fresh.fresh:
         findings.append(
-            Finding(
-                "FAIL",
-                "review",
-                f"the machine review is stale: generated against {reviewed[:12]}, HEAD is {head[:12]}. "
-                "Re-run `rein review generate`.",
-            )
+            Finding("PASS", "review", f"the machine review speaks for the product at HEAD ({fresh.head[:12]})")
         )
-    elif head and reviewed:
-        findings.append(Finding("PASS", "review", f"the machine review speaks for HEAD ({head[:12]})"))
     if review.coverage_sufficient:
         findings.append(
             Finding("PASS", "review", f"coverage sufficient; {len(review.extra_behaviors)} extra behaviour(s)")
@@ -1586,8 +1581,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     findings += check_chain(repo)
     findings += check_last_run(repo)
     findings += check_last_review_run(repo)
-    rc, head_out = repo._git_rc("rev-parse", "HEAD")
-    findings += check_review(review, head_out.strip() if rc == 0 else "")
+    findings += check_review(review, review_reading.freshness(repo, review, state))
     findings += check_review_outlook(repo)
     return findings
 

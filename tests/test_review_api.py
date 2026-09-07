@@ -210,19 +210,51 @@ class TestBuildGateDiff:
         assert diff["log"] and "only commit" in diff["log"][0]
 
     def test_machine_review_freshness(self, make_repo: MakeRepo) -> None:
-        # There is no security-review.md: freshness is the review.yaml machine binding's
-        # subject_head_sha against the current HEAD (a later commit leaves it stale, E2E-08).
+        # Freshness is `binding.change_digest` against the product as it now stands — the same
+        # question `rein approve` and `rein doctor` ask, so the pane cannot disagree with the gate.
+        # Not the commit id: the workflow commits review.yaml at the gate, and that commit must
+        # not make the review it records stale (E2E-08).
+        from rein import repo as repo_mod
+        from rein import review_reading
+        from rein import store as store_mod
+
         root = make_repo()
         _git(root, "init", "-q", "-b", "main")
         _write(root, "a.txt", "x\n")
         _git(root, "add", ".")
         _git(root, "commit", "-qm", "c")
         head = _git(root, "rev-parse", "HEAD")
-        _write(root, ".rein/review.yaml", f"machine:\n  binding:\n    subject_head_sha: {head}\n")
+        repo = repo_mod.Repo(root)
+        state = store_mod.Store(repo).read_state()
+        change = review_reading.change_digest(repo, head, review_reading.not_the_product(repo, state))
+
+        def seed(digest: str) -> None:
+            _write(
+                root,
+                ".rein/review.yaml",
+                "machine:\n"
+                "  status: generated\n"
+                "  binding:\n"
+                f"    change_digest: {digest}\n"
+                "    plan_digest: sha256:" + "b" * 64 + "\n"
+                "    environment_digest: sha256:" + "c" * 64 + "\n"
+                "    coverage_digest: sha256:" + "d" * 64 + "\n"
+                "    actual_digest: sha256:" + "f" * 64 + "\n"
+                f"    subject_head_sha: {head}\n",
+            )
+
+        seed(change)
         assert _review(root, "build")["review_meta"]["fresh"] is True
-        _write(root, ".rein/review.yaml", "machine:\n  binding:\n    subject_head_sha: '0000000'\n")
+
+        # A commit that touches only `.rein/` is not a change to the product, and the review that
+        # commit records goes on speaking for exactly what it read.
+        _git(root, "add", ".")
+        _git(root, "commit", "-qm", "record the review")
+        assert _review(root, "build")["review_meta"]["fresh"] is True
+
+        seed("sha256:" + "0" * 64)
         meta = _review(root, "build")["review_meta"]
-        assert meta["fresh"] is False and meta["reviewed_head"] == "0000000"
+        assert meta["fresh"] is False and meta["reviewed_head"] == head
 
 
 class TestScopeStage:

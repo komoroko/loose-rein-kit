@@ -1359,9 +1359,7 @@ def test_a_cli_that_cannot_be_isolated_from_the_directory_is_given_no_checkout(
     directory and reads the diff — which is what its contract asks of it anyway.
     """
     record = adapters.ADAPTER_TABLE["claude"]
-    monkeypatch.setitem(
-        adapters.ADAPTER_TABLE, "claude", dataclasses.replace(record, config_isolation=())
-    )
+    monkeypatch.setitem(adapters.ADAPTER_TABLE, "claude", dataclasses.replace(record, config_isolation=()))
     seen = _seen_by(review_repo, "security_reviewer", monkeypatch)
     assert seen["entries"] == []
 

@@ -232,6 +232,7 @@
           "additionalProperties": false,
           "properties": {
             "change_digest": {
+              "description": "The committed tree at `subject_head_sha` minus everything that is not the product (the SSOT, the frozen prose, the installed agent surfaces). This, and not `subject_head_sha`, decides whether the review still speaks for the repository: the workflow commits each phase's deliverables at its gate, so committing review.yaml is itself a later commit, and a staleness test on the commit id made recording a review invalidate it.",
               "$ref": "#/$defs/digest"
             },
             "plan_digest": {
