@@ -108,7 +108,7 @@ def test_a_refused_answer_carries_the_bytes_that_were_refused() -> None:
     for raw, expected in [
         ("", "''"),
         ("   ", "'   '"),
-        ("```json\n{}\n```", "```json"),
+        ("here you go:\n```json\n{}\n```", "here you go"),
         ("I'm sorry, I can't help with that.", "I'm sorry"),
     ]:
         with pytest.raises(review_policy.ReviewPolicyError) as caught:
@@ -126,11 +126,43 @@ def test_a_long_answer_is_excerpted_and_says_so() -> None:
     assert len(message) < 5000
 
 
-def test_leniency_is_not_the_repair() -> None:
-    """A fence is named in the error, never parsed through: a reviewer that cannot speak the
-    contract has said nothing, and crediting it with something is how that stops being true."""
+def test_one_enclosing_fence_is_a_frame_and_not_leniency() -> None:
+    """The bytes between the fences are the whole answer, and they are parsed strictly.
+
+    Refusing this cost real launches, repeatedly, on answers that were correct JSON wearing the
+    wrapper a chat interface puts on every code block — and told the operator only "unparseable".
+    Removing an unambiguous frame is not crediting a reviewer with having said something; the
+    tests below are what that would look like, and they still refuse.
+    """
+    assert review_policy.parse_reviewer_output('```json\n{"findings": []}\n```') == {"findings": []}
+    assert review_policy.parse_reviewer_output('```\n{"findings": []}\n```') == {"findings": []}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'here you go:\n```json\n{"findings": []}\n```',  # a preamble is not a frame
+        '```json\n{"findings": []}\n```\nhope that helps',  # nor is a trailing remark
+        '```json\n{"a": 1}\n```\n```json\n{"b": 2}\n```',  # two answers are not one
+        '```json\n{"findings": [\n```',  # a frame around nothing parseable
+    ],
+)
+def test_leniency_is_still_not_the_repair(raw: str) -> None:
+    """What the strictness is actually for: a reviewer that cannot speak the contract has said
+    nothing, and crediting it with something is how that stops being true."""
     with pytest.raises(review_policy.ReviewPolicyError):
-        review_policy.parse_reviewer_output('```json\n{"findings": []}\n```')
+        review_policy.parse_reviewer_output(raw)
+
+
+def test_a_stage_schema_is_derived_from_the_one_that_refuses_the_answer() -> None:
+    """A second description of the shape, written to constrain the model, would be a second thing
+    to keep in step with the validator — which is the failure mode this whole file is about."""
+    schema = review_policy.stage_output_schema("security_reviewer")
+    declared = models.schema("review")["$defs"]["machine"]["properties"]["security"]
+    assert schema["required"] == ["findings"]
+    assert schema["properties"]["findings"] == declared["properties"]["findings"]
+    assert "machine" not in schema["$defs"], "28 KB of the 35, and nothing a stage answers refs it"
+    assert review_policy.stage_output_schema("code_reviewer") == {}, "a role with no declared shape"
 
 
 def test_parse_reviewer_output_rejects_duplicate_keys() -> None:

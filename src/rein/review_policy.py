@@ -24,6 +24,7 @@ against crafted-malicious reviewer payloads without running a model.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -135,6 +136,62 @@ class Reviewers(Protocol):
 UNPARSEABLE_EXCERPT_CHARS = 500
 
 
+#: The key each stage answers under, and where `review.schema.json` already describes that shape.
+#: Derived rather than restated: the schema is what refuses the answer, so a second description of
+#: it written to constrain the model would be a second thing to keep in step.
+_STAGE_ANSWER: Mapping[str, tuple[str, str]] = {
+    "actual_extractor": ("actual_statements", "actual_extraction"),
+    "comparator": ("claims", "claims"),
+    "security_reviewer": ("", "security"),
+}
+
+
+def stage_output_schema(role: str) -> dict[str, Any]:
+    """A self-contained JSON Schema for what `role` must answer, or {} for a role with no shape.
+
+    For a CLI that can constrain its own output (`adapters.Adapter.output_schema_flags`) this is
+    what a fence, a preamble and a truncated object stop being possible at all — the failure that
+    cost a field run several launches was a comparator returning well-formed JSON inside a
+    ```json frame, over and over, because nothing but the prompt had ever asked it not to.
+
+    Assembled from `review.schema.json`'s own `$defs`, so it cannot drift from the validator that
+    refuses the answer. `machine` is left out: nothing a stage answers refs it, and it is 28 KB of
+    the 35 — and the whole schema travels as one argv element.
+    """
+    key, where = _STAGE_ANSWER.get(role, ("", ""))
+    if not where:
+        return {}
+    defs: Any = models.schema("review")["$defs"]
+    node = defs["machine"]["properties"][where]
+    root: dict[str, Any] = dict(node) if not key else {"type": "object", "required": [key], "properties": {key: node}}
+    if role == "comparator":
+        # The comparator echoes the Actual's digest so the answer names what it compared against
+        # (`conformance.run_comparator` refuses one that does not).
+        root["properties"] = {**root["properties"], "actual_digest": defs["digest"]}
+        root["required"] = [*root["required"], "actual_digest"]
+    return {**root, "$defs": {name: body for name, body in defs.items() if name != "machine"}}
+
+
+#: The one frame a well-formed answer may arrive inside. Not leniency: the bytes between the
+#: fences are the whole answer and are parsed strictly, so an answer with a prose preamble, a
+#: second fence, or malformed JSON is refused exactly as before. What was refused with it was a
+#: correct answer wearing the wrapper a chat interface puts on every code block — which cost real
+#: launches, repeatedly, and told the operator only "unparseable".
+_FENCE = re.compile(r"\A\s*```(?:json|JSON)?[ \t]*\r?\n(?P<body>.*)\r?\n?```\s*\Z", re.DOTALL)
+
+
+def unwrap_fence(raw: str) -> str:
+    """`raw` with a single enclosing code fence removed, or `raw` unchanged.
+
+    Removing a frame is not parsing leniently. The distinction matters because leniency here is
+    how a reviewer that cannot speak the contract starts being credited with having said
+    something: a preamble, a trailing remark, a second object, a truncated one — all still refused,
+    and the excerpt still travels with the refusal so the four repairs stay distinguishable.
+    """
+    match = _FENCE.match(raw)
+    return match.group("body") if match else raw
+
+
 def parse_reviewer_output(raw: str, *, what: str = "reviewer output") -> dict[str, Any]:
     """Parse a reviewer's raw output strictly, then enforce the shape caps (plan §12.7).
 
@@ -153,7 +210,7 @@ def parse_reviewer_output(raw: str, *, what: str = "reviewer output") -> dict[st
     was missing was the diagnosis, not the tolerance.
     """
     try:
-        document = strict_yaml.load_json_mapping(raw, what=what)
+        document = strict_yaml.load_json_mapping(unwrap_fence(raw), what=what)
     except strict_yaml.StrictParseError as exc:
         raise ReviewPolicyError(f"{what}: unparseable ({exc}); {_excerpt(raw)}") from None
     problems = validate_shape(document, what=what)

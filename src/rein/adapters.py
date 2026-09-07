@@ -160,6 +160,18 @@ class Adapter:
     #: (`review_transport.prompt_call`). Asserting stdin here to dodge that refusal would be
     #: declaring a channel nobody has run, which is the same class of claim `model_flags` refuses.
     prompt_on_stdin: bool = False
+    #: How to constrain this CLI's output to a JSON Schema, `str.format`-ed with `schema=` (the
+    #: schema as one JSON string). Empty for a CLI whose mechanism this release has not verified —
+    #: the same rule `model_flags` follows, and it costs nothing to leave empty: the answer is
+    #: parsed and validated either way.
+    #:
+    #: What it buys is that the failure stops being possible. A gate-④ stage's whole contract is
+    #: "one JSON object and no other text", enforced only by the prompt saying so — and a field run
+    #: lost several launches to a comparator returning correct JSON inside a ```json frame, again
+    #: and again, because nothing but a sentence had ever asked it not to. `review_policy` now
+    #: unwraps exactly that frame, which is the floor for every CLI; this is the ceiling for the
+    #: ones that can be told the shape instead of asked for it.
+    output_schema_flags: tuple[str, ...] = ()
     #: What keeps a launch from reading the *working directory's* configuration — the settings,
     #: hooks, pre-authorizations and MCP servers a CLI loads before it reads its prompt. Empty for
     #: a CLI where this release has not verified such a mechanism, and that emptiness is load-
@@ -256,6 +268,9 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         # permissions, hooks and servers this launch runs under are the machine owner's — the same
         # ones every other rein launch here already runs under — rather than the reviewed change's.
         config_isolation=("--setting-sources", "user", "--strict-mcp-config"),
+        # `--json-schema <schema>`: "JSON Schema for structured output validation", taking the
+        # schema inline as its value. Verified against `claude --help`.
+        output_schema_flags=("--json-schema", "{schema}"),
         # Every level is empty: a `-p` launch carries the permissions the project already
         # configured, and there is no flag here that would narrow them per launch. So what keeps
         # this reviewer off the code is the prompt and the loop's before/after fingerprint, not

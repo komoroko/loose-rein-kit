@@ -306,9 +306,15 @@ def derive_review_budget(
     here, on the grounds that the detector partitioned large diffs — it never did; and it was then
     the whole change, which measured a cycle against a budget that bounds a launch.
     """
+    from rein import human_review
+
     actuals = {
         "max_critical_decisions": sum(1 for c in decision_cards if _risk_of(c) == "critical"),
-        "max_human_statements": len(statements),
+        # The statements attached to a card somebody must answer, not every statement minted. One
+        # card carries four or five options and only high/critical cards are mandatory, so the old
+        # `len(statements)` measured the generator's output rather than the reviewer's workload —
+        # and put two owed decisions over a 30-statement ceiling behind five optional cards.
+        "max_human_statements": human_review.answerable_statements(decision_cards, statements),
         "max_unresolved_low_medium_unknowns": sum(
             1 for g in gaps if _risk_of(g) in ("low", "medium") and g.get("blocking") is not True
         ),

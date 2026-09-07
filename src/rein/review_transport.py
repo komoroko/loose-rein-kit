@@ -489,6 +489,12 @@ def _adapter_reviewer(
     )
     if wants_checkout:
         role_argv = (*role_argv, *record.config_isolation)
+    # Told the shape rather than asked for it, where the CLI can be. The prompt still states the
+    # contract in full — this is offered, never relied on, and a role this release has no schema
+    # for (or a CLI with no flag) is parsed and validated exactly as before.
+    if record.output_schema_flags and (schema := review_policy.stage_output_schema(role)):
+        payload = json.dumps(schema, ensure_ascii=False)
+        role_argv = (*role_argv, *(part.format(schema=payload) for part in record.output_schema_flags))
 
     def call(request: Mapping[str, Any]) -> review_policy.Answer:
         argv, stdin = prompt_call(

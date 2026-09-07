@@ -187,10 +187,43 @@ def test_budget_within_limits_is_not_blown() -> None:
 
 def test_a_config_limit_overrides_the_default() -> None:
     statements = [{"id": f"STMT-{i:03d}", "text": "x", "epistemic_status": "machine_inferred"} for i in range(1, 4)]
-    review = _review(machine={"statements": statements})
+    card = {
+        "id": "DC-001",
+        "question": "?",
+        "risk": "high",
+        "options": [{"id": letter, "statement_id": f"STMT-{n:03d}"} for n, letter in enumerate("ABC", start=1)],
+    }
+    review = _review(machine={"statements": statements, "decision_cards": [card]})
     assert human_review.scope_split_required(review, dict(review.human)) == []
     blown = human_review.scope_split_required(review, dict(review.human), {"max_human_statements": 2})
     assert blown == ["max_human_statements"]
+
+
+def test_options_of_cards_nobody_has_to_answer_are_not_the_reviewers_workload() -> None:
+    """The budget is named for the reviewer's workload and measured the generator's output.
+
+    `derive` mints one statement per *option* of every card at every risk, and only high and
+    critical cards must be answered — so two decisions somebody owed could arrive over the
+    30-statement ceiling behind five low-risk cards nobody was obliged to read. The instruction
+    attached to that ceiling is "split the scope", which is not a move that exists at gate ④.
+    """
+    statements = [{"id": f"STMT-{i:03d}", "text": "x", "epistemic_status": "machine_inferred"} for i in range(1, 36)]
+
+    def card(index: int, risk: str) -> dict[str, object]:
+        first = index * 5 - 4
+        return {
+            "id": f"DC-{index:03d}",
+            "question": "?",
+            "risk": risk,
+            "options": [{"id": letter, "statement_id": f"STMT-{first + n:03d}"} for n, letter in enumerate("ABCDE")],
+        }
+
+    cards = [card(1, "high"), card(2, "high"), *(card(i, "low") for i in range(3, 8))]
+    review = _review(machine={"statements": statements, "decision_cards": cards})
+
+    assert len(statements) == 35, "over the default ceiling of 30, as the old measurement counted it"
+    assert human_review.budget_actuals(review, dict(review.human))["max_human_statements"] == 10
+    assert human_review.scope_split_required(review, dict(review.human)) == []
 
 
 def test_a_diff_too_large_for_one_sitting_blows_its_budget() -> None:
@@ -247,13 +280,25 @@ def test_the_screen_uses_the_ceilings_the_review_was_generated_against() -> None
     raised a limit was still blocked at the default.
     """
     statements = [{"id": f"STMT-{i:03d}", "text": "x", "epistemic_status": "machine_inferred"} for i in range(1, 41)]
+    # Attached to cards a reviewer must answer — the budget is about workload, and a statement no
+    # card obliges anybody to read is not part of it (`answerable_statements`).
+    cards = [
+        {
+            "id": f"DC-{i:03d}",
+            "question": "?",
+            "risk": "high",
+            "options": [{"id": letter, "statement_id": f"STMT-{i * 4 - 3 + n:03d}"} for n, letter in enumerate("ABCD")],
+        }
+        for i in range(1, 11)
+    ]
+    machine = {"statements": statements, "decision_cards": cards}
     snapshot = [{"name": "max_human_statements", "limit": 60, "actual": 40, "exceeded": False}]
-    review = _review(machine={"statements": statements, "review_budget": snapshot})
+    review = _review(machine={**machine, "review_budget": snapshot})
     assert human_review.recorded_limits(review) == {"max_human_statements": 60}
     assert human_review.scope_split_required(review, dict(review.human)) == []
 
     # …and without the snapshot the same review is over the default ceiling of 30.
-    default_ceilings = _review(machine={"statements": statements})
+    default_ceilings = _review(machine=machine)
     assert human_review.scope_split_required(default_ceilings, dict(default_ceilings.human)) == ["max_human_statements"]
 
 
