@@ -183,7 +183,11 @@ security:
   # dependency answer at all, which is not the same as having a clean one.
   dependency_audit:
     command: [uv, run, pip-audit, --strict]
-    executor_profile: quality
+    # No `executor_profile`, so this runs on the host — and that is the only place it can run. An
+    # audit reads a published vulnerability database, and no sandbox here is granted egress
+    # (`network_profile` may only be `none`), so naming a sandboxed profile is refused rather than
+    # left to fail as if the dependencies were what was wrong. Name one only to point at another
+    # `kind: host` profile. This runs a scanner over manifests, not the repository's own code.
     # How long the recorded answer speaks for. Nothing in the repository has to change for it to
     # stop being true.
     max_age_days: 7

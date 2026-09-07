@@ -107,3 +107,66 @@ def test_a_project_that_declares_no_audit_is_told_so() -> None:
     assert audit.configured(models.Config(make_config())) == {}
     with pytest.raises(audit.AuditError, match="declares no"):
         audit.run(repo_mod.Repo(Path(".")), models.Config(make_config()))
+
+
+# --- what the audit may record, and what it must refuse to ---------------------
+
+
+def _audited(command: list[str], *, profile: str = "", profiles: dict[str, Any] | None = None) -> models.Config:
+    block: dict[str, Any] = {"command": command}
+    if profile:
+        block["executor_profile"] = profile
+    raw = make_config(profiles=profiles)
+    raw["security"] = {"dependency_audit": block}
+    return models.Config(raw)
+
+
+def _answering(exit_code: int, output: str) -> Any:
+    class _Executor:
+        def run(self, spec: Any) -> Any:
+            from rein import executors
+
+            return executors.ExecutionResult(exit_code=exit_code, output=output, image_digest="")
+
+    return lambda profile: _Executor()
+
+
+def test_a_sandboxed_profile_is_refused_before_it_is_launched() -> None:
+    """An audit reads a published database and `executors` grants no sandbox egress at all —
+    `network_profile` may only be `none`. That configuration cannot answer on any machine, on any
+    day, so it is refused rather than left to fail as though the dependencies were what was wrong.
+    """
+    boxed = {"boxed": {"kind": "oci", "image": "x@sha256:" + "a" * 64}}
+    config = _audited(["pip-audit"], profile="boxed", profiles=boxed)
+    with pytest.raises(audit.AuditError, match="sandboxed"):
+        audit.run(repo_mod.Repo(Path(".")), config)
+
+
+def test_a_profile_that_is_not_declared_is_not_quietly_the_host() -> None:
+    """Running a security answer somewhere other than where it was configured to run would be
+    guessing at where it came from."""
+    with pytest.raises(audit.AuditError, match="no such profile"):
+        audit.run(repo_mod.Repo(Path(".")), _audited(["pip-audit"], profile="ghost"))
+
+
+def test_a_machine_that_could_not_answer_records_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ "Could not ask" is not "the answer is bad", and only one of them is a fact about this
+    release's dependencies. Recorded as a failed audit it holds gate ⑤ shut in the one place here
+    with no dispute route — the same mistake this release fixed for a memory kill."""
+    from rein import executors
+
+    monkeypatch.setattr(executors, "for_profile", _answering(1, "pip-audit: Temporary failure in resolving 'pypi.org'"))
+    with pytest.raises(audit.AuditError, match="could not be run"):
+        audit.run(repo_mod.Repo(Path(".")), _audited(["pip-audit"]))
+
+
+def test_a_finding_about_the_dependencies_is_recorded_as_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other side of the same line: an audit that ran and found something is exactly what the
+    gate is asking about, and it is recorded with what it said."""
+    from rein import executors
+
+    monkeypatch.setattr(executors, "for_profile", _answering(1, "GHSA-xxxx: urllib3 1.26.4 is vulnerable"))
+    record = audit.run(repo_mod.Repo(Path(".")), _audited(["pip-audit"]))
+
+    assert record["passed"] is False
+    assert "GHSA-xxxx" in record["summary"]

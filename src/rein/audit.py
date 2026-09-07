@@ -28,7 +28,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from rein import common, digests, executors, models
+from rein import common, digests, executors, faults, models
 from rein import diff_facts as diff_facts_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -109,7 +109,21 @@ def staleness(record: object, *, dependencies: str, now: datetime, max_age: int)
 
 
 def run(repo: repo_mod.Repo, config: models.Config | None) -> dict[str, Any]:
-    """Run the configured audit and return the record to store. Raises when none is configured."""
+    """Run the configured audit and return the record to store. Raises when it could not be run.
+
+    **"Could not ask" is not "the answer is bad", and only one of them is a fact about this
+    release's dependencies.** `passed` used to be `exit_code == 0` and nothing else, so a command
+    that never reached the vulnerability database recorded a failed audit — which
+    `approve._audit_blockers` holds gate ⑤ shut with, in the one place here that has no dispute
+    route. That is the same mistake this release fixed for a memory kill (`faults.is_sandbox_oom`):
+    a machine that could not answer, read as a fact about the code. So a machine failure raises
+    instead, nothing is recorded, and the gate goes on saying what is true — that no audit has been
+    run.
+
+    A sandboxed profile is refused before it is launched rather than after it fails. An audit reads
+    a published database and `executors` grants no sandbox any egress at all (`network_profile` may
+    only be `none`), so that configuration cannot produce an answer on any machine, on any day.
+    """
     block = configured(config)
     command = [str(part) for part in block.get("command", [])]
     if not command:
@@ -119,13 +133,36 @@ def run(repo: repo_mod.Repo, config: models.Config | None) -> dict[str, Any]:
             "— it is the only security question that is not a function of the tree, and the only "
             "one a review cannot answer once."
         )
-    profile = None
-    if config is not None:
-        named = str(block.get("executor_profile", ""))
-        profile = config.profiles.get(named) if named else config.profile_for("quality_gate")
-    profile = profile or models.ExecutorProfile("host", {"kind": "host"})
+    # The default is the host, and it is not the quality gate's profile. Every other command here
+    # runs repository code, which belongs in a sandbox; this one runs a scanner that has to reach a
+    # published database, which no sandbox here may do. Inheriting the DoD's profile meant that
+    # following `doctor`'s advice to sandbox the quality gate silently made the release gate's one
+    # unrunnable requirement unrunnable.
+    named = str(block.get("executor_profile", ""))
+    profile = models.ExecutorProfile("host", {"kind": "host"})
+    if named:
+        if config is None or named not in config.profiles:
+            raise AuditError(
+                f"`security.dependency_audit.executor_profile` names {named!r} and no such profile is "
+                "declared in `executors.executor_profiles`. Running it somewhere else instead would be "
+                "guessing at where a security answer came from."
+            )
+        profile = config.profiles[named]
+    if profile.is_sandboxed:
+        raise AuditError(
+            f"the dependency audit is configured to run in profile {profile.name!r}, which is sandboxed. Egress "
+            "is denied from every sandbox here — `network_profile` may only be `none` — and an audit that "
+            "cannot reach the vulnerability database has no answer to give. Point "
+            "`security.dependency_audit.executor_profile` at a `kind: host` profile: this runs a scanner over "
+            "manifests, not the repository's own code."
+        )
     spec = executors.ExecutionSpec(command=tuple(command), profile=profile, mounts=(), workdir=str(repo.root))
     result = executors.for_profile(profile).run(spec)
+    if result.exit_code != 0 and faults.classify_step(result.exit_code, result.output) is not faults.Fault.CONTENT:
+        raise AuditError(
+            "the dependency audit could not be run — this is the machine failing, not a finding about the "
+            f"dependencies, so nothing has been recorded:\n{result.output[-2000:]}"
+        )
     rc, head = repo._git_rc("rev-parse", "HEAD")
     return {
         "ran_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
