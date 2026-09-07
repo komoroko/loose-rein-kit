@@ -488,9 +488,6 @@ ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "extra_behavior": re.compile(r"^EXTRA-\d{3,}$"),
 }
 
-#: Repo-relative POSIX paths only: no absolute path, no `..`, no backslash, no leading slash.
-REPO_PATH_RE = re.compile(r"^(?!/)(?!.*(?:^|/)\.\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$")
-
 #: The cycle id, which `state.yaml` and every event carry. One spelling of a rule that had four:
 #: the schema's pattern (checked against it by a test), `cycle.py`'s `--name` predicate, which
 #: accepted a leading dash and any Unicode letter the schema rejects, and two `if state else ""`
@@ -501,8 +498,12 @@ CYCLE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
 def is_repo_path(value: object) -> bool:
-    """True when `value` is a safe repo-relative POSIX path (no escape, no absolute form)."""
-    return isinstance(value, str) and bool(REPO_PATH_RE.match(value)) and "\\" not in value
+    """True when `value` is a safe repo-relative POSIX path (no escape, no absolute form).
+
+    The backslash test that used to sit here is in the pattern now: two places to state one rule is
+    how a validator and its code come to disagree about what a path is.
+    """
+    return isinstance(value, str) and bool(REPO_PATH_RE.match(value))
 
 
 def risk_at_least(risk: str, floor: str) -> bool:
@@ -560,6 +561,21 @@ def schema(name: str) -> Mapping[str, Any]:
         )
         _SCHEMA_CACHE[name] = loaded
     return _SCHEMA_CACHE[name]
+
+
+#: Repo-relative POSIX paths only, read from the schema that enforces it — the same direction
+#: `review_policy.review_schema_pattern` and `security_review.FINDING_ID_RE` already take, and for
+#: the same reason: this rule was written out five times (here, and `repoPath`/`pathGlob` in three
+#: schemas), which is five chances for the validator and the code to disagree about what a path is.
+#:
+#: It was an **allow-list of characters** — `[A-Za-z0-9._][A-Za-z0-9._/@+-]*` — so
+#: `app/[[...path]]/page.tsx` was not a safe repo-relative path, and neither was `app/(group)/` or
+#: any filename outside ASCII. A reference to real code read as an attempt to escape the
+#: repository. What the rule is about is escaping, so it now says that: no absolute form, no
+#: `..` segment, no empty segment, no backslash, no control character — plus one thing that is
+#: not about escaping at all, a leading `-`, which any command it is handed to can read as an
+#: option.
+REPO_PATH_RE = re.compile(schema("plan")["$defs"]["repoPath"]["pattern"])
 
 
 def schema_errors(document: Any, name: str) -> list[str]:

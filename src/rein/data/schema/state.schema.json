@@ -97,7 +97,7 @@
           "type": "object",
           "maxProperties": 1024,
           "propertyNames": {
-            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+            "$ref": "#/$defs/repoPath"
           },
           "additionalProperties": {
             "$ref": "#/$defs/digest"
@@ -788,6 +788,12 @@
           "$ref": "#/$defs/digest"
         }
       }
+    },
+    "repoPath": {
+      "description": "A repo-relative POSIX path. Checked for what it must not be rather than for which characters it may contain: no absolute form, no `..` segment, no empty segment, no backslash, no control character. A leading `-` is refused as well, which is not about escaping: a path that begins with one can be read as an option by any command it is handed to, and refusing it here covers every call site at once.",
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!-)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000-\\u001f]+$"
     }
   }
 }

@@ -685,3 +685,39 @@ def test_a_stack_branch_is_recognised_and_an_ordinary_one_is_not() -> None:
 def test_the_placeholder_set_names_commands_that_cannot_fail() -> None:
     assert ("true",) in models.PLACEHOLDER_COMMANDS
     assert ("python", "-m", "pytest") not in models.PLACEHOLDER_COMMANDS
+
+
+# --- one definition of what a repo path is ------------------------------------
+
+
+def test_the_path_rule_is_written_once() -> None:
+    """It was written five times — here and `repoPath`/`pathGlob` in three schemas — which is five
+    chances for the validator and the code to disagree about what a path is."""
+    patterns = {name: models.schema(name)["$defs"]["repoPath"]["pattern"] for name in ("plan", "review", "config")}
+    assert len(set(patterns.values())) == 1, patterns
+    assert models.REPO_PATH_RE.pattern == patterns["plan"]
+    assert models.schema("config")["$defs"]["pathGlob"]["pattern"] == patterns["plan"]
+    assert models.schema("state")["$defs"]["repoPath"]["pattern"] == patterns["plan"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "app/[[...path]]/page.tsx",  # Next.js optional catch-all — rejected as unsafe for two releases
+        "app/[slug]/page.tsx",
+        "app/(marketing)/layout.tsx",
+        "docs/設計.md",  # every non-ASCII filename was unsafe
+        "src/api/",
+        "infra/Lambda.Dockerfile",
+    ],
+)
+def test_real_paths_a_character_allowlist_called_unsafe(path: str) -> None:
+    """The rule is about escaping the repository, and it used to be enforced as an allow-list of
+    ASCII characters — so a reference to real code read as an attempt to escape."""
+    assert models.is_repo_path(path)
+
+
+@pytest.mark.parametrize("path", ["/etc/passwd", "../secrets", "a/../b", ".rein/../x", "a\\b", "a//b", "", "a\tb"])
+def test_what_a_path_still_may_not_be(path: str) -> None:
+    """No absolute form, no `..` segment, no empty segment, no backslash, no control character."""
+    assert not models.is_repo_path(path)

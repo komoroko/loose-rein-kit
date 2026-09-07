@@ -46,14 +46,14 @@ def test_an_unreadable_file_with_nothing_risk_bearing_in_it_is_a_low_gap() -> No
     Pricing every gap at `high` closed a loop — the gap raised the risk, and the risk was what
     made the gap blocking — so one unreadable file shut gate ④ with no way through.
     """
-    facts = diff_facts.analyze(_one_file("design/logo.psd", added=["some text"]))
+    facts = diff_facts.analyze(_one_file("design/logo.psd", added=["\x00some bytes"]))
     assert facts.coverage.coverage_status == "insufficient"  # still honest about not reading it
     assert review_policy.coverage_gap_risk(facts) == "low"
     assert review_policy.effective_risk(review_policy.risk_inputs_from_facts(facts)) == "low"
 
 
 def test_a_signal_inside_an_unreadable_file_still_prices_the_gap_high() -> None:
-    facts = diff_facts.analyze(_one_file("design/logo.psd", removed=["if not authorized: raise Denied()"]))
+    facts = diff_facts.analyze(_one_file("design/logo.psd", removed=["\x00 if not authorized: raise Denied()"]))
     assert review_policy.coverage_gap_risk(facts) == "high"
 
 

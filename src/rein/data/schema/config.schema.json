@@ -295,9 +295,7 @@
             ],
             "properties": {
               "path": {
-                "type": "string",
-                "maxLength": 512,
-                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*/?$"
+                "$ref": "#/$defs/repoPath"
               },
               "requires_gate": {
                 "enum": [
@@ -348,14 +346,16 @@
       "pattern": "^[a-z0-9][a-z0-9_-]*$"
     },
     "repoPath": {
+      "description": "A repo-relative POSIX path. Checked for what it must not be rather than for which characters it may contain: no absolute form, no `..` segment, no empty segment, no backslash, no control character. It was an ASCII allow-list, which rejected `app/[[...path]]/page.tsx`, `app/(group)/`, and every non-ASCII filename — a reference to real code read as an attempt to escape the repository. What the rule is actually about is escaping, and that is what it now says. A leading `-` is refused as well, which is not about escaping: a path that begins with one can be read as an option by any command it is handed to, and refusing it here covers every call site at once.",
       "type": "string",
       "maxLength": 512,
-      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+      "pattern": "^(?!/)(?!-)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000-\\u001f]+$"
     },
     "pathGlob": {
+      "description": "A repo-relative POSIX path. Checked for what it must not be rather than for which characters it may contain: no absolute form, no `..` segment, no empty segment, no backslash, no control character. It was an ASCII allow-list, which rejected `app/[[...path]]/page.tsx`, `app/(group)/`, and every non-ASCII filename — a reference to real code read as an attempt to escape the repository. What the rule is actually about is escaping, and that is what it now says. A glob may also carry `*` and `?`. A leading `-` is refused as well, which is not about escaping: a path that begins with one can be read as an option by any command it is handed to, and refusing it here covers every call site at once.",
       "type": "string",
       "maxLength": 512,
-      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._*?][A-Za-z0-9._/@+*?-]*$"
+      "pattern": "^(?!/)(?!-)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000-\\u001f]+$"
     },
     "envName": {
       "type": "string",

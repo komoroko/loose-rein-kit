@@ -130,7 +130,10 @@ def test_e2e_23_yaml_parser_attacks_are_refused(text: str) -> None:
 
 # E2E-24: a diff the detector cannot fully read makes coverage insufficient, never "0 extra".
 def test_e2e_24_unsupported_diff_is_insufficient() -> None:
-    facts = diff_facts.analyze("diff --git a/x.zig b/x.zig\n--- a/x.zig\n+++ b/x.zig\n@@ -1 +1 @@\n+const x = 1;\n")
+    """Content nothing can tokenize, not merely an extension the table cannot name: text is read
+    as text whatever it is called (`diff_facts._analysis_for`), and `unsupported` keeps the
+    meaning it is here to defend — bytes no reader could turn into lines."""
+    facts = diff_facts.analyze("diff --git a/x.bin b/x.bin\n--- a/x.bin\n+++ b/x.bin\n@@ -1 +1 @@\n+\x00\x01\x02\n")
     assert facts.coverage.coverage_status == "insufficient"
 
 

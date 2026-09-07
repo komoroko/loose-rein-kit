@@ -402,18 +402,18 @@ _LANGUAGE_ANALYSIS: dict[str, tuple[str, str]] = {
     ".md": ("markdown", "token_only"),
 }
 
-#: Files with no extension that are still plain text. Matched on the base name, case-sensitively
-#: except where both spellings are conventional.
+#: Files with no extension whose *language* this can name. Matched on the base name, case-
+#: sensitively except where both spellings are conventional.
+#:
+#: Deliberately short. Anything else that is plain text is read by the fallback below and recorded
+#: as `text`, so the entries here earn their place by naming a language and nothing else does —
+#: `LICENSE`, `CODEOWNERS` and the ignore files were all in this table saying `text`, which is the
+#: answer the fallback gives for free.
 _FILENAME_ANALYSIS: dict[str, tuple[str, str]] = {
     "Dockerfile": ("dockerfile", "token_only"),
     "Containerfile": ("dockerfile", "token_only"),
     "makefile": ("make", "token_only"),
     "Makefile": ("make", "token_only"),
-    "LICENSE": ("text", "token_only"),
-    "CODEOWNERS": ("text", "token_only"),
-    ".gitignore": ("text", "token_only"),
-    ".gitattributes": ("text", "token_only"),
-    ".dockerignore": ("text", "token_only"),
 }
 
 #: What an analyzer may claim it did. `ast_plus_llm` is deliberately absent: the Coverage
@@ -534,11 +534,42 @@ def _extension(path: str) -> str:
     return name[name.rindex(".") :] if "." in name else ""
 
 
-def _analysis_for(path: str) -> tuple[str, str] | None:
-    """(language, method) for `path`, or None when nothing here can read it."""
+#: A control character that is not whitespace. Its presence is what separates "text this could not
+#: name" from "bytes nothing here can tokenize" — a heuristic, and a narrow one: tab, newline and
+#: carriage return are excluded because text has them, and everything else in C0 plus DEL is a
+#: byte no source file carries on purpose.
+_BINARY_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _analysis_for(path: str, body: str = "") -> tuple[str, str] | None:
+    """(language, method) for `path`, or None when nothing here can read it.
+
+    **The extension is how the language is named, not how readability is decided.** It used to be
+    both, so `.mts`, `.cts` and `Lambda.Dockerfile` were `unsupported_language` — which makes the
+    Coverage Manifest `insufficient`, which blocks gate ④, whose stated remedy ("split the
+    unreadable part out of this scope") cannot be carried out on a TypeScript module the change is
+    about. Extending the table answers one release's filenames and none of the next.
+
+    So a file the table cannot place, whose content decodes as UTF-8 and carries no non-whitespace
+    control character, is `("text", "token_only")`. That is not a loosening in the sense
+    `unsupported` guards against: the signal detector reads every changed line of a `token_only`
+    file, so this is the difference between *we scanned it lexically and say so* and *we could not
+    read it at all* — and `unsupported` keeps the second, which is what binaries and formats
+    nothing here can tokenize actually are.
+
+    `body` empty means the content was not offered, and the answer is then the table's or None:
+    "we did not look" must not read as "it is text".
+    """
     name = path.rsplit("/", 1)[-1]
     by_name = _FILENAME_ANALYSIS.get(name)
-    return by_name if by_name is not None else _LANGUAGE_ANALYSIS.get(_extension(path))
+    if by_name is not None:
+        return by_name
+    by_extension = _LANGUAGE_ANALYSIS.get(_extension(path))
+    if by_extension is not None:
+        return by_extension
+    if body and not _BINARY_CONTROL.search(body):
+        return ("text", "token_only")
+    return None
 
 
 def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence[Analyzer] = ()) -> CoverageManifest:
@@ -591,7 +622,9 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
             has_binary = True
             unsupported.append({"path": file.path, "reason": "binary"})
             continue
-        language_method = _analysis_for(file.path)
+        # The diff's own lines, which are what a `token_only` reader would read. Already
+        # decoded — git marks a file it could not decode as binary, and that is handled above.
+        language_method = _analysis_for(file.path, "\n".join(file.changed_lines))
         if language_method is None:
             language_method, detail = _ask_analyzers(analyzers, file, used_analyzers)
         else:

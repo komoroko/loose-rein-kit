@@ -5,56 +5,136 @@
   "description": "The Expected Model: what this cycle claims the implementation will do, and the task DAG that builds it. Frozen at gate 3. Three sections and no more — `claims` ties each R-N/NFR-N heading of docs/10-requirements.md to a statement, `tasks` ties each statement to the work that answers it, and `rein dag --trace` walks the thread end to end. Every enum here is mirrored by a constant in rein/models.py; tests/test_models.py fails if the two drift.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["cycle", "claims"],
+  "required": [
+    "cycle",
+    "claims"
+  ],
   "properties": {
-    "cycle": { "$ref": "#/$defs/cycle" },
-    "claims": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/claim" } },
-    "tasks": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/task" } }
+    "cycle": {
+      "$ref": "#/$defs/cycle"
+    },
+    "claims": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/claim"
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    }
   },
   "$defs": {
-    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
-    "risk": { "enum": ["low", "medium", "high", "critical"] },
-    "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
-    "label": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
     "repoPath": {
-      "description": "A repo-relative POSIX path. No absolute form, no '..' segment, no backslash — a reference that can escape the repository is not a reference to anything reviewable.",
+      "description": "A repo-relative POSIX path. Checked for what it must not be rather than for which characters it may contain: no absolute form, no `..` segment, no empty segment, no backslash, no control character. It was an ASCII allow-list, which rejected `app/[[...path]]/page.tsx`, `app/(group)/`, and every non-ASCII filename — a reference to real code read as an attempt to escape the repository. What the rule is actually about is escaping, and that is what it now says. A leading `-` is refused as well, which is not about escaping: a path that begins with one can be read as an option by any command it is handed to, and refusing it here covers every call site at once.",
       "type": "string",
       "maxLength": 512,
-      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[A-Za-z0-9._][A-Za-z0-9._/@+-]*$"
+      "pattern": "^(?!/)(?!-)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000-\\u001f]+$"
     },
     "domains": {
       "type": "array",
       "maxItems": 16,
-      "items": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9][a-z0-9_-]*$" }
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[a-z0-9][a-z0-9_-]*$"
+      }
     },
-    "claimId": { "type": "string", "pattern": "^C-[0-9]{3,}$" },
-    "taskId": { "type": "string", "pattern": "^T-[0-9]{3,}$" },
-    "acceptanceId": { "type": "string", "pattern": "^A-[0-9]+$" },
+    "claimId": {
+      "type": "string",
+      "pattern": "^C-[0-9]{3,}$"
+    },
+    "taskId": {
+      "type": "string",
+      "pattern": "^T-[0-9]{3,}$"
+    },
+    "acceptanceId": {
+      "type": "string",
+      "pattern": "^A-[0-9]+$"
+    },
     "artifactRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "digest"],
+      "required": [
+        "path",
+        "digest"
+      ],
       "properties": {
-        "path": { "$ref": "#/$defs/repoPath" },
-        "digest": { "$ref": "#/$defs/digest" }
+        "path": {
+          "$ref": "#/$defs/repoPath"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
       }
     },
     "cycle": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "base_commit", "branch"],
+      "required": [
+        "id",
+        "base_commit",
+        "branch"
+      ],
       "properties": {
-        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z0-9][a-z0-9-]*$" },
-        "base_commit": { "$ref": "#/$defs/commit" },
-        "branch": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "base_commit": {
+          "$ref": "#/$defs/commit"
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
         "artifacts": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "brief": { "$ref": "#/$defs/artifactRef" },
-            "requirements": { "$ref": "#/$defs/artifactRef" },
-            "design": { "$ref": "#/$defs/artifactRef" }
+            "brief": {
+              "$ref": "#/$defs/artifactRef"
+            },
+            "requirements": {
+              "$ref": "#/$defs/artifactRef"
+            },
+            "design": {
+              "$ref": "#/$defs/artifactRef"
+            }
           }
         }
       }
@@ -63,61 +143,126 @@
       "description": "What one requirement means, in a sentence a reviewer can hold against the code. `requirement_ids` is what makes it traceable: a claim citing an id no heading declares is a dangling reference, and a heading no claim cites is an uncovered requirement — `rein dag --trace` blocks on both.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "statement", "risk"],
+      "required": [
+        "id",
+        "statement",
+        "risk"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/claimId" },
+        "id": {
+          "$ref": "#/$defs/claimId"
+        },
         "requirement_ids": {
           "type": "array",
           "maxItems": 64,
-          "items": { "type": "string", "maxLength": 32, "pattern": "^(R|NFR)-[0-9]+$" }
+          "items": {
+            "type": "string",
+            "maxLength": 32,
+            "pattern": "^(R|NFR)-[0-9]+$"
+          }
         },
-        "statement": { "$ref": "#/$defs/text" },
-        "risk": { "$ref": "#/$defs/risk" },
-        "domains": { "$ref": "#/$defs/domains" }
+        "statement": {
+          "$ref": "#/$defs/text"
+        },
+        "risk": {
+          "$ref": "#/$defs/risk"
+        },
+        "domains": {
+          "$ref": "#/$defs/domains"
+        }
       }
     },
     "task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "title", "kind", "risk"],
+      "required": [
+        "id",
+        "title",
+        "kind",
+        "risk"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/taskId" },
-        "title": { "$ref": "#/$defs/label" },
+        "id": {
+          "$ref": "#/$defs/taskId"
+        },
+        "title": {
+          "$ref": "#/$defs/label"
+        },
         "kind": {
           "description": "The DAG role that drives orchestration: layers, parallelism, and merge order derive from it, not from LLM discretion.",
-          "enum": ["foundation", "parallel", "integration"]
+          "enum": [
+            "foundation",
+            "parallel",
+            "integration"
+          ]
         },
-        "blocked_by": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/taskId" } },
-        "claim_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/claimId" } },
-        "domains": { "$ref": "#/$defs/domains" },
-        "risk": { "$ref": "#/$defs/risk" },
+        "blocked_by": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/taskId"
+          }
+        },
+        "claim_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/claimId"
+          }
+        },
+        "domains": {
+          "$ref": "#/$defs/domains"
+        },
+        "risk": {
+          "$ref": "#/$defs/risk"
+        },
         "scope": {
           "description": "Where this task's work belongs. Each entry covers the path it names and everything beneath it; a trailing '/' is optional punctuation and changes nothing, and the prefix is anchored at a separator (`src/app` covers `src/app/x.py`, never `src/app.py`). An empty `include` is unbounded, not forbidden. Checked against the real diff by the build loop.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "include": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/repoPath" } },
-            "exclude": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/repoPath" } }
+            "include": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "$ref": "#/$defs/repoPath"
+              }
+            },
+            "exclude": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "$ref": "#/$defs/repoPath"
+              }
+            }
           }
         },
         "acceptance": {
           "description": "This task's own bar, in a form something can check. Acceptance criteria used to live only as markdown checkboxes in `docs/tasks/T-NNN.md`, which nothing parsed — so 'the acceptance criteria are met' was an assertion by the agent that wrote the code. Stating them here does NOT let a task pick its own quality gate: the shared DoD in config.yaml still runs, unchanged, and this list is frozen by a human at gate ③ exactly like everything else in the plan.",
           "type": "array",
           "maxItems": 32,
-          "items": { "$ref": "#/$defs/acceptance" }
+          "items": {
+            "$ref": "#/$defs/acceptance"
+          }
         },
         "operator_surface": {
           "description": "What this task will require of a person: a setting somebody has to supply, a schema somebody has to migrate, a dependency somebody has to provide, a signal somebody has to watch. Frozen at gate 3 with the rest of the task, which is what turns it into an Expected side — at gate 4 the blind extractor's readings are sorted by whether one of these foresaw them, and the readings nothing foresaw are what the approver is shown first. Declaring nothing is allowed; it means every operator-facing reading in that area arrives at gate 4 as undeclared.",
           "type": "array",
           "maxItems": 32,
-          "items": { "$ref": "#/$defs/operatorSurface" }
+          "items": {
+            "$ref": "#/$defs/operatorSurface"
+          }
         }
       }
     },
     "operatorSurface": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "name", "paths"],
+      "required": [
+        "kind",
+        "name",
+        "paths"
+      ],
       "properties": {
         "kind": {
           "description": "A subset of the Actual Statement categories in review.schema.json, not a vocabulary of its own: the declaration is compared against what a blind extractor read out of the code, and two vocabularies over one comparison would need a mapping table that can be wrong. These are the categories describing a surface somebody outside the code can see.",
@@ -139,7 +284,9 @@
           "type": "array",
           "minItems": 1,
           "maxItems": 32,
-          "items": { "$ref": "#/$defs/repoPath" }
+          "items": {
+            "$ref": "#/$defs/repoPath"
+          }
         },
         "adr": {
           "description": "The decision record that settled what this requires of a person and whether it can be undone. Shown beside the declaration at gate 4 so the trade-off a human approved at gate 2 is reachable from what was built — the review never restates it, because a restatement is a sentence nobody observed.",
@@ -152,9 +299,14 @@
     "acceptance": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "statement"],
+      "required": [
+        "id",
+        "statement"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/acceptanceId" },
+        "id": {
+          "$ref": "#/$defs/acceptanceId"
+        },
         "statement": {
           "description": "One criterion, stated so that it could be false.",
           "$ref": "#/$defs/text"
@@ -163,20 +315,40 @@
           "description": "How this criterion is established. Absent means it is prose only — most criteria are, and that is honest; it simply contributes no evidence and is left to the gate ④ review.",
           "type": "object",
           "additionalProperties": false,
-          "required": ["kind"],
+          "required": [
+            "kind"
+          ],
           "properties": {
             "kind": {
               "description": "`command` runs an argv in a sandboxed profile and is decided by exit status. `artifact` requires the named paths to exist. `external` is evidence this loop cannot obtain — a staging check, a device, a person — so a task carrying one reaches `awaiting-evidence` rather than `done`, and a human records the observation with `rein evidence record`.",
-              "enum": ["command", "artifact", "external"]
+              "enum": [
+                "command",
+                "artifact",
+                "external"
+              ]
             },
             "command": {
               "description": "An argv array, never a shell string — the same rule the quality gate follows, for the same reason.",
               "type": "array",
               "maxItems": 32,
-              "items": { "type": "string", "minLength": 1, "maxLength": 512 }
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
             },
-            "executor_profile": { "type": "string", "minLength": 1, "maxLength": 64 },
-            "paths": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/repoPath" } }
+            "executor_profile": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "paths": {
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/repoPath"
+              }
+            }
           }
         }
       }
