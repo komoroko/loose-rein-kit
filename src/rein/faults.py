@@ -61,6 +61,10 @@ _OUTPUT_TAIL = 1000
 #: would restart exactly what they just stopped.
 _EXTERNAL_SIGNALS = frozenset({1, 9, 15})  # SIGHUP, SIGKILL, SIGTERM
 
+#: The sentence an OOM-killed sandbox carries out of `executors`. One value both modules read, so
+#: the classifier and the thing it classifies cannot spell it differently.
+OOM_NOTE = "the sandbox was killed for exceeding its memory limit of"
+
 #: Agent-capacity exhaustion, as the CLIs report it. Only ever consulted to decide *transient*,
 #: which is already the default for a launch — so a miss costs nothing but a slightly less
 #: specific console line, and a false hit cannot turn a code failure into a machine one.
@@ -192,15 +196,19 @@ def classify_step(rc: int, output: str) -> Fault:
 
     A step killed from outside is ENV_TRANSIENT, and this is the reading that was missing:
     :func:`_killed_externally` existed for a reported rc=143 in the field and nothing consulted
-    it, so the OOM killer, a supervisor's SIGTERM and a closing terminal all charged the step's
-    retry budget and were recorded as facts about the code. A container the kernel killed for
-    exceeding `memory_mb` also arrives here as 137, and that *is* partly about the code — but
-    the honest direction is the one that costs a re-run rather than a wrong verdict, so it reads
-    as the machine's failure and the console line names the limit.
+    it, so a supervisor's SIGTERM and a closing terminal charged the step's retry budget and were
+    recorded as facts about the code.
+
+    **A sandbox killed for exceeding `memory_mb` is ENV_PERMANENT, not transient.** It arrives as
+    the same 137 a SIGKILL from anywhere does, and it used to be read as "worth another try" —
+    but the next try has the same ceiling and dies the same way, which is exactly the network
+    case's shape and not the capacity case's. `executors` says so in the output rather than
+    leaving 137 to be interpreted, because the rc cannot carry it: a Next/Chromium suite under a
+    1024 MiB profile spent every retry rediscovering a number nobody had raised.
     """
     if rc == 0:
         raise ValueError("classify_step is for a failed step (rc != 0)")
-    if _unlaunchable(rc, output) or is_network_unreachable(output):
+    if _unlaunchable(rc, output) or is_network_unreachable(output) or is_sandbox_oom(output):
         return Fault.ENV_PERMANENT
     if _killed_externally(rc):
         return Fault.ENV_TRANSIENT
@@ -210,6 +218,16 @@ def classify_step(rc: int, output: str) -> Fault:
 def is_capacity(output: str) -> bool:
     """Does this output look like the agent ran out of capacity rather than out of luck?"""
     return bool(_CAPACITY_RE.search(output))
+
+
+def is_sandbox_oom(output: str) -> bool:
+    """Did the sandbox exceed its declared memory limit?
+
+    Read from the note `executors` writes rather than inferred from the rc: 137 is every SIGKILL,
+    and only the executor knows the run had a `--memory` ceiling and what it was. The sentence
+    lives here, in the module with no dependencies, so the writer reads it from the reader.
+    """
+    return OOM_NOTE in output
 
 
 def is_network_unreachable(output: str) -> bool:

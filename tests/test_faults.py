@@ -321,3 +321,23 @@ def test_a_reset_later_today_is_not_pushed_to_tomorrow() -> None:
 
 def test_a_refusal_that_names_no_time_schedules_nothing() -> None:
     assert faults.reset_at("429 rate limit exceeded") is None
+
+
+# --- a memory ceiling is not a fact about the code ----------------------------
+
+
+def test_a_sandbox_killed_for_its_memory_limit_is_permanent() -> None:
+    """It arrives as the same 137 every SIGKILL does, and used to read as "worth another try" —
+    but the next try has the same ceiling and dies the same way. That is the network case's shape,
+    not the capacity case's: a Next/Chromium suite under a 1024 MiB profile spent every retry
+    rediscovering a number nobody had raised."""
+    said = f"...\n{faults.OOM_NOTE} 1024 MiB (profile 'quality')."
+    assert faults.classify_step(137, said) is faults.Fault.ENV_PERMANENT
+    assert faults.is_sandbox_oom(said)
+
+
+def test_a_kill_from_anywhere_else_is_still_worth_retrying() -> None:
+    """A supervisor's SIGTERM, a closing terminal. The rc cannot tell them apart from an OOM —
+    only the executor knows the run had a `--memory` ceiling, which is why it says so."""
+    assert faults.classify_step(137, "Killed") is faults.Fault.ENV_TRANSIENT
+    assert not faults.is_sandbox_oom("Killed")
