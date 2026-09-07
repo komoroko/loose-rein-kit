@@ -30,8 +30,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from rein import digests, models, review_policy
 from rein import repo as repo_mod
-from rein import review_policy
 
 SEVERITY_VALUES = frozenset({"low", "medium", "high", "critical"})
 
@@ -208,6 +208,96 @@ def _anchored_lines(repo: repo_mod.Repo, anchor: Mapping[str, Any]) -> list[str]
     if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start or end > len(lines):
         return None
     return lines[start - 1 : end]
+
+
+def anchors_digest(repo: repo_mod.Repo, finding: Mapping[str, Any]) -> str:
+    """A digest over what this finding actually named: each anchor's path and its exact lines.
+
+    What a dispute binds. Not the finding's id, which says nothing about code, and not the blob
+    ids, which move on any unrelated edit to the same file — the same distinction
+    :func:`resolution_of` draws, for the same reason: the anchored *text* is what the finding was
+    about.
+
+    "" when nothing can be read — no anchors, or a blob this checkout no longer has. A dispute
+    that cannot be bound is not recorded, because a record that matches nothing would either
+    silence the finding forever or never match at all, and neither is a fact.
+    """
+    anchors = finding.get("code_anchors")
+    if not isinstance(anchors, list) or not anchors:
+        return ""
+    parts: list[list[str]] = []
+    for anchor in anchors:
+        if not isinstance(anchor, Mapping):
+            return ""
+        path, lines = str(anchor.get("path", "")), _anchored_lines(repo, anchor)
+        if not path or lines is None:
+            return ""
+        parts.append([path, *lines])
+    return digests.of(parts)
+
+
+def live_disputes(repo: repo_mod.Repo, state: models.State | None, findings: Iterable[Mapping[str, Any]]) -> set[str]:
+    """The ids among `findings` whose recorded dispute still binds the code it was about.
+
+    A dispute is a human saying the finding is not true, and it is a statement about *that* code.
+    So it holds while the anchored text is what it was when the dispute was recorded, and retires
+    the moment somebody edits it — which revives the finding rather than leaving a permanent
+    silence keyed to an id.
+
+    A finding whose anchors can no longer be read is **not** treated as disputed: "cannot say" is
+    not "the human said no", and the finding blocks until somebody says otherwise about something
+    that can be checked.
+    """
+    recorded = state.disputed_findings if state is not None else {}
+    if not recorded:
+        return set()
+    live: set[str] = set()
+    for finding in findings:
+        fid = str(finding.get("id", ""))
+        entry = recorded.get(fid)
+        if not isinstance(entry, Mapping):
+            continue
+        bound = str(entry.get("anchors_digest", ""))
+        if bound and bound == anchors_digest(repo, finding):
+            live.add(fid)
+    return live
+
+
+def apply_disputes(
+    repo: repo_mod.Repo, state: models.State | None, findings: Sequence[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """`findings` with every live dispute applied: not blocking, and saying why.
+
+    A dispute has to be re-applied on every generation, not merely honoured once. The reviewer has
+    no memory of the last review, so a deterministic false positive is found again by the same
+    reading of the same code — and a dispute that lived only in the human half was gone by then,
+    which is how "the reviewer is wrong about SEC-011" turned into a sentence somebody had to type
+    at every regeneration for the rest of the cycle.
+
+    The record is matched against the anchored text, so this marks the finding only while it is
+    about the code the human actually read (:func:`live_disputes`). Marked rather than dropped:
+    the document is the record of what the review found, and a finding that vanished because
+    somebody disagreed with it would leave the disagreement invisible.
+    """
+    disputed = live_disputes(repo, state, findings)
+    if not disputed:
+        return [dict(f) for f in findings]
+    recorded = state.disputed_findings if state is not None else {}
+    out: list[dict[str, Any]] = []
+    for finding in findings:
+        entry = dict(finding)
+        fid = str(entry.get("id", ""))
+        if fid in disputed:
+            record = recorded.get(fid, {})
+            entry["blocking"] = False
+            entry["status"] = "disputed"
+            entry["disputed_at"] = {
+                key: str(record.get(key))
+                for key in ("reason", "recorded_at")
+                if isinstance(record.get(key), str) and record.get(key)
+            }
+        out.append(entry)
+    return out
 
 
 def resolution_of(

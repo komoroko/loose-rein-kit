@@ -424,11 +424,13 @@ EVENT_VALUES = frozenset(EVENT_ORDER)
 CONFIRMATION_CHANNELS: tuple[str, ...] = ("terminal", "ui-session")
 CONFIRMATION_CHANNEL_VALUES = frozenset(CONFIRMATION_CHANNELS)
 
-#: A security finding's life. `open` holds gate ④ shut; `resolved` is recorded only when the code
-#: the finding anchored to is no longer in the tree (`security_review.resolution_of`) — a fact
-#: about the change, never the reviewer's word for it. A finding is never deleted, so the document
-#: keeps the record of what closed it and against which head.
-SECURITY_FINDING_STATUS_ORDER: tuple[str, ...] = ("open", "resolved")
+#: A security finding's life. `open` holds gate ④ shut. The two ways out are both facts rather
+#: than opinions, and neither is the reviewer's: `resolved` is recorded only when the code the
+#: finding anchored to is no longer in the tree (`security_review.resolution_of`), and `disputed`
+#: only when a human contradicted it with a reason that `state.disputed_findings` binds to the
+#: anchored text (`security_review.apply_disputes`) — so a dispute lapses if that code is edited.
+#: A finding is never deleted, so the document keeps the record of what closed it and how.
+SECURITY_FINDING_STATUS_ORDER: tuple[str, ...] = ("open", "resolved", "disputed")
 SECURITY_FINDING_STATUS_VALUES = frozenset(SECURITY_FINDING_STATUS_ORDER)
 
 #: A change request's life. `open` holds the gate shut; `addressed` is the agent saying it has
@@ -901,6 +903,24 @@ class State:
         return [cr for cr in self.change_requests if cr.get("gate") == gate and cr.get("status") in wanted]
 
     @property
+    def disputed_findings(self) -> Mapping[str, Mapping[str, Any]]:
+        """Security findings a human contradicted, by id — the durable half of `dispute_finding`.
+
+        The review's own `human.dispositions` entry records that a decision card was answered, and
+        a regeneration discards it. That left a disputed false positive with no exit: the
+        regeneration carried it forward as a prior blocker, the reviewer honestly did not re-emit
+        a finding it did not believe, and `security_review.resolution_of` could not close it
+        because the code it named was correct and still there.
+
+        Each record binds the anchored text (`anchors_digest`), so it retires the way acceptance
+        evidence does: change the code the dispute was about and the finding is live again.
+        """
+        value = self.raw.get("disputed_findings")
+        if not isinstance(value, dict):
+            return {}
+        return {str(k): v for k, v in value.items() if isinstance(v, dict)}
+
+    @property
     def task_status(self) -> Mapping[str, str]:
         value = self.raw.get("tasks")
         if not isinstance(value, dict):
@@ -1037,14 +1057,18 @@ class Review:
 
     @property
     def blocking_security_findings(self) -> tuple[Mapping[str, Any], ...]:
-        """Findings that still hold gate ④ shut: `blocking`, and not closed by the change itself.
+        """Findings that still hold gate ④ shut: `blocking`, and not already closed.
 
-        A `resolved` finding stays in the document — that is the record of what closed it and
-        against which head — but it is not a blocker any more. Filtering here rather than at each
-        reader is what keeps `doctor`, `findings`, `human_review`, `pr_draft`, `review_policy` and
-        `status_api` from having to agree about it separately.
+        A closed finding stays in the document — that is the record of what closed it and how —
+        but it is not a blocker any more. There are two ways to close, and this excludes both:
+        `resolved`, when the code the finding anchored to is gone, and `disputed`, when a human
+        contradicted it with a reason bound to the anchored text (`security_review.apply_disputes`
+        also clears `blocking`, so the flag and the status agree). Filtering here rather than at
+        each reader is what keeps `doctor`, `findings`, `human_review`, `pr_draft`,
+        `review_policy` and `status_api` from having to agree about it separately.
         """
-        return tuple(f for f in self.security_findings if f.get("blocking") is True and f.get("status") != "resolved")
+        closed = {"resolved", "disputed"}
+        return tuple(f for f in self.security_findings if f.get("blocking") is True and f.get("status") not in closed)
 
     @property
     def coverage(self) -> Mapping[str, Any]:

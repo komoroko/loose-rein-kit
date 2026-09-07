@@ -74,6 +74,7 @@ import time
 import urllib.parse
 import webbrowser
 from collections.abc import Callable
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -91,6 +92,7 @@ from rein import (
     review_api,
     revise,
     run_progress,
+    security_review,
     status_api,
 )
 from rein import events as events_mod
@@ -850,11 +852,108 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _review_disposition(self, body: dict[str, object]) -> None:
         subject, action = str(body.get("subject_id") or ""), str(body.get("action") or "")
         note = str(body.get("note") or "")
+        # A dispute of a security finding is a statement about *code*, and it has to outlive the
+        # machine review that raised it — regenerating discards the human half, and until this
+        # existed a disputed false positive came back on every regeneration with nothing to settle
+        # it (`security_review.apply_disputes`). A dispute with no reason is refused: a review that
+        # cannot be contradicted makes it infallible, and one that can be waved away makes it
+        # pointless.
+        if action == "dispute_finding" and security_review.FINDING_ID_RE.match(subject):
+            if not note.strip():
+                raise UiActionError(
+                    HTTPStatus.BAD_REQUEST,
+                    "a dispute needs a reason — it is a human contradicting the reviewer on the record",
+                )
+            self._record_dispute(body, subject, note)
+            return
         self._review_mutate(
             body,
             "disposition_recorded",
             lambda _review, human: human_review.record_disposition(human, subject, action, note=note),
         )
+
+    def _record_dispute(self, body: dict[str, object], finding_id: str, reason: str) -> None:
+        """Record the dispute in `state.yaml` and answer the card, in one transaction.
+
+        Two records of two different facts, not one fact written twice. The `human.dispositions`
+        entry says this decision card was answered, which is what `unanswered_decisions` reads and
+        what a freeze waits for; it belongs to this review and goes when this review does. The
+        `state.disputed_findings` entry says the finding is not true, bound to the anchored text —
+        it is what survives the next regeneration and what lapses if that code is edited.
+        """
+        expected = str(body.get("machine_digest") or "")
+        if not expected:
+            raise UiActionError(
+                HTTPStatus.BAD_REQUEST,
+                "machine_digest is required — an answer has to name the machine review it is about",
+            )
+        repo = repo_mod.Repo(self.server.active_root())
+        store = store_mod.Store(repo)
+        try:
+            with store.transaction() as tx:
+                review = tx.store.read_review()
+                if review is None or not review.is_generated:
+                    raise UiActionError(HTTPStatus.BAD_REQUEST, "no machine review to answer")
+                human_review.assert_machine_current(review, expected)
+                state = tx.store.read_state()
+                if state is None or not state.cycle_id:
+                    raise UiActionError(HTTPStatus.CONFLICT, "state.yaml names no cycle — run `rein doctor`")
+                finding = next(
+                    (f for f in review.security_findings if str(f.get("id", "")) == finding_id),
+                    None,
+                )
+                if finding is None:
+                    raise UiActionError(HTTPStatus.BAD_REQUEST, f"{finding_id} is not a finding in this review")
+                bound = security_review.anchors_digest(repo, finding)
+                if not bound:
+                    raise UiActionError(
+                        HTTPStatus.CONFLICT,
+                        f"{finding_id} names no readable code anchor, so a dispute of it could not be bound to "
+                        "anything and would silence it for good. Ask the reviewer to anchor it, or answer the "
+                        "card another way.",
+                    )
+                tx.write(
+                    "review",
+                    {
+                        **review.raw,
+                        "human": human_review.record_disposition(
+                            dict(review.human), finding_id, "dispute_finding", note=reason
+                        ),
+                    },
+                    expect_digest=store_mod.read_digest(review),
+                )
+                tx.write(
+                    "state",
+                    {
+                        **state.raw,
+                        "disputed_findings": {
+                            **dict(state.disputed_findings),
+                            finding_id: {
+                                "reason": reason,
+                                "anchors_digest": bound,
+                                "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                **({"subject_head_sha": review.subject_head_sha} if review.subject_head_sha else {}),
+                            },
+                        },
+                    },
+                )
+                tx.append(
+                    "disposition_recorded",
+                    cycle_id=state.cycle_id,
+                    subject_ids=[finding_id],
+                    detail={"action": "dispute_finding", "reason": reason[:500]},
+                )
+            fresh = store.read_review()
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "machine_digest": fresh.machine_digest() if fresh else "",
+                    "session": review_api.review_session(self.server.active_root()),
+                },
+            )
+        except human_review.StaleReview as exc:
+            raise UiActionError(HTTPStatus.CONFLICT, str(exc)) from None
 
     def _review_expert(self, body: dict[str, object]) -> None:
         domain, reason = str(body.get("domain") or ""), str(body.get("reason") or "")

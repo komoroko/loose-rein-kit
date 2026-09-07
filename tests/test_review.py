@@ -1422,23 +1422,116 @@ def _stored_review(base: str) -> models.Review:
     return models.Review(make_review(generated=True, security_findings=[BLOCKING_FINDING], base_sha=base))
 
 
-def test_prior_blocking_findings_are_carried_into_the_next_security_review() -> None:
+def test_prior_blocking_findings_are_carried_into_the_next_security_review(tmp_path: Path) -> None:
     """A reviewer may not clear its own block by regenerating and omitting the finding — but
     nothing passed the previous findings in, so the check had nothing to compare against."""
-    assert review._prior_blocking(_stored_review(BASE_A), BASE_A) == [BLOCKING_FINDING]
-    assert review._prior_blocking(None, BASE_A) == []
+    repo = repo_mod.Repo(tmp_path)
+    assert review._prior_blocking(repo, _stored_review(BASE_A), BASE_A, None) == [BLOCKING_FINDING]
+    assert review._prior_blocking(repo, None, BASE_A, None) == []
 
 
-def test_a_blocking_finding_does_not_follow_the_review_onto_a_different_base() -> None:
+def test_a_blocking_finding_does_not_follow_the_review_onto_a_different_base(tmp_path: Path) -> None:
     """A finding is a statement about a change. Change the base and it is about something else.
 
     Carried by id alone, a finding taken against base A kept blocking a regeneration against
     base B — a different diff, sometimes not even containing the code the finding named — and the
     only way past it was for the reviewer to re-assert something it could no longer see.
     """
-    assert review._prior_blocking(_stored_review(BASE_A), BASE_B) == []
+    repo = repo_mod.Repo(tmp_path)
+    assert review._prior_blocking(repo, _stored_review(BASE_A), BASE_B, None) == []
     # A review that never recorded a base cannot claim to be about this one either.
-    assert review._prior_blocking(_stored_review(""), BASE_A) == []
+    assert review._prior_blocking(repo, _stored_review(""), BASE_A, None) == []
+
+
+def _anchored_finding(root: Path, path: str, text: str) -> dict[str, object]:
+    """A blocking finding anchored to `text`, which is line 1 of `path` in the committed tree."""
+    (root / path).write_text(text, encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", f"add {path}")
+    blob = _git(root, "rev-parse", f"HEAD:{path}")
+    return {
+        **BLOCKING_FINDING,
+        "code_anchors": [
+            {"path": path, "blob": f"git-blob:{blob}", "start_line": 1, "end_line": 1},
+        ],
+    }
+
+
+def test_a_disputed_finding_is_not_carried_forward_and_is_marked_in_the_next_review(
+    review_repo: Path,
+) -> None:
+    """The deadlock a false positive used to be.
+
+    A human disputes SEC-001; the machine review is regenerated (which discards the human half);
+    the reviewer, honestly, does not re-emit a finding it does not believe; `resolution_of` cannot
+    close it because the code it named is correct and still there — so the drop is refused as "a
+    reviewer cannot clear its own block", for the rest of the cycle. There was no exit.
+
+    Two responsibilities were folded together: carrying a blocker forward so a reviewer cannot
+    quietly retract it, and re-deciding whether it is true. `state.disputed_findings` holds the
+    second, bound to the anchored text, and both halves of the pipeline read it.
+    """
+    from tests._support import make_review
+
+    repo = repo_mod.Repo(review_repo)
+    finding = _anchored_finding(review_repo, "vault.py", "TOKEN = os.environ['T']\n")
+    stored = models.Review(make_review(generated=True, security_findings=[finding], base_sha=BASE_A))
+
+    # Without a dispute the finding carries, and a reviewer that drops it is refused.
+    assert review._prior_blocking(repo, stored, BASE_A, None) == [finding]
+
+    bound = security_review.anchors_digest(repo, finding)
+    assert bound, "an anchored finding can be bound to the code it named"
+    state = models.State(
+        {
+            **make_state(project="rv", phase="build"),
+            "disputed_findings": {
+                "SEC-001": {"reason": "that is a test fixture, not a live credential", "anchors_digest": bound},
+            },
+        }
+    )
+
+    # It no longer carries, so the reviewer's honest omission is no longer a refusal…
+    assert review._prior_blocking(repo, stored, BASE_A, state) == []
+    # …and if it *is* found again — the same reading of the same code — it is marked rather than
+    # left to be disputed once per regeneration for the rest of the cycle.
+    marked = security_review.apply_disputes(repo, state, [finding])
+    assert marked[0]["blocking"] is False
+    assert marked[0]["status"] == "disputed"
+    assert "test fixture" in marked[0]["disputed_at"]["reason"]
+
+
+def test_a_dispute_lapses_when_the_code_it_was_about_is_edited(review_repo: Path) -> None:
+    """A dispute is a statement about code, not about an id. Edit the code and the finding is live
+    again — otherwise "the reviewer is wrong" would be a permanent silence keyed to a number."""
+    repo = repo_mod.Repo(review_repo)
+    finding = _anchored_finding(review_repo, "vault.py", "TOKEN = os.environ['T']\n")
+    state = models.State(
+        {
+            **make_state(project="rv", phase="build"),
+            "disputed_findings": {
+                "SEC-001": {"reason": "a fixture", "anchors_digest": security_review.anchors_digest(repo, finding)},
+            },
+        }
+    )
+    assert security_review.live_disputes(repo, state, [finding]) == {"SEC-001"}
+
+    moved = _anchored_finding(review_repo, "vault.py", "TOKEN = 'hunter2'\n")
+    assert security_review.live_disputes(repo, state, [moved]) == set()
+
+
+def test_a_finding_with_no_readable_anchor_is_never_treated_as_disputed(review_repo: Path) -> None:
+    """ "Cannot say" is not "the human said no". A dispute that could not be bound to anything would
+    either silence the finding for good or never match at all."""
+    repo = repo_mod.Repo(review_repo)
+    assert security_review.anchors_digest(repo, BLOCKING_FINDING) == ""
+    state = models.State(
+        {
+            **make_state(project="rv", phase="build"),
+            "disputed_findings": {"SEC-001": {"reason": "no", "anchors_digest": "sha256:" + "0" * 64}},
+        }
+    )
+    assert security_review.live_disputes(repo, state, [BLOCKING_FINDING]) == set()
 
 
 # --- the pipeline's shape -----------------------------------------------------

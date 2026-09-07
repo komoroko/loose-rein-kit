@@ -573,6 +573,43 @@
           }
         }
       }
+    },
+    "disputed_findings": {
+      "description": "Security findings a human has contradicted, with the reason, and bound to the code the finding named. This is the durable half of `dispute_finding`: the review's own `human.dispositions` entry records that a decision card was answered and is discarded when the machine review is regenerated, which left a disputed false positive with no exit at all — the regeneration carried it forward as a prior blocker, the reviewer honestly did not re-emit it, and `security_review.resolution_of` could not close it because the code it named was correct and still there. Kept here it survives the regeneration, and it retires the way acceptance evidence does: `anchors_digest` binds the anchored text, so editing the code the dispute was about revives the finding rather than silencing it forever.",
+      "type": "object",
+      "maxProperties": 500,
+      "propertyNames": {
+        "pattern": "^SEC-[0-9]{3,}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "anchors_digest",
+          "recorded_at"
+        ],
+        "properties": {
+          "reason": {
+            "description": "Why the finding is not true. A dispute with no reason makes the review infallible in the other direction.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "anchors_digest": {
+            "description": "Digest over the finding's anchored text — each anchor's path and the exact lines it named, read from the blob it recorded. The dispute holds only while this still matches, so it is a statement about code and not about an id.",
+            "$ref": "#/$defs/digest"
+          },
+          "recorded_at": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "subject_head_sha": {
+            "description": "The commit the disputed review was taken against, so a reader can go and look at what was disputed.",
+            "$ref": "#/$defs/commit"
+          }
+        }
+      }
     }
   },
   "$defs": {
