@@ -192,8 +192,10 @@ positive is contradicted by a human with `dispute_finding`, and that record live
 bound to the anchored text — so it survives the regeneration that discards the human review, and
 lapses if that code is edited. Gate ⑤ **carries the review rather than re-reading the code** — its
 receipt binds the machine digest — and runs `rein audit run`, the one security answer that is not
-a function of the tree and therefore the only one that expires without the repository moving
-(detail: build.md, verify.md).
+a function of the tree and therefore the only one that expires without the repository moving. It
+runs on the host and nowhere else — an audit reads a published database and no sandbox here is
+granted egress — and a machine that could not answer records nothing, because "could not ask" is
+not "the answer is bad" (detail: build.md, verify.md).
 
 ## Branch / commit / permissions
 
@@ -213,7 +215,9 @@ a function of the tree and therefore the only one that expires without the repos
   Merged atomically, nothing is rebased and the commits the build produced are the ones that land.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
-  `completed_commit` and gate receipt on commits that no longer exist.
+  `completed_commit` and gate receipt on commits that no longer exist. Gate ④'s own repairs follow
+  the same rule and the build loop does it for them: the fix is committed in a worktree on the
+  owning slice's branch and merged upward, never at the work branch's tip.
 - `command-preauthorization` of known-safe commands cuts repeated prompts **without touching
   gates** (generic commands in the installed settings; product-specific ones in the product's
   own) — never pre-authorize push / PR / **merge to main** / `cycle-close` / `pr-stack`, nor `rein

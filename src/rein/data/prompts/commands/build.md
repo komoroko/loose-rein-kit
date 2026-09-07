@@ -260,9 +260,12 @@ is the point; never fold them into the implementer's session.
 
    From here, **a fix for a review finding is committed onto the slice that introduced the code, not
    onto the work branch.** `rein build` reads the change, repairs the findings a task's declared
-   scope owns and lands each fix on the pull request that owns it, and `rein pr-stack --restack`
-   carries the fixes up the stack by merging. **Never rebase a stack**: it strands every
-   `completed_commit` and gate receipt on commits that no longer exist.
+   scope owns and commits each **where a review fix belongs**: on the slice that introduced the
+   code when this cycle is a stack — in a worktree on that slice's branch, then carried up into the
+   work branch by merging — and on the work branch itself when it is a single pull request. **Never
+   rebase a stack**: it strands every `completed_commit` and gate receipt on commits that no longer
+   exist, which is why the fix goes down to its slice and merges up rather than the history moving.
+   `rein pr-stack --restack` is the same walk, for a fix you commit onto a slice yourself.
 
 1. **Answer any open change requests first.** Run `rein changes list --gate build --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds gate ④ shut, and approving is what closes the addressed ones.
 2. **The grounded review is taken by the run itself, and the run repairs what it may.** `rein

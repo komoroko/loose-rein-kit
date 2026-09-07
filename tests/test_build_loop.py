@@ -36,10 +36,12 @@ from rein import (
     faults,
     models,
     pr_stack,
+    repair,
     review_policy,
     review_reading,
 )
 from rein import events as events_mod
+from rein import findings as findings_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
@@ -2981,3 +2983,109 @@ def test_a_reading_that_cannot_be_taken_does_not_un_finish_the_build(
     monkeypatch.setattr(loop, "_repair", lambda graph, item: pytest.fail("nothing was read to repair"))
 
     assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+
+
+def _repair_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_loop.Orchestrator, list[str]]:
+    """A gate-4 repair with everything around the commit stubbed out: one launch, in scope, green."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    committed: list[str] = []
+    monkeypatch.setattr(loop, "_launch", lambda *a, **k: None)
+    monkeypatch.setattr(loop.ws, "head", lambda: "0" * 40)
+    monkeypatch.setattr(loop.ws, "changed_since", lambda base, cwd="": ["src/api/client.py"])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "")
+
+    def record(cwd: str, message: str) -> bool:
+        committed.append(message)
+        return True
+
+    monkeypatch.setattr(loop.ws, "finalize_commit", record)
+    return loop, committed
+
+
+def test_a_gate_four_repair_is_committed_before_the_next_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The next reading is over committed history — `review.generate` resolves HEAD and digests the
+    committed tree — so a fix left in the working tree is a fix the reviewer cannot see. The machine
+    half comes out byte-identical, which reads as "nothing has moved", the finding stands, the round
+    is spent, and the tree the gate receipt binds does not contain the repair.
+
+    The implementer is told to commit; that is an instruction, not evidence. Every task finalizes
+    for the same reason (`build_git.finalize_commit`), and this is the one launch that did not.
+    """
+    loop, committed = _repair_loop(tmp_path, monkeypatch)
+    found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
+    loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+    assert committed == ["T-001: gate-4 repair"]
+
+
+def test_a_cycle_that_is_not_a_stack_repairs_on_the_work_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A single pull request has one place for the fix, and `derive` refusing to cut a stack out of
+    this repository means exactly that — not that the repair has nowhere to go."""
+    loop, committed = _repair_loop(tmp_path, monkeypatch)
+    found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
+    loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+
+    assert committed == ["T-001: gate-4 repair"]
+    assert "no stack to place this on" in capsys.readouterr().out
+
+
+def test_a_repair_that_cannot_be_committed_stops_the_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tree that could not be committed is the precursor of data loss, so the run says so and
+    leaves the work where it is rather than reading past it."""
+    loop, _ = _repair_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: False)
+    with pytest.raises(build_loop.StopLoop, match="could not be committed"):
+        found = findings_mod.Attribution("SEC-001", "security", "T-001", "x")
+        loop._repair(loop._load_graph(), repair.Repair("T-001", (found,)))
+
+
+def test_gate_four_reads_the_baseline_gate_three_froze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_consume` reads it before a batch, and a run that finds every task already done never
+    reaches that line — which is exactly the run that repairs here. Without it a step frozen red at
+    gate ③ stops the repair over a failure the plan was approved on top of."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    frozen = {
+        "measured_at": "2026-01-01T00:00:00+00:00",
+        "tree_digest": "t",
+        "frozen": True,
+        "red_steps": [{"name": "check", "failure": "ruff: 3 pre-existing errors"}],
+    }
+    loop.state = models.State({**loop.state.raw, "baseline": frozen})  # type: ignore[union-attr]
+    monkeypatch.setattr(loop, "_generate_review", lambda: False)
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert set(loop._baseline_red) == {"check"}
+
+
+def test_a_stop_loop_outside_a_batch_is_reported_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`_load_baseline` and `_close_gate4` are the two calls that are not in a batch, and the
+    handlers used to be inside the `while`. `common.StopLoop` is not a `common.ReinError`, so
+    `cli.main` does not catch it either: the sentence this was given to say reached the operator as
+    a traceback and exit 1."""
+    loop = orchestrator(tmp_path)
+    loop.state = models.State({k: v for k, v in loop.state.raw.items() if k != "baseline"})  # type: ignore[union-attr]
+    with caplog.at_level(logging.ERROR, logger="rein.build_loop"):
+        rc = loop._run_loop()
+    assert rc == common.EXIT_HUMAN_NEEDED
+    assert "rein baseline measure" in caplog.text
+
+
+def test_a_reading_that_could_not_be_taken_is_not_reported_as_nothing_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An empty routing means two different things: a reading that found nothing, and a reading
+    that never happened. Printing the first over the second put the reassurance two lines under
+    the failure that earned it."""
+    loop = _scoped_repo(tmp_path, rounds=2)
+    monkeypatch.setattr(loop, "_generate_review", lambda: False)
+
+    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    out = capsys.readouterr().out
+    assert "no reading was taken" in out
+    assert "nothing blocking" not in out
