@@ -72,6 +72,10 @@ VERBS: dict[str, Verb] = {
     "revise": Verb("revise", "roll back upstream (gates reset in a chain; --from-review derives the tasks)"),
     "review": Verb("review", "the grounded machine review (generate --supervise waits out a capacity stop)"),
     "build": Verb("build_loop", "the deterministic /build orchestrator (--supervise: retry in-process on exit 3)"),
+    "baseline": Verb(
+        "build_loop:baseline_main",
+        "measure which quality-gate steps are already red on the work branch (gate 3 freezes it)",
+    ),
     "doctor": Verb("doctor", "read-only diagnosis: format, integrations, sandbox, plan, review"),
     "cycle-close": Verb("cycle", "archive the finished delta cycle and reset"),
     "pr-draft": Verb("pr_draft", "assemble a PR body from the SSOT (read-only)"),

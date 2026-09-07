@@ -152,6 +152,37 @@ def _review_blockers(
     return blockers
 
 
+def _baseline_blockers(state: models.State, gate: str) -> list[str]:
+    """Gate ③ decides that this plan is implementable against this tree. It has to know the tree.
+
+    The measurement used to live inside `rein build`, taken just before the first batch — which is
+    after this approval. So a cycle could be approved and started on a work branch whose `check`
+    had been red for weeks, and the discovery was the first task's to make: three implementer
+    launches spent on a failure it had not caused, in a scope that did not contain it, and three
+    `task_failed` verdicts in a chain that never rotates.
+
+    A red baseline is not refused. It is required to be a *decision*: `rein baseline measure
+    --freeze` says a human looked at it and started anyway, and the loop then stops a task that
+    hits one of those steps rather than sending it back.
+    """
+    if gate != "tasks":
+        return []
+    baseline = state.baseline
+    if not baseline:
+        return [
+            "no baseline is recorded — gate 3 decides this plan is implementable against this tree, "
+            "and nothing has asked the tree. Run `rein baseline measure`."
+        ]
+    red = sorted(state.baseline_red())
+    if red and baseline.get("frozen") is not True:
+        return [
+            f"the work branch is already red on {', '.join(red)} and nobody has said so on the record. "
+            "Fix it, or `rein baseline measure --freeze` to approve it as known — a task that fails one "
+            "of these is then stopped rather than sent back to an implementer who cannot fix it."
+        ]
+    return []
+
+
 def _change_request_blockers(state: models.State, gate: str) -> list[str]:
     """Open change requests hold the gate shut. This is what makes declining mean something.
 
@@ -233,6 +264,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
             "cannot be issued against a damaged log (see `rein events --verify`)"
         )
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
+    blockers += _baseline_blockers(state, gate)
     blockers += _change_request_blockers(state, gate)
     blockers += _clarification_blockers(repo, gate)
     blockers += _plan_blockers(repo, plan, gate)

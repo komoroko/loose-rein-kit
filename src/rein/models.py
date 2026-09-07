@@ -383,6 +383,11 @@ EVENT_ORDER: tuple[str, ...] = (
     # it was produced by a different agent than the one gate ③ saw.
     "agents_switched",
     "decision_declared",
+    # The work branch's quality gate, measured before any task ran. Its own name because it is a
+    # fact about the *tree* rather than about a run: gate ③ freezes it, `rein build` reads it, and
+    # a task that fails a step the baseline already knew about is stopped rather than sent back to
+    # an implementer whose scope does not contain the break.
+    "baseline_measured",
     "coverage_generated",
     # No `actual_extraction_started`: the vocabulary carried one and nothing ever emitted it. A
     # closed vocabulary refuses unknown names precisely so the log stays aggregatable, which makes
@@ -901,6 +906,33 @@ class State:
         """This gate's change requests, filtered to `statuses` (all of them when none is given)."""
         wanted = frozenset(statuses) if statuses else CHANGE_REQUEST_STATUS_VALUES
         return [cr for cr in self.change_requests if cr.get("gate") == gate and cr.get("status") in wanted]
+
+    @property
+    def baseline(self) -> Mapping[str, Any]:
+        """What the work branch's quality gate said before any task ran, or {} when unmeasured.
+
+        Taken at gate ③ rather than inside `rein build`, because the question it answers — "is
+        this plan implementable against this tree?" — is the one the gate is deciding. Measured
+        after the approval, a step that had been red for weeks was discovered by the first task
+        to hit it, which then spent its whole send-back budget on a failure it had not caused and
+        could not have fixed inside its own scope.
+
+        `tree_digest` binds it to the tree it was measured on, so it lapses when that tree moves —
+        the same discipline as acceptance evidence and a dispute.
+        """
+        value = self.raw.get("baseline")
+        return value if isinstance(value, dict) else {}
+
+    def baseline_red(self) -> Mapping[str, str]:
+        """The already-red steps by name, with what each said. {} when green or unmeasured."""
+        rows = self.baseline.get("red_steps")
+        if not isinstance(rows, list):
+            return {}
+        return {
+            str(row.get("name", "")): str(row.get("failure", ""))
+            for row in rows
+            if isinstance(row, dict) and row.get("name")
+        }
 
     @property
     def disputed_findings(self) -> Mapping[str, Mapping[str, Any]]:

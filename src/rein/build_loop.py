@@ -61,6 +61,7 @@ import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -805,7 +806,8 @@ class Orchestrator:
         # that with `blocked` would file a defect in the plan as a defect in the code.
         self._stops: dict[str, str] = {}
         # DoD steps already red on the work branch before any task ran, and what they said. A task
-        # that fails one of these is not sent back to an implementer: `_establish_baseline`.
+        # that fails one of these is not sent back to an implementer: `_load_baseline` reads the
+        # record gate ③ froze.
         self._baseline_red: dict[str, str] = {}
         self._baseline_taken = False
 
@@ -2094,7 +2096,7 @@ class Orchestrator:
         is the *observation* instead, which is tool-agnostic and exact:
 
           **It was already red.** The step failed on the work branch before any task ran
-          (`_establish_baseline`). Sending an implementer back to fix a break it did not cause, in
+          (the baseline gate ③ froze). Sending an implementer back to fix a break it did not cause, in
           a scope that does not contain it, is three launches spent on a question nobody asked.
 
           **Nothing moved.** The same step failed with byte-identical output over a tree with the
@@ -2847,8 +2849,8 @@ class Orchestrator:
             promoted = True
         return promoted
 
-    def _establish_baseline(self) -> None:
-        """Which DoD steps are already red on the tree no task has touched yet.
+    def measure_baseline(self) -> dict[str, Any]:
+        """Run the task-stage DoD over the work branch's tip and return the record to freeze.
 
         The reported case: a run's tasks stopped, one after another, on a `check` that a
         dependency drift had broken weeks earlier. Each one spent its whole send-back budget —
@@ -2858,36 +2860,60 @@ class Orchestrator:
 
         The loop could not tell those apart from a real regression because it had never asked the
         one question that separates them: *was this step red before the task touched anything?*
-        Asked once here, against the work branch's tip, and answered by the same runner and the
-        same evidence ledger the gate itself uses — so on an unmoved tree it is a cache hit and
-        costs nothing.
 
-        Taken once, and only when a batch is actually about to run: a `rein build` that finds every
-        task done goes straight to gate ④, and paying a full gate run there answers nothing.
+        It is asked here, and **at gate ③ rather than inside the build**. Taken just before the
+        first batch, it was taken after the approval that had already decided this plan was
+        implementable against this tree — so a cycle could be approved and started on a tree that
+        had been red for weeks, and the discovery was the first task's to make and to pay for. The
+        gate is where a red step is either fixed or frozen as a deliberate, recorded decision.
+
+        Answered by the same runner and the same evidence ledger the gate itself uses, so on an
+        unmoved tree it is a cache hit and costs nothing.
 
         Recording, not refusing. A cycle whose first task is "fix the failing tests" is a
         legitimate thing to start, and the implementer runs *before* the gate: if it fixed the
-        step, the step goes green and none of this applies. What changes is only what happens when
-        it is still red — `_run_task_to_done` stops rather than buying the same failure three more
-        times.
+        step, the step goes green and none of this applies. What a frozen red changes is only what
+        happens when it is still red — the loop stops rather than buying the same failure three
+        more times.
+        """
+        red: list[dict[str, str]] = []
+        for step in self._steps_at("task"):
+            if step.kind != "command" or not step.command:
+                continue
+            failure = self._run_cmd_step(step, self.root)
+            if failure:
+                red.append({"name": step.name, "failure": failure[:4000]})
+        return {
+            "measured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "tree_digest": self._fingerprint(self.root),
+            "red_steps": red,
+        }
+
+    def _load_baseline(self) -> None:
+        """Read the baseline gate ③ froze. Refuse the run when there is none to read.
+
+        A pure read: the measurement belongs to the gate, and re-taking it here would measure
+        whatever tree this run happens to be resuming into — a tree with tasks already landed in
+        it, which is not a baseline at all.
         """
         if self.dry_run or self._baseline_taken:
             return
         self._baseline_taken = True
-        steps = [s for s in self._steps_at("task") if s.kind == "command" and s.command]
-        for step in steps:
-            try:
-                failure = self._run_cmd_step(step, self.root)
-            except EnvironmentFault:
-                # Not a fact about the code either way, and the run is about to hit it again for
-                # real. Leave it to the batch, which knows how to abort without marking anything.
-                return
-            if failure:
-                self._baseline_red[step.name] = failure
+        recorded = self.state.baseline if self.state else {}
+        if not recorded:
+            raise StopLoop(
+                "no baseline is recorded for this work branch, so a step that was already red "
+                "cannot be told apart from one this run broke. Measure it with "
+                "`rein baseline measure` — gate ③ is what it belongs to.",
+                code=common.EXIT_HUMAN_NEEDED,
+            )
+        self._baseline_red = dict(self.state.baseline_red() if self.state else {})
+        tree = self._fingerprint(self.root)
+        moved = tree and recorded.get("tree_digest") and tree != recorded["tree_digest"]
         if self._baseline_red:
             print(
-                f"    [baseline] already red on the work branch before any task ran: "
-                f"{', '.join(sorted(self._baseline_red))}"
+                f"    [baseline] frozen red at gate ③: {', '.join(sorted(self._baseline_red))}"
+                + (" (measured over a tree this branch has since moved past)" if moved else "")
             )
 
     def _run_loop(self) -> int:
@@ -2915,7 +2941,7 @@ class Orchestrator:
             # Here rather than at the top of the run: a `rein build` that finds every task done goes
             # straight to gate ④, and a full gate run at the root to answer a question no task is
             # going to ask is exactly the waste this exists to end.
-            self._establish_baseline()
+            self._load_baseline()
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
             try:
                 if mode == "serial" or not self.config.worktree_enabled:
@@ -3275,6 +3301,79 @@ def _supervise(config: Config, repo: repo_mod.Repo, interval_sec: int) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def baseline_main(argv: list[str] | None = None) -> int:
+    """`rein baseline measure` — what the work branch's quality gate says before any task runs.
+
+    Its own verb, and gate ③'s rather than the build's, because the question is about the *tree*:
+    is this plan implementable against what is here now? Taken inside `rein build` it was taken
+    after the approval that had already answered that, so a cycle could start on a tree that had
+    been red for weeks and the first task paid three implementer launches to find out.
+
+    Runs the DoD, so it takes the build lock and goes through the executor profiles like any other
+    step — this runs repository code, and it does not get a pass for being a measurement.
+    """
+    parser = argparse.ArgumentParser(description="measure the work branch's quality gate before any task runs")
+    sub = parser.add_subparsers(dest="action", required=True)
+    measure = sub.add_parser("measure", help="run the task-stage DoD over the work branch and record the result")
+    measure.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    measure.add_argument(
+        "--freeze",
+        action="store_true",
+        help="approve the red steps as known and expected — without it a red baseline holds gate 3 shut",
+    )
+    args = parser.parse_args(argv)
+    common.configure_logging()
+
+    try:
+        repo = repo_mod.get(args.repo)
+    except repo_mod.RepoNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+    try:
+        config = Config.load(repo)
+    except (OSError, ValueError, adapters.LaunchRefused, models.DocumentError, strict_yaml.StrictParseError) as exc:
+        logger.error(f"cannot load .rein/config.yaml: {exc} — `rein doctor` validates it")
+        return 1
+
+    orchestrator = Orchestrator(config, dry_run=False, repo=repo)
+    store = store_mod.Store(repo)
+    try:
+        with build_lock(repo):
+            record = orchestrator.measure_baseline()
+    except EnvironmentFault as fault:
+        logger.error(f"the baseline could not be measured: {fault}")
+        return 1
+    record["frozen"] = bool(args.freeze)
+
+    with store.transaction() as tx:
+        state = tx.store.read_state()
+        if state is None or not state.cycle_id:
+            logger.error("no .rein/state.yaml — run `rein init` first")
+            return 1
+        tx.write("state", {**state.raw, "baseline": record})
+        tx.append(
+            "baseline_measured",
+            cycle_id=state.cycle_id,
+            detail={"red_steps": [row["name"] for row in record["red_steps"]], "frozen": record["frozen"]},
+        )
+
+    red = record["red_steps"]
+    if not red:
+        print(f"baseline: the work branch is green on every task-stage step ({record['tree_digest'][:12]})")
+        return 0
+    names = ", ".join(row["name"] for row in red)
+    if record["frozen"]:
+        print(f"baseline: {names} already red, frozen as known. Gate 3 may be approved over this.")
+        return 0
+    print(
+        f"baseline: {names} already red on the work branch.\n"
+        "Gate 3 stays shut until this is a decision rather than a discovery: fix it, or re-run "
+        "with `--freeze` to approve it as known — a task that then fails one of these is stopped "
+        "instead of being sent back to an implementer whose scope does not contain the break."
+    )
+    return 0
 
 
 @contextlib.contextmanager

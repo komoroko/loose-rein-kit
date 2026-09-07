@@ -2171,42 +2171,53 @@ def test_recording_an_escalation_appends_exactly_one_event(tmp_path: Path) -> No
     }
 
 
-def test_a_baseline_is_not_established_in_a_dry_run(tmp_path: Path) -> None:
+def test_a_dry_run_reads_no_baseline(tmp_path: Path) -> None:
     """A dry run enters no sandbox and runs no command — its job is to print the control flow."""
     root = build_repo(tmp_path)
     repo = repo_mod.Repo(root)
     loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=True, repo=repo)
-    loop._establish_baseline()
+    loop._load_baseline()
     assert loop._baseline_red == {}
 
 
-def test_the_baseline_is_taken_once_per_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """One batch per layer, and the tree under it moves as tasks land — re-running the whole DoD at
-    the root before each batch would buy a number nothing reads."""
+def test_the_baseline_is_measured_once_for_the_gate_not_once_per_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The measurement belongs to gate ③, and `rein build` only reads what it froze.
+
+    Taken inside the build it was taken after the approval that had already decided this plan was
+    implementable against this tree — and on a resumed run it would have measured a tree with
+    tasks already landed in it, which is not a baseline at all.
+    """
     loop = orchestrator(tmp_path)
     ran: list[str] = []
 
     def record(step: build_loop.GateStep, cwd: str) -> str:
         ran.append(step.name)
-        return ""
+        return "make: *** [check] Error 1" if step.name == "check" else ""
 
     monkeypatch.setattr(loop, "_run_cmd_step", record)
-    loop._establish_baseline()
-    loop._establish_baseline()
+    measured = loop.measure_baseline()
     assert ran == ["test", "check"]
+    assert [row["name"] for row in measured["red_steps"]] == ["check"]
+
+    # Reading it back runs nothing at all.
+    ran.clear()
+    loop.state = models.State({**loop.state.raw, "baseline": measured})  # type: ignore[union-attr]
+    loop._load_baseline()
+    assert ran == []
+    assert set(loop._baseline_red) == {"check"}
 
 
-def test_a_baseline_that_cannot_run_marks_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No container runtime, no pinned image — the machine failed, so nothing was learned about any
-    step. The batch about to start hits the same fault and aborts the run without marking a task."""
+def test_a_build_with_no_recorded_baseline_stops_rather_than_guessing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without it, a step that was already red cannot be told apart from one this run broke — and
+    the loop would spend a task's whole send-back budget finding that out."""
     loop = orchestrator(tmp_path)
-
-    def unrunnable(step: build_loop.GateStep, cwd: str) -> str:
-        raise faults.EnvironmentFault(faults.Fault.ENV_PERMANENT, where="test", rc=127, output="could not run make")
-
-    monkeypatch.setattr(loop, "_run_cmd_step", unrunnable)
-    loop._establish_baseline()
-    assert loop._baseline_red == {}
+    loop.state = models.State({k: v for k, v in loop.state.raw.items() if k != "baseline"})  # type: ignore[union-attr]
+    with pytest.raises(build_loop.StopLoop, match="rein baseline measure"):
+        loop._load_baseline()
 
 
 # --- where a task's work lands ------------------------------------------------

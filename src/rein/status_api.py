@@ -127,12 +127,16 @@ def next_action(
     gate_ready: bool | None = None,
     open_change_requests: int = 0,
     attributed_findings: int = 0,
+    baseline: str = "",
 ) -> Recommendation:
     """The deterministic decision table (first match wins).
 
     `gate_ready` is tri-state, for the same reason `pending_queue`'s `gate_blockers` is: `None`
     means readiness was **not probed**, which is not the same as probed-and-blocked. Collapsing
     them would let "we did not look" decide a recommendation.
+
+    `baseline` is "" (fine), "missing", or "red" — what the work branch's quality gate said before
+    any task ran, which gate ③ has to know before it can decide this plan is implementable.
     """
     # 1. The audit chain is the substrate every receipt binds. Nothing else matters until it is intact.
     if chain_defects:
@@ -174,6 +178,27 @@ def next_action(
             kind="evidence",
             reason="tasks are waiting on acceptance evidence this loop cannot obtain; observe it and record it "
             "with `rein evidence record`.",
+        )
+    # 4c. Gate ③ decides this plan is implementable against this tree, and until the tree has been
+    # asked there is nothing to decide it against. Before the phase rows for the same reason
+    # sandboxing is: it is a precondition, and `/tasks` would not do it.
+    if baseline and current_phase == "tasks":
+        if baseline == "missing":
+            return Recommendation(
+                command="rein baseline measure",
+                kind="fix",
+                reason="Gate 3 decides this plan is implementable against this tree, and nothing has asked the "
+                "tree yet. Measured after the approval instead, a step that had been red for weeks was the "
+                "first task's to discover — and to spend its whole send-back budget on.",
+                also=("rein doctor",),
+            )
+        return Recommendation(
+            command="rein baseline measure --freeze",
+            kind="fix",
+            reason="The work branch is already red before any task has run, and nobody has said so on the "
+            "record. Fix it, or freeze it as known — a task that then fails one of those steps is stopped "
+            "rather than sent back to an implementer whose scope does not contain the break.",
+            also=("rein baseline measure",),
         )
     # 5. Sandboxing is a precondition for running anything, so it precedes the phase rows.
     if unsandboxed_profiles:
@@ -287,6 +312,21 @@ def next_action(
         kind="fix",
         reason=f"current_phase '{current_phase}' is not in the lifecycle vocabulary; diagnose the SSOT.",
     )
+
+
+def _baseline_state(state: models.State | None) -> str:
+    """ "" when the baseline is fine or unknowable, else "missing" or "red".
+
+    Read here rather than inside the table so the table stays a pure function of its arguments —
+    the property that lets the same state always yield the same recommendation.
+    """
+    if state is None:
+        return ""
+    if not state.baseline:
+        return "missing"
+    if state.baseline_red() and state.baseline.get("frozen") is not True:
+        return "red"
+    return ""
 
 
 def _handoffs(state: models.State | None) -> dict[str, dict[str, str]]:
@@ -760,6 +800,7 @@ def collect_status(
         gate_ready=None if gate_blockers is None else not gate_blockers,
         open_change_requests=len(state.change_requests_for(probe_gate, "open")) if state and probe_gate else 0,
         attributed_findings=len(findings.seeds(findings.attribute(plan, review))) if plan else 0,
+        baseline=_baseline_state(state),
     )
     # A /-command only exists inside an agent whose surface was installed; recommending one in a
     # repo with no integration would send the user to a command their agent has never heard of.

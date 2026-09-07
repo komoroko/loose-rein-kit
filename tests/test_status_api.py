@@ -718,3 +718,38 @@ def test_the_status_carries_a_generation_in_flight(tmp_path: Path) -> None:
     assert isinstance(live, dict)
     assert live["outcome"] == "running" and live["total"] == 5 and live["done"] == 0
     assert live["stale"] is False, "a file written a moment ago is not stale"
+
+
+# --- the tree gate 3 approves over --------------------------------------------
+
+
+def _tasks_phase(**over: object) -> dict[str, object]:
+    return {
+        "current_phase": "tasks",
+        "gates": {"requirements": "approved", "design": "approved", "tasks": "pending"},
+        "counts": {"todo": 1},
+        "attention_count": 0,
+        "chain_defects": 0,
+        "uninitialized": False,
+        "gate_chain_broken": False,
+        "plan_missing": False,
+        "unsandboxed_profiles": [],
+        **over,
+    }
+
+
+def test_an_unmeasured_baseline_is_named_rather_than_left_to_the_first_task() -> None:
+    """Gate 3 decides this plan is implementable against this tree. `/tasks` does not ask the tree,
+    so recommending it would send the human round a loop that cannot answer the blocker."""
+    rec = status_api.next_action(**_tasks_phase(baseline="missing"))  # type: ignore[arg-type]
+    assert rec.command == "rein baseline measure"
+
+
+def test_a_red_baseline_asks_for_a_decision_not_a_re_measurement() -> None:
+    """Recording it is not the point; a human saying "yes, start anyway" is."""
+    rec = status_api.next_action(**_tasks_phase(baseline="red"))  # type: ignore[arg-type]
+    assert rec.command == "rein baseline measure --freeze"
+
+
+def test_a_measured_baseline_does_not_stand_in_the_way() -> None:
+    assert status_api.next_action(**_tasks_phase(baseline="")).command == "/tasks"  # type: ignore[arg-type]

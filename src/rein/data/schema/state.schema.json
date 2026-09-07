@@ -610,6 +610,57 @@
           }
         }
       }
+    },
+    "baseline": {
+      "description": "Which quality-gate steps were already red on the work branch before any task ran, measured over the tree gate 3 was approved for. It used to be taken inside `rein build`, just before the first batch — after the approval that decided the plan was implementable — so a cycle could be approved and started against a tree that had been red for weeks, and the first task to hit the step spent its whole send-back budget on a failure it had not caused. Measured at the gate instead, a red step is something a human freezes deliberately or fixes first. `tree_digest` binds it: a baseline is a statement about one tree, and it lapses when that tree moves.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "measured_at",
+        "tree_digest",
+        "red_steps"
+      ],
+      "properties": {
+        "measured_at": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "tree_digest": {
+          "description": "The content fingerprint of the work branch the measurement was taken on.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "red_steps": {
+          "description": "The steps that failed, and what they said. Empty means the work branch was green — which is the fact the gate wants recorded, not an absence of one.",
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "failure"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "failure": {
+                "description": "A compact excerpt of what the step said, so a task blocked on it can be told what the baseline already knew.",
+                "type": "string",
+                "maxLength": 4000
+              }
+            }
+          }
+        },
+        "frozen": {
+          "description": "Whether a human approved gate 3 knowing these steps were red. Absent or false with a non-empty `red_steps` holds gate 3 shut: a known-red baseline is a decision, not a discovery.",
+          "type": "boolean"
+        }
+      }
     }
   },
   "$defs": {
