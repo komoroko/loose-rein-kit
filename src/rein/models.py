@@ -388,6 +388,10 @@ EVENT_ORDER: tuple[str, ...] = (
     # a task that fails a step the baseline already knew about is stopped rather than sent back to
     # an implementer whose scope does not contain the break.
     "baseline_measured",
+    # The dependency audit ran. Its own name because it is gate ⑤'s one security answer that
+    # is not a function of the tree — it expires without anything in the repository moving, so
+    # "when it last ran" is a question the log has to be able to answer.
+    "dependency_audit_run",
     "coverage_generated",
     # No `actual_extraction_started`: the vocabulary carried one and nothing ever emitted it. A
     # closed vocabulary refuses unknown names precisely so the log stays aggregatable, which makes

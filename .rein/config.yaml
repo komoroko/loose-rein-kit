@@ -165,6 +165,29 @@ quality_gate:
     retries: 1
     required: false
 
+security:
+  # THE ONE SECURITY ANSWER GATE 5 CANNOT CARRY FROM GATE 4.
+  #
+  # Everything else it needs it already has: the structured review is bound to the reviewed HEAD
+  # and its blocking findings hold this gate shut too. A dependency audit is different in kind —
+  # the same commit audited last month and today can differ, because the database moved while the
+  # code did not. So it is the one thing that must actually be RUN at gate 5, and the one piece of
+  # evidence here that expires without anything in the repository changing.
+  #
+  # `rein audit run` runs this and records what it said, bound to a digest over this tree's
+  # manifests and lockfiles — so editing source does not retire the answer, and changing a
+  # dependency does. Gate 5 refuses a release with no audit, a stale one, or a failing one.
+  #
+  # Replace the command with your ecosystem's: pip-audit, `npm audit --audit-level=high`,
+  # `cargo audit`, `make audit`. A project that declares none is told at gate 5 that it has no
+  # dependency answer at all, which is not the same as having a clean one.
+  dependency_audit:
+    command: [uv, run, pip-audit, --strict]
+    executor_profile: quality
+    # How long the recorded answer speaks for. Nothing in the repository has to change for it to
+    # stop being true.
+    max_age_days: 7
+
 review_policy:
   # How gate 4 takes its reading. `auto` composes it from the plan's task scopes — one reading
   # per scoped task, plus the seam over what two scopes share or none covers — so one launch
@@ -186,6 +209,13 @@ review_policy:
   # reading — under `composition: auto` that is one task's slice, never the cycle. A change too
   # big for one reading is a task whose scope is too broad, which is a thing to fix at gate 3
   # while splitting is still a move that exists.
+  # How many times gate 4 may repair its own blocking findings and read the change again before
+  # it stops and asks. A finding is repaired only when a task's declared scope owns the code it
+  # anchored to and the fix changes no claim, criterion or requirement — and the NEXT reading is
+  # what decides whether it closed, never the fixer's account of it. Bounded because the failure
+  # this must survive is a false positive: repairing something that was never true converges on
+  # nothing. 0 turns it off, and `rein build` then takes no reading at all.
+  repair_rounds: 2
   budgets:
     max_critical_decisions: 5
     max_human_statements: 30

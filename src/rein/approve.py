@@ -30,8 +30,10 @@ import logging
 import re
 import sys
 from collections.abc import Mapping
+from datetime import datetime, timezone
 
 from rein import (
+    audit,
     change_request,
     common,
     dag,
@@ -152,6 +154,37 @@ def _review_blockers(
     return blockers
 
 
+def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Config | None, gate: str) -> list[str]:
+    """Gate ⑤'s one security answer that is not carried from gate ④'s review.
+
+    Everything else it needs about security the review already holds, bound to the reviewed HEAD.
+    A dependency audit is different in kind: the same commit audited last month and today can
+    differ, because the database moved while the code did not. `verify.md` has said so since it
+    existed and nothing ran it — the instruction lived in a prompt, no document held the answer,
+    and no readiness check asked for one, so a release could be signed with the audit having been
+    "done" in a chat window.
+
+    A project that declares no audit command is told so rather than waved through: "we have no way
+    to ask" is not "there is nothing wrong".
+    """
+    if gate != "release":
+        return []
+    if not audit.configured(config):
+        return [
+            "no `security.dependency_audit.command` is configured, so this release has no "
+            "dependency answer at all. It is the one security question a review cannot answer once "
+            "— add the command (pip-audit, npm audit, cargo audit, `make audit`) and run "
+            "`rein audit run`."
+        ]
+    reason = audit.staleness(
+        state.raw.get("dependency_audit"),
+        dependencies=audit.dependency_digest(repo),
+        now=datetime.now(timezone.utc),
+        max_age=audit.max_age_days(config),
+    )
+    return [reason] if reason else []
+
+
 def _baseline_blockers(state: models.State, gate: str) -> list[str]:
     """Gate ③ decides that this plan is implementable against this tree. It has to know the tree.
 
@@ -265,6 +298,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
         )
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
     blockers += _baseline_blockers(state, gate)
+    blockers += _audit_blockers(repo, state, store.read_config(), gate)
     blockers += _change_request_blockers(state, gate)
     blockers += _clarification_blockers(repo, gate)
     blockers += _plan_blockers(repo, plan, gate)

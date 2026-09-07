@@ -661,6 +661,38 @@
           "type": "boolean"
         }
       }
+    },
+    "dependency_audit": {
+      "description": "The last dependency audit: when it ran, against which commit, and what it said. Gate 5's one security answer that is not carried from gate 4's review, because it is the one that is not a function of the tree — so it records a date as well as a commit, and expires.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ran_at",
+        "passed",
+        "dependencies"
+      ],
+      "properties": {
+        "ran_at": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "commit": {
+          "description": "The commit it ran over, for a reader who wants to look. Not what it is bound to.",
+          "$ref": "#/$defs/commit"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "summary": {
+          "description": "What the audit said, as the human reads it beside the release decision.",
+          "type": "string",
+          "maxLength": 4000
+        },
+        "dependencies": {
+          "description": "A digest over this tree's dependency manifests and lockfiles. What the audit is about, and so what retires it — binding to the commit would retire the answer on every source edit, which is a re-run bought for nothing.",
+          "$ref": "#/$defs/digest"
+        }
+      }
     }
   },
   "$defs": {

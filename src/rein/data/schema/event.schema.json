@@ -57,6 +57,7 @@
         "agents_switched",
         "decision_declared",
         "baseline_measured",
+        "dependency_audit_run",
         "coverage_generated",
         "actual_extraction_generated",
         "actual_extraction_failed",
