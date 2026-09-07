@@ -623,7 +623,7 @@ def test_a_blocking_finding_the_plan_owns_sends_the_build_back_rather_than_a_rol
         gate_chain_broken=False,
         plan_missing=False,
         unsandboxed_profiles=[],
-        attributed_findings=2,
+        repairable_findings=2,
     )
 
     assert rec.command == "rein build"
@@ -648,7 +648,7 @@ def test_no_finding_leaves_the_build_recommendation_alone() -> None:
         gate_chain_broken=False,
         plan_missing=False,
         unsandboxed_profiles=[],
-        attributed_findings=0,
+        repairable_findings=0,
     )
 
     assert "--from-review" not in rec.command
@@ -815,3 +815,40 @@ def test_a_blocked_task_is_recommended_before_the_phase_command() -> None:
 
 def test_nothing_blocked_recommends_nothing() -> None:
     assert status_api.blocked_recovery(models.State(make_state())) is None
+
+
+def _build_phase(**extra: object) -> status_api.Recommendation:
+    return status_api.next_action(
+        current_phase="build",
+        gates={
+            "requirements": "approved",
+            "design": "approved",
+            "tasks": "approved",
+            "build": "pending",
+            "release": "pending",
+        },
+        counts={"todo": 0, "in-progress": 0, "done": 2, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
+        attention_count=0,
+        chain_defects=0,
+        uninitialized=False,
+        gate_chain_broken=False,
+        plan_missing=False,
+        unsandboxed_profiles=[],
+        **extra,  # type: ignore[arg-type]
+    )
+
+
+def test_a_finding_the_loop_may_not_decide_is_not_another_build() -> None:
+    """Counted as one number, a `diverged` claim went to `rein build` — which read the change, said
+    "what is left is a decision", and returned; `rein next` then recommended the same build again.
+    The two halves of `repair.route` are two different next moves."""
+    rec = _build_phase(repairable_findings=0, decidable_findings=2)
+
+    assert rec.command == "rein ui"
+    assert "Decision Cards" in rec.reason
+
+
+def test_a_finding_the_loop_owns_is_still_the_build_s() -> None:
+    rec = _build_phase(repairable_findings=1, decidable_findings=3)
+
+    assert rec.command == "rein build", "a repairable finding outranks a decidable one: it costs nobody anything"

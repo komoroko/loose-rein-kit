@@ -42,8 +42,8 @@ from rein import (
     dag_trace,
     event_chain,
     faults,
-    findings,
     models,
+    repair,
     run_progress,
     strict_yaml,
 )
@@ -139,7 +139,8 @@ def next_action(
     unsandboxed_build_targets: list[str] | None = None,
     gate_ready: bool | None = None,
     open_change_requests: int = 0,
-    attributed_findings: int = 0,
+    repairable_findings: int = 0,
+    decidable_findings: int = 0,
     baseline: str = "",
     blocked: Recommendation | None = None,
 ) -> Recommendation:
@@ -148,6 +149,12 @@ def next_action(
     `gate_ready` is tri-state, for the same reason `pending_queue`'s `gate_blockers` is: `None`
     means readiness was **not probed**, which is not the same as probed-and-blocked. Collapsing
     them would let "we did not look" decide a recommendation.
+
+    `repairable_findings` and `decidable_findings` are the two halves of `repair.route`, and they
+    are two rows because they are two different next moves. Counting them as one number sent a
+    `diverged` claim — which the loop is not allowed to decide — to `rein build`, which read the
+    change, said "what is left is a decision", and returned; `rein next` then recommended the same
+    build again. One recommendation has to be able to say "answer the cards".
 
     `baseline` is "" (fine), "missing", or "red" — what the work branch's quality gate said before
     any task ran, which gate ③ has to know before it can decide this plan is implementable.
@@ -298,14 +305,27 @@ def next_action(
             # task's declared scope owns the code they anchored to, and the repair changes no
             # claim and no plan. `rein build` reads the review, repairs them and reads again;
             # this row exists because that is not what "phase in progress" would suggest.
-            if current_phase == "build" and attributed_findings:
+            if current_phase == "build" and repairable_findings:
                 return Recommendation(
                     command="rein build",
                     kind="fix",
-                    reason=f"The machine review has {attributed_findings} blocking finding(s) whose task the "
-                    "plan already names. The build repairs those itself and reads the change again — no gate "
-                    "moves, and what it cannot decide reaches you as a Decision Card.",
+                    reason=f"The machine review has {repairable_findings} blocking finding(s) a task's declared "
+                    "scope owns. The build repairs those itself and reads the change again — no gate moves, "
+                    "and what it cannot decide reaches you as a Decision Card.",
                     also=("rein ui", "rein pr-stack --restack"),
+                )
+            # 8c. And what is left when the loop can repair nothing: a `diverged` claim, an extra
+            # behaviour nobody asked for, a finding no declared scope owns. Recommending the build
+            # for these was recommending a reading that would change nothing and end by saying so —
+            # a loop with no exit until the reader noticed the cards on their own.
+            if current_phase == "build" and decidable_findings:
+                return Recommendation(
+                    command="rein ui",
+                    kind="fix",
+                    reason=f"The machine review has {decidable_findings} blocking finding(s) the loop may not "
+                    "decide: whether the code or the plan is the mistaken half. Answer the Decision Cards — "
+                    "`revise_implementation` hands the subject back to `rein build` as a code repair.",
+                    also=("rein review generate", f"rein approve {gate} --check"),
                 )
             also: tuple[str, ...] = (f"rein approve {gate} --check",)
             if current_phase == "build":
@@ -899,6 +919,10 @@ def collect_status(
     # queue's rows and `rein events --summary` all read this, so they cannot disagree.
     attention = events_mod.open_conditions(events, task_status)
 
+    # Gate ④'s blocking findings, split by who can act on each. Empty when there is no plan or no
+    # generated review, which `repair.route` answers for itself.
+    routing = repair.route(plan, review) if plan is not None else repair.Routing()
+
     template_mode = config.template_mode if config else False
     uninitialized = is_uninitialized(config, state)
     unsandboxed_profiles = config.unsandboxed_code_profiles() if config else []
@@ -929,7 +953,10 @@ def collect_status(
         # None when readiness was not probed — the table must not read that as "blocked".
         gate_ready=None if gate_blockers is None else not gate_blockers,
         open_change_requests=len(state.change_requests_for(probe_gate, "open")) if state and probe_gate else 0,
-        attributed_findings=len(findings.seeds(findings.attribute(plan, review))) if plan else 0,
+        # Split by `repair.route`, the same function `rein build` routes them with, so the board
+        # and the loop cannot disagree about which findings anybody has to act on by hand.
+        repairable_findings=sum(len(item.items) for item in routing.code),
+        decidable_findings=len(routing.judgement) + len(routing.unowned),
         baseline=_baseline_state(state),
         blocked=blocked_recovery(state),
     )
