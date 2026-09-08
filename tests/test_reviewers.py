@@ -360,6 +360,28 @@ def test_security_review_refuses_to_downgrade_a_prior_blocking_finding() -> None
         )
 
 
+def test_a_carried_finding_restated_below_the_floor_is_not_a_dropped_one() -> None:
+    """The drop check asked whether a carried id was still *blocking*, and what it means to ask is
+    whether it is still *said*.
+
+    A `review.yaml` written before the flag was derived can carry a `medium` a reviewer called
+    blocking. Re-stating it at the same severity is the honest answer — no downgrade, no drop —
+    but it prices below the floor now, so it never joined the set the check tested and came back
+    as dropped, with a refusal telling the reviewer to re-state a finding it had just re-stated.
+    Re-pricing is `reject_risk_downgrade`'s question, and it is asked two lines above.
+    """
+    payload = {"findings": [{"id": "SEC-001", "severity": "medium", "attack_scenario": "x"}]}
+    result = security_review.run_security_review(
+        {"prior_blocking": [_prior("SEC-001", severity="medium")]},
+        fake(payload),
+        repo=repo_mod.Repo(Path("/x")),
+        commit="HEAD",
+    )
+    assert [f["id"] for f in result.findings] == ["SEC-001"]
+    assert result.findings[0]["blocking"] is False
+    assert result.resolved == ()
+
+
 def test_a_reviewer_does_not_price_its_own_finding() -> None:
     """`blocking` is not a contract field. Whatever a reviewer sends under that name is replaced by
     what `review_policy.blocks` makes of the severity it stated."""

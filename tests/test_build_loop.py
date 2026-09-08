@@ -16,7 +16,7 @@ import json
 import logging
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -501,10 +501,20 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     further still. Each leaf's commit is read at its own merge."""
     loop = orchestrator(tmp_path)
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
-    heads = iter(["a" * 40, "b" * 40, "c" * 40, "d" * 40])
     recorded: dict[str, str] = {}
+    tip = _tip(loop, monkeypatch, "a" * 40, "b" * 40, "c" * 40)
 
     monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": recorded.update({tid: commit}))
+    _merging_batch(loop, monkeypatch)
+    monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: tip())
+
+    loop._consume_parallel(tasks)
+
+    assert recorded == {"T-001": "a" * 40, "T-002": "b" * 40, "T-003": "c" * 40}
+
+
+def _merging_batch(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every leaf implements, commits and merges cleanly, and the integration gate is green."""
     monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
@@ -512,11 +522,121 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (True, ""))
-    monkeypatch.setattr(loop.ws, "landed", lambda task_id: next(heads))
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+
+
+def _tip(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch, *commits: str) -> Callable[[], bool]:
+    """The work branch's tip, which `_landed` reads. The returned call advances it and answers True,
+    so a merge or a repair stub can be written as the thing that moved the branch."""
+    moves = iter(commits)
+    now = [""]
+    monkeypatch.setattr(loop.ws, "landed", lambda task_id: now[0])
+
+    def advance() -> bool:
+        now[0] = next(moves)
+        return True
+
+    return advance
+
+
+def test_a_repaired_leaf_that_is_not_the_tip_keeps_its_own_merge_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repair lands on top of the branch, and in a batch of two the first leaf's work is not what
+    sits under that tip — the second leaf's merge is.
+
+    `pr_stack.derive` cuts slices by walking first-parent order, so moving T-001's
+    `completed_commit` above T-002's merge makes T-002's pull request the one holding T-001's
+    commits. Nothing catches it: parallel leaves have no `blockedBy` between them, so
+    `_landing_order_problems` sees a topological order that is perfectly fine. The repair rides
+    above the recorded merge instead, on the slice branch it was committed to.
+    """
+    loop = orchestrator(tmp_path)
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
+    done: dict[str, list[str]] = {}
+    tip = _tip(loop, monkeypatch, "a" * 40, "b" * 40, "c" * 40)
+
+    def record(task_id: str, status: str, commit: str = "") -> None:
+        if status == "done":
+            done.setdefault(task_id, []).append(commit)
+
+    _merging_batch(loop, monkeypatch)
+    monkeypatch.setattr(loop, "_set_status", record)
+    monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: tip())
+    # T-001 repairs; the fix is the branch tip afterwards, above T-002's merge.
+    monkeypatch.setattr(loop, "_repair_warm_findings", lambda task, readout: task.id == "T-001" and tip())
 
     loop._consume_parallel(tasks)
 
-    assert recorded == {"T-001": "a" * 40, "T-002": "b" * 40, "T-003": "c" * 40}
+    assert done == {"T-001": ["a" * 40, "a" * 40], "T-002": ["b" * 40]}
+
+
+def test_a_repaired_leaf_that_is_still_the_tip_records_the_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: with the repaired leaf's own merge still under it, the repair commit is
+    directly on top of that leaf's work and closing the task there keeps the slices in merge order.
+    """
+    loop = orchestrator(tmp_path)
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    done: dict[str, list[str]] = {}
+    tip = _tip(loop, monkeypatch, "a" * 40, "c" * 40)
+
+    def record(task_id: str, status: str, commit: str = "") -> None:
+        if status == "done":
+            done.setdefault(task_id, []).append(commit)
+
+    _merging_batch(loop, monkeypatch)
+    monkeypatch.setattr(loop, "_set_status", record)
+    monkeypatch.setattr(loop, "merge_leaf", lambda t, branch: tip())
+    monkeypatch.setattr(loop, "_repair_warm_findings", lambda t, readout: tip())
+
+    loop._consume_parallel([task])
+
+    assert done == {"T-001": ["a" * 40, "c" * 40]}
+
+
+def test_a_repair_re_points_the_task_evidence_at_the_tree_it_produced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`done` means the DoD went green against the tree the task actually produced, and the
+    fingerprint recorded beside the status is what says which tree that was. The caller re-records
+    `completed_commit` right after a repair, so a fingerprint left at its pre-repair value would be
+    a record that contradicts itself — the commit half current, the tree half naming a tree that is
+    no longer on the branch. A step the repair did not re-run keeps the account it had.
+    """
+    loop = orchestrator(tmp_path)
+    loop._evidence["T-001"] = {
+        "steps": [{"name": "test", "reused": False}, {"name": "review", "reused": False}],
+        "tree": "before",
+    }
+    monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "after")
+
+    loop._restate_evidence("T-001", [{"name": "test", "reused": True}])
+
+    assert loop._evidence["T-001"]["tree"] == "after"
+    assert loop._evidence["T-001"]["steps"] == [
+        {"name": "test", "reused": True},
+        {"name": "review", "reused": False},
+    ]
+
+
+def test_the_gate_after_a_repair_reports_what_it_re_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Those runs were made and then dropped: `_record_task_evidence` is never called again, so
+    the record kept citing the runs from before the repair."""
+    loop = orchestrator(tmp_path)
+    step = build_loop.GateStep(name="test", kind="command", command=("true",))
+    monkeypatch.setattr(loop, "_steps_at", lambda stage: [step])
+
+    def run(gate_step: build_loop.GateStep, cwd: str) -> str:
+        loop._current_step_evidence.append({"name": gate_step.name, "image": "host:local", "reused": False})
+        return ""
+
+    monkeypatch.setattr(loop, "_run_cmd_step", run)
+
+    ran = loop._gate_after_repair(dag.Task(id="T-001", title="leaf", kind="parallel"))
+
+    assert ran == [{"name": "test", "image": "host:local", "reused": False}]
 
 
 def test_a_leaf_gate_violation_blocks_without_merging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -416,7 +416,14 @@ def run_security_review(
     }
     problems: list[str] = []
     findings: list[dict[str, Any]] = []
-    still_blocking: set[str] = set()
+    # Every id this generation states, blocking or not. What the drop check below asks is whether
+    # the reviewer still *says* the finding — and a finding the policy now prices below the floor
+    # was still said. Keying that set on `blocks()` conflated the two, so a finding carried out of
+    # a document written before the flag was derived (where a reviewer could call a `medium`
+    # blocking) came back as dropped the moment it was honestly re-stated at the same severity,
+    # with a refusal telling the reviewer to do the thing it had just done and no way out but a
+    # human dispute. Re-pricing is the other check's job, and `reject_risk_downgrade` is it.
+    restated: set[str] = set()
     for index, finding in enumerate(raw):
         if not isinstance(finding, Mapping):
             problems.append(f"findings[{index}] is not a mapping")
@@ -432,15 +439,14 @@ def run_security_review(
         carried_severity = str((prior_by_id.get(fid) or {}).get("severity", ""))
         if severity in SEVERITY_VALUES and carried_severity in SEVERITY_VALUES:
             problems += review_policy.reject_risk_downgrade(severity, carried_severity, subject=fid)
+        restated.add(fid)
         blocking = review_policy.blocks(severity)
-        if blocking:
-            still_blocking.add(fid)
         seen = _first_seen(prior_by_id.get(fid), this_change)
         findings.append({**dict(finding), "blocking": blocking, "status": "open", "first_seen": seen})
     unresolved: list[str] = []
     closed: list[dict[str, Any]] = []
     for fid, prior in prior_by_id.items():
-        if fid in still_blocking:
+        if fid in restated:
             continue
         resolved = resolution_of(prior, repo=repo, commit=commit)
         if resolved is None:

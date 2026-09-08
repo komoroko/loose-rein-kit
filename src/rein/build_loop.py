@@ -1980,9 +1980,10 @@ class Orchestrator:
         is for. Whether the finding closed is not this launch's account of itself either: the
         re-warm below reads the slice again from cold, and gate ④ reads it once more after that.
 
-        True when it repaired, which is the caller's cue to re-record `completed_commit`: the
-        repair put another commit on the branch and the task's recorded commit has to name the
-        tree that ends up there.
+        True when it repaired, which is the caller's cue to write the status again: the evidence
+        beside it has been re-pointed at the repaired tree, and the recorded commit follows the
+        repair wherever the repair could land on top of this task's own work — which in a batch of
+        leaves is only the one that merged last (`_consume_parallel` says why).
         """
         if readout is None or self.dry_run or self._plan is None:
             return False
@@ -3239,9 +3240,24 @@ class Orchestrator:
             # the run. Interleaved with the pass above, that would leave the leaves after it
             # unrecorded, and they passed their gate and merged exactly like the rest.
             for task in merged:
+                # Asked before the repair moves the branch: is this leaf's own merge still the tip?
+                at_tip = bool(landed.get(task.id)) and landed[task.id] == self._landed(task.id)
                 if self._repair_warm_findings(task, self._warm_reading(task)):
-                    # The repair *is* the tip now, and it is this task's.
-                    self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
+                    # A repair lands on top of the branch, and only the leaf that merged last has
+                    # its own work directly under that tip. Moving an earlier leaf's
+                    # `completed_commit` up there would put it above a *later* leaf's merge, and
+                    # `pr_stack.derive` cuts slices by walking first-parent order — so that later
+                    # leaf's pull request would swallow this one's commits, and nothing would say
+                    # so: parallel leaves have no `blockedBy` between them, so
+                    # `_landing_order_problems` sees a topological order that is still fine. The
+                    # merge commit stays recorded; the repair rides above it, on the slice branch
+                    # it was committed to. The write still happens either way — the evidence
+                    # beside the status was just re-pointed at the repaired tree.
+                    self._set_status(
+                        task.id,
+                        self._completion_status(task),
+                        commit=self._landed(task.id) if at_tip else landed.get(task.id, ""),
+                    )
         else:
             for task in merged:
                 self._set_status(task.id, "blocked")
@@ -3449,7 +3465,7 @@ class Orchestrator:
             self._repair_on_slice(task, item, slice_branch)
         else:
             self._repair_on_work_branch(task, item)
-        self._gate_after_repair(task)
+        self._restate_evidence(task.id, self._gate_after_repair(task))
 
     def _slice_branch(self, task_id: str) -> str:
         """The stack branch that introduced this task's code, or "" when this is not a stack.
@@ -3568,13 +3584,18 @@ class Orchestrator:
             )
         print(f"    [gate 4] {task.id}: {len(result.merged)} branch(es) advanced to carry the repair up the stack")
 
-    def _gate_after_repair(self, task: dag.Task) -> None:
+    def _gate_after_repair(self, task: dag.Task) -> list[dict[str, Any]]:
         """The task-stage DoD over the work branch, which is where the repair has now landed.
 
         A step the baseline froze red at gate ③ is not this repair's to answer: it was red before
         any task ran, a human approved the plan over it on the record, and stopping the run here
         would re-stage the discovery that the frozen baseline exists to prevent.
+
+        Returns the evidence these re-runs produced. They were run and then dropped: the task's
+        record still named the runs from before the repair, so `done` cited a green nobody had
+        established over the tree that ended up on the branch.
         """
+        established = len(self._current_step_evidence)
         for step in self._steps_at("task"):
             if step.kind != "command" or not step.command:
                 continue
@@ -3586,6 +3607,35 @@ class Orchestrator:
                     f"{task.id}: the gate-4 repair left '{step.name}' red:\n{failure}",
                     code=common.EXIT_HUMAN_NEEDED,
                 )
+        return [dict(entry) for entry in self._current_step_evidence[established:]]
+
+    def _restate_evidence(self, task_id: str, steps: Sequence[Mapping[str, Any]]) -> None:
+        """Re-point a repaired task's evidence at the tree the repair produced.
+
+        `done` means the DoD went green against the tree the task actually produced, and the
+        fingerprint recorded beside the status is what says which tree that was. A repair moves
+        the tree, so the digest taken before it names one that is no longer on the branch — and
+        the caller re-records `completed_commit` immediately after, which would leave the commit
+        half current beside a stale fingerprint. Stale together was at least self-consistent;
+        half-refreshed is a record that contradicts itself.
+
+        Steps replace the ones of the same name — the rule `_record_task_evidence` already
+        deduplicates by — so what the repair re-ran is the run that holds, and a step it did not
+        re-run keeps the account it had.
+        """
+        if self.dry_run:
+            return
+        fingerprint = self._fingerprint(self.root)
+        with self._evidence_lock:
+            record = self._evidence.get(task_id)
+            if record is None:
+                return
+            by_name = {str(entry["name"]): entry for entry in record.get("steps", [])}
+            for entry in steps:
+                by_name[str(entry["name"])] = dict(entry)
+            record["steps"] = list(by_name.values())
+            if fingerprint:
+                record["tree"] = fingerprint
 
     def _present_gate4(self, routing: repair_mod.Routing, rounds: int, repaired: int = 0, *, read: bool = True) -> int:
         """What is left after the repair rounds, and what a human has to do about it.
