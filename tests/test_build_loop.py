@@ -621,6 +621,96 @@ def test_a_repair_re_points_the_task_evidence_at_the_tree_it_produced(
     ]
 
 
+def test_a_serial_task_records_the_repair_that_landed_on_top_of_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The serial half of the task-boundary repair, which nothing exercised: the unit tests
+    monkeypatch `_repair` and `_warm_reading` both, so the wiring that follows a repair with a
+    second status write was only ever read. On the work branch the repair *is* the tip and there
+    is no later leaf under it, so the new commit is the one recorded.
+    """
+    loop = orchestrator(tmp_path)
+    done: list[str] = []
+    tip = _tip(loop, monkeypatch, "a" * 40, "c" * 40)
+
+    monkeypatch.setattr(loop.ws, "head", lambda cwd="": "0" * 40)
+    monkeypatch.setattr(loop, "_run_task_to_done", lambda task, cwd, base: (True, ""))
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: tip())
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+    monkeypatch.setattr(loop, "_repair_warm_findings", lambda task, readout: tip())
+    monkeypatch.setattr(
+        loop, "_set_status", lambda tid, status, commit="": done.append(commit) if status == "done" else None
+    )
+
+    loop._consume_serial([dag.Task(id="T-001", title="foundation", kind="foundation")])
+
+    assert done == ["a" * 40, "c" * 40]
+
+
+def test_a_serial_task_with_nothing_to_repair_is_recorded_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other side of it: no repair, no second write, and no reading is treated as a clean one."""
+    loop = orchestrator(tmp_path)
+    done: list[str] = []
+    tip = _tip(loop, monkeypatch, "a" * 40)
+
+    monkeypatch.setattr(loop.ws, "head", lambda cwd="": "0" * 40)
+    monkeypatch.setattr(loop, "_run_task_to_done", lambda task, cwd, base: (True, ""))
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: tip())
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+    monkeypatch.setattr(
+        loop, "_set_status", lambda tid, status, commit="": done.append(commit) if status == "done" else None
+    )
+
+    loop._consume_serial([dag.Task(id="T-001", title="foundation", kind="foundation")])
+
+    assert done == ["a" * 40]
+
+
+def test_a_repair_is_labelled_by_what_asked_for_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Every line of the repair path said `[gate 4]`, including the ones a repair at a task
+    boundary printed several tasks before the gate was reached. A log that names the wrong phase
+    has to be read against the code to be believed."""
+    loop = orchestrator(tmp_path)
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    item = repair.Repair("T-001", (findings_mod.Attribution("SEC-001", "security", "T-001", "alpha/mod.py"),))
+    monkeypatch.setattr(loop, "_slice_branch", lambda task_id, where="gate 4": "")
+    monkeypatch.setattr(loop, "_repair_on_work_branch", lambda t, i, where="gate 4": None)
+    monkeypatch.setattr(loop, "_gate_after_repair", lambda t, where="gate 4": [])
+    monkeypatch.setattr(loop, "_restate_evidence", lambda task_id, steps: None)
+
+    loop._repair(task, item, where="review")
+    assert "[review] T-001: 1 finding(s)" in capsys.readouterr().out
+    loop._repair(task, item)
+    assert "[gate 4] T-001: 1 finding(s)" in capsys.readouterr().out
+
+
+def test_a_task_boundary_repair_commits_as_what_it_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The commit subject named the gate too, so a repair made at a task boundary landed on the
+    branch calling itself a gate-4 repair."""
+    loop = orchestrator(tmp_path)
+    subjects: list[str] = []
+    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+
+    def finalize(cwd: str, message: str) -> bool:
+        subjects.append(message)
+        return True
+
+    monkeypatch.setattr(loop.ws, "finalize_commit", finalize)
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+
+    loop._accept_repair(task, str(loop.root), "a" * 40, where="review")
+    loop._accept_repair(task, str(loop.root), "a" * 40)
+
+    assert subjects == ["T-001: review repair", "T-001: gate-4 repair"]
+
+
 def test_the_gate_after_a_repair_reports_what_it_re_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Those runs were made and then dropped: `_record_task_evidence` is never called again, so
     the record kept citing the runs from before the repair."""
@@ -2681,13 +2771,17 @@ def _sec(fid: str, path: str, *, blocking: bool = True) -> dict[str, object]:
 
 
 def _warm_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_loop.Orchestrator, list[str]]:
-    """A loop whose T-001 owns `alpha/`, with `_repair` recorded rather than run."""
+    """A loop whose T-001 owns `alpha/`, with `_repair` recorded rather than run. What is recorded is
+    `<finding>@<where>`: a repair the loop makes here is not gate ④'s, and the label it carries is
+    what the log and the repair's own commit subject are written from."""
     loop = orchestrator(
         tmp_path,
         plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"])]),
     )
     repaired: list[str] = []
-    monkeypatch.setattr(loop, "_repair", lambda task, item: repaired.extend(a.finding_id for a in item.items))
+    monkeypatch.setattr(
+        loop, "_repair", lambda task, item, *, where: repaired.extend(f"{a.finding_id}@{where}" for a in item.items)
+    )
     monkeypatch.setattr(loop, "_warm_reading", lambda task: None)  # the re-read after the repair
     return loop, repaired
 
@@ -2702,7 +2796,7 @@ def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
     assert loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-001", "alpha/mod.py")))
-    assert repaired == ["SEC-001"]
+    assert repaired == ["SEC-001@review"]
 
 
 def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
