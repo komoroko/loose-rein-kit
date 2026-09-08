@@ -94,6 +94,9 @@ from rein import (
     strict_yaml,
 )
 from rein import (
+    findings as findings_mod,
+)
+from rein import (
     repair as repair_mod,
 )
 from rein import repo as repo_mod
@@ -1875,7 +1878,7 @@ class Orchestrator:
     def _note_acceptance(self, ac_id: str, kind: str, *, reused: bool) -> None:
         self._current_acceptance.append({"id": ac_id, "kind": kind, "reused": reused})
 
-    def _warm_reading(self, task: dag.Task) -> None:
+    def _warm_reading(self, task: dag.Task) -> review_reading.ReadOut | None:
         """Take gate ④'s reading of this task now, while its diff is one task wide.
 
         The gate reads the change in the readings the plan's task scopes describe
@@ -1899,11 +1902,17 @@ class Orchestrator:
         says, so every per-task reading warmed after that point is one nothing will ever look up.
         The risk is a property of the whole change and it only ever rises, so this stops the
         warming for the rest of the run the same way an unanswerable adapter does.
+
+        **The `ReadOut` is the point of the return type.** This launched a security reviewer over
+        the task's slice and then threw its answer away: the finding was paid for here and first
+        read at gate ④, several tasks later, by which time the code it names has been built on.
+        `_repair_warm_findings` reads it. `None` means no reading was taken — a skip, or an
+        adapter that would not answer — which is not the same as a reading that found nothing.
         """
         if self.dry_run or self._warming_off or self.config.raw.composition == review_reading.WHOLE:
-            return
+            return None
         if not task.scope_include:
-            return
+            return None
         try:
             # The same base the gate will resolve, not the plan's field: they differ whenever the
             # plan names a commit this checkout does not have, and a warm-up taken against a
@@ -1911,7 +1920,7 @@ class Orchestrator:
             base = review_reading.resolve_base(self.repo, self._plan, None)
             head = self.repo._git_rc("rev-parse", "HEAD")[1].strip()
             if not base or not head:
-                return
+                return None
             exclude = review_reading.not_the_product(self.repo, self.state)
             limits = {**human_review.DEFAULT_BUDGET, **self.config.raw.budgets}
             # One analysis of one whole diff answers both: the floor the gate will key on, and
@@ -1925,8 +1934,8 @@ class Orchestrator:
                     f"    [review] {task.id}: the change is {effective} — gate ④ reads it whole, "
                     "so no per-task reading is warmed from here on"
                 )
-                return
-            review_reading.warm(
+                return None
+            return review_reading.warm(
                 self.repo,
                 review_transport.StagedReviewers(self.repo, config=self.config.raw),
                 reading=review_reading.Reading(unit=task.id, include=tuple(task.scope_include)),
@@ -1946,6 +1955,63 @@ class Orchestrator:
         ) as exc:
             self._warming_off = True
             print(f"    [review] {task.id}: the gate-④ reading was not taken here ({exc}); the gate will take it")
+            return None
+
+    def _repair_warm_findings(self, task: dag.Task, readout: review_reading.ReadOut | None) -> bool:
+        """Hand this task the blocking security findings its own reading just produced.
+
+        **The reading was already taken and already paid for** (`_warm_reading`); until now its
+        answer was written to the stage cache and read by nobody. So a security finding about
+        code this task wrote was first seen at gate ④ — after every later task had been built on
+        top of it, and after the implementer that wrote it was long gone. Reading it here costs
+        nothing that was not already spent, and the judge is still a different one: the finding
+        comes from the security reviewer's own launch, validated by
+        `security_review.run_security_review`, and the fixer is an implementer.
+
+        **Only findings this task's declared scope owns.** Attribution is `findings.owner_of_path`
+        — the same function gate ④ routes by — so nothing is guessed: a finding anchored in
+        another task's territory, or in none, travels to gate ④ where a human can see the whole
+        picture. It would be refused here anyway, by the scope check every repair goes through
+        (`_accept_repair`).
+
+        **One round, and no new knob for it.** The failure this has to survive is a false
+        positive, where repairing converges on nothing; a single round at the task boundary is
+        cheap and bounded, and whatever still stands is exactly what `review_policy.repair_rounds`
+        is for. Whether the finding closed is not this launch's account of itself either: the
+        re-warm below reads the slice again from cold, and gate ④ reads it once more after that.
+
+        True when it repaired, which is the caller's cue to write the status again: the evidence
+        beside it has been re-pointed at the repaired tree, and the recorded commit follows the
+        repair wherever the repair could land on top of this task's own work — which in a batch of
+        leaves is only the one that merged last (`_consume_parallel` says why).
+        """
+        if readout is None or self.dry_run or self._plan is None:
+            return False
+        owned: list[findings_mod.Attribution] = []
+        for finding in readout.security.findings:
+            if finding.get("blocking") is not True:
+                continue
+            paths = [
+                str(anchor.get("path", ""))
+                for anchor in (finding.get("code_anchors") or [])
+                if isinstance(anchor, Mapping) and anchor.get("path")
+            ]
+            hit = next((p for p in paths if findings_mod.owner_of_path(self._plan, p) == task.id), "")
+            if hit:
+                owned.append(findings_mod.Attribution(str(finding.get("id", "SEC-?")), "security", task.id, hit))
+        if not owned:
+            return False
+        print(
+            f"    [review] {task.id}: the security review of this task found {len(owned)} blocking "
+            "finding(s) in its own scope — repairing them here rather than at gate ④"
+        )
+        self._repair(task, repair_mod.Repair(task.id, tuple(owned)), where="review")
+        # The repair moved this slice's content, so the answer just cached for it is about a tree
+        # that no longer exists and the gate would re-read it regardless. Reading it again here is
+        # what decides whether the finding closed — from cold, by a reader with no memory of
+        # having raised it — and it leaves the gate's cache warm rather than stale.
+        self._warm_reading(task)
+        return True
 
     def _completion_status(self, task: dag.Task) -> str:
         """`done`, or `awaiting-evidence` when a criterion nobody here can establish is still open.
@@ -3044,7 +3110,12 @@ class Orchestrator:
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
             self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
-            self._warm_reading(task)
+            # The task is done and recorded before this runs, and stays that way if it raises: the
+            # work passed the whole DoD and landed, and a repair that cannot be finished is a
+            # human's problem with a task that is *done*, not a reason to un-finish it. A repair
+            # that does land puts another commit on the branch, so the commit is re-recorded.
+            if self._repair_warm_findings(task, self._warm_reading(task)):
+                self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
 
     def _consume_parallel(self, tasks: list[dag.Task]) -> None:
         """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
@@ -3160,9 +3231,33 @@ class Orchestrator:
             ok, log = True, ""
         ids = ",".join(t.id for t in merged)
         if ok:
+            # Every leaf recorded first, in one pass. `landed` was captured per leaf as each one
+            # merged: `_landed` reads the branch tip, so asking it here would name the last merge
+            # for every member of the batch.
             for task in merged:
                 self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
-                self._warm_reading(task)
+            # Then the readings, which can raise — a repair that reaches outside its scope stops
+            # the run. Interleaved with the pass above, that would leave the leaves after it
+            # unrecorded, and they passed their gate and merged exactly like the rest.
+            for task in merged:
+                # Asked before the repair moves the branch: is this leaf's own merge still the tip?
+                at_tip = bool(landed.get(task.id)) and landed[task.id] == self._landed(task.id)
+                if self._repair_warm_findings(task, self._warm_reading(task)):
+                    # A repair lands on top of the branch, and only the leaf that merged last has
+                    # its own work directly under that tip. Moving an earlier leaf's
+                    # `completed_commit` up there would put it above a *later* leaf's merge, and
+                    # `pr_stack.derive` cuts slices by walking first-parent order — so that later
+                    # leaf's pull request would swallow this one's commits, and nothing would say
+                    # so: parallel leaves have no `blockedBy` between them, so
+                    # `_landing_order_problems` sees a topological order that is still fine. The
+                    # merge commit stays recorded; the repair rides above it, on the slice branch
+                    # it was committed to. The write still happens either way — the evidence
+                    # beside the status was just re-pointed at the repaired tree.
+                    self._set_status(
+                        task.id,
+                        self._completion_status(task),
+                        commit=self._landed(task.id) if at_tip else landed.get(task.id, ""),
+                    )
         else:
             for task in merged:
                 self._set_status(task.id, "blocked")
@@ -3293,7 +3388,11 @@ class Orchestrator:
             if not routing.repairable or round_no == rounds:
                 break
             for item in routing.code:
-                self._repair(graph, item)
+                owner = next((t for t in graph.tasks if t.id == item.task_id), None)
+                if owner is None:  # a finding attributed to a task the graph no longer has
+                    print(f"    [gate 4] {item.task_id} is not in the plan any more — leaving its findings to a human")
+                    continue
+                self._repair(owner, item)
                 repaired += len(item.items)
         return self._present_gate4(routing, rounds, repaired, read=read)
 
@@ -3335,8 +3434,8 @@ class Orchestrator:
         print("Run `rein review generate` yourself once that is repaired — the gate needs one either way.")
         return False
 
-    def _repair(self, graph: dag.Graph, item: repair_mod.Repair) -> None:
-        """One implementer launch against one task's share of gate ④'s findings, then the DoD.
+    def _repair(self, task: dag.Task, item: repair_mod.Repair, *, where: str = "gate 4") -> None:
+        """One implementer launch against one task's share of the review's findings, then the DoD.
 
         **Where the fix is committed is decided by whether this cycle is shipping as a stack.**
 
@@ -3355,20 +3454,25 @@ class Orchestrator:
         and `pr_stack.restack` walks it up the chain into the work branch. The DoD then runs at the
         root, over the merged result — because what the quality gate is asked about is the tree the
         gate ④ reading will read, never the slice in isolation.
-        """
-        task = next((t for t in graph.tasks if t.id == item.task_id), None)
-        if task is None:  # a finding attributed to a task the graph no longer has
-            print(f"    [gate 4] {item.task_id} is not in the plan any more — leaving its findings to the human")
-            return
-        print(f"    [gate 4] {task.id}: {len(item.items)} finding(s) → the implementer")
-        slice_branch = self._slice_branch(task.id)
-        if slice_branch:
-            self._repair_on_slice(task, item, slice_branch)
-        else:
-            self._repair_on_work_branch(task, item)
-        self._gate_after_repair(task)
 
-    def _slice_branch(self, task_id: str) -> str:
+        It takes the `dag.Task` rather than the graph because both callers already hold one: gate
+        ④ resolves the id against the graph before it calls this, and the task boundary
+        (`_repair_warm_findings`) has the task in hand. The graph was an argument for one lookup.
+
+        `where` is which of those two called, and it is only ever a label: every line this path
+        printed said `[gate 4]`, including the ones a task-boundary repair produced several tasks
+        before the gate was reached. A log that names the wrong phase is a log that has to be
+        read against the code to be believed.
+        """
+        print(f"    [{where}] {task.id}: {len(item.items)} finding(s) → the implementer")
+        slice_branch = self._slice_branch(task.id, where=where)
+        if slice_branch:
+            self._repair_on_slice(task, item, slice_branch, where=where)
+        else:
+            self._repair_on_work_branch(task, item, where=where)
+        self._restate_evidence(task.id, self._gate_after_repair(task, where=where))
+
+    def _slice_branch(self, task_id: str, *, where: str = "gate 4") -> str:
         """The stack branch that introduced this task's code, or "" when this is not a stack.
 
         Read from the same `pr_stack.derive` the stack itself is cut with, and only counting a
@@ -3384,14 +3488,14 @@ class Orchestrator:
             docs = pr_stack.Documents.read(self.repo)
             slices = pr_stack.derive(self.repo, docs)
         except (pr_stack.StackError, dag.DagError, models.DocumentError, store_mod.StoreError) as exc:
-            print(f"    [gate 4] no stack to place this on ({exc}) — the work branch it is")
+            print(f"    [{where}] no stack to place this on ({exc}) — the work branch it is")
             return ""
         found = next((s for s in slices if s.task_id == task_id), None)
         if found is None or found.branch == self.branch:
             return ""
         return found.branch if review_reading.commit_exists(self.repo, found.branch) else ""
 
-    def _repair_on_work_branch(self, task: dag.Task, item: repair_mod.Repair) -> None:
+    def _repair_on_work_branch(self, task: dag.Task, item: repair_mod.Repair, *, where: str = "gate 4") -> None:
         """The single-pull-request case: repair where everything is already merged."""
         before = self.ws.head()
         self._launch(
@@ -3401,15 +3505,15 @@ class Orchestrator:
                 access=adapters.WRITE,
             ),
             cwd=self.root,
-            where=f"{task.id}: the gate-4 repair",
+            where=f"{task.id}: the repair",
             task_id=task.id,
             role="implementer",
         )
-        self._accept_repair(task, self.root, before)
+        self._accept_repair(task, self.root, before, where=where)
 
-    def _repair_on_slice(self, task: dag.Task, item: repair_mod.Repair, branch: str) -> None:
+    def _repair_on_slice(self, task: dag.Task, item: repair_mod.Repair, branch: str, *, where: str = "gate 4") -> None:
         """The stacked case: repair on the slice that introduced the code, then merge it upward."""
-        print(f"    [gate 4] {task.id}: on its own slice {branch}, then up the stack")
+        print(f"    [{where}] {task.id}: on its own slice {branch}, then up the stack")
         with build_git.scratch_worktree(self.repo, self.config.worktree_dir, _GATE4_WORKTREE, branch, common.run) as (
             path
         ):
@@ -3421,14 +3525,14 @@ class Orchestrator:
                     access=adapters.WRITE,
                 ),
                 cwd=path,
-                where=f"{task.id}: the gate-4 repair on {branch}",
+                where=f"{task.id}: the repair on {branch}",
                 task_id=task.id,
                 role="implementer",
             )
-            self._accept_repair(task, path, before)
-        self._propagate(task)
+            self._accept_repair(task, path, before, where=where)
+        self._propagate(task, where=where)
 
-    def _accept_repair(self, task: dag.Task, cwd: str, before: str) -> None:
+    def _accept_repair(self, task: dag.Task, cwd: str, before: str, *, where: str = "gate 4") -> None:
         """Check what the repair touched, then commit it. Raises rather than letting either slide.
 
         **The next reading is over committed history**, so an uncommitted repair is one that never
@@ -3437,28 +3541,29 @@ class Orchestrator:
         finding still standing. The implementer is told to commit; that is an instruction, not
         evidence, which is why every task finalizes its own diff (`build_git.finalize_commit`).
         """
+        phase = where.replace(" ", "-")
         changed = self.ws.changed_since(before, cwd=cwd) if before else []
         if violations := self._gate_violations(changed):
             raise StopLoop(
-                f"{task.id}: the gate-4 repair changed gate-guarded paths while their gate is pending:\n"
+                f"{task.id}: the {phase} repair changed gate-guarded paths while their gate is pending:\n"
                 + "\n".join(f"  - {path}: {why}" for path, why in violations),
                 code=common.EXIT_HUMAN_NEEDED,
             )
         if outside := dossier.scope_violations(task, changed):
             raise StopLoop(
-                f"{task.id}: the gate-4 repair changed {', '.join(outside)}, which its declared scope does "
+                f"{task.id}: the {phase} repair changed {', '.join(outside)}, which its declared scope does "
                 "not cover. A repair that reaches into another task's territory is a scope change, and a "
                 "scope change to an approved plan is a human's decision.",
                 code=common.EXIT_HUMAN_NEEDED,
             )
-        if not self.ws.finalize_commit(cwd, f"{task.id}: gate-4 repair"):
+        if not self.ws.finalize_commit(cwd, f"{task.id}: {phase} repair"):
             raise StopLoop(
-                f"{task.id}: the gate-4 repair could not be committed. The fix is in the tree and nothing "
+                f"{task.id}: the {phase} repair could not be committed. The fix is in the tree and nothing "
                 "has been lost; commit it yourself, then re-run `rein build`.",
                 code=common.EXIT_HUMAN_NEEDED,
             )
 
-    def _propagate(self, task: dag.Task) -> None:
+    def _propagate(self, task: dag.Task, *, where: str = "gate 4") -> None:
         """Carry a slice's repair up the stack by merging, never by rewriting.
 
         The same walk `rein pr-stack --restack` performs, run here because the repair is only half
@@ -3483,26 +3588,60 @@ class Orchestrator:
                 "Nothing is lost and nothing was rewritten — resolve it and run `rein pr-stack --restack`.",
                 code=common.EXIT_HUMAN_NEEDED,
             )
-        print(f"    [gate 4] {task.id}: {len(result.merged)} branch(es) advanced to carry the repair up the stack")
+        print(f"    [{where}] {task.id}: {len(result.merged)} branch(es) advanced to carry the repair up the stack")
 
-    def _gate_after_repair(self, task: dag.Task) -> None:
+    def _gate_after_repair(self, task: dag.Task, *, where: str = "gate 4") -> list[dict[str, Any]]:
         """The task-stage DoD over the work branch, which is where the repair has now landed.
 
         A step the baseline froze red at gate ③ is not this repair's to answer: it was red before
         any task ran, a human approved the plan over it on the record, and stopping the run here
         would re-stage the discovery that the frozen baseline exists to prevent.
+
+        Returns the evidence these re-runs produced. They were run and then dropped: the task's
+        record still named the runs from before the repair, so `done` cited a green nobody had
+        established over the tree that ended up on the branch.
         """
+        established = len(self._current_step_evidence)
         for step in self._steps_at("task"):
             if step.kind != "command" or not step.command:
                 continue
             if failure := self._run_cmd_step(step, self.root):
                 if step.name in self._baseline_red:
-                    print(f"    [gate 4] '{step.name}' is red, and was already red at gate ③ — not this repair's")
+                    print(f"    [{where}] '{step.name}' is red, and was already red at gate ③ — not this repair's")
                     continue
                 raise StopLoop(
-                    f"{task.id}: the gate-4 repair left '{step.name}' red:\n{failure}",
+                    f"{task.id}: the repair left '{step.name}' red:\n{failure}",
                     code=common.EXIT_HUMAN_NEEDED,
                 )
+        return [dict(entry) for entry in self._current_step_evidence[established:]]
+
+    def _restate_evidence(self, task_id: str, steps: Sequence[Mapping[str, Any]]) -> None:
+        """Re-point a repaired task's evidence at the tree the repair produced.
+
+        `done` means the DoD went green against the tree the task actually produced, and the
+        fingerprint recorded beside the status is what says which tree that was. A repair moves
+        the tree, so the digest taken before it names one that is no longer on the branch — and
+        the caller re-records `completed_commit` immediately after, which would leave the commit
+        half current beside a stale fingerprint. Stale together was at least self-consistent;
+        half-refreshed is a record that contradicts itself.
+
+        Steps replace the ones of the same name — the rule `_record_task_evidence` already
+        deduplicates by — so what the repair re-ran is the run that holds, and a step it did not
+        re-run keeps the account it had.
+        """
+        if self.dry_run:
+            return
+        fingerprint = self._fingerprint(self.root)
+        with self._evidence_lock:
+            record = self._evidence.get(task_id)
+            if record is None:
+                return
+            by_name = {str(entry["name"]): entry for entry in record.get("steps", [])}
+            for entry in steps:
+                by_name[str(entry["name"])] = dict(entry)
+            record["steps"] = list(by_name.values())
+            if fingerprint:
+                record["tree"] = fingerprint
 
     def _present_gate4(self, routing: repair_mod.Routing, rounds: int, repaired: int = 0, *, read: bool = True) -> int:
         """What is left after the repair rounds, and what a human has to do about it.

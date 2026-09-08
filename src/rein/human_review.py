@@ -305,19 +305,15 @@ def completion_blockers(
     if review is None or not review.is_generated:
         return ["no machine review has been generated — run `rein review generate`"]
     human = human if human is not None else dict(review.human)
-    blockers: list[str] = []
 
-    # Priced by risk, through the module that owns the gate-④ decision — `approve.readiness` reads
-    # the same function, so the freeze and the gate can no longer disagree about the same manifest.
-    #
-    # This used to block unconditionally, which reinstated exactly the dead end
-    # `review_policy.coverage_gap_risk` exists to have broken: a single unreadable file makes the
-    # manifest `insufficient` regardless of what was in it, and with the freeze refusing on that
-    # alone, a low-risk cycle containing one binary asset had no way through gate ④ at all — scope
-    # split included, since splitting never removes the file. What was left of the honesty property
-    # is untouched: the manifest still says `insufficient`, the reviewer still reads it, and
-    # extra-behaviour counts are still withheld rather than rendered as zero.
-    blockers += review_policy.coverage_blocks(review, review.effective_risk)
+    # Everything the *machine* half says about this review, from the module that owns the gate-④
+    # decision — one function, one wording, one set of rules. This used to be four blocks copied
+    # into this function (coverage, blocking gaps, blocking extra behaviours, standing security
+    # findings), phrased differently from the originals, and the copies had already drifted: only
+    # `blocking_reasons` looked at `independence_observed`, so a review whose two halves came off
+    # one model could be frozen here and then refused at the gate, for a reason the freeze screen
+    # never mentioned.
+    blockers: list[str] = list(review_policy.blocking_reasons(review, review.effective_risk, human))
 
     # The substantive judgement, and the only answer this review demands. It is what keeps a freeze
     # from being reachable by reading: every finding the machine could not settle is a card, and a
@@ -342,19 +338,6 @@ def completion_blockers(
             "decision about how much one person can hold at once"
         )
 
-    blocking_gaps = [str(g.get("id")) for g in _machine_list(review, "gaps") if g.get("blocking") is True]
-    if blocking_gaps:
-        blockers.append(f"blocking gaps: {', '.join(blocking_gaps)}")
-    blocking_extras = [str(e.get("id")) for e in review.extra_behaviors if e.get("blocking") is True]
-    if blocking_extras:
-        blockers.append(f"blocking extra behaviours: {', '.join(blocking_extras)}")
-    # Read through the same disposition the gate reads it through, or a finding a human has
-    # disputed on the record would still hold the freeze shut and the dispute would be a note
-    # nobody could act on.
-    disputed = review_policy.disputed_subjects(human)
-    standing = [f for f in review.blocking_security_findings if str(f.get("id", "")) not in disputed]
-    if standing:
-        blockers.append("blocking security findings: " + ", ".join(str(f.get("id")) for f in standing))
     return blockers
 
 

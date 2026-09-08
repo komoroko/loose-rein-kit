@@ -246,7 +246,6 @@ def _extra(**over: Any) -> dict[str, Any]:
         "category": "retry_timeout_fallback",
         "risk": "medium",
         "grounded": False,
-        "blocking": False,
         "actual_statement_ids": ["AST-001"],
     }
     return {**base, **over}
@@ -332,7 +331,7 @@ def _prior(fid: str, **over: Any) -> dict[str, Any]:
 
 
 def test_security_review_rejects_an_unknown_severity() -> None:
-    payload = {"findings": [{"id": "SEC-001", "severity": "apocalyptic", "attack_scenario": "x", "blocking": True}]}
+    payload = {"findings": [{"id": "SEC-001", "severity": "apocalyptic", "attack_scenario": "x"}]}
     with pytest.raises(security_review.SecurityReviewError, match="severity"):
         security_review.run_security_review({}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD")
 
@@ -349,32 +348,62 @@ def test_security_review_refuses_to_downgrade_a_prior_blocking_finding() -> None
     """The wider door the id-set check left open.
 
     "Did the review drop the finding?" was answered by comparing id sets, and every returned
-    finding joined that set regardless of its `blocking` value. So re-listing `SEC-1` as
-    non-blocking satisfied the check exactly as well as fixing it did — which is the one thing a
-    reviewer is not allowed to do to its own block.
+    finding joined that set whatever it said about itself. Re-listing `SEC-001` at a severity the
+    policy does not block on satisfies that exactly as well as fixing the code does — which is the
+    one thing a reviewer is not allowed to do to its own block. Severity is where the door is now
+    that the flag is derived, so that is where the floor is.
     """
-    payload = {
-        "findings": [{"id": "SEC-001", "severity": "high", "attack_scenario": "reaches a host cred", "blocking": False}]
-    }
-    with pytest.raises(security_review.SecurityReviewError, match="cannot clear a blocking flag"):
+    payload = {"findings": [{"id": "SEC-001", "severity": "low", "attack_scenario": "reaches a host cred"}]}
+    with pytest.raises(security_review.SecurityReviewError, match="below the effective floor"):
         security_review.run_security_review(
             {"prior_blocking": [_prior("SEC-001")]}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD"
         )
 
 
-def test_security_review_accepts_a_well_formed_finding() -> None:
+def test_a_carried_finding_restated_below_the_floor_is_not_a_dropped_one() -> None:
+    """The drop check asked whether a carried id was still *blocking*, and what it means to ask is
+    whether it is still *said*.
+
+    A `review.yaml` written before the flag was derived can carry a `medium` a reviewer called
+    blocking. Re-stating it at the same severity is the honest answer — no downgrade, no drop —
+    but it prices below the floor now, so it never joined the set the check tested and came back
+    as dropped, with a refusal telling the reviewer to re-state a finding it had just re-stated.
+    Re-pricing is `reject_risk_downgrade`'s question, and it is asked two lines above.
+    """
+    payload = {"findings": [{"id": "SEC-001", "severity": "medium", "attack_scenario": "x"}]}
+    result = security_review.run_security_review(
+        {"prior_blocking": [_prior("SEC-001", severity="medium")]},
+        fake(payload),
+        repo=repo_mod.Repo(Path("/x")),
+        commit="HEAD",
+    )
+    assert [f["id"] for f in result.findings] == ["SEC-001"]
+    assert result.findings[0]["blocking"] is False
+    assert result.resolved == ()
+
+
+def test_a_reviewer_does_not_price_its_own_finding() -> None:
+    """`blocking` is not a contract field. Whatever a reviewer sends under that name is replaced by
+    what `review_policy.blocks` makes of the severity it stated."""
     payload = {
-        "findings": [{"id": "SEC-001", "severity": "high", "attack_scenario": "reaches a host cred", "blocking": True}]
+        "findings": [
+            {"id": "SEC-001", "severity": "critical", "attack_scenario": "x", "blocking": False},
+            {"id": "SEC-002", "severity": "low", "attack_scenario": "y", "blocking": True},
+        ]
     }
+    result = security_review.run_security_review({}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD")
+    assert [f["id"] for f in result.blocking] == ["SEC-001"]
+
+
+def test_security_review_accepts_a_well_formed_finding() -> None:
+    payload = {"findings": [{"id": "SEC-001", "severity": "high", "attack_scenario": "reaches a host cred"}]}
     result = security_review.run_security_review({}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD")
     assert len(result.blocking) == 1
 
 
 def test_a_finding_records_the_change_it_is_a_statement_about() -> None:
     """A finding with no base is a finding that cannot be told apart from one about other code."""
-    payload = {
-        "findings": [{"id": "SEC-001", "severity": "high", "attack_scenario": "reaches a host cred", "blocking": True}]
-    }
+    payload = {"findings": [{"id": "SEC-001", "severity": "high", "attack_scenario": "reaches a host cred"}]}
     request = {"trusted_base_sha": "a" * 40, "subject_head_sha": "b" * 40}
     result = security_review.run_security_review(request, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD")
     assert result.findings[0]["first_seen"] == {"trusted_base_sha": "a" * 40, "subject_head_sha": "b" * 40}
@@ -385,9 +414,7 @@ def test_a_carried_finding_keeps_the_change_it_was_first_found_against() -> None
     name: a blocking finding that survived three regenerations reported the third head as where it
     was first seen, and a human reading the review had no way to tell a standing finding from a
     new one."""
-    payload = {
-        "findings": [{"id": "SEC-001", "severity": "high", "attack_scenario": "reaches a host cred", "blocking": True}]
-    }
+    payload = {"findings": [{"id": "SEC-001", "severity": "high", "attack_scenario": "reaches a host cred"}]}
     carried = _prior("SEC-001", first_seen={"trusted_base_sha": "a" * 40, "subject_head_sha": "b" * 40})
     request = {"trusted_base_sha": "a" * 40, "subject_head_sha": "c" * 40, "prior_blocking": [carried]}
     result = security_review.run_security_review(request, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD")
@@ -397,9 +424,7 @@ def test_a_carried_finding_keeps_the_change_it_was_first_found_against() -> None
 def test_a_finding_the_reviewer_derived_afresh_is_first_seen_now() -> None:
     """There is continuity only where the pipeline carries a finding forward. A finding nobody
     carried has none, and this change is the honest answer."""
-    payload = {
-        "findings": [{"id": "SEC-002", "severity": "high", "attack_scenario": "reaches a host cred", "blocking": True}]
-    }
+    payload = {"findings": [{"id": "SEC-002", "severity": "high", "attack_scenario": "reaches a host cred"}]}
     carried = _prior("SEC-001", first_seen={"trusted_base_sha": "a" * 40, "subject_head_sha": "b" * 40}, blocking=True)
     request = {"trusted_base_sha": "a" * 40, "subject_head_sha": "c" * 40, "prior_blocking": [carried]}
     with pytest.raises(security_review.SecurityReviewError, match="dropped previously blocking"):
@@ -518,7 +543,7 @@ def test_the_extractor_may_not_mint_an_id_of_another_shape() -> None:
 
 
 def test_a_security_finding_id_of_another_shape_is_refused() -> None:
-    payload = {"findings": [{"id": "SEC-1", "severity": "high", "attack_scenario": "x", "blocking": True}]}
+    payload = {"findings": [{"id": "SEC-1", "severity": "high", "attack_scenario": "x"}]}
     with pytest.raises(security_review.SecurityReviewError, match="not a security finding id"):
         security_review.run_security_review({}, fake(payload), repo=repo_mod.Repo(Path("/x")), commit="HEAD")
 

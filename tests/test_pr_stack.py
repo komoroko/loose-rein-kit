@@ -1787,7 +1787,8 @@ def test_a_gate_four_repair_is_committed_onto_the_slice_that_introduced_the_code
     monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "")
 
     found = findings.Attribution("SEC-001", "security", "T-001", "src/T-001.py")
-    loop._repair(dag.join(bundle_plan(repo), None), repair.Repair("T-001", (found,)))
+    owning = next(t for t in dag.join(bundle_plan(repo), None).tasks if t.id == "T-001")
+    loop._repair(owning, repair.Repair("T-001", (found,)))
 
     assert "gate-4 repair" in git(root, "log", "--format=%s", owner.branch), "on the slice that owns the code"
     assert "gate-4 repair" in git(root, "log", "--format=%s", WORK_BRANCH), "and carried up into the work branch"

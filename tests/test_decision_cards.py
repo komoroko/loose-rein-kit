@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from rein import human_review, models, review
+from rein import decision_cards, human_review, models, review, review_policy
 
 
 def _claim(claim_id: str = "C-001", verdict: str = "diverged", **extra: Any) -> dict[str, Any]:
@@ -267,3 +267,24 @@ def test_every_blocking_card_is_named_not_a_capped_sample() -> None:
     blocking = [c["id"] for c in machine["decision_cards"] if c["risk"] in ("high", "critical")]
     assert human_review.unanswered_decisions(_review(machine), {}) == blocking
     assert len(blocking) == 6
+
+
+def _gap(n: int, risk: str = "low") -> dict[str, Any]:
+    return {"id": f"GAP-{n:03d}", "kind": "evidence_gap", "statement_id": f"STMT-{n:03d}", "risk": risk}
+
+
+def test_the_last_card_that_fits_is_derived() -> None:
+    """The ceiling is the schema's, read from it rather than restated."""
+    statements, cards = decision_cards.derive_cards(gaps=[_gap(n) for n in range(1, decision_cards.MAX_CARDS + 1)])
+    assert len(cards) == decision_cards.MAX_CARDS
+    assert len(statements) == decision_cards.MAX_CARDS * 5
+
+
+def test_one_decision_too_many_refuses_rather_than_dropping_it() -> None:
+    """It used to write `subjects[:64]`, and the budget that was supposed to notice counted the
+    cards this function *returns* — so the decisions dropped here were dropped before anything
+    could see them. Sixty-five findings produced a review that said sixty-four, silently, in the
+    artefact a human signs."""
+    gaps = [_gap(n) for n in range(1, decision_cards.MAX_CARDS + 2)]
+    with pytest.raises(review_policy.ReviewPolicyError, match="says less than it read"):
+        decision_cards.derive_cards(gaps=gaps)

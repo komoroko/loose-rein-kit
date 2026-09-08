@@ -1,17 +1,19 @@
 """The Policy Engine: it decides risk, coverage, and blocking — the reviewers only propose.
 
 Every reviewer is untrusted output (plan §12.7). An LLM extractor can claim a
-behavior it never grounded, mark its own finding non-blocking, or quietly lower a change's
-risk so it slips under the evidence bar. This module is the boundary that refuses all three,
-mechanically, before any reviewer text reaches a human:
+behavior it never grounded, or quietly lower a change's risk so it slips under the evidence
+bar. This module is the boundary that refuses both, mechanically, before any reviewer text
+reaches a human — and it does not ask a reviewer the one question it owns:
 
   effective risk   the max of every risk contributor (plan §13.5); an AI can never lower it,
                    so a diff that deletes a guard is at least `high` whatever the plan says.
   code anchors     a reviewer's "this happens at file:line" is checked against the *committed*
                    blob at that path — a fabricated or stale anchor is rejected (§12.7).
   integrity        derived here from the anchors a claim's citations rest on, never sent by a
-                   reviewer (`derive_integrity`); nor may one clear a `blocking` flag the policy
-                   set (§24.2, §24.3).
+                   reviewer (`derive_integrity`) (§24.2, §24.3).
+  blocking         derived here from the severity a reviewer states (:func:`blocks`), never sent
+                   by one. The three contracts used to carry a `"blocking": <bool>` field, so
+                   whether a finding held the gate shut was the finding's own author's to say.
   known ids only   every Claim/Task id a reviewer references must exist in the frozen plan —
                    an invented `C-999` is a fabricated citation, not evidence.
   independence     a critical review needs the Actual Extractor and the Comparator in distinct
@@ -24,6 +26,7 @@ against crafted-malicious reviewer payloads without running a model.
 
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -162,7 +165,13 @@ def stage_output_schema(role: str) -> dict[str, Any]:
     if not where:
         return {}
     defs: Any = models.schema("review")["$defs"]
-    node = defs["machine"]["properties"][where]
+    node = copy.deepcopy(defs["machine"]["properties"][where])
+    if role == "security_reviewer":
+        # `blocking` is required *of the document* and written by :func:`blocks`. Asking the
+        # reviewer for it — which a CLI constrained by this schema would — is the thing that was
+        # wrong with it being a contract field at all, arriving through the back door.
+        item = node["properties"]["findings"]["items"]
+        item["required"] = [name for name in item["required"] if name != "blocking"]
     root: dict[str, Any] = dict(node) if not key else {"type": "object", "required": [key], "properties": {key: node}}
     if role == "comparator":
         # The comparator echoes the Actual's digest so the answer names what it compared against
@@ -519,13 +528,6 @@ def reject_risk_downgrade(claimed_risk: str, floor: str, *, subject: str = "chan
     return []
 
 
-def reject_blocking_removal(subject_id: str, reviewer_blocking: object, policy_blocking: bool) -> list[str]:
-    """A reviewer may not clear a `blocking` flag the policy set (plan §12.7)."""
-    if policy_blocking and reviewer_blocking is False:
-        return [f"{subject_id}: a reviewer cannot clear a blocking flag the policy requires"]
-    return []
-
-
 # --- independence (plan §12.4, E2E-26) ----------------------------------------
 
 
@@ -596,6 +598,41 @@ def independence_observed(review: models.Review, effective: str) -> list[str]:
 
 
 # --- blocking (the gate-4 decision) -------------------------------------------
+
+#: The severity at which a finding holds gate ④ shut. One number, in one place, because
+#: `blocking` is a policy question and the three reviewer stages used to be asked it directly:
+#: every contract carried a `"blocking": <bool>` field, so a `critical` security finding the
+#: model marked `false` blocked nothing, and this module's own first line — "it decides risk,
+#: coverage, and blocking" — was not true of any finding the review had newly found. What a
+#: reviewer is for is *describing* what it read; how much that costs is not its to say.
+BLOCKING_FLOOR = "high"
+
+
+def blocks(risk: str, *, grounded: bool = False) -> bool:
+    """Does a finding at this severity hold gate ④ shut? The policy's answer, never a reviewer's.
+
+    `risk` is the finding's own severity — a security finding's `severity`, a gap's or an extra
+    behaviour's `risk` — which a reviewer does state, and which is checked against the effective
+    floor everywhere it can be (`reject_risk_downgrade`). The mapping from that to "the gate stays
+    shut" lives here.
+
+    `grounded` is the extra-behaviour case and only that: behaviour a requirement already accounts
+    for is not a finding about the change, whatever its risk. Everything else defaults to
+    ungrounded, which is the answerable direction.
+
+    Below the floor a finding is recorded and becomes a Decision Card rather than a wall — the
+    same line `unanswered_decisions` draws, so the two thresholds are the one threshold.
+
+    A risk this ladder does not have blocks. The reviewer that produced it is refused by its own
+    stage's validator anyway, so the value is never reached in a review that gets written; what
+    this settles is the direction an unrecognised value falls in, and a policy engine's default
+    is the closed one.
+    """
+    if grounded:
+        return False
+    if risk not in models.RISK_VALUES:
+        return True
+    return models.risk_at_least(risk, BLOCKING_FLOOR)
 
 
 def coverage_blocks(review: models.Review, effective: str) -> list[str]:

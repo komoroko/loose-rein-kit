@@ -1881,7 +1881,7 @@ def test_the_execution_plan_reports_counts_and_names_only_what_will_launch() -> 
     }
     rendered = review._render_execution_plan(plan)
     head, *rest = rendered.splitlines()
-    assert head.startswith("review plan: 2 reading(s), 5 stage decision(s) —")
+    assert head.startswith("review plan: 2 reading(s), highest-risk first, 5 stage decision(s) —")
     assert "3 reuse" in head and "1 run" in head and "1 undecided" in head
     assert head.endswith("shared reading: yes")
     assert rest == ["  to run: actual_extraction ×1 (opus) — T-001"], rest
@@ -2881,6 +2881,24 @@ def test_readings_are_taken_at_once_and_say_the_same_thing(tmp_path: Path) -> No
 
     serial = review.generate(repo, _reviewers(_fake_reviewer), base=base, force=True, readers=1)
     assert serial["coverage"] == machine["coverage"]
+
+
+@pytest.mark.integration
+def test_the_riskiest_reading_is_read_first(tmp_path: Path) -> None:
+    """Risk decided whether the change composed at all and nothing after that: the readings were
+    taken in plan order, so a run cut short by a session limit or a Ctrl-C left the cache holding
+    the tasks with the lowest ids. The detector's own floor for each slice orders them instead —
+    the one use of a per-reading risk that cannot lower anything, since the floor every request
+    carries is still the whole change's.
+    """
+    base = _composed_repo(tmp_path)
+    # `beta` names a credential, which is the detector's `security_boundary` signal: `high`, by
+    # regex, with no model in it. `alpha` matches nothing and stays `low`.
+    (tmp_path / "beta" / "mod.py").write_text("def beta(token: str) -> int:\n    return 1\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-qam", "beta touches a credential")
+
+    machine = review.generate(repo_mod.Repo(tmp_path), _reviewers(_fake_reviewer), base=base)
+    assert [r["unit"] for r in machine["coverage"]["composition"]["readings"]] == ["T-002", "T-001"]
 
 
 @pytest.mark.integration
