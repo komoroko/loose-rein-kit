@@ -27,7 +27,7 @@ prompts:
     schema/config.schema.json: sha256:170f9ffa4d990ef7707ee0a6923ccf8294279624b2ee5f9e344684e60c2fe88a
     schema/event.schema.json: sha256:3bbffbe976bdae34821314919d5a830e3bd978b04f98b0af6e75dde0e418c675
     schema/plan.schema.json: sha256:f9f08b0576f65f6c6287238082cc066f2439cc7a0dbd773b364bdeb05094830a
-    schema/review.schema.json: sha256:a5eb487ca94e5072318c21c0a3f456e0792ffe059b06602b6f4bc1c33d49e2b1
+    schema/review.schema.json: sha256:829a1146a5c45f7a6f7d38e3772e682f663877e8f3d49174533724da5c6d104b
     schema/state.schema.json: sha256:2b1653e8d9b96568b99ae954dd20e8a8a092af9686b720bf88da7790722b1d90
 integrations:
   claude:
@@ -117,4 +117,4 @@ integrations:
             command: rein guard
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-09-08'
+updated_at: '2026-09-13'

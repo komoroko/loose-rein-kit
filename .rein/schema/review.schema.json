@@ -588,12 +588,6 @@
                 "$ref": "#/$defs/digest"
               }
             },
-            "deleted_lines_analyzed": {
-              "type": "boolean"
-            },
-            "dependency_semantics_analyzed": {
-              "type": "boolean"
-            },
             "binary_semantics_analyzed": {
               "type": "boolean"
             },

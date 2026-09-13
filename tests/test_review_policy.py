@@ -70,10 +70,51 @@ def test_a_removed_binary_prices_no_gap_at_all() -> None:
     assert review_policy.effective_risk(review_policy.risk_inputs_from_facts(facts)) == "low"
 
 
-def test_a_dependency_change_prices_the_gap_medium() -> None:
-    """No lexical scan says what the new versions do — but that is a `medium` unknown, not a wall."""
+def test_a_dependency_change_is_medium_by_the_detector_and_not_by_the_gap() -> None:
+    """The `medium` a dependency change is worth reaches `effective_risk` once, not twice.
+
+    `detect_signals` raises a `dependency` hit on every changed manifest or lockfile, and that is
+    `detector_risk_floor`. Pricing the same fact a second time as a coverage gap made the manifest
+    `insufficient` for a change every byte of which had been read, with no remedy at gate ④.
+    """
     facts = diff_facts.analyze(_one_file("uv.lock", added=['name = "requests"']))
-    assert review_policy.coverage_gap_risk(facts) == "medium"
+    assert facts.coverage.coverage_status == "sufficient"
+    assert review_policy.coverage_gap_risk(facts) == "low"
+    assert facts.risk_floor == "medium"
+    assert review_policy.effective_risk(review_policy.risk_inputs_from_facts(facts)) == "medium"
+
+
+def _review_over(diff_text: str) -> models.Review:
+    """A generated review carrying the manifest `diff_facts` built for this diff, and nothing else."""
+    manifest = diff_facts.analyze(diff_text).coverage.to_manifest()
+    return models.Review({"machine": {"status": "generated", "coverage": manifest}, "human": {"status": "not_started"}})
+
+
+def test_a_cycle_that_adds_a_dependency_is_not_blocked_by_its_own_lockfile() -> None:
+    """The shape that had no way through gate ④: code, the manifest that declares its new
+    dependency, and the lockfile that is the product of declaring it.
+
+    Neither remedy the block named existed. There is no scope that holds the code and not the
+    lock; a slice holding only the lock was `insufficient` by itself; and the risk it was measured
+    against was frozen by a human at gate ③, so lowering it is a false statement about the change
+    rather than a repair.
+    """
+    diff = (
+        _one_file("src/client.py", added=["    resp = requests.get(url, timeout=30)"])
+        + _one_file("pyproject.toml", added=['  "requests>=2.32",'])
+        + _one_file("uv.lock", added=['name = "requests"', 'version = "2.32.3"'])
+    )
+    assert review_policy.coverage_blocks(_review_over(diff), "high") == []
+    assert review_policy.coverage_blocks(_review_over(diff), "critical") == []
+
+
+def test_a_coverage_block_names_the_files_it_is_about() -> None:
+    """The remedy it offers is about files, so it says which. "Split the unreadable part out of
+    this scope" over a manifest that would not name the part is an instruction nobody can follow."""
+    diff = _one_file("src/client.py", added=["    call()"]) + _one_file("design/logo.psd", added=["\x00bytes"])
+    blocked = review_policy.coverage_blocks(_review_over(diff), "high")
+    assert blocked and "design/logo.psd" in blocked[0]
+    assert "src/client.py" not in blocked[0]
 
 
 # --- shape caps (plan §12.7) --------------------------------------------------
