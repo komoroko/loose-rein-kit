@@ -133,12 +133,6 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
     store = store_mod.Store(repo)
     findings: list[Finding] = []
     loaded: dict[str, object] = {}
-    # A repository written by a newer rein is the one case where "invalid document" is a fact about
-    # the reader, not the document: that release widened a schema, this tool has the narrow one, and
-    # the key it rejects is one the repo is entitled to carry. Saying `rein revise --to tasks` there
-    # sends a human to rewind an approved gate — the most expensive move the workflow has — to fix
-    # nothing. The skew already has its own WARN; this makes it the repair line too.
-    behind = lock_mod.behind_summary(repo, rein.__version__)
     for name, reader in (
         ("config", store.read_config),
         ("state", store.read_state),
@@ -148,9 +142,12 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
         try:
             value = reader()
         except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-            repair = _DOCUMENT_REPAIR[name]
-            if behind is not None:
-                repair = f"{behind} — read the document with the release that wrote it before treating it as damaged"
+            # `exc.repair` when the raiser knew better than this table does. It does in exactly
+            # one case: a repository written by a newer rein, where "invalid document" is a fact
+            # about the reader — that release widened a schema, this tool has the narrow one, and
+            # the key it rejects is one the repo is entitled to carry. Saying `rein revise --to
+            # tasks` there sends a human to rewind an approved gate to fix nothing.
+            repair = getattr(exc, "repair", "") or _DOCUMENT_REPAIR[name]
             findings.append(Finding("FAIL", "format", f"{name}.yaml: {exc}\n  repair: {repair}"))
             continue
         if value is None:

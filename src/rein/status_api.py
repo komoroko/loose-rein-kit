@@ -34,7 +34,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import rein
 from rein import (
     adapters,
     agent_cli,
@@ -870,27 +869,12 @@ def collect_status(
     repo = root if isinstance(root, repo_mod.Repo) else repo_mod.Repo(Path(root).resolve())
     warnings: list[str] = []
     store = store_mod.Store(repo)
-    # Asked here rather than at process start, because this function is what a long-running
-    # `rein ui` re-runs on every tick — and the upgrade that invalidates it happens in another
-    # terminal. A repository written by a newer rein carries documents whose schemas that release
-    # widened, so this tool reports them as invalid, and the repair for "invalid" is not the repair
-    # for "behind" (`lock.written_by_newer`). `ui._WATCHED` already stats `rein.lock`, so the
-    # answer moves as soon as the lock does.
-    behind = lock_mod.behind_summary(repo, rein.__version__)
-
-    def unreadable(name: str, exc: Exception) -> str:
-        if behind is None:
-            return f"cannot read {name}.yaml: {exc}"
-        return (
-            f"{name}.yaml does not parse under this rein, and that is the explanation rather than "
-            f"a damaged document: {behind}. Restart any `rein ui` left running afterwards."
-        )
 
     state: models.State | None = None
     try:
         state = store.read_state()
     except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-        warnings.append(unreadable("state", exc))
+        warnings.append(f"cannot read state.yaml: {exc}")
     if state is None and not warnings:
         warnings.append("no .rein/state.yaml yet")
 
@@ -898,19 +882,19 @@ def collect_status(
     try:
         plan = store.read_plan()
     except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-        warnings.append(unreadable("plan", exc))
+        warnings.append(f"cannot read plan.yaml: {exc}")
 
     review: models.Review | None = None
     try:
         review = store.read_review()
     except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-        warnings.append(unreadable("review", exc))
+        warnings.append(f"cannot read review.yaml: {exc}")
 
     config: models.Config | None = None
     try:
         config = store.read_config()
     except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-        warnings.append(unreadable("config", exc))
+        warnings.append(f"cannot read config.yaml: {exc}")
 
     gates = {g: state.gate_status(g) for g in GATE_ORDER} if state else dict.fromkeys(GATE_ORDER, "pending")
     current_phase = state.current_phase if state else "brief"

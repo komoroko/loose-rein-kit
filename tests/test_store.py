@@ -447,3 +447,87 @@ def test_only_the_store_writes_a_machine_written_document() -> None:
             if any(target.endswith(f".{name}") for name in machine_written):
                 offenders.append(f"{path}:{node.lineno} atomic_write({target})")
     assert not offenders, "these write a machine-written document outside the store: " + "; ".join(offenders)
+
+
+# --- older than the repository ------------------------------------------------
+
+
+def _behind_repo(tmp_path: Path) -> repo_mod.Repo:
+    """A repository a newer rein wrote: the lock says so, and one document proves it.
+
+    Both halves matter. A bumped lock over documents this tool still parses exercises the check
+    and not the situation — what a newer release actually does is widen a schema and use the new
+    key, and the first thing anybody sees is a read failing.
+    """
+    from rein import lock as lock_mod
+    from tests._support import make_config, make_state, seed_repo
+
+    seed_repo(tmp_path, state=make_state(project="p"), config=make_config())
+    lock_mod.write(tmp_path / ".rein" / "rein.lock", lock_mod.new("99.0.0", "git+https://github.com/o/r@v99.0.0"))
+    config = tmp_path / ".rein" / "config.yaml"
+    config.write_text(config.read_text(encoding="utf-8") + "\nsecurity:\n  future_key: 1\n", encoding="utf-8")
+    return repo_mod.Repo(tmp_path)
+
+
+def test_a_document_a_newer_release_wrote_is_behind_and_not_invalid(tmp_path: Path) -> None:
+    """ "Invalid" and "behind" are different facts with different repairs, and only one of them is
+    about the document. Answered here because this is where all four documents are read: a caller
+    that had to know to ask would be a caller that could forget, and `approve.readiness` did."""
+    with pytest.raises(models.DocumentError) as caught:
+        store.Store(_behind_repo(tmp_path)).read_config()
+
+    exc = caught.value
+    assert isinstance(exc, store.DocumentBehindError)
+    assert "older than the release that wrote this repository" in str(exc)
+    assert "written by rein 99.0.0" in str(exc)
+    assert "Additional properties" not in str(exc)
+    assert "uv tool install --force" in exc.repair
+    # Still a DocumentError, so nothing that already caught one stops catching it — and the schema
+    # errors are still there for anyone who wants to look.
+    assert exc.errors and "Additional properties" in exc.errors[0]
+
+
+def test_a_tool_behind_the_repository_may_not_write_it(tmp_path: Path) -> None:
+    """At the one door every SSOT mutation passes, rather than in front of the writes somebody
+    thought of. A gate receipt binds digests the writing process computed and records which
+    *channel* confirmed rather than which release wrote it, so afterwards nothing distinguishes
+    one written under a schema this tool has the narrow version of — and neither a task status nor
+    a review freeze is any different."""
+    with pytest.raises(store.BehindError) as caught:
+        with store.Store(_behind_repo(tmp_path)).transaction():
+            pass  # pragma: no cover - the transaction is refused before the body runs
+    assert "refusing to write" in str(caught.value)
+    assert "written by rein 99.0.0" in str(caught.value)
+    assert not isinstance(caught.value, store.StoreError), "being out of date is not a broken store"
+
+
+def test_a_current_tool_reads_and_writes_normally(tmp_path: Path) -> None:
+    from tests._support import make_config, make_state, seed_repo
+
+    seed_repo(tmp_path, state=make_state(project="p"), config=make_config())  # seeds a 0.1.0 lock
+    s = store.Store(repo_mod.Repo(tmp_path))
+    assert s.behind() is None
+    assert s.read_config() is not None
+    with s.transaction():
+        pass
+
+
+def test_a_lock_nobody_can_read_stops_a_write_and_explains_nothing_about_a_read(tmp_path: Path) -> None:
+    """ "Cannot tell" is one answer at the write door and a different one at the read.
+
+    A write must not assume it is current, so the refusal is the same as being behind. A read must
+    not say "behind" either, because nothing established that — attaching a cause to a failure on
+    no evidence is the mistake this whole area is about, with the sign reversed. The damaged lock
+    has its own report: `cli` turns it into a hard error on every invocation.
+    """
+    from tests._support import make_config, make_state, seed_repo
+
+    seed_repo(tmp_path, state=make_state(project="p"), config=make_config())
+    (tmp_path / ".rein" / "rein.lock").write_text("format: not-ours\ntool_version: 0.1.0\n", encoding="utf-8")
+    s = store.Store(repo_mod.Repo(tmp_path))
+
+    assert s.behind() is None
+    assert s.read_config() is not None, "an unreadable lock is not a reason to fail a document read"
+    with pytest.raises(store.BehindError, match="has no answer"):
+        with s.transaction():
+            pass  # pragma: no cover - refused before the body runs

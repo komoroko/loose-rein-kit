@@ -80,7 +80,6 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import rein
 from rein import (
     adapters,
     agent_cli,
@@ -97,7 +96,6 @@ from rein import (
     status_api,
 )
 from rein import events as events_mod
-from rein import lock as lock_mod
 from rein import registry as registry_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -740,6 +738,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "bytes than the ones you read. Re-open the gate and check the digests again.",
                 )
             approval_id = approve.record_approval(repo, gate, subject, confirmed_via="ui-session")
+        except store_mod.BehindError as exc:
+            raise UiActionError(HTTPStatus.CONFLICT, str(exc)) from None
         except (approve.ApprovalError, models.DocumentError, store_mod.StoreError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
         logger.warning(f"gate '{gate}' opened from the dashboard ({approval_id})")
@@ -791,21 +791,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
     ) -> None:
         """Persist one human-half change through the Store, guarding staleness and recording why.
 
-        Refused outright while the repository is newer than this process. Freezing the human
-        review is the precondition gate ④ is requested on, and it is the one write here that does
-        not pass `approve.readiness` — so the skew check it carries has to be repeated at this
-        door rather than assumed. `rein ui` is the only rein process long-lived enough for the
-        answer to change under it: every other one is a one-shot command that asked at startup.
+        A write from a dashboard older than the repository is refused by `Store.transaction`
+        itself, which is where every SSOT mutation passes and therefore the only place that does
+        not have to be told which writes matter. `rein ui` is the one rein process long-lived
+        enough for that answer to change under it — every other is a one-shot command that asked
+        at startup — so it is also the one that has to ask again per request rather than once.
         """
         repo = repo_mod.Repo(self.server.active_root())
-        behind = lock_mod.behind_summary(repo, rein.__version__)
-        if behind is not None:
-            raise UiActionError(
-                HTTPStatus.CONFLICT,
-                f"{behind}. This dashboard is running an older release than the repository it is "
-                "serving, so it cannot freeze a review of documents it does not fully parse. "
-                "Upgrade and restart the dashboard.",
-            )
         # Required, not optional: an empty digest waved through would let a client that simply
         # omitted the field — a stale tab, a script, a retried request — merge its answers into
         # whatever machine review is on disk, the exact E2E-08 failure the guard exists to stop.
@@ -841,7 +833,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "session": review_api.review_session(self.server.active_root()),
                 },
             )
-        except human_review.StaleReview as exc:
+        except (human_review.StaleReview, store_mod.BehindError) as exc:
+            # Both are "this process and this repository disagree about what is current" — one
+            # about the review on screen, one about the release that wrote the documents.
             raise UiActionError(HTTPStatus.CONFLICT, str(exc)) from None
         except (store_mod.StoreError, models.DocumentError, ValueError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None

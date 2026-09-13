@@ -1177,6 +1177,7 @@ def test_a_dashboard_behind_the_repository_refuses_to_freeze(review_server: ui.D
     status, data = write(review_server, "/api/review/complete", {"machine_digest": digest})
     assert status == 409
     assert "written by rein 99.0.0" in json.loads(data)["error"]
+    assert "refusing to write" in json.loads(data)["error"]
 
 
 def test_review_post_without_token_is_403(review_server: ui.DashboardServer) -> None:
