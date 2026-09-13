@@ -11,6 +11,12 @@ re-open a closed boundary (E2E-21):
   `post_build.security_review`, `skip_grounding`) — the Absolute-Block bypasses (plan §4.1, §15.4);
 - a damaged audit chain (deletion, reorder, truncation, or a wholesale re-hash — E2E-22).
 
+"Base-side" is two claims, and only one of them was ever checked here. The *inputs* are
+base-side: the trigger, the two SHAs, the full history. So is the *verifier itself* supposed to
+be — and a job that installs `rein` after `actions/checkout` resolves its dependency closure with
+uv reading settings out of the tree the pull request wrote (`uv.toml`, `[tool.uv]`), which is the
+same bypass as deleting the job, one level down. `provenance_violations` is that half.
+
 The one honesty this file owes the reader: this check is a bootstrap — there is no prior base
 verifier to check the commit that adds this file, so that first run is *not* self-verified and the
 workflow and README say so (plan §29.3).
@@ -141,7 +147,7 @@ def _policy_job_weakening(repo: repo_mod.Repo, base_sha: str, head_sha: str) -> 
         return []  # the base never ran it here; requiring it now is a different conversation
 
     head_texts = {p: _show(repo, head_sha, p) or "" for p in _tree_paths(repo, head_sha) if _is_workflow(p)}
-    surviving = [text for text in head_texts.values() if _POLICY_INVOCATION in text]
+    surviving = {p: text for p, text in head_texts.items() if _POLICY_INVOCATION in text}
     if not surviving:
         return [
             "the head tree no longer runs `rein policy-check` in any workflow — a pull request "
@@ -149,8 +155,10 @@ def _policy_job_weakening(repo: repo_mod.Repo, base_sha: str, head_sha: str) -> 
         ]
     violations: list[str] = []
     for token, what in _POLICY_REQUIRED:
-        if not any(token in text for text in surviving):
+        if not any(token in text for text in surviving.values()):
             violations.append(f"the head's `rein policy-check` workflow no longer carries {what} ({token})")
+    for path, text in sorted(surviving.items()):
+        violations += provenance_violations(text, what=f"the head's {path}")
     return violations
 
 
@@ -162,6 +170,116 @@ def _tree_paths_or_none(repo: repo_mod.Repo, sha: str) -> list[str] | None:
 
 def _is_workflow(path: str) -> bool:
     return path.startswith(".github/workflows/") and path.endswith((".yml", ".yaml"))
+
+
+#: How a step puts `rein` on PATH from somewhere that is not the checked-out tree.
+_INSTALLS_REIN = ("uv tool install", "pipx install", "pip install")
+#: How a step resolves `rein` *out of* the tree instead. Each of these needs a checkout to have
+#: happened, so a job built this way cannot satisfy the ordering below at all.
+_FROM_THE_TREE = ("uv sync", "uv run", "poetry run", "pdm run", "pipenv run", "python -m rein", "pip install -e")
+#: What stops uv discovering `uv.toml` / `[tool.uv]` from the working directory. `--no-config` on
+#: the command, or the environment variable anywhere in the workflow — env is inherited downward,
+#: so a workflow that sets it at any level sets it for this step.
+_NO_DISCOVERY = ("--no-config", "UV_NO_CONFIG")
+
+
+def _step_text(step: object) -> str:
+    """Everything one step says it runs or uses, as one string."""
+    if not isinstance(step, dict):
+        return ""
+    return " ".join(str(step.get(key, "")) for key in ("uses", "run", "name"))
+
+
+def _step_command(step: object) -> str:
+    """The first line of what a step runs — what a violation quotes back at its author."""
+    if not isinstance(step, dict) or not step.get("run"):
+        return ""
+    return str(step["run"]).strip().splitlines()[0].strip()
+
+
+def policy_job_steps(text: str, *, what: str) -> list[object]:
+    """The steps of every job that runs `rein policy-check`. Raises when the workflow cannot be read.
+
+    Parsed rather than scanned, which the rest of this module deliberately is not. Presence checks
+    survive on raw text because they ask whether a token is anywhere in the file; **order** does
+    not — `ci.yml` in this repository has its first `actions/checkout` in the unit-test job, four
+    jobs above the one that matters — and a scan cannot tell a step from a comment that looks like
+    one, which against head-controlled text is not a distinction to leave open.
+    """
+    document = strict_yaml.load_mapping(text, what=what)
+    jobs = document.get("jobs")
+    if not isinstance(jobs, dict):
+        raise strict_yaml.StrictParseError(f"{what}: no `jobs` mapping")
+    steps: list[object] = []
+    for job in jobs.values():
+        job_steps = job.get("steps") if isinstance(job, dict) else None
+        if not isinstance(job_steps, list):
+            continue
+        if any(_POLICY_INVOCATION in _step_text(step) for step in job_steps):
+            steps += job_steps
+    return steps
+
+
+def provenance_violations(text: str, *, what: str) -> list[str]:
+    """Ways the `rein` that judges a pull request could have been resolved by that pull request.
+
+    The curated lists this module already had enumerate the **inputs** handed to the verifier — the
+    trigger, the two SHAs, the full history. Nothing said where the **verifier** came from, and
+    that is the other half of "base-side": the job does not have to be deleted, only pointed at a
+    toolchain the head can influence. Three ways it can be, checked in that order because each one
+    makes the next moot:
+
+    **It is the tree.** `uv run` / `uv sync` / `poetry run` build the tool out of the pull
+    request's own source. Nothing is left to subvert; the change is judged by itself.
+
+    **It was installed after `actions/checkout`.** That lands the head on disk, and uv then
+    discovers `uv.toml` and `[tool.uv]` from the working directory — so a pull request can point
+    `index-url` / `extra-index-url` / `find-links` at a host it controls. `rein` itself comes from
+    git and is not swapped that way; its **dependency closure** is, and those import at startup.
+
+    **Nothing pins that shut.** Installing first works because there is no tree to discover
+    settings from; `--no-config` (or `UV_NO_CONFIG`) is what keeps a later reordering from
+    reopening it in silence.
+    """
+    try:
+        steps = policy_job_steps(text, what=what)
+    except strict_yaml.StrictParseError as exc:
+        return [f"{what} cannot be read, so where its `rein` comes from is unknown: {exc}"]
+    if not steps:
+        return []
+
+    texts = [_step_text(step) for step in steps]
+    invoking = next(step for step in steps if _POLICY_INVOCATION in _step_text(step))
+    tree_built = next((t for t in (_step_command(step) for step in steps) if any(m in t for m in _FROM_THE_TREE)), "")
+    if any(marker in _step_text(invoking) for marker in _FROM_THE_TREE):
+        return [
+            f"{what} runs `{_step_command(invoking)}`, which resolves `rein` out of the checked-out "
+            "tree — the pull request is judged by a tool it wrote. Install it from a commit the "
+            "head did not write, before the checkout"
+        ]
+
+    checkout = next((i for i, t in enumerate(texts) if "actions/checkout" in t), None)
+    install = next((i for i, t in enumerate(texts) if any(token in t for token in _INSTALLS_REIN)), None)
+
+    violations: list[str] = []
+    if install is None:
+        saw = f" — it runs `{tree_built}`" if tree_built else ""
+        violations.append(
+            f"{what} runs `{_POLICY_INVOCATION}` with a `rein` no step installed from outside the "
+            f"head tree{saw}. The verifier a pull request cannot fake must not be resolved by it"
+        )
+    elif checkout is not None and checkout < install:
+        violations.append(
+            f"{what} installs `rein` after `actions/checkout`, so uv discovers `uv.toml` and "
+            "`[tool.uv]` from the tree the pull request wrote and resolves the verifier's "
+            "dependencies through an index that tree names. Install it before the checkout"
+        )
+    if install is not None and not any(token in text for token in _NO_DISCOVERY):
+        violations.append(
+            f"{what} installs `rein` without `--no-config` (or `UV_NO_CONFIG`), so reordering the "
+            "steps reopens uv's settings discovery silently"
+        )
+    return violations
 
 
 def trusted_base(

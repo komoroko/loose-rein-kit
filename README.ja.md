@@ -337,9 +337,40 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 | CI でシークレットスキャン(gitleaks) | コミット段階のフックは、それを入れた開発者しか守らない。 |
 
 ローカルから確認できる範囲は `rein doctor` が報告する。ワークフローが `rein policy-check` を
-実行しているかを確認し、実行していなければ WARN を出す。残りはリポジトリ管理者の責務である。なお
-`policy-check` を導入するコミット自体は検証されない。それを検査すべき、より古いベース側の検証器が
-まだ存在しないためである。
+実行しているか、head が選べないベースをイベントから受け取っているか、そして実行している `rein`
+自体がどこから来たかを確認し、満たしていなければ WARN を出す。残りはリポジトリ管理者の責務である。
+なお `policy-check` を導入するコミット自体は検証されない。それを検査すべき、より古いベース側の
+検証器がまだ存在しないためである。
+
+ジョブ自体はここに書き下しておく。ステップの順序が意味を持ち、しかもそれが他のジョブと同じ順序
+ではないためである:
+
+```yaml
+  policy-check:
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: astral-sh/setup-uv@<commit sha>
+      # checkout より前に置く。uv が `uv.toml` / `[tool.uv]` を探索できるツリーがまだ無い状態で
+      # 入れるため。取得元は head が書き換えられないコミットにする。`--no-config` は、後から
+      # ステップを並べ替えてもこの穴が黙って開き直らないようにするためのもの。checkout の後に
+      # 入れると、検証器自身の依存をどのインデックスから解決するかをプルリクエスト側が選べる。
+      # それらは起動時に import される。
+      - run: >-
+          uv tool install --no-config
+          'git+https://github.com/komoroko/loose-rein-kit.git@<.rein/rein.lock のタグ>'
+      - uses: actions/checkout@<commit sha>
+        with:
+          fetch-depth: 0
+      - run: >-
+          rein policy-check
+          --base-sha '${{ github.event.pull_request.base.sha }}'
+          --head-sha '${{ github.event.pull_request.head.sha }}'
+          --base-ref '${{ github.event.pull_request.base.ref }}'
+          --default-branch 'origin/${{ github.event.repository.default_branch }}'
+```
+
+head がこれを弱めるプルリクエストは `rein policy-check` が失敗させ、ジョブを書いている段階では
+`rein doctor` が手元で報告する。
 
 ## 証拠にもとづく判定
 

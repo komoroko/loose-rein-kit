@@ -335,10 +335,40 @@ judge it would not be a boundary. Set them once, on the hosting side:
 | No self-approval on a PR that changes `.rein/` or `.github/workflows/` | Those are the boundary itself. |
 | Secret scanning / gitleaks in CI | The commit-stage hook only protects the developer who installed it. |
 
-`rein doctor` reports the one part it can see locally: whether a workflow runs
-`rein policy-check` (WARN when nothing does). The rest lives with whoever administers the
+`rein doctor` reports the parts it can see locally: whether a workflow runs
+`rein policy-check` (WARN when nothing does), whether the event gives it a base the head cannot
+choose, and where the `rein` running it came from. The rest lives with whoever administers the
 repository, and the first `policy-check` run — the commit that introduces it — is not
 self-verified, because there is no earlier base-side verifier to check it.
+
+The job itself is the one piece of CI worth spelling out here, because the order of its steps is
+load-bearing and it is not the order every other job uses:
+
+```yaml
+  policy-check:
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: astral-sh/setup-uv@<commit sha>
+      # Before the checkout, so there is no tree for uv to discover `uv.toml` / `[tool.uv]` from,
+      # and from a commit the head did not write. `--no-config` keeps a reordering from silently
+      # reopening it. Installing after the checkout lets the pull request choose the index its own
+      # verifier's dependencies are resolved from, and they import at startup.
+      - run: >-
+          uv tool install --no-config
+          'git+https://github.com/komoroko/loose-rein-kit.git@<the tag in .rein/rein.lock>'
+      - uses: actions/checkout@<commit sha>
+        with:
+          fetch-depth: 0
+      - run: >-
+          rein policy-check
+          --base-sha '${{ github.event.pull_request.base.sha }}'
+          --head-sha '${{ github.event.pull_request.head.sha }}'
+          --base-ref '${{ github.event.pull_request.base.ref }}'
+          --default-branch 'origin/${{ github.event.repository.default_branch }}'
+```
+
+`rein policy-check` refuses a pull request whose head weakens any of this, and `rein doctor`
+reports it locally while the job is still being written.
 
 ## Evidence over the agent's account
 
