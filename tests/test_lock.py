@@ -169,3 +169,16 @@ def test_written_by_newer_names_the_writer_and_stays_quiet_otherwise(tmp_path: P
     assert lock.written_by_newer(_repo_with(tmp_path, "0.4.0"), "0.4.0") is None
     assert lock.written_by_newer(_repo_with(tmp_path, "0.3.0"), "0.4.0") is None, "older is not this check's business"
     assert lock.written_by_newer(repo_mod.Repo(tmp_path / "nowhere"), "0.4.0") is None
+
+
+def test_behind_summary_states_the_fact_and_leaves_the_consequence_to_the_caller(tmp_path: Path) -> None:
+    """One sentence, written once. What being behind *costs* differs by where it is noticed —
+    a document that is not damaged, a receipt that must not be written — and that half is the
+    caller's; the fact and its repair are not."""
+    summary = lock.behind_summary(_repo_with(tmp_path, "0.5.0", source="git+https://github.com/o/r@v0.5.0"), "0.4.0")
+    assert summary is not None
+    assert "written by rein 0.5.0" in summary
+    assert "running 0.4.0" in summary
+    assert "uv tool install --force" in summary
+    assert lock.behind_summary(_repo_with(tmp_path, "0.4.0"), "0.4.0") is None
+    assert lock.behind_summary(_repo_with(tmp_path, "0.3.0"), "0.4.0") is None

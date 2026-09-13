@@ -137,7 +137,7 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
     # the key it rejects is one the repo is entitled to carry. Saying `rein revise --to tasks` there
     # sends a human to rewind an approved gate — the most expensive move the workflow has — to fix
     # nothing. The skew already has its own WARN; this makes it the repair line too.
-    behind = lock_mod.written_by_newer(repo, rein.__version__)
+    behind = lock_mod.behind_summary(repo, rein.__version__)
     for name, reader in (
         ("config", store.read_config),
         ("state", store.read_state),
@@ -149,12 +149,7 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
         except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
             repair = _DOCUMENT_REPAIR[name]
             if behind is not None:
-                recorded, hint = behind
-                repair = (
-                    f"this repository was written by rein {recorded} and you are running "
-                    f"{rein.__version__} — read the document with the release that wrote it before "
-                    f"treating it as damaged: {hint}"
-                )
+                repair = f"{behind} — read the document with the release that wrote it before treating it as damaged"
             findings.append(Finding("FAIL", "format", f"{name}.yaml: {exc}\n  repair: {repair}"))
             continue
         if value is None:

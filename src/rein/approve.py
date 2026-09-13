@@ -32,6 +32,7 @@ import sys
 from collections.abc import Mapping
 from datetime import datetime, timezone
 
+import rein
 from rein import (
     audit,
     change_request,
@@ -45,6 +46,7 @@ from rein import (
     review_policy,
     review_reading,
 )
+from rein import lock as lock_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -185,6 +187,29 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
     return [reason] if reason else []
 
 
+def _skew_blockers(repo: repo_mod.Repo) -> list[str]:
+    """A receipt may not be written by a tool older than the release that wrote this repository.
+
+    A receipt binds `plan_digest` / `config_digest` / `environment_digest`, and a process that
+    cannot parse the repository's current documents computes those against schemas it has the
+    narrow version of. Nothing in the record distinguishes such a receipt from one written by a
+    current process — `confirmed_via` says which channel confirmed, not which build wrote it — so
+    the check has to happen before, not after.
+
+    Here rather than in either place a human confirms, because it is a precondition of the
+    approval and not of the pane. One check covers `rein approve` at a terminal, the dashboard's
+    approval footer (`ui._approve_gate`), and the pending queue that tells a human a gate is ready.
+    """
+    behind = lock_mod.behind_summary(repo, rein.__version__)
+    if behind is None:
+        return []
+    return [
+        f"{behind}. A gate receipt binds digests this process computed, and a tool that cannot "
+        "read the repository's current documents must not compute them. Upgrade first, and "
+        "restart any `rein ui` that is running."
+    ]
+
+
 def _baseline_blockers(state: models.State, gate: str) -> list[str]:
     """Gate ③ decides that this plan is implementable against this tree. It has to know the tree.
 
@@ -290,6 +315,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
         return ["no .rein/state.yaml — run `rein init` first"]
 
     blockers: list[str] = []
+    blockers += _skew_blockers(repo)
     _, defects = event_chain.scan(repo.events)
     if defects:
         blockers.append(

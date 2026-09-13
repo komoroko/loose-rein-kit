@@ -266,6 +266,29 @@ def test_status_stays_up_over_a_broken_document(tmp_path: Path) -> None:
     assert status["next"]["command"]  # type: ignore[index]
 
 
+def test_a_document_a_newer_rein_wrote_is_reported_behind_and_not_invalid(tmp_path: Path) -> None:
+    """The repair for "invalid" is not the repair for "behind", and this is where the two are told
+    apart on every read rather than once per process.
+
+    `rein ui` is the only rein that stays up long enough for the answer to change under it: the
+    `rein sync` that materialises a newer release's schema happens in another terminal, and the
+    dashboard then reports a config it cannot parse as the one thing that was not wrong. This
+    function is what a tick re-runs, so the question is asked here.
+    """
+    from rein import lock as lock_mod
+
+    seed_repo(tmp_path)
+    lock_mod.write(tmp_path / ".rein" / "rein.lock", lock_mod.new("99.0.0", "git+https://github.com/o/r@v99.0.0"))
+    (tmp_path / ".rein" / "config.yaml").write_text("security:\n  dependency_audit: {}\n", encoding="utf-8")
+
+    warnings = status_api.collect_status(repo_mod.Repo(tmp_path))["warnings"]
+    assert isinstance(warnings, list)
+    behind = [w for w in warnings if "config.yaml" in w]
+    assert behind and "written by rein 99.0.0" in behind[0]
+    assert "uv tool install --force" in behind[0]
+    assert "Additional properties" not in behind[0]
+
+
 def test_an_inconsistent_task_graph_is_a_warning_not_a_crash(tmp_path: Path) -> None:
     seed_repo(tmp_path, state=make_state(tasks={"T-777": "done"}))
     status = status_api.collect_status(repo_mod.Repo(tmp_path))
