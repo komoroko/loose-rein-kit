@@ -4,6 +4,90 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.4.7] - 2026-09-13
+
+**A dependency change was read, so coverage stops calling it unread.**
+`dependency_semantics_analyzed` was `not has_dependency_change` and nothing else, so it had no
+path to `true`: every cycle that touched a lockfile was coverage-`insufficient` by definition, and
+at high risk that shut gate ④ with neither remedy the block named available — a lockfile cannot be
+split out of the scope that produced it, and the risk it is measured against was frozen by a human
+at gate ③. What a dependency change leaves unanswered is not whether the diff could be read (every
+byte of it was) but what the new versions do, which no reading of this repository answers at any
+depth; that question has its own gate, evidence and expiry, and `approve._audit_blockers` holds
+gate ⑤ shut until `rein audit run` has answered it over this tree's manifests. The flag is gone
+from the manifest, the schema and `_default_status`, and with it the second pricing of the same
+fact in `coverage_gap_risk` — `detect_signals` already floors a dependency change at `medium`
+through `detector_risk_floor`. `deleted_lines_analyzed`, hardcoded `True`, went with it, and so
+did `not binary_semantics_analyzed` as a *condition*: a binary file lands in `unsupported_files`
+in the same breath, so it could never fire alone. The field stays, because `coverage_gap_risk` is
+where it is the difference between "nothing could be read" and "the scan found nothing in it".
+`ChangeOutlook.coverage_blocks_gate` re-derived insufficiency as `bool(unreadable)` — a second
+definition, which is how a board says `PASS` about a change the gate then refuses — and reads the
+manifest's own verdict now. The block names the paths it is about, because every remaining cause
+of insufficiency is one. **A `review.yaml` written by 0.4.6 carries the two removed keys and the
+schema is `additionalProperties: false`: regenerate it (`rein review generate`) rather than
+editing it.**
+
+**The version-skew question is asked at the layer that reads the documents.** `lock.startup_warning`
+is a per-invocation check that `cli` calls once at process start, which is the same thing as "once
+per process" for every rein but one: `rein ui` stays up for days, serves several repositories, and
+is invalidated by an upgrade in another terminal — the `rein sync` that materialises the new schema
+is itself the event that makes the running dashboard wrong. It then reported a correct `config.yaml`
+as invalid, which is the one thing that was not wrong.
+
+The answer belongs to `Store`, because *being behind is the reason a read fails*: a newer release
+widens a schema, this tool has the narrow one, and it rejects a key the repository is entitled to
+carry. So all four document readers raise `DocumentBehindError` — a `models.DocumentError`, so
+nothing that already caught one stops catching it, carrying its own `repair` and keeping the schema
+errors on `.errors` for anyone who wants them. `doctor`, the status board, `rein start` and every
+other reader get the right sentence without asking for it, and a check placed *after* the read (as
+`approve.readiness` first had it) is no longer a check that never runs in the case it was written
+for.
+
+Writing is refused outright, at `Store.transaction` — the one door every SSOT mutation passes.
+Naming the writes that matter would mean maintaining that list: a gate receipt binds digests the
+writing process computed and records which *channel* confirmed rather than which release wrote it,
+so afterwards nothing distinguishes one written under a schema this tool has the narrow version of,
+and neither a task status nor a review freeze is any different. `approve.readiness` reports the
+same fact as a blocker before it reads anything, so a board says "upgrade" rather than "ready".
+
+**The verifier's own provenance is part of being base-side.** `_POLICY_REQUIRED`,
+`_ENFORCEMENT_MARKERS` and `fetch-depth: 0` enumerate one thing — the inputs handed to the
+verifier — and said nothing about where the verifier came from. A workflow that installs `rein`
+after `actions/checkout` lets uv discover `uv.toml` and `[tool.uv]` from the tree the pull request
+wrote, so the head chooses the index its own judge's dependency closure is resolved through, and
+that closure imports at startup. `policy_check.provenance` is the other half, per job, in three
+parts: the tool is built out of the tree (`uv run` / `uv sync`), it was installed after the
+checkout, or nothing pins uv's settings discovery shut.
+
+Parsed, not scanned, which the rest of that module deliberately is not — because two of the three
+questions are about structure. **Order is per job**: this repository's own `ci.yml` has its first
+`actions/checkout` four jobs above the one that matters, and a flat list of every matching job's
+steps is the same mistake one level in, where one job's install satisfies another job's checkout.
+And `--no-config` is read off the install step with `UV_NO_CONFIG` off the parsed `env:` at step,
+job or workflow level, because a scan cannot tell either from a comment shaped like one.
+
+**It reports what a head introduces, not what it inherited.** A base whose policy job the head
+could already influence is in a state this check cannot repair by refusing — the compromised `rein`
+is the one running, so its verdict is worth nothing either way, and failing every unrelated pull
+request in that repository buys nothing. Findings are keyed by workflow, job and kind, so a
+worsening change and a newly added job are still caught; `doctor` names a pre-existing one locally,
+where it gets fixed.
+
+`strict_yaml`'s implicit **bool** resolver is narrowed to YAML 1.2's core schema for this:
+`yes`/`no`/`on`/`off` reading as booleans is the same ambiguity that module exists to refuse, so
+narrowing it makes the boundary stricter, and a workflow (whose `on:` key became `True` under YAML
+1.1, which the strict loader refuses as a non-string key) parses as a side effect. **A hand-written
+`.rein/config.yaml` that spells a boolean `yes`, `no`, `on` or `off` now reads as a string and
+fails its schema — write `true`/`false`.** Nothing rein writes was ever affected.
+
+This repository's own policy job was the worst instance of what the check now refuses: `uv sync
+--frozen` plus `uv run --frozen rein policy-check` built the judge out of the pull request's own
+source, with no indirection at all. It installs from `github.event.pull_request.base.sha` before
+the checkout now, into a named `UV_TOOL_BIN_DIR` the job puts on PATH itself (`uv tool install`
+does not, and says so). Both READMEs carry the job, because its step order is load-bearing and it
+is not the order every other job in the file uses.
+
 ## [0.4.6] - 2026-09-08
 
 **The policy prices a finding; the reviewer only describes it.** All three reviewer stages were
