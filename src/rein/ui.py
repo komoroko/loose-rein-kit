@@ -738,6 +738,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "bytes than the ones you read. Re-open the gate and check the digests again.",
                 )
             approval_id = approve.record_approval(repo, gate, subject, confirmed_via="ui-session")
+        except store_mod.BehindError as exc:
+            raise UiActionError(HTTPStatus.CONFLICT, str(exc)) from None
         except (approve.ApprovalError, models.DocumentError, store_mod.StoreError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
         logger.warning(f"gate '{gate}' opened from the dashboard ({approval_id})")
@@ -787,7 +789,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
         event: str,
         apply: Callable[[models.Review, dict[str, object]], dict[str, object]],
     ) -> None:
-        """Persist one human-half change through the Store, guarding staleness and recording why."""
+        """Persist one human-half change through the Store, guarding staleness and recording why.
+
+        A write from a dashboard older than the repository is refused by `Store.transaction`
+        itself, which is where every SSOT mutation passes and therefore the only place that does
+        not have to be told which writes matter. `rein ui` is the one rein process long-lived
+        enough for that answer to change under it — every other is a one-shot command that asked
+        at startup — so it is also the one that has to ask again per request rather than once.
+        """
+        repo = repo_mod.Repo(self.server.active_root())
         # Required, not optional: an empty digest waved through would let a client that simply
         # omitted the field — a stale tab, a script, a retried request — merge its answers into
         # whatever machine review is on disk, the exact E2E-08 failure the guard exists to stop.
@@ -797,7 +807,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 HTTPStatus.BAD_REQUEST,
                 "machine_digest is required — an answer has to name the machine review it is about",
             )
-        store = store_mod.Store(repo_mod.Repo(self.server.active_root()))
+        store = store_mod.Store(repo)
         try:
             with store.transaction() as tx:
                 review = tx.store.read_review()
@@ -823,7 +833,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "session": review_api.review_session(self.server.active_root()),
                 },
             )
-        except human_review.StaleReview as exc:
+        except (human_review.StaleReview, store_mod.BehindError) as exc:
+            # Both are "this process and this repository disagree about what is current" — one
+            # about the review on screen, one about the release that wrote the documents.
             raise UiActionError(HTTPStatus.CONFLICT, str(exc)) from None
         except (store_mod.StoreError, models.DocumentError, ValueError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None

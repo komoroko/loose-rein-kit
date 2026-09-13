@@ -186,6 +186,24 @@ def written_by_newer(repo: repo_mod.Repo, running_version: str) -> tuple[str, st
     return recorded, _upgrade_hint(source_of(data))
 
 
+def behind_summary(repo: repo_mod.Repo, running_version: str) -> str | None:
+    """`this repository was written by rein X and you are running Y — <how to upgrade>`, or None.
+
+    The shared half of every message about running behind, so the fact and its repair are written
+    once. What follows it differs by what the skew costs where it is noticed — a document that is
+    not damaged, a receipt that must not be written — and that half belongs to the caller.
+
+    Separate from :func:`startup_warning`, which is the one-line stderr notice a one-shot command
+    prints before it goes on. This is for the places where being behind is the *answer* to
+    something else the tool was about to say, and for the two where it has to refuse.
+    """
+    behind = written_by_newer(repo, running_version)
+    if behind is None:
+        return None
+    recorded, hint = behind
+    return f"this repository was written by rein {recorded} and you are running {running_version} — {hint}"
+
+
 def startup_warning(repo: repo_mod.Repo, running_version: str) -> str | None:
     """The cheap per-invocation check: one warning line, or None when all is well.
 

@@ -543,6 +543,12 @@ class DocumentError(common.ReinError, ValueError):
     handed the next one is exactly the review friction plan §2.6 budgets against.
     """
 
+    #: What to do about it, when the raiser knows something the reader does not. Empty here: a
+    #: document that fails its own schema is repaired by whatever wrote it, which this layer
+    #: cannot name. A subclass that *does* know (`store.DocumentBehindError`) fills it in, so a
+    #: caller can prefer it over its own guess without asking what kind of error it caught.
+    repair: str = ""
+
     def __init__(self, what: str, errors: Sequence[str]) -> None:
         self.what = what
         self.errors = list(errors)

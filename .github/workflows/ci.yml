@@ -112,17 +112,39 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          fetch-depth: 0 # policy-check reads both the base and head trees
-
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: true
 
-      - name: Sync dependencies
-        run: uv sync --frozen
+      # Before the checkout, and from the base commit. Both halves matter.
+      #
+      # Before: after `actions/checkout` the working directory is the head tree, and uv discovers
+      # `uv.toml` / `[tool.uv]` from it — so a pull request could point `index-url` at a host it
+      # controls and resolve this verifier's dependency closure through it. They import at startup.
+      # `--no-config` keeps a later reordering from reopening that silently.
+      #
+      # From the base commit: `uv sync --frozen` built `rein` out of the pull request's own source,
+      # which is the same hole with no indirection at all — the tool judging the change *was* the
+      # change. The base SHA comes from the event context, so the head cannot name it, and a pull
+      # request that fixes `policy-check` is judged by the release before it. That is what
+      # "base-side" means, not a shortcoming of it.
+      - name: Install rein from the trusted base commit
+        env:
+          # Named rather than inherited, and outside the workspace: `uv tool install` does not put
+          # its bin directory on PATH (it warns that it has not), so the step says where the
+          # executable goes and puts that one directory on PATH itself. Nothing the checkout writes
+          # can reach it. On the step and not the job because `runner` is not a context a job-level
+          # `env:` may read — a workflow that tries fails to parse, with no job and no message.
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/rein-bin
+        run: |
+          uv tool install --no-config \
+            "git+https://github.com/komoroko/loose-rein-kit.git@${{ github.event.pull_request.base.sha }}"
+          echo "$UV_TOOL_BIN_DIR" >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # policy-check reads both the base and head trees
 
       # Bootstrap note (plan §29.3): the commit that FIRST introduces this check has no prior base
       # verifier to check it, so that one run is not self-verified. Every later PR is checked by the
@@ -135,7 +157,7 @@ jobs:
       # the SHAs do.
       - name: Run policy-check (base-side meta-policy)
         run: >-
-          uv run --frozen rein policy-check
+          rein policy-check
           --base-sha "${{ github.event.pull_request.base.sha }}"
           --head-sha "${{ github.event.pull_request.head.sha }}"
           --base-ref "${{ github.event.pull_request.base.ref }}"

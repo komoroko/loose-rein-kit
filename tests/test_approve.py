@@ -214,6 +214,35 @@ def test_a_damaged_audit_chain_blocks_every_gate(tmp_path: Path) -> None:
     assert any("audit chain has" in b for b in approve.readiness(repo, "requirements"))
 
 
+def test_a_tool_behind_the_repository_may_not_write_a_receipt(tmp_path: Path) -> None:
+    """A receipt binds digests the recording process computed, and nothing in it says which build
+    did. `confirmed_via` names the channel, not the release — so a receipt written by a tool that
+    cannot parse the repository's current documents is indistinguishable afterwards from a sound
+    one, and the check has to be a precondition rather than a caveat.
+
+    Here rather than in either pane a human confirms: one check covers `rein approve` at a
+    terminal, the dashboard's approval footer, and the pending queue that says a gate is ready.
+    """
+    from rein import lock as lock_mod
+
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    lock_mod.write(repo.lock, lock_mod.new("99.0.0", "git+https://github.com/o/r@v99.0.0"))
+    # The documents have to actually fail under this tool's schemas, because that *is* the
+    # symptom: a newer release widens one and uses the new key. Checked after the reads, this
+    # function raised `DocumentError` out of `store.read_config()` and the check never ran — which
+    # is what the dashboard then rendered as "config.yaml is invalid".
+    config = repo.root / ".rein" / "config.yaml"
+    config.write_text(config.read_text(encoding="utf-8") + "\nsecurity:\n  future_key: 1\n", encoding="utf-8")
+
+    for gate in models.GATE_ORDER:
+        blockers = approve.readiness(repo, gate, already_approved_blocks=False)
+        assert any("written by rein 99.0.0" in b for b in blockers), gate
+        assert not [b for b in blockers if "Additional properties" in b], gate
+
+    lock_mod.write(repo.lock, lock_mod.new("0.1.0", ""))
+    assert not [b for b in approve.readiness(repo, "requirements") if "written by rein" in b]
+
+
 def test_an_unknown_gate_is_refused(tmp_path: Path) -> None:
     repo = repo_at(tmp_path)
     with pytest.raises(approve.ApprovalError, match="unknown gate"):

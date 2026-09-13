@@ -19,6 +19,12 @@ Dropping the implicit timestamp resolver is deliberate and load-bearing, not inc
 hardening: timestamps stay `str`, so :mod:`rein.digests` sees the same bytes the file
 holds and a digest computed on one machine matches one computed on another.
 
+The implicit **bool** resolver is narrowed to YAML 1.2's core schema — `true`/`false` and their
+case variants, and nothing else. YAML 1.1 also reads `yes`, `no`, `on` and `off` as booleans, which
+is the same ambiguity by another name: a key spelled `on:` becomes `True`, and a value spelled
+`no` becomes `False` in a document whose author typed a word. Under the narrowed resolver both stay
+strings and a schema that wants a boolean says so.
+
 Failure posture: **one exception type, always fail closed.** :class:`StrictParseError`
 carries a human-readable reason with the source mark; no caller is offered a "tolerant"
 variant, because a second, laxer entry point is how tolerance creeps back in.
@@ -28,6 +34,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -161,8 +168,15 @@ class _StrictLoader(yaml.SafeLoader):
 # edited — mutating the inherited dict would reconfigure yaml.SafeLoader process-wide and
 # change how unrelated code (including PyYAML's own tests) parses. Dropping the timestamp
 # resolver is what keeps dates as `str` for reproducible digests (module docstring).
+#: YAML 1.2 core: the only plain scalars that are booleans. `yes`/`no`/`on`/`off` are words.
+_CORE_BOOL = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+
 _StrictLoader.yaml_implicit_resolvers = {
-    first: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:timestamp"]
+    first: [
+        (tag, _CORE_BOOL if tag == "tag:yaml.org,2002:bool" else regexp)
+        for tag, regexp in resolvers
+        if tag != "tag:yaml.org,2002:timestamp"
+    ]
     for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
 

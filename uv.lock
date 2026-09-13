@@ -377,7 +377,7 @@ wheels = [
 
 [[package]]
 name = "loose-rein-kit"
-version = "0.4.6"
+version = "0.4.7"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },

@@ -44,7 +44,9 @@ from typing import Any, TypeVar
 
 import yaml
 
+import rein
 from rein import common, digests, event_chain, models, strict_yaml
+from rein import lock as lock_mod
 from rein import repo as repo_mod
 
 _DIR_MODE = 0o700
@@ -55,6 +57,52 @@ _FILE_MODE = 0o600
 _REPO_FILE_MODE = 0o644
 
 _T = TypeVar("_T")
+
+
+class BehindError(common.ReinError, RuntimeError):
+    """This tool is older than the release that wrote this repository, and was about to write it.
+
+    Raised by :meth:`Store.transaction`, which is every SSOT mutation's one door. Placed there
+    rather than in front of each caller that happens to matter, because the ones that matter are
+    not knowable from here: a gate receipt binds digests the writing process computed and records
+    which *channel* confirmed rather than which release wrote it, so afterwards nothing
+    distinguishes a receipt written under a schema this tool has the narrow version of. Neither
+    does a task status, a review freeze, or an evidence record.
+
+    A subclass of nothing in particular on purpose — it is not a `StoreError`, because a caller
+    that turns "the store failed" into "the document is bad" would say the wrong thing about a
+    tool that is merely out of date.
+    """
+
+
+class DocumentBehindError(models.DocumentError):
+    """A document this tool cannot parse *because it is older than what wrote the repository*.
+
+    "Invalid" and "behind" are different facts with different repairs, and only one of them is
+    about the document. A newer release widens a schema; this tool has the narrow one and rejects
+    a key the repository is entitled to carry. Sending a human to `rein revise --to tasks` there
+    asks them to rewind an approved gate — the most expensive move the workflow has — to fix
+    nothing.
+
+    A subclass of :class:`models.DocumentError` so every `except models.DocumentError` keeps
+    catching it: the *category* is unchanged (a caller was reading a document and could not), and
+    only the sentence and the repair differ. Raised from :class:`Store`, which is where all four
+    documents are read, so no caller has to know to ask — the answer arrives with the failure.
+    The schema errors are still on `.errors` for anyone who wants to look.
+    """
+
+    def __init__(self, what: str, errors: Sequence[str], behind: str) -> None:
+        super().__init__(what, errors)
+        self.behind = behind
+        self.repair = f"{behind} — read it with the release that wrote it rather than treating it as damaged"
+        # Deliberately does not name the document: every caller already has, because it was the
+        # one it asked for. "cannot read config.yaml: this rein cannot parse config.yaml" is the
+        # shape that gets skimmed past.
+        self.args = (
+            f"this rein is older than the release that wrote this repository, and that — not a "
+            f"damaged document — is why it does not parse: {behind}. Restart any running "
+            "`rein ui` after upgrading.",
+        )
 
 
 class StoreError(common.ReinError, RuntimeError):
@@ -372,7 +420,73 @@ class Store:
             raise StoreError(f"cannot read {path}: {exc}") from None
         return strict_yaml.load_mapping(text, what=path.name)
 
+    def behind(self) -> str | None:
+        """Why this tool is older than the release that wrote this repository, or None.
+
+        One question, asked at the layer that reads and writes the documents rather than by each
+        caller that might want to mention it. `lock.startup_warning` is the per-invocation notice,
+        which is the same thing as "once per process" for every rein but `ui` — a server that stays
+        up for days, serves several repositories, and is invalidated by an upgrade in another
+        terminal.
+
+        A lock nobody can read answers None, and that is not it being swallowed: the question is
+        whether being behind *explains* something else, and with no readable lock nothing has been
+        established either way. Saying "behind" there would attach a cause to a failure on no
+        evidence. The damaged lock has its own report — `cli` turns it into a hard error on every
+        invocation and `doctor` names it — and :meth:`write_refusal` is where "cannot tell" and
+        "must not" become the same answer.
+        """
+        try:
+            return lock_mod.behind_summary(self.repo, rein.__version__)
+        except lock_mod.LockError:
+            return None
+
+    def write_refusal(self) -> str | None:
+        """Why this tool must not write this repository's SSOT, or None. Two reasons, one posture.
+
+        The lock says a newer release wrote the documents, or the lock cannot be read and the
+        question has no answer. Both are "this process cannot vouch for what is already here", and
+        a write is not the place to assume otherwise.
+        """
+        try:
+            behind = lock_mod.behind_summary(self.repo, rein.__version__)
+        except lock_mod.LockError as exc:
+            return (
+                f"refusing to write this repository's SSOT: {exc}. Whether this tool is older than "
+                "the release that wrote these documents has no answer while the lock is unreadable. "
+                "Run `rein doctor`."
+            )
+        if behind is None:
+            return None
+        return (
+            f"refusing to write this repository's SSOT: {behind}. A document written here would be "
+            "written by a tool that does not fully parse what is already there."
+        )
+
+    def _read(self, reader: Callable[[], _T]) -> _T:
+        """Run one document reader, and say "behind" instead of "invalid" when that is the truth."""
+        try:
+            return reader()
+        except models.DocumentError as exc:
+            behind = self.behind()
+            if behind is None:
+                raise
+            raise DocumentBehindError(exc.what, exc.errors, behind) from None
+
     def read_plan(self) -> models.Plan | None:
+        return self._read(self._plan)
+
+    def read_state(self) -> models.State | None:
+        return self._read(self._state)
+
+    def read_review(self) -> models.Review | None:
+        return self._read(self._review)
+
+    def read_config(self) -> models.Config | None:
+        """The validated config, or None when absent. Raises on a config that fails its schema."""
+        return self._read(self._config)
+
+    def _plan(self) -> models.Plan | None:
         raw = self.read_raw("plan")
         if raw is None:
             return None
@@ -383,7 +497,7 @@ class Store:
             raise models.DocumentError("plan.yaml", errors)
         return plan
 
-    def read_state(self) -> models.State | None:
+    def _state(self) -> models.State | None:
         raw = self.read_raw("state")
         if raw is None:
             return None
@@ -392,7 +506,7 @@ class Store:
             raise models.DocumentError("state.yaml", errors)
         return models.State(raw)
 
-    def read_review(self) -> models.Review | None:
+    def _review(self) -> models.Review | None:
         raw = self.read_raw("review")
         if raw is None:
             return None
@@ -401,8 +515,7 @@ class Store:
             raise models.DocumentError("review.yaml", errors)
         return models.Review(raw)
 
-    def read_config(self) -> models.Config | None:
-        """The validated config, or None when absent. Raises on a config that fails its schema."""
+    def _config(self) -> models.Config | None:
         try:
             text = self.repo.config.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -434,7 +547,16 @@ class Store:
         """Hold the store lock and yield a :class:`Transaction`; commit on clean exit.
 
         An exception inside the block aborts: nothing is written, no event is appended.
+
+        Refused outright while the repository is newer than this tool (:class:`BehindError`). This
+        is the one door every SSOT mutation goes through, which is why the check is here: naming
+        the writes that matter would mean maintaining that list, and a gate receipt, a task status
+        and a review freeze are all written by a process whose reading of the documents is the
+        thing in doubt.
         """
+        refusal = self.write_refusal()
+        if refusal is not None:
+            raise BehindError(refusal)
         ensure_private_dir(self.runtime)
         with FileLock(self.store_lock, wait_sec=STORE_LOCK_WAIT_SEC):
             if recover:

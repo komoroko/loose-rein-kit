@@ -2449,13 +2449,15 @@ def test_the_coverage_manifest_still_reads_the_whole_diff() -> None:
     """The honesty property the folding must not touch.
 
     What the manifest measures is how much of the change could be analysed; folding a file before
-    counting it would be measuring the fold. A dependency change goes on making the coverage
-    `insufficient` for exactly the reason it always did.
+    counting it would be measuring the fold. So the lockfile the reviewers never see is counted,
+    measured, and named in `languages` at the depth it was actually read.
     """
     facts = diff_facts.analyze(_LOCKFILE_DIFF)
     manifest = facts.coverage.to_manifest()
-    assert manifest["coverage_status"] == "insufficient"
-    assert manifest["dependency_semantics_analyzed"] is False
+    assert manifest["analyzed_files"] == 2  # the code and the lockfile whose body is withheld
+    assert manifest["analyzed_bytes"] == len(_LOCKFILE_DIFF.encode("utf-8"))
+    assert manifest["languages"] == {"python": "ast", "lockfile": "token_only"}
+    assert manifest["coverage_status"] == "sufficient"
 
 
 # --- the priming turn's acknowledgement is a control signal, so it is checked (D3) ---------
@@ -2795,6 +2797,7 @@ def test_an_over_budget_reading_names_the_task_whose_scope_is_too_broad(review_r
         total_bytes=2_141_194,
         ceiling=524_288,
         unreadable=(),
+        coverage_status="sufficient",
         effective_risk="high",
         unit="T-004",
         readings=7,
@@ -2814,6 +2817,7 @@ def test_a_big_cycle_read_in_slices_is_not_over_budget(review_repo: Path) -> Non
         total_bytes=754_000,
         ceiling=524_288,
         unreadable=(),
+        coverage_status="sufficient",
         effective_risk="high",
         unit="T-004",
         readings=9,
@@ -3067,7 +3071,13 @@ def test_all_product_code_names_nothing() -> None:
     """`made_of` answers "what would I remove", and "it is all product code" is the null answer to
     that. A board line that always ended in "made of: source 100%" would be noise."""
     one = review.ChangeOutlook(
-        diff_bytes=100, total_bytes=100, ceiling=10, unreadable=(), effective_risk="low", composition=(("source", 100),)
+        diff_bytes=100,
+        total_bytes=100,
+        ceiling=10,
+        unreadable=(),
+        coverage_status="sufficient",
+        effective_risk="low",
+        composition=(("source", 100),),
     )
     assert one.made_of() == ""
     two = review.ChangeOutlook(
@@ -3075,6 +3085,7 @@ def test_all_product_code_names_nothing() -> None:
         total_bytes=100,
         ceiling=10,
         unreadable=(),
+        coverage_status="sufficient",
         effective_risk="low",
         composition=(("source", 75), ("test", 25)),
     )
@@ -3126,7 +3137,8 @@ def test_a_path_git_quoted_still_reaches_the_test_half(tmp_path: Path) -> None:
 def test_a_change_that_is_all_lockfile_says_so(tmp_path: Path) -> None:
     """Silence on a single non-source kind was the bug with its sign reversed: 900 KB of lockfile
     and nothing else is where the answer to "what would I remove" is most obvious."""
-    lockfile = review.ChangeOutlook(900_000, 900_000, 500_000, (), "low", (("dependency", 900_000),))
+    lockfile = review.ChangeOutlook(900_000, 900_000, 500_000, (), "sufficient", "low", (("dependency", 900_000),))
     assert lockfile.made_of() == "made of: dependency 900.0 KB (100%)"
     # "It is all product code" stays silent: there is nothing to remove.
-    assert review.ChangeOutlook(900_000, 900_000, 500_000, (), "low", (("source", 900_000),)).made_of() == ""
+    source = review.ChangeOutlook(900_000, 900_000, 500_000, (), "sufficient", "low", (("source", 900_000),))
+    assert source.made_of() == ""

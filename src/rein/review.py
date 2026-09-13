@@ -251,6 +251,9 @@ class ChangeOutlook:
     total_bytes: int
     ceiling: int
     unreadable: tuple[str, ...]
+    #: The manifest's own verdict on this change, so the board and the gate cannot disagree about
+    #: what "insufficient" means. `unreadable` is what to *say*; this is what was *decided*.
+    coverage_status: str
     effective_risk: str
     #: What the payload is made of, by `diff_facts` kind, largest first. The number alone says a
     #: review cannot be run; this says which lever to reach for.
@@ -266,8 +269,14 @@ class ChangeOutlook:
 
     @property
     def coverage_blocks_gate(self) -> bool:
-        """Would this coverage block gate ④? Insufficient coverage only blocks at high/critical."""
-        return bool(self.unreadable) and models.risk_at_least(self.effective_risk, "high")
+        """Would this coverage block gate ④? Insufficient coverage only blocks at high/critical.
+
+        The same two facts `review_policy.coverage_blocks` decides on, read off the same manifest.
+        This used to re-derive the first of them as `bool(self.unreadable)` — a second definition
+        of insufficiency, which is how a board comes to say `PASS` about a change the gate then
+        refuses.
+        """
+        return self.coverage_status != "sufficient" and models.risk_at_least(self.effective_risk, "high")
 
     def line(self) -> str:
         """One line for a status board: what the reading stages would be asked to hold."""
@@ -357,6 +366,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         total_bytes=facts.coverage.analyzed_bytes,
         ceiling=int(limits["max_diff_bytes"]),
         unreadable=tuple(sorted(p for p in unreadable if p)),
+        coverage_status=facts.coverage.coverage_status,
         effective_risk=effective,
         composition=tuple(bytes_by_kind(diff_text).items()),
         unit=unit,

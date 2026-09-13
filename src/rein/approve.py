@@ -279,10 +279,24 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
         raise ApprovalError(f"unknown gate {gate!r} (one of {', '.join(models.GATE_ORDER)})")
 
     store = store_mod.Store(repo)
+    # Before the documents are read, not after. A newer release widens a schema, so the very
+    # symptom of being behind is that a read raises — and a check that ran afterwards was a check
+    # that never ran in the case it was written for. Reported rather than raised, because "you are
+    # behind" is a thing a board can show beside every other blocker, and an exception is not.
+    behind = store.behind()
+    if behind is not None:
+        return [
+            f"{behind}. A gate receipt binds digests this process computed, and `confirmed_via` "
+            "records which channel confirmed rather than which release wrote it — so a receipt "
+            "written from here would be indistinguishable afterwards from a sound one. Upgrade "
+            "first, and restart any running `rein ui`."
+        ]
+
     try:
         state = store.read_state()
         plan = store.read_plan()
         review = store.read_review()
+        config = store.read_config()
     except models.DocumentError as exc:
         return [str(exc)]
 
@@ -298,7 +312,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
         )
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
     blockers += _baseline_blockers(state, gate)
-    blockers += _audit_blockers(repo, state, store.read_config(), gate)
+    blockers += _audit_blockers(repo, state, config, gate)
     blockers += _change_request_blockers(state, gate)
     blockers += _clarification_blockers(repo, gate)
     blockers += _plan_blockers(repo, plan, gate)

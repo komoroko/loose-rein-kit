@@ -248,10 +248,18 @@ def test_generated_marker_in_content_is_detected() -> None:
     assert facts.coverage.coverage_status == "insufficient"
 
 
-def test_dependency_change_leaves_semantics_unanalyzed() -> None:
+def test_a_dependency_change_is_read_and_priced_but_not_a_coverage_gap() -> None:
+    """Every byte of a lockfile diff is read; what it does not say is what the new versions do.
+
+    That is not a question any reading of this repository answers, so it is not this manifest's to
+    call unread — it is gate ⑤'s, which holds the release shut until `rein audit run` has answered
+    it. The manifest still says how deeply it read (`token_only`) and the detector still floors the
+    risk at `medium`, which is the whole of what a dependency change is worth here.
+    """
     facts = diff_facts.analyze(_diff("pyproject.toml", added=['requests = "^2.99"']))
-    assert facts.coverage.dependency_semantics_analyzed is False
-    assert facts.coverage.coverage_status == "insufficient"
+    assert facts.coverage.coverage_status == "sufficient"
+    assert facts.coverage.languages == {"toml": "token_only"}
+    assert facts.risk_floor == "medium"
 
 
 def test_a_huge_diff_is_read_whole_and_says_so() -> None:

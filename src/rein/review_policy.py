@@ -283,11 +283,15 @@ def coverage_gap_risk(facts: diff_facts_mod.DiffFacts) -> str:
     scope split included, since splitting never removes the file.
 
     The gap is therefore worth what was in the files it covers. Nothing could be read at all —
-    a binary — and it is `high`. Otherwise the signal
-    detector did scan those files line by line (it is language-neutral), so the gap inherits the
-    highest risk any signal matched *inside* them, and a dependency change contributes `medium`
-    because no lexical scan accounts for what the new versions do. This never lowers a risk some
-    other contributor raised: `effective_risk` still takes the max over all eight.
+    a binary — and it is `high`. Otherwise the signal detector did scan those files line by line
+    (it is language-neutral), so the gap inherits the highest risk any signal matched *inside*
+    them. This never lowers a risk some other contributor raised: `effective_risk` still takes the
+    max over all eight.
+
+    A dependency change used to contribute `medium` here as well, which was the same floor twice:
+    `detect_signals` raises a `dependency` hit at `medium` on every changed manifest or lockfile,
+    and that reaches `effective_risk` on its own as `detector_risk_floor`. It is gone from this
+    function along with the manifest flag that carried it (`diff_facts._default_status`).
     """
     manifest = facts.coverage
     if manifest.coverage_status == "sufficient":
@@ -295,10 +299,7 @@ def coverage_gap_risk(facts: diff_facts_mod.DiffFacts) -> str:
     if not manifest.binary_semantics_analyzed:
         return "high"
     unread = {entry.get("path", "") for entry in (*manifest.unsupported_files, *manifest.generated_files)}
-    risks = [hit.risk for hit in facts.signals if hit.path in unread]
-    if not manifest.dependency_semantics_analyzed:
-        risks.append("medium")
-    return models.max_risk(risks)
+    return models.max_risk([hit.risk for hit in facts.signals if hit.path in unread])
 
 
 def risk_inputs_from_facts(
@@ -652,6 +653,12 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
     land here. What can is a `review.yaml` written by a release that composed one anyway, which is
     exactly the shape a validator must still refuse — and the way out is now a regeneration rather
     than a rewind of gate ③.
+
+    **The block names the files, because the remedy it offers is about files.** It used to say
+    "split the unreadable part out of this scope" over a manifest that would not say which part
+    that was, and for the one insufficiency a dependency change produced there was no such part at
+    all (`diff_facts._default_status`). Every remaining cause is a path — an unsupported or
+    generated file, or one no reading covered — so the sentence carries them.
     """
     manifest = review.coverage
     composed = str((manifest.get("composition") or {}).get("mode", "")) == "composed" if manifest else False
@@ -669,9 +676,37 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
     if str(manifest.get("coverage_status")) == "sufficient":
         return []
     return [
-        f"coverage is insufficient for a {effective} change — split the unreadable part out of "
-        "this scope, or reduce the change's risk"
+        f"coverage is insufficient for a {effective} change — {_unread_paths(manifest)} went "
+        "unread, so Extra Behavior is undeterminable rather than zero. Take them out of the "
+        "change, or split them out of this scope"
     ]
+
+
+#: How many unread paths a blocking reason names before it stops listing them. Enough to see the
+#: shape of the gap without turning one blocker into a directory listing.
+_NAMED_UNREAD = 5
+
+
+def _unread_paths(manifest: Mapping[str, Any]) -> str:
+    """The paths that made this manifest insufficient, named. "something" when it cannot say.
+
+    The three causes are the three the manifest records: a file no analyzer could read, a
+    generated one whose content is nobody's to review, and — under a composed reading — a changed
+    path no reading covered at all (`review_reading.compose_coverage`).
+    """
+    paths: list[str] = []
+    for key in ("unsupported_files", "generated_files"):
+        entries = manifest.get(key)
+        if isinstance(entries, list):
+            paths += [str(e.get("path", "")) for e in entries if isinstance(e, Mapping)]
+    unread = (manifest.get("composition") or {}).get("unread_paths")
+    if isinstance(unread, list):
+        paths += [str(p) for p in unread]
+    named = [p for p in dict.fromkeys(paths) if p]
+    if not named:
+        return "part of the change"
+    shown = ", ".join(named[:_NAMED_UNREAD])
+    return f"{shown} …" if len(named) > _NAMED_UNREAD else shown
 
 
 def disputed_subjects(human: Mapping[str, Any]) -> set[str]:

@@ -45,6 +45,7 @@ from rein import (
     gitignore,
     install,
     models,
+    policy_check,
     review_reading,
     strict_yaml,
     upstream,
@@ -132,12 +133,6 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
     store = store_mod.Store(repo)
     findings: list[Finding] = []
     loaded: dict[str, object] = {}
-    # A repository written by a newer rein is the one case where "invalid document" is a fact about
-    # the reader, not the document: that release widened a schema, this tool has the narrow one, and
-    # the key it rejects is one the repo is entitled to carry. Saying `rein revise --to tasks` there
-    # sends a human to rewind an approved gate — the most expensive move the workflow has — to fix
-    # nothing. The skew already has its own WARN; this makes it the repair line too.
-    behind = lock_mod.written_by_newer(repo, rein.__version__)
     for name, reader in (
         ("config", store.read_config),
         ("state", store.read_state),
@@ -147,14 +142,12 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
         try:
             value = reader()
         except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-            repair = _DOCUMENT_REPAIR[name]
-            if behind is not None:
-                recorded, hint = behind
-                repair = (
-                    f"this repository was written by rein {recorded} and you are running "
-                    f"{rein.__version__} — read the document with the release that wrote it before "
-                    f"treating it as damaged: {hint}"
-                )
+            # `exc.repair` when the raiser knew better than this table does. It does in exactly
+            # one case: a repository written by a newer rein, where "invalid document" is a fact
+            # about the reader — that release widened a schema, this tool has the narrow one, and
+            # the key it rejects is one the repo is entitled to carry. Saying `rein revise --to
+            # tasks` there sends a human to rewind an approved gate to fix nothing.
+            repair = getattr(exc, "repair", "") or _DOCUMENT_REPAIR[name]
             findings.append(Finding("FAIL", "format", f"{name}.yaml: {exc}\n  repair: {repair}"))
             continue
         if value is None:
@@ -1078,20 +1071,22 @@ def check_ci(repo: repo_mod.Repo) -> list[Finding]:
             ),
         ]
 
-    name, text = invoking[0]
-    findings.append(Finding("PASS", "ci", f"the base-side meta-policy runs in {name}"))
-    # A `policy-check` step is only a check if the event gives it a base the head cannot choose.
-    for token, what in (
-        ("pull_request", "a `pull_request` trigger — the only event where CI knows a trusted base"),
-        ("github.event.pull_request.base.sha", "the base SHA from the event context, not a branch name"),
-        ("github.event.pull_request.head.sha", "the head SHA from the event context"),
-    ):
+    findings.append(Finding("PASS", "ci", f"the base-side meta-policy runs in {invoking[0][0]}"))
+    # A `policy-check` step is only a check if the event gives it a base the head cannot choose —
+    # `policy_check._POLICY_REQUIRED`, read rather than restated. The base side enforces this list
+    # and this reports it; two spellings of one list is two lists that drift.
+    for token, what in policy_check._POLICY_REQUIRED:
         if not any(token in body for _, body in invoking):
-            findings.append(Finding("WARN", "ci", f"the policy-check workflow does not carry {what}"))
+            findings.append(Finding("WARN", "ci", f"the policy-check workflow does not carry {what} ({token})"))
     if not any("fetch-depth: 0" in body for _, body in invoking):
         findings.append(
             Finding("WARN", "ci", "the policy-check workflow does not set `fetch-depth: 0` — it cannot read both trees")
         )
+    # And where the verifier itself came from. Reported here because this is the machine the job
+    # is being written on, which is while reordering two steps is still free; `policy_check`
+    # refuses the same thing from the base side, where it is no longer a suggestion.
+    for workflow, body in invoking:
+        findings += [Finding("WARN", "ci", v) for v in policy_check.provenance_violations(body, what=workflow)]
     return findings
 
 

@@ -499,8 +499,6 @@ class CoverageManifest:
     unsupported_files: tuple[dict[str, str], ...]
     generated_files: tuple[dict[str, str], ...]
     languages: dict[str, str]
-    deleted_lines_analyzed: bool
-    dependency_semantics_analyzed: bool
     binary_semantics_analyzed: bool
     coverage_status: str = field(default="")
     #: analyzer name → the digest of the executable that answered, for every external analyzer
@@ -515,8 +513,6 @@ class CoverageManifest:
             "analyzed_hunks": self.analyzed_hunks,
             "analyzed_bytes": self.analyzed_bytes,
             "languages": dict(sorted(self.languages.items())),
-            "deleted_lines_analyzed": self.deleted_lines_analyzed,
-            "dependency_semantics_analyzed": self.dependency_semantics_analyzed,
             "binary_semantics_analyzed": self.binary_semantics_analyzed,
             "coverage_status": self.coverage_status,
         }
@@ -588,12 +584,9 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
     generated: list[dict[str, str]] = []
     languages: dict[str, str] = {}
     used_analyzers: dict[str, str] = {}
-    has_dependency_change = False
     has_binary = False
 
     for file in files:
-        if _DEPENDENCY_FILES.search(file.path):
-            has_dependency_change = True
         if file.deleted:
             # A deletion is not content. The change is that the bytes are gone, and that is stated
             # in full by the path, so there is nothing here for the manifest to be a statement
@@ -611,9 +604,6 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
             # reader has to stop and decode. `review.fold_bodies` withholds these bodies for
             # the same reason, and the two have to agree: a body the reviewers are not sent is not
             # one the manifest may call analyzed.
-            #
-            # `has_dependency_change` above is deliberately not skipped: deleting a lockfile is a
-            # dependency change whose semantics no lexical reader accounts for.
             continue
         if _is_generated(file):
             generated.append({"path": file.path, "source_locator": ""})
@@ -647,11 +637,6 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
         unsupported_files=tuple(unsupported),
         generated_files=tuple(generated),
         languages=languages,
-        # Every removed line the manifest covers is inside a parsed hunk, so removals are analyzed
-        # whenever hunks are. A whole-file deletion is not covered here at all (above).
-        deleted_lines_analyzed=True,
-        # Detecting a dependency *file* changed is not understanding what the new versions do.
-        dependency_semantics_analyzed=not has_dependency_change,
         binary_semantics_analyzed=not has_binary,
         analyzers=used_analyzers,
     )
@@ -662,28 +647,42 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
 
 
 def _default_status(manifest: CoverageManifest) -> str:
-    """`sufficient` only when none of the things below went unread — risk-blind by design.
+    """`sufficient` only when every file in the change could be read — risk-blind by design.
 
-    This records *what was read*, and nothing here weighs how much the unread part matters:
-    any unsupported/binary/generated file, or an unevaluated dependency change, makes coverage
-    `insufficient` on its own. `review_policy.coverage_gap_risk` is what prices that gap
-    against the rest of the change, and `review_policy.coverage_blocks` decides the gate.
+    This records *what was read*, and nothing here weighs how much the unread part matters: one
+    unsupported, binary or generated file makes coverage `insufficient` on its own.
+    `review_policy.coverage_gap_risk` is what prices that gap against the rest of the change, and
+    `review_policy.coverage_blocks` decides the gate.
 
-    The list is exactly what the checks below name, and no more. The schema used to declare a
-    `rename_semantics_analyzed` alongside the dependency and binary flags, written by nobody and
-    read by nobody — a third measure this function appeared to take and did not. It is gone rather
-    than implemented: `DiffFile.renamed_from` already reaches the reviewer, so a move is
-    distinguishable from a rewrite by the participant that can actually judge it.
+    The list is exactly what the check below names, and no more. Three other measures stood here
+    and each was removed rather than kept, for the same reason: a condition this function appeared
+    to take and did not.
 
-    A fourth check went the same way: `analyzed_files == 0 and deleted_lines_present`. Every file
-    holding a removed line is either analyzed (so the count is not zero) or unsupported, generated
-    or a dependency (so a check above has already fired), which left it unable to fire — and once
-    a whole-file deletion stopped being a file the manifest speaks about, the only thing it could
-    still have caught was a pure deletion, which is exactly the change it must not call unread.
+    - `rename_semantics_analyzed` was declared by the schema, written by nobody and read by nobody.
+      `DiffFile.renamed_from` already reaches the reviewer, so a move is distinguishable from a
+      rewrite by the participant that can actually judge it.
+    - `analyzed_files == 0 and deleted_lines_present` could not fire: every file holding a removed
+      line is either analyzed or already named by the check below, and once a whole-file deletion
+      stopped being a file the manifest speaks about, the only thing left for it to catch was a
+      pure deletion — exactly the change it must not call unread.
+    - `dependency_semantics_analyzed` had **no path to `true`**: it was `not has_dependency_change`
+      and nothing else, so a cycle that added a dependency was `insufficient` by definition, with
+      neither remedy the block names available — a lockfile cannot be split out of the scope that
+      produced it, and the risk it is measured against was frozen by a human at gate ③. What a
+      dependency change leaves unanswered is not *could this diff be read* — every byte of it was
+      — but *what do the new versions do*, which no reading of this repository answers at any
+      depth. That question has its own gate, its own evidence and its own expiry:
+      `approve._audit_blockers` holds gate ⑤ shut until `rein audit run` has answered it over this
+      tree's manifests. The depth this manifest *did* read a lockfile at is already stated, by
+      `languages` recording it `token_only`, and the risk it carries is already floored at `medium`
+      by the detector's own `dependency` signal.
+
+    `binary_semantics_analyzed` went the same way as a *condition* while staying a fact: a binary
+    file sets it and lands in `unsupported_files` in the same breath (`build_coverage`), so the
+    check could never fire on its own. `coverage_gap_risk` still reads the flag, where it is the
+    difference between "nothing could be read" and "the scan found nothing in it".
     """
     if manifest.unsupported_files or manifest.generated_files:
-        return "insufficient"
-    if not manifest.dependency_semantics_analyzed or not manifest.binary_semantics_analyzed:
         return "insufficient"
     return "sufficient"
 

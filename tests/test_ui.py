@@ -1161,6 +1161,25 @@ def test_a_stage_tick_means_a_recorded_judgement_not_a_visit(review_server: ui.D
     assert settled["scope"] is None and settled["orient"] is None and settled["diff"] is None
 
 
+def test_a_dashboard_behind_the_repository_refuses_to_freeze(review_server: ui.DashboardServer) -> None:
+    """The one gate-④ precondition that does not pass `approve.readiness`, and the one process
+    whose answer changes while it runs.
+
+    The `rein sync` that materialises a newer release's schema happens in another terminal, and
+    this server has been holding the old `Config` model since before it. `_WATCHED` already stats
+    `rein.lock`, so the fact is on disk and reaching the page; what was missing was anybody asking
+    it at the door where a human freezes a review.
+    """
+    from rein import lock as lock_mod
+
+    digest = _digest(review_server)
+    lock_mod.write(review_server.root / ".rein" / "rein.lock", lock_mod.new("99.0.0", "git+https://github.com/o/r@x"))
+    status, data = write(review_server, "/api/review/complete", {"machine_digest": digest})
+    assert status == 409
+    assert "written by rein 99.0.0" in json.loads(data)["error"]
+    assert "refusing to write" in json.loads(data)["error"]
+
+
 def test_review_post_without_token_is_403(review_server: ui.DashboardServer) -> None:
     status, _ = _request(review_server, "POST", "/api/review/decision", {"card_id": "DC-001", "choice": "B"})
     assert status == 403

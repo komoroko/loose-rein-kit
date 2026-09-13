@@ -654,11 +654,12 @@ _WIRED_POLICY_WORKFLOW = """on:
 jobs:
   policy:
     steps:
+      - run: uv tool install --no-config 'git+https://github.com/komoroko/loose-rein-kit@v1'
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - run: >-
-          uv run rein policy-check
+          rein policy-check
           --base-sha "${{ github.event.pull_request.base.sha }}"
           --head-sha "${{ github.event.pull_request.head.sha }}"
 """
@@ -682,6 +683,32 @@ def test_a_policy_check_fed_a_base_the_head_can_choose_is_not_a_check(tmp_path: 
     weakened = _WIRED_POLICY_WORKFLOW.replace("github.event.pull_request.base.sha", "github.head_ref")
     findings = _ci(tmp_path, weakened)
     assert any(f.level == "WARN" and "base SHA from the event context" in f.message for f in findings)
+
+
+def test_a_policy_check_run_from_the_head_tree_is_reported_where_it_is_still_free_to_fix(
+    tmp_path: Path,
+) -> None:
+    """The same provenance rule `policy_check` enforces base-side, reported on the machine the job
+    is being written on — which is while reordering two steps costs nothing."""
+    from_tree = _WIRED_POLICY_WORKFLOW.replace(
+        "      - run: uv tool install --no-config 'git+https://github.com/komoroko/loose-rein-kit@v1'\n", ""
+    ).replace("          rein policy-check", "          uv run rein policy-check")
+    findings = _ci(tmp_path, from_tree)
+    assert any(f.level == "WARN" and "resolves `rein` out of the checked-out tree" in f.message for f in findings)
+
+    after = _WIRED_POLICY_WORKFLOW.replace(
+        "      - run: uv tool install --no-config 'git+https://github.com/komoroko/loose-rein-kit@v1'\n", ""
+    ).replace(
+        "          fetch-depth: 0\n",
+        "          fetch-depth: 0\n      - run: uv tool install --no-config 'git+https://x/y@v1'\n",
+    )
+    assert any("after `actions/checkout`" in f.message for f in _ci(tmp_path, after))
+
+
+def test_this_repository_own_policy_job_satisfies_its_own_check() -> None:
+    """The check that would be worth least if the repository shipping it did not pass it."""
+    findings = doctor.check_ci(repo_mod.Repo(Path(__file__).resolve().parents[1]))
+    assert [f.level for f in findings if f.area == "ci"] == ["PASS"]
 
 
 def test_an_unpinned_third_party_action_is_reported(tmp_path: Path) -> None:
