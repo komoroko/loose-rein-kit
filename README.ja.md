@@ -348,6 +348,9 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 ```yaml
   policy-check:
     if: github.event_name == 'pull_request'
+    env:
+      # `uv tool install` は bin ディレクトリを PATH に載せない。場所を指定して自分で通す。
+      UV_TOOL_BIN_DIR: ${{ runner.temp }}/rein-bin
     steps:
       - uses: astral-sh/setup-uv@<commit sha>
       # checkout より前に置く。uv が `uv.toml` / `[tool.uv]` を探索できるツリーがまだ無い状態で
@@ -355,9 +358,10 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
       # ステップを並べ替えてもこの穴が黙って開き直らないようにするためのもの。checkout の後に
       # 入れると、検証器自身の依存をどのインデックスから解決するかをプルリクエスト側が選べる。
       # それらは起動時に import される。
-      - run: >-
-          uv tool install --no-config
-          'git+https://github.com/komoroko/loose-rein-kit.git@<.rein/rein.lock のタグ>'
+      - run: |
+          uv tool install --no-config \
+            "git+https://github.com/komoroko/loose-rein-kit.git@<.rein/rein.lock のタグ>"
+          echo "${{ runner.temp }}/rein-bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@<commit sha>
         with:
           fetch-depth: 0
@@ -370,7 +374,9 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 ```
 
 head がこれを弱めるプルリクエストは `rein policy-check` が失敗させ、ジョブを書いている段階では
-`rein doctor` が手元で報告する。
+`rein doctor` が手元で報告する。既に古い形で書かれているジョブが遡って落とされることはない。
+ベース側が報告するのは head が**新たに持ち込んだ**ものだけで、既存の状態を名指すのは `doctor`
+の役目である。
 
 ## 証拠にもとづく判定
 

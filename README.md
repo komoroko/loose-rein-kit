@@ -347,15 +347,19 @@ load-bearing and it is not the order every other job uses:
 ```yaml
   policy-check:
     if: github.event_name == 'pull_request'
+    env:
+      # `uv tool install` does not put its bin directory on PATH, so name it and add it yourself.
+      UV_TOOL_BIN_DIR: ${{ runner.temp }}/rein-bin
     steps:
       - uses: astral-sh/setup-uv@<commit sha>
       # Before the checkout, so there is no tree for uv to discover `uv.toml` / `[tool.uv]` from,
       # and from a commit the head did not write. `--no-config` keeps a reordering from silently
       # reopening it. Installing after the checkout lets the pull request choose the index its own
       # verifier's dependencies are resolved from, and they import at startup.
-      - run: >-
-          uv tool install --no-config
-          'git+https://github.com/komoroko/loose-rein-kit.git@<the tag in .rein/rein.lock>'
+      - run: |
+          uv tool install --no-config \
+            "git+https://github.com/komoroko/loose-rein-kit.git@<the tag in .rein/rein.lock>"
+          echo "${{ runner.temp }}/rein-bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@<commit sha>
         with:
           fetch-depth: 0
@@ -368,7 +372,9 @@ load-bearing and it is not the order every other job uses:
 ```
 
 `rein policy-check` refuses a pull request whose head weakens any of this, and `rein doctor`
-reports it locally while the job is still being written.
+reports it locally while the job is still being written. A job already shaped the old way is not
+failed retroactively — the base side reports what a head *introduces*, and `doctor` is where a
+pre-existing one gets named.
 
 ## Evidence over the agent's account
 

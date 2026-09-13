@@ -111,6 +111,11 @@ jobs:
     # event context — never a branch name and never a base the head declared (plan §29.1, §29.3).
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      # Named rather than inherited, and outside the workspace: `uv tool install` does not put its
+      # bin directory on PATH (it warns that it has not), so the job says where the executable goes
+      # and puts that one directory on PATH itself. Nothing the checkout writes can reach it.
+      UV_TOOL_BIN_DIR: ${{ runner.temp }}/rein-bin
     steps:
       - name: Install uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -130,9 +135,10 @@ jobs:
       # request that fixes `policy-check` is judged by the release before it. That is what
       # "base-side" means, not a shortcoming of it.
       - name: Install rein from the trusted base commit
-        run: >-
-          uv tool install --no-config
-          'git+https://github.com/komoroko/loose-rein-kit.git@${{ github.event.pull_request.base.sha }}'
+        run: |
+          uv tool install --no-config \
+            "git+https://github.com/komoroko/loose-rein-kit.git@${{ github.event.pull_request.base.sha }}"
+          echo "${{ runner.temp }}/rein-bin" >> "$GITHUB_PATH"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

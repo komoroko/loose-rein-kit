@@ -180,10 +180,40 @@ def test_an_install_without_no_config_is_a_violation() -> None:
 
 
 def test_the_env_var_pins_it_as_well_as_the_flag() -> None:
-    env = _POLICY_WORKFLOW.replace("uv tool install --no-config", "uv tool install").replace(
-        "jobs:\n", "env:\n  UV_NO_CONFIG: '1'\njobs:\n"
+    """Read out of the parsed `env:`, at any of the three levels it is inherited down."""
+    loose = _POLICY_WORKFLOW.replace("uv tool install --no-config", "uv tool install")
+    assert (
+        policy_check.provenance_violations(loose.replace("jobs:\n", "env:\n  UV_NO_CONFIG: '1'\njobs:\n"), what="w")
+        == []
     )
-    assert policy_check.provenance_violations(env, what="ci.yml") == []
+    at_job = loose.replace("    steps:\n", "    env:\n      UV_NO_CONFIG: '1'\n    steps:\n")
+    assert policy_check.provenance_violations(at_job, what="w") == []
+
+
+def test_a_comment_does_not_pin_the_settings_discovery() -> None:
+    """The same reason the steps are parsed at all. Scanning the file's text for `--no-config`
+    made one of the three checks satisfiable by a comment, in a function whose docstring gives
+    "a scan cannot tell a step from a comment" as the reason it parses."""
+    faked = _POLICY_WORKFLOW.replace(
+        "      - run: uv tool install --no-config 'git+https://github.com/o/r@v1'\n",
+        "      # --no-config\n      - run: uv tool install 'git+https://github.com/o/r@v1'\n",
+    )
+    assert [f.code for f in policy_check.provenance(faked, what="w")] == ["unpinned_config"]
+
+
+def test_each_job_is_read_on_its_own() -> None:
+    """One job's install must not satisfy another job's checkout. A flat list of every matching
+    job's steps is the per-file mistake one level in."""
+    two = (
+        _POLICY_WORKFLOW
+        + """  second:
+    steps:
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - run: rein policy-check --base-sha a --head-sha b
+"""
+    )
+    found = policy_check.provenance(two, what="w")
+    assert [(f.job, f.code) for f in found] == [("second", "no_install")]
 
 
 def test_the_order_is_read_per_job_and_not_per_file() -> None:
@@ -254,6 +284,66 @@ def test_a_head_that_moves_the_install_below_the_checkout_is_refused(repo: repo_
     _git(repo.root, "commit", "-qm", "tidy the policy job")
     problems = policy_check.check(repo, base, _head(repo))
     assert any("after `actions/checkout`" in p for p in problems)
+
+
+#: What an adopter who followed the README before this check existed has in their base tree.
+_VULNERABLE_WORKFLOW = _POLICY_WORKFLOW.replace(
+    "      - run: uv tool install --no-config 'git+https://github.com/o/r@v1'\n", ""
+).replace(
+    "          fetch-depth: 0\n",
+    "          fetch-depth: 0\n      - run: uv tool install 'git+https://github.com/o/r@v1'\n",
+)
+
+
+def _commit_workflow(repo: repo_mod.Repo, text: str, message: str) -> str:
+    workflows = repo.root / ".github" / "workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / "ci.yml").write_text(text, encoding="utf-8")
+    _git(repo.root, "add", "-A")
+    _git(repo.root, "commit", "-qm", message)
+    return _head(repo)
+
+
+@pytest.mark.integration
+def test_a_base_that_was_already_resolvable_does_not_fail_every_later_pull_request(repo: repo_mod.Repo) -> None:
+    """Weakening, not wrong. A base whose policy job the head could already influence is in a
+    state this check cannot repair by refusing — the compromised `rein` is the one running, so its
+    verdict is worth nothing either way, and failing an unrelated pull request buys neither the
+    repository's safety nor the author's attention. `doctor` names it where it gets fixed."""
+    base = _commit_workflow(repo, _VULNERABLE_WORKFLOW, "adopt the old README shape")
+    (repo.root / "README.md").write_text("hello\n", encoding="utf-8")
+    _git(repo.root, "add", "-A")
+    _git(repo.root, "commit", "-qm", "docs: a typo")
+    assert policy_check.check(repo, base, _head(repo)) == []
+
+
+@pytest.mark.integration
+def test_a_head_that_makes_an_already_weak_job_weaker_is_still_refused(repo: repo_mod.Repo) -> None:
+    """The comparison must not become a blanket amnesty: a different failure on the same job is a
+    failure the head introduced."""
+    base = _commit_workflow(repo, _VULNERABLE_WORKFLOW, "adopt the old README shape")
+    worse = _VULNERABLE_WORKFLOW.replace(
+        "      - run: uv tool install 'git+https://github.com/o/r@v1'\n", "      - run: uv sync --frozen\n"
+    ).replace("          rein policy-check", "          uv run --frozen rein policy-check")
+    _commit_workflow(repo, worse, "switch to uv run")
+    assert any("resolves `rein` out of the checked-out tree" in p for p in policy_check.check(repo, base, _head(repo)))
+
+
+@pytest.mark.integration
+def test_a_head_that_adds_a_second_resolvable_policy_job_is_refused(repo: repo_mod.Repo) -> None:
+    """Keyed by job as well as by file, so a new job cannot hide behind an old job's finding."""
+    base = _commit_workflow(repo, _POLICY_WORKFLOW, "wire policy-check")
+    added = (
+        _POLICY_WORKFLOW
+        + """  extra:
+    steps:
+      - uses: actions/checkout@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - run: rein policy-check --base-sha a --head-sha b
+"""
+    )
+    _commit_workflow(repo, added, "add a second policy job")
+    problems = policy_check.check(repo, base, _head(repo))
+    assert any("job 'extra'" in p for p in problems)
 
 
 @pytest.mark.integration

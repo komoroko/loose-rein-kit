@@ -27,6 +27,9 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 from rein import event_chain, models, strict_yaml
 from rein import repo as repo_mod
@@ -137,7 +140,15 @@ def _policy_job_weakening(repo: repo_mod.Repo, base_sha: str, head_sha: str) -> 
     Nothing looked at the workflows at all, so the simplest bypass in the repository was to
     delete the job: `policy-check` passed the pull request that removed `policy-check`. It reads
     the raw text rather than parsing the YAML because what matters is whether the invocation and
-    its trusted inputs survive, not where in the file they live.
+    its trusted inputs survive, not where in the file they live — except for the one question that
+    is about structure rather than presence (:func:`provenance`).
+
+    **Weakening, which is not the same as wrong.** Every finding here is one the head introduced:
+    a base that never wired a hook is not weakening anything by still not having it, and a base
+    whose policy job was already resolvable by the head is in a state this check cannot repair by
+    refusing — the compromised `rein` is the one running, so its verdict is worth nothing either
+    way, and failing every unrelated pull request in that repository buys the safety of neither.
+    `doctor` names it locally, which is where a state that predates this check gets fixed.
     """
     base_paths = _tree_paths_or_none(repo, base_sha)
     if base_paths is None:
@@ -157,8 +168,17 @@ def _policy_job_weakening(repo: repo_mod.Repo, base_sha: str, head_sha: str) -> 
     for token, what in _POLICY_REQUIRED:
         if not any(token in text for text in surviving.values()):
             violations.append(f"the head's `rein policy-check` workflow no longer carries {what} ({token})")
+    already = {
+        (path, finding.job, finding.code)
+        for path in surviving
+        for finding in provenance(_show(repo, base_sha, path) or "", what=path)
+    }
     for path, text in sorted(surviving.items()):
-        violations += provenance_violations(text, what=f"the head's {path}")
+        violations += [
+            finding.message
+            for finding in provenance(text, what=f"the head's {path}")
+            if (path, finding.job, finding.code) not in already
+        ]
     return violations
 
 
@@ -177,10 +197,25 @@ _INSTALLS_REIN = ("uv tool install", "pipx install", "pip install")
 #: How a step resolves `rein` *out of* the tree instead. Each of these needs a checkout to have
 #: happened, so a job built this way cannot satisfy the ordering below at all.
 _FROM_THE_TREE = ("uv sync", "uv run", "poetry run", "pdm run", "pipenv run", "python -m rein", "pip install -e")
-#: What stops uv discovering `uv.toml` / `[tool.uv]` from the working directory. `--no-config` on
-#: the command, or the environment variable anywhere in the workflow — env is inherited downward,
-#: so a workflow that sets it at any level sets it for this step.
-_NO_DISCOVERY = ("--no-config", "UV_NO_CONFIG")
+#: The environment variable that turns uv's settings discovery off, for a job that prefers it to
+#: the flag. Looked for in the parsed `env:` of the step, the job and the workflow — env is
+#: inherited downward — and never in the file's text, where a comment would satisfy it.
+_NO_CONFIG_ENV = "UV_NO_CONFIG"
+_NO_CONFIG_FLAG = "--no-config"
+
+
+@dataclass(frozen=True)
+class Provenance:
+    """One way a job's `rein` could have been resolved by the pull request it judges.
+
+    Carries a `code` as well as a sentence because the base side compares rather than asserts:
+    the sentence names a path and quotes a command, so two workflows that are wrong in the same
+    way do not produce equal strings, and "did the head introduce this" needs them to.
+    """
+
+    job: str
+    code: str
+    message: str
 
 
 def _step_text(step: object) -> str:
@@ -197,37 +232,103 @@ def _step_command(step: object) -> str:
     return str(step["run"]).strip().splitlines()[0].strip()
 
 
-def policy_job_steps(text: str, *, what: str) -> list[object]:
-    """The steps of every job that runs `rein policy-check`. Raises when the workflow cannot be read.
+def _env_of(node: object) -> Mapping[str, Any]:
+    env = node.get("env") if isinstance(node, dict) else None
+    return env if isinstance(env, Mapping) else {}
+
+
+def _policy_jobs(text: str, *, what: str) -> tuple[Mapping[str, Any], dict[str, Any]]:
+    """`(the workflow's own env, every job that runs rein policy-check)`. Raises when unreadable.
 
     Parsed rather than scanned, which the rest of this module deliberately is not. Presence checks
-    survive on raw text because they ask whether a token is anywhere in the file; **order** does
-    not — `ci.yml` in this repository has its first `actions/checkout` in the unit-test job, four
-    jobs above the one that matters — and a scan cannot tell a step from a comment that looks like
-    one, which against head-controlled text is not a distinction to leave open.
+    survive on raw text because they ask whether a token is anywhere in the file. Two things here
+    do not. **Order** is per job — `ci.yml` in this repository has its first `actions/checkout` in
+    the unit-test job, four above the one that matters — and a flat list of every matching job's
+    steps is the same mistake one level in: one job's install would satisfy another job's
+    checkout. And a scan cannot tell a step from a comment shaped like one, which against
+    head-controlled text is not a distinction to leave open.
     """
     document = strict_yaml.load_mapping(text, what=what)
     jobs = document.get("jobs")
     if not isinstance(jobs, dict):
         raise strict_yaml.StrictParseError(f"{what}: no `jobs` mapping")
-    steps: list[object] = []
-    for job in jobs.values():
-        job_steps = job.get("steps") if isinstance(job, dict) else None
-        if not isinstance(job_steps, list):
-            continue
-        if any(_POLICY_INVOCATION in _step_text(step) for step in job_steps):
-            steps += job_steps
-    return steps
+    matching = {
+        str(name): job
+        for name, job in jobs.items()
+        if isinstance(job, dict)
+        and isinstance(job.get("steps"), list)
+        and any(_POLICY_INVOCATION in _step_text(step) for step in job["steps"])
+    }
+    return _env_of(document), matching
 
 
-def provenance_violations(text: str, *, what: str) -> list[str]:
+def _job_provenance(name: str, job: Mapping[str, Any], workflow_env: Mapping[str, Any], what: str) -> list[Provenance]:
+    """Every way *this* job's `rein` is resolvable by the pull request. In severity order."""
+    steps = list(job["steps"])
+    texts = [_step_text(step) for step in steps]
+    invoking = next(step for step in steps if _POLICY_INVOCATION in _step_text(step))
+
+    if any(marker in _step_text(invoking) for marker in _FROM_THE_TREE):
+        return [
+            Provenance(
+                name,
+                "from_the_tree",
+                f"{what} job '{name}' runs `{_step_command(invoking)}`, which resolves `rein` out "
+                "of the checked-out tree — the pull request is judged by a tool it wrote. Install "
+                "it from a commit the head did not write, before the checkout",
+            )
+        ]
+
+    checkout = next((i for i, t in enumerate(texts) if "actions/checkout" in t), None)
+    install = next((i for i, t in enumerate(texts) if any(token in t for token in _INSTALLS_REIN)), None)
+
+    found: list[Provenance] = []
+    if install is None:
+        found.append(
+            Provenance(
+                name,
+                "no_install",
+                f"{what} job '{name}' runs `{_POLICY_INVOCATION}` with a `rein` no step installed "
+                "from outside the head tree. The verifier a pull request cannot fake must not be "
+                "resolved by it",
+            )
+        )
+        return found
+    if checkout is not None and checkout < install:
+        found.append(
+            Provenance(
+                name,
+                "after_checkout",
+                f"{what} job '{name}' installs `rein` after `actions/checkout`, so uv discovers "
+                "`uv.toml` and `[tool.uv]` from the tree the pull request wrote and resolves the "
+                "verifier's dependencies through an index that tree names. Install it before the "
+                "checkout",
+            )
+        )
+    pinned = _NO_CONFIG_FLAG in str(steps[install].get("run", "")) or any(
+        _NO_CONFIG_ENV in env for env in (_env_of(steps[install]), _env_of(job), workflow_env)
+    )
+    if not pinned:
+        found.append(
+            Provenance(
+                name,
+                "unpinned_config",
+                f"{what} job '{name}' installs `rein` without `{_NO_CONFIG_FLAG}` (and sets no "
+                f"`{_NO_CONFIG_ENV}`), so reordering the steps reopens uv's settings discovery "
+                "silently",
+            )
+        )
+    return found
+
+
+def provenance(text: str, *, what: str) -> list[Provenance]:
     """Ways the `rein` that judges a pull request could have been resolved by that pull request.
 
     The curated lists this module already had enumerate the **inputs** handed to the verifier — the
     trigger, the two SHAs, the full history. Nothing said where the **verifier** came from, and
     that is the other half of "base-side": the job does not have to be deleted, only pointed at a
-    toolchain the head can influence. Three ways it can be, checked in that order because each one
-    makes the next moot:
+    toolchain the head can influence. Three ways it can be, checked in that order because the
+    first makes the rest moot:
 
     **It is the tree.** `uv run` / `uv sync` / `poetry run` build the tool out of the pull
     request's own source. Nothing is left to subvert; the change is judged by itself.
@@ -240,46 +341,24 @@ def provenance_violations(text: str, *, what: str) -> list[str]:
     **Nothing pins that shut.** Installing first works because there is no tree to discover
     settings from; `--no-config` (or `UV_NO_CONFIG`) is what keeps a later reordering from
     reopening it in silence.
+
+    An unreadable workflow is a finding rather than a pass: "I could not tell where this came
+    from" is not "it came from somewhere safe", least of all about text the head wrote.
     """
     try:
-        steps = policy_job_steps(text, what=what)
+        workflow_env, jobs = _policy_jobs(text, what=what)
     except strict_yaml.StrictParseError as exc:
-        return [f"{what} cannot be read, so where its `rein` comes from is unknown: {exc}"]
-    if not steps:
-        return []
+        unknown = f"{what} cannot be read, so where its `rein` comes from is unknown: {exc}"
+        return [Provenance("", "unreadable", unknown)]
+    found: list[Provenance] = []
+    for name, job in jobs.items():
+        found += _job_provenance(name, job, workflow_env, what)
+    return found
 
-    texts = [_step_text(step) for step in steps]
-    invoking = next(step for step in steps if _POLICY_INVOCATION in _step_text(step))
-    tree_built = next((t for t in (_step_command(step) for step in steps) if any(m in t for m in _FROM_THE_TREE)), "")
-    if any(marker in _step_text(invoking) for marker in _FROM_THE_TREE):
-        return [
-            f"{what} runs `{_step_command(invoking)}`, which resolves `rein` out of the checked-out "
-            "tree — the pull request is judged by a tool it wrote. Install it from a commit the "
-            "head did not write, before the checkout"
-        ]
 
-    checkout = next((i for i, t in enumerate(texts) if "actions/checkout" in t), None)
-    install = next((i for i, t in enumerate(texts) if any(token in t for token in _INSTALLS_REIN)), None)
-
-    violations: list[str] = []
-    if install is None:
-        saw = f" — it runs `{tree_built}`" if tree_built else ""
-        violations.append(
-            f"{what} runs `{_POLICY_INVOCATION}` with a `rein` no step installed from outside the "
-            f"head tree{saw}. The verifier a pull request cannot fake must not be resolved by it"
-        )
-    elif checkout is not None and checkout < install:
-        violations.append(
-            f"{what} installs `rein` after `actions/checkout`, so uv discovers `uv.toml` and "
-            "`[tool.uv]` from the tree the pull request wrote and resolves the verifier's "
-            "dependencies through an index that tree names. Install it before the checkout"
-        )
-    if install is not None and not any(token in text for token in _NO_DISCOVERY):
-        violations.append(
-            f"{what} installs `rein` without `--no-config` (or `UV_NO_CONFIG`), so reordering the "
-            "steps reopens uv's settings discovery silently"
-        )
-    return violations
+def provenance_violations(text: str, *, what: str) -> list[str]:
+    """:func:`provenance` as sentences — for `doctor`, which has no base to compare against."""
+    return [finding.message for finding in provenance(text, what=what)]
 
 
 def trusted_base(
