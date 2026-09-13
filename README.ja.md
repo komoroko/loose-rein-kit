@@ -348,9 +348,6 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
 ```yaml
   policy-check:
     if: github.event_name == 'pull_request'
-    env:
-      # `uv tool install` は bin ディレクトリを PATH に載せない。場所を指定して自分で通す。
-      UV_TOOL_BIN_DIR: ${{ runner.temp }}/rein-bin
     steps:
       - uses: astral-sh/setup-uv@<commit sha>
       # checkout より前に置く。uv が `uv.toml` / `[tool.uv]` を探索できるツリーがまだ無い状態で
@@ -358,10 +355,16 @@ Loose Rein はこれらを読み取って診断するだけで、自分では設
       # ステップを並べ替えてもこの穴が黙って開き直らないようにするためのもの。checkout の後に
       # 入れると、検証器自身の依存をどのインデックスから解決するかをプルリクエスト側が選べる。
       # それらは起動時に import される。
-      - run: |
+      #
+      # `uv tool install` は bin ディレクトリを PATH に載せないので、場所を指定して自分で通す。
+      # job ではなく step に置くこと。`runner` は job レベルの `env:` から読めるコンテキストでは
+      # なく、読もうとした workflow はジョブもメッセージも無いままパースに失敗する。
+      - env:
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/rein-bin
+        run: |
           uv tool install --no-config \
             "git+https://github.com/komoroko/loose-rein-kit.git@<.rein/rein.lock のタグ>"
-          echo "${{ runner.temp }}/rein-bin" >> "$GITHUB_PATH"
+          echo "$UV_TOOL_BIN_DIR" >> "$GITHUB_PATH"
       - uses: actions/checkout@<commit sha>
         with:
           fetch-depth: 0

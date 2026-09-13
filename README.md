@@ -347,19 +347,21 @@ load-bearing and it is not the order every other job uses:
 ```yaml
   policy-check:
     if: github.event_name == 'pull_request'
-    env:
-      # `uv tool install` does not put its bin directory on PATH, so name it and add it yourself.
-      UV_TOOL_BIN_DIR: ${{ runner.temp }}/rein-bin
     steps:
       - uses: astral-sh/setup-uv@<commit sha>
       # Before the checkout, so there is no tree for uv to discover `uv.toml` / `[tool.uv]` from,
       # and from a commit the head did not write. `--no-config` keeps a reordering from silently
       # reopening it. Installing after the checkout lets the pull request choose the index its own
       # verifier's dependencies are resolved from, and they import at startup.
-      - run: |
+      #
+      # `uv tool install` does not put its bin directory on PATH, so name it and add it yourself.
+      # On the step, not the job: `runner` is not a context a job-level `env:` may read.
+      - env:
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/rein-bin
+        run: |
           uv tool install --no-config \
             "git+https://github.com/komoroko/loose-rein-kit.git@<the tag in .rein/rein.lock>"
-          echo "${{ runner.temp }}/rein-bin" >> "$GITHUB_PATH"
+          echo "$UV_TOOL_BIN_DIR" >> "$GITHUB_PATH"
       - uses: actions/checkout@<commit sha>
         with:
           fetch-depth: 0
