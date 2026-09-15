@@ -23,7 +23,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from rein import adapters, digests, event_chain, models, store
+from rein import adapters, digests, event_chain, gate_guard, models, store
 
 GATE_ORDER = models.GATE_ORDER
 
@@ -45,7 +45,6 @@ def _digest(seed: str) -> str:
 
 def make_state(
     *,
-    phase: str = "build",
     gates: dict[str, str] | None = None,
     project: str = DEMO_PROJECT,
     cycle_id: str = DEMO_CYCLE,
@@ -54,21 +53,18 @@ def make_state(
     updated_at: str = "2026-07-23T10:00:00+09:00",
     baseline: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """A state document; `gates` overrides the mid-build defaults (approved through tasks).
+    """A state document; `gates` overrides the default (mandate approved, change not yet accepted).
 
     An approved gate automatically gets a receipt, because the schema refuses one without —
     which is the point: there is no such thing as an approval with nothing behind it. A green
-    quality-gate baseline is here for the same reason: gate 3 cannot be approved without one, so a
-    fixture approved through tasks that carried none would be a state the product cannot reach.
+    quality-gate baseline is here for the same reason: a mandate cannot be approved without one, so
+    a fixture with an approved mandate that carried none would be a state the product cannot reach.
     Pass `baseline={}` for a fixture that is deliberately about its absence.
+
+    There is no `phase` argument, because there is no phase to set: where a cycle stands is read off
+    these two gates (`models.State.stage`).
     """
-    resolved = {
-        "requirements": "approved",
-        "design": "approved",
-        "tasks": "approved",
-        "build": "pending",
-        "release": "pending",
-    }
+    resolved = {"mandate": "approved", "acceptance": "pending"}
     resolved.update(gates or {})
 
     gate_block: dict[str, Any] = {}
@@ -82,7 +78,6 @@ def make_state(
     document: dict[str, Any] = {
         "project": project,
         "cycle_id": cycle_id,
-        "current_phase": phase,
         "updated_at": updated_at,
         "gates": gate_block,
         "plan": {"status": plan_status, "digest": _digest("plan")},
@@ -331,6 +326,9 @@ def make_review(
         "status": "generated",
         "binding": {
             "change_digest": _digest("change"),
+            # The digest of an empty tree: a fixture repository has no `rein install` surfaces
+            # recorded in its lock, so there is no surface and nothing about it can have moved.
+            "host_surface_digest": digests.tree_digest([]),
             "plan_digest": _digest("plan"),
             "environment_digest": _digest("toolchain"),
         },
@@ -369,13 +367,13 @@ def make_review(
 
 #: A digest-pinned OCI profile set, for tests that need to get past doctor's sandbox check.
 SANDBOXED_PROFILES: dict[str, dict[str, Any]] = {
-    name: {
+    "quality": {
         "kind": "oci",
-        "image": f"localhost/rein-{name}@sha256:" + "0" * 64,
+        "image": "localhost/rein-python@sha256:" + "0" * 64,
         "network_profile": "none",
         "read_only_root": True,
+        "containerfile": "python",
     }
-    for name in ("implementer", "reviewer", "quality")
 }
 
 
@@ -385,7 +383,7 @@ def make_config(
     branch: str = DEMO_BRANCH,
     template_mode: bool = False,
     quality_gate: list[dict[str, Any]] | None = None,
-    guard_paths: list[dict[str, str]] | None = None,
+    guard_paths: list[str] | None = None,
     profiles: dict[str, dict[str, Any]] | None = None,
     max_parallel: int = 3,
     launch_retries: int | None = None,
@@ -404,16 +402,10 @@ def make_config(
     body: dict[str, Any] = {
         "project": {"name": project, "work_branch": branch},
         "execution": execution,
-        "executors": {
-            "implementer_profile": "implementer",
-            "reviewer_profile": "reviewer",
-        },
-        "executor_profiles": profiles
-        or {
-            "implementer": {"kind": "host"},
-            "reviewer": {"kind": "host"},
-            "quality": {"kind": "host"},
-        },
+        "executors": {"quality_gate_profile": "quality"},
+        # `containerfile` mirrors the shipped scaffold: a profile's name and its Containerfile's
+        # name are different things, and `sandbox_setup_command` reads the second.
+        "executor_profiles": profiles or {"quality": {"kind": "host", "containerfile": "python"}},
         "agents": {
             "implementer": {"adapter": "claude"},
             "code_reviewer": {"adapter": "claude"},
@@ -448,20 +440,7 @@ def make_config(
             "template_mode": template_mode,
             # `is None` rather than falsy: a test that asks for *no* guarded paths must get
             # none, not silently fall back to the defaults it was trying to remove.
-            "paths": guard_paths
-            if guard_paths is not None
-            else [
-                {"path": "docs/20-design.md", "requires_gate": "requirements"},
-                {"path": "docs/decisions/", "requires_gate": "requirements"},
-                {"path": "docs/tasks/", "requires_gate": "design"},
-                {"path": "docs/test/", "requires_gate": "build"},
-                {"path": "src/", "requires_gate": "tasks"},
-                {"path": "lib/", "requires_gate": "tasks"},
-                {"path": "app/", "requires_gate": "tasks"},
-                {"path": "backend/", "requires_gate": "tasks"},
-                {"path": "frontend/", "requires_gate": "tasks"},
-                {"path": "scripts/", "requires_gate": "tasks"},
-            ],
+            "paths": guard_paths if guard_paths is not None else list(gate_guard.DEFAULT_GUARD_PATHS),
         },
         "github": {"enabled": False, "label": "rein"},
     }

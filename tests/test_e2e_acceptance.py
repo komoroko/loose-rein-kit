@@ -43,7 +43,7 @@ def build_repo(tmp_path: Path, acceptance: list[dict[str, Any]]) -> repo_mod.Rep
         root,
         config=make_config(branch=WORK_BRANCH, quality_gate=GATE, max_parallel=2, launch_retries=0),
         plan=make_plan(tasks=[make_task("T-001", kind="parallel", claim_ids=["C-001"], acceptance=acceptance)]),
-        state=make_state(phase="build", plan_status="frozen"),
+        state=make_state(plan_status="frozen"),
     )
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "seed")

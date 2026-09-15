@@ -1,7 +1,12 @@
 # .rein/state.yaml — this project's MUTABLE state. Nothing else.
 #
 # Task titles, dependencies, and claim mappings are NOT here: they live in plan.yaml, frozen
-# at gate 3. Duplicating them is how two documents drift apart.
+# when the mandate is approved. Duplicating them is how two documents drift apart.
+#
+# Nor is "what phase are we in". Where the cycle stands follows from the two gates below and is
+# derived, never stored — `drafting` until the mandate is approved, `building` until the change is
+# accepted, `done` after. It used to be a `current_phase` field written by the same transaction
+# that recorded an approval, which made one write the author of two facts that could then disagree.
 #
 # This file is machine-written. Every change goes through one Central Store transaction
 # together with the audit events that explain it, so `rein` is the only writer — editing
@@ -15,15 +20,19 @@
 
 project: "product"
 cycle_id: cycle-1                      # lowercase slug naming this delta cycle
-current_phase: brief                   # brief | requirements | design | tasks | build | verify | done
 updated_at: ""
 
+# The two things a human approves. Not the five phases: what a human decides is what the loop may
+# change and what it must prove, and then whether the change is taken — never the order the work
+# is done in.
 gates:
-  requirements: { status: pending, receipt: null }   # gate 1 — the human OKs the /req result
-  design:       { status: pending, receipt: null }   # gate 2 — the human OKs the /design choices
-  tasks:        { status: pending, receipt: null }   # gate 3 — the human OKs the plan; the plan freezes
-  build:        { status: pending, receipt: null }   # gate 4 — the human OKs the grounded review
-  release:      { status: pending, receipt: null }   # gate 5 — the human OKs the release
+  # gate 1 — the scope the loop may touch, the claims it must make true, and the evidence that
+  # counts. Written from /req, /design and /tasks, in whatever order suits the change. Approving it
+  # freezes plan.yaml and config.yaml.
+  mandate:    { status: pending, receipt: null }
+  # gate 2 — the change is taken. Rests on the grounded review, the coverage manifest, the
+  # dependency audit and every task being finished.
+  acceptance: { status: pending, receipt: null }
 
 plan:
   status: draft                        # draft | frozen | invalidated

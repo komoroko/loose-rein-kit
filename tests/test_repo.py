@@ -89,7 +89,7 @@ def test_gate_guard_resolves_repo_from_the_payload_cwd(repo_root: Path, monkeypa
         {
             "cwd": str(repo_root / "docs"),
             "tool_name": "Write",
-            "tool_input": {"file_path": str(repo_root / "docs" / "20-design.md")},
+            "tool_input": {"file_path": str(repo_root / "src" / "app.py")},
         }
     )
     env = {**os.environ, "PYTHONPATH": "src"}
@@ -102,18 +102,13 @@ def test_gate_guard_resolves_repo_from_the_payload_cwd(repo_root: Path, monkeypa
         env=env,
     )
     assert proc.returncode == 0
-    assert '"deny"' in proc.stdout  # requirements gate pending → the design doc write is denied
+    assert '"deny"' in proc.stdout  # no mandate → the write to a guarded path is denied
 
 
 def test_evaluate_accepts_an_explicit_repo_without_chdir(repo_root: Path) -> None:
-    seed_repo(
-        repo_root,
-        state=make_state(
-            gates={"requirements": "approved", "design": "pending", "tasks": "pending"}, plan_status="draft"
-        ),
-    )
+    seed_repo(repo_root, state=make_state(gates={"mandate": "pending"}, plan_status="draft"))
     repo = repo_mod.Repo(repo_root)
     ok, _ = gate_guard.evaluate(str(repo_root / "docs" / "20-design.md"), repo)
-    assert ok is True  # requirements approved → design doc editable
-    ok, reason = gate_guard.evaluate(str(repo_root / "docs" / "tasks" / "T-001.md"), repo)
-    assert ok is False and "design" in reason
+    assert ok is True  # the mandate's own material is never guarded
+    ok, reason = gate_guard.evaluate(str(repo_root / "src" / "app.py"), repo)
+    assert ok is False and "no mandate is approved" in reason

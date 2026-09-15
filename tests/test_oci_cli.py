@@ -118,11 +118,7 @@ def test_build_targets_are_containerfiles_not_profile_names() -> None:
 
 # --- --write-config: the copy-the-digest-by-hand step ----------------------------
 
-_PINS = {
-    "quality": "localhost/rein-python@sha256:" + "a" * 64,
-    "reviewer": "localhost/rein-reviewer@sha256:" + "b" * 64,
-    "implementer": "localhost/rein-implementer@sha256:" + "c" * 64,
-}
+_PINS = {"quality": "localhost/rein-python@sha256:" + "a" * 64}
 
 
 def _shipped_config() -> str:

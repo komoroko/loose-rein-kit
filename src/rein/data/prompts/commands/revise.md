@@ -5,34 +5,41 @@ Symmetric with the human opening a gate, **rewinding approval is also the human'
 (Capability terms like `structured-question` resolve per AGENTS.md "Capability vocabulary" and your agent's capability mapping.)
 
 ## When to use it
-- When `/build`'s implementer reports `needs-revision` (a requirements/design defect) and the loop has stopped.
-- When `/verify` reveals a requirement/design-level problem (a spec error, etc.).
-- When `/verify` finds an **implementation-level defect serious enough to reopen the build**: target `build` — `gates.build`/`gates.release` go back to `pending` and gate ④ is re-taken after the fix (see `/verify` step 4).
-- Small implementation-convenience rework within a still-open build is out of scope (handle that with a fix within the task). Use this **only when an already-approved gate needs reopening**.
+**Only when what was *authorized* turns out to be wrong** — a claim that does not mean what it said,
+an acceptance criterion that cannot be met, a `scope` that never covered the thing that broke, a
+frozen environment that has to change. That is `--to mandate`, and it re-opens `plan.yaml`.
+`--to acceptance` withdraws a change that was already taken.
+
+**Not for any of these**, which need no approval and no roll back:
+- Re-cutting the task DAG, reordering it, splitting or merging tasks. A different decomposition of
+  the same mandate is the same mandate.
+- A code defect the grounded review found. `rein build` repairs every blocking finding a task's
+  declared scope owns and reads the change again, moving no gate (`repair.route`).
+- A defect `/verify` finds in the code. Add the task; the mandate already authorizes fixing it.
 
 ## Steps
-1. **Confirm the defect and the human's decision**: present the escalation log / needs-revision points and have the human decide "how far to go back (requirements, design, or build)". Do not roll back on your own.
-2. Finalize the target phase (`requirements` | `design` | `tasks` | `build`) and the reason **in a single `structured-question`**.
+1. **Confirm the defect and the human's decision**: present the escalation log / needs-revision points, say plainly *what about the authorization* is wrong, and have the human decide. Do not roll back on your own — and do not propose one for work that is merely harder than expected.
+2. Finalize the target gate (`mandate` | `acceptance`) and the reason **in a single `structured-question`**.
 3. **Reset gates in a chain** (deterministic process):
    ```
-   rein revise --to <phase> --reason '<reason>'
+   rein revise --to <gate> --reason '<reason>'
    ```
-   `rein revise` resets every gate from the target onward to `pending` **in a chain**, moves `current_phase` back, and records it in the roll-back log. This prevents the stale-approval inconsistency of "upstream pending while downstream approved". The editing order from then on is mechanically enforced by `gate_guard` (e.g. while design is pending, edits to `docs/tasks/**` and implementation code are denied). Use `--dry-run` to check just the plan.
+   `rein revise` resets that gate and every one after it to `pending` **in a chain**, and records it in the roll-back log. This prevents the stale-approval inconsistency of "upstream pending while downstream approved". `--to mandate` also un-freezes `plan.yaml` and `config.yaml`; from then on `gate_guard` denies writes to the guarded paths again, because nothing authorizes them. Use `--dry-run` to check just the plan.
 4. **Task impact analysis (deterministic mark, then reconcile — do not discard)**: before fixing upstream, mark the ripple to existing tasks in code.
    - Identify the tasks **directly affected** by the upstream change, then mark them **and their transitive dependents (downstream)** as `needs-revision` deterministically:
      ```
      rein revise --impacted T-00x,T-00y
      ```
      (combinable with `--to` in one invocation; `--dry-run` previews; `rein dag --impacted` enumerates the same set read-only). Missing an impacted task is the dangerous direction, so the **whole closure is marked mechanically** — nothing in it runs until reconciled.
-   - **A code defect gate ④ found is not an upstream change, and does not come here.** `rein build` repairs every blocking finding a task's declared scope owns and reads the change again, without moving a gate (`repair.route`). There used to be a `--from-review` that derived the seed ids from those findings, and it marked the task *and its whole dependent closure* `needs-revision` — a status about the plan — so a repair that changed no requirement, no claim and no plan demanded a `/tasks` reconcile and a re-approval of gate ③. What reaches `/revise` from gate ④ is what a human decided *is* an upstream defect: a Decision Card answered `revise_design` or `revise_requirement`, which is a different sentence from "the code is wrong".
+   - **A code defect the acceptance gate found is not an upstream change, and does not come here.** `rein build` repairs every blocking finding a task's declared scope owns and reads the change again, without moving a gate (`repair.route`). There used to be a `--from-review` that derived the seed ids from those findings, and it marked the task *and its whole dependent closure* `needs-revision` — a status about the plan — so a repair that changed no requirement, no claim and no plan demanded a `/tasks` reconcile and a re-approval of the mandate gate. What reaches `/revise` from the acceptance gate is what a human decided *is* an upstream defect: a Decision Card answered `revise_design` or `revise_requirement`, which is a different sentence from "the code is wrong".
    - Marking is all this step does. The marked closure is then reclassified inside the re-run of `/tasks` ("Re-run after a roll back", which owns the keep / modify / obsolete / new taxonomy and what becomes of a task that was `done`) — nothing in the closure runs until that reconcile has happened.
-5. **Guide to rebuilding**: "next is `/<phase>`". Reflect the above reconcile inside the re-run of `/design`/`/tasks`, and present the **impact (the impacted list and classification)** to the human at gate ③ for re-approval.
+5. **Guide to rebuilding**: say which document has to change and point at the command that writes it (`/req`, `/design`, `/tasks` — in whatever order the defect calls for). Reflect the reconcile inside the re-run of `/tasks`, and present the **impact (the impacted list and classification)** to the human at the mandate gate for re-approval.
 
 ## Principles
 - **Rewinding approval is the human's privilege.** `/revise` is run only under the human's explicit judgment.
 - **Do not discard and rebuild tasks.** Reconcile existing tasks against the revised upstream, and pick up the impact exhaustively with deterministic computation (`--impacted`).
 - The truth is `.rein/state.yaml` (gates, task status), `.rein/plan.yaml` (the tasks), and `.rein/events.ndjson` (the roll-back log). `/revise` also clears the receipts of the reset gates and returns the **human** half of
-  `review.yaml` to `not_started` — its answers, and the freeze `rein approve build` re-checks, were
-  recorded about an implementation of a plan that no longer stands. The machine half is left as it
+  `review.yaml` to `not_started` — its answers, and the freeze `rein approve acceptance` re-checks, were
+  recorded about an implementation of a mandate that no longer stands. The machine half is left as it
   is: it is a reading of the code rather than of the plan, regenerating it costs three reviewer
   launches, and clearing it here would destroy the thing those answers were answers *to*.

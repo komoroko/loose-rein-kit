@@ -194,7 +194,7 @@ def review_prompt(
             "churn. Judge the change against the acceptance criteria, starting with the ones whose "
             "`evidence.kind` is `prose`: a criterion carrying a `command` or an `artifact` was "
             "already established by the caller, and a prose one is judged by nobody between you and "
-            f"gate ④. The full diff is `{diff_cmd}`.\n"
+            f"acceptance. The full diff is `{diff_cmd}`.\n"
             if diff_cmd
             else f"**Read {dossier_path} first.** It carries the claims this task answers, its acceptance "
             "criteria, its declared scope, and its changed paths split by kind.\n"
@@ -238,7 +238,7 @@ def review_prompt(
         '  {"findings": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}\n'
         "`must_fix` is a defect the change cannot land with — a bug, a broken contract, a security "
         "problem. `consider` is everything else worth saying; it stops nothing and is carried to the "
-        "human at gate ④. An empty list is a real answer, and the right one when the change is sound: "
+        "human at acceptance. An empty list is a real answer, and the right one when the change is sound: "
         "inventing a finding to look thorough costs an implementer round for nothing."
     )
 
@@ -265,7 +265,7 @@ def review_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str]
 
 
 def gate_four_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str]) -> str:
-    """Hand gate ④'s blocking findings about one task back to an implementer.
+    """Hand acceptance's blocking findings about one task back to an implementer.
 
     Not `review_fix_prompt`: that one is a per-task reviewer looking at a change that has not
     landed, inside its own worktree, with the task's own send-back budget. This is the *grounded*
@@ -282,7 +282,7 @@ def gate_four_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[s
     launch's account of it.
     """
     return (
-        f'You are the implementer for task {task.id} "{task.title}". The grounded review at gate 4 read '
+        f'You are the implementer for task {task.id} "{task.title}". The grounded review at acceptance read '
         "the merged tree against the frozen plan and found the following in code your task's declared "
         "scope owns:\n"
         f"{findings}\n"
@@ -422,7 +422,7 @@ def integration_review_prompt(
     the merge in view: each was written in an isolated worktree against one ticket, by an
     implementer that could not see the other tasks. The interaction defect a merge creates is by
     construction the one no leaf's tests exercise, so "already settled" named the half that is
-    least settled here. Nothing else covers it either — gate ④'s seam reading takes the paths two
+    least settled here. Nothing else covers it either — acceptance's seam reading takes the paths two
     scopes share or none covers, and two tasks whose files are disjoint produce no seam at all.
     Cross-task correctness had no owner; it has one now.
     """
@@ -453,6 +453,6 @@ def integration_review_prompt(
         f"Write your findings to `{findings_path}` and nothing else:\n"
         '  {"findings": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}\n'
         "`must_fix` is a defect the merged tree cannot land with. `consider` is everything else worth "
-        "saying; it stops nothing and is carried to the human at gate ④. An empty list is a real "
+        "saying; it stops nothing and is carried to the human at acceptance. An empty list is a real "
         "answer, and the right one when the join is sound."
     )

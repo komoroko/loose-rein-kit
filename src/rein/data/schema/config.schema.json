@@ -64,27 +64,20 @@
       }
     },
     "executors": {
-      "description": "Which profile each role runs under. The profile bodies live in executor_profiles; the indirection is what lets one sandbox be shared and audited once.",
+      "description": "Which profile the quality gate's command steps run under; the profile bodies live in executor_profiles. One key, because one path reaches an executor: `executors.for_profile` is called by the quality-gate runner and by the dependency audit, and an agent CLI is launched by neither. `implementer_profile` and `reviewer_profile` were required here and described as `which profile each role runs under`, and they wrapped nothing at all — an implementer, a reviewer and every fixer are launched as host processes from rein itself. Configuring them bought a promise nothing kept.",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "implementer_profile",
-        "reviewer_profile"
+        "quality_gate_profile"
       ],
       "properties": {
-        "implementer_profile": {
-          "$ref": "#/$defs/profileName"
-        },
-        "reviewer_profile": {
-          "$ref": "#/$defs/profileName"
-        },
         "quality_gate_profile": {
           "$ref": "#/$defs/profileName"
         }
       }
     },
     "executor_profiles": {
-      "description": "Sandbox definitions. Any command that runs repository-derived code, tests, or build scripts must use an `oci` profile regardless of risk; `host` is reserved for trusted tooling that runs no repository code (plan 10.1).",
+      "description": "Sandbox definitions. Any command step that runs repository-derived code, tests, or build scripts must use an `oci` profile regardless of risk; `host` is reserved for trusted tooling that runs no repository code (plan 10.1). What this covers is the quality gate's command steps and the acceptance criteria that go through the same runner — it is not isolation around the agent CLI that wrote that code, which runs as a host process from rein itself and is isolated only by whatever the adapter establishes for itself (`adapters.Adapter.own_sandbox`).",
       "type": "object",
       "minProperties": 1,
       "maxProperties": 32,
@@ -319,30 +312,11 @@
           "type": "boolean"
         },
         "paths": {
-          "description": "Each path guards the file it names and everything beneath it; a trailing '/' is optional punctuation and changes nothing. The prefix is anchored at a separator, so `src` guards `src/a.py` and never `srcfile.py`. The most specific entry wins, so key order does not decide.",
+          "description": "Paths the loop may not write without an approved mandate whose scope covers them. Each guards the file it names and everything beneath it; a trailing '/' is optional punctuation and changes nothing. The prefix is anchored at a separator, so `src` guards `src/a.py` and never `srcfile.py`. Each entry used to carry a `requires_gate` naming which of five phase gates opened it, which is gone with the phases: what a human authorizes is a scope, not an order, so the question is whether a mandate covering this path has been approved.",
           "type": "array",
           "maxItems": 128,
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "path",
-              "requires_gate"
-            ],
-            "properties": {
-              "path": {
-                "$ref": "#/$defs/repoPath"
-              },
-              "requires_gate": {
-                "enum": [
-                  "requirements",
-                  "design",
-                  "tasks",
-                  "build",
-                  "release"
-                ]
-              }
-            }
+            "$ref": "#/$defs/repoPath"
           }
         }
       }

@@ -19,6 +19,12 @@ import Gate from "./gate/Gate.jsx";
 // The lifecycle rail, and the page's only rendering of "which gate waits on you". Three states and
 // no fourth: opened by a recorded human approval, waiting on you, not yet reached. The waiting one
 // is the single inverted block on the page — nothing else on any screen is painted that way.
+//
+// Two stations, because a human approves twice: the mandate (what the loop may change and must
+// prove) and acceptance (the change is taken). There were five, one per phase, plus a `live` class
+// that lit the station matching `current_phase` — a second source of "where are we" that could
+// disagree with the gates it sat on top of. The stage is derived from these two now, and the rail
+// draws only them.
 function Spine({ status, route }) {
   const awaiting = (awaitingGate(status) || {}).name;
   const item = (view, label) => (
@@ -36,7 +42,6 @@ function Spine({ status, route }) {
           const cls = [
             "station",
             g.status === "approved" ? "approved" : g.name === awaiting ? "awaiting" : "future",
-            g.phase === status.current_phase ? "live" : "",
             here ? "active" : "",
           ].filter(Boolean).join(" ");
           // Every approval is a human's typed confirmation and the receipt id is the proof of it,
@@ -141,7 +146,7 @@ export default function App() {
     ? "loading…"
     : status.error
       ? "status error: " + status.error
-      : `${status.project || "(no project)"} · ${status.branch || "-"} · phase ${status.current_phase || "-"}`;
+      : `${status.project || "(no project)"} · ${status.branch || "-"} · ${status.stage || "-"}`;
 
   return (
     <>

@@ -24,7 +24,7 @@ a large one hits `E2BIG` (`review.py` already had to move its request to stdin f
 file goes under `.rein/work/`, which every task commit already excludes and which dies with the
 worktree — the canonical record of anything decided here goes through the control plane.
 
-**The blind extractor never gets one.** Gate ④'s actual-behaviour extraction is the one
+**The blind extractor never gets one.** The acceptance gate's actual-behaviour extraction is the one
 participant that is *supposed* to re-derive everything, having never seen the plan
 (`actual_extraction.FORBIDDEN_KEYS`). It re-derives it from its own request, which is all it is
 given: that stage is launched outside the repository precisely so it cannot go and read what a
@@ -287,7 +287,7 @@ def _acceptance(task: dag.Task) -> list[dict[str, Any]]:
     """This task's own bar, and how each criterion will be judged.
 
     Saying *how* matters as much as saying what. A criterion the loop will run as a command is a
-    thing to make pass; one that is prose only is a thing to make true and explain at gate ④; one
+    thing to make pass; one that is prose only is a thing to make true and explain at acceptance; one
     that is `external` is a thing to make ready for somebody to look at. Handing all three over as
     an undifferentiated checklist — which is what a markdown ticket does — loses that.
     """

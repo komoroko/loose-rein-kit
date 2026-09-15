@@ -21,7 +21,7 @@
 > sandboxed profile), `artifact` (paths that must exist), `external` (an observation this loop
 > cannot make — a staging check, a device, a person; the task waits at `awaiting-evidence` until
 > somebody records it with `rein evidence record`), or no `evidence` at all, which is honest for
-> a criterion that is genuinely a judgement call and leaves it to the gate ④ review.
+> a criterion that is genuinely a judgement call and leaves it to the acceptance review.
 
 - **A-1**: <one thing, stated so that it could be false>
 - **A-2**:
@@ -29,11 +29,11 @@
 ## What this requires of a person
 > Copied from the design's "What this requires of a person / Reversibility" lines. **The
 > machine-readable copy lives in `.rein/plan.yaml` under this task's `operator_surface:`**, and that
-> is the one gate ④ reads. Each entry names a `kind` (`persistence` / `public_interface` /
+> is the one acceptance reads. Each entry names a `kind` (`persistence` / `public_interface` /
 > `dependency` / `default_value` / `observability` / `security_boundary` — the same words the blind
 > extractor uses), what a person deals with, where it can be read at the end, and the ADR that
 > decided it. Nothing to declare is a fine answer; what the code turns out to require still reaches
-> gate ④, just as something nobody foresaw.
+> acceptance, just as something nobody foresaw.
 
 - **<kind>**: <what a person deals with> — read at `<path>` (ADR-NNN)
 
@@ -52,7 +52,7 @@
 -
 
 ## Self-assessment (assumptions, confidence)
-> Material for making low-confidence tasks explicit to the human at gate ③.
+> Material for making low-confidence tasks explicit to the human at the mandate.
 - **Confidence**: high / medium / low
 - **Assumptions made**: <uncertain points, external dependencies, the risk of misreading due to coarse granularity, etc.>
-- **Open questions** (decisions to surface at gate ③):
+- **Open questions** (decisions to surface at the mandate):

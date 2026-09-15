@@ -6,7 +6,7 @@ is running; the core's gate rules apply at all times regardless.
 
 ## Gate self-assessment (required at every gate)
 
-At every gate (①–⑤), present a **self-assessment block** alongside the deliverable — surfacing
+At every gate, present a **self-assessment block** alongside the deliverable — surfacing
 the system's own uncertainty is what lightens the human's review. **Three kinds of item, and no more**:
 **assumptions made**; **confidence** (high / medium / low by area, always with a reason for low
 spots); **open questions / points for the human to decide** (most important). Three *kinds* is a
@@ -21,7 +21,7 @@ author's second answer to it is the self-consistent explanation this arrangement
 as evidence. And a *context-bloat signal* — hygiene addressed to the agent, not a decision for the
 human; it lives in the pre-compact check under "Context budget".
 
-Self-assessment alone is not independent verification: gates ①–③ additionally require one
+Self-assessment alone is not independent verification: the mandate additionally require one
 **adversarial-review round** by the `adversarial-reviewer` role — procedure and recording:
 the req.md, design.md, and tasks.md procedure files. There is no waiver: a hotfix reduces
 its *scope* through `/revise`, it does not skip the round that would have read it.
@@ -39,15 +39,15 @@ outcome-independent work** (scaffolding, dev-env/CI setup, read-only investigati
 the boundary. It is throwaway-by-default, recorded in the phase deliverable's "speculative work
 log" (per-phase specifics: each procedure file's "While waiting for approval" section).
 
-## The gate ④ human review
+## The human review before acceptance
 
-Gate ④ does not review a document, it reviews a **generated grounded review**, and what it asks the
+Acceptance does not review a document, it rests on a **generated grounded review**, and what it asks the
 human for is a **judgement**, not a reading. `rein build` writes the machine half and repairs what
 it may of its own blocking findings — every one a task's declared scope owns — reading the change
 again from cold after each round, so what survives to the screen is what a machine cannot decide.
 `rein review generate` writes it on request. The human half is worked through in `rein ui` — a
 rail of **scope → orient → decision → diff → freeze** — and frozen with `rein review complete`.
-Freezing is a precondition of `rein approve build` — it is **not** the approval.
+Freezing is a precondition of `rein approve acceptance` — it is **not** the approval.
 
 **A Decision Card answer is an instruction, not a note.** `revise_implementation` says the code is
 the mistaken half of a `diverged` claim, and the next `rein build` repairs that subject like any
@@ -78,14 +78,14 @@ card spends their attention on reconstruction.
   that changed no test file is named, not counted); the Expected/Actual comparison on its three axes; and what is still
   open, including what the implementer said about each task that did **not** land. Every line is
   **derived from the SSOT**, and where it carries a sentence somebody else wrote, the confidence and
-  the code anchor travel with it. If the sandbox moved since gate ③ it says so: that blocks nothing
+  the code anchor travel with it. If the sandbox moved since the mandate it says so: that blocks nothing
   (`kind`, `network_profile` and `mount_repo` are frozen), but the approver is told the evidence was
-  produced in an environment the gate ③ approval never saw.
+  produced in an environment the mandate approval never saw.
 - **Orient's one substantive section is what the change now requires of a person** — a setting to
   supply, a schema to migrate, a dependency to provide, a signal to watch. It sorts the blind
   extractor's operator-facing readings against each task's frozen `operator_surface`: **what nobody
   declared comes first**, then what was declared and never read out, then a **count** of the ones
-  that went as foreseen. It does not re-open the choice — that was decided at gate ② and is recorded
+  that went as foreseen. It does not re-open the choice — that was decided in the design the mandate cites and is recorded
   in the ADR the declaration names.
 - **Decision Cards are the one screen that asks for anything.** Every finding the review could
   not settle — an unaligned claim, a gap, ungrounded extra behaviour, a security finding —
@@ -97,7 +97,7 @@ card spends their attention on reconstruction.
 - **A tick means a recorded judgement**, never that a screen was visited.
 - **Coverage is priced by risk, not by presence.** An `insufficient` manifest blocks at
   high/critical — "extra behaviour: undeterminable" cannot be waved through as zero — and below
-  that is recorded, shown, and does not shut the gate. The freeze and `rein approve build` read the
+  that is recorded, shown, and does not shut the gate. The freeze and `rein approve acceptance` read the
   same rule.
 - **A composed review says so, and what it could not read across.** `coverage.composition` names
   every reading the change was read in — one per scoped task, plus the seam over what two scopes
@@ -120,7 +120,7 @@ three tiers, each with its own refresh cycle and exit** — no tier grows withou
 |------|----------|---------------|--------------------------------|
 | **Short** — session | conversation, open log rows in the phase deliverable, `in_progress` state | each checkpoint (gate approval / build-layer boundary): flush → compress resolved rows → suggest `session-compaction` | only decisions/outcomes survive, into deliverables and resolved log rows |
 | **Mid** — cycle | phase deliverables (`docs/**`), `.rein/state.yaml`, retrospective | written per phase, committed at each gate; logs closed at `/verify` | archived by `rein cycle-close`; durable lessons promoted to the long tier |
-| **Long** — permanent | `AGENTS.md`, the capability mappings, `.rein/prompts/**`, `docs/00-product-brief.md`, `docs/05-current-state.md`, `docs/archive/` | promotions at gate ⑤; `05-current-state.md` updated at `/verify`; archive appended at `cycle-close` | none — always loaded, keep it leanest |
+| **Long** — permanent | `AGENTS.md`, the capability mappings, `.rein/prompts/**`, `docs/00-product-brief.md`, `docs/05-current-state.md`, `docs/archive/` | promotions at acceptance; `05-current-state.md` updated at `/verify`; archive appended at `cycle-close` | none — always loaded, keep it leanest |
 
 Rules: **keep deliverables lean; push detail out to linked files** (e.g. an `ADR-*.md`).
 **Compress the append-only deliverable logs** at each checkpoint — summarize resolved
@@ -149,7 +149,7 @@ archive to `docs/archive/`, gates/phase reset; `docs/00-product-brief.md` and th
 baseline — `/req`/`/design` read it first; traceability R-N / NFR-N covers the delta only).
 
 **Mid-cycle scope change / hotfix / abandonment** (each a human decision): a non-defect scope
-addition defers to the next cycle or reopens gate ① via `/revise`. An emergency hotfix is a
+addition defers to the next cycle or reopens the mandate via `/revise`. An emergency hotfix is a
 *minimal* delta cycle (gates in order, one-paragraph deliverables); if even that is too slow
 the human fixes outside the loop — log the escalation, fold it into `docs/05-current-state.md`
 at the next `/verify`. Abandonment is `rein cycle-close --name abandoned-<slug>`

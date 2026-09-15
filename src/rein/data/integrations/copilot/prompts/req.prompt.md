@@ -1,5 +1,5 @@
 ---
-description: Phase 1 requirements. Sound out from the brief, firm up the requirements, and ask for approval at gate ①.
+description: Requirements. Sound out from the brief and firm up the claims the mandate will carry.
 agent: agent
 ---
 

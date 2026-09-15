@@ -6,7 +6,7 @@ pure over ``review.yaml`` — a machine half the generator produced and a human 
 building — so each rule is a fixed fact a test can pin without a browser:
 
 - **Decision** (§14.1). Every finding the review could not settle becomes a Decision Card, and a
-  high/critical card with no recorded answer blocks the freeze. That is the one thing gate ④ asks
+  high/critical card with no recorded answer blocks the freeze. That is the one thing acceptance asks
   a human *for*: a judgement, on the record, with the reviewer's own confidence beside it.
 - **Expertise** (§14.9, E2E-05). High/critical work in a domain the reviewer declared `partial` or
   `unfamiliar` cannot be closed by a general reviewer's risk acceptance; it needs an expert, an
@@ -184,7 +184,7 @@ def answerable_statements(
     critical cards must be answered (:func:`unanswered_decisions`), so two decisions a person owed
     could arrive over the 30-statement ceiling behind five low-risk cards nobody was obliged to
     read. The instruction attached to that ceiling is "split the scope", which is not a move that
-    exists at gate ④, so the only exit was to raise the number.
+    exists at acceptance, so the only exit was to raise the number.
 
     Counted here instead: the statements attached, through `applicability.subject_id`, to the
     cards the floor makes mandatory. A low-risk card is still worth reading and still costs
@@ -227,7 +227,7 @@ def _diff_bytes(review: models.Review) -> int:
     under a composed review no reviewer ever reads the whole change: each reading is measured,
     widened and refused on its own (`review_reading.read_facts`). Measuring the whole here made the
     budget a function of how much a cycle shipped, and its own instruction — split the scope — is
-    not a move that exists at gate ④, where every task is implemented, merged and `done`. Measured
+    not a move that exists at acceptance, where every task is implemented, merged and `done`. Measured
     on this repository, two consecutive release cycles came to 662 KB and 754 KB against a 512 KiB
     ceiling, so the only exit was raising the number.
     """
@@ -334,7 +334,7 @@ def completion_blockers(
         blockers.append(
             f"review budget exceeded — split the scope, do not grow the screen: {', '.join(blown)}. "
             "Reduce what this cycle claims through `/revise` and review the remainder in its own "
-            "gate ④ round, or raise the limit in `review_policy.budgets` as a deliberate, recorded "
+            "acceptance round, or raise the limit in `review_policy.budgets` as a deliberate, recorded "
             "decision about how much one person can hold at once"
         )
 
@@ -395,7 +395,7 @@ def record_decision(
     confidence: str,
     reason: str = "",
 ) -> dict[str, Any]:
-    """Answer one Decision Card — the judgement gate ④ asks the human for.
+    """Answer one Decision Card — the judgement acceptance asks the human for.
 
     Re-answering is allowed and replaces the previous answer: a decision is a conclusion the
     reviewer is entitled to change while the review is still open, and forcing a first answer to

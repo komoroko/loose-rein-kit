@@ -244,6 +244,7 @@
               "binding": {
                 "required": [
                   "change_digest",
+                  "host_surface_digest",
                   "plan_digest",
                   "environment_digest"
                 ]
@@ -270,6 +271,10 @@
           "properties": {
             "change_digest": {
               "description": "The committed tree at `subject_head_sha` minus everything that is not the product (the SSOT, the frozen prose, the installed agent surfaces). This, and not `subject_head_sha`, decides whether the review still speaks for the repository: the workflow commits each phase's deliverables at its gate, so committing review.yaml is itself a later commit, and a staleness test on the commit id made recording a review invalidate it.",
+              "$ref": "#/$defs/digest"
+            },
+            "host_surface_digest": {
+              "description": "The committed tree at `subject_head_sha` narrowed to the surfaces `rein install <agent>` wrote — the phase commands, the role prompts, the hooks and the settings each host reads before it reads its prompt. `change_digest` is taken with those paths excluded, because the blind extractor must not read this tool's own orchestration text; the security reviewer is launched into a checkout of the head and told to review them, so a pre-authorized command, a hook or an MCP server added there is a finding. On one digest, a commit that added nothing but a `permissions.allow` entry moved no key, replayed the cached answer, launched no reviewer, and left the review reporting itself fresh. Two subjects, two digests.",
               "$ref": "#/$defs/digest"
             },
             "plan_digest": {

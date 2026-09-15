@@ -61,19 +61,20 @@ def _required_without_command(steps: Sequence[models.GateStep]) -> list[Problem]
     return problems
 
 
-def _profiles_used(
-    config: models.Config, steps: Sequence[models.GateStep], roles: Sequence[str]
-) -> dict[str, models.ExecutorProfile]:
-    """Every executor profile this run can actually reach, by name."""
+def _profiles_used(config: models.Config, steps: Sequence[models.GateStep]) -> dict[str, models.ExecutorProfile]:
+    """Every executor profile this run can actually reach, by name.
+
+    The quality gate's command steps and nothing else, because that is the only path an executor
+    is on (`executors.for_profile`). It also walked `implementer` and `reviewer`, checking that
+    images could be entered by launches that never entered them.
+    """
     used: dict[str, models.ExecutorProfile] = {}
     profiles = config.profiles
     for step in steps:
+        if step.kind != "command":
+            continue
         named = profiles.get(step.executor_profile) if step.executor_profile else None
-        resolved = named or config.profile_for("quality_gate")
-        if resolved is not None:
-            used[resolved.name] = resolved
-    for role in roles:
-        resolved = config.profile_for(role)
+        resolved = named or config.quality_gate_profile
         if resolved is not None:
             used[resolved.name] = resolved
     return used
@@ -191,6 +192,6 @@ def check(
     """
     return [
         *_required_without_command(steps),
-        *_sandbox_problems(_profiles_used(config, steps, ("implementer", "reviewer")), runtime=runtime),
+        *_sandbox_problems(_profiles_used(config, steps), runtime=runtime),
         *_cli_problems(argv_by_role),
     ]

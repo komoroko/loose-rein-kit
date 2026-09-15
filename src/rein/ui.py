@@ -6,7 +6,7 @@ stays offline-safe. The lifecycle is the page's navigation: five gates in a spin
 the one awaiting a decision is the only inverted block on the screen. **Now** (next recommended
 command and the pending queue — from status_api.collect_status()); a gate's **reading room**
 (`#gate/<name>`: its deliverables rendered server-side by mdlite with the self-assessment pinned,
-gate ④'s stages, diff and security-review freshness — from review_api.collect_review() — ending in
+acceptance's stages, diff and security-review freshness — from review_api.collect_review() — ending in
 the approval footer); **Board** (DAG, layer progress, frontier, traceability); **Record** (the
 events.ndjson feed); **Console** (the whitelisted operations). The page also notifies the
 approval-wait: browser notifications are opt-in; the tab title and favicon always carry the state.
@@ -90,7 +90,6 @@ from rein import (
     human_review,
     models,
     review_api,
-    revise,
     run_progress,
     security_review,
     status_api,
@@ -303,22 +302,20 @@ def action_argv(action: str, params: dict[str, object]) -> list[str]:
     # There is deliberately no `events_resolve` action: a log an operator can close by hand is
     # not evidence of anything, and dispositions live in `review.yaml`, where they are signed.
     if action == "revise":
-        phase = str(params.get("phase") or "")
-        if phase not in revise.PHASE_GATE:
-            raise UiActionError(
-                HTTPStatus.BAD_REQUEST, f"revise 'phase' must be one of {', '.join(sorted(revise.PHASE_GATE))}"
-            )
+        gate = str(params.get("gate") or "")
+        if gate not in models.GATE_VALUES:
+            raise UiActionError(HTTPStatus.BAD_REQUEST, f"revise 'gate' must be one of {', '.join(models.GATE_ORDER)}")
         reason = str(params.get("reason") or "").strip()
         if not reason:
             raise UiActionError(HTTPStatus.BAD_REQUEST, "revise needs a non-empty 'reason'")
-        return ["rein", "revise", "--to", phase, "--reason", reason]
+        return ["rein", "revise", "--to", gate, "--reason", reason]
     if action == "cycle_close":
         slug = str(params.get("slug") or "")
         if not _SLUG_RE.match(slug):
             raise UiActionError(HTTPStatus.BAD_REQUEST, "cycle_close 'slug' must match [a-z0-9][a-z0-9-]*")
         return ["rein", "cycle-close", "--name", slug]
     if action == "agent":
-        # Not a decision gate ③ freezes: `agents` sits outside `Config.frozen_digest`, so pointing
+        # Not a decision the mandate freezes: `agents` sits outside `Config.frozen_digest`, so pointing
         # a role at another CLI needs no approval and rewinds nothing. `rein agent` refuses a
         # combination the loop could not launch, and records the switch in the audit chain.
         role = str(params.get("role") or "")
@@ -640,7 +637,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         )
 
     def _send_review_get(self, suffix: str) -> None:
-        """Route a /api/review/ GET: the gate ④ session, one of its stages, or a gate's deliverables.
+        """Route a /api/review/ GET: the acceptance session, one of its stages, or a gate's deliverables.
 
         The session paths are matched first and by exact shape; anything else is handed to
         review_api as a gate *name*, so a traversal-shaped suffix is just an unknown gate (404). The

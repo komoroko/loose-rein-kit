@@ -194,10 +194,35 @@ def test_a_model_an_adapter_cannot_be_told_to_run_is_refused_not_dropped() -> No
     stop — the independence check is derived from it."""
     from rein import models
 
-    assert adapters.ADAPTER_TABLE["codex"].model_flags == ()
-    config = models.Config({"agents": {"implementer": {"adapter": "codex", "model": "gpt"}}})
+    assert adapters.ADAPTER_TABLE["amp"].model_flags == (), "amp's execute-mode reference documents none"
+    config = models.Config({"agents": {"implementer": {"adapter": "amp", "model": "gpt"}}})
     with pytest.raises(adapters.LaunchRefused, match="cannot tell"):
         adapters.launch_argv(config, "implementer")
+
+
+def test_the_codex_thread_id_is_read_off_the_stream_it_was_always_in() -> None:
+    """`codex exec --json` opens with `thread.started`, whose id `codex exec resume <id>` takes.
+
+    The adapter was recorded as having no session at all on the reading that its resume verb takes
+    only the *last* one — so every retry re-read the ticket, the design slice and the code from
+    cold. The id was in the first line of the stream the envelope parser was already walking.
+    """
+    from tests._support import codex_events
+
+    assert usage.codex_session(codex_events("done")) == "t-1"
+
+
+def test_a_codex_stream_that_names_no_thread_is_cold_rather_than_broken() -> None:
+    """A run that produced an answer has not failed because it cannot be continued."""
+    stream = "\n".join(
+        json.dumps(e)
+        for e in (
+            {"type": "item.completed", "item": {"id": "1", "type": "agent_message", "text": "x"}},
+            {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+        )
+    )
+    assert usage.codex_session(stream) == ""
+    assert usage.parse_codex_envelope(stream)[0] == "x", "and the answer still reads"
 
 
 def test_a_replay_is_not_priced_as_a_bill() -> None:

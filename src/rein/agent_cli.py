@@ -6,7 +6,7 @@ sharing a model share its blind spots (plan §12.4).
 
 So this command sets the adapter for one role, or for all of them, and then says out loud
 whether the independence requirement is currently satisfiable. Saying so is the point — a
-setup that silently violates it would fail much later, at gate ④, as an unexplained block.
+setup that silently violates it would fail much later, at acceptance, as an unexplained block.
 
   rein agent --show
   rein agent claude                          # every role
@@ -179,10 +179,10 @@ def _record_switch(
 ) -> None:
     """Put the switch in the audit chain. Never the reason the switch fails.
 
-    `agents` sits outside the gate ③ freeze on purpose (`models.Config.frozen_digest`), so nothing
+    `agents` sits outside the mandate freeze on purpose (`models.Config.frozen_digest`), so nothing
     asks a human before this file moves. That makes this line the only place the change survives,
-    and the only way gate ④ can be told that the evidence in front of it was produced by a
-    different agent than the one gate ③ saw — which is what `environment_digest` moving says.
+    and the only way acceptance can be told that the evidence in front of it was produced by a
+    different agent than the one the mandate saw — which is what `environment_digest` moving says.
 
     Same posture as `oci_cli._record_repin`: the config on disk is already correct by the time this
     runs, so a chain that cannot be appended to is reported loudly and does not undo the write.

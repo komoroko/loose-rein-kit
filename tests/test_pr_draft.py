@@ -71,13 +71,13 @@ def test_an_unrecorded_digest_says_so_rather_than_being_omitted(tmp_path: Path) 
 
 
 def test_every_gate_is_listed_with_its_approval(tmp_path: Path) -> None:
-    body = body_for(tmp_path, state=make_state(gates=ALL_APPROVED, phase="done"))
+    body = body_for(tmp_path, state=make_state(gates=ALL_APPROVED))
     for gate in models.GATE_ORDER:
         assert f"- {gate}: approved (approval: GA-{gate.upper()}-0001)" in body
 
 
 def test_a_pending_gate_shows_no_approval(tmp_path: Path) -> None:
-    assert "- build: pending (approval: -)" in body_for(tmp_path)
+    assert "- acceptance: pending (approval: -)" in body_for(tmp_path)
 
 
 def test_a_damaged_chain_says_the_pr_must_not_be_merged(tmp_path: Path) -> None:

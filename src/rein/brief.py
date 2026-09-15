@@ -1,6 +1,6 @@
-"""The gate ④ orientation brief: what was built, and under what conditions — derived, not written.
+"""The acceptance orientation brief: what was built, and under what conditions — derived, not written.
 
-Gate ④ used to hand a human a boundary (`scope`) and then, immediately, a stack of Decision Cards.
+The acceptance gate used to hand a human a boundary (`scope`) and then, immediately, a stack of Decision Cards.
 Everything between those two — what the cycle actually delivered, which dependencies moved, which
 sandbox and which network posture each gate step ran under, what the code was observed to do, what
 the gate established and what it left open — existed only as facts scattered across `plan.yaml`,
@@ -82,7 +82,7 @@ def _task_entry(task: models.Task, entry: Mapping[str, Any]) -> dict[str, Any]:
 def _delivered(plan: models.Plan | None, state: models.State | None) -> list[dict[str, Any]]:
     """The tasks whose work is in the reviewed tree, in plan order.
 
-    Plan order rather than completion order: the plan is what the human froze at gate ③, and a
+    Plan order rather than completion order: the plan is what the human froze at the mandate, and a
     table sorted by when an agent happened to finish is a table about the agent.
     """
     if plan is None or state is None:
@@ -133,14 +133,14 @@ def _execution_boundary(config: models.Config | None) -> list[dict[str, Any]]:
 
 
 def _environment_drift(state: models.State | None, config: models.Config | None) -> dict[str, Any]:
-    """Is the environment the evidence was produced in the one gate ③ approved? {} when it is, or
+    """Is the environment the evidence was produced in the one the mandate approved? {} when it is, or
     when the freeze recorded nothing to compare against.
 
-    Gate ③ deliberately freezes neither the image pin nor `agents`: a task that adds a dependency
+    The mandate deliberately freezes neither the image pin nor `agents`: a task that adds a dependency
     makes the pinned image wrong, and rebuilding it is a rebuild of the same sandbox rather than a
     change of decision; and which CLI and model a role launches is a running choice an operator may
     remake without rewinding an approved plan. That permission is what this section pays for. The
-    approver at gate ④ is signing over evidence, and "the environment it was produced in moved
+    approver at acceptance is signing over evidence, and "the environment it was produced in moved
     after the plan was approved" is a fact about that evidence — not a blocker, and not something
     they should have to go and look for.
 
@@ -195,7 +195,7 @@ def _requirements_on_people(
     ordered by decision value rather than by category:
 
     - **`undeclared` first.** An operator-facing behaviour the code was read to have, that no task
-      declared at gate ③. Nobody decided this would be someone's job; the approver is being asked
+      declared at the mandate. Nobody decided this would be someone's job; the approver is being asked
       to sign over it anyway. Carried with its confidence and its anchor, because a sentence
       without those is not evidence of anything.
     - **`unobserved`.** A declaration nothing was read out about. Either it was not built or it
@@ -296,7 +296,7 @@ def _operations(config: models.Config | None) -> dict[str, Any]:
     """Whether anything ever launched the deliverable, and whether the gate insists on it.
 
     A green test suite over a package that cannot start is the failure the launch step exists to
-    catch, so it is a fact a reviewer must see at gate ④ rather than infer from the absence of one.
+    catch, so it is a fact a reviewer must see at acceptance rather than infer from the absence of one.
 
     Two states used to collapse into one empty result, and the scaffold's own default fell through
     both. A step under another name reported `{}`, which the review screen rendered as "the smoke
@@ -417,7 +417,7 @@ def _control(state: models.State | None) -> dict[str, Any]:
 
 
 def _residuals(state: models.State | None) -> dict[str, Any]:
-    """What is still open — the part of gate ④ that is easiest to approve past without noticing."""
+    """What is still open — the part of acceptance that is easiest to approve past without noticing."""
     if state is None:
         return {}
     tasks = state.raw.get("tasks")
@@ -541,19 +541,19 @@ def derive(
     return sections
 
 
-#: Cap on the residual findings carried to gate ④, mirroring the per-review cap a single reviewer
+#: Cap on the residual findings carried to acceptance, mirroring the per-review cap a single reviewer
 #: may hand back (`dossier.MAX_FINDINGS`). Past it the list is truncated and says so — a silent cut
 #: would make "no more findings" and "we stopped listing" the same thing on screen.
 MAX_RESIDUAL_FINDINGS = 50
 
 
 def residual_findings(state: models.State | None) -> list[dict[str, Any]]:
-    """Per-task review findings that were never resolved, carried to the human at gate ④.
+    """Per-task review findings that were never resolved, carried to the human at acceptance.
 
     The per-task reviewer's `must_fix` findings are resolved inside the build loop or the task
     blocks; its `consider` findings stop nothing by design and were written to the task's handoff —
     where, until this existed, they were read by nobody. Both `build.md` and the reviewer's own
-    prompt told the reviewer those findings would reach a human at gate ④, and the state schema
+    prompt told the reviewer those findings would reach a human at acceptance, and the state schema
     says so too. This is the code that makes that true.
 
     Each finding is stamped with **the tree it was made against**, not the reviewed HEAD. A

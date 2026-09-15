@@ -7,10 +7,8 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.4.7
   files:
-    AGENTS.rein.md: sha256:882df453a40815acaf9429beea7b8f7183e38c0794d7e3fa7542efbfffead2d9
-    oci/implementer/Containerfile: sha256:f30a750e50230c23abf5190dadb72de1f16948f94c33c11a713faea4ba8060fd
+    AGENTS.rein.md: sha256:5afdd09db9a691aa010c94465fb2abfee2d1c768b74573332c5cbcb19039e5a5
     oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
-    oci/reviewer/Containerfile: sha256:84de911666abc463a3299086c35e665ff75201a88258c4fd20834dac2891e566
     prompts/agents/adversarial-reviewer.md: sha256:ad06570024893dd1da00836376619c860cc26981d59b422ab2c0ccd327bdb5c1
     prompts/agents/architect.md: sha256:01f47a9e7b0342ca76fae5a3aa4539b9fd82bca60e7435458e8cf34a66a17d12
     prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64
@@ -24,10 +22,10 @@ prompts:
     prompts/commands/tasks.md: sha256:e2d2d01b4413bae9e520eedabd90018c41fdc1d051ffbc0e5302fa87536966d5
     prompts/commands/verify.md: sha256:25eb60c6a107df14ec1a5f17535aad774fce44f82909b6917334b4d5b214593f
     prompts/rules/gate-workflow.md: sha256:0f10d7414d389c4e1a43c16dcd19cbff13830e31dc9d0cc6b541eae309384fdf
-    schema/config.schema.json: sha256:170f9ffa4d990ef7707ee0a6923ccf8294279624b2ee5f9e344684e60c2fe88a
+    schema/config.schema.json: sha256:f99ea0e9fe5321c0eafbf65aa1d8a1fc8c3734d2786450da913c20709074ae73
     schema/event.schema.json: sha256:3bbffbe976bdae34821314919d5a830e3bd978b04f98b0af6e75dde0e418c675
     schema/plan.schema.json: sha256:f9f08b0576f65f6c6287238082cc066f2439cc7a0dbd773b364bdeb05094830a
-    schema/review.schema.json: sha256:829a1146a5c45f7a6f7d38e3772e682f663877e8f3d49174533724da5c6d104b
+    schema/review.schema.json: sha256:fc1bbf9a53b3aeb10515d17242ca308da0496944dc94c8540b62e551eab4432f
     schema/state.schema.json: sha256:2b1653e8d9b96568b99ae954dd20e8a8a092af9686b720bf88da7790722b1d90
 integrations:
   claude:
@@ -117,4 +115,4 @@ integrations:
             command: rein guard
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-09-13'
+updated_at: '2026-09-15'

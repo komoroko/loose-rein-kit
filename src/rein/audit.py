@@ -1,8 +1,8 @@
-"""`rein audit run` — the one security answer gate ⑤ cannot carry from gate ④.
+"""`rein audit run` — the one security answer acceptance cannot carry from acceptance.
 
 Everything else the release gate needs about security it already has: the structured review is
 bound to the reviewed HEAD, its blocking findings hold this gate shut too, and a later commit
-leaves it stale. Re-reading the code at gate ⑤ would ask the same reviewer the same question about
+leaves it stale. Re-reading the code at acceptance would ask the same reviewer the same question about
 the same commit.
 
 A dependency audit is the exception, and `verify.md` has said so since it existed: *the same commit
@@ -12,7 +12,7 @@ not.* It is the one answer that is not a function of the tree.
 It was also, until this module, the one answer nothing produced. The instruction lived in a prompt
 — run `make audit`, record the date and the commit — and no code ran it, no document held it, and
 no readiness check asked for it. A promise a phase command makes and nothing keeps is worse than no
-promise: `/verify` could be completed, gate ⑤ approved, and the release shipped with the audit
+promise: `/verify` could be completed, acceptance approved, and the release shipped with the audit
 having been "done" in a chat window.
 
 **Its findings are not this loop's to repair, and that is the routing rule rather than a shortcut.**
@@ -114,7 +114,7 @@ def run(repo: repo_mod.Repo, config: models.Config | None) -> dict[str, Any]:
     **"Could not ask" is not "the answer is bad", and only one of them is a fact about this
     release's dependencies.** `passed` used to be `exit_code == 0` and nothing else, so a command
     that never reached the vulnerability database recorded a failed audit — which
-    `approve._audit_blockers` holds gate ⑤ shut with, in the one place here that has no dispute
+    `approve._audit_blockers` holds acceptance shut with, in the one place here that has no dispute
     route. That is the same mistake this release fixed for a memory kill (`faults.is_sandbox_oom`):
     a machine that could not answer, read as a fact about the code. So a machine failure raises
     instead, nothing is recorded, and the gate goes on saying what is true — that no audit has been
@@ -128,7 +128,7 @@ def run(repo: repo_mod.Repo, config: models.Config | None) -> dict[str, Any]:
     command = [str(part) for part in block.get("command", [])]
     if not command:
         raise AuditError(
-            "this project declares no `security.dependency_audit.command`, so gate 5 has no "
+            "this project declares no `security.dependency_audit.command`, so acceptance has no "
             "dependency answer to carry. Add one (pip-audit, npm audit, cargo audit, `make audit`) "
             "— it is the only security question that is not a function of the tree, and the only "
             "one a review cannot answer once."
@@ -175,7 +175,7 @@ def run(repo: repo_mod.Repo, config: models.Config | None) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="rein audit", description="the dependency audit gate 5 requires")
+    parser = argparse.ArgumentParser(prog="rein audit", description="the dependency audit acceptance requires")
     sub = parser.add_subparsers(dest="cmd", required=True)
     runner = sub.add_parser("run", help="run the configured dependency audit and record what it said")
     runner.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")

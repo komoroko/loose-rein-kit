@@ -451,11 +451,6 @@ def check_guard_defaults(config_text: str) -> list[str]:
         failures.append(f"{CONFIG_PATH}: guard.paths is missing `{key}` (in gate_guard.DEFAULT_GUARD_PATHS)")
     for key in sorted(set(shipped) - set(defaults)):
         failures.append(f"gate_guard.py: DEFAULT_GUARD_PATHS is missing `{key}` (in {CONFIG_PATH} guard.paths)")
-    for key in sorted(set(defaults) & set(shipped)):
-        if str(shipped[key]) != defaults[key]:
-            failures.append(
-                f"guard_paths `{key}`: {CONFIG_PATH} says {shipped[key]} but gate_guard.py defaults say {defaults[key]}"
-            )
     return failures
 
 
@@ -688,14 +683,16 @@ def check_scaffold_config_parity(root: Path) -> list[str]:
     return failures
 
 
-#: Schema properties no Python is expected to name, and why. Two kinds only.
+#: Schema properties no Python is expected to name, and why. One kind only.
 #:
 #: **Agent-authored** — a reviewer writes the field and jsonschema is what checks it. No Python
 #: reads them because nothing downstream needs to: they are carried into the review document and
 #: read by the human. Legitimate, and the reason this canary needs a list at all.
 #:
-#: **Built at runtime** — the key is assembled rather than written out, so a literal search cannot
-#: see it. `Config.profile_for` does `f"{role}_profile"`.
+#: There used to be a second kind, "built at runtime", holding `implementer_profile` and
+#: `reviewer_profile` — keys assembled as `f"{role}_profile"` so a literal search could not see
+#: them. What the exemption actually covered was two settings nothing wrapped, which is exactly
+#: the shape this canary exists to catch. They are gone, and so is the exemption.
 #:
 #: Anything else is the `machine.extra_behaviors` shape: declared in the schema, consumed by
 #: something, and written by nobody. Adding a name here is a claim that has to be true.
@@ -707,8 +704,6 @@ DECLARED_BUT_UNREAD: dict[str, str] = {
     "observed_conditions": "agent-authored: the conditions an extracted statement holds under",
     "recommended_fix": "agent-authored: what the security reviewer suggests",
     "unknowns": "agent-authored: what the extractor could not determine",
-    "implementer_profile": 'built at runtime by Config.profile_for as f"{role}_profile"',
-    "reviewer_profile": 'built at runtime by Config.profile_for as f"{role}_profile"',
 }
 
 

@@ -53,6 +53,7 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
         "change_digest": "sha256:" + "a" * 64,
         "plan_digest": "sha256:" + "b" * 64,
         "environment_digest": "sha256:" + "c" * 64,
+        "host_surface_digest": "sha256:" + "e" * 64,
     }
     coverage = {
         "diff_digest": "sha256:" + "d" * 64,
@@ -147,7 +148,7 @@ def _fake_reviewer(role: str, request: Mapping[str, Any]) -> str:
 def review_repo(tmp_path: Path) -> Path:
     seed_repo(
         tmp_path,
-        state=make_state(project="rv", phase="build"),
+        state=make_state(project="rv"),
         plan=make_plan(),
         config=make_config(),
     )
@@ -1058,7 +1059,7 @@ def test_change_digest_excludes_the_rein_dir(review_repo: Path) -> None:
 def _budget_repo(root: Path, ceiling: int) -> Path:
     config = make_config()
     config["review_policy"] = {"budgets": {"max_diff_bytes": ceiling}}
-    seed_repo(root, state=make_state(project="rv", phase="build"), plan=make_plan(), config=config)
+    seed_repo(root, state=make_state(project="rv"), plan=make_plan(), config=config)
     _git(root, "init", "-q", "-b", "main")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "seed")
@@ -1377,14 +1378,20 @@ def test_a_worktree_that_cannot_be_made_falls_back_to_the_empty_directory(
     assert seen["entries"] == []
 
 
-def test_a_host_with_no_security_discipline_is_given_no_checkout(
+def test_a_host_with_no_security_discipline_is_still_given_the_checkout(
     review_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The checkout exists to serve a discipline. Without one there is nothing for it to do, and the
-    stage keeps the property the other two have — its answer is a function of its request alone."""
+    """The checkout is what the question is *about*, not how it is asked.
+
+    A host discipline is offered, never relied on: `security_review.contract` states the question in
+    full beside it, so a CLI without `/security-review` asks the same thing itself. Gating the
+    checkout on the discipline made every CLI but one review a different change from the one the
+    contract described — the settings, hooks and MCP servers the contract names as findings were
+    simply not there to read.
+    """
     bare = dataclasses.replace(adapters.ADAPTER_TABLE["claude"], disciplines={})
     monkeypatch.setitem(adapters.ADAPTER_TABLE, "claude", bare)
-    assert _seen_by(review_repo, "security_reviewer", monkeypatch)["entries"] == []
+    assert _seen_by(review_repo, "security_reviewer", monkeypatch)["entries"] != []
 
 
 # -- what the pipeline had been handing its own stages -------------------------
@@ -1484,7 +1491,7 @@ def test_a_disputed_finding_is_not_carried_forward_and_is_marked_in_the_next_rev
     assert bound, "an anchored finding can be bound to the code it named"
     state = models.State(
         {
-            **make_state(project="rv", phase="build"),
+            **make_state(project="rv"),
             "disputed_findings": {
                 "SEC-001": {"reason": "that is a test fixture, not a live credential", "anchors_digest": bound},
             },
@@ -1508,7 +1515,7 @@ def test_a_dispute_lapses_when_the_code_it_was_about_is_edited(review_repo: Path
     finding = _anchored_finding(review_repo, "vault.py", "TOKEN = os.environ['T']\n")
     state = models.State(
         {
-            **make_state(project="rv", phase="build"),
+            **make_state(project="rv"),
             "disputed_findings": {
                 "SEC-001": {"reason": "a fixture", "anchors_digest": security_review.anchors_digest(repo, finding)},
             },
@@ -1527,7 +1534,7 @@ def test_a_finding_with_no_readable_anchor_is_never_treated_as_disputed(review_r
     assert security_review.anchors_digest(repo, BLOCKING_FINDING) == ""
     state = models.State(
         {
-            **make_state(project="rv", phase="build"),
+            **make_state(project="rv"),
             "disputed_findings": {"SEC-001": {"reason": "no", "anchors_digest": "sha256:" + "0" * 64}},
         }
     )
@@ -2523,6 +2530,7 @@ def test_a_commit_that_cannot_change_the_payload_keeps_the_stage_keys() -> None:
             ceiling=400_000,
             risk_floor="low",
             prior_blocking=[],
+            host_surface="sha256:" + "3" * 64,
         )
 
     assert keys() == keys()
@@ -2754,7 +2762,7 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
     say "in 18 readings" for a review that is going to take four."""
     seed_repo(
         tmp_path,
-        state=make_state(project="rv", phase="build"),
+        state=make_state(project="rv"),
         plan=make_plan(
             tasks=[
                 make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
@@ -2804,7 +2812,7 @@ def test_an_over_budget_reading_names_the_task_whose_scope_is_too_broad(review_r
     )
     assert outlook.over_budget
     assert "largest reading T-004" in outlook.line()
-    assert "OVER, narrow T-004's scope at gate ③" in outlook.line()
+    assert "OVER, narrow T-004's scope at the mandate" in outlook.line()
     assert "in 7 readings" in outlook.line()
 
 
@@ -2832,7 +2840,7 @@ def _composed_repo(root: Path) -> str:
     """A repo whose plan scopes two tasks, so gate ④ composes. Returns the base commit."""
     seed_repo(
         root,
-        state=make_state(project="rv", phase="build"),
+        state=make_state(project="rv"),
         plan=make_plan(
             tasks=[
                 make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),

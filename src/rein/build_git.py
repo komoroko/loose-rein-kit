@@ -460,7 +460,7 @@ class GitWorkspace:
     def changed_since(self, base: str, cwd: str = "") -> list[str]:
         """Paths changed since `base` in `cwd` (the root by default): commits plus the dirty tree.
 
-        `cwd` is for a checkout that is not the root and is not a leaf either — gate ④'s repair
+        `cwd` is for a checkout that is not the root and is not a leaf either — acceptance's repair
         stands in a scratch worktree on the slice branch that introduced the code, and asking
         `branch_changed_paths` there would answer a different question (everything since that
         branch forked), which is the whole slice rather than what this launch did to it.

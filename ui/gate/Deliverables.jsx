@@ -12,7 +12,7 @@ export const DIFF_ID = "__diff__";
 export function mainEntries(review) {
   if (!review || review.error) return [];
   const items = [];
-  if (review.diff && review.gate !== "build") {
+  if (review.diff && review.gate !== "acceptance") {
     items.push({ id: DIFF_ID, label: "change set (git diff)", exists: !review.diff.error });
   }
   return items.concat(review.deliverables || []);

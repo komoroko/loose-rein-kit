@@ -54,7 +54,7 @@ def repo(tmp_path: Path) -> repo_mod.Repo:
                 make_task("T-002", kind="parallel", claim_ids=["C-001"]),
             ]
         ),
-        state=make_state(phase="build", plan_status="frozen"),
+        state=make_state(plan_status="frozen"),
     )
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "seed")

@@ -10,18 +10,18 @@ import test from "node:test";
 import { STATUS, baseRoutes, boot } from "./_harness.mjs";
 
 const REVIEW = {
-  gate: "build",
+  gate: "acceptance",
   index: 4,
   status: "pending",
   is_awaiting: true,
-  awaiting: "build",
+  awaiting: "acceptance",
   deliverables: [],
   context: [],
 };
 
 async function orient(brief) {
   const app = await boot({
-    hash: "#gate/build",
+    hash: "#gate/acceptance",
     routes: baseRoutes((url) => {
       if (url.startsWith("/api/review/stage/orient")) return { stage: "orient", brief, residual_findings: [] };
       if (url.endsWith("/api/review/session"))

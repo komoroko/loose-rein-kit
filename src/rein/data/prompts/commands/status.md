@@ -6,14 +6,16 @@ Show the Human-on-the-Loop monitoring view. **Do not change state (read-only).**
    because this is a look, not a return: advancing the watermark here would empty the delta the
    next session opens with. It is the deterministic
    answer — `/status`, `rein next` and the dashboard all read the same object, so do **not**
-   re-derive phase, gates or counts from `.rein/state.yaml` / `.rein/plan.yaml` by hand.
+   re-derive the stage, the gates or the counts from `.rein/state.yaml` / `.rein/plan.yaml` by hand.
+   There is no phase field to read: `stage` is `drafting` / `building` / `done`, derived from the
+   two gates.
 2. Lead with **"Waiting on you"**: the count, then each item with its severity
    (`blocking` = a gate cannot open while it stands / `attention` = needs a person / `info`), what
    it is, and the command that addresses it. If the heading says gate readiness was not probed, say
    so — an unprobed queue is not an empty one. Then the gate list and the `next` recommendation.
 3. **Task progress**: run `rein dag --render` and show its deterministic output (counts,
    execution layers, critical path, executable frontier). Skip if the plan has no tasks yet
-   (before `/tasks`).
+   (before the task DAG exists).
    - **Dependency graph**: `rein dag --mermaid` renders the whole picture (`graph TD`, status
      colour-coding, critical path in bold). Include it **when asked, or when the layer structure
      changed** — pasting it every time buries the board it is meant to illustrate.

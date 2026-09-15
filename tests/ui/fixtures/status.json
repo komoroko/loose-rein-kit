@@ -2,51 +2,24 @@
   "project": "demo",
   "cycle_id": "demo-cycle",
   "branch": "build/demo",
-  "current_phase": "build",
+  "stage": "building",
   "updated_at": "2026-07-23T10:00:00+09:00",
-  "phase_order": [
-    "brief",
-    "requirements",
-    "design",
-    "tasks",
-    "build",
-    "verify",
+  "stage_order": [
+    "drafting",
+    "building",
     "done"
   ],
   "gates": [
     {
-      "name": "requirements",
+      "name": "mandate",
       "status": "approved",
       "index": 1,
-      "phase": "requirements",
-      "approval_id": "GA-REQUIREMENTS-0001"
+      "approval_id": "GA-MANDATE-0001"
     },
     {
-      "name": "design",
-      "status": "approved",
+      "name": "acceptance",
+      "status": "pending",
       "index": 2,
-      "phase": "design",
-      "approval_id": "GA-DESIGN-0001"
-    },
-    {
-      "name": "tasks",
-      "status": "approved",
-      "index": 3,
-      "phase": "tasks",
-      "approval_id": "GA-TASKS-0001"
-    },
-    {
-      "name": "build",
-      "status": "pending",
-      "index": 4,
-      "phase": "build",
-      "approval_id": null
-    },
-    {
-      "name": "release",
-      "status": "pending",
-      "index": 5,
-      "phase": "verify",
       "approval_id": null
     }
   ],
@@ -70,13 +43,32 @@
     "stale": false,
     "total": 19,
     "done": 7,
-    "last": { "unit": "T-003", "stage": "actual_extraction", "reused": false },
+    "last": {
+      "unit": "T-003",
+      "stage": "actual_extraction",
+      "reused": false
+    },
     "stages": [
-      { "stage": "actual_extraction", "unit": "T-001", "role": "actual_extractor", "decision": "reuse" },
-      { "stage": "actual_extraction", "unit": "T-003", "role": "actual_extractor", "decision": "run" }
+      {
+        "stage": "actual_extraction",
+        "unit": "T-001",
+        "role": "actual_extractor",
+        "decision": "reuse"
+      },
+      {
+        "stage": "actual_extraction",
+        "unit": "T-003",
+        "role": "actual_extractor",
+        "decision": "run"
+      }
     ],
     "billed_by_role": {
-      "actual_extractor": { "launches": 4, "measured": true, "input_tokens": 812340, "output_tokens": 21044 }
+      "actual_extractor": {
+        "launches": 4,
+        "measured": true,
+        "input_tokens": 812340,
+        "output_tokens": 21044
+      }
     }
   },
   "tasks": {
@@ -211,7 +203,7 @@
     "ok": true,
     "errors": [],
     "warnings": [
-      "docs/20-design.md is absent — the design dimension was not checked"
+      "docs/20-design.md is absent \u2014 the design dimension was not checked"
     ],
     "requirements": [
       {
@@ -297,7 +289,7 @@
   "next": {
     "command": "/tasks",
     "kind": "reconcile",
-    "reason": "needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve gate 3. (No agent surface is installed — run `rein install <agent>`, then open a new session so the /-commands exist in your agent.)",
+    "reason": "needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve the mandate. (No agent surface is installed \u2014 run `rein install <agent>`, then open a new session so the /-commands exist in your agent.)",
     "also": [
       "rein dag --render"
     ]
@@ -306,7 +298,7 @@
     "id": "reconcile:reconcile:/tasks",
     "waiting_on_human": true,
     "kind": "reconcile",
-    "headline": "needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve gate 3. (No agent surface is installed — run `rein install <agent>`, then open a new session so the /-commands exist in your agent.)",
+    "headline": "needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve gate 3. (No agent surface is installed \u2014 run `rein install <agent>`, then open a new session so the /-commands exist in your agent.)",
     "action": "/tasks",
     "blocking": 2,
     "open": 5
@@ -325,7 +317,7 @@
       "severity": "blocking",
       "kind": "gate_blocker",
       "subject": "build",
-      "headline": "no machine review has been generated — run `rein review generate`. Gate 4 approves a grounded review, not a green test run.",
+      "headline": "no machine review has been generated \u2014 run `rein review generate`. Gate 4 approves a grounded review, not a green test run.",
       "action": "rein approve build --check"
     },
     {

@@ -30,11 +30,7 @@ def _config(**profiles: dict[str, Any]) -> models.Config:
     return models.Config(
         {
             "project": {"name": "demo", "work_branch": "work"},
-            "executors": {
-                "implementer_profile": "impl",
-                "reviewer_profile": "rev",
-                "quality_gate_profile": "quality",
-            },
+            "executors": {"quality_gate_profile": "quality"},
             "executor_profiles": profiles or {"impl": _HOST, "rev": _HOST, "quality": _HOST},
         }
     )
@@ -100,7 +96,7 @@ def test_a_profile_no_step_reaches_is_not_checked() -> None:
     config = models.Config(
         {
             "project": {"name": "demo", "work_branch": "work"},
-            "executors": {"implementer_profile": "impl", "reviewer_profile": "rev"},
+            "executors": {"quality_gate_profile": "quality"},
             "executor_profiles": {"impl": _HOST, "rev": _HOST, "unused": _PINNED},
         }
     )

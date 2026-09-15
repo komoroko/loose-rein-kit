@@ -173,7 +173,8 @@ export default function Gate({ status, gate }) {
   const [panel, setPanel] = useState(null);
   const [reload, setReload] = useState(0);
 
-  const isBuild = gate === "build";
+  // The acceptance room is the one that reads a generated review rather than a document set.
+  const isBuild = gate === "acceptance";
 
   // Two effects, and neither resets anything: `<Gate>` is keyed on the gate and the project in
   // App.jsx, so switching either remounts this component and every piece of state below starts
@@ -191,7 +192,7 @@ export default function Gate({ status, gate }) {
 
       const items = mainEntries(payload);
       setSelected((current) => (items.some((x) => x.id === current) ? current : (items[0] || {}).id || null));
-      if (gate !== "build") return;
+      if (gate !== "acceptance") return;
 
       const s = await getJson("/api/review/session");
       if (cancelled) return;
@@ -331,7 +332,7 @@ export default function Gate({ status, gate }) {
       <div className="block">
         <div id="rvBar">
           <GateHead status={status} gate={gate} review={review} />
-          {/* Gate ④ with no machine review falls back to the deliverable list, silently. While a
+          {/* Acceptance with no machine review falls back to the deliverable list, silently. While a
               generation is in flight that silence is a lie — the stages this room is *for* are
               being read right now. The line comes off the SSE `status` push, because the session
               payload below is fetched once per gate and never polls. */}
@@ -386,7 +387,7 @@ function Footer({ review, session, isBuild, gate, onApprove, onChanges }) {
   }
   if (!review.is_awaiting) return <span className="note">Not the gate under decision.</span>;
 
-  const warn = review.gate === "release" && review.open_escalations
+  const warn = review.gate === "acceptance" && review.open_escalations
     ? <span className="warn">{review.open_escalations} open escalation(s) — resolve before the release decision</span>
     : null;
 

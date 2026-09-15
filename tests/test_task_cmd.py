@@ -22,7 +22,7 @@ def repo_with_a_blocked_task(tmp_path: Path) -> repo_mod.Repo:
     seed_repo(
         tmp_path,
         plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
-        state=make_state(phase="build", plan_status="frozen"),
+        state=make_state(plan_status="frozen"),
     )
     repo = repo_mod.Repo(tmp_path)
     build_loop.set_task_status(repo, "T-001", "in-progress")

@@ -26,7 +26,7 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     seed_repo(
         root,
-        state=make_state(project="rt", gates=dict.fromkeys(models.GATE_ORDER, "pending"), phase="build"),
+        state=make_state(project="rt", gates=dict.fromkeys(models.GATE_ORDER, "pending")),
         config=make_config(profiles=SANDBOXED_PROFILES),
     )
     return root
@@ -114,7 +114,10 @@ def test_what_is_waiting_is_not_only_what_wrote_an_event(repo: Path) -> None:
     """
     _log(repo, "task_completed")
     text = resume.run(repo)
-    assert "waiting on you" in text and "blocking" in text
+    assert "waiting on you" in text
+    # …and it is the gate, which appended nothing: the log holds one `task_completed` and no
+    # event about the approval that is actually being waited on.
+    assert "rein approve mandate" in text
 
 
 def test_the_packet_names_the_one_decision_waiting_on_a_human(repo: Path) -> None:

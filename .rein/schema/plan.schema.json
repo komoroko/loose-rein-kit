@@ -13,6 +13,27 @@
     "cycle": {
       "$ref": "#/$defs/cycle"
     },
+    "scope": {
+      "description": "What the loop may change under this mandate. Each entry covers the path it names and everything beneath it; a trailing '/' is optional punctuation, and the prefix is anchored at a separator (`src/app` covers `src/app/x.py`, never `src/app.py`). An empty `include` is unbounded — every guarded path is in scope — which is the honest default for a cycle that has not narrowed itself, and is what the five phase gates amounted to once the last of them opened. `rein guard` refuses a write outside it, so this is the mechanical half of \"the range you may delegate\".",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "include": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/repoPath"
+          }
+        },
+        "exclude": {
+          "type": "array",
+          "maxItems": 128,
+          "items": {
+            "$ref": "#/$defs/repoPath"
+          }
+        }
+      }
+    },
     "claims": {
       "type": "array",
       "maxItems": 512,
@@ -238,7 +259,7 @@
           }
         },
         "acceptance": {
-          "description": "This task's own bar, in a form something can check. Acceptance criteria used to live only as markdown checkboxes in `docs/tasks/T-NNN.md`, which nothing parsed — so 'the acceptance criteria are met' was an assertion by the agent that wrote the code. Stating them here does NOT let a task pick its own quality gate: the shared DoD in config.yaml still runs, unchanged, and this list is frozen by a human at gate ③ exactly like everything else in the plan.",
+          "description": "This task's own bar, in a form something can check. Acceptance criteria used to live only as markdown checkboxes in `docs/tasks/T-NNN.md`, which nothing parsed — so 'the acceptance criteria are met' was an assertion by the agent that wrote the code. Stating them here does NOT let a task pick its own quality gate: the shared DoD in config.yaml still runs, unchanged, and this list is frozen by a human at the mandate exactly like everything else in the plan.",
           "type": "array",
           "maxItems": 32,
           "items": {
@@ -312,7 +333,7 @@
           "$ref": "#/$defs/text"
         },
         "evidence": {
-          "description": "How this criterion is established. Absent means it is prose only — most criteria are, and that is honest; it simply contributes no evidence and is left to the gate ④ review.",
+          "description": "How this criterion is established. Absent means it is prose only — most criteria are, and that is honest; it simply contributes no evidence and is left to the acceptance review.",
           "type": "object",
           "additionalProperties": false,
           "required": [

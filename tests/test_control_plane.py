@@ -29,11 +29,7 @@ CENTRAL_ONLY = sorted(models.CENTRAL_ONLY_CAPABILITIES)
 
 @pytest.fixture
 def repo(tmp_path: Path) -> repo_mod.Repo:
-    seed_repo(
-        tmp_path,
-        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
-        state=make_state(phase="build"),
-    )
+    seed_repo(tmp_path, plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]), state=make_state())
     return repo_mod.Repo(tmp_path)
 
 

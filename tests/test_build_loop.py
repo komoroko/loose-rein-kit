@@ -90,7 +90,7 @@ def build_repo(tmp_path: Path, **kwargs: object) -> Path:
             ]
         ),
     )
-    kwargs.setdefault("state", make_state(phase="build", plan_status="frozen"))
+    kwargs.setdefault("state", make_state(plan_status="frozen"))
     seed_repo(tmp_path, **kwargs)  # type: ignore[arg-type]
     return tmp_path
 
@@ -412,8 +412,8 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
     `copilot` grants no tool at all without one, so an ungranted launch could not open the checkout
     the security stage is given to read. Neither gets a grant that could change anything.
 
-    The request itself goes where that CLI takes one (`review_transport.prompt_call`): neither of
-    these reads stdin, so the payload is the last thing on the line, after the grant.
+    The request itself goes where that CLI takes one (`review_transport.prompt_call`): `codex exec`
+    reads it on stdin, `copilot -p` takes it as the flag's value.
     """
     from rein import common, review_transport
 
@@ -435,7 +435,8 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
 
     record = adapters.ADAPTER_TABLE[adapter]
     payload = json.dumps({"request": "x"})
-    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ), *record.prompt_argv(payload)]
+    tail = () if record.prompt_on_stdin else record.prompt_argv(payload)
+    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ), *tail]
     assert not set(launched[0]) & set(record.access_flags(adapters.WRITE)) - set(record.launch_argv())
 
 
@@ -687,12 +688,12 @@ def test_a_repair_is_labelled_by_what_asked_for_it(
     loop._repair(task, item, where="review")
     assert "[review] T-001: 1 finding(s)" in capsys.readouterr().out
     loop._repair(task, item)
-    assert "[gate 4] T-001: 1 finding(s)" in capsys.readouterr().out
+    assert "[acceptance] T-001: 1 finding(s)" in capsys.readouterr().out
 
 
 def test_a_task_boundary_repair_commits_as_what_it_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The commit subject named the gate too, so a repair made at a task boundary landed on the
-    branch calling itself a gate-4 repair."""
+    branch calling itself a acceptance repair."""
     loop = orchestrator(tmp_path)
     subjects: list[str] = []
     monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
@@ -708,7 +709,7 @@ def test_a_task_boundary_repair_commits_as_what_it_is(tmp_path: Path, monkeypatc
     loop._accept_repair(task, str(loop.root), "a" * 40, where="review")
     loop._accept_repair(task, str(loop.root), "a" * 40)
 
-    assert subjects == ["T-001: review repair", "T-001: gate-4 repair"]
+    assert subjects == ["T-001: review repair", "T-001: acceptance repair"]
 
 
 def test_the_gate_after_a_repair_reports_what_it_re_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -806,7 +807,7 @@ def test_an_off_vocabulary_status_is_refused(tmp_path: Path) -> None:
 
 
 def test_the_loop_refuses_while_gate_three_is_pending(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    root = build_repo(tmp_path, state=make_state(gates={"tasks": "pending"}, phase="tasks", plan_status="draft"))
+    root = build_repo(tmp_path, state=make_state(gates={"mandate": "pending"}, plan_status="draft"))
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 2
     assert "no frozen plan to build against" in capsys.readouterr().err
 
@@ -814,7 +815,7 @@ def test_the_loop_refuses_while_gate_three_is_pending(tmp_path: Path, capsys: py
 def test_the_loop_refuses_to_build_against_a_draft_plan(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Gate 3's approval is what freezes the plan; building against a draft would implement a
     plan nobody signed for."""
-    root = build_repo(tmp_path, state=make_state(phase="build", plan_status="draft"))
+    root = build_repo(tmp_path, state=make_state(plan_status="draft"))
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 2
     assert "not 'frozen'" in capsys.readouterr().err
 
@@ -831,13 +832,12 @@ def test_approving_gate_three_is_what_lets_the_loop_start(tmp_path: Path, capsys
     from rein import repo as repo_mod
 
     root = build_repo(
-        tmp_path,
-        state=make_state(gates={"tasks": "pending", "build": "pending"}, phase="tasks", plan_status="draft"),
+        tmp_path, state=make_state(gates={"mandate": "pending", "acceptance": "pending"}, plan_status="draft")
     )
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 2
 
     repo = repo_mod.Repo(root)
-    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
     capsys.readouterr()  # drop the refusal above
 
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
@@ -901,7 +901,7 @@ def test_the_handover_says_what_was_not_established(tmp_path: Path, capsys: pyte
     out = capsys.readouterr().out
     assert "did NOT establish" in out
     assert "grounded review" in out
-    assert "cannot open gate 4" in out
+    assert "cannot open acceptance" in out
 
 
 def test_the_handover_does_not_offer_to_approve(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -1465,7 +1465,7 @@ def test_there_is_no_resolve_verb() -> None:
 
 def test_a_task_left_in_progress_is_reset_to_todo(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The frontier only picks up `todo`, so an interrupted task would deadlock the loop."""
-    root = build_repo(tmp_path, state=make_state(phase="build", tasks={"T-001": "in-progress"}))
+    root = build_repo(tmp_path, state=make_state(tasks={"T-001": "in-progress"}))
     repo = repo_mod.Repo(root)
     loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
     loop._recover_in_progress()
@@ -1948,11 +1948,37 @@ def test_every_adapter_declares_what_it_can_do() -> None:
     assert codex.access_flags(adapters.WRITE) == ("--sandbox", "workspace-write")
     assert codex.access_flags(adapters.READ) == (), "codex exec reads without being asked"
     assert codex.own_sandbox, "codex sandboxes itself — the fact the nested-sandbox check needs"
-    assert not codex.resumable, "codex resumes the *last* session, which parallel leaves cannot name"
+    # Resumable by the *other* mechanism: the CLI mints the thread id and reports it in the `--json`
+    # stream, and `codex exec resume <id>` continues that one. It was recorded as having no session
+    # at all on the reading that its resume verb takes only the last one, which it does not.
+    assert codex.resumable and not codex.session_flags
+    assert codex.session_from_envelope is not None and codex.resume_argv == ("resume", "{session}")
+    assert codex.resume_verb("T-1") == ("resume", "T-1")
 
     claude = adapters.ADAPTER_TABLE["claude"]
     assert claude.resumable and not claude.own_sandbox
+    assert claude.resume_argv == (), "claude is told an id; it does not name one"
     assert not any(claude.access_flags(level) for level in (adapters.READ, adapters.REVIEW, adapters.WRITE))
+
+
+def test_the_two_shapes_of_session_land_in_different_places() -> None:
+    """A caller-chosen id is a flag and is appended; a CLI-minted one is a verb and follows `argv`.
+
+    `claude --resume <id>` and `codex exec resume <id>` are not the same grammar, and putting the
+    verb where the flag goes makes codex read `resume` as the prompt. So the placement is a
+    property of the record, not of the call site.
+    """
+    claude = adapters.ADAPTER_TABLE["claude"]
+    line = adapters.command(claude.launch_argv(), "P", access=adapters.WRITE, session="S", resume=True)
+    assert line[-3:] == ["--resume", "S", "P"]
+    assert adapters.command(claude.launch_argv(), "P", session="S")[-3:] == ["--session-id", "S", "P"]
+
+    codex = adapters.ADAPTER_TABLE["codex"]
+    line = adapters.command(codex.launch_argv(), "P", access=adapters.WRITE, session="S", resume=True)
+    assert line[:4] == ["codex", "exec", "resume", "S"], "the verb follows the CLI's own argv"
+    assert line[-1] == "P" and "--json" in line
+    # And a first launch is bare: codex names the session, so there is nothing to stamp.
+    assert adapters.command(codex.launch_argv(), "P", session="S") == adapters.command(codex.launch_argv(), "P")
 
 
 def test_an_adapter_named_differently_from_its_binary_is_still_found() -> None:
@@ -3045,11 +3071,12 @@ def test_a_gate_four_stage_reaches_a_cli_that_does_not_read_stdin() -> None:
     """
     from rein import review_transport
 
-    claude = adapters.ADAPTER_TABLE["claude"]
-    argv, stdin = review_transport.prompt_call(claude, ["claude", "-p"], "PAYLOAD")
-    assert (argv, stdin) == (["claude", "-p"], "PAYLOAD"), "the one CLI whose stdin is established"
+    for name in ("claude", "codex"):
+        record = adapters.ADAPTER_TABLE[name]
+        argv, stdin = review_transport.prompt_call(record, list(record.argv), "PAYLOAD")
+        assert (argv, stdin) == (list(record.argv), "PAYLOAD"), f"{name} takes its prompt on stdin"
 
-    for name in ("gemini", "copilot", "amp", "opencode", "codex", "cursor"):
+    for name in ("gemini", "copilot", "amp", "opencode", "cursor"):
         record = adapters.ADAPTER_TABLE[name]
         argv, stdin = review_transport.prompt_call(record, list(record.argv), "PAYLOAD")
         assert argv[-1] == "PAYLOAD", f"{name} was launched without its question"
@@ -3279,7 +3306,7 @@ def test_a_reading_that_cannot_be_taken_does_not_un_finish_the_build(
 
 
 def _repair_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_loop.Orchestrator, list[str]]:
-    """A gate-4 repair with everything around the commit stubbed out: one launch, in scope, green."""
+    """A acceptance repair with everything around the commit stubbed out: one launch, in scope, green."""
     loop = _scoped_repo(tmp_path, rounds=2)
     committed: list[str] = []
     monkeypatch.setattr(loop, "_launch", lambda *a, **k: None)
@@ -3310,7 +3337,7 @@ def test_a_gate_four_repair_is_committed_before_the_next_reading(
     loop, committed = _repair_loop(tmp_path, monkeypatch)
     found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
     loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
-    assert committed == ["T-001: gate-4 repair"]
+    assert committed == ["T-001: acceptance repair"]
 
 
 def test_a_cycle_that_is_not_a_stack_repairs_on_the_work_branch(
@@ -3322,7 +3349,7 @@ def test_a_cycle_that_is_not_a_stack_repairs_on_the_work_branch(
     found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
     loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
 
-    assert committed == ["T-001: gate-4 repair"]
+    assert committed == ["T-001: acceptance repair"]
     assert "no stack to place this on" in capsys.readouterr().out
 
 

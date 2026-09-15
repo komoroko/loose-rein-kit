@@ -219,7 +219,7 @@ def test_a_surface_an_older_release_wrote_is_not_reported_as_healthy(tmp_path: P
     "entry,expected",
     [
         ("Bash(rein approve:*)", ["rein approve"]),
-        ("Bash(rein approve build)", ["rein approve"]),
+        ("Bash(rein approve acceptance)", ["rein approve"]),
         ("Bash(rein cycle-close:*)", ["rein cycle-close"]),
         # An outward-facing verb is stopped whole, not per flag: prefix matching runs both ways,
         # so the bare verb catches `--push` and `--ready` alike.
@@ -290,16 +290,16 @@ def test_an_approved_gate_with_a_full_receipt_passes(tmp_path: Path) -> None:
     state = models.State(make_state())  # approved through tasks, each with a schema-valid receipt
     results = doctor.check_receipts(state)
     assert all(f.level == "PASS" for f in results)
-    assert any("GA-REQUIREMENTS-" in f.message for f in results)
+    assert any("GA-MANDATE-" in f.message for f in results)
 
 
 def test_an_approved_gate_with_no_approval_id_fails() -> None:
     """`check_receipts` is a read-only re-check, not a re-run of schema validation — it must
     catch a broken receipt even when nothing upstream of it did."""
     raw = make_state()
-    raw["gates"]["requirements"]["receipt"]["approval_id"] = ""
+    raw["gates"]["mandate"]["receipt"]["approval_id"] = ""
     results = doctor.check_receipts(models.State(raw))
-    req = [f for f in results if "requirements" in f.message]
+    req = [f for f in results if "mandate" in f.message]
     assert req and req[0].level == "FAIL" and "no approval id" in req[0].message
 
 
@@ -308,9 +308,9 @@ def test_an_approved_gate_missing_a_bound_digest_fails() -> None:
     document that was hand-edited around the schema (or read from an older format) must still
     be caught here."""
     raw = make_state()
-    del raw["gates"]["requirements"]["receipt"]["attested_chain_root"]
+    del raw["gates"]["mandate"]["receipt"]["attested_chain_root"]
     results = doctor.check_receipts(models.State(raw))
-    req = [f for f in results if "requirements" in f.message]
+    req = [f for f in results if "mandate" in f.message]
     assert req and req[0].level == "FAIL"
     assert "missing" in req[0].message
 
@@ -340,7 +340,7 @@ def _frozen(plan_doc: dict[str, object], config_doc: dict[str, object], **overri
         "environment_digest": models.Config(config_doc).environment_digest(),
         **overrides,
     }
-    for gate in ("requirements", "design", "tasks"):
+    for gate in ("mandate",):
         receipt = raw["gates"][gate]["receipt"]
         receipt["plan_digest"] = raw["plan"]["digest"]
         receipt["config_digest"] = raw["plan"]["config_digest"]
@@ -385,7 +385,7 @@ def test_a_config_edited_after_the_freeze_is_a_fail() -> None:
     results = doctor.check_freeze_drift(state, models.Plan(plan_doc), edited)
     fails = [f for f in results if f.level == "FAIL"]
     assert len(fails) == 1
-    assert "config.yaml has changed since gate 3 froze it" in fails[0].message
+    assert "config.yaml has changed since the mandate froze it" in fails[0].message
 
 
 def test_a_plan_edited_after_the_freeze_is_a_fail() -> None:
@@ -398,28 +398,26 @@ def test_a_plan_edited_after_the_freeze_is_a_fail() -> None:
 
 
 def test_a_post_freeze_receipt_naming_another_digest_is_a_fail() -> None:
-    """The artifact matches the freeze, but gate ③'s receipt names something else — so the
+    """The artifact matches the freeze, but the mandate's receipt names something else — so the
     approval was taken against a document other than the one now frozen."""
     plan_doc, config_doc = make_plan(), make_config()
     state = _frozen(plan_doc, config_doc)
     raw = dict(state.raw)
-    raw["gates"]["tasks"]["receipt"]["config_digest"] = "sha256:" + "0" * 64
+    raw["gates"]["mandate"]["receipt"]["config_digest"] = "sha256:" + "0" * 64
     results = doctor.check_freeze_drift(models.State(raw), models.Plan(plan_doc), models.Config(config_doc))
     fails = [f for f in results if f.level == "FAIL"]
     assert len(fails) == 1
-    assert "gate 'tasks' receipt" in fails[0].message and "not the one the freeze records" in fails[0].message
+    assert "gate 'mandate' receipt" in fails[0].message and "not the one the freeze records" in fails[0].message
 
 
-def test_the_pre_freeze_gates_are_not_judged_against_the_freeze() -> None:
-    """Gates ① and ② were approved while the plan was still a draft, and /design and /tasks then
-    moved it — legitimately. Comparing their receipts against the live document (the obvious
-    reading of "check every receipt's digests") turns every healthy repository permanently red.
-    """
+def test_a_pending_gate_is_not_judged_against_the_freeze() -> None:
+    """Only an approved receipt makes a claim about the frozen bytes. There is no longer a gate
+    approved *before* the freeze — the mandate approval is the freeze — so what this excludes is
+    the gate nobody has opened."""
     plan_doc, config_doc = make_plan(), make_config()
     state = _frozen(plan_doc, config_doc)
     raw = dict(state.raw)
-    for gate in ("requirements", "design"):
-        raw["gates"][gate]["receipt"]["plan_digest"] = "sha256:" + "1" * 64
+    raw["gates"]["acceptance"]["receipt"] = {"plan_digest": "sha256:" + "1" * 64}
     results = doctor.check_freeze_drift(models.State(raw), models.Plan(plan_doc), models.Config(config_doc))
     assert not [f for f in results if f.level == "FAIL"]
 
@@ -475,7 +473,7 @@ def test_check_sandbox_fails_when_the_local_image_does_not_match_the_pin(monkeyp
     suspect that before it says so."""
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
     installed = "sha256:" + "b" * 64
-    profile_image = SANDBOXED_PROFILES["implementer"]["image"]
+    profile_image = SANDBOXED_PROFILES["quality"]["image"]
     monkeypatch.setattr(
         common,
         "run",
@@ -483,14 +481,14 @@ def test_check_sandbox_fails_when_the_local_image_does_not_match_the_pin(monkeyp
     )
     config = models.Config(make_config(profiles=SANDBOXED_PROFILES))
     results = doctor.check_sandbox(config)
-    fails = [f for f in results if f.level == "FAIL" and "profile 'implementer'" in f.message]
+    fails = [f for f in results if f.level == "FAIL" and "profile 'quality'" in f.message]
     assert len(fails) == 1
     assert "does not match the pinned" in fails[0].message
 
 
 def test_check_sandbox_passes_when_the_local_image_matches_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
-    digest = SANDBOXED_PROFILES["implementer"]["image"].rpartition("@")[2]
+    digest = SANDBOXED_PROFILES["quality"]["image"].rpartition("@")[2]
     monkeypatch.setattr(
         common,
         "run",
@@ -498,7 +496,7 @@ def test_check_sandbox_passes_when_the_local_image_matches_the_pin(monkeypatch: 
     )
     config = models.Config(make_config(profiles=SANDBOXED_PROFILES))
     results = doctor.check_sandbox(config)
-    passes = [f for f in results if f.level == "PASS" and "profile 'implementer':" in f.message]
+    passes = [f for f in results if f.level == "PASS" and "profile 'quality':" in f.message]
     assert passes and "pinned image is present" in passes[0].message
 
 
@@ -537,9 +535,9 @@ def test_a_missing_adapter_only_warns_before_the_build_phase(monkeypatch: pytest
     assert "rein agent <cli>" in results[0].message
 
 
-def test_a_missing_adapter_fails_once_the_build_phase_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_missing_adapter_fails_once_the_mandate_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
     _no_adapter_on_path(monkeypatch)
-    results = doctor.check_adapters(models.Config(make_config()), models.State({"current_phase": "build"}))
+    results = doctor.check_adapters(models.Config(make_config()), models.State(make_state()))
     assert [f.level for f in results] == ["FAIL"]
 
 
@@ -564,10 +562,10 @@ def test_an_adapter_this_release_cannot_launch_fails_whatever_is_on_path() -> No
 def test_a_model_the_adapter_cannot_be_told_to_run_fails() -> None:
     """The launchers refuse it; doctor is where that is meant to be found, not `rein build`."""
     config = make_config()
-    config["agents"]["comparator"] = {"adapter": "codex", "model": "o1"}  # type: ignore[index]
+    config["agents"]["comparator"] = {"adapter": "amp", "model": "o1"}  # type: ignore[index]
     results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
     assert [f.level for f in results if f.level == "FAIL"], results
-    assert any("cannot tell 'codex' which model to run" in f.message for f in results)
+    assert any("cannot tell 'amp' which model to run" in f.message for f in results)
 
 
 def test_the_runtime_fallback_warns_that_it_is_weaker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -590,7 +588,7 @@ def test_a_leftover_journal_is_reported(tmp_path: Path) -> None:
 
 
 def test_a_broken_gate_ladder_fails(tmp_path: Path) -> None:
-    state = models.State(make_state(gates={"requirements": "pending"}))
+    state = models.State(make_state(gates={"mandate": "pending", "acceptance": "approved"}))
     results = doctor.check_gate_chain(state)
     assert results[0].level == "FAIL"
     assert "survived a roll back" in results[0].message
@@ -936,7 +934,7 @@ def test_a_missing_runtime_is_reported_before_any_image_is_configured(monkeypatc
 def test_the_sandbox_fail_names_a_command_that_finishes_the_job() -> None:
     results = doctor.check_sandbox(models.Config(make_config()))
     fail = next(f for f in results if f.level == "FAIL" and "run repository-derived code" in f.message)
-    assert "rein oci build --all --write-config" in fail.message
+    assert "rein oci build --profile python --write-config" in fail.message
 
 
 # --- what the last build run came to ------------------------------------------
@@ -1128,12 +1126,18 @@ def test_an_adapter_that_cannot_resume_says_what_that_costs() -> None:
     """Not a defect — it is what the CLI offers — but it was invisible, and it is the largest
     avoidable cost in a long build."""
     config = make_config()
-    config["agents"]["implementer"]["adapter"] = "codex"  # type: ignore[index]
+    config["agents"]["implementer"]["adapter"] = "copilot"  # type: ignore[index]
     results = doctor.check_retry_continuity(models.Config(config))
     assert [f.level for f in results] == ["INFO"]
     assert "fresh launch" in results[0].message
 
     assert doctor.check_retry_continuity(models.Config(make_config()))[0].level == "PASS"
+
+    # And codex passes through the *other* mechanism — it names its own session and is resumed by
+    # verb. It was reported here as cold for as long as `resumable` meant "has two flags".
+    codex = make_config()
+    codex["agents"]["implementer"]["adapter"] = "codex"  # type: ignore[index]
+    assert doctor.check_retry_continuity(models.Config(codex))[0].level == "PASS"
 
 
 # --- the DoD steps that establish nothing --------------------------------------
@@ -1193,10 +1197,11 @@ def test_an_agent_step_is_not_judged_by_its_command() -> None:
 # --- sandbox: a FAIL that means "fix before continuing" ------------------------
 
 
-def test_unsandboxed_profiles_are_a_warning_before_the_build_phase(tmp_path: Path) -> None:
-    """`FAIL` is defined as fix-before-continuing, and a repo at `brief` has nothing to continue to."""
+def test_unsandboxed_profiles_are_a_warning_before_the_mandate_opens(tmp_path: Path) -> None:
+    """`FAIL` is defined as fix-before-continuing, and a repo with no mandate has nothing to
+    continue to — nothing has run repository code because nothing is allowed to."""
     config = models.Config(make_config())
-    state = models.State(make_state(phase="requirements"))
+    state = models.State(make_state(gates={"mandate": "pending"}))
 
     results = doctor.check_sandbox(config, state)
 
@@ -1206,7 +1211,7 @@ def test_unsandboxed_profiles_are_a_warning_before_the_build_phase(tmp_path: Pat
 
 def test_unsandboxed_profiles_are_a_failure_once_the_build_starts(tmp_path: Path) -> None:
     config = models.Config(make_config())
-    state = models.State(make_state(phase="build"))
+    state = models.State(make_state())
 
     results = doctor.check_sandbox(config, state)
 
@@ -1293,7 +1298,7 @@ def test_a_schema_invalid_document_is_reported_with_the_command_that_repairs_it(
     findings, _ = doctor.check_documents(repo_mod.Repo(tmp_path))
     failed = [f for f in findings if f.level == "FAIL" and f.message.startswith("config.yaml")]
     assert failed, "a config the schema refuses is a FAIL"
-    assert "rein revise --to tasks" in failed[0].message
+    assert "rein revise --to mandate" in failed[0].message
 
 
 def test_a_document_a_newer_rein_wrote_is_not_reported_as_damaged(tmp_path: Path) -> None:

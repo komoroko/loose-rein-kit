@@ -97,11 +97,123 @@ def test_two_readings_of_the_same_bytes_are_not_one_answer() -> None:
             ceiling=400_000,
             risk_floor="low",
             prior_blocking=[],
+            host_surface="sha256:" + "3" * 64,
             unit=unit,
         )
 
     assert keys("T-001") == keys("T-001")
     assert keys("T-001") != keys("seam")
+
+
+# --- the host surfaces are a second subject, with a second digest --------------
+
+
+@pytest.fixture
+def installed_repo(tmp_path: Path) -> Path:
+    """A repository with a surface `rein install claude` would have written, recorded in the lock."""
+    from rein import lock as lock_mod
+
+    (tmp_path / ".rein").mkdir()
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text('{"permissions": {"allow": []}}\n', encoding="utf-8")
+    (tmp_path / ".claude" / "commands").mkdir()
+    (tmp_path / ".claude" / "commands" / "build.md").write_text("read the build procedure\n", encoding="utf-8")
+    data = lock_mod.new("0.1.0", "")
+    data["integrations"] = {
+        "claude": {
+            "version": "0.1.0",
+            "installed_at": "2026-01-01",
+            "files": {".claude/commands/build.md": "sha256:" + "0" * 64},
+            "settings": {"created": True, "permissions_allow": [], "hooks": {}},
+        }
+    }
+    lock_mod.write(tmp_path / ".rein" / "rein.lock", data)
+    _git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "mod.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    return tmp_path
+
+
+def test_the_installed_surfaces_are_excluded_from_the_product_and_named_on_their_own(installed_repo: Path) -> None:
+    """One set could not say "hide this from the extractor" and "measure this for the security
+    reviewer" at once, so `host_surface` is named apart from `not_the_product`."""
+    repo = repo_mod.Repo(installed_repo)
+    surfaces = review_reading.host_surface(repo)
+    assert surfaces == (".claude/commands/build.md", ".claude/settings.json")
+    assert set(surfaces) <= set(review_reading.not_the_product(repo, None))
+
+
+def test_widening_permissions_allow_moves_the_security_key_and_nothing_else(installed_repo: Path) -> None:
+    """The hole this pair of digests closes.
+
+    `security_review.contract` tells the reviewer that a pre-authorized command added to `.claude/`
+    is a finding, and `not_the_product` excludes exactly that path from the product digest. On one
+    digest, a commit that widened `permissions.allow` and touched nothing else changed no key: the
+    stage replayed its cached answer, no reviewer was launched, no checkout of the head was made,
+    and the setting was never read by anyone.
+    """
+    repo = repo_mod.Repo(installed_repo)
+    exclude = review_reading.not_the_product(repo, None)
+
+    def keys() -> dict[str, str]:
+        head = _git(installed_repo, "rev-parse", "HEAD")
+        return review_reading.reading_keys(
+            config=None,
+            change=review_reading.change_digest(repo, head, exclude),
+            coverage_digest="sha256:" + "2" * 64,
+            trusted_base="b" * 40,
+            ceiling=400_000,
+            risk_floor="low",
+            prior_blocking=[],
+            host_surface=review_reading.host_surface_digest(repo, head),
+        )
+
+    before = keys()
+    (installed_repo / ".claude" / "settings.json").write_text(
+        '{"permissions": {"allow": ["Bash(curl:*)"]}}\n', encoding="utf-8"
+    )
+    _git(installed_repo, "add", "-A")
+    _git(installed_repo, "commit", "-qm", "widen the allowlist and nothing else")
+    after = keys()
+
+    assert after["security_review"] != before["security_review"]
+    # And only that stage: the blind extractor is never sent the surfaces, so it is not a function
+    # of them and keying it on them would re-read a half-megabyte extraction for nothing.
+    assert after["actual_extraction"] == before["actual_extraction"]
+
+
+def test_a_review_bound_to_the_old_surfaces_is_stale(installed_repo: Path) -> None:
+    """Freshness is measured over both subjects, so the same commit retires the review itself."""
+    repo = repo_mod.Repo(installed_repo)
+    head = _git(installed_repo, "rev-parse", "HEAD")
+    bound = models.Review(
+        {
+            "machine": {
+                "status": "generated",
+                "binding": {
+                    "change_digest": review_reading.change_digest(
+                        repo, head, review_reading.not_the_product(repo, None)
+                    ),
+                    "host_surface_digest": review_reading.host_surface_digest(repo, head),
+                    "subject_head_sha": head,
+                },
+            },
+            "human": {"status": "not_started"},
+        }
+    )
+    assert review_reading.freshness(repo, bound, None).fresh is True
+
+    (installed_repo / ".claude" / "settings.json").write_text(
+        '{"permissions": {"allow": ["Bash(curl:*)"]}}\n', encoding="utf-8"
+    )
+    _git(installed_repo, "add", "-A")
+    _git(installed_repo, "commit", "-qm", "widen the allowlist and nothing else")
+
+    stale = review_reading.freshness(repo, bound, None)
+    assert stale.fresh is False
+    assert "host surfaces" in stale.reason
 
 
 # --- a slice nobody read is named, never counted as read ----------------------
@@ -225,7 +337,7 @@ def _composed_repo(tmp_path: Path, *, base_files: Mapping[str, str] | None = Non
 
     seed_repo(
         tmp_path,
-        state=make_state(project="rv", phase="build"),
+        state=make_state(project="rv"),
         plan=make_plan(
             claims=[make_claim()],
             tasks=[

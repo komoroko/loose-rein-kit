@@ -593,7 +593,7 @@ def refresh_ungenerated_review(repo: repo_mod.Repo) -> bool:
     """Re-materialize `review.yaml` while it holds no review. True when it was rewritten.
 
     The scaffold is written once by `init` and never again, so a release that changes the review
-    document's shape strands every repository that has not reached gate ④ yet — and strands it on
+    document's shape strands every repository that has not reached acceptance yet — and strands it on
     a file that is *machine-written and empty*: `status: not_generated`, no machine half, no human
     answers, nothing anybody recorded. A repo was left unable to run `rein revise` by a stub whose
     entire content was "nothing has happened here".

@@ -326,9 +326,11 @@ def test_the_codex_hook_registers_the_same_guard_as_the_other_hosts(repo: repo_m
     assert hooks["hooks"]["PreToolUse"][0]["matcher"] == "apply_patch"
 
 
-def test_guard_denies_a_pending_gate_write_in_an_initialized_repo(repo: repo_mod.Repo) -> None:
-    ok, reason = gate_guard.evaluate(str(repo.path("docs/20-design.md")), repo)
-    assert ok is False and "requirements" in reason
+def test_guard_denies_an_unauthorized_write_in_an_initialized_repo(repo: repo_mod.Repo) -> None:
+    ok, reason = gate_guard.evaluate(str(repo.path("src/app.py")), repo)
+    assert ok is False and "no mandate is approved" in reason
+    # The mandate's own material is never guarded — it is what the approval is written from.
+    assert gate_guard.evaluate(str(repo.path("docs/20-design.md")), repo)[0] is True
     # tests/ stays deliberately unguarded (speculative work keeps flowing).
     ok, _ = gate_guard.evaluate(str(repo.path("tests/test_x.py")), repo)
     assert ok is True

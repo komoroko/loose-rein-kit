@@ -1,5 +1,5 @@
 ---
-description: Phase 4 implementation. Consume the task DAG with `rein build`. Each task's condition to advance is green tests.
+description: Implementation. Consume the task DAG with `rein build`, inside the approved mandate.
 agent: agent
 ---
 

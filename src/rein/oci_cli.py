@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.error(f"no such profile(s) in config.yaml: {', '.join(sorted(missing))}")
             return 1
         # Parse before writing: a config this command corrupted would be a worse outcome than one
-        # the human had to edit by hand, and `rein guard` rule 2 refuses it after gate 3 anyway.
+        # the human had to edit by hand, and `rein guard` rule 2 refuses it after the mandate anyway.
         try:
             before = models.Config.parse(path.read_text(encoding="utf-8")).environment_digest()
             after = models.Config.parse(text).environment_digest()
@@ -237,10 +237,10 @@ def main(argv: list[str] | None = None) -> int:
 def _record_repin(repo: repo_mod.Repo, pins: dict[str, str], *, before: str, after: str) -> None:
     """Put the re-pin in the audit chain. Prints and continues if it cannot.
 
-    Gate ③ deliberately does not freeze the image pin — rebuilding it because a task added a
+    The mandate deliberately does not freeze the image pin — rebuilding it because a task added a
     dependency is a rebuild of the *same* sandbox, and making that cost a rollback is what stopped
     such a task landing at all. What the pin being unfrozen must not mean is that it moves in
-    silence: gate ④ reads the environment digest beside the evidence it produced, and this event is
+    silence: acceptance reads the environment digest beside the evidence it produced, and this event is
     where the change acquires a time, a reason and a place in the chain.
 
     Not fatal. The images are built and config.yaml is already written; refusing to record that

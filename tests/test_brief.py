@@ -70,7 +70,7 @@ def test_the_network_line_reports_what_the_sandbox_enforced() -> None:
     rows = {row["step"]: row for row in sections["execution_boundary"]}
     assert rows["test"]["sandbox"] == "oci"
     assert rows["test"]["network"] == "none"
-    assert rows["test"]["image"].startswith("localhost/rein-quality@sha256:")
+    assert rows["test"]["image"].startswith("localhost/rein-python@sha256:")
     assert rows["test"]["command"] == ["make", "test"]
 
 

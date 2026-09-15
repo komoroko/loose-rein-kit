@@ -74,9 +74,9 @@ VERBS: dict[str, Verb] = {
     "build": Verb("build_loop", "the deterministic /build orchestrator (--supervise: retry in-process on exit 3)"),
     "baseline": Verb(
         "build_loop:baseline_main",
-        "measure which quality-gate steps are already red on the work branch (gate 3 freezes it)",
+        "measure which quality-gate steps are already red on the work branch (the mandate freezes it)",
     ),
-    "audit": Verb("audit", "run and record the dependency audit gate 5 requires (it expires; the tree does not)"),
+    "audit": Verb("audit", "run and record the dependency audit acceptance requires (it expires; the tree does not)"),
     "doctor": Verb("doctor", "read-only diagnosis: format, integrations, sandbox, plan, review"),
     "cycle-close": Verb("cycle", "archive the finished delta cycle and reset"),
     "pr-draft": Verb("pr_draft", "assemble a PR body from the SSOT (read-only)"),

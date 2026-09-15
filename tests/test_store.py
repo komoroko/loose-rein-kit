@@ -19,13 +19,9 @@ from rein import repo as repo_mod
 STATE: dict[str, Any] = {
     "project": "demo",
     "cycle_id": "demo-cycle",
-    "current_phase": "build",
     "gates": {
-        "requirements": {"status": "pending", "receipt": None},
-        "design": {"status": "pending", "receipt": None},
-        "tasks": {"status": "pending", "receipt": None},
-        "build": {"status": "pending", "receipt": None},
-        "release": {"status": "pending", "receipt": None},
+        "mandate": {"status": "pending", "receipt": None},
+        "acceptance": {"status": "pending", "receipt": None},
     },
     "plan": {"status": "draft"},
 }
@@ -129,7 +125,7 @@ def test_write_and_event_land_together(repo: repo_mod.Repo) -> None:
         tx.write("state", STATE)
         tx.append("cycle_initialized", cycle_id="demo-cycle", actor="alice")
 
-    assert st.read_state().current_phase == "build"  # type: ignore[union-attr]
+    assert st.read_state().cycle_id == "demo-cycle"  # type: ignore[union-attr]
     events = st.read_events()
     assert [e.event for e in events] == ["cycle_initialized"]
     assert events[0].seq == 1
@@ -165,9 +161,9 @@ def test_an_exception_inside_the_block_writes_nothing(repo: repo_mod.Repo) -> No
 
 def test_a_staged_document_that_fails_its_schema_is_refused(repo: repo_mod.Repo) -> None:
     st = store.Store(repo)
-    with pytest.raises(models.DocumentError, match="current_phase"):
+    with pytest.raises(models.DocumentError, match="plan"):
         with st.transaction() as tx:
-            tx.write("state", {**STATE, "current_phase": "somewhere"})
+            tx.write("state", {**STATE, "plan": {"status": "somewhere"}})
 
 
 def test_stale_write_is_refused(repo: repo_mod.Repo) -> None:
@@ -179,14 +175,14 @@ def test_stale_write_is_refused(repo: repo_mod.Repo) -> None:
     stale = st.document_digest("state")
     # Somebody else commits in between.
     with st.transaction() as tx:
-        tx.write("state", {**STATE, "current_phase": "verify"})
+        tx.write("state", {**STATE, "cycle_id": "second"})
         tx.append("task_completed", cycle_id="demo-cycle")
 
     with pytest.raises(store.StaleWriteError, match="changed since it was read"):
         with st.transaction() as tx:
-            tx.write("state", {**STATE, "current_phase": "done"}, expect_digest=stale)
+            tx.write("state", {**STATE, "cycle_id": "third"}, expect_digest=stale)
             tx.append("task_completed", cycle_id="demo-cycle")
-    assert st.read_state().current_phase == "verify"  # type: ignore[union-attr]
+    assert st.read_state().cycle_id == "second"  # type: ignore[union-attr]
 
 
 def test_read_digest_is_taken_from_what_the_caller_read(repo: repo_mod.Repo) -> None:
@@ -204,14 +200,14 @@ def test_read_digest_is_taken_from_what_the_caller_read(repo: repo_mod.Repo) -> 
     assert seen == st.document_digest("state")
 
     with st.transaction() as tx:  # somebody else commits between the read and the write
-        tx.write("state", {**STATE, "current_phase": "verify"})
+        tx.write("state", {**STATE, "cycle_id": "second"})
         tx.append("task_completed", cycle_id="demo-cycle")
 
     with pytest.raises(store.StaleWriteError):
         with st.transaction() as tx:
-            tx.write("state", {**STATE, "current_phase": "done"}, expect_digest=seen)
+            tx.write("state", {**STATE, "cycle_id": "third"}, expect_digest=seen)
             tx.append("task_completed", cycle_id="demo-cycle")
-    assert st.read_state().current_phase == "verify"  # type: ignore[union-attr]
+    assert st.read_state().cycle_id == "second"  # type: ignore[union-attr]
 
 
 def test_read_digest_of_an_absent_document_is_empty() -> None:
@@ -235,10 +231,10 @@ def test_retry_on_stale_re_runs_the_operation(repo: repo_mod.Repo) -> None:
         seen = store.read_digest(state)
         if len(attempts) == 1:  # a competing commit lands after our read
             with st.transaction() as tx:
-                tx.write("state", {**STATE, "current_phase": "verify"})
+                tx.write("state", {**STATE, "cycle_id": "second"})
                 tx.append("task_completed", cycle_id="demo-cycle")
         with st.transaction() as tx:
-            tx.write("state", {**state.raw, "current_phase": "done"}, expect_digest=seen)
+            tx.write("state", {**state.raw, "cycle_id": "retried"}, expect_digest=seen)
             tx.append("task_completed", cycle_id="demo-cycle")
         return "ok"
 
@@ -264,7 +260,7 @@ def test_projected_chain_root_matches_the_root_after_commit(repo: repo_mod.Repo)
         tx.append("cycle_initialized", cycle_id="demo-cycle")
 
     with st.transaction() as tx:
-        tx.append("gate_approved", cycle_id="demo-cycle", subject_ids=["requirements"])
+        tx.append("gate_approved", cycle_id="demo-cycle", subject_ids=["mandate"])
         projected = tx.projected_chain_root()
         assert projected != st.chain_root()  # the chain does move; that was the bug
 

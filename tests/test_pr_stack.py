@@ -386,15 +386,15 @@ def test_push_is_allowed_before_gate_four(cycle: Callable[..., dict[str, Any]]) 
     assert preconditions(cycle(), "push").ok
 
 
-def test_ready_is_refused_while_gate_four_is_pending(cycle: Callable[..., dict[str, Any]]) -> None:
+def test_ready_is_refused_while_acceptance_is_pending(cycle: Callable[..., dict[str, Any]]) -> None:
     result = preconditions(cycle(), "ready")
 
     assert not result.ok
-    assert any("gate ④" in problem for problem in result.errors)
+    assert any("acceptance gate is not approved" in problem for problem in result.errors)
 
 
-def test_restack_is_refused_once_gate_four_is_approved(cycle: Callable[..., dict[str, Any]]) -> None:
-    result = preconditions(cycle(gates={"build": "approved"}), "restack")
+def test_restack_is_refused_once_acceptance_is_approved(cycle: Callable[..., dict[str, Any]]) -> None:
+    result = preconditions(cycle(gates={"acceptance": "approved"}), "restack")
 
     assert not result.ok
     assert any("rein revise" in problem for problem in result.errors)
@@ -406,26 +406,26 @@ def test_push_after_approval_warns_instead_of_dead_ending(cycle: Callable[..., d
     `--ready` refuses a slice with no pull request, so a `--push` that refused an approved gate
     would leave the cycle with no way out at all.
     """
-    result = preconditions(cycle(gates={"build": "approved"}), "push")
+    result = preconditions(cycle(gates={"acceptance": "approved"}), "push")
 
     assert result.ok
     assert any("--ready" in warning for warning in result.warnings)
 
 
 def test_ready_refuses_slices_that_were_never_pushed(cycle: Callable[..., dict[str, Any]]) -> None:
-    result = preconditions(cycle(gates={"build": "approved"}), "ready")
+    result = preconditions(cycle(gates={"acceptance": "approved"}), "ready")
 
     assert any("no pull request yet" in problem for problem in result.errors)
 
 
 def test_ready_refuses_when_no_review_has_been_generated(cycle: Callable[..., dict[str, Any]]) -> None:
-    result = preconditions(cycle(gates={"build": "approved"}), "ready")
+    result = preconditions(cycle(gates={"acceptance": "approved"}), "ready")
 
     assert any("nothing binding these slices" in problem for problem in result.errors)
 
 
 def test_ready_refuses_a_review_generated_against_another_head(cycle: Callable[..., dict[str, Any]]) -> None:
-    bundle = cycle(gates={"build": "approved"}, review=make_review(generated=True, head_sha="a" * 40))
+    bundle = cycle(gates={"acceptance": "approved"}, review=make_review(generated=True, head_sha="a" * 40))
 
     result = preconditions(bundle, "ready")
 
@@ -435,7 +435,7 @@ def test_ready_refuses_a_review_generated_against_another_head(cycle: Callable[.
 def test_ready_passes_once_the_gate_the_review_and_the_pull_requests_all_agree(
     cycle: Callable[..., dict[str, Any]],
 ) -> None:
-    bundle = cycle(gates={"build": "approved"})
+    bundle = cycle(gates={"acceptance": "approved"})
     slices = derive(bundle)
     for s in slices:
         git(bundle["root"], "branch", s.branch, s.head_sha)
@@ -497,7 +497,7 @@ def test_a_draft_body_says_it_has_not_been_reviewed(cycle: Callable[..., dict[st
     text = body(cycle())
 
     assert "**Draft.**" in text
-    assert "gate ④: pending" in text
+    assert "acceptance: pending" in text
     assert "Slice 1 of 3" in text
 
 
@@ -511,7 +511,7 @@ def test_a_draft_body_prints_no_cycle_digests(cycle: Callable[..., dict[str, Any
 
 def test_an_approved_body_says_the_slice_was_not_reviewed_alone(cycle: Callable[..., dict[str, Any]]) -> None:
     head = "b" * 40
-    bundle = cycle(gates={"build": "approved"}, review=make_review(generated=True, head_sha=head))
+    bundle = cycle(gates={"acceptance": "approved"}, review=make_review(generated=True, head_sha=head))
 
     text = body(bundle)
 
@@ -532,7 +532,7 @@ def test_a_verdict_is_never_collapsed_into_one_word(cycle: Callable[..., dict[st
             "conformance": {"status": "unknown"},
         }
     ]
-    bundle = cycle(gates={"build": "approved"}, review=review)
+    bundle = cycle(gates={"acceptance": "approved"}, review=review)
 
     text = body(bundle)
 
@@ -550,7 +550,7 @@ def test_a_draft_body_states_the_claim_without_a_verdict(cycle: Callable[..., di
 
 
 def test_a_claim_the_review_never_reached_is_reported_as_such(cycle: Callable[..., dict[str, Any]]) -> None:
-    bundle = cycle(gates={"build": "approved"}, review=make_review(generated=True, head_sha="d" * 40))
+    bundle = cycle(gates={"acceptance": "approved"}, review=make_review(generated=True, head_sha="d" * 40))
 
     text = body(bundle)
 
@@ -589,7 +589,7 @@ def test_a_recorded_observation_names_the_tree_it_binds(cycle: Callable[..., dic
 
 
 def test_a_task_with_no_acceptance_says_the_gate_is_the_criterion(cycle: Callable[..., dict[str, Any]]) -> None:
-    assert "none declared — the criterion is the gate ④ review itself" in body(cycle())
+    assert "none declared — the criterion is the acceptance review itself" in body(cycle())
 
 
 def test_the_body_lists_the_commits_the_slice_carries(cycle: Callable[..., dict[str, Any]]) -> None:
@@ -826,7 +826,7 @@ def test_a_dry_run_touches_neither_refs_nor_files(cycle: Callable[..., dict[str,
 
 
 def test_a_failing_precondition_stops_the_run(cycle: Callable[..., dict[str, Any]]) -> None:
-    bundle = cycle(gates={"build": "approved"})
+    bundle = cycle(gates={"acceptance": "approved"})
     # An approved gate only warns for --push; a broken audit chain is what actually stops it.
     (bundle["root"] / ".rein/events.ndjson").write_text("{ not json\n", encoding="utf-8")
 
@@ -983,7 +983,7 @@ def approved_stack(bundle: dict[str, Any], run: Any) -> tuple[pr_stack.Documents
     bodies = pr_stack.write_bodies(repo, docs, slices, base="main")
     pr_stack.publish(repo, docs, slices, bodies, remote="origin", run=run)
 
-    state = make_state(gates={"build": "approved"}, tasks={t: "done" for t in bundle["landed"]})
+    state = make_state(gates={"acceptance": "approved"}, tasks={t: "done" for t in bundle["landed"]})
     for task_id, commit in bundle["landed"].items():
         state["tasks"][task_id]["completed_commit"] = commit
     repo.state.write_bytes(store_mod.dump_yaml(state))
@@ -1054,7 +1054,7 @@ def test_lift_stops_at_the_first_failure(cycle: Callable[..., dict[str, Any]]) -
 
 
 def test_ready_refuses_a_slice_with_no_recorded_pull_request(cycle: Callable[..., dict[str, Any]]) -> None:
-    bundle = cycle(gates={"build": "approved"})
+    bundle = cycle(gates={"acceptance": "approved"})
     docs = documents(bundle)
     slices = pr_stack.derive(bundle["repo"], docs, base="main")
     run, _ = recorder()
@@ -1067,7 +1067,7 @@ def test_lifting_without_a_terminal_is_refused(
     cycle: Callable[..., dict[str, Any]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(common, "stdin_is_terminal", lambda: False)
-    bundle = cycle(gates={"build": "approved"})
+    bundle = cycle(gates={"acceptance": "approved"})
 
     with pytest.raises(pr_stack.PublishError, match="no flag that skips it"):
         pr_stack._confirm_ready(documents(bundle), derive(bundle), [])
@@ -1078,12 +1078,12 @@ def test_the_ready_prompt_shows_the_receipt_that_covers_it(
 ) -> None:
     monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
     monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: True)
-    bundle = cycle(gates={"build": "approved"})
+    bundle = cycle(gates={"acceptance": "approved"})
 
     pr_stack._confirm_ready(documents(bundle), derive(bundle), [])
 
     printed = capsys.readouterr().out
-    assert "GA-BUILD-0001" in printed
+    assert "GA-ACCEPTANCE-0001" in printed
     assert "attested_chain_root" in printed
 
 
@@ -1092,7 +1092,7 @@ def test_declining_the_ready_prompt_lifts_nothing(
 ) -> None:
     monkeypatch.setattr(common, "stdin_is_terminal", lambda: True)
     monkeypatch.setattr(common, "ask_yes_no", lambda _prompt: False)
-    bundle = cycle(gates={"build": "approved"})
+    bundle = cycle(gates={"acceptance": "approved"})
 
     with pytest.raises(pr_stack.PublishError, match="still drafts"):
         pr_stack._confirm_ready(documents(bundle), derive(bundle), [])
@@ -1270,10 +1270,8 @@ def test_propagation_gaps_name_the_slice_the_work_branch_lacks(cycle: Callable[.
     assert pr_stack.propagation_gaps(bundle["repo"], documents(bundle), slices) == ["T-001"]
 
 
-def test_restack_is_refused_once_gate_four_is_approved_through_the_cli(
-    cycle: Callable[..., dict[str, Any]],
-) -> None:
-    rc, _ = run_cli(cycle(gates={"build": "approved"}), "--restack")
+def test_restack_is_refused_once_acceptance_is_approved_through_the_cli(cycle: Callable[..., dict[str, Any]]) -> None:
+    rc, _ = run_cli(cycle(gates={"acceptance": "approved"}), "--restack")
 
     assert rc == 2
 
@@ -1540,7 +1538,7 @@ def test_a_refused_merge_moves_nothing(cycle: Callable[..., dict[str, Any]]) -> 
 
 def test_merge_refuses_when_a_slice_has_no_pull_request(cycle: Callable[..., dict[str, Any]]) -> None:
     """A stack can only be merged whole, so one unopened slice stops all of it."""
-    bundle = cycle(gates={"build": "approved"})
+    bundle = cycle(gates={"acceptance": "approved"})
     docs = documents(bundle)
     slices = pr_stack.derive(bundle["repo"], docs, base="main")
     run, _ = recorder()
@@ -1572,14 +1570,14 @@ def test_answering_no_merges_nothing(cycle: Callable[..., dict[str, Any]], monke
         pr_stack._confirm_merge(pr_stack.ledger(docs.events))
 
 
-def test_merge_refuses_before_gate_four(cycle: Callable[..., dict[str, Any]]) -> None:
+def test_merge_refuses_before_acceptance(cycle: Callable[..., dict[str, Any]]) -> None:
     bundle = cycle()
     docs = documents(bundle)
 
     result = pr_stack.preconditions(bundle["repo"], docs, derive(bundle), mode="merge", base="main")
 
     assert not result.ok
-    assert any("gate ④ (build) is not approved" in problem for problem in result.errors)
+    assert any("acceptance gate is not approved" in problem for problem in result.errors)
 
 
 def test_merge_refuses_while_a_slice_is_still_a_draft(cycle: Callable[..., dict[str, Any]]) -> None:
@@ -1790,8 +1788,8 @@ def test_a_gate_four_repair_is_committed_onto_the_slice_that_introduced_the_code
     owning = next(t for t in dag.join(bundle_plan(repo), None).tasks if t.id == "T-001")
     loop._repair(owning, repair.Repair("T-001", (found,)))
 
-    assert "gate-4 repair" in git(root, "log", "--format=%s", owner.branch), "on the slice that owns the code"
-    assert "gate-4 repair" in git(root, "log", "--format=%s", WORK_BRANCH), "and carried up into the work branch"
+    assert "acceptance repair" in git(root, "log", "--format=%s", owner.branch), "on the slice that owns the code"
+    assert "acceptance repair" in git(root, "log", "--format=%s", WORK_BRANCH), "and carried up into the work branch"
     # Nothing was rewritten: every commit the state recorded is still in the work branch's history.
     for commit in bundle["landed"].values():
         assert pr_stack.is_ancestor(repo, commit, git(root, "rev-parse", WORK_BRANCH))

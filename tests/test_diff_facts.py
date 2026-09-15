@@ -123,6 +123,7 @@ def test_a_manifest_naming_an_unread_file_can_actually_be_written() -> None:
             "status": "generated",
             "binding": {
                 "change_digest": "sha256:" + "a" * 64,
+                "host_surface_digest": "sha256:" + "e" * 64,
                 "plan_digest": "sha256:" + "b" * 64,
                 "environment_digest": "sha256:" + "c" * 64,
             },

@@ -542,7 +542,7 @@ def _analysis_for(path: str, body: str = "") -> tuple[str, str] | None:
 
     **The extension is how the language is named, not how readability is decided.** It used to be
     both, so `.mts`, `.cts` and `Lambda.Dockerfile` were `unsupported_language` — which makes the
-    Coverage Manifest `insufficient`, which blocks gate ④, whose stated remedy ("split the
+    Coverage Manifest `insufficient`, which blocks acceptance, whose stated remedy ("split the
     unreadable part out of this scope") cannot be carried out on a TypeScript module the change is
     about. Extending the table answers one release's filenames and none of the next.
 
@@ -593,7 +593,7 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
             # about — neither read nor unread. Calling it "unanalyzable" conflated *could not
             # read* with *is not there*, and the price was not a wording: `coverage_gap_risk`
             # floors an unread binary at `high`, an unsupported extension makes the status
-            # `insufficient`, and `coverage_blocks` shuts gate ④ on either — so removing a
+            # `insufficient`, and `coverage_blocks` shuts acceptance on either — so removing a
             # committed artifact blocked the gate on a change that had deleted the very thing
             # nobody could read. The remedy the block names ("split the unreadable part out of
             # this scope") does not exist for a deletion: splitting never removes a file.
@@ -668,11 +668,11 @@ def _default_status(manifest: CoverageManifest) -> str:
     - `dependency_semantics_analyzed` had **no path to `true`**: it was `not has_dependency_change`
       and nothing else, so a cycle that added a dependency was `insufficient` by definition, with
       neither remedy the block names available — a lockfile cannot be split out of the scope that
-      produced it, and the risk it is measured against was frozen by a human at gate ③. What a
+      produced it, and the risk it is measured against was frozen by a human at the mandate. What a
       dependency change leaves unanswered is not *could this diff be read* — every byte of it was
       — but *what do the new versions do*, which no reading of this repository answers at any
       depth. That question has its own gate, its own evidence and its own expiry:
-      `approve._audit_blockers` holds gate ⑤ shut until `rein audit run` has answered it over this
+      `approve._audit_blockers` holds acceptance shut until `rein audit run` has answered it over this
       tree's manifests. The depth this manifest *did* read a lockfile at is already stated, by
       `languages` recording it `token_only`, and the risk it carries is already floored at `medium`
       by the detector's own `dependency` signal.

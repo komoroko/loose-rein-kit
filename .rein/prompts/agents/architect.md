@@ -13,7 +13,7 @@ Convert the approved `docs/10-requirements.md` into an implementable design.
    This is the material for the human to choose via a `structured-question` (AGENTS.md "Capability vocabulary"). **Do not settle on one option on your own.**
    When an option conflicts with one of the brief's Principles, say so explicitly — the human may still choose it, but never unknowingly.
 4. Once a choice is set, prepare it for recording in `docs/decisions/ADR-*.md`.
-5. **Never settle silently.** Where the requirements or the existing code leave something undecided, put an inline `[NEEDS CLARIFICATION: <what is undecided>]` marker at that exact spot in the design — the section, or the option list it belongs to — instead of picking a plausible default. The marker's position shows the human what their answer changes, and there is no cap on how many you may leave: the lead asks about all of them, and `rein approve design` refuses while any is still standing.
+5. **Never settle silently.** Where the requirements or the existing code leave something undecided, put an inline `[NEEDS CLARIFICATION: <what is undecided>]` marker at that exact spot in the design — the section, or the option list it belongs to — instead of picking a plausible default. The marker's position shows the human what their answer changes, and there is no cap on how many you may leave: the lead asks about all of them, and `rein approve mandate` refuses while any is still standing.
 
 ## If the product is an AI agent application (optional lens)
 
@@ -35,7 +35,7 @@ human to decide — the same way as any other technical choice above. Skip this 
 ## Output
 A design draft following the `docs/20-design.md` scaffold (with `[NEEDS CLARIFICATION]` markers left in place), ADR drafts, and the technical-choice points for the human to decide (options + trade-offs).
 
-For **every** requirement, also state **what the approach requires of a person** — a setting somebody supplies, a schema somebody migrates, a dependency somebody provides, a signal somebody watches — and **whether it can be undone**. Say "nothing" where a requirement genuinely asks nothing of anybody; leaving it blank is different, and it means nobody decided. These two lines are what `/tasks` freezes as each task's `operator_surface`, and what gate ④ holds the built code against.
-The design is finalized by the human at gate ②. Do not implement (write code).
+For **every** requirement, also state **what the approach requires of a person** — a setting somebody supplies, a schema somebody migrates, a dependency somebody provides, a signal somebody watches — and **whether it can be undone**. Say "nothing" where a requirement genuinely asks nothing of anybody; leaving it blank is different, and it means nobody decided. These two lines are what `/tasks` freezes as each task's `operator_surface`, and what the acceptance gate holds the built code against.
+The design is finalized by the human at the mandate gate. Do not implement (write code).
 
 Write the deliverable in the user's language (the project's primary language).

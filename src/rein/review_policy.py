@@ -279,7 +279,7 @@ def coverage_gap_risk(facts: diff_facts_mod.DiffFacts) -> str:
 
     An `insufficient` manifest is a statement about *reading*, not about danger, and conflating
     the two closed a loop: the gap raised the effective risk, and the raised risk was what made
-    the gap blocking, so a diff holding a single unreadable file had no way through gate ④ —
+    the gap blocking, so a diff holding a single unreadable file had no way through acceptance —
     scope split included, since splitting never removes the file.
 
     The gap is therefore worth what was in the files it covers. Nothing could be read at all —
@@ -494,7 +494,7 @@ def derive_integrity(
     The comparator's contract offered `verified` as the first of three legal values, a validator
     refused it unconditionally for every claim that used it, and the only status any review could
     ever carry was `unavailable` — an axis that existed as a slot. One field report: sixteen of
-    eighteen claims refused, three launches and 727,272 cache-creation tokens discarded, gate ④
+    eighteen claims refused, three launches and 727,272 cache-creation tokens discarded, acceptance
     unreachable, per run.
 
     What it means here:
@@ -600,7 +600,7 @@ def independence_observed(review: models.Review, effective: str) -> list[str]:
 
 # --- blocking (the gate-4 decision) -------------------------------------------
 
-#: The severity at which a finding holds gate ④ shut. One number, in one place, because
+#: The severity at which a finding holds acceptance shut. One number, in one place, because
 #: `blocking` is a policy question and the three reviewer stages used to be asked it directly:
 #: every contract carried a `"blocking": <bool>` field, so a `critical` security finding the
 #: model marked `false` blocked nothing, and this module's own first line — "it decides risk,
@@ -610,7 +610,7 @@ BLOCKING_FLOOR = "high"
 
 
 def blocks(risk: str, *, grounded: bool = False) -> bool:
-    """Does a finding at this severity hold gate ④ shut? The policy's answer, never a reviewer's.
+    """Does a finding at this severity hold acceptance shut? The policy's answer, never a reviewer's.
 
     `risk` is the finding's own severity — a security finding's `severity`, a gap's or an extra
     behaviour's `risk` — which a reviewer does state, and which is checked against the effective
@@ -652,7 +652,7 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
     reads a critical change whole in the first place, so a review this release generated can never
     land here. What can is a `review.yaml` written by a release that composed one anyway, which is
     exactly the shape a validator must still refuse — and the way out is now a regeneration rather
-    than a rewind of gate ③.
+    than a rewind of the mandate.
 
     **The block names the files, because the remedy it offers is about files.** It used to say
     "split the unreadable part out of this scope" over a manifest that would not say which part
@@ -727,7 +727,7 @@ def disputed_subjects(human: Mapping[str, Any]) -> set[str]:
 
 
 def blocking_reasons(review: models.Review, effective: str, human: Mapping[str, Any] | None = None) -> list[str]:
-    """Every mechanical reason this review cannot open gate 4, aggregated (plan §14, §15)."""
+    """Every mechanical reason this review cannot open acceptance, aggregated (plan §14, §15)."""
     disputed = disputed_subjects(human if human is not None else review.human)
     reasons: list[str] = []
     for finding in review.blocking_security_findings:

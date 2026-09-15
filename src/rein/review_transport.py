@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import pathlib
 import tempfile
 import threading
 import uuid
@@ -66,7 +67,7 @@ def prompt_call(
 ) -> tuple[list[str], str]:
     """`(the command line, what to write to its stdin)` for a launch whose whole input is `payload`.
 
-    Gate ④'s stages have exactly one input — the JSON request — and two ways to receive it. Which
+    The acceptance gate's stages have exactly one input — the JSON request — and two ways to receive it. Which
     one a CLI has is a fact about that CLI, declared in `Adapter.prompt_on_stdin`, and this is the
     only place that reads it.
 
@@ -479,30 +480,37 @@ def _adapter_reviewer(
     role_argv = (*adapters.launch_argv(config, role), *record.access_flags(adapters.READ))
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
 
-    # Three conditions, and the third is what makes the second safe. A checkout of the change puts
+    # Two conditions, and the second is what makes the first safe. A checkout of the change puts
     # this launch inside a directory whose settings, hooks and MCP servers *are* the thing under
     # review, so it is handed one only when the CLI can be told to ignore them
     # (`adapters.Adapter.config_isolation`). A CLI with no such mechanism gets the empty directory
     # and reads the diff, which is what `security_review.contract` already asks of it.
-    wants_checkout = (
-        role == _CHECKOUT_ROLE and bool(record.disciplines.get(adapters.SECURITY)) and bool(record.config_isolation)
-    )
+    #
+    # There used to be a third — that the CLI carried a host security discipline of its own — and it
+    # was wrong twice over. A discipline is *offered*, never relied on (`adapters.Adapter.disciplines`):
+    # the contract states the question in full beside it, so a CLI without one asks the same thing
+    # itself. And the checkout is what the question is *about*, not how it is asked, so making the
+    # subject conditional on the host's command inventory meant every CLI but one reviewed a
+    # different change from the one the contract described.
+    wants_checkout = role == _CHECKOUT_ROLE and bool(record.config_isolation)
     if wants_checkout:
         role_argv = (*role_argv, *record.config_isolation)
     # Told the shape rather than asked for it, where the CLI can be. The prompt still states the
     # contract in full — this is offered, never relied on, and a role this release has no schema
     # for (or a CLI with no flag) is parsed and validated exactly as before.
+    #
+    # Two CLIs, two ways of being told: `claude --json-schema` takes the JSON inline, while
+    # `codex exec --output-schema` names a **file**. Passing one where the other is expected is not
+    # a smaller mistake in either direction — a CLI handed half a kilobyte of JSON where it wanted a
+    # path reads it as a filename that does not exist — so which it is, is a field on the record.
+    schema_json = ""
     if record.output_schema_flags and (schema := review_policy.stage_output_schema(role)):
-        payload = json.dumps(schema, ensure_ascii=False)
-        role_argv = (*role_argv, *(part.format(schema=payload) for part in record.output_schema_flags))
+        schema_json = json.dumps(schema, ensure_ascii=False)
+        if not record.output_schema_is_path:
+            role_argv = (*role_argv, *(part.format(schema=schema_json) for part in record.output_schema_flags))
+            schema_json = ""
 
     def call(request: Mapping[str, Any]) -> review_policy.Answer:
-        argv, stdin = prompt_call(
-            record,
-            [*role_argv, *(reading.branch_flags(request) if reading else ())],
-            json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False),
-            role=role,
-        )
         checkout = (
             _pending_changes(repo, str(request.get("trusted_base_sha", "")), str(request.get("subject_head_sha", "")))
             if wants_checkout
@@ -511,6 +519,21 @@ def _adapter_reviewer(
         # `ignore_cleanup_errors` because the answer is already in hand by then: an agent CLI that
         # left something undeletable behind must not turn a finished review into a traceback.
         with tempfile.TemporaryDirectory(prefix="rein-review-", ignore_cleanup_errors=True) as empty, checkout as tree:
+            launch_argv = role_argv
+            if schema_json:
+                # Written here rather than beside the reviewer, so the file's lifetime is the
+                # launch's: a path handed out and deleted later is a launch that reads nothing.
+                # `empty` is the scratch directory in both cases — it exists whether or not the
+                # security stage is also given a checkout to work in.
+                schema_file = pathlib.Path(empty) / f"{role}.schema.json"
+                schema_file.write_text(schema_json, encoding="utf-8")
+                launch_argv = (*role_argv, *(p.format(schema=schema_file) for p in record.output_schema_flags))
+            argv, stdin = prompt_call(
+                record,
+                [*launch_argv, *(reading.branch_flags(request) if reading else ())],
+                json.dumps(reading.without_the_reading(request) if reading else request, ensure_ascii=False),
+                role=role,
+            )
             rc, out = common.run(argv, cwd=tree or empty, timeout=timeout or None, input_text=stdin)
         if rc != 0:
             ledger.add(role, usage_mod.Usage.unavailable())

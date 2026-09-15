@@ -37,26 +37,38 @@ values, `epistemic_status`) stays as-is in every language.
 
 ## Development lifecycle
 
+**A human approves twice, and neither approval is about the order of the work.**
+
 ```
-brief → requirements → design → tasks → build → verify → done
-        (/req)        (/design) (/tasks) (/build) (/verify)
-          ▲gate①        ▲gate②     ▲gate③   ▲gate④    ▲gate⑤
+                    ┌─ mandate ─────────────────┐   ┌─ acceptance ───────────┐
+drafting ───────────┤ what the loop may change, ├───┤ the evidence is there, ├─── done
+  /req /design      │ what it must make true,   │   │ take the change        │
+  /tasks (any       │ what evidence counts      │   └────────────────────────┘
+  order, repeated)  └───────────────────────────┘        ▲gate②
+                             ▲gate①                      /verify presents it
 ```
 
-`/req`→`docs/10-requirements.md` (gate① requirements) · `/design`→`docs/20-design.md`+ADRs
-(gate② design) · `/tasks`→`docs/tasks/T-*.md`+`plan.yaml`+a measured **baseline** (gate③ tasks) ·
-`/build`→code+tests then a **grounded review** it repairs what it can of (gate④ build) ·
-`/verify`→`docs/test/test-plan.md`+a **dependency audit** (gate⑤ release).
+`/req`→`docs/10-requirements.md`+the claims · `/design`→`docs/20-design.md`+ADRs ·
+`/tasks`→`docs/tasks/T-*.md`+`plan.yaml`'s task DAG+a measured **baseline**. The three write **one
+mandate** between them and are material for it, not gates of their own: run them in whatever order
+the change calls for, repeat them, or skip one whose answer is already obvious. `rein approve
+mandate` is the single decision that covers all three.
 
-Gate ③ measures the work branch's quality gate before it approves a plan against it
+Inside an approved mandate, `/build` implements and verifies — decomposing, reordering and
+re-running as it needs to, because none of that changes what it may touch or what it must prove.
+`/verify` adds `docs/test/test-plan.md` and a **dependency audit**, then presents the **grounded
+review** for `rein approve acceptance`.
+
+The mandate measures the work branch's quality gate before it authorizes a plan against it
 (`rein baseline measure`): a step already red is fixed or frozen as a deliberate decision, never
 discovered by the first task to spend its send-back budget on it.
 
 `/status` shows progress; `rein next`/`ui` show the same board (a fixed safe-operations
 whitelist, never phase execution). At `done`, `/verify` records `docs/retrospective.md`. An
 ongoing repo repeats the lifecycle as **delta cycles**, closed with `rein cycle-close`
-(mechanics: the rules module). **A scope change to approved requirements goes through
-`/revise` or the next cycle — never widened silently.**
+(mechanics: the rules module). **Widening what the loop may change — a new scope path, a new claim,
+a relaxed acceptance criterion — goes through `/revise` or the next cycle, never silently.
+Re-cutting the tasks inside an approved mandate is not that, and needs no approval.**
 
 ## Single Source of Truth (SSOT)
 
@@ -64,10 +76,10 @@ Four documents, distinct roles — do not conflate them:
 
 - **`.rein/plan.yaml`** — the frozen **Expected Model**: one claim per requirement
   (`R-N`/`NFR-N`), and the task DAG. `claim_ids` threads each task back to the claim it
-  answers, cross-checked by `rein dag --trace`. Frozen at gate ③.
+  answers, cross-checked by `rein dag --trace`. Frozen when the mandate is approved.
 - **`.rein/state.yaml`** — phase, gate approvals, task status. `gates.<name>` is
   `pending`|`approved` — **the only write path to `approved` is a human approval `rein`
-  recorded**, and the receipt binds the digests that approval covered. Gate ③ also pins the
+  recorded**, and the receipt binds the digests that approval covered. The mandate approval also pins the
   **prose the build reads** (`plan.sources`: the task tickets and the design/requirements
   documents); a task's `evidence` records the tree its `done` was decided on. The receipt
   records which channel confirmed, never which human.
@@ -79,8 +91,10 @@ Four documents, distinct roles — do not conflate them:
 
 ## Gate rules (strict)
 
-1. **Do not work on the next phase while its prerequisite gate is unapproved.** Each command
-   checks its prerequisite up front; if unapproved, stop and say what is needed.
+1. **Do not change the product without an approved mandate that covers the path.** `/build` checks
+   it up front; if the mandate is pending, stop and say what is missing. Writing the mandate's own
+   material — requirements, design, task tickets — needs no approval and has no order: what is
+   gated is touching the product, not the sequence you think in.
 2. **Only a human opens a gate, and never you.** Go only as far as an `approval-presentation` and
    stop. The human confirms in one of two places, and **you use neither**: `rein approve <gate>`
    at their own terminal (readiness checked, the covered digests printed, `[y/N]` with the default
@@ -89,17 +103,21 @@ Four documents, distinct roles — do not conflate them:
    `rein approve <gate>` — it does, once a gate is ready — that is a line to *show*, not to run.
 3. **Do not silently fix problems in requirements/design.** Set the task `needs-revision`,
    record a `knowledge-gap`/escalation event, and raise it to the human.
+4. **Do not widen the mandate to fit the work.** Reaching outside its `scope`, adding a claim, or
+   softening an acceptance criterion is a change to what was authorized, and `/revise` is how it is
+   asked for. Re-cutting the tasks to do the same authorized work differently is not — that is the
+   loop's to decide, and needs nobody.
 
 Enforcement is layered: `rein guard` denies violations in code at edit/commit/merge
-stage; unreadable gates **fail closed**. **A guard denial marks a gate boundary — never
-disable, relax, or bypass it** (detail: the rules module).
+stage; unreadable gates and an unreadable scope **fail closed**. **A guard denial marks a boundary
+of what was delegated — never disable, relax, or bypass it** (detail: the rules module).
 
 ## Roll back (returning upstream)
 
-On a confirmed upstream defect, roll back at the human's discretion with `/revise`: **gates
-reset in a chain** — an upstream `pending` never leaves a downstream gate `approved`, and it
-invalidates the receipts and the review built on top of it. **Rewinding approval is a human
-privilege**, never automatic. Reclassify each task the impact analysis (`rein dag
+On a confirmed defect in what was authorized, roll back at the human's discretion with `/revise
+--to mandate` (or `--to acceptance`): **gates reset in a chain** — an upstream `pending` never
+leaves a downstream gate `approved`, and it invalidates the receipts and the review built on top of
+it. **Rewinding approval is a human privilege**, never automatic. Reclassify each task the impact analysis (`rein dag
 --impacted`) flags, never discard (procedure: revise.md, tasks.md).
 
 ## Task dependency graph
@@ -113,12 +131,12 @@ task's territory blocks the task rather than landing.
 **The loop derives; agents do not re-derive.** Each launch is handed a **dossier**
 (`.rein/work/T-NNN.json`) with the claims the task answers and what each asserts, its acceptance
 criteria, its scope, the changed paths split into source / tests / mechanical churn, and what
-earlier attempts tried. The one deliberate exception is gate ④'s blind extractor: never give it
+earlier attempts tried. The one deliberate exception is the grounded review's blind extractor: never give it
 the plan.
 
 **Whoever judges does not repair — and both halves are the loop's.** The reviewer is launched
 read-only and writes findings; an implementer resolves them and the reviewer looks again. That
-holds at gate ④ as well as inside a task: the build reads the change, repairs every blocking
+holds over the whole change as well as inside a task: the build reads the change, repairs every blocking
 finding a task's declared scope owns, and reads it again from cold, up to
 `review_policy.repair_rounds`. No gate moves — a repair inside an approved scope changes no
 requirement, no claim and no plan, and `rein guard` makes that mechanical rather than promised.
@@ -136,7 +154,7 @@ human decides *whether*; the loop does the work.
 
 - **Reuse first; build only the minimum acceptance criteria require (YAGNI)** — speculative
   generality no requirement names is scope creep.
-- **A claim with no evidence is `unknown`, never prose.** At gate ④, whether the code satisfies
+- **A claim with no evidence is `unknown`, never prose.** In the grounded review, whether the code satisfies
   a claim is judged on three separate axes (integrity / semantic support / conformance) by
   comparing what the plan says (Expected) against what a reviewer that never saw the plan read
   out of the code (Actual) — there is no single `verified`, and "extra behaviours: 0" shows only
@@ -144,8 +162,11 @@ human decides *whether*; the loop does the work.
 - **Pass the quality gate before moving on.** DoD = `quality_gate` in
   `.rein/config.yaml` (default `test`→`check`→`review`→`smoke`; runnable deliverables
   set `smoke`'s `required: true`). The lead **re-runs each command step and reads its exit
-  status** — a delegated agent's textual "green" is never evidence. Repo code and tests run in
-  the **OCI sandbox**, never on the host.
+  status** — a delegated agent's textual "green" is never evidence. A command step **runs repo code
+  and tests in the OCI sandbox, never on the host** (`executors.quality_gate_profile`). The agent
+  CLI that *wrote* them is a different question and a host process: `rein` launches it in the
+  checkout with your credentials, isolated only by whatever the adapter establishes for itself.
+  Containing the agents too means running `rein` inside a container.
 - **`done` means the evidence was there, not that the agent stopped.** A task closes only when
   the DoD went green **against the tree the task actually produced** — a content fingerprint
   `state.yaml` records beside the status. An attempt that changed nothing does not reach the gate
@@ -167,9 +188,9 @@ human decides *whether*; the loop does the work.
   rests on tests nobody wrote for it" is on the record instead of being a silence.
 - **A task's own bar is `acceptance` in the plan, and the DoD still runs.** The DoD asks whether
   the code is *sound*; a task's acceptance criteria ask whether it did what it was *for* — both,
-  and neither chosen by the implementer (a human freezes the list at gate ③). Each criterion says
+  and neither chosen by the implementer (a human freezes the list with the mandate). Each criterion says
   how it is judged: `command`, `artifact`, `external`, or nothing at all, which is honest for a
-  judgement call and leaves it to gate ④. **`external` is evidence this loop cannot obtain** — a
+  judgement call and leaves it to the grounded review. **`external` is evidence this loop cannot obtain** — a
   staging check, a device, a person — so the work merges and the task waits at
   **`awaiting-evidence`** until somebody records what they saw with `rein evidence record`. That
   record binds the tree it was made against, so changing the code retires it.
@@ -177,7 +198,7 @@ human decides *whether*; the loop does the work.
 - **Context isolation and hygiene.** Delegate phase work to role agents; keep deliverables and
   logs lean (tiers, GC, compaction: the rules module).
 - **Promote durable lessons** from `docs/retrospective.md` into the always-loaded files at
-  gate ⑤, not archived away.
+  acceptance, not archived away.
 - If anything behaves oddly, run `rein doctor` first.
 - **The verb list is in the CLI, not in this file.** `rein help --all` names every verb (the
   default listing carries only the ones a human types) and `rein <verb> --help` gives its
@@ -186,11 +207,18 @@ human decides *whether*; the loop does the work.
 ## Security gate
 
 **gitleaks** at commit stage; a **structured security review** feeds the grounded review before
-gate ④. What "stale" means there is a change to the *product*, measured on content: committing
-`review.yaml` is itself a later commit and must not invalidate the review it records. A false
-positive is contradicted by a human with `dispute_finding`, and that record lives in `state.yaml`
-bound to the anchored text — so it survives the regeneration that discards the human review, and
-lapses if that code is edited. Gate ⑤ **carries the review rather than re-reading the code** — its
+acceptance. What "stale" means there is measured on content, over **two subjects**: the *product*, and
+the **host surfaces** `rein install` wrote — the settings, hooks, MCP servers and instruction files
+a CLI reads before it reads its prompt. The security reviewer is sent a checkout of the head with
+those in it and told that a pre-authorized command or a hook added there is a finding, while the
+product digest is taken with them excluded so the blind extractor never reads this tool's own
+orchestration text. One digest could not carry both questions, and the one it dropped was the
+security one: a commit that widened `permissions.allow` and touched nothing else moved no key,
+replayed the cached answer, launched no reviewer, and left the review calling itself fresh.
+`.rein/` is in neither subject — committing `review.yaml` is itself a later commit and must not
+invalidate the review it records. A false positive is contradicted by a human with
+`dispute_finding`, and that record lives in `state.yaml` bound to the anchored text — so it
+survives the regeneration that discards the human review, and lapses if that code is edited. Acceptance **carries the review rather than re-reading the code** — its
 receipt binds the machine digest — and runs `rein audit run`, the one security answer that is not
 a function of the tree and therefore the only one that expires without the repository moving. It
 runs on the host and nowhere else — an audit reads a published database and no sandbox here is
@@ -205,7 +233,7 @@ not "the answer is bad" (detail: build.md, verify.md).
 - Per-task commits **`T-NNN: <summary>`**; commit each phase's deliverables at its gate approval.
 - **Push / PR / merge to main are outward-facing** — human approval only, same for GitHub Issues.
 - A cycle may ship as **one pull request** (`rein pr-draft` assembles the body) or as a **stack of
-  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before gate ④ and is lifted
+  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before acceptance and is lifted
   by `rein pr-stack --ready` once a human approves it, and landed by `rein pr-stack --merge`. All
   three confirm at a terminal first and none may be pre-authorized. The slices are registered as a
   **GitHub stack**, and `--merge` lands the whole of it in one atomic `gh stack merge`.
@@ -215,7 +243,7 @@ not "the answer is bad" (detail: build.md, verify.md).
   Merged atomically, nothing is rebased and the commits the build produced are the ones that land.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
-  `completed_commit` and gate receipt on commits that no longer exist. Gate ④'s own repairs follow
+  `completed_commit` and gate receipt on commits that no longer exist. The grounded review's own repairs follow
   the same rule and the build loop does it for them: the fix is committed in a worktree on the
   owning slice's branch and merged upward, never at the work branch's tip.
 - `command-preauthorization` of known-safe commands cuts repeated prompts **without touching

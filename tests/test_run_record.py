@@ -26,7 +26,7 @@ ALWAYS = {"kind", "run_id", "outcome"}
 
 
 def _store(tmp_path: Path) -> store_mod.Store:
-    seed_repo(tmp_path, state=make_state(project="rr", phase="build"))
+    seed_repo(tmp_path, state=make_state(project="rr"))
     return store_mod.Store(repo_mod.Repo(tmp_path))
 
 

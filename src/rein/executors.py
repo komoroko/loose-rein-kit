@@ -6,6 +6,20 @@ host runs it with the host's credentials, its SSH agent, its cloud tokens, its d
 `host` execution exists only for trusted, pinned tooling that runs nothing the repository
 produced.
 
+**What reaches this module, precisely.** Two callers: the quality gate's `kind: command` steps
+(`build_loop._run_cmd_step`, which the mechanized acceptance criteria also go through) and the
+dependency audit, which is the deliberate inverse — it must run on the host, because it reads a
+published vulnerability database and no profile here is granted egress.
+
+**And what does not: the agent CLI.** An implementer, a reviewer and every fixer are launched with
+`common.run` from the rein process, in the checkout, with the operator's credentials. `executors`
+boxes in the *execution* of what they wrote, not the writing of it. That boundary used to be
+blurred by an `executors` block naming an `implementer_profile` and a `reviewer_profile` the
+launcher never read — and by a dossier that told the agent which sandbox it was "running inside"
+on the strength of them. Isolating the agents themselves means running `rein` inside a container
+(and then telling the adapter not to sandbox itself — `doctor` warns about the nested pair),
+which is a different mechanism from this one and is not pretended to be this one.
+
 The sandbox is built from a config `executor_profile` and hardened the same way every time:
 
   network       denied, full stop (`--network none`). A profile *may* name a network profile,
@@ -26,7 +40,9 @@ in change after that review was signed (plan §10.2), so the profile carries
 
 Images are built locally from the Containerfiles the package ships (`data/oci/<profile>/`) via
 :func:`build_image`, which prints the digest to pin. Nothing here reaches a registry: the
-sandbox a review runs in is reproducible from the repository, not fetched.
+sandbox a gate step runs in is reproducible from the repository, not fetched. One is shipped —
+`python` — because one path reaches an executor; an `implementer` and a `reviewer` Containerfile
+were shipped beside it and nothing ever entered either.
 """
 
 from __future__ import annotations
@@ -306,7 +322,7 @@ def build_image_from_dockerfile(dockerfile: Path, *, tag: str | None = None, run
     """Build a repository-local Containerfile and return its `sha256:` image digest.
 
     A custom OCI profile (`dockerfile:` in config, not the packaged `containerfile:` name) lives
-    in the repository — already a frozen path once gate 3 freezes config.yaml — so unlike
+    in the repository — already a frozen path once the mandate freezes config.yaml — so unlike
     :func:`build_image` there is nothing to extract from package data: the build context is
     simply the Containerfile's own directory on disk.
     """

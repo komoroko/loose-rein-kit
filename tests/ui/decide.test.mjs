@@ -11,11 +11,11 @@ const AWAITING = {
 };
 
 const REVIEW = {
-  gate: "requirements",
+  gate: "mandate",
   index: 1,
   status: "pending",
   is_awaiting: true,
-  awaiting: "requirements",
+  awaiting: "mandate",
   deliverables: [
     { id: "req", label: "docs/10-requirements.md", exists: true, path: "docs/10-requirements.md", html: "<p>B.</p>" },
   ],
@@ -25,11 +25,11 @@ const REVIEW = {
 async function readingRoom({ readiness = { ok: true, covers: { plan: "sha256:aa", tasks: "sha256:bb" } } } = {}) {
   const posts = [];
   const app = await boot({
-    hash: "#gate/requirements",
+    hash: "#gate/mandate",
     routes: baseRoutes((url, options) => {
       if (options?.method === "POST") {
         posts.push({ url, body: JSON.parse(options.body) });
-        return { ok: true, gate: "requirements", approval_id: "GA-1" };
+        return { ok: true, gate: "mandate", approval_id: "GA-1" };
       }
       if (url.endsWith("/readiness")) return readiness;
       if (url.startsWith("/api/review/")) return REVIEW;
@@ -86,7 +86,7 @@ test("approving posts the digests that were on screen, and echoes nothing to the
   await app.click("#rvFoot .confirm button.primary"); // the panel's confirms in it
 
   assert.deepEqual(posts.map((p) => p.url), ["/api/gate/approve"]);
-  assert.deepEqual(posts[0].body, { gate: "requirements", covers: { plan: "sha256:aa", tasks: "sha256:bb" } });
+  assert.deepEqual(posts[0].body, { gate: "mandate", covers: { plan: "sha256:aa", tasks: "sha256:bb" } });
   await app.go("#console");
   assert.equal(app.window.document.getElementById("out"), null, "a decision is not a command's output");
 });
@@ -104,7 +104,7 @@ test("requesting changes is a form, prefilled with what is being read", async ()
   await app.click({ text: "Request the change" });
   assert.deepEqual(posts[0], {
     url: "/api/changes",
-    body: { gate: "requirements", target: "docs/10-requirements.md#R-3", reason: "R-3 has no acceptance criterion." },
+    body: { gate: "mandate", target: "docs/10-requirements.md#R-3", reason: "R-3 has no acceptance criterion." },
   });
 });
 
@@ -134,7 +134,7 @@ test("the console states a roll-back's consequence above the button that runs it
 
   await app.click({ text: "Yes, do it" });
   assert.deepEqual(posts, [
-    { action: "revise", params: { phase: "requirements", reason: "the auth model is wrong" } },
+    { action: "revise", params: { gate: "mandate", reason: "the auth model is wrong" } },
   ]);
   assert.match(app.text("out"), /exit 0/, "a command's output is the result");
 });

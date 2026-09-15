@@ -117,14 +117,14 @@ build:
 """
 
 
-def test_brownfield_config_scopes_guard_to_docs_and_sets_cmds() -> None:
-    """A pending gate must not freeze normal development on code that already exists, so the
-    guard is scoped to the docs deliverables and the code prefixes are commented out."""
+def test_brownfield_config_empties_the_guard_and_sets_cmds() -> None:
+    """An unapproved mandate must not freeze development on code that already exists, so every
+    guarded path is commented out until somebody re-enables it."""
     from rein import data as data_mod
 
     out = init_cmd.brownfield_config(data_mod.read_text("scaffold/rein/config.yaml"), "npm test", "npm run lint")
-    assert "#     - { path: src/, requires_gate: tasks }" in out
-    assert "- { path: docs/20-design.md, requires_gate: requirements }" in out  # docs stay guarded
+    assert "#     - src/" in out
+    assert "#     - frontend/" in out
     assert 'command: ["npm", "test"]' in out
     assert 'command: ["npm", "run", "lint"]' in out
     assert "template_mode: false" in out
@@ -286,14 +286,13 @@ def test_run_init_brownfield_adapts_config_and_brief(tmp_path: Path, capsys: pyt
     out = capsys.readouterr().out
     assert "brownfield" in out and "/onboard" in out
     config = (tmp_path / ".rein" / "config.yaml").read_text(encoding="utf-8")
-    assert "#     - { path: src/, requires_gate: tasks }" in config  # code paths unguarded until re-enabled
+    assert "#     - src/" in config  # code paths unguarded until re-enabled
     assert 'command: ["npm", "test"]' in config and 'command: ["npm", "run", "lint"]' in config
     brief = (tmp_path / "docs" / "00-product-brief.md").read_text(encoding="utf-8")
     assert "Adopted into an existing codebase" in brief
     # The guard config still parses and validates as YAML.
     parsed = yaml.safe_load(config)
-    guarded = {entry["path"]: entry["requires_gate"] for entry in parsed["guard"]["paths"]}
-    assert guarded.get("docs/tasks/") == "design"
+    guarded = parsed["guard"]["paths"]
     assert "src/" not in guarded  # commented out: existing code keeps flowing
 
 
@@ -312,7 +311,7 @@ def test_main_greenfield_flag_overrides_detection(tmp_path: Path, capsys: pytest
     assert init_cmd.main(["--name", "demo", "--greenfield", "--repo", str(tmp_path)]) == 0
     assert "greenfield" in capsys.readouterr().out
     config = (tmp_path / ".rein" / "config.yaml").read_text(encoding="utf-8")
-    assert "- { path: src/, requires_gate: tasks }" in config  # code paths stay guarded (greenfield semantics)
+    assert "- src/" in config  # code paths stay guarded (greenfield semantics)
 
 
 def test_wizard_asks_only_name_and_brief(
@@ -349,15 +348,14 @@ def test_wizard_asks_only_name_and_brief(
 # --- sandboxing is part of initialization -----------------------------------------
 #
 # It is the one precondition `rein init` never mentioned: a fresh config ships `kind: host`,
-# which is not policy-compliant, and the human learned about it later from a `doctor` FAIL that
-# pointed at a command sandboxing one profile of three.
+# which is not policy-compliant, and the human learned about it later from a `doctor` FAIL.
 
 
 def test_a_fresh_repo_is_told_what_it_still_owes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert init_cmd.run_init(tmp_path, "demo", "build/demo", "") == 0
     out = capsys.readouterr().out
     assert "sandbox: not built yet" in out
-    assert "rein oci build --all --write-config" in out
+    assert "rein oci build --profile python --write-config" in out
 
 
 def test_a_missing_runtime_is_named_as_the_thing_to_install_first(
@@ -369,7 +367,7 @@ def test_a_missing_runtime_is_named_as_the_thing_to_install_first(
     init_cmd.run_init(tmp_path, "demo", "build/demo", "")
     line = init_cmd.sandbox_step(tmp_path, offer=False)
     assert "docker/podman not found" in line
-    assert "rein oci build --all --write-config" in line
+    assert "rein oci build --profile python --write-config" in line
 
 
 def test_the_wizard_offers_to_build_and_takes_no_for_an_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

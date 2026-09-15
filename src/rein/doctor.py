@@ -108,15 +108,18 @@ def check_lock(repo: repo_mod.Repo) -> list[Finding]:
 #: What repairs a schema-invalid SSOT document, per document. `build.md` promises that every
 #: doctor finding is "reported with the command that repairs it", and these four were reported
 #: with none: an upgrade that renamed `config.yaml` keys left a repo with three FAILs, no named
-#: command, and a repair (`rein revise --to tasks`) that is not guessable — the keys are frozen at
-#: gate ③, so they cannot be edited until a human rolls the plan back.
+#: command, and a repair (`rein revise --to mandate`) that is not guessable — the keys are frozen at
+#: the mandate, so they cannot be edited until a human rolls the plan back.
 _DOCUMENT_REPAIR: dict[str, str] = {
     "config": (
-        "frozen at gate ③, so it cannot be edited in place: `rein revise --to tasks` first "
-        "(a human's rollback), then fix the keys, then re-approve gate ③. "
+        "frozen when the mandate is approved, so it cannot be edited in place: `rein revise --to mandate` first "
+        "(a human's rollback), then fix the keys, then re-approve the mandate. "
         "`rein upgrade` prints the renames for the versions crossed."
     ),
-    "plan": "frozen at gate ③: `rein revise --to tasks` first, then fix it, then re-approve gate ③",
+    "plan": (
+        "frozen when the mandate is approved, so it cannot be edited in place: "
+        "`rein revise --to mandate` first, then fix it, then re-approve the mandate"
+    ),
     "state": (
         "hand-repair is not the path — restore it from the last commit; `rein events --verify` "
         "says what the chain expects"
@@ -302,16 +305,19 @@ def check_integrations(repo: repo_mod.Repo, config: models.Config | None) -> lis
 # --- gate receipts ---------------------------------------------------------------
 
 
-#: Gates approved at or after the freeze. Their receipts bind the *frozen* plan and config, so a
-#: receipt of theirs that names a different digest is a real inconsistency. Gates ① and ② are
-#: deliberately absent: they were approved while the plan was still a draft, and `/design` and
-#: `/tasks` then moved it — legitimately. Comparing their receipts against the live document (as
-#: the obvious reading of "check the digests" would) turns every healthy repository permanently red.
-_POST_FREEZE_GATES = ("tasks", "build", "release")
+#: Gates whose approval is taken at or after the freeze. Their receipts bind the *frozen* plan and
+#: config, so a receipt of theirs naming a different digest is a real inconsistency.
+#:
+#: Both of them, now that there are two. It used to exclude the requirements and design gates,
+#: which were approved while the plan was still a draft that `/design` and `/tasks` then moved —
+#: comparing their receipts against the live document turned every healthy repository permanently
+#: red. There is no such gate any more: the mandate approval *is* the freeze, so every receipt in
+#: the document was taken against frozen bytes.
+_POST_FREEZE_GATES = models.GATE_ORDER
 
 
 def _source_drift(state: models.State, repo: repo_mod.Repo | None) -> list[Finding]:
-    """Has any prose the build reads moved since gate ③ froze it?
+    """Has any prose the build reads moved since the mandate froze it?
 
     `plan.yaml` was always bound by a digest. The task tickets and the design document an
     implementer is actually pointed at were bound to nothing, so an edit after the approval
@@ -334,29 +340,33 @@ def _source_drift(state: models.State, repo: repo_mod.Repo | None) -> list[Findi
             Finding(
                 "FAIL",
                 "gates",
-                f"{len(moved)} document(s) the build reads changed since gate 3 froze them "
+                f"{len(moved)} document(s) the build reads changed since the mandate froze them "
                 f"({', '.join(moved[:5])}{'…' if len(moved) > 5 else ''}). The implementation would be "
-                "built from text nobody approved — roll back with `rein revise --to tasks` and re-approve.",
+                "built from text nobody approved — roll back with `rein revise --to mandate` and re-approve.",
             )
         )
     if gone:
         findings.append(
-            Finding("FAIL", "gates", f"{len(gone)} document(s) frozen at gate 3 are missing: {', '.join(gone[:5])}")
+            Finding(
+                "FAIL", "gates", f"{len(gone)} document(s) frozen by the mandate are missing: {', '.join(gone[:5])}"
+            )
         )
     if not moved and not gone:
-        findings.append(Finding("PASS", "gates", f"{len(pinned)} document(s) still match the digests gate 3 froze"))
+        findings.append(
+            Finding("PASS", "gates", f"{len(pinned)} document(s) still match the digests the mandate froze")
+        )
     return findings
 
 
 def _environment_drift(state: models.State, config: models.Config | None) -> Finding:
-    """Has the environment the evidence is produced in moved since gate ③ saw it?
+    """Has the environment the evidence is produced in moved since the mandate saw it?
 
     Two things live in that environment and both may legitimately move mid-cycle: the pinned
     sandbox image (rebuilt because a task added a dependency) and `agents` (the CLI and model each
     role launches). `frozen_digest` deliberately covers neither, so nothing blocks. What must not
-    happen is that it goes *unsaid*: an approval taken at gate ④ over evidence produced in an
-    environment the gate ③ approval never saw is a fact its reader is entitled to. So it is
-    reported here, and again in the gate ④ brief.
+    happen is that it goes *unsaid*: an approval taken at acceptance over evidence produced in an
+    environment the mandate approval never saw is a fact its reader is entitled to. So it is
+    reported here, and again in the acceptance brief.
     """
     recorded = state.plan_environment_digest
     if not recorded:
@@ -369,12 +379,12 @@ def _environment_drift(state: models.State, config: models.Config | None) -> Fin
         )
     live = config.environment_digest()
     if live == recorded:
-        return Finding("PASS", "gates", "the sandboxes and agents are the ones gate 3 saw")
+        return Finding("PASS", "gates", "the sandboxes and agents are the ones the mandate saw")
     return Finding(
         "INFO",
         "gates",
-        f"the environment has changed since gate 3 saw it ({recorded[:19]}… → {live[:19]}…) — allowed "
-        "(a rebuilt image, or a role pointed at another agent), and gate 4 shows it beside the "
+        f"the environment has changed since the mandate saw it ({recorded[:19]}… → {live[:19]}…) — allowed "
+        "(a rebuilt image, or a role pointed at another agent), and acceptance shows it beside the "
         "evidence it produced",
     )
 
@@ -385,7 +395,7 @@ def check_freeze_drift(
     config: models.Config | None,
     repo: repo_mod.Repo | None = None,
 ) -> list[Finding]:
-    """Has anything the gate ③ freeze covers moved since? (read-only half of `rein guard` rule 2)
+    """Has anything the mandate freeze covers moved since? (read-only half of `rein guard` rule 2)
 
     Separate from :func:`check_receipts`, which answers "does this receipt bind anything". This
     answers "does what it bound still exist" — a receipt can name every required digest while
@@ -399,7 +409,7 @@ def check_freeze_drift(
     if state is None:
         return []
     if state.plan_status != "frozen":
-        return [Finding("INFO", "gates", f"the plan is '{state.plan_status}' — gate 3 has not frozen it yet")]
+        return [Finding("INFO", "gates", f"the plan is '{state.plan_status}' — the mandate has not frozen it yet")]
 
     findings: list[Finding] = []
     frozen = {"plan_digest": state.plan_digest, "config_digest": state.plan_config_digest}
@@ -417,13 +427,13 @@ def check_freeze_drift(
                 Finding(
                     "FAIL",
                     "gates",
-                    f"{label} has changed since gate 3 froze it: it now hashes to {live[:19]}… but the "
+                    f"{label} has changed since the mandate froze it: it now hashes to {live[:19]}… but the "
                     f"freeze records {recorded[:19]}…. Every gate approved since covers the older bytes — "
-                    "roll back with `rein revise --to tasks` and re-approve rather than editing a frozen artifact.",
+                    "roll back with `rein revise --to mandate` and re-approve rather than editing a frozen artifact.",
                 )
             )
         else:
-            findings.append(Finding("PASS", "gates", f"{label} still matches the digest gate 3 froze"))
+            findings.append(Finding("PASS", "gates", f"{label} still matches the digest the mandate froze"))
 
     findings.append(_environment_drift(state, config))
     findings += _source_drift(state, repo)
@@ -548,7 +558,7 @@ def check_sandbox(config: models.Config | None, state: models.State | None = Non
         return []
     findings: list[Finding] = []
     offenders = config.unsandboxed_code_profiles()
-    building = state is None or state.current_phase in ("build", "verify", "done")
+    building = state is None or state.stage in ("building", "done")
     if offenders:
         findings.append(
             Finding(
@@ -599,7 +609,7 @@ def check_sandbox(config: models.Config | None, state: models.State | None = Non
                     findings.append(Finding("WARN", "sandbox", f"profile '{name}': {message}"))
                 else:
                     # A local image exists under a digest that does not match the pin — the
-                    # config drifted from what gate 3 froze, or was rebuilt without re-pinning.
+                    # config drifted from what the mandate froze, or was rebuilt without re-pinning.
                     findings.append(Finding("FAIL", "sandbox", f"profile '{name}': {message}"))
         elif offenders:
             findings.append(
@@ -748,8 +758,8 @@ def check_adapters(config: models.Config | None, state: models.State | None) -> 
             findings.append(Finding("FAIL", "agents", refusal))
         else:
             binaries.setdefault(adapters.ADAPTER_TABLE[adapter].argv[0], []).append(role)
-    # Before the build phase a missing CLI is normal: nothing has needed it yet.
-    level = "FAIL" if state is not None and state.current_phase == "build" else "WARN"
+    # Before the mandate is approved a missing CLI is normal: nothing has needed it yet.
+    level = "FAIL" if state is not None and state.stage == "building" else "WARN"
     for binary, roles in sorted(binaries.items()):
         who = ", ".join(roles)
         if shutil.which(binary):
@@ -1486,9 +1496,9 @@ def check_review(review: models.Review | None, fresh: review_reading.Freshness |
 
 
 def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
-    """Can gate ④ be produced at all for the change as it stands? (`review.outlook`)
+    """Can acceptance be produced at all for the change as it stands? (`review.outlook`)
 
-    Both answers were being given at gate ④, where nothing can be done about either: a reading over
+    Both answers were being given at acceptance, where nothing can be done about either: a reading over
     `max_diff_bytes` is a task whose scope is too broad to read in one launch, told about after
     every task is merged and `done`, and a single committed binary makes coverage `insufficient` —
     a gate-④ block at high risk — after the whole reading pipeline has been paid for. Neither needs
@@ -1509,7 +1519,7 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
                 "WARN",
                 "review",
                 f"{view.line()} — `max_diff_bytes` bounds what one launch may read, and no launch "
-                f"can read {view.unit}. Narrow its scope or split the task at gate ③, or raise "
+                f"can read {view.unit}. Narrow its scope or split the task at the mandate, or raise "
                 "`review_policy.budgets.max_diff_bytes` as a deliberate decision."
                 + (f"\n  {view.made_of()}" if view.made_of() else ""),
             )
@@ -1524,7 +1534,7 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
                 "review",
                 f"{len(view.unreadable)} binary/unsupported file(s) are tracked in the change under "
                 f"review, so coverage will be `insufficient`"
-                + (f" and at {view.effective_risk} risk that blocks gate ④" if view.coverage_blocks_gate else "")
+                + (f" and at {view.effective_risk} risk that blocks acceptance" if view.coverage_blocks_gate else "")
                 + f": {named}. Remove them from the change (gitignore the smoke-test output) or "
                 "split them out of this scope.",
             )

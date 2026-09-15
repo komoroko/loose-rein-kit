@@ -215,7 +215,7 @@ def conflicts_with(repo: repo_mod.Repo, ours: str, theirs: str) -> bool:
     Used only to warn: a base that has moved is normal and its pull-request diffs stay correct
     (GitHub reads them from the merge base). What is *not* normal is a base that can no longer be
     merged, and the remedy for that — merge `main` into the work branch, regenerate the review,
-    take gate ④ again — is a human's call, so this reports and never acts.
+    take acceptance again — is a human's call, so this reports and never acts.
     """
     if not ours or not theirs:
         return False
@@ -450,7 +450,7 @@ def preconditions(
 
     The gate-④ split is the load-bearing one. `--push` and `--restack` are how a change gets *to*
     a reviewer, so they belong to the window before the gate opens; `--ready` and `--merge` are what
-    say a human approved, so they may not run before one has. Changing code after gate ④ is approved
+    say a human approved, so they may not run before one has. Changing code after acceptance is approved
     is rewinding an approval, which is a human's privilege (AGENTS.md) — hence `--restack` refuses
     there rather than quietly moving approved commits around.
     """
@@ -466,21 +466,21 @@ def preconditions(
             "cannot be verified (`rein doctor` lists them)"
         )
 
-    approved = state.gate_status("build") == "approved"
+    approved = state.gate_status("acceptance") == "approved"
     if mode in ("ready", "merge") and not approved:
         errors.append(
-            "gate ④ (build) is not approved — a slice may not leave draft or land on the base before the "
+            "the acceptance gate is not approved — a slice may not leave draft or land on the base before the "
             "grounded review a human signed off on. Present it with `rein review` and let a human run "
-            "`rein approve build`."
+            "`rein approve acceptance`."
         )
     if mode == "restack" and approved:
         errors.append(
-            "gate ④ (build) is already approved — propagating new commits now would change what that "
-            "approval covers. Rewinding an approval is a human's call: `rein revise --to build`."
+            "the acceptance gate is already approved — propagating new commits now would change what that "
+            "approval covers. Rewinding an approval is a human's call: `rein revise --to acceptance`."
         )
     if mode == "push" and approved:
         warnings.append(
-            "gate ④ (build) is already approved — these pull requests still open as drafts. "
+            "the acceptance gate is already approved — these pull requests still open as drafts. "
             "Run `rein pr-stack --ready` straight after to lift them."
         )
 
@@ -542,7 +542,7 @@ def preconditions(
         if conflicts_with(repo, tip, base_sha):
             warnings.append(
                 f"{base} has moved and no longer merges cleanly into {config.work_branch}. Do not rebase: "
-                f"`git merge {base}` on the work branch, regenerate the review, and take gate ④ again."
+                f"`git merge {base}` on the work branch, regenerate the review, and take acceptance again."
             )
         else:
             warnings.append(f"{base} has moved since this cycle branched — the pull requests will merge on top of it")
@@ -642,7 +642,7 @@ def _claim_lines(docs: Documents, slice_: Slice, *, approved: bool) -> list[str]
 
     The three axes are printed separately and never collapsed into one word. A claim has no single
     `verified`: integrity, semantic support and conformance are decided apart, and rendering them
-    as one verdict is the precise misreading gate ④ exists to prevent.
+    as one verdict is the precise misreading acceptance exists to prevent.
     """
     task = docs.plan.task(slice_.task_id) if slice_.task_id else None
     if task is None:
@@ -675,14 +675,14 @@ def _acceptance_lines(docs: Documents, slice_: Slice) -> list[str]:
     """This task's own bar, and for the criteria the loop cannot establish, whether anybody saw it."""
     task = docs.plan.task(slice_.task_id) if slice_.task_id else None
     if task is None or not task.acceptance:
-        return ["- (none declared — the criterion is the gate ④ review itself)"]
+        return ["- (none declared — the criterion is the acceptance review itself)"]
     recorded = {str(item.get("id")): item for item in docs.state.recorded_acceptance(slice_.task_id)}
     lines: list[str] = []
     for criterion in task.acceptance:
         ac_id = str(criterion.get("id", "?"))
         spec = criterion.get("evidence")
         kind = str(spec.get("kind", "")) if isinstance(spec, dict) else ""
-        how = f"`{kind}`" if kind else "prose only — left to the gate ④ review"
+        how = f"`{kind}`" if kind else "prose only — left to the acceptance review"
         lines.append(f"- **{ac_id}** — {criterion.get('statement', '')} · {how}")
         if kind != "external":
             continue
@@ -710,7 +710,7 @@ def slice_body(
     """One slice's pull-request body.
 
     The opening banner is the load-bearing part, and it says a different thing on each side of
-    gate ④. Before the gate: this has not been reviewed, which is why it is a draft. After it: the
+    acceptance. Before the gate: this has not been reviewed, which is why it is a draft. After it: the
     review ran **once, over the whole stack** — so a reader of this pull request alone must be told
     that this slice was never judged on its own, and what the review that covers it was bound to.
 
@@ -718,7 +718,7 @@ def slice_body(
     review would dress a draft in the authority of a finished one.
     """
     slice_ = slices[current]
-    approved = docs.state.gate_status("build") == "approved"
+    approved = docs.state.gate_status("acceptance") == "approved"
     heading = f"{slice_.label} — {slice_.title}" if slice_.task_id else slice_.title
     lines = [f"## {heading}", ""]
 
@@ -734,7 +734,7 @@ def slice_body(
         ]
     else:
         lines += [
-            f"> ⚠️ **Draft.** {position}. The grounded review has not run over it yet (gate ④: "
+            f"> ⚠️ **Draft.** {position}. The grounded review has not run over it yet (acceptance: "
             f"{docs.state.gate_status('build')}).",
             "> It leaves draft when a human approves that review — not before.",
         ]
@@ -941,7 +941,7 @@ def _confirm_push(slices: Sequence[Slice], remote: str, *, base: str) -> None:
     print(render(slices, base=base))
     print(
         "\nThey open as drafts because the grounded review has not approved them yet. "
-        "`rein pr-stack --ready` lifts them once gate ④ is open."
+        "`rein pr-stack --ready` lifts them once acceptance is open."
     )
     if not common.ask_yes_no(f"Push and open {len(slices)} draft pull request(s)?"):
         raise PublishError("nothing was pushed.")
@@ -1041,8 +1041,8 @@ def _confirm_ready(docs: Documents, slices: Sequence[Slice], records: Sequence[L
             "lifting pull requests out of draft needs a confirmation typed at a terminal, and stdin "
             "is not one. Run this in your shell — there is deliberately no flag that skips it."
         )
-    receipt = docs.state.gate_receipt("build") or {}
-    print(f"gate ④ (build) is approved: {receipt.get('approval_id', '(no approval id)')}\n")
+    receipt = docs.state.gate_receipt("acceptance") or {}
+    print(f"the acceptance gate is approved: {receipt.get('approval_id', '(no approval id)')}\n")
     print("That approval covers:")
     for key in ("validation_digest", "attested_chain_root", "result_chain_root"):
         print(f"  {key.ljust(20)}  {receipt.get(key, '(not recorded)')}")
@@ -1266,7 +1266,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ready",
         action="store_true",
-        help="once gate ④ is approved: rewrite each body and lift the drafts (confirms at a terminal)",
+        help="once acceptance is approved: rewrite each body and lift the drafts (confirms at a terminal)",
     )
     parser.add_argument(
         "--restack",

@@ -16,7 +16,7 @@ A measurement that cannot see that cannot answer what a cycle cost or where it w
 state with a name, the same rule the Coverage Manifest follows (plan §2.4): "we did not measure"
 and "it was free" must never render the same.
 
-An envelope is not only a bill. Gate ④'s three stages answer with **one JSON object and no other
+An envelope is not only a bill. The acceptance gate's three stages answer with **one JSON object and no other
 text** (`review_policy.parse_reviewer_output` parses the whole of it, strictly), and a CLI that
 prints a banner, its reasoning or a stats footer around that object has not answered — it has said
 something nobody can read. So for `codex` and `gemini` the envelope is what makes those stages work
@@ -251,7 +251,7 @@ def parse_codex_envelope(output: str) -> tuple[str, Usage]:
     JSONL, not one object: `thread.started`, then `item.completed` per item, then exactly one of
     `turn.completed` (carrying `usage`) or `turn.failed`. The answer is the **last** item of type
     `agent_message` — the earlier ones are the agent talking to itself on the way there, and
-    taking the first would hand gate ④ a paragraph of reasoning where it asked for JSON.
+    taking the first would hand acceptance a paragraph of reasoning where it asked for JSON.
 
     A turn that completed while the agent said nothing answers `""` rather than raising: a launch
     that edited files and reported no message is not a failed run, and the caller that actually
@@ -298,6 +298,32 @@ def parse_codex_envelope(output: str) -> tuple[str, Usage]:
     if usage is None:
         raise AdapterEnvelopeError("the event stream ended without a completed turn")
     return answer, usage
+
+
+def codex_session(output: str) -> str:
+    """The thread id a `codex exec --json` stream opened with, or "" when it did not say.
+
+    The stream's first event is `thread.started`, whose `thread_id` upstream documents as "the
+    identifier of the new thread; can be used to resume the thread later" — which is exactly what
+    `codex exec resume <id>` takes. Read separately from `parse_codex_envelope` rather than folded
+    into its return, because the two answer different questions at different moments: the envelope
+    is read once a launch has finished and is about what it said and cost, while this is about
+    which conversation the *next* launch should continue.
+
+    A stream that names no thread answers "" and the next launch is cold. Never a raise: a run that
+    produced an answer has not failed because it cannot be continued.
+    """
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "thread.started":
+            return str(event.get("thread_id") or "")
+    return ""
 
 
 def parse_opencode_envelope(output: str) -> tuple[str, Usage]:

@@ -12,9 +12,9 @@ Four rules, in order of severity:
    `events.ndjson` are written only inside a Central Store transaction.
    A hand edit produces a state change with no matching audit event — the exact invisible
    mutation the chain exists to make impossible.
-2. **A frozen plan is frozen.** Once gate ③ closes, `plan.yaml`, `config.yaml`, the sandbox
+2. **A frozen plan is frozen.** Once the mandate closes, `plan.yaml`, `config.yaml`, the sandbox
    definitions, and the materialized prompts/schema are pinned by the receipt the human confirmed.
-   Changing them goes through `rein revise --to tasks`, which resets the downstream
+   Changing them goes through `rein revise --to mandate`, which resets the downstream
    gates in a chain (plan §16.4).
 3. **A deliverable waits for its prerequisite gate.** docs/20-design.md needs `requirements`,
    docs/tasks/ needs `design`, src/ needs `tasks`, docs/test/ needs `build`. Configurable per
@@ -47,8 +47,8 @@ import logging
 import re
 import subprocess
 import sys
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +89,7 @@ HOOK_REGISTRATION: tuple[str, ...] = (
 #: config may not deny (:func:`_rule_three`).
 CONFIG_PATH = ".rein/config.yaml"
 
-#: Pinned by the gate ③ receipt. Rule 2 — denied once `plan.status` is frozen.
+#: Pinned by the mandate receipt. Rule 2 — denied once `plan.status` is frozen.
 FROZEN_AFTER_GATE_THREE: tuple[str, ...] = (
     ".rein/plan.yaml",
     CONFIG_PATH,
@@ -98,28 +98,25 @@ FROZEN_AFTER_GATE_THREE: tuple[str, ...] = (
     ".rein/oci/",
 )
 
-#: Rule 3's built-in defaults, used when config carries no `guard.paths`. A key guards the path it
-#: names and everything beneath it; the trailing slash is punctuation, not meaning.
-DEFAULT_GUARD_PATHS: dict[str, str] = {
-    "docs/20-design.md": "requirements",
-    "docs/decisions/": "requirements",
-    "docs/tasks/": "design",
-    "docs/test/": "build",
-    "src/": "tasks",
-    "lib/": "tasks",
-    "app/": "tasks",
-    "backend/": "tasks",
-    "frontend/": "tasks",
-    "scripts/": "tasks",
-}
-
-_PHASE_LABEL = {
-    "requirements": "/req (requirements)",
-    "design": "/design (design)",
-    "tasks": "/tasks (task plan)",
-    "build": "/build (implementation)",
-    "release": "/verify (release)",
-}
+#: Rule 3's built-in guarded set, used when config carries no `guard.paths`. Each guards the path
+#: it names and everything beneath it; the trailing slash is punctuation, not meaning.
+#:
+#: Code, and only code. The deliverable documents used to be in here too, each waiting on the phase
+#: gate before it — `docs/20-design.md` on requirements, `docs/tasks/` on design — which is the
+#: shape of a guard enforcing an *order*. They are the material a mandate is written from, and are
+#: written before there is a mandate to gate them on; what the guard is for is the thing a mandate
+#: authorizes, which is changing the product.
+#:
+#: `docs/test/` is not here for the same reason: `/verify` writes it while the mandate is open, and
+#: there is no gate between the mandate and acceptance for it to wait on.
+DEFAULT_GUARD_PATHS: tuple[str, ...] = (
+    "src/",
+    "lib/",
+    "app/",
+    "backend/",
+    "frontend/",
+    "scripts/",
+)
 
 
 def _repo_or_cwd(start: Path | None = None) -> repo_mod.Repo:
@@ -149,7 +146,7 @@ class GuardSettings:
     """
 
     template_mode: bool = False
-    paths: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_GUARD_PATHS))
+    paths: tuple[str, ...] = DEFAULT_GUARD_PATHS
     unreadable: str = ""
 
 
@@ -200,36 +197,27 @@ def guard_settings(repo: repo_mod.Repo) -> GuardSettings:
     entries = guard.get("paths")
     if entries is None:
         return GuardSettings(template_mode=template_mode)
-    if not isinstance(entries, list) or not all(isinstance(entry, Mapping) for entry in entries):
-        return GuardSettings(unreadable="config.yaml's `guard.paths` is not a list of {path, requires_gate} entries")
-    rules = {str(e.get("path", "")): str(e.get("requires_gate", "")) for e in entries}
-    if not all(rules) or not all(rules.values()):
-        # An entry missing either half used to be dropped from the map instead, which put this
-        # function back in the business it was written to get out of: a mistyped `path:` key made a
-        # rule vanish, and with it the only entry a product had added to its own guard. A rule map
-        # the guard cannot read in full is a rule map it does not have.
-        return GuardSettings(unreadable="config.yaml has a `guard.paths` entry with no `path` or no `requires_gate`")
+    if not isinstance(entries, list) or not all(isinstance(entry, str) and entry for entry in entries):
+        # A guarded set the guard cannot read in full is a guarded set it does not have. Dropping
+        # the entries it could not parse would put this function back in the business it was
+        # written to get out of: a mistyped entry making a rule vanish, silently.
+        return GuardSettings(unreadable="config.yaml's `guard.paths` is not a list of repository paths")
     # An empty list is not "guard nothing": the defaults stand, exactly as they do for a config
     # that names no paths at all. Disarming rule 3 is what `template_mode` is for, and it says so.
-    return GuardSettings(template_mode=template_mode, paths=rules or dict(DEFAULT_GUARD_PATHS))
+    return GuardSettings(template_mode=template_mode, paths=tuple(entries) or DEFAULT_GUARD_PATHS)
 
 
-def required_gate(file_path: str, rules: dict[str, str], repo: repo_mod.Repo | None = None) -> str | None:
-    """The gate this edit requires under rule 3. None when the path is not guarded.
+def is_guarded(file_path: str, paths: Sequence[str], repo: repo_mod.Repo | None = None) -> bool:
+    """Whether rule 3 governs this path — whether writing it needs an approved mandate.
 
-    The most specific entry wins, so the decision does not depend on the config's key order. An
-    exact entry still beats every prefix — a prefix that covers a path can only be shorter than it
-    — which is why that case no longer needs a branch of its own.
-
-    `rules` is required rather than defaulted from the config: the caller has to have decided what
+    `paths` is required rather than defaulted from the config: the caller has to have decided what
     to do about a config it could not read before it gets to ask this question.
     """
     repo = repo or _repo_or_cwd()
     rel = repo.rel(file_path)
     if rel is None:
-        return None
-    key = common.longest_cover(rel, rules)
-    return rules[key] if key is not None else None
+        return False
+    return common.longest_cover(rel, {p: p for p in paths}) is not None
 
 
 def _read_state(repo: repo_mod.Repo) -> models.State | None:
@@ -297,9 +285,9 @@ def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = 
             )
         if state.plan_status == "frozen":
             return False, (
-                f"Blocked: the plan froze at gate 3 and {rel} is bound by the receipt the human signed."
+                f"Blocked: the plan froze at the mandate and {rel} is bound by the receipt the human signed."
                 " Changing it now would leave the approval covering bytes nobody read. Roll back first:"
-                " `rein revise --to tasks` (this resets the downstream gates in a chain)."
+                " `rein revise --to mandate` (this resets the downstream gates in a chain)."
             )
         return True, ""
 
@@ -317,7 +305,7 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
         # human's own `git commit` of the fix, since rule 3 runs at commit stage over every changed
         # path. Nothing else about this file loosens: rule 2 still refuses it once the plan is
         # frozen, and the commit-stage frozen-artifact check still compares it against the digest
-        # gate ③ bound.
+        # the mandate bound.
         return False, (
             "Blocked: the guard reads `guard.paths` and `guard.template_mode` from"
             f" .rein/config.yaml, and it could not: {settings.unreadable}. It does not know which"
@@ -326,8 +314,7 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
             " `rein doctor` reports what is wrong with it. There is deliberately no flag that"
             " turns this guard off."
         )
-    gate = required_gate(file_path, settings.paths, repo)
-    if gate is None:
+    if not is_guarded(file_path, settings.paths, repo):
         return True, ""
     if settings.template_mode:
         return True, ""
@@ -338,22 +325,62 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
             " gate guard fails closed. Repair state.yaml — restore it from git. There is deliberately"
             " no flag that turns this guard off."
         )
-    if state.gate_status(gate) == "approved":
-        return True, ""
-    phase = _PHASE_LABEL.get(gate, gate)
-    return False, (
-        f"Blocked: gate '{gate}' is not approved, and this edit requires it."
-        f" Complete {phase} first and get the human's signed approval."
-    )
+    if state.gate_status("mandate") != "approved":
+        return False, (
+            "Blocked: no mandate is approved, and this path is one a mandate authorizes changes to."
+            " Write what the change is for and what would make it true (/req, /design, /tasks — in"
+            " whatever order suits it), then get the human's approval with `rein approve mandate`."
+        )
+    # The mandate is open; the remaining question is whether it covers *this* path. An empty
+    # `include` is unbounded, so a cycle that has not narrowed itself is not one that has forbidden
+    # everything (`models.Plan.scope`).
+    outside = _outside_the_mandate(repo, file_path)
+    if outside:
+        return False, outside
+    return True, ""
+
+
+def _outside_the_mandate(repo: repo_mod.Repo, file_path: str) -> str:
+    """Why this path is outside the approved mandate's scope, or "" when it is inside.
+
+    Read off `plan.yaml`, which the mandate approval froze — so the scope a write is measured
+    against is the one a human read. A plan that cannot be read denies, for the same reason an
+    unreadable state does: a guard that cannot determine its scope must not open it.
+    """
+    rel = repo.rel(file_path)
+    if rel is None:
+        return ""
+    try:
+        text = repo.plan.read_text(encoding="utf-8")
+        document = strict_yaml.load_mapping(text, what="plan.yaml")
+    except (OSError, strict_yaml.StrictParseError) as exc:
+        return (
+            "Blocked: the mandate's scope lives in .rein/plan.yaml and it could not be read"
+            f" ({exc}), so the gate guard fails closed. Restore it from git; `rein doctor` reports"
+            " what is wrong with it."
+        )
+    include, exclude = models.Plan(document).scope
+    if common.longest_cover(rel, {p: p for p in exclude}) is not None:
+        return (
+            f"Blocked: {rel} is excluded by the approved mandate's scope. Widening what the loop"
+            " may change is a human's decision — `rein revise --to mandate` re-opens it."
+        )
+    if include and common.longest_cover(rel, {p: p for p in include}) is None:
+        return (
+            f"Blocked: {rel} is outside the approved mandate's scope ({', '.join(include)})."
+            " Widening what the loop may change is a human's decision — `rein revise --to mandate`"
+            " re-opens it."
+        )
+    return ""
 
 
 def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:
-    """The commit-stage form of rule 2: the frozen artifacts must still hash to what gate ③ froze.
+    """The commit-stage form of rule 2: the frozen artifacts must still hash to what the mandate froze.
 
     Stronger than the path rule the hook applies, because it compares content. An edit that was
     made, reverted, and re-applied leaves no trace in a path list but moves the digest.
 
-    Both artifacts are checked. Gate ③ freezes `config.yaml` for the same reason it freezes
+    Both artifacts are checked. The mandate freezes `config.yaml` for the same reason it freezes
     `plan.yaml` — it fixes the sandbox and the quality gate the evidence will be produced in — so
     covering only the plan left half the freeze resting on the path rule alone.
 
@@ -397,8 +424,8 @@ def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:
             failures.append(f"{label} is frozen in state.yaml but the file is gone")
         elif current != recorded:
             failures.append(
-                f"{label} has changed since gate 3 froze it (its digest no longer matches the receipt). "
-                "Roll back with `rein revise --to tasks` instead of editing a frozen artifact."
+                f"{label} has changed since the mandate froze it (its digest no longer matches the receipt). "
+                "Roll back with `rein revise --to mandate` instead of editing a frozen artifact."
             )
     return failures
 

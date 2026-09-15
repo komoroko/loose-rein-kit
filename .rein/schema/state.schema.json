@@ -8,7 +8,6 @@
   "required": [
     "project",
     "cycle_id",
-    "current_phase",
     "gates",
     "plan"
   ],
@@ -24,45 +23,23 @@
       "maxLength": 128,
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
-    "current_phase": {
-      "enum": [
-        "brief",
-        "requirements",
-        "design",
-        "tasks",
-        "build",
-        "verify",
-        "done"
-      ]
-    },
     "updated_at": {
       "type": "string",
       "maxLength": 64
     },
     "gates": {
+      "description": "The two things a human approves. `mandate` authorizes what the loop may change and what it must prove; `acceptance` takes the change on the evidence now recorded. There were five, one per phase, and the same transaction that flipped one also advanced a `current_phase` field beside it — so authority and progress were one write and could disagree. Where the cycle stands is now derived from these two (`models.State.stage`) and stored nowhere.",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "requirements",
-        "design",
-        "tasks",
-        "build",
-        "release"
+        "mandate",
+        "acceptance"
       ],
       "properties": {
-        "requirements": {
+        "mandate": {
           "$ref": "#/$defs/gate"
         },
-        "design": {
-          "$ref": "#/$defs/gate"
-        },
-        "tasks": {
-          "$ref": "#/$defs/gate"
-        },
-        "build": {
-          "$ref": "#/$defs/gate"
-        },
-        "release": {
+        "acceptance": {
           "$ref": "#/$defs/gate"
         }
       }
@@ -93,7 +70,7 @@
           "$ref": "#/$defs/digest"
         },
         "sources": {
-          "description": "The prose the implementation phase reads — the task tickets and the design/requirements documents — digested at the gate ③ freeze, keyed by repo-relative path. plan.yaml is frozen with a digest; the documents an implementer is actually sent to read were bound to nothing, so a ticket edited after the freeze changed what got built with no record that it had. Worse, a parallel leaf is cut from the work branch's tip and reads only what is committed, so an *uncommitted* edit changed nothing at all and said nothing either.",
+          "description": "The prose the implementation phase reads — the task tickets and the design/requirements documents — digested at the the mandate freeze, keyed by repo-relative path. plan.yaml is frozen with a digest; the documents an implementer is actually sent to read were bound to nothing, so a ticket edited after the freeze changed what got built with no record that it had. Worse, a parallel leaf is cut from the work branch's tip and reads only what is committed, so an *uncommitted* edit changed nothing at all and said nothing either.",
           "type": "object",
           "maxProperties": 1024,
           "propertyNames": {
@@ -180,7 +157,7 @@
                   "$ref": "#/$defs/digest"
                 },
                 "note": {
-                  "description": "What was observed, and where. A human reads this beside the gate ④ decision.",
+                  "description": "What was observed, and where. A human reads this beside the acceptance decision.",
                   "type": "string",
                   "maxLength": 2000
                 },
@@ -410,7 +387,7 @@
                 }
               },
               "review": {
-                "description": "What the independent reviewer said about the last attempt. Carried so the next launch reads it instead of the reviewer re-deriving the same objection, and so `consider` findings — which stop nothing — still reach the human at gate ④ rather than dying with the session that produced them.",
+                "description": "What the independent reviewer said about the last attempt. Carried so the next launch reads it instead of the reviewer re-deriving the same objection, and so `consider` findings — which stop nothing — still reach the human at acceptance rather than dying with the session that produced them.",
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -533,11 +510,8 @@
           "gate": {
             "description": "Which gate this request stands against.",
             "enum": [
-              "requirements",
-              "design",
-              "tasks",
-              "build",
-              "release"
+              "mandate",
+              "acceptance"
             ]
           },
           "target": {

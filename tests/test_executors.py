@@ -122,8 +122,13 @@ def test_host_executor_runs_a_trusted_command() -> None:
 
 
 def test_containerfile_names_lists_the_packaged_profiles() -> None:
-    names = executors.containerfile_names()
-    assert {"python", "reviewer", "implementer"} <= set(names)
+    """One image, because one path reaches an executor.
+
+    `implementer` and `reviewer` were packaged alongside it and nothing ever entered either: an
+    agent CLI is launched as a host process from rein, never through a profile. Shipping the
+    Containerfiles made the gap look like a configuration somebody had not finished.
+    """
+    assert set(executors.containerfile_names()) == {"python"}
 
 
 def test_verify_pinned_host_profile_is_a_noop() -> None:
