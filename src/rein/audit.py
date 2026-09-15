@@ -148,11 +148,16 @@ def run(repo: repo_mod.Repo, config: models.Config | None) -> dict[str, Any]:
                 "guessing at where a security answer came from."
             )
         profile = config.profiles[named]
-    if profile.is_sandboxed:
+    if profile.runs_contained:
+        why = (
+            "which boxes in an agent CLI. Its egress exists so a model API can be reached, not so a "
+            "security answer can be produced somewhere nobody can see"
+            if profile.is_agent_sandbox
+            else "which is sandboxed. Egress is denied from a `kind: oci` profile — `network_profile` may "
+            "only be `none` — and an audit that cannot reach the vulnerability database has no answer to give"
+        )
         raise AuditError(
-            f"the dependency audit is configured to run in profile {profile.name!r}, which is sandboxed. Egress "
-            "is denied from every sandbox here — `network_profile` may only be `none` — and an audit that "
-            "cannot reach the vulnerability database has no answer to give. Point "
+            f"the dependency audit is configured to run in profile {profile.name!r}, {why}. Point "
             "`security.dependency_audit.executor_profile` at a `kind: host` profile: this runs a scanner over "
             "manifests, not the repository's own code."
         )

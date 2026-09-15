@@ -385,6 +385,7 @@ def make_config(
     quality_gate: list[dict[str, Any]] | None = None,
     guard_paths: list[str] | None = None,
     profiles: dict[str, dict[str, Any]] | None = None,
+    agent_profile: str = "",
     max_parallel: int = 3,
     launch_retries: int | None = None,
     repair_rounds: int = 0,
@@ -402,7 +403,12 @@ def make_config(
     body: dict[str, Any] = {
         "project": {"name": project, "work_branch": branch},
         "execution": execution,
-        "executors": {"quality_gate_profile": "quality"},
+        "executors": {
+            "quality_gate_profile": "quality",
+            # Absent by default, which is the product's default too: an agent runs on the host
+            # unless somebody built it a box, because the image has to carry the CLI.
+            **({"agent_profile": agent_profile} if agent_profile else {}),
+        },
         # `containerfile` mirrors the shipped scaffold: a profile's name and its Containerfile's
         # name are different things, and `sandbox_setup_command` reads the second.
         "executor_profiles": profiles or {"quality": {"kind": "host", "containerfile": "python"}},

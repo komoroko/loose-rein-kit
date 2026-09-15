@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections.abc import Collection
 from pathlib import Path
 
 from rein import common, executors, models
@@ -66,8 +67,15 @@ def _custom_dockerfile(profile_name: str, repo_arg: str | None) -> tuple[repo_mo
     return repo, repo.path(profile.dockerfile)
 
 
-def pin_profiles(text: str, pins: dict[str, str]) -> tuple[str, list[str]]:
-    """Rewrite `config.yaml` so each named profile is `kind: oci` with `image:` set. Returns the text.
+def pin_profiles(text: str, pins: dict[str, str], agents: Collection[str] = ()) -> tuple[str, list[str]]:
+    """Rewrite `config.yaml` so each named profile is a sandbox with `image:` set. Returns the text.
+
+    `agents` names the profiles that box in an agent CLI rather than repository code: they are
+    written `kind: oci-agent` / `network_profile: egress`, because those two are the pair the
+    runner will start an agent in, and `oci` / `none` is the pair it will start repository code in.
+    Writing one profile with the other's pair produces a config the executor refuses — which is the
+    intent, but refusing it at a launch rather than here would mean discovering it after a mandate
+    had frozen the file.
 
     Editing YAML as text rather than round-tripping it through a parser is deliberate: config.yaml
     is a document a human maintains, and every comment in it explains a decision — a re-emit would
@@ -106,10 +114,11 @@ def pin_profiles(text: str, pins: dict[str, str]) -> tuple[str, list[str]]:
                 # `image` and `network_profile` go straight after `kind` so they land inside the
                 # block whether or not the profile already had them — appending at the end of the
                 # block would fall past a trailing comment. The schema requires both once `kind` is
-                # `oci`, and `none` is the only network the runner will start a sandbox with.
-                out.append(f"{body}kind: oci")
+                # a sandbox kind, and the runner starts each kind with one network and no other.
+                is_agent = active in agents
+                out.append(f"{body}kind: {'oci-agent' if is_agent else 'oci'}")
                 out.append(f"{body}image: {pins[active]}")
-                out.append(f"{body}network_profile: none")
+                out.append(f"{body}network_profile: {'egress' if is_agent else 'none'}")
                 wrote_image = True
                 continue
             if key_of(stripped) in ("image", "network_profile"):
@@ -135,6 +144,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     target.add_argument("--all", action="store_true", help="build every packaged Containerfile")
+    build.add_argument(
+        "--build-arg",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="passed to the engine as --build-arg; the `agent` image needs AGENT_CLI=<npm package>",
+    )
     build.add_argument(
         "--write-config",
         action="store_true",
@@ -166,6 +182,10 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         pins: dict[str, str] = {}
+        # Which of those pins box in an agent CLI rather than repository code. Tracked alongside
+        # the pins because the two kinds are written differently into config.yaml, and the only
+        # place that knows which is which is the Containerfile the image came from.
+        agent_pins: set[str] = set()
         custom = None if args.all else _custom_dockerfile(args.profile, args.repo)
         if custom is not None:
             # `--profile <name>` named a configured `dockerfile:` profile, not a packaged
@@ -180,8 +200,25 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             print(f"built {args.profile}\ndigest: {digest}")
             pins[args.profile] = f"localhost/rein-{args.profile}@{digest}"
+            configured = _read_config(args.repo)
+            profile = configured[1].profiles.get(args.profile) if configured else None
+            if profile is not None and profile.is_agent_sandbox:
+                agent_pins.add(args.profile)
         else:
+            build_args: dict[str, str] = {}
+            for item in args.build_arg:
+                key, sep, value = item.partition("=")
+                if not sep or not key:
+                    logger.error("--build-arg takes KEY=VALUE, got %r", item)
+                    return 1
+                build_args[key] = value
             names = list(executors.containerfile_names()) if args.all else [args.profile]
+            if args.all and "AGENT_CLI" not in build_args:
+                # Skipped rather than failed: `--all` is how somebody sets up the quality gate, and
+                # the agent image cannot be built without knowing which CLI goes in it. Saying so
+                # here is what stops `--all` from ending in a build failure that reads like a bug.
+                names = [name for name in names if name != "agent"]
+                print("skipping 'agent': it needs --build-arg AGENT_CLI=<npm package>", flush=True)
             for index, name in enumerate(names, start=1):
                 # Progress goes out before the build, not after. `common.run` captures the
                 # engine's output, so a three-image build otherwise prints nothing for several
@@ -189,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
                 # it is working.
                 print(f"[{index}/{len(names)}] building rein-{name} (this can take a few minutes)…", flush=True)
                 try:
-                    digest = executors.build_image(name)
+                    digest = executors.build_image(name, build_args=build_args)
                 except executors.ExecutorError as exc:
                     logger.error(str(exc))
                     return 1
@@ -197,6 +234,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"built rein-{name}\ndigest: {digest}")
                 for profile_name in _profiles_built_from(name, args.repo):
                     pins[profile_name] = image
+                    if name == "agent":
+                        agent_pins.add(profile_name)
         if not args.write_config:
             where = ", ".join(f"executor_profiles.{key}" for key in sorted(pins))
             print(f"\nPin these in .rein/config.yaml under {where}:")
@@ -207,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             repo = repo_mod.get(args.repo)
             path = repo.path(".rein/config.yaml")
-            text, missing = pin_profiles(path.read_text(encoding="utf-8"), pins)
+            text, missing = pin_profiles(path.read_text(encoding="utf-8"), pins, agent_pins)
         except (repo_mod.RepoNotFoundError, OSError) as exc:
             logger.error(str(exc))
             return 1
@@ -224,7 +263,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         path.write_text(text, encoding="utf-8")
         _record_repin(repo, pins, before=before, after=after)
-        print(f"\npinned {', '.join(sorted(pins))} in .rein/config.yaml (kind: oci)")
+        kinds = ", ".join(f"{name} (kind: {'oci-agent' if name in agent_pins else 'oci'})" for name in sorted(pins))
+        print(f"\npinned {kinds} in .rein/config.yaml")
         # Verify here rather than telling the human to run it. A pin that does not resolve is the
         # failure this command is most likely to leave behind, and "run `rein oci verify` next"
         # made confirming it an optional step that a first-time setup skips.

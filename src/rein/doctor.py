@@ -574,31 +574,62 @@ def check_sandbox(config: models.Config | None, state: models.State | None = Non
             )
         )
     for name, profile in sorted(config.profiles.items()):
-        if profile.is_sandboxed and not profile.image_digest:
+        if profile.runs_contained and not profile.image_digest:
             findings.append(Finding("FAIL", "sandbox", f"profile '{name}' has no digest-pinned image"))
-        elif profile.is_sandboxed:
+        elif profile.runs_contained:
             findings.append(Finding("PASS", "sandbox", f"profile '{name}' pinned to {profile.image_digest[:19]}…"))
-        if profile.is_sandboxed and (profile.network_profile or "none") != "none":
+        # Each kind starts with one network and no other, so a profile naming the other kind's is a
+        # config that will be refused at a launch. Said here, where it is still a line to edit.
+        wanted = "egress" if profile.is_agent_sandbox else "none"
+        if profile.runs_contained and (profile.network_profile or wanted) != wanted:
+            why = (
+                "an agent that cannot reach its model API does nothing"
+                if profile.is_agent_sandbox
+                else "egress needs an experiment receipt this release cannot check"
+            )
             findings.append(
                 Finding(
                     "WARN",
                     "sandbox",
-                    f"profile '{name}' names network '{profile.network_profile}', which the executor refuses at "
-                    "run time — egress needs an experiment receipt this release cannot check. Set it to 'none' "
-                    "so the config says what will actually happen.",
+                    f"profile '{name}' is `kind: {profile.kind}` and names network "
+                    f"'{profile.network_profile}', which the executor refuses at run time — {why}. Set it to "
+                    f"'{wanted}' so the config says what will actually happen.",
                 )
             )
+    agent = config.agent_profile
+    if agent is None:
+        findings.append(
+            Finding(
+                "WARN",
+                "sandbox",
+                "no `executors.agent_profile`: the agent CLI that writes the code runs as a host process "
+                "with your credentials, your ~/.ssh and your cloud tokens. The quality gate sandboxes what "
+                "it wrote, not the writing of it. Build a box for it with `rein oci build --profile agent "
+                "--build-arg AGENT_CLI=<npm package> --write-config`. Not a finding about this run: it is a "
+                "boundary that is available and switched off, and leaving it off is a decision.",
+            )
+        )
+    elif not agent.is_agent_sandbox:
+        findings.append(
+            Finding(
+                "FAIL",
+                "sandbox",
+                f"`executors.agent_profile` names '{agent.name}', which is `kind: {agent.kind}`. An agent "
+                "launch needs `kind: oci-agent`, and `rein build` refuses rather than running the agent on "
+                "the host — a key that reads like a boundary and is not one is worse than no key.",
+            )
+        )
 
     # Checked whenever a sandbox is configured *or still owed*. Gating this on "OCI profiles are
     # configured" meant a fresh repository — every profile still `kind: host` — was told to build
     # images and never told it needed a container runtime to do it, so the prerequisite surfaced
     # only as a failed build several minutes later.
-    if offenders or any(p.is_sandboxed for p in config.profiles.values()):
+    if offenders or any(p.runs_contained for p in config.profiles.values()):
         runtime = shutil.which("docker") or shutil.which("podman")
         if runtime:
             findings.append(Finding("PASS", "sandbox", f"container runtime found ({Path(runtime).name})"))
             for name, profile in sorted(config.profiles.items()):
-                if not profile.is_sandboxed or not profile.image_digest:
+                if not profile.runs_contained or not profile.image_digest:
                     continue  # covered above: not sandboxed, or already flagged as unpinned
                 ok, message = executors.verify_pinned(profile, runtime=runtime)
                 if ok:
@@ -692,7 +723,14 @@ def check_nested_sandbox(config: models.Config | None) -> list[Finding]:
     adapter told not to sandbox itself. Naming the combination is the whole job — the fix belongs
     to whoever chose the environment, not to a tool guessing which isolation to weaken.
     """
-    if config is None or not running_containerized():
+    if config is None:
+        return []
+    agent = config.agent_profile
+    if running_containerized():
+        outer = "`rein` is running inside a container"
+    elif agent is not None and agent.is_agent_sandbox:
+        outer = f"`executors.agent_profile` launches every agent inside '{agent.name}'"
+    else:
         return []
     findings: list[Finding] = []
     for name in sorted({config.adapter(role) or "claude" for role in agent_cli.ROLES}):
@@ -702,11 +740,10 @@ def check_nested_sandbox(config: models.Config | None) -> list[Finding]:
                 Finding(
                     "WARN",
                     "sandbox",
-                    f"`rein` is running inside a container and the {name!r} adapter establishes its own "
-                    "sandbox on top. The inner one needs kernel features the outer has dropped, so it fails "
-                    "where the agent writes — which reaches the run as a task that produced no change. "
-                    "Either run `rein` on the host and let the executor profiles do the isolating, or "
-                    "configure the adapter not to sandbox itself.",
+                    f"{outer} and the {name!r} adapter establishes its own sandbox on top. The inner one "
+                    "needs kernel features the outer has dropped, so it fails where the agent writes — "
+                    "which reaches the run as a task that produced no change. Configure the adapter not to "
+                    "sandbox itself, or drop the outer box and let it do the isolating.",
                 )
             )
     return findings

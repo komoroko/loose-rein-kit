@@ -38,13 +38,23 @@ executors:
 # with your credentials. A fresh repository ships `kind: host`, which is NOT policy-compliant;
 # `rein doctor` reports it as a FAIL until you fix it, and `rein init` offers to do it for you.
 #
-# **What it does not isolate: the agent CLI that wrote that code.** An implementer, a reviewer and
-# every fixer are launched as host processes from `rein`, in your checkout, with your credentials.
-# Whatever isolation they have is the adapter's own (`codex exec` establishes seccomp/landlock
-# around its work; `claude -p` carries the project's permissions). If you want the agents contained
-# too, the way to do it today is to run `rein` itself inside a container — and then configure the
-# adapter not to sandbox itself, because two nested sandboxes fail at the point the agent writes
-# (`rein doctor` warns about exactly that combination).
+# **The agent CLI that wrote that code is the other box, and an optional one.** Set
+# `executors.agent_profile` to a `kind: oci-agent` profile and every implementer, reviewer and
+# fixer is launched inside it: the worktree mounted read-write at /work, the control socket bound
+# in so a leaf can still report what it did, and no HOME of yours, no ~/.ssh, no ~/.aws, no docker
+# socket, no capabilities. That kind IS granted egress — an agent that cannot reach its model API
+# does nothing — so it is not a boundary against exfiltration and does not claim to be; what it
+# buys is that the process writing your code cannot read the rest of your machine.
+#
+#     rein oci build --profile agent --build-arg AGENT_CLI=@anthropic-ai/claude-code --write-config
+#
+# The CLI is a build argument because it is the one thing this package cannot choose for you, and
+# that is also why the key is optional: leaving it unset launches the agent on the host with your
+# credentials, isolated only by whatever the adapter establishes for itself (`codex exec`
+# establishes seccomp/landlock around its work; `claude -p` carries the project's permissions).
+# Either way `rein doctor`, the dossier and the acceptance brief say which it was. When you do box
+# it, configure the adapter NOT to sandbox itself: two nested sandboxes fail at the point the agent
+# writes, and `rein doctor` warns about exactly that combination.
 #
 #     rein oci build --all --write-config   # build the packaged image and pin it here
 #
@@ -98,6 +108,20 @@ executor_profiles:
     # pids_limit: 128
     # memory_mb: 1024
     # cpu_count: 2
+
+  # The agent box. Commented out because it is optional and because the image has to carry your
+  # CLI — uncomment after `rein oci build --profile agent --build-arg AGENT_CLI=... --write-config`
+  # and point `executors.agent_profile` at it. `network_profile: egress` is the only value this
+  # kind takes, and `none` is the only value `kind: oci` takes; the runner refuses the other way
+  # round, which is why the two are separate kinds rather than one kind with a knob.
+  # agent:
+  #   kind: oci-agent
+  #   containerfile: agent
+  #   image: localhost/rein-agent@sha256:<rein oci build prints this>
+  #   network_profile: egress
+  #   env_allowlist: [ANTHROPIC_API_KEY]   # the model credential, and nothing else
+  #   memory_mb: 4096
+  #   cpu_count: 4
 
 agents:
   implementer:

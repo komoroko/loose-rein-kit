@@ -175,14 +175,32 @@ rein oci build --all --write-config # build and pin the packaged image (needs do
 The wizard asks this at the right time and can run it for you; `rein doctor` is what tells you
 afterwards whether the pin is in place.
 
-**What this does and does not contain.** It contains the *execution* of repository-derived code:
-the quality gate's `command` steps, and the acceptance criteria that go through the same runner.
-It does **not** contain the agent CLI that wrote that code — `rein` launches every implementer,
-reviewer and fixer as a host process in your checkout, with your credentials, isolated only by
-whatever that CLI establishes for itself (`codex exec` brings its own seccomp/landlock sandbox;
-`claude -p` carries the project's own permissions). If you want the agents contained too, run
-`rein` itself inside a container and configure the adapter not to sandbox itself — `rein doctor`
-warns about the nested pair, which fails at the point the agent writes.
+**What this contains.** The *execution* of repository-derived code: the quality gate's `command`
+steps, and the acceptance criteria that go through the same runner. `kind: oci`, denied the network
+outright.
+
+**Containing the agent CLI too** is a second, optional box and a different kind, because the two
+want opposite things of the network:
+
+```bash
+rein oci build --profile agent --build-arg AGENT_CLI=@anthropic-ai/claude-code --write-config
+```
+
+That pins a `kind: oci-agent` profile and sets `executors.agent_profile`, and every implementer,
+reviewer and fixer is then launched inside it: the worktree mounted read-write at `/work`, the
+control socket bound in so the leaf can still report what it did, and **no HOME of yours, no
+~/.ssh, no ~/.aws, no docker socket, no capabilities**. It *is* given egress — an agent that cannot
+reach its model API does nothing — so it is not a boundary against exfiltration and nothing here
+claims it is; what it buys is that the process writing your code cannot read the rest of your
+machine.
+
+Leaving it off is a legitimate choice and stays the default: the image has to carry the CLI, and no
+packaged image can carry every CLI you might point a role at. Absent, `rein` launches the agent as
+a host process in your checkout with your credentials, isolated only by whatever that CLI
+establishes for itself (`codex exec` brings its own seccomp/landlock sandbox; `claude -p` carries
+the project's own permissions) — and `rein doctor`, the dossier and the acceptance brief all say so
+rather than leaving you to assume. Configure the adapter **not** to sandbox itself when you do box
+it: `rein doctor` warns about the nested pair, which fails at the point the agent writes.
 
 The packaged image carries python, uv and pytest and runs with no network — enough for the shipped
 default gate and nothing more. **A gate that needs a linter, a type checker, or a dependency
@@ -445,8 +463,9 @@ is decided on. What is:
   binds the tree it was made against, so changing the code retires it.
 - **The environment is pinned too.** The quality-gate command steps that *run* repository code and
   tests run in the OCI sandbox, pinned by digest rather than tag, so the environment a review ran
-  in cannot change after that review was approved. The agent CLI itself is a host process and is
-  not inside that boundary.
+  in cannot change after that review was approved. The agent CLI that *wrote* it has its own box
+  (`executors.agent_profile`, `kind: oci-agent`, digest-pinned the same way) — optional, since the
+  image has to carry the CLI, and reported either way.
 - **All of it lands on a hash-chained log.** `.rein/events.ndjson` records every state change and
   why; a gate receipt pins the chain root, so a deleted, reordered, or re-hashed line breaks the
   chain that receipt stands on.

@@ -64,9 +64,11 @@ def _required_without_command(steps: Sequence[models.GateStep]) -> list[Problem]
 def _profiles_used(config: models.Config, steps: Sequence[models.GateStep]) -> dict[str, models.ExecutorProfile]:
     """Every executor profile this run can actually reach, by name.
 
-    The quality gate's command steps and nothing else, because that is the only path an executor
-    is on (`executors.for_profile`). It also walked `implementer` and `reviewer`, checking that
-    images could be entered by launches that never entered them.
+    Two paths reach an executor and this walks both: the quality gate's command steps, and the
+    agent launch when `executors.agent_profile` is set. It used to walk `implementer` and
+    `reviewer` too, checking that images could be entered by launches that never entered them —
+    which is the opposite mistake, and the one that let a missing image stay undiscovered until
+    the launch that needed it.
     """
     used: dict[str, models.ExecutorProfile] = {}
     profiles = config.profiles
@@ -77,6 +79,9 @@ def _profiles_used(config: models.Config, steps: Sequence[models.GateStep]) -> d
         resolved = named or config.quality_gate_profile
         if resolved is not None:
             used[resolved.name] = resolved
+    agent = config.agent_profile
+    if agent is not None:
+        used[agent.name] = agent
     return used
 
 
@@ -87,7 +92,7 @@ def _sandbox_problems(used: dict[str, models.ExecutorProfile], *, runtime: str |
     repository code unsandboxed, which is a policy finding rather than a reason this run cannot
     proceed.
     """
-    sandboxed = {name: p for name, p in used.items() if p.is_sandboxed}
+    sandboxed = {name: p for name, p in used.items() if p.runs_contained}
     if not sandboxed:
         return []
     if runtime is None:

@@ -129,6 +129,21 @@ def _execution_boundary(config: models.Config | None) -> list[dict[str, Any]]:
             # "none" about it would be a claim the runtime never made.
             row["network"] = (profile.network_profile or "none") if profile.is_sandboxed else "unconfined"
         rows.append(row)
+    # Where the code was *written*, beside where it was run. The two are different questions and
+    # the approver was only ever shown the second: a sandboxed quality gate says nothing about the
+    # agent that authored the tests it ran, which until `executors.agent_profile` existed was
+    # always a host process holding the operator's credentials.
+    agent = config.agent_profile
+    rows.append(
+        {
+            "step": "<agent launches>",
+            "kind": "agent",
+            "profile": agent.name if agent is not None else "",
+            "sandbox": agent.kind if agent is not None else "host",
+            **({"image": agent.image} if agent is not None and agent.image else {}),
+            "network": "egress" if agent is not None and agent.is_agent_sandbox else "unconfined",
+        }
+    )
     return rows
 
 

@@ -64,7 +64,7 @@
       }
     },
     "executors": {
-      "description": "Which profile the quality gate's command steps run under; the profile bodies live in executor_profiles. One key, because one path reaches an executor: `executors.for_profile` is called by the quality-gate runner and by the dependency audit, and an agent CLI is launched by neither. `implementer_profile` and `reviewer_profile` were required here and described as `which profile each role runs under`, and they wrapped nothing at all — an implementer, a reviewer and every fixer are launched as host processes from rein itself. Configuring them bought a promise nothing kept.",
+      "description": "Where the two kinds of thing run. `quality_gate_profile` is required and boxes in repository-derived code: the quality gate's command steps, which the mechanized acceptance criteria also go through. `agent_profile` is optional and boxes in the agent CLI itself — absent, an implementer, a reviewer and every fixer are launched as host processes with the operator's credentials, which is the honest default because the image has to carry the CLI and no packaged image can carry every CLI a role might be pointed at. What this block no longer has is `implementer_profile` and `reviewer_profile`: they were required here and described as \"which profile each role runs under\", and they wrapped nothing at all. Configuring them bought a promise nothing kept.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -72,6 +72,10 @@
       ],
       "properties": {
         "quality_gate_profile": {
+          "$ref": "#/$defs/profileName"
+        },
+        "agent_profile": {
+          "description": "The `kind: oci-agent` profile every agent launch runs in. Absent: the agent runs on the host, and `rein doctor`, the dossier and the status board all say so.",
           "$ref": "#/$defs/profileName"
         }
       }
@@ -380,8 +384,10 @@
       ],
       "properties": {
         "kind": {
+          "description": "What this profile boxes in. `oci` is for repository-derived code — the quality gate's command steps and the mechanized acceptance criteria — and is denied egress outright. `oci-agent` is for the agent CLI that *writes* that code, and requires egress, because an agent that cannot reach its model API does nothing; what it is worth is the rest of the box (no HOME of yours, no ~/.ssh, no ~/.aws, no docker socket, no capabilities, no path out of the mounted worktree), not the network, and nothing here claims the network is filtered. `host` is for trusted pinned tooling that runs nothing the repository produced.",
           "enum": [
             "oci",
+            "oci-agent",
             "host"
           ]
         },
@@ -416,7 +422,8 @@
         "network_profile": {
           "type": "string",
           "maxLength": 64,
-          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "description": "The one network each sandbox kind will start with, stated rather than inherited: `none` for `oci` (any other value is refused — egress is granted only by an experiment with a signed receipt, and no such receipt exists to check) and `egress` for `oci-agent`, which is the engine's default bridge, unfiltered."
         },
         "env_allowlist": {
           "type": "array",
@@ -449,7 +456,10 @@
           "if": {
             "properties": {
               "kind": {
-                "const": "oci"
+                "enum": [
+                  "oci",
+                  "oci-agent"
+                ]
               }
             },
             "required": [

@@ -162,7 +162,11 @@ ACCEPTANCE_EVIDENCE_KIND_VALUES = frozenset(ACCEPTANCE_EVIDENCE_KINDS)
 #: The kinds this loop can establish on its own.
 MECHANIZED_EVIDENCE_KINDS = frozenset({"command", "artifact"})
 
-EXECUTOR_VALUES = frozenset({"oci", "host"})
+#: The kinds that run contained — what the schema requires an image and a network profile of, and
+#: what `executors.for_profile` sends to `OciExecutor`. Two rather than one because repository code
+#: and the agent that writes it want opposite things of the network (`ExecutorProfile.kind`).
+SANDBOX_EXECUTOR_VALUES = frozenset({"oci", "oci-agent"})
+EXECUTOR_VALUES = SANDBOX_EXECUTOR_VALUES | {"host"}
 
 # Sandbox knobs (plan §10.2).
 MOUNT_MODE_VALUES = frozenset({"none", "read_only", "read_write"})
@@ -545,7 +549,14 @@ def sandbox_setup_command(build_targets: Sequence[str]) -> str:
     """
     if len(build_targets) > 1:
         return "rein oci build --all --write-config"
-    return f"rein oci build --profile {build_targets[0]} --write-config" if build_targets else ""
+    if not build_targets:
+        return ""
+    target = build_targets[0]
+    # The agent image is the one that cannot be built from its name alone: which CLI goes in it is
+    # the operator's answer, not the package's. Printing the command without that argument sends a
+    # first-time setup into a build that refuses, with the missing half nowhere on the screen.
+    extra = " --build-arg AGENT_CLI=<npm package>" if target == "agent" else ""
+    return f"rein oci build --profile {target}{extra} --write-config"
 
 
 # --- errors -------------------------------------------------------------------
@@ -1238,7 +1249,25 @@ class ExecutorProfile:
 
     @property
     def is_sandboxed(self) -> bool:
+        """A sandbox for **repository-derived code**: the quality gate's command steps, and the
+        mechanized acceptance criteria that run through the same runner. Egress is refused."""
         return self.kind == "oci"
+
+    @property
+    def is_agent_sandbox(self) -> bool:
+        """A sandbox for **an agent CLI**: the thing that writes the code, rather than the code.
+
+        A separate kind because the two want opposite things of the network. Repository code has
+        no business phoning out, so `oci` refuses egress outright; an agent that cannot reach its
+        model API cannot do anything at all, so `oci-agent` requires it. Encoding that as one kind
+        with a knob would have meant a quality-gate profile could be handed egress by a typo.
+        """
+        return self.kind == "oci-agent"
+
+    @property
+    def runs_contained(self) -> bool:
+        """Either sandbox — what decides digest pinning, image builds, and executor dispatch."""
+        return self.is_sandboxed or self.is_agent_sandbox
 
     @property
     def image(self) -> str:
@@ -1521,6 +1550,23 @@ class Config:
         if not isinstance(executors, dict):
             return None
         return self.profiles.get(_str(executors, "quality_gate_profile"))
+
+    @property
+    def agent_profile(self) -> ExecutorProfile | None:
+        """The sandbox an agent CLI is launched in, or None to launch it on the host.
+
+        None is a legitimate answer and stays the default, which is why this key is optional where
+        `quality_gate_profile` is required: the image has to carry the CLI, and no image this
+        package ships can carry every CLI anyone points a role at. What is not legitimate is the
+        state this replaced — an `implementer_profile` that named a sandbox and wrapped nothing, so
+        the operator who configured it believed in a boundary that did not exist. Absent means the
+        agent runs as a host process with the operator's credentials, and every surface that
+        reports the environment says exactly that.
+        """
+        executors = self.raw.get("executors")
+        if not isinstance(executors, dict):
+            return None
+        return self.profiles.get(_str(executors, "agent_profile"))
 
     @property
     def quality_gate(self) -> tuple[GateStep, ...]:

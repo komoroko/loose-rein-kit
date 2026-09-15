@@ -122,13 +122,14 @@ def test_host_executor_runs_a_trusted_command() -> None:
 
 
 def test_containerfile_names_lists_the_packaged_profiles() -> None:
-    """One image, because one path reaches an executor.
+    """Two images, because two paths reach an executor.
 
-    `implementer` and `reviewer` were packaged alongside it and nothing ever entered either: an
-    agent CLI is launched as a host process from rein, never through a profile. Shipping the
-    Containerfiles made the gap look like a configuration somebody had not finished.
+    `python` boxes in repository-derived code; `agent` boxes in the CLI that writes it. What is
+    not here is the pair that used to be — `implementer` and `reviewer`, shipped beside `python`
+    while nothing launched through either, so the gap read as a configuration somebody had not
+    finished rather than a mechanism that did not exist.
     """
-    assert set(executors.containerfile_names()) == {"python"}
+    assert set(executors.containerfile_names()) == {"python", "agent"}
 
 
 def test_verify_pinned_host_profile_is_a_noop() -> None:
@@ -272,3 +273,80 @@ def test_the_swap_ceiling_is_stated_rather_than_left_to_the_engine() -> None:
     argv = executors.OciExecutor(runtime="docker")._argv(spec)
     assert "--memory" in argv and argv[argv.index("--memory") + 1] == "2048m"
     assert "--memory-swap" in argv and argv[argv.index("--memory-swap") + 1] == "2048m"
+
+
+# --- the agent sandbox: the other kind, and the opposite network -----------------
+#
+# `oci` boxes in repository-derived code and is denied egress. `oci-agent` boxes in the CLI that
+# writes that code and requires it, because an agent that cannot reach its model API does nothing.
+# These assert that the two cannot be confused for each other by a config, because the failure
+# mode of confusing them is a quality-gate step with a way out.
+
+
+def _agent_profile(**overrides: object) -> models.ExecutorProfile:
+    raw: dict[str, object] = {
+        "kind": "oci-agent",
+        "image": "localhost/rein-agent@sha256:" + "b" * 64,
+        "network_profile": "egress",
+    }
+    raw.update(overrides)
+    return models.ExecutorProfile("agent", raw)
+
+
+def test_an_agent_sandbox_is_given_the_bridge_and_every_other_hardening_flag() -> None:
+    """The network is the only thing that differs. Everything the quality-gate box drops, this
+    drops too — which is what the boundary is actually worth, since the network is wide open."""
+    joined = " ".join(executors.OciExecutor(runtime="docker")._argv(_spec(_agent_profile())))
+    assert "--network bridge" in joined
+    assert "--network none" not in joined
+    for flag in ("--security-opt no-new-privileges", "--cap-drop ALL", "--user 1000:1000", "HOME=/tmp"):
+        assert flag in joined
+    for forbidden in ("/var/run/docker.sock", ".ssh", ".aws", "/root"):
+        assert forbidden not in joined
+
+
+def test_an_agent_sandbox_without_egress_is_refused() -> None:
+    """`none` here would build a box the agent cannot work in, and the failure would arrive as a
+    model call that timed out rather than as a config that says the wrong thing."""
+    with pytest.raises(executors.ExecutorError, match="does nothing"):
+        executors.OciExecutor(runtime="docker").run(_spec(_agent_profile(network_profile="none")))
+
+
+def test_a_quality_gate_profile_cannot_borrow_the_agent_kind_s_egress() -> None:
+    """The reason the two kinds exist rather than one kind with a knob: a typo in a knob would
+    hand repository-derived code a way out, and nothing downstream would read differently."""
+    with pytest.raises(executors.ExecutorError, match="signed receipt"):
+        executors.OciExecutor(runtime="docker").run(_spec(_oci_profile(network_profile="egress")))
+
+
+def test_stdin_attaches_the_container_s_input_and_nothing_else() -> None:
+    """An adapter that takes its prompt on stdin needs `-i`. Never `-t`: a tty tells some CLIs a
+    human is watching, and they change what they emit when they think so."""
+    joined = " ".join(executors.OciExecutor(runtime="docker")._argv(_spec(_agent_profile(), stdin="prompt")))
+    assert "--interactive" in joined
+    assert "--tty" not in joined
+    assert "-t" not in joined.split()
+
+
+def test_runner_minted_wiring_passes_whatever_the_allowlist_says() -> None:
+    """The allowlist stops the *host's* environment leaking in. The control socket and the
+    capability token did not come from the host's environment — they were minted for this launch —
+    and a profile that forgot to name them would produce a leaf that cannot report its own outcome
+    and no error saying why."""
+    spec = _spec(
+        _agent_profile(env_allowlist=["ANTHROPIC_API_KEY"]),
+        env={"ANTHROPIC_API_KEY": "k", "SECRET_TOKEN": "leak"},
+        env_always={"REIN_CONTROL_SOCKET": "/run/rein/control.sock", "REIN_TASK_ID": "T-001"},
+    )
+    joined = " ".join(executors.OciExecutor(runtime="docker")._argv(spec))
+    assert "ANTHROPIC_API_KEY=k" in joined
+    assert "REIN_CONTROL_SOCKET=/run/rein/control.sock" in joined
+    assert "REIN_TASK_ID=T-001" in joined
+    assert "SECRET_TOKEN" not in joined
+
+
+def test_for_profile_sends_both_contained_kinds_to_the_oci_executor(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(executors, "container_runtime", lambda: "docker")
+    assert isinstance(executors.for_profile(_oci_profile()), executors.OciExecutor)
+    assert isinstance(executors.for_profile(_agent_profile()), executors.OciExecutor)
+    assert isinstance(executors.for_profile(models.ExecutorProfile("t", {"kind": "host"})), executors.HostExecutor)

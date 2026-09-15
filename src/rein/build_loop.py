@@ -182,6 +182,11 @@ _DIRTY_PATHS_SHOWN = 20
 #: working directory cannot disagree about where the repository is.
 _SANDBOX_WORKDIR = "/work"
 
+#: Where the control socket is bound inside an agent sandbox. A fixed path rather than the host's,
+#: because the host's lives under `/run/user/<uid>` and a container that mounted *that* would be
+#: handed every other socket in it.
+_SANDBOX_CONTROL_SOCKET = "/run/rein/control.sock"
+
 
 def _worktree_common_git_dir(checkout: Path) -> Path | None:
     """The main repository's `.git` for a linked worktree, or None for an ordinary checkout.
@@ -1026,6 +1031,7 @@ class Orchestrator:
         adapter = argv[0] if argv else ""
         record = adapters.adapter_for(argv)
         prompt_bytes = sum(len(part.encode("utf-8")) for part in argv)
+        contained = self._agent_sandbox()
         while True:
             # Counted per attempt, inside the loop, because a retry is another launch: the same
             # argv goes to the provider again and is paid for again. Counting once per `_launch`
@@ -1034,7 +1040,10 @@ class Orchestrator:
             # the billed one said 3.
             self._spend(role or where, prompt_bytes, resumed=resumed)
             with common.Heartbeat(where):
-                rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
+                if contained is None:
+                    rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
+                else:
+                    rc, out = self._launch_contained(contained, argv, cwd=cwd, where=where, env=env)
             if rc == 0:
                 try:
                     said, spent = record.read_output(out) if record else (out, usage_mod.Usage.unavailable())
@@ -1149,20 +1158,97 @@ class Orchestrator:
         self._spend_handover(role, dossier.handover_bytes(document, written, self.repo.path))
         return f"{dossier.RELATIVE_PATH}/{task.id}.json"
 
+    def _agent_sandbox(self) -> models.ExecutorProfile | None:
+        """The profile an agent CLI is launched in, or None to launch it on the host.
+
+        None is the configured default and an honest one: the image has to carry the CLI, so no
+        packaged image can cover every role anyone points at a CLI. What is refused is the third
+        state — `executors.agent_profile` naming a profile that is not a sandbox. That reads like
+        a boundary in the file a human approved, so it fails here rather than running the agent on
+        the machine and saying nothing, which is precisely what `implementer_profile` used to do.
+        """
+        profile = self.config.raw.agent_profile
+        if profile is None or profile.is_agent_sandbox:
+            return profile
+        raise common.ReinError(
+            f"executors.agent_profile names {profile.name!r}, which is `kind: {profile.kind}`. An agent "
+            "launch needs `kind: oci-agent` — the kind that is granted egress, because an agent that "
+            "cannot reach its model API does nothing. Build one with `rein oci build --profile agent "
+            "--build-arg AGENT_CLI=<npm package> --write-config`, or drop the key and the agent runs on "
+            "the host."
+        )
+
+    def _launch_contained(
+        self,
+        profile: models.ExecutorProfile,
+        argv: list[str],
+        *,
+        cwd: str,
+        where: str,
+        env: dict[str, str] | None,
+    ) -> tuple[int, str]:
+        """One agent launch inside `profile`, with the worktree and the control socket bound in.
+
+        The worktree is mounted read-write because an implementer's whole job is to change it, and
+        at the same absolute path rules as a gate step (`_mounts_for`) so a leaf's `.git` redirect
+        resolves. The control socket is bound at a fixed path and the leaf is told that path, which
+        is the one thing that has to be rewritten between the host's environment and the
+        container's: the host's socket lives under `/run/user/<uid>/rein/<id>`, and mounting that
+        directory would hand the container every other socket in it.
+
+        `HOME` is the container's ephemeral tmpfs, not the operator's, so the CLI's own state dies
+        with the launch. That is also why an adapter's `own_sandbox` has to be switched off in here
+        — a second sandbox inside this one fails at the point it tries to write, and `doctor` says
+        so before a run finds out.
+        """
+        spec = executors.ExecutionSpec(
+            command=tuple(argv),
+            profile=profile,
+            mounts=self._mounts_for(profile, cwd),
+            env=dict(env or os.environ),
+            env_always=self._contained_wiring(env),
+            workdir=_SANDBOX_WORKDIR,
+            timeout_sec=self.config.timeout_agent,
+        )
+        try:
+            result = executors.for_profile(profile).run(spec)
+        except executors.ExecutorError as exc:
+            raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
+        return result.exit_code, result.output
+
+    @staticmethod
+    def _contained_wiring(env: dict[str, str] | None) -> dict[str, str]:
+        """The control-plane variables as the container must see them.
+
+        `REIN_CONTROL_SOCKET` is rewritten to the bound path; everything else the orchestrator
+        minted travels as-is. Empty when there is no control plane (a dry run), which leaves the
+        leaf with no socket and a `rein report` that refuses rather than writing into a worktree
+        about to be deleted — the same behaviour a host launch has.
+        """
+        if not env or control_plane.SOCKET_ENV not in env:
+            return {}
+        wiring = {
+            name: value for name, value in env.items() if name.startswith("REIN_") and name != control_plane.SOCKET_ENV
+        }
+        wiring[control_plane.SOCKET_ENV] = _SANDBOX_CONTROL_SOCKET
+        return wiring
+
     def _launch_environment(self) -> str:
         """What the agent is actually running inside, so it stops inferring it from its prompt.
 
-        **`host`, always, and that is the fact rather than a default.** An agent CLI is launched
-        with `common.run` from this process — every implementer, every reviewer, every fixer — and
-        the executor profiles wrap the quality gate's command steps, not the launch. This used to
-        report `executors.implementer_profile`'s `kind`, so a repository that had pinned its images
-        told the agent it was inside an OCI sandbox while the process ran on the machine.
+        Derived from where the launch will really happen, never from a config key that says where
+        it ought to. This used to report `executors.implementer_profile`'s `kind`, and since no
+        launcher read that key, a repository that had pinned its images told the agent it was
+        inside an OCI sandbox while the process ran on the machine.
 
-        `own_sandbox` is the one thing that can change the answer, and it is the adapter's doing:
+        `own_sandbox` is the other thing that can change the answer, and it is the adapter's doing:
         `codex exec` establishes seccomp/landlock isolation around its own work. Saying which it is
         matters in both directions — an agent told it is already sandboxed does not try to build a
         second one, and an agent told it is not does not assume the tree is disposable.
         """
+        profile = self.config.raw.agent_profile
+        if profile is not None and profile.is_agent_sandbox:
+            return f"oci-agent ({profile.name}; egress open, repository mounted at {_SANDBOX_WORKDIR})"
         adapter = self._implementer_adapter
         return f"host ({adapter.name} sandboxes itself)" if adapter and adapter.own_sandbox else "host"
 
@@ -1669,10 +1755,15 @@ class Orchestrator:
         This is the sandbox's boundary widening by exactly one directory: with `--network none`
         still in force, a step can now write the repository it is already building (a leaf
         commits to its own branch anyway) and nothing else.
+
+        An agent sandbox takes the same mounts plus the control socket, and takes them read-write
+        whatever `mount_repo` says: an agent that cannot write the checkout it was handed cannot do
+        the one thing it was launched for, so a `read_only` there would be a config error dressed
+        as a preference.
         """
-        if not profile.is_sandboxed:
+        if not profile.runs_contained:
             return ()
-        mode = str(profile.raw.get("mount_repo", "read_write"))
+        mode = "read_write" if profile.is_agent_sandbox else str(profile.raw.get("mount_repo", "read_write"))
         if mode == "none":
             return ()
         access = "ro" if mode == "read_only" else "rw"
@@ -1680,6 +1771,8 @@ class Orchestrator:
         git_dir = _worktree_common_git_dir(Path(cwd))
         if git_dir is not None:
             mounts.append((git_dir, str(git_dir), access))
+        if profile.is_agent_sandbox and self.control is not None:
+            mounts.append((Path(self.control.socket_path), _SANDBOX_CONTROL_SOCKET, "rw"))
         return tuple(mounts)
 
     def _run_pipeline(self, task: dag.Task, cwd: str, base: str = "") -> tuple[str | None, str]:

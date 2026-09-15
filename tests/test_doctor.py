@@ -1444,3 +1444,61 @@ def test_the_shipped_gemini_matcher_covers_every_write_tool() -> None:
     groups = install._settings_template(install.INTEGRATIONS["gemini"].settings_source)["hooks"]["BeforeTool"]
     covered = {tool for group in groups for tool in str(group.get("matcher", "")).split("|")}
     assert covered >= set(gate_guard.GEMINI_WRITE_TOOLS), f"missing: {set(gate_guard.GEMINI_WRITE_TOOLS) - covered}"
+
+
+# --- the agent sandbox ---------------------------------------------------------
+
+
+AGENT_PROFILES: dict[str, object] = {
+    **SANDBOXED_PROFILES,
+    "agent": {
+        "kind": "oci-agent",
+        "image": "localhost/rein-agent@sha256:" + "b" * 64,
+        "network_profile": "egress",
+        "containerfile": "agent",
+    },
+}
+
+
+def test_no_agent_profile_is_a_warning_naming_what_is_not_contained() -> None:
+    """A boundary that is available and switched off. The quality gate sandboxes what an agent
+    wrote; with no `executors.agent_profile` nothing sandboxes the writing of it, and that used to
+    be invisible — the two keys that looked like they said otherwise reached no launch."""
+    results = doctor.check_sandbox(models.Config(make_config(profiles=SANDBOXED_PROFILES)))
+    agent = [f for f in results if "agent_profile" in f.message]
+    assert [f.level for f in agent] == ["WARN"]
+    assert "host process" in agent[0].message
+
+
+def test_an_agent_profile_that_is_not_a_sandbox_is_a_failure() -> None:
+    """`kind: host` here reads like a boundary in a file a human approved and is not one — the
+    exact shape of `implementer_profile`, which is why this fails rather than warns."""
+    config = make_config(profiles=SANDBOXED_PROFILES, agent_profile="quality")
+    results = doctor.check_sandbox(models.Config(config))
+    assert any(f.level == "FAIL" and "kind: oci-agent" in f.message for f in results)
+
+
+def test_a_configured_agent_sandbox_reports_no_finding_about_itself() -> None:
+    config = make_config(profiles=AGENT_PROFILES, agent_profile="agent")  # type: ignore[arg-type]
+    results = doctor.check_sandbox(models.Config(config))
+    assert not [f for f in results if f.level in {"FAIL", "WARN"} and "agent" in f.message]
+
+
+def test_an_agent_profile_denied_egress_is_a_warning_while_it_is_still_a_line_to_edit() -> None:
+    """The executor refuses it at a launch. Saying so here is the difference between editing one
+    line and discovering it after a mandate froze the file."""
+    profiles = {**AGENT_PROFILES, "agent": {**AGENT_PROFILES["agent"], "network_profile": "none"}}  # type: ignore[dict-item]
+    config = make_config(profiles=profiles, agent_profile="agent")  # type: ignore[arg-type]
+    results = doctor.check_sandbox(models.Config(config))
+    assert any(f.level == "WARN" and "does nothing" in f.message for f in results)
+
+
+def test_a_self_sandboxing_adapter_inside_our_own_box_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The nested pair reached `rein` running in a container before this; now the loop can build
+    the outer box itself, so the same collision is reachable on a host machine."""
+    monkeypatch.setattr(doctor, "running_containerized", lambda: False)
+    config = make_config(profiles=AGENT_PROFILES, agent_profile="agent")  # type: ignore[arg-type]
+    config["agents"]["implementer"]["adapter"] = "codex"  # type: ignore[index]
+    results = doctor.check_nested_sandbox(models.Config(config))
+    assert [f.level for f in results] == ["WARN"]
+    assert "agent_profile" in results[0].message

@@ -163,10 +163,14 @@ human decides *whether*; the loop does the work.
   `.rein/config.yaml` (default `test`→`check`→`review`→`smoke`; runnable deliverables
   set `smoke`'s `required: true`). The lead **re-runs each command step and reads its exit
   status** — a delegated agent's textual "green" is never evidence. A command step **runs repo code
-  and tests in the OCI sandbox, never on the host** (`executors.quality_gate_profile`). The agent
-  CLI that *wrote* them is a different question and a host process: `rein` launches it in the
-  checkout with your credentials, isolated only by whatever the adapter establishes for itself.
-  Containing the agents too means running `rein` inside a container.
+  and tests in the OCI sandbox, never on the host** (`executors.quality_gate_profile`, `kind: oci`,
+  no egress). The agent CLI that *wrote* them is the other question and has its own answer:
+  `executors.agent_profile` (`kind: oci-agent`) launches every implementer, reviewer and fixer in a
+  box with the worktree mounted, the control socket bound in, and **no HOME of yours, no ~/.ssh, no
+  ~/.aws, no docker socket**. That kind *is* granted egress — an agent that cannot reach its model
+  API does nothing — so it is not a boundary against exfiltration and does not claim to be. The key
+  is **optional**: the image has to carry the CLI, so absent it the agent runs on the host with your
+  credentials, and `rein doctor`, the dossier and the acceptance brief all say which it was.
 - **`done` means the evidence was there, not that the agent stopped.** A task closes only when
   the DoD went green **against the tree the task actually produced** — a content fingerprint
   `state.yaml` records beside the status. An attempt that changed nothing does not reach the gate
@@ -221,8 +225,9 @@ invalidate the review it records. A false positive is contradicted by a human wi
 survives the regeneration that discards the human review, and lapses if that code is edited. Acceptance **carries the review rather than re-reading the code** — its
 receipt binds the machine digest — and runs `rein audit run`, the one security answer that is not
 a function of the tree and therefore the only one that expires without the repository moving. It
-runs on the host and nowhere else — an audit reads a published database and no sandbox here is
-granted egress — and a machine that could not answer records nothing, because "could not ask" is
+runs on the host and nowhere else — an audit reads a published database, and the one sandbox kind
+with egress exists to carry an agent's model calls, not to produce a security answer somewhere
+nobody can see — and a machine that could not answer records nothing, because "could not ask" is
 not "the answer is bad" (detail: build.md, verify.md).
 
 ## Branch / commit / permissions

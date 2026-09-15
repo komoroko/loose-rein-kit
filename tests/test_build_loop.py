@@ -3409,3 +3409,134 @@ def test_a_reading_that_could_not_be_taken_is_not_reported_as_nothing_blocking(
     out = capsys.readouterr().out
     assert "no reading was taken" in out
     assert "nothing blocking" not in out
+
+
+# --- the agent sandbox: containing the CLI that writes the code -----------------
+#
+# The quality gate boxes in what an agent wrote. Until `executors.agent_profile` existed there was
+# nothing that boxed in the writing of it: every implementer, reviewer and fixer was a host process
+# holding the operator's credentials, and the config keys that looked like they said otherwise
+# (`implementer_profile`, `reviewer_profile`) reached no launch at all.
+
+
+AGENT_PROFILE = {"kind": "oci-agent", "image": "localhost/rein-agent@sha256:" + "b" * 64, "network_profile": "egress"}
+
+
+def agent_loop(tmp_path: Path, **profile_overrides: object) -> build_loop.Orchestrator:
+    return orchestrator(
+        tmp_path,
+        config=make_config(
+            agent_profile="agent",
+            profiles={
+                "quality": {"kind": "host", "containerfile": "python"},
+                "agent": {**AGENT_PROFILE, **profile_overrides},
+            },
+        ),
+    )
+
+
+def test_without_an_agent_profile_the_launch_stays_on_the_host(tmp_path: Path) -> None:
+    """The default, and an honest one: no packaged image can carry every CLI a role might be
+    pointed at, so the absence of a box is a fact to report rather than a gap to paper over."""
+    loop = orchestrator(tmp_path)
+    assert loop._agent_sandbox() is None
+    assert loop._launch_environment() == "host"
+
+
+def test_an_agent_profile_that_is_not_a_sandbox_stops_the_run(tmp_path: Path) -> None:
+    """The state this key exists to make impossible. `implementer_profile` named a profile, read
+    like a boundary, and ran the agent on the machine anyway — so a key that cannot deliver what
+    it says fails here rather than silently meaning nothing."""
+    loop = orchestrator(
+        tmp_path,
+        config=make_config(
+            agent_profile="quality",
+            profiles={"quality": {"kind": "host", "containerfile": "python"}},
+        ),
+    )
+    with pytest.raises(common.ReinError, match="oci-agent"):
+        loop._agent_sandbox()
+
+
+def test_the_agent_is_told_which_box_it_is_in(tmp_path: Path) -> None:
+    """Derived from where the launch will really happen, never from a key that says where it
+    ought to: this used to report a profile's `kind` while the process ran on the host."""
+    assert "oci-agent (agent" in agent_loop(tmp_path)._launch_environment()
+
+
+def test_an_agent_sandbox_mounts_the_worktree_read_write(tmp_path: Path) -> None:
+    """`mount_repo: read_only` is a legitimate answer for a gate that only inspects, and a config
+    error for an agent: writing the checkout is the one thing it was launched to do."""
+    loop = agent_loop(tmp_path, mount_repo="read_only")
+    mounts = loop._mounts_for(loop.config.raw.profiles["agent"], cwd="/repo/worktree")
+    assert (Path("/repo/worktree"), "/work", "rw") in mounts
+
+
+def test_the_control_socket_is_bound_at_a_fixed_path_not_the_host_s(tmp_path: Path) -> None:
+    """The host's socket lives under /run/user/<uid>/rein/<id>, and mounting that directory would
+    hand the container every other socket in it."""
+
+    class _Control:
+        socket_path = Path("/run/user/1000/rein/abc/control.sock")
+        secret = b"s"
+
+    loop = agent_loop(tmp_path)
+    loop.control = _Control()  # type: ignore[assignment]
+    mounts = loop._mounts_for(loop.config.raw.profiles["agent"], cwd="/repo/worktree")
+    bound = [m for m in mounts if m[1] == build_loop._SANDBOX_CONTROL_SOCKET]
+    assert bound == [(_Control.socket_path, "/run/rein/control.sock", "rw")]
+    assert not any(str(m[1]).startswith("/run/user") for m in mounts)
+
+
+def test_the_leaf_is_told_the_bound_socket_path_and_keeps_its_other_wiring() -> None:
+    """Rewriting `REIN_CONTROL_SOCKET` is the one thing that has to differ between a host launch
+    and a contained one. Everything else the orchestrator minted travels unchanged, and the host's
+    own environment does not travel at all."""
+    wiring = build_loop.Orchestrator._contained_wiring(
+        {
+            "REIN_CONTROL_SOCKET": "/run/user/1000/rein/abc/control.sock",
+            "REIN_CAPABILITY_TOKEN": "tok",
+            "REIN_TASK_ID": "T-001",
+            "PATH": "/usr/bin",
+            "AWS_SECRET_ACCESS_KEY": "leak",
+        }
+    )
+    assert wiring["REIN_CONTROL_SOCKET"] == build_loop._SANDBOX_CONTROL_SOCKET
+    assert wiring["REIN_CAPABILITY_TOKEN"] == "tok"
+    assert wiring["REIN_TASK_ID"] == "T-001"
+    assert "PATH" not in wiring
+    assert "AWS_SECRET_ACCESS_KEY" not in wiring
+
+
+def test_with_no_control_plane_there_is_no_wiring_to_pass() -> None:
+    """A dry run has no socket. The leaf then has none either, and its `rein report` refuses
+    rather than writing into a worktree about to be deleted — the same as a host launch."""
+    assert build_loop.Orchestrator._contained_wiring(None) == {}
+    assert build_loop.Orchestrator._contained_wiring({"REIN_TASK_ID": "T-001"}) == {}
+
+
+def test_a_launch_goes_through_the_executor_when_a_box_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of the whole change: with a profile set, no agent argv reaches `common.run`."""
+    loop = agent_loop(tmp_path)
+    seen: dict[str, executors.ExecutionSpec] = {}
+
+    class _Executor:
+        def run(self, spec: executors.ExecutionSpec) -> executors.ExecutionResult:
+            seen["spec"] = spec
+            return executors.ExecutionResult(
+                exit_code=0, output=agent_output(["claude"], "done"), image_digest="sha256:" + "b" * 64
+            )
+
+    monkeypatch.setattr(executors, "for_profile", lambda profile: _Executor())
+    monkeypatch.setattr(build_loop, "_run", _never_called)
+    loop._launch(["claude", "-p", "do it"], cwd=str(tmp_path), where="T-001: implementer", role="implementer")
+    spec = seen["spec"]
+    assert spec.command == ("claude", "-p", "do it")
+    assert spec.profile.name == "agent"
+    assert spec.workdir == build_loop._SANDBOX_WORKDIR
+
+
+def _never_called(*args: object, **kwargs: object) -> tuple[int, str]:
+    raise AssertionError("an agent launch reached the host while a sandbox was configured")
