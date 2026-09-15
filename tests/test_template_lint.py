@@ -36,10 +36,7 @@ _CONFIG = store.dump_yaml(
     )
 ).decode()
 
-_AGENTS = (
-    "kinds: foundation / parallel / integration. "
-    "gates: requirements, design, tasks, build, release. steps: test, review.\n"
-)
+_AGENTS = "kinds: foundation / parallel / integration. gates: mandate, acceptance. steps: test, review.\n"
 _TASKS_CMD = (
     "kind: foundation | parallel | integration. "
     "status: todo in-progress blocked needs-revision awaiting-evidence done.\n"
@@ -346,9 +343,8 @@ def test_check_readme_parity_ignores_prose_make_mentions() -> None:
 # --- version ↔ changelog -----------------------------------------------------------
 
 
-def _config_with_guard(paths: dict[str, str]) -> str:
-    entries = [{"path": path, "requires_gate": gate} for path, gate in paths.items()]
-    return store.dump_yaml(make_config(guard_paths=entries)).decode()
+def _config_with_guard(paths: tuple[str, ...]) -> str:
+    return store.dump_yaml(make_config(guard_paths=list(paths))).decode()
 
 
 def test_check_guard_defaults_green_and_drifts() -> None:
@@ -357,23 +353,21 @@ def test_check_guard_defaults_green_and_drifts() -> None:
     rule added to only one of them is the drift this canary exists to catch."""
     from rein import gate_guard
 
-    green = _config_with_guard(dict(gate_guard.DEFAULT_GUARD_PATHS))
+    green = _config_with_guard(gate_guard.DEFAULT_GUARD_PATHS)
     assert template_lint.check_guard_defaults(green) == []
 
-    missing = template_lint.check_guard_defaults(_config_with_guard({"src/": "tasks"}))
+    missing = template_lint.check_guard_defaults(_config_with_guard(("src/",)))
     assert any("guard.paths is missing" in f for f in missing)
 
-    extra = template_lint.check_guard_defaults(
-        _config_with_guard({**gate_guard.DEFAULT_GUARD_PATHS, "extra/": "tasks"})
-    )
+    extra = template_lint.check_guard_defaults(_config_with_guard((*gate_guard.DEFAULT_GUARD_PATHS, "extra/")))
     assert any("DEFAULT_GUARD_PATHS is missing `extra/`" in f for f in extra)
 
-    mismatch = template_lint.check_guard_defaults(
-        _config_with_guard({**gate_guard.DEFAULT_GUARD_PATHS, "src/": "design"})
+    dropped = template_lint.check_guard_defaults(
+        _config_with_guard(tuple(p for p in gate_guard.DEFAULT_GUARD_PATHS if p != "src/"))
     )
-    assert any("`src/`" in f and "design" in f for f in mismatch)
+    assert any("guard.paths is missing `src/`" in f for f in dropped)
 
-    assert "guard.paths block is missing" in template_lint.check_guard_defaults(_config_with_guard({}))[0]
+    assert "guard.paths block is missing" in template_lint.check_guard_defaults(_config_with_guard(()))[0]
 
 
 def _gitignore(*entries: str) -> str:
@@ -559,6 +553,44 @@ def test_check_version_changelog_green_and_drifts() -> None:
     assert "0.1.0" in template_lint.check_version_changelog("0.1.0", log)[0]
     assert "missing or empty" in template_lint.check_version_changelog("", log)[0]
     assert "no `## [x.y.z]`" in template_lint.check_version_changelog("0.2.0", "# Changelog\n")[0]
+
+
+def test_check_required_status_covers_every_job(tmp_path: Path) -> None:
+    """The single required status has to wait on every job *and* test each result.
+
+    Both halves failed in this repository already: `integration` was outside the aggregate while
+    it was the only thing proving the sandbox claim, and `checks` was outside it when a mypy
+    failure reported green beside it in the same run.
+    """
+
+    def lint(workflow: str) -> list[str]:
+        directory = tmp_path / ".github" / "workflows"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "ci.yml").write_text(workflow, encoding="utf-8")
+        # Explicitly typed: `template_lint` is loaded from its path, so mypy sees `Any`.
+        found: list[str] = template_lint.check_required_status_covers_every_job(tmp_path)
+        return found
+
+    covered = (
+        "jobs:\n"
+        "  unit:\n    steps: []\n"
+        "  lint:\n    steps: []\n"
+        "  tests:\n"
+        "    needs: [unit, lint]\n"
+        "    steps:\n"
+        "      - run: |\n"
+        '          test "${{ needs.unit.result }}" = "success"\n'
+        '          test "${{ needs.lint.result }}" = "success"\n'
+    )
+    assert lint(covered) == []
+
+    not_waited = covered.replace("    needs: [unit, lint]", "    needs: [unit]")
+    assert "'lint' is not in `tests.needs`" in lint(not_waited)[0]
+
+    not_asserted = covered.replace('          test "${{ needs.lint.result }}" = "success"\n', "")
+    assert "its result is never tested" in lint(not_asserted)[0]
+
+    assert "no `tests` job" in lint("jobs:\n  unit:\n    steps: []\n")[0]
 
 
 # --- against the live repo (the actual CI gate) ------------------------------------

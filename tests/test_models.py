@@ -100,9 +100,17 @@ def test_every_vocabulary_appears_as_a_schema_enum() -> None:
             )
 
 
-def test_gate_and_phase_ladders_agree() -> None:
-    assert set(models.PHASE_AFTER_GATE) == set(models.GATE_ORDER)
-    assert set(models.PHASE_AFTER_GATE.values()) <= set(models.PHASE_ORDER)
+def test_the_stage_is_derived_from_the_gates_and_stored_nowhere() -> None:
+    """There is no table from gates to stages, because there is nothing to keep in step.
+
+    `PHASE_AFTER_GATE` existed only because approving a gate also wrote a `current_phase` beside
+    it — one transaction authoring two facts that could then disagree.
+    """
+    assert not hasattr(models, "PHASE_AFTER_GATE")
+    assert models.State({"gates": {}}).stage == "drafting"
+    approved = {"status": "approved"}
+    assert models.State({"gates": {"mandate": approved}}).stage == "building"
+    assert models.State({"gates": {"mandate": approved, "acceptance": approved}}).stage == "done"
 
 
 def test_central_only_capabilities_are_capabilities() -> None:
@@ -331,20 +339,16 @@ def test_all_errors_are_reported_not_just_the_first() -> None:
 STATE = """
 project: demo
 cycle_id: payment-retry
-current_phase: build
 updated_at: "2026-07-23T17:00:00+09:00"
 gates:
-  requirements:
+  mandate:
     status: approved
     receipt:
-      approval_id: GA-REQUIREMENTS-0001
+      approval_id: GA-MANDATE-0001
       validation_digest: sha256:2222222222222222222222222222222222222222222222222222222222222222
       attested_chain_root: sha256:3333333333333333333333333333333333333333333333333333333333333333
       result_chain_root: sha256:4444444444444444444444444444444444444444444444444444444444444444
-  design: {status: pending, receipt: null}
-  tasks: {status: pending, receipt: null}
-  build: {status: pending, receipt: null}
-  release: {status: pending, receipt: null}
+  acceptance: {status: pending, receipt: null}
 plan:
   status: frozen
   digest: sha256:5555555555555555555555555555555555555555555555555555555555555555
@@ -355,10 +359,10 @@ tasks:
 
 def test_state_parses() -> None:
     state = models.State.parse(STATE)
-    assert state.current_phase == "build"
-    assert state.gate_status("requirements") == "approved"
-    assert state.gate_status("design") == "pending"
-    assert state.approved_gates == ("requirements",)
+    assert state.stage == "building"
+    assert state.gate_status("mandate") == "approved"
+    assert state.gate_status("acceptance") == "pending"
+    assert state.approved_gates == ("mandate",)
     assert state.task_status == {"T-002": "done"}
     assert state.plan_status == "frozen"
 
@@ -370,22 +374,24 @@ def test_gate_status_of_an_absent_gate_reads_pending() -> None:
 
 def test_approved_gate_without_a_receipt_is_rejected() -> None:
     # There is no path to `approved` that is not a digest-bound receipt.
-    bad = STATE.replace("  design: {status: pending, receipt: null}", "  design: {status: approved, receipt: null}")
+    bad = STATE.replace(
+        "  acceptance: {status: pending, receipt: null}", "  acceptance: {status: approved, receipt: null}"
+    )
     with pytest.raises(models.DocumentError, match="receipt"):
         models.State.parse(bad)
 
 
 def test_gate_chain_violation_detected() -> None:
     approved = models.State.parse(STATE)
-    assert approved.pending_upstream("build") == "design"
-    assert approved.gate_chain_violations() == []  # requirements approved, nothing downstream yet
+    assert approved.pending_upstream("acceptance") is None
+    assert approved.gate_chain_violations() == []  # the mandate is approved, nothing after it yet
 
-    # An approval that survived a roll back: design approved while requirements is pending.
+    # An approval that survived a roll back: the change was taken, the mandate withdrawn.
     raw = strict_yaml.load_mapping(STATE)
-    raw["gates"]["design"] = dict(raw["gates"]["requirements"])
-    raw["gates"]["requirements"] = {"status": "pending", "receipt": None}
+    raw["gates"]["acceptance"] = dict(raw["gates"]["mandate"])
+    raw["gates"]["mandate"] = {"status": "pending", "receipt": None}
     broken = models.State(raw)
-    assert broken.gate_chain_violations() == [("design", "requirements")]
+    assert broken.gate_chain_violations() == [("acceptance", "mandate")]
 
 
 # --- review -------------------------------------------------------------------
@@ -395,6 +401,7 @@ machine:
   status: generated
   binding:
     change_digest: sha256:6666666666666666666666666666666666666666666666666666666666666666
+    host_surface_digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
     plan_digest: sha256:7777777777777777777777777777777777777777777777777777777777777777
     environment_digest: sha256:8888888888888888888888888888888888888888888888888888888888888888
   coverage:
@@ -491,7 +498,7 @@ def test_the_human_half_no_longer_accepts_a_challenge_answer() -> None:
 
 # --- config: the two digests ----------------------------------------------------
 #
-# Gate ③ freezes a config.yaml with its image pins taken out, and records the whole sandbox
+# The mandate freezes a config.yaml with its image pins taken out, and records the whole sandbox
 # picture beside it. The split is what lets a task that legitimately adds a dependency have its
 # sandbox rebuilt without re-approving a plan nothing changed — and the second digest is what stops
 # that permission from being a hole nobody can see through.
@@ -501,7 +508,7 @@ def _config(**profiles: dict[str, Any]) -> models.Config:
     return models.Config(
         {
             "project": {"name": "demo", "work_branch": "work"},
-            "executors": {"implementer_profile": "impl", "reviewer_profile": "rev"},
+            "executors": {"quality_gate_profile": "quality"},
             "executor_profiles": profiles,
         }
     )
@@ -522,7 +529,7 @@ def test_a_rebuilt_image_does_not_move_the_frozen_digest() -> None:
 
 def test_opening_a_sandbox_moves_the_frozen_digest() -> None:
     """Only the pin moved out. `kind` and `network_profile` widen what may happen, and widening is
-    the judgement a human made at gate ③."""
+    the judgement a human made at the mandate."""
     pinned = _config(impl=_PINNED, rev=_PINNED)
     for change in ({"kind": "host"}, {"network_profile": "egress"}, {"mount_repo": "read_write"}):
         opened = _config(impl={**_PINNED, **change}, rev=_PINNED)
@@ -543,7 +550,7 @@ def test_switching_an_agent_does_not_move_the_frozen_digest() -> None:
     """Which CLI and model a role launches is a running choice, not a term of the approved plan.
 
     It used to be inside the freeze, so `rein agent copilot` mid-cycle made the next `rein guard`
-    say "config.yaml has changed since gate 3 froze it — roll back with `rein revise --to tasks`":
+    say "config.yaml has changed since the mandate froze it — roll back with `rein revise --to tasks`":
     a rewound approval for a plan nobody had touched.
     """
     before = _config(impl=_PINNED, rev=_PINNED)
@@ -618,7 +625,7 @@ def test_event_round_trips_through_a_mapping() -> None:
 
 
 def test_a_task_reads_back_the_operator_surface_the_plan_froze() -> None:
-    """The Expected side of gate ④'s "what does this now require of somebody" comparison."""
+    """The Expected side of acceptance's "what does this now require of somebody" comparison."""
     plan = models.Plan(
         make_plan(
             tasks=[

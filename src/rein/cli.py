@@ -65,7 +65,7 @@ VERBS: dict[str, Verb] = {
     # daily
     "start": Verb("resume", "first run: setup wizard; afterwards: what moved since you last looked"),
     "next": Verb("status_api", "only the next recommended command (deterministic; --json for integrations)"),
-    "ui": Verb("ui", "local dashboard — read gates, do the gate-4 human review, run doctor/revise, pick agents"),
+    "ui": Verb("ui", "local dashboard — read gates, do the acceptance human review, run doctor/revise, pick agents"),
     # gates and shipping
     "approve": Verb("approve", "readiness check, then the human's confirmation at this terminal"),
     "changes": Verb("change_request", "ask for changes instead of approving (holds the gate shut)"),
@@ -74,9 +74,9 @@ VERBS: dict[str, Verb] = {
     "build": Verb("build_loop", "the deterministic /build orchestrator (--supervise: retry in-process on exit 3)"),
     "baseline": Verb(
         "build_loop:baseline_main",
-        "measure which quality-gate steps are already red on the work branch (gate 3 freezes it)",
+        "measure which quality-gate steps are already red on the work branch (the mandate freezes it)",
     ),
-    "audit": Verb("audit", "run and record the dependency audit gate 5 requires (it expires; the tree does not)"),
+    "audit": Verb("audit", "run and record the dependency audit acceptance requires (it expires; the tree does not)"),
     "doctor": Verb("doctor", "read-only diagnosis: format, integrations, sandbox, plan, review"),
     "cycle-close": Verb("cycle", "archive the finished delta cycle and reset"),
     "pr-draft": Verb("pr_draft", "assemble a PR body from the SSOT (read-only)"),
@@ -293,7 +293,23 @@ def main(argv: list[str] | None = None) -> int:
     #
     # version answers the question "what is installed here", which is the first thing anyone asks
     # of a lock the tool refuses to read. Hard-stopping on it would report a broken install.
-    if verb not in ("guard", "doctor", "version"):
+    #
+    # policy-check is exempt for a reason none of the others share: it is *defined* to be run by a
+    # release older than the tree it reads. CI installs it from the trusted base commit and hands
+    # it two SHAs; everything it judges it reads with `git show <sha>:<path>`, and it never opens
+    # `.rein/rein.lock` at all. Gating it on the format of a lock the head wrote is the head
+    # deciding whether the base-side verifier may run — which it did: the first `lock.FORMAT` bump
+    # made the verifier refuse to start on its own pull request, and every later one would have.
+    # The working tree is not this verb's subject, so nothing in it may stop it.
+    #
+    # `sync --force` is the one verb that repairs a lock this check refuses: it overwrites every
+    # materialized file from the packaged payload and needs nothing the old lock recorded
+    # (`install._lock_or_new`). Stopping it here is what left a repository that crossed a
+    # `lock.FORMAT` bump with no way back. Plain `sync` is not exempt — the exemption is the flag
+    # that says "discard what is recorded", not the verb.
+    if verb == "sync" and "--force" in rest:
+        return _resolve(VERBS[verb].spec)(rest)
+    if verb not in ("guard", "doctor", "version", "policy-check"):
         rc = _lock_check(repo_flag)
         if rc != 0:
             return rc

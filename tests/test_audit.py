@@ -1,4 +1,4 @@
-"""The one security answer gate ⑤ cannot carry from gate ④.
+"""The one security answer acceptance cannot carry from acceptance.
 
 `verify.md` has said since it existed that the dependency audit is the one thing that must
 actually be run at the release gate, because it is the only security question that is not a
@@ -151,7 +151,7 @@ def test_a_profile_that_is_not_declared_is_not_quietly_the_host() -> None:
 
 def test_a_machine_that_could_not_answer_records_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """ "Could not ask" is not "the answer is bad", and only one of them is a fact about this
-    release's dependencies. Recorded as a failed audit it holds gate ⑤ shut in the one place here
+    release's dependencies. Recorded as a failed audit it holds acceptance shut in the one place here
     with no dispute route — the same mistake this release fixed for a memory kill."""
     from rein import executors
 

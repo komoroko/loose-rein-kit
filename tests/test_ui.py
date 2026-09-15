@@ -45,11 +45,11 @@ def test_action_argv_whitelist() -> None:
     """
     assert ui.action_argv("doctor", {}) == ["rein", "doctor"]
     # Free text is its own argv element, so there is nothing to quote: `shell=False`.
-    assert ui.action_argv("revise", {"phase": "design", "reason": "rethink auth; rm -rf /"}) == [
+    assert ui.action_argv("revise", {"gate": "mandate", "reason": "rethink auth; rm -rf /"}) == [
         "rein",
         "revise",
         "--to",
-        "design",
+        "mandate",
         "--reason",
         "rethink auth; rm -rf /",
     ]
@@ -62,7 +62,7 @@ def test_action_argv_whitelist() -> None:
 
 
 def test_the_agent_action_is_the_switch_a_human_would_have_typed() -> None:
-    """Pointing a role at another CLI is not a gate ③ decision — `agents` is outside the config
+    """Pointing a role at another CLI is not a mandate decision — `agents` is outside the config
     digest the freeze covers — so the dashboard may run it, and `rein agent` is what refuses a
     combination the loop could not launch."""
     assert ui.action_argv("agent", {"role": "implementer", "adapter": "copilot"}) == [
@@ -89,7 +89,7 @@ def test_the_dashboard_never_runs_an_installer() -> None:
     print instead."""
     cases: tuple[tuple[str, dict[str, object]], ...] = (
         ("doctor", {}),
-        ("revise", {"phase": "design", "reason": "x"}),
+        ("revise", {"gate": "mandate", "reason": "x"}),
         ("cycle_close", {"slug": "c"}),
         ("agent", {"role": "implementer", "adapter": "codex"}),
     )
@@ -106,13 +106,13 @@ def test_the_dashboard_never_runs_an_installer() -> None:
         # action that could only ever fail. The action is gone, so it is now simply not on the
         # whitelist — a log an operator can close by hand is not evidence of anything.
         ("events_resolve", {"id": 3, "note": "fixed"}),
-        ("revise", {"phase": "verify", "reason": "x"}),  # not a roll-back target
-        ("revise", {"phase": "design", "reason": "  "}),  # empty reason
+        ("revise", {"gate": "verify", "reason": "x"}),  # a phase name is not a roll-back target
+        ("revise", {"gate": "mandate", "reason": "  "}),  # empty reason
         ("cycle_close", {"slug": "Bad Slug!"}),  # invalid slug characters
         ("cycle_close", {"slug": "x; rm -rf /"}),  # injection attempt
         # `tests` ran `make test` — this repository's own pytest, never a product's DoD, and in a
         # product repository no makefile at all. Gone rather than repaired: the DoD's test step is
-        # re-run by the build loop and its result is on the record gate ④ reads.
+        # re-run by the build loop and its result is on the record acceptance reads.
         ("tests", {}),
         ("agent", {"role": "nobody", "adapter": "claude"}),  # not a role the config declares
         ("agent", {"role": "implementer", "adapter": "cluade"}),  # not an adapter this release launches
@@ -138,12 +138,7 @@ def _seed_repo(base: Path, project: str) -> Path:
     base.mkdir(parents=True, exist_ok=True)
     seed_repo(
         base,
-        state=make_state(
-            project=project,
-            gates=dict.fromkeys(models.GATE_ORDER, "pending"),
-            phase="requirements",
-            plan_status="draft",
-        ),
+        state=make_state(project=project, gates=dict.fromkeys(models.GATE_ORDER, "pending"), plan_status="draft"),
         config=make_config(profiles=SANDBOXED_PROFILES),
     )
     return base
@@ -255,7 +250,7 @@ def test_the_stream_opens_by_saying_what_is_true_now(server: ui.DashboardServer)
         payload = stream.opening()
     # This fixture stands at gate ① with nothing mechanical in the way, so the recommendation is
     # the human's decision — not "/req" again. The dashboard's waiting-state signals key off it.
-    assert payload["next"]["command"] == "rein approve requirements"
+    assert payload["next"]["command"] == "rein approve mandate"
     assert payload["decision"]["waiting_on_human"] is True
     assert payload["project"] == "demo"
 
@@ -389,7 +384,6 @@ def _repo_with_tasks(tmp_path: Path) -> Path:
         state=make_state(
             project="demo",
             gates=dict.fromkeys(models.GATE_ORDER, "pending"),
-            phase="build",
             plan_status="frozen",
             tasks={"T-001": "done", "T-002": "in-progress"},
         ),
@@ -427,7 +421,7 @@ def test_status_payload_carries_every_field_the_modules_read(tmp_path: Path) -> 
 
     # Now.jsx InTheWay / notify.js snapshot
     assert isinstance(payload["attention"], list)
-    for key in ("gates", "warnings", "next", "project", "current_phase", "phase_order", "decision"):
+    for key in ("gates", "warnings", "next", "project", "stage", "stage_order", "decision"):
         assert key in payload, f"status.{key}"
     decision = payload["decision"]
     assert isinstance(decision, dict)
@@ -439,7 +433,7 @@ def test_the_pending_decision_is_one_identity_not_a_stream_of_events() -> None:
     """The notifier interrupts on `decision.id` changing; a decision the loop re-derives is silent."""
     from rein import status_api
 
-    approve = status_api.Recommendation(command="rein approve build", kind="approve_gate", reason="ready")
+    approve = status_api.Recommendation(command="rein approve acceptance", kind="approve_gate", reason="ready")
     first = status_api.pending_decision(approve, "build")
     assert first["waiting_on_human"] is True and first["id"]
     # the same decision, re-derived on the next poll, is the same identity
@@ -571,7 +565,7 @@ def test_post_unknown_action_is_400(server: ui.DashboardServer) -> None:
 #
 # The doctrine this replaces said "a localhost click is not authentication" while embedding the
 # CSRF token in the served page — so anything able to `curl` that page could write, including the
-# gate-④ human-review writes the gate requires. The correction is not about proving a human,
+# acceptance human-review writes the gate requires. The correction is not about proving a human,
 # which nothing here can do. It is about the channel the capability travels over: the launch link
 # is printed to the terminal `rein ui` runs in, and a captured subprocess cannot read that.
 
@@ -585,16 +579,16 @@ def test_a_gate_is_approved_from_the_pane_that_showed_it(server: ui.DashboardSer
     from rein import repo as repo_mod
     from rein import store as store_mod
 
-    ready = _readiness(server, "requirements")
+    ready = _readiness(server, "mandate")
     assert ready["ok"] and ready["covers"]
 
-    status, body = write(server, "/api/gate/approve", {"gate": "requirements", "covers": ready["covers"]})
+    status, body = write(server, "/api/gate/approve", {"gate": "mandate", "covers": ready["covers"]})
     assert status == 200, body
     approval_id = json.loads(body)["approval_id"]
 
     state = store_mod.Store(repo_mod.Repo(repo)).read_state()
-    assert state is not None and state.gate_status("requirements") == "approved"
-    receipt = state.gate_receipt("requirements") or {}
+    assert state is not None and state.gate_status("mandate") == "approved"
+    receipt = state.gate_receipt("mandate") or {}
     assert receipt["approval_id"] == approval_id
     # The receipt says which channel carried the confirmation rather than flattening both into an
     # unqualified "approved" — neither is proof of a human, and a later reader must see which.
@@ -602,15 +596,15 @@ def test_a_gate_is_approved_from_the_pane_that_showed_it(server: ui.DashboardSer
 
 
 def test_an_approval_that_does_not_name_what_it_covers_is_refused(server: ui.DashboardServer) -> None:
-    assert write(server, "/api/gate/approve", {"gate": "requirements"})[0] == 400
+    assert write(server, "/api/gate/approve", {"gate": "mandate"})[0] == 400
 
 
 def test_an_approval_is_refused_when_the_repository_moved_under_it(server: ui.DashboardServer, repo: Path) -> None:
     """The digests on screen are what the approval binds. If they moved while the human was
     reading them, recording would cover bytes nobody saw."""
-    ready = _readiness(server, "requirements")
+    ready = _readiness(server, "mandate")
     stale = {**ready["covers"], "plan_digest": "sha256:" + "0" * 64}
-    status, body = write(server, "/api/gate/approve", {"gate": "requirements", "covers": stale})
+    status, body = write(server, "/api/gate/approve", {"gate": "mandate", "covers": stale})
     assert status == 409
     assert "moved while this gate was on screen" in json.loads(body)["error"]
 
@@ -619,13 +613,13 @@ def test_a_blocked_gate_is_refused_rather_than_recorded(server: ui.DashboardServ
     from rein import repo as repo_mod
     from rein import store as store_mod
 
-    ready = _readiness(server, "build")
+    ready = _readiness(server, "acceptance")
     assert ready["ok"] is False and ready["blockers"] and ready["covers"] is None
 
-    status, _ = write(server, "/api/gate/approve", {"gate": "build", "covers": {}})
+    status, _ = write(server, "/api/gate/approve", {"gate": "acceptance", "covers": {}})
     assert status == 409
     state = store_mod.Store(repo_mod.Repo(repo)).read_state()
-    assert state is not None and state.gate_status("build") == "pending"
+    assert state is not None and state.gate_status("acceptance") == "pending"
 
 
 def test_fetching_the_page_yields_no_way_to_write(server: ui.DashboardServer, repo: Path) -> None:
@@ -638,17 +632,17 @@ def test_fetching_the_page_yields_no_way_to_write(server: ui.DashboardServer, re
     assert server.token not in page
     assert "window.READ_ONLY = true" in page
 
-    ready = _readiness(server, "requirements")
+    ready = _readiness(server, "mandate")
     status, _ = _request(
-        server, "POST", "/api/gate/approve", {"gate": "requirements", "covers": ready["covers"]}, token=server.token
+        server, "POST", "/api/gate/approve", {"gate": "mandate", "covers": ready["covers"]}, token=server.token
     )
     assert status == 403
     state = store_mod.Store(repo_mod.Repo(repo)).read_state()
-    assert state is not None and state.gate_status("requirements") == "pending"
+    assert state is not None and state.gate_status("mandate") == "pending"
 
 
 def test_the_session_and_the_token_are_both_required(server: ui.DashboardServer) -> None:
-    body: dict[str, object] = {"gate": "requirements", "covers": {}}
+    body: dict[str, object] = {"gate": "mandate", "covers": {}}
     assert _request(server, "POST", "/api/gate/approve", body, session=session_for(server))[0] == 403
     assert _request(server, "POST", "/api/gate/approve", body, token=server.token)[0] == 403
 
@@ -716,7 +710,7 @@ def test_read_only_server_refuses_posts(repo: Path) -> None:
     srv = ui.DashboardServer(("127.0.0.1", 0), root=repo, read_only=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        status, _ = write(srv, "/api/gate/approve", {"gate": "requirements"})
+        status, _ = write(srv, "/api/gate/approve", {"gate": "mandate"})
         assert status == 405
         with _Stream(srv) as stream:
             assert stream.opening()["project"] == "demo"  # reads still work
@@ -728,7 +722,7 @@ def test_read_only_server_refuses_posts(repo: Path) -> None:
 def test_main_once_prints_parseable_json(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert ui.main(["--once", "--root", str(repo)]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["next"]["command"] == "rein approve requirements"
+    assert payload["next"]["command"] == "rein approve mandate"
 
 
 def test_main_refuses_non_loopback_bind_with_writes_enabled(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -798,21 +792,9 @@ def test_events_are_parsed_once_per_version_of_the_log(server: ui.DashboardServe
 # --- /api/stream ------------------------------------------------------------------
 
 
-def _advance_to_design(repo: Path) -> None:
+def _approve_the_mandate(repo: Path) -> None:
     (repo / ".rein" / "state.yaml").write_bytes(
-        store.dump_yaml(
-            make_state(
-                gates={
-                    "requirements": "approved",
-                    "design": "pending",
-                    "tasks": "pending",
-                    "build": "pending",
-                    "release": "pending",
-                },
-                phase="design",
-                plan_status="draft",
-            )
-        )
+        store.dump_yaml(make_state(gates={"mandate": "approved", "acceptance": "pending"}, plan_status="draft"))
     )
 
 
@@ -834,7 +816,7 @@ def test_the_stream_says_nothing_while_the_repository_does_not_move(server: ui.D
 def test_the_stream_pushes_a_status_when_the_ssot_moves(server: ui.DashboardServer, repo: Path) -> None:
     with _Stream(server) as stream:
         assert stream.opening()["gates"][0]["status"] == "pending"
-        _advance_to_design(repo)
+        _approve_the_mandate(repo)
         assert stream.next_event("status")[1]["gates"][0]["status"] == "approved"
 
 
@@ -875,7 +857,7 @@ def test_status_identity_ignores_when_the_payload_was_generated(repo: Path) -> N
     a, b = ui._collect_status(repo), ui._collect_status(repo)
     assert a["generated_at"] != b["generated_at"] or a["generated_at"] is not None
     assert ui._status_identity(a) == ui._status_identity(b)
-    _advance_to_design(repo)
+    _approve_the_mandate(repo)
     assert ui._status_identity(ui._collect_status(repo)) != ui._status_identity(a)
 
 
@@ -884,7 +866,7 @@ def test_the_fingerprint_moves_when_the_ssot_does_and_costs_no_parse(repo: Path)
     before = ui._ssot_fingerprint(repo)
     assert before, "the fingerprint must actually watch something"
     assert ui._ssot_fingerprint(repo) == before  # stable while nothing moves
-    _advance_to_design(repo)
+    _approve_the_mandate(repo)
     assert ui._ssot_fingerprint(repo) != before
 
 
@@ -918,7 +900,7 @@ def test_the_frontend_fixture_still_looks_like_a_real_status_payload(repo: Path)
     # the block's own shape is pinned by test_status_payload_carries_every_field_the_modules_read.
     assert set(fixture["tasks"]["counts"]) == set(models.TASK_STATUS_ORDER)
     for gate in fixture["gates"]:
-        assert set(gate) == {"name", "status", "index", "phase", "approval_id"}
+        assert set(gate) == {"name", "status", "index", "approval_id"}
 
 
 def test_status_reads_the_event_log_through_the_cache(repo: Path) -> None:
@@ -942,11 +924,11 @@ def test_get_review_serves_rendered_deliverable(server: ui.DashboardServer, repo
         "# Requirements\n<script>steal(TOKEN)</script>\n\n## Self-assessment\n- **Confidence**: low\n",
         encoding="utf-8",
     )
-    status, data = _request(server, "GET", "/api/review/requirements")
+    status, data = _request(server, "GET", "/api/review/mandate")
     assert status == 200
     payload = json.loads(data)
     assert payload["is_awaiting"] is True and payload["index"] == 1
-    (main,) = payload["deliverables"]
+    (main,) = [d for d in payload["deliverables"] if d["label"] == "docs/10-requirements.md"]
     assert "<h1>Requirements</h1>" in main["html"]
     assert "<script" not in main["html"]  # XSS regression: agent markup arrives inert
     assert main["self_assessment"]["confidence"] == "low"
@@ -957,7 +939,7 @@ def test_get_review_unknown_gate_is_404(server: ui.DashboardServer, path: str) -
     assert _request(server, "GET", path)[0] == 404
 
 
-# --- the gate ④ human review (plan §21.1, §21.2) --------------------------------
+# --- the acceptance human review (plan §21.1, §21.2) --------------------------------
 
 
 def _generated_review_with_card() -> dict[str, object]:
@@ -972,6 +954,7 @@ def _generated_review_with_card() -> dict[str, object]:
             "status": "generated",
             "binding": {
                 "change_digest": "sha256:" + "a" * 64,
+                "host_surface_digest": "sha256:" + "e" * 64,
                 "plan_digest": "sha256:" + "b" * 64,
                 "environment_digest": "sha256:" + "c" * 64,
             },
@@ -1019,7 +1002,7 @@ def review_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
     root.mkdir()
     seed_repo(
         root,
-        state=make_state(project="rv", gates=dict.fromkeys(models.GATE_ORDER, "pending"), phase="build"),
+        state=make_state(project="rv", gates=dict.fromkeys(models.GATE_ORDER, "pending")),
         config=make_config(profiles=SANDBOXED_PROFILES),
         review=_generated_review_with_card(),
     )
@@ -1105,7 +1088,7 @@ def test_an_answer_naming_no_machine_review_is_refused(review_server: ui.Dashboa
 
 
 def test_a_decision_card_can_be_answered_from_the_pane(review_server: ui.DashboardServer) -> None:
-    """The judgement gate ④ asks for had a schema slot, an id validator and no endpoint at all."""
+    """The judgement acceptance asks for had a schema slot, an id validator and no endpoint at all."""
     body: dict[str, object] = {
         "card_id": "DC-001",
         "choice": "A",
@@ -1162,7 +1145,7 @@ def test_a_stage_tick_means_a_recorded_judgement_not_a_visit(review_server: ui.D
 
 
 def test_a_dashboard_behind_the_repository_refuses_to_freeze(review_server: ui.DashboardServer) -> None:
-    """The one gate-④ precondition that does not pass `approve.readiness`, and the one process
+    """The one acceptance precondition that does not pass `approve.readiness`, and the one process
     whose answer changes while it runs.
 
     The `rein sync` that materialises a newer release's schema happens in another terminal, and
@@ -1189,7 +1172,7 @@ def test_review_is_readable_on_a_read_only_server(repo: Path) -> None:
     srv = ui.DashboardServer(("127.0.0.1", 0), root=repo, read_only=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        assert _request(srv, "GET", "/api/review/requirements")[0] == 200  # reviewing is view-only
+        assert _request(srv, "GET", "/api/review/mandate")[0] == 200  # reviewing is view-only
     finally:
         srv.shutdown()
         srv.server_close()
@@ -1278,21 +1261,21 @@ def test_the_pane_can_record_a_change_request(server: ui.DashboardServer, repo: 
     status, body = write(
         server,
         "/api/changes",
-        {"gate": "requirements", "target": "docs/10-requirements.md#R-3", "reason": "unmeasurable"},
+        {"gate": "mandate", "target": "docs/10-requirements.md#R-3", "reason": "unmeasurable"},
     )
     assert status == 200
-    assert json.loads(body)["id"].startswith("CR-REQUIREMENTS-")
+    assert json.loads(body)["id"].startswith("CR-MANDATE-")
 
-    blockers = approve.readiness(repo_mod.Repo(repo), "requirements")
+    blockers = approve.readiness(repo_mod.Repo(repo), "mandate")
     assert any("open change request" in b for b in blockers)
 
 
 def test_a_change_request_still_needs_the_session(server: ui.DashboardServer) -> None:
-    body: dict[str, object] = {"gate": "requirements", "target": "R-3", "reason": "x"}
+    body: dict[str, object] = {"gate": "mandate", "target": "R-3", "reason": "x"}
     assert _request(server, "POST", "/api/changes", body, token=server.token)[0] == 403
 
 
 def test_an_unanchored_change_request_is_refused(server: ui.DashboardServer) -> None:
-    status, body = write(server, "/api/changes", {"gate": "requirements", "target": "", "reason": "vague"})
+    status, body = write(server, "/api/changes", {"gate": "mandate", "target": "", "reason": "vague"})
     assert status == 400
     assert "needs a --target" in json.loads(body)["error"]

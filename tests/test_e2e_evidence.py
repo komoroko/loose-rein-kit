@@ -49,7 +49,7 @@ def repo(tmp_path: Path) -> repo_mod.Repo:
         root,
         config=make_config(branch=WORK_BRANCH, quality_gate=GATE, max_parallel=2, launch_retries=0),
         plan=make_plan(tasks=[make_task("T-001", kind="parallel", claim_ids=["C-001"])]),
-        state=make_state(phase="build", plan_status="frozen"),
+        state=make_state(plan_status="frozen"),
     )
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "seed")
@@ -303,7 +303,7 @@ def test_the_ledger_survives_a_damaged_line(tmp_path: Path) -> None:
 
 
 def freeze_sources(repo: repo_mod.Repo, sources: dict[str, str]) -> None:
-    """Record `sources` as what gate ③ froze, the way `approve` would have."""
+    """Record `sources` as what the mandate froze, the way `approve` would have."""
     store = store_mod.Store(repo)
     state = store.read_state()
     assert state is not None
@@ -324,7 +324,7 @@ def write_ticket(repo: repo_mod.Repo, body: str) -> str:
 def test_a_ticket_edited_after_the_freeze_stops_the_build(repo: repo_mod.Repo) -> None:
     """`plan.yaml` was digest-frozen; the ticket the implementer is sent to read was not.
 
-    So an edit after gate ③ changed what got built, and nothing recorded that the thing built was
+    So an edit after the mandate changed what got built, and nothing recorded that the thing built was
     not the thing approved.
     """
     freeze_sources(repo, {"docs/tasks/T-001.md": write_ticket(repo, "# T-001\n original\n")})

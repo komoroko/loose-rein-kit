@@ -94,7 +94,7 @@ def test_plain_text_formats_are_scanned_not_declared_unreadable() -> None:
     """`token_only` is a real method: the signal detector reads every changed line of these.
 
     Filing a stylesheet or a Dockerfile under "unsupported language" claimed less than was
-    actually done, and cost gate ④ its exit — there is no scope split that removes the file.
+    actually done, and cost acceptance its exit — there is no scope split that removes the file.
     """
     for path in ("web/app.css", "Dockerfile", "makefile", "deploy/main.tf"):
         facts = diff_facts.analyze(_diff(path, added=["a = 1"]))
@@ -123,6 +123,7 @@ def test_a_manifest_naming_an_unread_file_can_actually_be_written() -> None:
             "status": "generated",
             "binding": {
                 "change_digest": "sha256:" + "a" * 64,
+                "host_surface_digest": "sha256:" + "e" * 64,
                 "plan_digest": "sha256:" + "b" * 64,
                 "environment_digest": "sha256:" + "c" * 64,
             },
@@ -148,7 +149,7 @@ def test_a_removed_binary_is_not_an_unread_one() -> None:
 
     The manifest says what it could not read *of the change*. For a removal there is nothing:
     the path is the whole fact, and it was read. Recording it as `binary`/`unsupported` floored
-    `coverage_gap_risk` at high and shut gate ④ on changes whose only unreadable file had been
+    `coverage_gap_risk` at high and shut acceptance on changes whose only unreadable file had been
     deleted — with no remedy, since splitting the scope never removes a file from a diff.
     """
     diff = (
@@ -173,7 +174,7 @@ def test_a_removed_unsupported_file_is_not_an_unread_one() -> None:
 
     0.3.12 exempted a deleted *binary* and stopped one branch short. Deleting a `.mk` and an
     `.ndjson` still filed them as unread, which makes coverage `insufficient`, and `coverage_blocks`
-    shuts gate ④ at high effective risk — on a 17-task cycle whose only offence was removing a
+    shuts acceptance at high effective risk — on a 17-task cycle whose only offence was removing a
     predecessor tool's scaffolding. There is no operator move: `dispute_finding` is for security
     findings, and splitting the scope never removes a file from a diff. The repair on the day was
     to restore both files and defer the deletion, which is a gate deciding what may be deleted.
@@ -252,7 +253,7 @@ def test_a_dependency_change_is_read_and_priced_but_not_a_coverage_gap() -> None
     """Every byte of a lockfile diff is read; what it does not say is what the new versions do.
 
     That is not a question any reading of this repository answers, so it is not this manifest's to
-    call unread — it is gate ⑤'s, which holds the release shut until `rein audit run` has answered
+    call unread — it is acceptance's, which holds the release shut until `rein audit run` has answered
     it. The manifest still says how deeply it read (`token_only`) and the detector still floors the
     risk at `medium`, which is the whole of what a dependency change is worth here.
     """
@@ -326,7 +327,7 @@ def test_text_the_table_cannot_name_is_read_rather_than_refused(path: str) -> No
     """The extension is how the language is *named*, not how readability is *decided*.
 
     It was both, so `.mts` and `Lambda.Dockerfile` came back `unsupported_language` — which makes
-    coverage `insufficient`, which shuts gate ④, whose stated remedy ("split the unreadable part
+    coverage `insufficient`, which shuts acceptance, whose stated remedy ("split the unreadable part
     out of this scope") cannot be carried out on the TypeScript module the change is about.
     """
     manifest = diff_facts.analyze(_one_file(path, "export const a = 1;")).coverage

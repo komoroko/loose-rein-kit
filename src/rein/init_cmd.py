@@ -9,8 +9,8 @@ is touched: no pyproject rewrite, no makefile. The agent surface is asked for on
 what makes /req exist) and otherwise left to `rein install <agent>`.
 
 Brownfield is auto-detected (any existing code layout / build manifest at the root): the
-seeded config scopes `guard.paths` to the docs deliverables only — pending gates must
-not freeze development on existing code — fills the quality-gate test/check commands from the
+seeded config empties `guard.paths` — an unapproved mandate must not freeze development on code
+that already exists — fills the quality-gate test/check commands from the
 repo's own tooling when recognizable (overridable with --test-cmd/--check-cmd), and the brief
 carries the adopted-note pointing at /onboard. --greenfield/--brownfield override the
 detection. Existing files are never overwritten (idempotent re-runs).
@@ -119,16 +119,21 @@ def _argv_yaml(command: str) -> str:
 def brownfield_config(text: str, test_cmd: str, check_cmd: str) -> str:
     """Adapt the scaffold config.yaml for an existing repo (pure text surgery, comments survive)."""
     text = disable_template_mode(text)
-    # Scope the guard to the docs deliverables only: a pending gate must not freeze normal
+    # Empty the guarded set: with no mandate approved yet, guarding these would freeze normal
     # development on code that already exists. The commented lines show how to re-enable them.
+    #
+    # `paths: []` rather than a `paths:` key with nothing under it — YAML reads that as null, which
+    # the schema refuses, so a brownfield repo would have been initialized with a config it could
+    # not parse. An explicit empty list also says the thing out loud: nothing is guarded yet.
     for key in ("src/", "lib/", "app/", "backend/", "frontend/", "scripts/"):
         text = re.sub(
-            rf"^(    - \{{ path: {re.escape(key)}, requires_gate: tasks \}})$",
+            rf"^(    - {re.escape(key)})$",
             r"    # \1   # re-enable (or map your layout) when ready",
             text,
             count=1,
             flags=re.MULTILINE,
         )
+    text = re.sub(r"^  paths:$", "  paths: []", text, count=1, flags=re.MULTILINE)
     if test_cmd:
         text = _set_step_command(text, "test", test_cmd)
     if check_cmd:

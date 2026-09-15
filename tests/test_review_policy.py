@@ -44,7 +44,7 @@ def test_an_unreadable_file_with_nothing_risk_bearing_in_it_is_a_low_gap() -> No
     """The gap is real and recorded; it is just not worth `high` on its own.
 
     Pricing every gap at `high` closed a loop — the gap raised the risk, and the risk was what
-    made the gap blocking — so one unreadable file shut gate ④ with no way through.
+    made the gap blocking — so one unreadable file shut acceptance with no way through.
     """
     facts = diff_facts.analyze(_one_file("design/logo.psd", added=["\x00some bytes"]))
     assert facts.coverage.coverage_status == "insufficient"  # still honest about not reading it
@@ -75,7 +75,7 @@ def test_a_dependency_change_is_medium_by_the_detector_and_not_by_the_gap() -> N
 
     `detect_signals` raises a `dependency` hit on every changed manifest or lockfile, and that is
     `detector_risk_floor`. Pricing the same fact a second time as a coverage gap made the manifest
-    `insufficient` for a change every byte of which had been read, with no remedy at gate ④.
+    `insufficient` for a change every byte of which had been read, with no remedy at acceptance.
     """
     facts = diff_facts.analyze(_one_file("uv.lock", added=['name = "requests"']))
     assert facts.coverage.coverage_status == "sufficient"
@@ -91,12 +91,12 @@ def _review_over(diff_text: str) -> models.Review:
 
 
 def test_a_cycle_that_adds_a_dependency_is_not_blocked_by_its_own_lockfile() -> None:
-    """The shape that had no way through gate ④: code, the manifest that declares its new
+    """The shape that had no way through acceptance: code, the manifest that declares its new
     dependency, and the lockfile that is the product of declaring it.
 
     Neither remedy the block named existed. There is no scope that holds the code and not the
     lock; a slice holding only the lock was `insufficient` by itself; and the risk it was measured
-    against was frozen by a human at gate ③, so lowering it is a false statement about the change
+    against was frozen by a human at the mandate, so lowering it is a false statement about the change
     rather than a repair.
     """
     diff = (

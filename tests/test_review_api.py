@@ -1,4 +1,4 @@
-"""review_api: gate → fixed deliverable set, split-out self-assessment, and the gate-④ diff.
+"""review_api: gate → fixed deliverable set, split-out self-assessment, and the acceptance diff.
 
 The reach-safety class matters most: the module decides *server-side* which files the review pane
 may read, so these tests pin the template exclusion, the containment check on symlinks, the size
@@ -23,6 +23,20 @@ MakeRepo = Callable[..., Path]
 def _review(root: Path, gate: str) -> dict[str, Any]:
     """collect_review with assertion-friendly typing (the payload is JSON-shaped by contract)."""
     return review_api.collect_review(root, gate)
+
+
+def _one(payload: dict[str, Any], label: str, *, section: str = "deliverables") -> dict[str, Any]:
+    """The one deliverable with this label.
+
+    The mandate pane carries every document the decision is written from, so a test about one of
+    them names it rather than unpacking a single-element list — which is what these did when each
+    phase had a gate and a pane of its own.
+    """
+    rows = payload[section]
+    assert isinstance(rows, list)
+    (found,) = [d for d in rows if d["label"] == label]
+    assert isinstance(found, dict)
+    return found
 
 
 REQ_DOC = (
@@ -56,15 +70,13 @@ class TestGateMapping:
         with pytest.raises(review_api.ReviewError):
             _review(root, "nope")
 
-    def test_requirements_gate_deliverable_and_context(self, make_repo: MakeRepo) -> None:
-        root = make_repo(
-            state=make_state(phase="requirements", gates={g: "pending" for g in ("requirements", "design", "tasks")})
-        )
+    def test_the_mandate_pane_carries_its_material_and_the_brief(self, make_repo: MakeRepo) -> None:
+        root = make_repo(state=make_state(gates={"mandate": "pending"}))
         _write(root, "docs/10-requirements.md", REQ_DOC)
         _write(root, "docs/00-product-brief.md", "# Brief\ngoal")
-        out = _review(root, "requirements")
-        assert out["is_awaiting"] is True and out["awaiting"] == "requirements"
-        (main,) = out["deliverables"]
+        out = _review(root, "mandate")
+        assert out["is_awaiting"] is True and out["awaiting"] == "mandate"
+        main = _one(out, "docs/10-requirements.md")
         assert main["exists"] is True
         assert "<h2>Summary</h2>" in main["html"]
         assert main["self_assessment"]["confidence"] == "low"
@@ -75,7 +87,7 @@ class TestGateMapping:
     def test_unfilled_confidence_placeholder_reads_unset(self, make_repo: MakeRepo) -> None:
         root = make_repo()
         _write(root, "docs/10-requirements.md", "## Self-assessment\n- **Confidence**: high / medium / low\n")
-        (main,) = _review(root, "requirements")["deliverables"]
+        main = _one(_review(root, "mandate"), "docs/10-requirements.md")
         assert main["self_assessment"]["confidence"] is None
 
     def test_prose_mentioning_a_level_does_not_become_the_confidence(self, make_repo: MakeRepo) -> None:
@@ -90,7 +102,7 @@ class TestGateMapping:
             "- **Assumptions made**: we have high confidence the runner exists\n"
             "- **Confidence**: low (integration unverified)\n",
         )
-        (main,) = _review(root, "requirements")["deliverables"]
+        main = _one(_review(root, "mandate"), "docs/10-requirements.md")
         assert main["self_assessment"]["confidence"] == "low"
 
     def test_per_area_confidence_reports_the_weakest_area(self, make_repo: MakeRepo) -> None:
@@ -102,7 +114,7 @@ class TestGateMapping:
             "docs/10-requirements.md",
             "## Self-assessment\n- **Confidence**: high (API surface), low (integration with CI)\n",
         )
-        (main,) = _review(root, "requirements")["deliverables"]
+        main = _one(_review(root, "mandate"), "docs/10-requirements.md")
         assert main["self_assessment"]["confidence"] == "low"
 
     def test_per_area_placeholder_prose_still_reads_unset(self, make_repo: MakeRepo) -> None:
@@ -113,42 +125,48 @@ class TestGateMapping:
             "docs/20-design.md",
             "## Self-assessment\n- **Confidence**: per area high / medium / low (e.g. architecture=high)\n",
         )
-        main = _review(root, "design")["deliverables"][0]
+        main = _one(_review(root, "mandate"), "docs/20-design.md")
         assert main["self_assessment"]["confidence"] is None
 
-    def test_design_glob_excludes_template_and_sorts(self, make_repo: MakeRepo) -> None:
+    def test_the_adr_glob_excludes_the_template_and_sorts(self, make_repo: MakeRepo) -> None:
         root = make_repo()
         for name in ("ADR-002.md", "ADR-001.md", "ADR-template.md"):
             _write(root, f"docs/decisions/{name}", f"# {name}")
-        labels = [d["label"] for d in _review(root, "design")["deliverables"]]
-        assert labels == ["docs/20-design.md", "docs/decisions/ADR-001.md", "docs/decisions/ADR-002.md"]
+        labels = [d["label"] for d in _review(root, "mandate")["deliverables"]]
+        assert labels == [
+            ".rein/plan.yaml",
+            "docs/10-requirements.md",
+            "docs/20-design.md",
+            "docs/decisions/ADR-001.md",
+            "docs/decisions/ADR-002.md",
+        ]
 
-    def test_tasks_gate_renders_tickets_and_verbatim_yaml(self, make_repo: MakeRepo) -> None:
+    def test_the_mandate_pane_renders_tickets_and_verbatim_yaml(self, make_repo: MakeRepo) -> None:
         root = make_repo()
         _write(root, ".rein/plan.yaml", "claims: []  # <script>alert(1)</script>\n")
         _write(root, "docs/tasks/T-001.md", "# T-001\n\n## Self-assessment\n- **Confidence**: medium\n")
         _write(root, "docs/tasks/T-template.md", "# template")
-        out = _review(root, "tasks")
+        out = _review(root, "mandate")
         labels = [d["label"] for d in out["deliverables"]]
-        assert labels == ["docs/tasks/T-001.md", ".rein/plan.yaml"]
-        yaml_entry = out["deliverables"][1]
+        assert labels == [".rein/plan.yaml", "docs/10-requirements.md", "docs/20-design.md", "docs/tasks/T-001.md"]
+        yaml_entry = _one(out, ".rein/plan.yaml")
         assert yaml_entry["kind"] == "code"
         assert yaml_entry["html"].startswith("<pre><code>")
         assert "<script>" not in yaml_entry["html"]
 
     def test_missing_deliverable_is_reported_absent(self, make_repo: MakeRepo) -> None:
         root = make_repo()
-        (main,) = _review(root, "requirements")["deliverables"]
+        main = _one(_review(root, "mandate"), "docs/10-requirements.md")
         assert main["exists"] is False and main["html"] == ""
 
-    def test_release_gate_counts_open_escalations(self, make_repo: MakeRepo) -> None:
+    def test_the_acceptance_pane_counts_open_escalations(self, make_repo: MakeRepo) -> None:
         root = make_repo()
         from rein import event_chain
         from tests._support import chain
 
         event_chain.append_lines(root / ".rein" / "events.ndjson", chain("task_completed", "task_failed"))
         # Only the event awaiting a human decision counts; a completed task does not.
-        assert _review(root, "release")["open_escalations"] == 1
+        assert _review(root, "acceptance")["open_escalations"] == 1
 
 
 class TestReachSafety:
@@ -160,25 +178,25 @@ class TestReachSafety:
         outside.write_text("# secret", encoding="utf-8")
         (root / "docs").mkdir(exist_ok=True)
         (root / "docs" / "10-requirements.md").symlink_to(outside)
-        (main,) = _review(root, "requirements")["deliverables"]
+        main = _one(_review(root, "mandate"), "docs/10-requirements.md")
         assert main["exists"] is False and "secret" not in main["html"]
 
     def test_oversize_deliverable_is_truncated(self, make_repo: MakeRepo) -> None:
         root = make_repo()
         _write(root, "docs/10-requirements.md", "x" * (review_api._MAX_DELIVERABLE + 100))
-        (main,) = _review(root, "requirements")["deliverables"]
+        main = _one(_review(root, "mandate"), "docs/10-requirements.md")
         assert main["truncated"] is True
 
     def test_agent_markup_never_survives_rendering(self, make_repo: MakeRepo) -> None:
         root = make_repo()
         _write(root, "docs/10-requirements.md", "# R\n<script>fetch('/api/gate/approve')</script>")
-        (main,) = _review(root, "requirements")["deliverables"]
+        main = _one(_review(root, "mandate"), "docs/10-requirements.md")
         assert "<script" not in main["html"]
 
 
-class TestBuildGateDiff:
+class TestAcceptanceGateDiff:
     def test_non_git_repo_degrades_to_error(self, make_repo: MakeRepo) -> None:
-        out = _review(make_repo(), "build")
+        out = _review(make_repo(), "acceptance")
         assert "error" in out["diff"]
         assert out["review_meta"]["fresh"] is False
 
@@ -192,7 +210,7 @@ class TestBuildGateDiff:
         _write(root, "a.txt", "base\nnew line\n")
         _git(root, "add", ".")
         _git(root, "commit", "-qm", "T-001: change")
-        out = _review(root, "build")
+        out = _review(root, "acceptance")
         diff = out["diff"]
         assert diff["base_ref"] == "main" and diff["base"] != diff["head"]
         assert "+new line" in diff["patch"]
@@ -205,7 +223,7 @@ class TestBuildGateDiff:
         _write(root, "a.txt", "base\n")
         _git(root, "add", ".")
         _git(root, "commit", "-qm", "only commit")
-        diff = _review(root, "build")["diff"]
+        diff = _review(root, "acceptance")["diff"]
         assert "patch" not in diff
         assert diff["log"] and "only commit" in diff["log"][0]
 
@@ -227,6 +245,7 @@ class TestBuildGateDiff:
         repo = repo_mod.Repo(root)
         state = store_mod.Store(repo).read_state()
         change = review_reading.change_digest(repo, head, review_reading.not_the_product(repo, state))
+        surface = review_reading.host_surface_digest(repo, head)
 
         def seed(digest: str) -> None:
             _write(
@@ -236,6 +255,7 @@ class TestBuildGateDiff:
                 "  status: generated\n"
                 "  binding:\n"
                 f"    change_digest: {digest}\n"
+                f"    host_surface_digest: {surface}\n"
                 "    plan_digest: sha256:" + "b" * 64 + "\n"
                 "    environment_digest: sha256:" + "c" * 64 + "\n"
                 "    coverage_digest: sha256:" + "d" * 64 + "\n"
@@ -244,16 +264,16 @@ class TestBuildGateDiff:
             )
 
         seed(change)
-        assert _review(root, "build")["review_meta"]["fresh"] is True
+        assert _review(root, "acceptance")["review_meta"]["fresh"] is True
 
         # A commit that touches only `.rein/` is not a change to the product, and the review that
         # commit records goes on speaking for exactly what it read.
         _git(root, "add", ".")
         _git(root, "commit", "-qm", "record the review")
-        assert _review(root, "build")["review_meta"]["fresh"] is True
+        assert _review(root, "acceptance")["review_meta"]["fresh"] is True
 
         seed("sha256:" + "0" * 64)
-        meta = _review(root, "build")["review_meta"]
+        meta = _review(root, "acceptance")["review_meta"]
         assert meta["fresh"] is False and meta["reviewed_head"] == head
 
 
@@ -273,6 +293,7 @@ class TestScopeStage:
             "  effective_risk: high\n"
             "  binding:\n"
             "    change_digest: sha256:" + "a" * 64 + "\n"
+            "    host_surface_digest: sha256:" + "e" * 64 + "\n"
             "    plan_digest: sha256:" + "b" * 64 + "\n"
             "    environment_digest: sha256:" + "c" * 64 + "\n"
             "    trusted_base_sha: " + "f" * 40 + "\n"
@@ -350,7 +371,7 @@ class TestAsBuilt:
     """The as-built view: one declared surface as it *ends up*, read at the reviewed commit.
 
     Two properties, and the second is the security one. It must read the reviewed commit rather
-    than the working tree, or gate ④ shows a file from a tree its findings are not about. And it
+    than the working tree, or acceptance shows a file from a tree its findings are not about. And it
     must serve only what the stored brief published — the route reads blobs out of the repository,
     so what it may read has to come from the review, never from the request.
     """
@@ -369,6 +390,7 @@ class TestAsBuilt:
             "  status: generated\n"
             "  binding:\n"
             "    change_digest: sha256:" + "a" * 64 + "\n"
+            "    host_surface_digest: sha256:" + "e" * 64 + "\n"
             "    plan_digest: sha256:" + "b" * 64 + "\n"
             "    subject_head_sha: " + head + "\n"
             "  brief:\n"

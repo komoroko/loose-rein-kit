@@ -5,11 +5,11 @@ import test from "node:test";
 import { STATUS, baseRoutes, boot } from "./_harness.mjs";
 
 const REVIEW = {
-  gate: "build",
+  gate: "acceptance",
   index: 4,
   status: "pending",
   is_awaiting: true,
-  awaiting: "build",
+  awaiting: "acceptance",
   deliverables: [],
   context: [],
 };
@@ -32,14 +32,14 @@ test("the spine marks exactly one gate as the one waiting on you", async () => {
   const app = await dashboard();
   const spine = app.html("stepper");
   assert.equal((spine.match(/station awaiting/g) || []).length, 1, "one inverted block, never two");
-  assert.match(spine, /href="#gate\/build"/);
-  assert.match(spine, /station approved[^>]*href="#gate\/requirements"/);
+  assert.match(spine, /href="#gate\/acceptance"/);
+  assert.match(spine, /station approved[^>]*href="#gate\/mandate"/);
   assert.equal((spine.match(/class="station /g) || []).length, STATUS.gates.length);
 });
 
 test("Now names the gate it is clearing the way for", async () => {
   const app = await dashboard();
-  assert.match(app.text("attentionHead"), /In the way of gate ④ build/);
+  assert.match(app.text("attentionHead"), /In the way of gate ② acceptance/);
   assert.match(app.html("next"), /class="cmd"/);
   assert.match(app.html("attention"), /waiting on you/);
 });
@@ -74,7 +74,7 @@ test("each route mounts one view and no other", async () => {
     ["#board", "board"],
     ["#record", "record"],
     ["#console", "console"],
-    ["#gate/build", "gate"],
+    ["#gate/acceptance", "gate"],
   ]) {
     await app.go(hash);
     for (const view of views) {
@@ -108,7 +108,7 @@ test("the Record screen fetches only when the log moved and someone is looking",
   assert.equal(feeds(), 2, "a log that moves while nobody is looking asks for nothing");
 });
 
-// --- a gate-④ generation in flight -------------------------------------------
+// --- an acceptance generation in flight -------------------------------------------
 //
 // The line reaches the page on the SSE `status` push and nowhere else. The gate pane fetches
 // `/api/review/session` once per gate and never polls, so a progress figure hung off that payload
@@ -147,9 +147,9 @@ test("a finished run leaves no line behind", async () => {
   assert.doesNotMatch(app.html("next"), /grounded review/);
 });
 
-test("gate ④ with no review says a generation is running instead of falling back in silence", async () => {
+test("acceptance with no review says a generation is running instead of falling back in silence", async () => {
   const app = await boot({
-    hash: "#gate/build",
+    hash: "#gate/acceptance",
     routes: baseRoutes((url) => {
       if (url === "/api/review/session") return { generated: false, reason: "no machine review has been generated" };
       return url.startsWith("/api/review/") ? REVIEW : undefined;

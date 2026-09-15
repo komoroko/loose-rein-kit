@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import control_plane, models
+from rein import build_loop, common, control_plane, executors, models
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import make_plan, make_state, make_task, seed_repo
@@ -29,11 +29,7 @@ CENTRAL_ONLY = sorted(models.CENTRAL_ONLY_CAPABILITIES)
 
 @pytest.fixture
 def repo(tmp_path: Path) -> repo_mod.Repo:
-    seed_repo(
-        tmp_path,
-        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
-        state=make_state(phase="build"),
-    )
+    seed_repo(tmp_path, plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]), state=make_state())
     return repo_mod.Repo(tmp_path)
 
 
@@ -473,3 +469,64 @@ def test_a_stop_without_a_reason_is_refused(repo: repo_mod.Repo) -> None:
     """The verb exists to end unexplained stops, so it may not be used to make one."""
     assert control_plane.report_main(["--task", "T-001", "--outcome", "blocked", "--repo", str(repo.root)]) == 1
     assert store_mod.Store(repo).read_events() == []
+
+
+@pytest.mark.integration
+def test_a_container_can_reach_the_control_plane_over_the_bound_socket(repo: repo_mod.Repo) -> None:
+    """The one claim in the agent sandbox that is not readable off an argv.
+
+    Everything else about `kind: oci-agent` is a flag this suite asserts without a runtime. This is
+    not: whether a leaf inside the box can still record what it did depends on a bind-mounted unix
+    socket surviving the launch uid, `--cap-drop ALL`, `--read-only` and a container's own
+    namespace — and if it does not, an implementer works normally and then loses its outcome, which
+    is the failure shape hardest to read backwards from. So this speaks the real protocol, through
+    the real server, from inside a real container.
+
+    Skipped without docker, and it asks for no image of its own: the packaged base is enough to
+    open a socket, which is the whole question.
+    """
+    runtime = shutil.which("docker")
+    if runtime is None:
+        pytest.skip("no docker on PATH")
+    with control_plane.serving(repo) as running:
+        token = control_plane.mint(
+            running.secret, run_id="RUN-1", task_id="T-001", capabilities=sorted(control_plane.LEAF_CAPABILITIES)
+        )
+        request = json.dumps(
+            {
+                "capability": "knowledge_gap.create",
+                "token": token,
+                "nonce": "n-1",
+                "args": {"statement": "from inside the box", "risk": "low"},
+            }
+        )
+        client = (
+            "import socket,sys;"
+            "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);"
+            f"s.connect({build_loop._SANDBOX_CONTROL_SOCKET!r});"
+            "s.sendall(sys.stdin.buffer.read()+b'\\n');"
+            "sys.stdout.write(s.recv(65536).decode())"
+        )
+        argv = [
+            runtime, "run", "--rm", "--interactive",
+            # The same hardening an agent launch gets. If any of it closed the socket, the whole
+            # mechanism would be unusable and this is where that shows.
+            # The launch uid comes from the executor, not from a literal: the socket is 0600 and
+            # owned by whoever runs this, so a hardcoded number passes only where it happens to
+            # match. That is exactly how this test was green locally and red on a CI runner.
+            "--network", "none", "--user", executors._container_user(), "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--read-only",
+            "--tmpfs", "/tmp:size=64m,mode=1777", "--env", "HOME=/tmp",
+            "--mount",
+            f"type=bind,src={running.socket_path},dst={build_loop._SANDBOX_CONTROL_SOCKET},readonly=false",
+            "docker.io/library/python:3.13-slim-bookworm",
+            "python", "-c", client,
+        ]  # fmt: skip
+        rc, out = common.run(argv, timeout=300, input_text=request)
+    assert rc == 0, out
+    answer = json.loads(out.strip().splitlines()[-1])
+    assert answer.get("ok") is True, out
+    # And it is a real write, not an acknowledged no-op: the event the container asked for is in
+    # the orchestrator's chained log, on the host, after the container is gone.
+    chain = repo.root / ".rein" / "events.ndjson"
+    assert "from inside the box" in chain.read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-// Deliverable review (gates ①②③⑤): a document list on the left, rendered markdown on the right.
+// Deliverable review (the mandate): a document list on the left, rendered markdown on the right.
 //
 // The document bodies arrive pre-rendered from the server (mdlite, escape-first). They are the only
 // server HTML this page inserts as HTML, and they are marked as such at both of the two sites that
@@ -12,7 +12,7 @@ export const DIFF_ID = "__diff__";
 export function mainEntries(review) {
   if (!review || review.error) return [];
   const items = [];
-  if (review.diff && review.gate !== "build") {
+  if (review.diff && review.gate !== "acceptance") {
     items.push({ id: DIFF_ID, label: "change set (git diff)", exists: !review.diff.error });
   }
   return items.concat(review.deliverables || []);

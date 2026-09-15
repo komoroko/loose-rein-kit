@@ -4,6 +4,7 @@ and the install→guard→uninstall end-to-end path."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -326,9 +327,11 @@ def test_the_codex_hook_registers_the_same_guard_as_the_other_hosts(repo: repo_m
     assert hooks["hooks"]["PreToolUse"][0]["matcher"] == "apply_patch"
 
 
-def test_guard_denies_a_pending_gate_write_in_an_initialized_repo(repo: repo_mod.Repo) -> None:
-    ok, reason = gate_guard.evaluate(str(repo.path("docs/20-design.md")), repo)
-    assert ok is False and "requirements" in reason
+def test_guard_denies_an_unauthorized_write_in_an_initialized_repo(repo: repo_mod.Repo) -> None:
+    ok, reason = gate_guard.evaluate(str(repo.path("src/app.py")), repo)
+    assert ok is False and "no mandate is approved" in reason
+    # The mandate's own material is never guarded — it is what the approval is written from.
+    assert gate_guard.evaluate(str(repo.path("docs/20-design.md")), repo)[0] is True
     # tests/ stays deliberately unguarded (speculative work keeps flowing).
     ok, _ = gate_guard.evaluate(str(repo.path("tests/test_x.py")), repo)
     assert ok is True
@@ -428,9 +431,62 @@ def test_sync_refuses_to_advance_the_lock_past_a_document_it_cannot_read(
     assert after["tool_version"] == "0.0.1", "the transition a human still needs is not erased"
 
 
+def test_only_a_forced_sync_rewrites_a_lock_in_a_format_this_release_refuses(repo: repo_mod.Repo) -> None:
+    """The one way back across a `lock.FORMAT` bump, and the reason it is safe.
+
+    Every verb stops at the refused lock (`cli._lock_check`), which is the right posture for a
+    record describing a layout this release does not have — but it left a repository that crossed a
+    bump with nothing it could run, short of hand-editing a machine-written file the guard denies.
+    `sync --force` overwrites every materialized file from the packaged payload and needs none of
+    what the old lock recorded about them, so it is the operation that can repair it, and the only
+    one: plain `sync` still refuses.
+    """
+    # Written as text: `lock.write` stamps the current FORMAT, so it cannot produce a foreign one.
+    body = repo.lock.read_text(encoding="utf-8")
+    body = body.replace(f"format: {lock_mod.FORMAT}", "format: rein-grounded-v0")
+    body = re.sub(
+        r"^source: .*$", "source: git+https://example.invalid/loose-rein-kit.git", body, count=1, flags=re.MULTILINE
+    )
+    repo.lock.write_text(body, encoding="utf-8")
+
+    with pytest.raises(lock_mod.LockError, match="written by rein"):
+        install.sync(repo)
+
+    assert install.sync(repo, force=True) == 0
+    after = lock_mod.read(repo.lock)
+    assert after is not None
+    assert after["format"] == lock_mod.FORMAT
+    # `format` versions the four SSOT documents' shape, not this file's own, so what the lock says
+    # about itself survives: starting from a bare skeleton lost the install source and the record
+    # of which integration surfaces exist, neither of which a migration would have had to invent.
+    assert after["source"] == "git+https://example.invalid/loose-rein-kit.git"
+
+
+def test_a_forced_sync_still_refuses_to_advance_a_lock_past_documents_it_cannot_read(
+    repo: repo_mod.Repo,
+) -> None:
+    """`--force` repairs the lock's own format line; it is not a way past the documents.
+
+    Otherwise the one command that can cross a format bump would also be the one that stamps the
+    new version onto a repository whose `state.yaml` this release still refuses — which is the
+    failure the refusal exists to prevent, reached by the door marked repair.
+    """
+    body = repo.lock.read_text(encoding="utf-8")
+    body = body.replace(f"format: {lock_mod.FORMAT}", "format: rein-grounded-v0")
+    body = re.sub(r"^tool_version: .*$", "tool_version: 0.0.1", body, count=1, flags=re.MULTILINE)
+    repo.lock.write_text(body, encoding="utf-8")
+    config = repo.path(".rein/config.yaml")
+    config.write_text(config.read_text(encoding="utf-8") + "\nnot_a_known_key: 1\n", encoding="utf-8")
+
+    assert install.sync(repo, force=True) == 1
+    after = lock_mod.read_unchecked(repo.lock)
+    assert after is not None
+    assert after["tool_version"] == "0.0.1", "the transition a human still needs is not erased"
+
+
 def test_sync_rematerializes_the_review_stub_while_it_holds_no_review(repo: repo_mod.Repo) -> None:
     """The scaffold is written once at `init` and never migrated, so a release that changes the
-    document's shape strands every repo that has not reached gate ④ — on a file whose entire
+    document's shape strands every repo that has not reached acceptance — on a file whose entire
     content is "nothing has happened here"."""
     review_path = repo.path(".rein/review.yaml")
     review_path.write_text("machine:\n  status: not_generated\n  coverage: []\n", encoding="utf-8")

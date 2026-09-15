@@ -3,9 +3,11 @@
 (Phase-scoped rules — gate self-assessment, approval-wait, context budget: read `.rein/prompts/rules/gate-workflow.md` before starting.)
 (Capability terms like `approval-presentation` resolve per AGENTS.md "Capability vocabulary" and your agent's capability mapping.)
 
-## Prerequisite gate check (always first)
-Read `.rein/state.yaml` and confirm `gates.tasks == approved`.
-If unapproved, do not work; say "please approve `/tasks` first" and stop.
+## Prerequisite check (always first)
+Read `.rein/state.yaml` and confirm `gates.mandate == approved`. If it is pending, do not work: say
+what the mandate still needs (`rein next` names it) and stop. This is the one gate implementation
+waits on — and what it authorizes is the `scope` and the claims, not an order of work. Inside it the
+loop decomposes, reorders and re-runs as it needs to.
 
 ## The consumption algorithm
 
@@ -39,7 +41,7 @@ If unapproved, do not work; say "please approve `/tasks` first" and stop.
    the strong one, a fact about every test in the change at once; a **red** one says the test half
    is not inert against the old code and no more, since it cannot separate a failed assertion from
    an import the base never had. A task that changed no test file has no control to take, which is
-   **recorded, not passed**, and the record is read: the gate ④ orientation counts the tasks whose
+   **recorded, not passed**, and the record is read: the acceptance orientation counts the tasks whose
    control answered and **names the ones where it could not be taken**, so "this task's green rests
    on tests nobody wrote for it" reaches the approver instead of sitting in a file. Then the task's own **`acceptance`** criteria are established the same way — a
    failing one returns through the same channel a red gate step does, inheriting the send-back
@@ -67,17 +69,17 @@ If unapproved, do not work; say "please approve `/tasks` first" and stop.
    green over the merged tree says nothing about the interaction.
 7. **Close** — mark the merged tasks `done`, **each carrying the tree its DoD was established on**
    (`evidence` in `state.yaml`) — or **`awaiting-evidence`** when a criterion nobody here can
-   establish is still open, which merges the work and parks only the task, and gate ④ cannot open
+   establish is still open, which merges the work and parks only the task, and the acceptance gate cannot open
    while one stands. Then recompute. An empty frontier with unfinished tasks = all
-   blocked/needs-revision → escalate and stop; all done → gate ④ below. **Only the human opens
-   `gates.build`.**
+   blocked/needs-revision → escalate and stop; all done → the acceptance gate below. **Only the human opens
+   `gates.acceptance`.**
 
 ## Running it — `rein build`
 The installed orchestrator reads `.rein/config.yaml`, `plan.yaml` and `state.yaml`, and launches
 its implementer/reviewer agents headless in the **OCI sandbox** via the adapters set by `rein agent <role> <cli>` (default
 `claude`), so the requirement is **that CLI installed and authenticated** — any agent (or the
 human in a terminal) may invoke `rein build`. At the
-start it code-checks `gates.tasks == approved` and stops doing nothing if unapproved.
+start it code-checks `gates.mandate == approved` and stops doing nothing if unapproved.
 
 **This is the only way the implementation phase runs.** There is no hand-driven equivalent: the
 loop's guarantees are the code's, `state.yaml` is machine-written (`rein guard` denies edits to
@@ -92,7 +94,7 @@ rein build --dry-run   # check just the control flow without calling the agent C
 ```
 
 It refuses to start (exit `2`) when a document it would send an agent to read has moved since
-gate ③ froze it — commit it, or roll back with `rein revise --to tasks` if the approval no longer
+the mandate gate froze it — commit it, or roll back with `rein revise --to mandate` if the approval no longer
 covers it.
 
 It also refuses on **any** uncommitted change in the working tree. A serial task runs in the
@@ -100,7 +102,7 @@ repository root and its change is derived as "the commits since the pre-task HEA
 tree", so an edit already sitting there is attributed to the first task that runs: it counts
 against that task's declared scope, fills the empty-diff check that exists to catch an implementer
 which wrote nothing, reaches the reviewer as part of the change under review, and `git add -A`
-lands it inside `T-NNN: <title>` — in the history the gate ④ record names. A parallel leaf never
+lands it inside `T-NNN: <title>` — in the history the acceptance record names. A parallel leaf never
 had this problem: `git worktree add` hands it a clean checkout, so everything it finds afterwards
 is its own. The refusal is how a serial task gets the same guarantee. Commit or stash first.
 
@@ -124,9 +126,9 @@ as a human:
 
 | code | meaning | what to do |
 |---|---|---|
-| `0` | every task is done | go to gate ④ |
+| `0` | every task is done | go to the acceptance gate |
 | `1` | a task could not pass the gate, or the frontier is empty with work left | a human reads the escalation |
-| `2` | it refused to start, or the machine failed in a way waiting cannot fix (gate ③ unapproved, plan not frozen, the agent CLI not on PATH, an unpinned sandbox image) | repair what it names |
+| `2` | it refused to start, or the machine failed in a way waiting cannot fix (the mandate gate unapproved, plan not frozen, the agent CLI not on PATH, an unpinned sandbox image) | repair what it names |
 | `3` | the machine failed in a way time fixes — agent capacity exhausted, a signal, another run holding the lock. **No task was marked and no retry budget was spent** | re-run later; it continues from the preserved work |
 
 A **session/usage limit is a normal event**, not an incident. The loop exits `3` immediately
@@ -233,7 +235,7 @@ is the point; never fold them into the implementer's session.
   duplication between what two tasks added, one responsibility now in two places, an abstraction
   one task introduced that the next worked around. Its `must_fix` findings go to the integration
   fixer within the step's own budget; its `consider` findings are filed against the merged task
-  whose scope owns the anchor and reach the human at gate ④.
+  whose scope owns the anchor and reach the human at the acceptance gate.
 - **`stage:`** on any step says where it runs — `task`, `integration`, or `both` (the default).
   It moves *when* a step runs, never whether: a fast focused suite can guard each task while the
   whole one runs once over the join.
@@ -248,7 +250,7 @@ is the point; never fold them into the implementer's session.
   Register that command's execution permission in the product's committed permission settings
   (`command-preauthorization`) so the smoke step doesn't re-prompt every loop.
 
-## When all tasks complete (gate ④)
+## When all tasks complete (the acceptance gate)
 
 0. **If this cycle ships as a stack, publish it now — as drafts.** `rein pr-stack` cuts the work
    branch into one pull request per task and prints the `gh pr create --draft` lines; `--push`
@@ -267,7 +269,7 @@ is the point; never fold them into the implementer's session.
    exist, which is why the fix goes down to its slice and merges up rather than the history moving.
    `rein pr-stack --restack` is the same walk, for a fix you commit onto a slice yourself.
 
-1. **Answer any open change requests first.** Run `rein changes list --gate build --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds gate ④ shut, and approving is what closes the addressed ones.
+1. **Answer any open change requests first.** Run `rein changes list --gate acceptance --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds the acceptance gate shut, and approving is what closes the addressed ones.
 2. **The grounded review is taken by the run itself, and the run repairs what it may.** `rein
    build` ends by reading the change, repairing every blocking finding a task's declared scope
    owns, and reading it again from cold — up to `review_policy.repair_rounds` (default 2). No gate
@@ -298,12 +300,12 @@ is the point; never fold them into the implementer's session.
    deterministic detector's own floor for each slice, so a run cut short leaves the most
    consequential ones answered. Set `review_policy.composition: whole` to pay for one reading
    of everything instead. What it reads is the **product**: not `.rein/`, not the plan's own prose
-   (the documents gate ③ froze, `docs/tasks/`, the ADRs), not the surfaces `rein install` wrote,
+   (the documents the mandate gate froze, `docs/tasks/`, the ADRs), not the surfaces `rein install` wrote,
    and — for the blind extractor alone — not the tests. **Each reading** is measured
    against `review_policy.budgets.max_diff_bytes` *before* a model is launched — that budget bounds
    one launch, not one cycle, so a reading over it is a task whose scope is too broad to read, and
-   the answer is to narrow it at gate ③, never to grow the request. **Do not wait for
-   gate ④ to find that out**: `rein start --full` carries the outlook, `rein doctor` names it, and
+   the answer is to narrow it at the mandate gate, never to grow the request. **Do not wait for
+   the acceptance gate to find that out**: `rein start --full` carries the outlook, `rein doctor` names it, and
    `rein build` says so as each task lands, which is while splitting is still possible.
    A run is dozens of launches over hours: it prints `[review] N/M <stage>[T-NNN]` as each stage
    lands, and `rein ui` shows the same figure live, so a human need not watch the terminal.
@@ -313,13 +315,13 @@ is the point; never fold them into the implementer's session.
    high/critical extra behaviour, or an insufficient Coverage Manifest blocks the gate — return
    those to the implementer to fix (a fix moves HEAD, so re-generate; a later commit leaves the
    review stale) and record judgment calls as escalation events for the human. Do not present
-   gate ④ while a blocker stands. **A security finding closes itself**: the next generation
+   the acceptance gate while a blocker stands. **A security finding closes itself**: the next generation
    re-checks the code each blocking finding anchored to, and records the finding `resolved` when
    that code is gone — in that generation's findings and in the audit chain, which is where it
    outlives a document the next generation rewrites. Fixing it is the way through, and re-stating
    it is refused only while the code is still there. One that named no anchor is closed by a
    human's `dispute_finding` in the review, never by the reviewer omitting it.
-3. `notify-and-wait`: tell the human the gate-④ approval is pending.
+3. `notify-and-wait`: tell the human the acceptance approval is pending.
    - **(Only with GitHub integration)** Run `rein issue-sync` to reflect each task's
      latest status (done → close, etc.) to Issues. Best-effort; do not stop the gate if it
      fails (auto-skips if `github.enabled: false` / gh/remote absent). It stays outside the
@@ -334,13 +336,13 @@ is the point; never fold them into the implementer's session.
    the review itself and read there. Say where it is, not what it says. The human review is
    completed in `rein ui` — the stage rail walks the reviewer from the scope through the orient
    brief and the Decision Cards to the freeze button
-   (`.rein/prompts/rules/gate-workflow.md` "The gate ④ human review") — and frozen
+   (`.rein/prompts/rules/gate-workflow.md` "The human review before acceptance") — and frozen
    there or with `rein review complete` before the gate can be requested. Unanswered
    high/critical Decision Cards block the freeze; say so rather than presenting the gate.
    - **Smoke-step check**: if the deliverable is runnable (CLI, server, …) and
      `quality_gate`'s `smoke.run` is still empty, say so explicitly at the gate — the DoD ran
      without a launch check — and propose the command to fill in plus `required: true` (the loop
-     prints this nudge mechanically at gate ④; with `required: true` set, an empty run refuses
+     prints this nudge mechanically at the acceptance gate; with `required: true` set, an empty run refuses
      to build at all — an unnoticed empty smoke silently defeats its purpose).
    - **Always present a self-assessment as well** (`.rein/prompts/rules/gate-workflow.md` "Gate self-assessment"),
      including the outcomes of spots that produced blocked/needs-revision.
@@ -352,7 +354,7 @@ is the point; never fold them into the implementer's session.
    require redoing the implementation.
 6. Once a human approves (acknowledging the `approval-presentation`, or an explicit "approve")
    — **running the next command (`/verify`) is not itself approval** — ask the human to run
-   `rein approve build` **themselves**, never for them (mechanics: AGENTS.md "Gate rules" 2).
+   `rein approve acceptance` **themselves**, never for them (mechanics: AGENTS.md "Gate rules" 2).
    Declining is recorded as a change request, not lost — see step 0. Point to "next is `/verify`",
    and after committing the gate's deliverables, suggest `session-compaction` (pre-compact check:
    `.rein/prompts/rules/gate-workflow.md` "Context budget").

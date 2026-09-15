@@ -4,6 +4,108 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.5.0] - 2026-09-15
+
+**A human approves a mandate and an acceptance, not five phases.** `approve.record_approval` wrote
+`gates[g] = approved` and `current_phase` in one transaction, so authority and progress were the
+same variable: every question about what the loop may do arrived as a question about what order to
+do it in, and the number of approvals was fixed by the number of stages. There are two gates now.
+`mandate` is what the loop may change (`plan.scope`), what it must make true (the claims) and what
+evidence counts; `acceptance` is whether the change is taken. `current_phase` is deleted and
+`State.stage` derives `drafting` / `building` / `done` from the two gates, stored nowhere, so there
+is no second copy to disagree with the first. `/req`, `/design` and `/tasks` are material for one
+mandate rather than gates of their own — any order, repeat one, skip one whose answer is obvious.
+`rein guard` rule 3 stops asking "which gate does this path wait for" and asks whether an approved
+mandate covers the path, and `revise --to` takes a gate rather than a phase.
+
+**Every SSOT document changed shape, so the lock format did too — `rein-grounded-v2`.** A 0.4.x
+repository's `state.yaml` names five gates and carries `current_phase`; `config.yaml`'s
+`guard.paths` was a mapping of path to gate and is now a list; `executors.implementer_profile` and
+`reviewer_profile` are gone. Every one of those is `additionalProperties: false` territory, so the
+documents are refused rather than half-read. **There is no migration.** `rein` stops at the lock
+with both versions named and the two real ways out: install the recorded version again and finish
+the cycle on it, or `rein init` a fresh one. The format string stayed put across 0.3.6–0.3.8 while
+keys were renamed underneath it, which is the failure this is the second half of the fix for:
+`tests/test_lock.py` now pins `lock.FORMAT` to the digest of the four schemas, so a shape change
+that forgets to move it fails there instead of in somebody's repository.
+
+**`plan.yaml` is frozen whole, tasks included.** There was a second digest covering `cycle` +
+`scope` + `claims` only, on the reading that a different decomposition of the same mandate is the
+same authorization. It is not, and the reason is one field: `tasks[].acceptance` is a task's own
+bar and a human freezes that list with the mandate, so a digest that skipped `tasks` would have let
+a criterion be softened under an approval that never covered it. The digest is deleted — it had no
+caller — and the prose that promised free re-cutting now says what the guard has always done: the
+order the loop consumes the DAG in is its own, the DAG is not.
+
+**A mandate binds where it reaches, not only where `guard.paths` already looked.** Rule 3 returned
+"allowed" for any path outside the guarded set before it ever consulted the scope, so a mandate
+naming `.github/workflows/`, a packaging manifest or a sibling service bound nothing there: the
+path was unguarded, so the scope was never asked. A path is now asked about when *either* list
+covers it, and `scope.exclude` is absolute — a path a human excluded is refused wherever it lives.
+
+**The security review's cache key did not cover what the security review reads.** One exclusion
+set, `not_the_product`, carried two opposed requirements: hide the host surfaces from the blind
+extractor, and show them to the security reviewer as the thing it is there to report on. The change
+digest was taken with the second set, so a commit that widened `permissions.allow` and touched
+nothing else moved no key, replayed the cached answer, launched no reviewer, and left the review
+calling itself fresh. `host_surface` is its own concept with its own digest, keyed into the security
+stage alone and checked by `freshness`. It is also **measured on the repository rather than only on
+`rein.lock`**: the lock is the record of what `install` wrote and a record can be behind the tree —
+one rewritten across a format bump names no integrations while every surface it named is still
+there — so the answer is the union of what the lock recorded and what each integration's own spec
+writes and is present. Reading only the record made that an empty surface, which hands the blind
+extractor this tool's own orchestration text and keys the security stage on the digest of an empty
+tree, both while reporting themselves fine.
+
+**A box for the agent CLI, not only for what it wrote.** `executors.implementer_profile` and
+`reviewer_profile` were required by the schema and reached no container launch, so the dossier's
+`env.sandbox` told agents something untrue; both are deleted with the images they implied and with
+the unconditional host fallback in `_profile_for`. In their place `executors.agent_profile` is a
+real one: a `kind: oci-agent` profile wraps every `build_loop._launch` with the worktree read-write
+at `/work`, the control socket bound at `/run/rein/control.sock`, and no HOME of the operator's, no
+`~/.ssh`, no `~/.aws`, no docker socket. Two kinds rather than one kind with a knob, because
+repository code and the agent that writes it want opposite things of the network: `oci` is refused
+egress outright, `oci-agent` requires it, and the executor decides by kind rather than on a
+caller's say-so. That egress is the engine's default bridge and it is **unfiltered** — not a
+boundary against exfiltration, and nothing claims it is. Optional and off by default, since the
+image has to carry the CLI; what is refused is the third state, an `agent_profile` naming a
+`kind: host` profile.
+
+**The codex adapter.** `Adapter` could only express a session the caller stamps onto the launch,
+which is claude's shape. Codex is the other one — the CLI mints a `thread_id`, reports it in
+`thread.started`, and resumes by subcommand — so the model gained that second shape
+(`session_from_envelope` + `resume_argv`) rather than a codex special case, and with it `--model`,
+`--output-schema` by path and prompts on stdin. Not exercised against a live codex; the flags and
+the envelope field are read from upstream sources, and both READMEs say so.
+
+**Every sandboxed container runs as the host user, not as uid 1000.** `--user 1000:1000` was a
+guess that the operator is the first account on a single-seat Linux box, and where the guess was
+wrong the container ran as a uid that owns nothing it was handed. `control_plane` binds its socket
+at 0600 — a control plane any local account may write to is not one — so a leaf on a mismatched uid
+got `EACCES` on `rein report`: it does the work, then cannot say what it did, which is the failure
+shape hardest to read backwards from. The uid was never the boundary (`--cap-drop ALL`,
+`no-new-privileges`, `--read-only`, the network by `kind`, the ephemeral HOME are), so nothing is
+weakened by making it true instead of lucky. The suite pinned the same literal, which is why it was
+green on a laptop at uid 1000 and red on a CI runner at 1001; it now says the host.
+
+**`policy-check` is exempt from the startup lock check.** It is the one verb *defined* to be run by
+a release older than the tree it reads: CI installs it from the trusted base commit, hands it two
+SHAs, and it reads every tree it judges with `git show <sha>:<path>` without ever opening
+`.rein/rein.lock`. Gating it there let the head decide whether the base-side verifier may start, and
+the `rein-grounded-v2` bump above did exactly that on its own pull request. The workflow completes
+the same thought: the policy job now stands in the default branch rather than in the head's
+checkout, so no file the head wrote is even in the verifier's ambient environment.
+
+**The required CI status waits on every job, and a canary keeps it that way.** Branch protection
+requires one name and the workflow has five jobs, so whatever the required one does not wait on can
+go red while it reports success. That is not hypothetical twice over: `integration` sat outside the
+aggregate while it was the only thing proving the sandbox claim, and `checks` sat outside it while
+a mypy failure reported green beside it in the same run. `tests` now waits on all four and tests
+each result — `needs` makes a job waited on, the script body is what makes its failure a failure —
+and `template_lint.check_required_status_covers_every_job` fails when a job is added and not named
+there. The lint/type/drift/frontend job is called `checks` rather than `pre-commit`, because it
+runs `make check` whole and a frontend failure under the old name read as a lint failure.
+
 ## [0.4.7] - 2026-09-13
 
 **A dependency change was read, so coverage stops calling it unread.**

@@ -133,7 +133,7 @@ class Repo:
 
     @property
     def plan(self) -> Path:
-        """The Expected Model — frozen at gate ③."""
+        """The Expected Model — frozen when the mandate is approved."""
         return self.root / ".rein/plan.yaml"
 
     @property

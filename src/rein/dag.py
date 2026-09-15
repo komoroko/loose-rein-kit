@@ -8,7 +8,7 @@ and a reviewer can predict what `/build` will do before it does it.
 The two halves come from different files, so that progress edits and plan edits never touch the
 same one:
 
-  ``plan.yaml.tasks``   id, title, kind, blocked_by, claim_ids, risk, scope — frozen at gate ③
+  ``plan.yaml.tasks``   id, title, kind, blocked_by, claim_ids, risk, scope — frozen when the mandate is approved
   ``state.yaml.tasks``  status, attempts, completed_commit — mutated every iteration
 
 A status entry naming a task the plan does not declare is an error, not a stray key: it means
@@ -215,10 +215,10 @@ class Graph:
         return result
 
     def claims_without_a_task(self, plan: models.Plan) -> list[str]:
-        """Claims no task is answerable for — a gate ③ readiness failure (plan §16.4).
+        """Claims no task is answerable for — a mandate readiness failure (plan §16.4).
 
         A claim with no owning task is a promise the build cannot keep, and it would surface at
-        gate ④ as an unexplained `missing` verdict rather than as the planning gap it is.
+        acceptance as an unexplained `missing` verdict rather than as the planning gap it is.
         """
         covered = {cid for t in self.tasks for cid in t.claim_ids}
         return sorted(c.id for c in plan.claims if c.id not in covered)

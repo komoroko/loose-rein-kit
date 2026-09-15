@@ -1,4 +1,4 @@
-"""What a gate-④ generation is doing *right now* — the one writer of it, and the one reader.
+"""What an acceptance generation is doing *right now* — the one writer of it, and the one reader.
 
 `rein review generate` says a great deal on its console and nothing anywhere else, so a human
 watching the dashboard while a composed review runs sees "no machine review has been generated"

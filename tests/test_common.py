@@ -299,7 +299,7 @@ def test_the_most_specific_pattern_wins_regardless_of_order() -> None:
 #
 # These moved here with the class. They were written against the build loop, where it lived and
 # where it had its only caller; the property is not the build's — it belongs to any command that
-# spends minutes inside one captured launch, and gate ④'s composed review is now the longer of
+# spends minutes inside one captured launch, and acceptance's composed review is now the longer of
 # the two.
 
 

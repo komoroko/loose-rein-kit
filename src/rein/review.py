@@ -1,4 +1,4 @@
-"""Assemble the grounded machine review — the artefact gate ④ actually approves (plan §12, §17).
+"""Assemble the grounded machine review — the artefact acceptance actually approves (plan §12, §17).
 
 This is the orchestration the build loop hands off to and `rein review generate` runs. It is
 deliberately thin over parts that already exist and are tested on their own: the deterministic
@@ -67,6 +67,7 @@ logger = logging.getLogger(__name__)
 ReviewError = review_reading.ReviewError
 not_the_product = review_reading.not_the_product
 change_digest = review_reading.change_digest
+host_surface_digest = review_reading.host_surface_digest
 fold_bodies = review_reading.fold_bodies
 split_tests = review_reading.split_tests
 bytes_by_kind = review_reading.bytes_by_kind
@@ -222,19 +223,19 @@ def assemble(
 class ChangeOutlook:
     """Whether this cycle's change can be reviewed at all — derivable at any moment, from git.
 
-    Two constraints refuse a review, and both were being enforced at gate ④, where the only move
+    Two constraints refuse a review, and both were being enforced at acceptance, where the only move
     left is to raise the number the tool's own documentation calls the wrong answer:
 
     - **`max_diff_bytes`.** It bounds what one reviewer is asked to read in **one launch**, and one
       launch holds one reading — so what it is measured against here is the largest reading, named.
       Measured over the whole change instead, it was a wall in front of a quantity nobody reads:
       two consecutive release cycles of this repository came to 662 KB and 754 KB against a 512 KiB
-      ceiling, and one field cycle met it at 2,141,194 bytes, whose only exit was a gate-③ rollback
+      ceiling, and one field cycle met it at 2,141,194 bytes, whose only exit was a mandate's rollback
       to raise the limit to 1,584,559. Per reading the lever is a real one and it is upstream —
-      a task whose scope is too broad to read is a task to split at gate ③, while splitting is
+      a task whose scope is too broad to read is a task to split at the mandate, while splitting is
       still a move that exists.
     - **Coverage.** A single tracked binary — smoke-test output somebody committed months ago —
-      makes the Coverage Manifest `insufficient`, which at `high` risk blocks gate ④. Nothing said
+      makes the Coverage Manifest `insufficient`, which at `high` risk blocks acceptance. Nothing said
       so: not `doctor`, not `status`, and not `build` while it landed seventeen tasks.
 
     Neither needs a model, a launch, or a review: both are `git diff` plus the same `diff_facts`
@@ -269,7 +270,7 @@ class ChangeOutlook:
 
     @property
     def coverage_blocks_gate(self) -> bool:
-        """Would this coverage block gate ④? Insufficient coverage only blocks at high/critical.
+        """Would this coverage block acceptance? Insufficient coverage only blocks at high/critical.
 
         The same two facts `review_policy.coverage_blocks` decides on, read off the same manifest.
         This used to re-derive the first of them as `bool(self.unreadable)` — a second definition
@@ -284,7 +285,7 @@ class ChangeOutlook:
         # change's own would be one number twice under two labels — and that shape, `N MB / ceiling`,
         # is the line this has always printed.
         composed = self.unit != review_reading.WHOLE
-        over = f" — OVER, narrow {self.unit}'s scope at gate ③" if self.over_budget else ""
+        over = f" — OVER, narrow {self.unit}'s scope at the mandate" if self.over_budget else ""
         ceiling = f"{self.ceiling / 1_000_000:.2f} MB"
         whole = f"{self.total_bytes / 1_000_000:.2f} MB"
         if composed:
@@ -294,7 +295,7 @@ class ChangeOutlook:
         else:
             text = f"change under review: {whole} / {ceiling}{over}"
         if self.unreadable:
-            verdict = "blocks gate ④" if self.coverage_blocks_gate else "recorded, not blocking below high risk"
+            verdict = "blocks acceptance" if self.coverage_blocks_gate else "recorded, not blocking below high risk"
             text += f"; {len(self.unreadable)} unreadable file(s) make coverage insufficient ({verdict})"
         return text
 
@@ -321,7 +322,7 @@ class ChangeOutlook:
 
 
 def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | None:
-    """What gate ④ would be asked to read, right now. None when the repo cannot answer yet.
+    """What acceptance would be asked to read, right now. None when the repo cannot answer yet.
 
     Cheap enough to run from `status`: **one** `git diff` and the deterministic analysis, no
     launches. The readings are derived from the plan and attributed out of that one diff
@@ -345,7 +346,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         str(entry.get("path", "")) for entry in (*facts.coverage.unsupported_files, *facts.coverage.generated_files)
     ]
     effective = review_reading.effective_risk(facts, plan)
-    # The same readings gate ④ will take, decided by the same function on the same inputs — a board
+    # The same readings acceptance will take, decided by the same function on the same inputs — a board
     # that showed a different split from the one the pipeline runs would be reporting on a review
     # nobody is going to generate.
     readings = review_reading.plan_readings(
@@ -412,7 +413,7 @@ def generate(
 
     **A failure records itself.** Every `raise` below used to leave the audit chain with nothing in
     it: `events.ATTENTION_EVENTS` listed `review_failed` and `actual_extraction_failed` as things
-    needing a human decision and no code path anywhere emitted either, so a gate ④ that could not
+    needing a human decision and no code path anywhere emitted either, so an acceptance that could not
     be produced reported "needing a human decision: 0". The whole log exists so that no state
     change goes unexplained, and the review pipeline's own failure was the state change it could
     not explain.
@@ -423,7 +424,7 @@ def generate(
     # wrapping those would change what a human sees at the console to say where it happened.
     #
     # It starts at `inputs`, not `coverage`, because reading the SSOT is a stage that fails: a
-    # plan.yaml that does not parse means gate ④ cannot be produced, and with these four reads
+    # plan.yaml that does not parse means acceptance cannot be produced, and with these four reads
     # outside the recording block that failure was the one kind still going unrecorded. `cycle` is
     # read *from* those documents, so it is bound before them and stays "" when they are what broke.
     stage = "inputs"
@@ -473,6 +474,9 @@ def generate(
         trusted_base = _resolve_base(repo, plan, base)
         exclude = not_the_product(repo, state)
         change = change_digest(repo, head, exclude)
+        # The second subject: the installed surfaces the security stage is sent a checkout of and
+        # told to review, which `change` is taken with excluded (`review_reading.host_surface`).
+        surface = host_surface_digest(repo, head)
 
         # A config may set only the budgets it wants to move, so the effective ceilings are the
         # defaults with the repository's overrides on top — the same merge `human_review` does at
@@ -489,7 +493,7 @@ def generate(
         # asked to read in one launch, and under a composed review no reviewer ever reads the whole
         # change; `read_facts` refuses each reading against it as that reading is measured. Checking
         # the whole here was a wall in front of a quantity nobody reads, and its own instruction —
-        # split the scope — is not a move that exists at gate ④.
+        # split the scope — is not a move that exists at acceptance.
         whole_diff = review_reading.diff_of(repo, trusted_base, head, exclude)
         facts = diff_facts.analyze(whole_diff)
         effective = review_reading.effective_risk(facts, plan)
@@ -543,6 +547,7 @@ def generate(
 
         subject = {
             "change_digest": change,
+            "host_surface_digest": surface,
             "plan_digest": plan.digest() if plan is not None else digests.of({}),
             "config_digest": config.frozen_digest() if config is not None else digests.of({}),
             "environment_digest": _environment_digest(config),
@@ -573,6 +578,7 @@ def generate(
                 # same number `build_loop` resolves when it warms a reading, so both look the
                 # question up under one key.
                 risk_floor=facts.risk_floor,
+                host_surface=surface,
                 prior_blocking=prior_by_unit[m.reading.unit],
             )
             for m in measures
@@ -1352,13 +1358,13 @@ def _without_generated_at(machine: Mapping[str, Any]) -> dict[str, Any]:
 def _environment_digest(config: models.Config | None) -> str:
     """What the review was produced in: the executor profiles that ran its steps, pins included.
 
-    Delegates to :meth:`models.Config.environment_digest`, which the gate ③ freeze binds too — two
+    Delegates to :meth:`models.Config.environment_digest`, which the mandate freeze binds too — two
     copies of "which sandbox was this" would eventually disagree, and then a freeze and a review
     would be talking about different environments while reporting the same digest name.
 
     This is the digest that is *allowed* to move within a cycle (a dependency was added, the image
-    was rebuilt). Which is exactly why it is recorded here: gate ④ shows the human that the
-    environment its evidence was produced in is not the one gate ③ saw.
+    was rebuilt). Which is exactly why it is recorded here: acceptance shows the human that the
+    environment its evidence was produced in is not the one the mandate saw.
     """
     return config.environment_digest() if config is not None else digests.of({"executors": None})
 
@@ -1525,7 +1531,7 @@ def _generate_cli(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="rein review", description="the grounded machine review (gate ④)")
+    parser = argparse.ArgumentParser(prog="rein review", description="the grounded machine review (acceptance)")
     sub = parser.add_subparsers(dest="cmd", required=True)
     gen = sub.add_parser("generate", help="run the review pipeline and write review.yaml")
     gen.add_argument(
@@ -1546,7 +1552,7 @@ def main(argv: list[str] | None = None) -> int:
             "reading per scoped task, each independent of the others, so this buys wall-clock and "
             "costs the same tokens — but concurrent launches spend your provider's session and "
             "rate limits, which is why it is a flag and not a setting: it is a judgement about "
-            "the account, not about the change, and gate ③'s frozen config is no place for it"
+            "the account, not about the change, and the mandate's frozen config is no place for it"
         ),
     )
     gen.add_argument(

@@ -159,7 +159,7 @@ export async function boot({ hash = "#now", readOnly = false, routes = () => ({}
   };
 }
 
-/** `{text: "Approve gate ④"}` — the way a person finds a button. */
+/** `{text: "Approve acceptance"}` — the way a person finds a button. */
 function byText(w, { text, tag = "button" }) {
   return [...w.document.querySelectorAll(tag)].find((el) => el.textContent.includes(text)) || null;
 }

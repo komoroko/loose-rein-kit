@@ -1,4 +1,4 @@
-// The form controls the gate-④ stages ask with.
+// The form controls the acceptance stages ask with.
 //
 // Each card owns its own answer in component state. The old pane could not: every repaint rebuilt
 // the DOM from strings, so a half-typed reason had to be read back out of the document at submit

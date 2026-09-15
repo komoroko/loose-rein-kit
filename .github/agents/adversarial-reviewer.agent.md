@@ -1,5 +1,5 @@
 ---
-description: Independent red-team critique of the phase deliverable before gates ①–③. Attacks for counterexamples, ambiguities, hidden assumptions, and plan defects; report-only. Delegated from /req, /design, and /tasks.
+description: Independent red-team critique of the mandate's material before it is approved. Attacks for counterexamples, ambiguities, hidden assumptions, and plan defects; report-only. Delegated from /req, /design, and /tasks.
 tools: ['search', 'fetch']
 ---
 

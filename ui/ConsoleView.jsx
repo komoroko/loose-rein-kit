@@ -29,12 +29,13 @@ function Confirm({ question, consequence, onGo, onCancel }) {
   );
 }
 
-const PHASES = ["requirements", "design", "tasks", "build"];
+// What a roll back can target: the two things a human approved.
+const GATES = ["mandate", "acceptance"];
 
-// Which CLI and model each role launches. Not a gate ③ decision — `agents` sits outside the config
-// digest the freeze covers — so this changes without rewinding anything, and the switch lands in
-// the audit chain as `agents_switched` so gate ④ can still be told the evidence in front of it was
-// produced by a different agent than the one gate ③ saw.
+// Which CLI and model each role launches. Not part of the mandate — `agents` sits outside the
+// config digest the freeze covers — so this changes without rewinding anything, and the switch
+// lands in the audit chain as `agents_switched` so the grounded review can still be told the
+// evidence in front of it was produced by a different agent than the one the mandate saw.
 function Agents({ agents, onApply }) {
   const [draft, setDraft] = useState({});
   if (!agents) return <Empty>No config.yaml to read the roles from.</Empty>;
@@ -106,7 +107,7 @@ function Agents({ agents, onApply }) {
         </tbody>
       </table>
       <p className="note">
-        A switch rewinds no approval. It does move the environment digest, so gate ④ shows it beside
+        A switch rewinds no approval. It does move the environment digest, so acceptance shows it beside
         the evidence that was produced before it.
       </p>
     </>
@@ -115,7 +116,7 @@ function Agents({ agents, onApply }) {
 
 export default function ConsoleView({ status }) {
   const [out, setOut] = useState(null);
-  const [phase, setPhase] = useState(PHASES[0]);
+  const [gate, setGate] = useState(GATES[0]);
   const [reason, setReason] = useState("");
   const [slug, setSlug] = useState("");
   const [confirm, setConfirm] = useState(null);
@@ -151,11 +152,11 @@ export default function ConsoleView({ status }) {
       return;
     }
     setConfirm({
-      question: `Roll back to ${phase}?`,
+      question: `Roll back to ${gate}?`,
       consequence:
-        `Gates reset in a chain starting at ${phase}: each one goes back to pending, and the ` +
+        `Gates reset in a chain starting at ${gate}: each one goes back to pending, and the ` +
         `receipts and reviews built on top of them stop counting. Reason on the record: ${reason.trim()}`,
-      go: () => run("revise", { phase, reason: reason.trim() }),
+      go: () => run("revise", { gate, reason: reason.trim() }),
     });
   }
 
@@ -211,12 +212,12 @@ export default function ConsoleView({ status }) {
               </p>
               <div className="row">
                 <select
-                  id="revPhase"
-                  aria-label="Roll back to phase"
-                  value={phase}
-                  onChange={(e) => setPhase(e.target.value)}
+                  id="revGate"
+                  aria-label="Roll back to gate"
+                  value={gate}
+                  onChange={(e) => setGate(e.target.value)}
                 >
-                  {PHASES.map((p) => (
+                  {GATES.map((p) => (
                     <option key={p}>{p}</option>
                   ))}
                 </select>

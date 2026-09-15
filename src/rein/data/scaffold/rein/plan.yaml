@@ -1,4 +1,4 @@
-# .rein/plan.yaml — the EXPECTED MODEL: what this cycle is supposed to do. Frozen at gate 3;
+# .rein/plan.yaml — the EXPECTED MODEL: what this cycle is supposed to do. Frozen with the mandate;
 # after that, changing it goes through `rein revise --to tasks`, which invalidates the
 # downstream gates in a chain.
 #
@@ -41,8 +41,8 @@ tasks: []
 #    scope:                           # where this task's work belongs; the loop checks the diff
 #      include: [src/]                #   against it. Covers everything beneath; the "/" is optional.
 #    operator_surface:                # what this task will require of a PERSON. Frozen here so that
-#      - kind: persistence            #   gate 4 can sort what the code turned out to require by
+#      - kind: persistence            #   acceptance can sort what the code turned out to require by
 #        name: users.email_verified   #   whether anybody foresaw it. kind is one of the extractor's
 #        paths: [db/schema/users.sql] #   own words, so both sides compare without a translation
 #        adr: ADR-004                 #   table. paths is where the surface can be READ at the end —
-#                                     #   also what gate 4 serves as the as-built view.
+#                                     #   also what acceptance serves as the as-built view.

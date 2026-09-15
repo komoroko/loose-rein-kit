@@ -1,13 +1,13 @@
-"""Which of gate ④'s findings the loop repairs, and which a human decides.
+"""Which of acceptance's findings the loop repairs, and which a human decides.
 
 Inside a task, judging and repairing are already separated *and both automated*: the reviewer
 writes findings, the implementer resolves the `must_fix` ones, the reviewer looks again
-(`build_loop._run_agent_step`). At gate ④ only the judging half was automated. `review.assemble`
+(`build_loop._run_agent_step`). At acceptance only the judging half was automated. `review.assemble`
 produced findings and the loop printed three commands for somebody to type.
 
-The route back into the code was `rein revise --to build --from-review`, which marks the task
+The route back into the code was `rein revise --to acceptance --from-review`, which marks the task
 **and its whole dependent closure** `needs-revision` — the status reserved for a defect in the
-*specification*. So `status_api` then demanded a `/tasks` reconcile and a re-approval of gate ③,
+*specification*. So `status_api` then demanded a `/tasks` reconcile and a re-approval of the mandate,
 for a repair that changes no requirement, no claim and no plan. Reset, salvage, re-approve, and
 round again: that loop is what this module ends.
 
@@ -17,7 +17,7 @@ round again: that loop is what this module ends.
   acceptance criterion and no requirement. The loop repairs it, and no gate moves. That the
   repair cannot become a plan change is mechanical rather than promised:
   `gate_guard.FROZEN_AFTER_GATE_THREE` denies a write to `plan.yaml` or `config.yaml` while the
-  plan is frozen, which it is from gate ③ onward.
+  plan is frozen, which it is from the mandate onward.
 * **plan** — the repair needs a claim, an acceptance criterion or a requirement to change. A
   human, through `/revise`. Not this loop's, at any budget.
 * **judgement** — deciding which of those two it *is*. A claim that came back `diverged` may mean
@@ -52,7 +52,7 @@ REPAIRS_THE_CODE = "revise_implementation"
 
 @dataclass(frozen=True)
 class Repair:
-    """One task, and the findings of gate ④ it has to answer."""
+    """One task, and the findings of acceptance it has to answer."""
 
     task_id: str
     items: tuple[findings_mod.Attribution, ...]
@@ -63,7 +63,7 @@ class Repair:
 
 @dataclass(frozen=True)
 class Routing:
-    """Gate ④'s blocking findings, split by who can act on each."""
+    """The acceptance gate's blocking findings, split by who can act on each."""
 
     #: Grouped by task, in plan order, so one launch answers everything about one scope.
     code: tuple[Repair, ...] = ()
@@ -108,7 +108,7 @@ def answered_to_repair(human: Mapping[str, object] | None) -> set[str]:
 
 
 def route(plan: models.Plan, review: models.Review | None, human: Mapping[str, object] | None = None) -> Routing:
-    """Split gate ④'s blocking findings into what the loop repairs and what a human decides.
+    """Split acceptance's blocking findings into what the loop repairs and what a human decides.
 
     A security finding is a **code** repair as soon as a task's scope owns its anchor. Nothing
     about it is a question: the reviewer read the code, named the lines, and the plan says whose

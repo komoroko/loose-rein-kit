@@ -38,6 +38,6 @@ Notes:
   outlive this session, and **never turn that into a poll**: re-entering to ask whether it is done
   spends a launch to learn that it is still building (build.md, "When the run outlasts your host's
   command timeout").
-- The security review before gate ④ / at `/verify`: perform a security-focused review pass; it is
+- The security review before acceptance / at `/verify`: perform a security-focused review pass; it is
   recorded in `review.yaml`'s `machine.security` by `rein review generate`, bound to the
   reviewed HEAD, and summarized in the test plan's security column.

@@ -1,4 +1,4 @@
-"""Verify decision_cards.py: the derived judgement surface of gate ④.
+"""Verify decision_cards.py: the derived judgement surface of acceptance.
 
 These cards are the one artefact the human is answerable for, so what matters here is that they are
 *derivations* — every finding that needs a decision produces one, none is invented, and the option
@@ -28,6 +28,7 @@ def _claim(claim_id: str = "C-001", verdict: str = "diverged", **extra: Any) -> 
 def _machine(**kwargs: Any) -> dict[str, Any]:
     binding = {
         "change_digest": "sha256:" + "a" * 64,
+        "host_surface_digest": "sha256:" + "e" * 64,
         "plan_digest": "sha256:" + "b" * 64,
         "environment_digest": "sha256:" + "c" * 64,
     }

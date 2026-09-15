@@ -53,6 +53,7 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
         "change_digest": "sha256:" + "a" * 64,
         "plan_digest": "sha256:" + "b" * 64,
         "environment_digest": "sha256:" + "c" * 64,
+        "host_surface_digest": "sha256:" + "e" * 64,
     }
     coverage = {
         "diff_digest": "sha256:" + "d" * 64,
@@ -147,7 +148,7 @@ def _fake_reviewer(role: str, request: Mapping[str, Any]) -> str:
 def review_repo(tmp_path: Path) -> Path:
     seed_repo(
         tmp_path,
-        state=make_state(project="rv", phase="build"),
+        state=make_state(project="rv"),
         plan=make_plan(),
         config=make_config(),
     )
@@ -1058,7 +1059,7 @@ def test_change_digest_excludes_the_rein_dir(review_repo: Path) -> None:
 def _budget_repo(root: Path, ceiling: int) -> Path:
     config = make_config()
     config["review_policy"] = {"budgets": {"max_diff_bytes": ceiling}}
-    seed_repo(root, state=make_state(project="rv", phase="build"), plan=make_plan(), config=config)
+    seed_repo(root, state=make_state(project="rv"), plan=make_plan(), config=config)
     _git(root, "init", "-q", "-b", "main")
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "seed")
@@ -1072,7 +1073,7 @@ def test_the_ssot_is_not_in_the_diff_the_reviewers_read(review_repo: Path) -> No
     `change_digest` has always left `.rein/` out — as do the tree fingerprint and every task commit
     — while `_diff` handed the whole of it over as if a schema payload and an event log were code
     somebody wrote. A field report measured that at 27% of a normal cycle's diff, and it pushed the
-    blind extractor's request past the model's hard context ceiling: a gate ④ that could not be
+    blind extractor's request past the model's hard context ceiling: an acceptance that could not be
     produced at all.
     """
     seed = _git(review_repo, "rev-parse", "HEAD")
@@ -1377,14 +1378,20 @@ def test_a_worktree_that_cannot_be_made_falls_back_to_the_empty_directory(
     assert seen["entries"] == []
 
 
-def test_a_host_with_no_security_discipline_is_given_no_checkout(
+def test_a_host_with_no_security_discipline_is_still_given_the_checkout(
     review_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The checkout exists to serve a discipline. Without one there is nothing for it to do, and the
-    stage keeps the property the other two have — its answer is a function of its request alone."""
+    """The checkout is what the question is *about*, not how it is asked.
+
+    A host discipline is offered, never relied on: `security_review.contract` states the question in
+    full beside it, so a CLI without `/security-review` asks the same thing itself. Gating the
+    checkout on the discipline made every CLI but one review a different change from the one the
+    contract described — the settings, hooks and MCP servers the contract names as findings were
+    simply not there to read.
+    """
     bare = dataclasses.replace(adapters.ADAPTER_TABLE["claude"], disciplines={})
     monkeypatch.setitem(adapters.ADAPTER_TABLE, "claude", bare)
-    assert _seen_by(review_repo, "security_reviewer", monkeypatch)["entries"] == []
+    assert _seen_by(review_repo, "security_reviewer", monkeypatch)["entries"] != []
 
 
 # -- what the pipeline had been handing its own stages -------------------------
@@ -1484,7 +1491,7 @@ def test_a_disputed_finding_is_not_carried_forward_and_is_marked_in_the_next_rev
     assert bound, "an anchored finding can be bound to the code it named"
     state = models.State(
         {
-            **make_state(project="rv", phase="build"),
+            **make_state(project="rv"),
             "disputed_findings": {
                 "SEC-001": {"reason": "that is a test fixture, not a live credential", "anchors_digest": bound},
             },
@@ -1508,7 +1515,7 @@ def test_a_dispute_lapses_when_the_code_it_was_about_is_edited(review_repo: Path
     finding = _anchored_finding(review_repo, "vault.py", "TOKEN = os.environ['T']\n")
     state = models.State(
         {
-            **make_state(project="rv", phase="build"),
+            **make_state(project="rv"),
             "disputed_findings": {
                 "SEC-001": {"reason": "a fixture", "anchors_digest": security_review.anchors_digest(repo, finding)},
             },
@@ -1527,7 +1534,7 @@ def test_a_finding_with_no_readable_anchor_is_never_treated_as_disputed(review_r
     assert security_review.anchors_digest(repo, BLOCKING_FINDING) == ""
     state = models.State(
         {
-            **make_state(project="rv", phase="build"),
+            **make_state(project="rv"),
             "disputed_findings": {"SEC-001": {"reason": "no", "anchors_digest": "sha256:" + "0" * 64}},
         }
     )
@@ -2004,7 +2011,7 @@ def test_regenerating_an_unmoved_subject_appends_no_artefact_event(review_repo: 
 
 
 def test_regenerating_an_unmoved_subject_keeps_the_human_answers(review_repo: Path) -> None:
-    """The expensive half of the waste: a reviewer part-way through gate ④ who ran the command
+    """The expensive half of the waste: a reviewer part-way through acceptance who ran the command
     again lost everything they had recorded, about a change that had not moved."""
     repo = repo_mod.Repo(review_repo)
     review.generate(repo, _reviewers(_fake_reviewer))
@@ -2222,7 +2229,7 @@ def test_a_moved_head_is_re_read(review_repo: Path) -> None:
 @pytest.mark.integration
 def test_a_review_that_could_not_be_produced_says_so_in_the_audit_log(review_repo: Path) -> None:
     """`events.ATTENTION_EVENTS` counts `actual_extraction_failed` and `review_failed` as things
-    needing a human decision, and nothing anywhere emitted either — so every failure of gate ④'s
+    needing a human decision, and nothing anywhere emitted either — so every failure of acceptance's
     own machinery left the log reporting "needing a human decision: 0".
 
     The extractor is the stage failed here because it is the one with an event of its own: its
@@ -2414,7 +2421,7 @@ def test_a_deletion_is_not_a_coverage_gap_and_not_a_read_file() -> None:
 
     `fold_bodies` withholds a deleted body, so the manifest may not call it analyzed; and a
     deletion is not unread either, since the path states the change in full. Recording it as
-    unsupported shut gate ④ on a cycle whose only unreadable files had been *removed* — a block
+    unsupported shut acceptance on a cycle whose only unreadable files had been *removed* — a block
     whose stated remedy ("split the unreadable part out of this scope") does not exist for a
     deletion.
     """
@@ -2523,6 +2530,7 @@ def test_a_commit_that_cannot_change_the_payload_keeps_the_stage_keys() -> None:
             ceiling=400_000,
             risk_floor="low",
             prior_blocking=[],
+            host_surface="sha256:" + "3" * 64,
         )
 
     assert keys() == keys()
@@ -2734,8 +2742,8 @@ def test_splitting_a_diff_with_no_tests_costs_nothing() -> None:
 
 
 def test_the_outlook_says_what_gate_4_would_be_asked_to_read(review_repo: Path) -> None:
-    """Both of gate ④'s refusals are derivable from git at any moment, and both were first heard
-    at gate ④ — where "split the scope" is not a move that exists, because everything is merged."""
+    """Both of acceptance's refusals are derivable from git at any moment, and both were first heard
+    at acceptance — where "split the scope" is not a move that exists, because everything is merged."""
     (review_repo / "src.py").write_text("x = 1\n", encoding="utf-8")
     (review_repo / "smoke.wav").write_bytes(b"RIFF\x00\x01\x02\x03binary")
     _git(review_repo, "add", "-A")
@@ -2754,7 +2762,7 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
     say "in 18 readings" for a review that is going to take four."""
     seed_repo(
         tmp_path,
-        state=make_state(project="rv", phase="build"),
+        state=make_state(project="rv"),
         plan=make_plan(
             tasks=[
                 make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
@@ -2790,8 +2798,8 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
 
 def test_an_over_budget_reading_names_the_task_whose_scope_is_too_broad(review_repo: Path) -> None:
     """`max_diff_bytes` bounds one launch, so what is over it is a reading — and the reading has a
-    name. "Split the scope" pointed at the cycle, which at gate ④ is merged; the task's scope is
-    still a thing a human can narrow at gate ③."""
+    name. "Split the scope" pointed at the cycle, which at acceptance is merged; the task's scope is
+    still a thing a human can narrow at the mandate."""
     outlook = review.ChangeOutlook(
         diff_bytes=600_000,
         total_bytes=2_141_194,
@@ -2804,7 +2812,7 @@ def test_an_over_budget_reading_names_the_task_whose_scope_is_too_broad(review_r
     )
     assert outlook.over_budget
     assert "largest reading T-004" in outlook.line()
-    assert "OVER, narrow T-004's scope at gate ③" in outlook.line()
+    assert "OVER, narrow T-004's scope at the mandate" in outlook.line()
     assert "in 7 readings" in outlook.line()
 
 
@@ -2829,10 +2837,10 @@ def test_a_big_cycle_read_in_slices_is_not_over_budget(review_repo: Path) -> Non
 
 
 def _composed_repo(root: Path) -> str:
-    """A repo whose plan scopes two tasks, so gate ④ composes. Returns the base commit."""
+    """A repo whose plan scopes two tasks, so acceptance composes. Returns the base commit."""
     seed_repo(
         root,
-        state=make_state(project="rv", phase="build"),
+        state=make_state(project="rv"),
         plan=make_plan(
             tasks=[
                 make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),

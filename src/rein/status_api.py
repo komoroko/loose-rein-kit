@@ -55,25 +55,17 @@ from rein import store as store_mod
 logger = logging.getLogger(__name__)
 
 GATE_ORDER = models.GATE_ORDER
-PHASE_ORDER = models.PHASE_ORDER
+STAGE_ORDER = models.STAGE_ORDER
 
-#: Phase → the gate its command presents for approval.
-PHASE_GATE: dict[str, str] = {
-    "requirements": "requirements",
-    "design": "design",
-    "tasks": "tasks",
-    "build": "build",
-    "verify": "release",
-}
-PHASE_COMMAND: dict[str, str] = {
-    "requirements": "/req",
-    "design": "/design",
-    "tasks": "/tasks",
-    "build": "/build",
-    "verify": "/verify",
-}
-#: The phase each gate belongs to on the stepper (release is presented from /verify).
-GATE_PHASE: dict[str, str] = {**{g: g for g in GATE_ORDER[:-1]}, "release": "verify"}
+#: Stage → the gate whose approval ends it, and the command that presents that gate.
+#:
+#: Two rows, because there are two approvals. There were five, and a matching `PHASE_COMMAND` and
+#: `GATE_PHASE` beside them, all three derived from the one fact that approving a gate advanced a
+#: phase. What the board recommends inside `drafting` is not a fixed command per row any more:
+#: `/req`, `/design` and `/tasks` are the material a mandate is written from and may be run in any
+#: order, so the recommendation names the one the mandate is still missing
+#: (:func:`_mandate_gap`).
+STAGE_GATE: dict[str, str] = {"drafting": "mandate", "building": "acceptance"}
 
 _PLACEHOLDER_HINTS = ("<enter", "product", "build/product")
 
@@ -124,7 +116,7 @@ def _no_agent_surface(repo: repo_mod.Repo) -> bool:
 
 def next_action(
     *,
-    current_phase: str,
+    stage: str,
     gates: dict[str, str],
     counts: dict[str, int] | None,
     #: How many distinct conditions await a decision (`events.open_conditions`), never how many
@@ -157,7 +149,11 @@ def next_action(
     build again. One recommendation has to be able to say "answer the cards".
 
     `baseline` is "" (fine), "missing", or "red" — what the work branch's quality gate said before
-    any task ran, which gate ③ has to know before it can decide this plan is implementable.
+    any task ran, which the mandate has to know before it can say this plan is implementable
+    against this tree.
+
+    `stage` is derived from the gates (`models.State.stage`), never stored, so the table cannot be
+    asked a question whose answer contradicts the gate set it is given.
 
     `blocked` is :func:`blocked_recovery`'s answer, derived rather than decided here for the same
     reason: reading `state.yaml` inside the table would make the same arguments yield different
@@ -198,7 +194,8 @@ def next_action(
         return Recommendation(
             command="/tasks",
             kind="reconcile",
-            reason="needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve gate 3.",
+            reason="needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve "
+            "the mandate.",
             also=("rein dag --render",),
         )
     # 4b. A task waiting on evidence nothing here can produce. Re-running the build cannot move
@@ -210,17 +207,17 @@ def next_action(
             reason="tasks are waiting on acceptance evidence this loop cannot obtain; observe it and record it "
             "with `rein evidence record`.",
         )
-    # 4c. Gate ③ decides this plan is implementable against this tree, and until the tree has been
-    # asked there is nothing to decide it against. Before the phase rows for the same reason
+    # 4c. Approving a mandate says this plan is implementable against this tree, and until the tree
+    # has been asked there is nothing to say it against. Before the stage rows for the same reason
     # sandboxing is: it is a precondition, and `/tasks` would not do it.
-    if baseline and current_phase == "tasks":
+    if baseline and stage == "drafting":
         if baseline == "missing":
             return Recommendation(
                 command="rein baseline measure",
                 kind="fix",
-                reason="Gate 3 decides this plan is implementable against this tree, and nothing has asked the "
-                "tree yet. Measured after the approval instead, a step that had been red for weeks was the "
-                "first task's to discover — and to spend its whole send-back budget on.",
+                reason="Approving a mandate says this plan is implementable against this tree, and nothing has "
+                "asked the tree yet. Measured after the approval instead, a step that had been red for weeks was "
+                "the first task's to discover — and to spend its whole send-back budget on.",
                 also=("rein doctor",),
             )
         return Recommendation(
@@ -242,119 +239,123 @@ def next_action(
             "step you point it at.",
             also=("rein doctor",),
         )
-    # 6. Events awaiting a human decision block the release gate.
-    if current_phase == "verify" and attention_count:
+    # 6. Events awaiting a human decision block acceptance.
+    if stage == "building" and attention_count:
         return Recommendation(
             command="rein events --summary",
             kind="resolve",
             reason=f"{attention_count} condition(s) await a human decision; record a disposition for each "
-            "before the gate 5 release decision.",
+            "before the acceptance decision.",
         )
-    # 7. Before the lifecycle starts, the human writes the brief.
-    if current_phase == "brief":
-        return Recommendation(
-            command="/req",
-            kind="run_phase",
-            reason="Fill docs/00-product-brief.md, then run /req to start the requirements phase (gate 1).",
-        )
-    # 8. Everything approved: the cycle is over.
-    if current_phase == "done" or all(gates.get(g) == "approved" for g in GATE_ORDER):
+    # 7. Everything approved: the cycle is over.
+    if stage == "done":
         return Recommendation(
             command="rein cycle-close --name <slug>",
             kind="close",
-            reason="All gates are approved; archive this cycle's deliverables and reset for the next one.",
+            reason="The change was accepted; archive this cycle's deliverables and reset for the next one.",
         )
-    if plan_missing and current_phase not in {"brief", "requirements"}:
+    if plan_missing and stage == "building":
         return Recommendation(
             command="rein doctor",
             kind="fix",
-            reason=f"current_phase is '{current_phase}' but there is no .rein/plan.yaml to work from.",
+            reason="The mandate is approved but there is no .rein/plan.yaml to work from.",
         )
-    # 9. Inside a phase: pending gate → finish that phase; approved → advance.
-    gate = PHASE_GATE.get(current_phase)
-    if gate is not None:
-        index = GATE_ORDER.index(gate) + 1
-        if gates.get(gate) != "approved":
-            # A human already read this and said "not yet". The phase command is still the right
-            # recommendation, but the reason has to name what they asked for — otherwise the next
-            # session re-derives the deliverable from scratch and answers nothing.
-            if open_change_requests:
-                return Recommendation(
-                    command=PHASE_COMMAND[current_phase],
-                    kind="reconcile",
-                    reason=f"{open_change_requests} change request(s) you raised are still open, and gate "
-                    f"{index} stays shut until they are. Read them, fix only what each one anchors, and mark "
-                    "each addressed.",
-                    also=(f"rein changes list --gate {gate}",),
-                )
-            # The phase is done and nothing mechanical is left: what remains is a person deciding.
-            # This is the only row producing `approve_gate`, and so the only thing that ever turns
-            # `waiting_on_human` on — the state the dashboard's title, favicon and notification
-            # exist for. It reads the same `gate_blockers` the queue's `gate_ready` row does, so
-            # the board and the recommendation cannot disagree.
-            if gate_ready:
-                return Recommendation(
-                    command=f"rein approve {gate}",
-                    kind="approve_gate",
-                    reason=f"Phase '{current_phase}' is complete and gate {index} ({gate}) has no mechanical "
-                    "blocker left — it is waiting on your decision. Read it in `rein ui` and approve there, or "
-                    "run this yourself at a terminal; an agent never runs it for you.",
-                    also=("rein ui", f"rein approve {gate} --check"),
-                )
-            # 8b. The machine review found blocking things the loop can repair on its own — a
-            # task's declared scope owns the code they anchored to, and the repair changes no
-            # claim and no plan. `rein build` reads the review, repairs them and reads again;
-            # this row exists because that is not what "phase in progress" would suggest.
-            if current_phase == "build" and repairable_findings:
-                return Recommendation(
-                    command="rein build",
-                    kind="fix",
-                    reason=f"The machine review has {repairable_findings} blocking finding(s) a task's declared "
-                    "scope owns. The build repairs those itself and reads the change again — no gate moves, "
-                    "and what it cannot decide reaches you as a Decision Card.",
-                    also=("rein ui", "rein pr-stack --restack"),
-                )
-            # 8c. And what is left when the loop can repair nothing: a `diverged` claim, an extra
-            # behaviour nobody asked for, a finding no declared scope owns. Recommending the build
-            # for these was recommending a reading that would change nothing and end by saying so —
-            # a loop with no exit until the reader noticed the cards on their own.
-            if current_phase == "build" and decidable_findings:
-                return Recommendation(
-                    command="rein ui",
-                    kind="fix",
-                    reason=f"The machine review has {decidable_findings} blocking finding(s) the loop may not "
-                    "decide: whether the code or the plan is the mistaken half. Answer the Decision Cards — "
-                    "`revise_implementation` hands the subject back to `rein build` as a code repair.",
-                    also=("rein review generate", f"rein approve {gate} --check"),
-                )
-            also: tuple[str, ...] = (f"rein approve {gate} --check",)
-            if current_phase == "build":
-                also = ("rein build", *also)
-            return Recommendation(
-                command=PHASE_COMMAND[current_phase],
-                kind="run_phase",
-                reason=f"Phase '{current_phase}' is in progress; it ends by presenting gate {index} for the "
-                "human's approval.",
-                also=also,
-            )
-        next_phase = PHASE_ORDER[PHASE_ORDER.index(current_phase) + 1]
-        if next_phase == "done":
-            return Recommendation(
-                command="rein cycle-close --name <slug>",
-                kind="close",
-                reason="The release gate is approved; close the cycle.",
-            )
-        also = ("rein build",) if next_phase == "build" else ()
+    # 8. Inside a stage: the gate that ends it is either still shut, or the work has not started.
+    gate = STAGE_GATE.get(stage)
+    if gate is None:
         return Recommendation(
-            command=PHASE_COMMAND[next_phase],
-            kind="run_phase",
-            reason=f"Gate {index} ({gate}) is approved; advance to the {next_phase} phase.",
-            also=also,
+            command="rein doctor",
+            kind="fix",
+            reason=f"stage '{stage}' is not in the lifecycle vocabulary; diagnose the SSOT.",
         )
+    index = GATE_ORDER.index(gate) + 1
+    # A human already read this and said "not yet". The reason has to name what they asked for —
+    # otherwise the next session re-derives the deliverable from scratch and answers nothing.
+    if open_change_requests:
+        return Recommendation(
+            command=_stage_command(stage, plan_missing),
+            kind="reconcile",
+            reason=f"{open_change_requests} change request(s) you raised are still open, and the {gate} gate "
+            "stays shut until they are. Read them, fix only what each one anchors, and mark each addressed.",
+            also=(f"rein changes list --gate {gate}",),
+        )
+    # Nothing mechanical is left: what remains is a person deciding. This is the only row producing
+    # `approve_gate`, and so the only thing that ever turns `waiting_on_human` on — the state the
+    # dashboard's title, favicon and notification exist for. It reads the same `gate_blockers` the
+    # queue's `gate_ready` row does, so the board and the recommendation cannot disagree.
+    if gate_ready:
+        return Recommendation(
+            command=f"rein approve {gate}",
+            kind="approve_gate",
+            reason=f"Gate {index} ({gate}) has no mechanical blocker left — it is waiting on your decision. "
+            "Read it in `rein ui` and approve there, or run this yourself at a terminal; an agent never runs "
+            "it for you.",
+            also=("rein ui", f"rein approve {gate} --check"),
+        )
+    # The machine review found blocking things the loop can repair on its own — a task's declared
+    # scope owns the code they anchored to, and the repair changes no claim and no plan. `rein
+    # build` reads the review, repairs them and reads again; this row exists because that is not
+    # what "work in progress" would suggest.
+    if stage == "building" and repairable_findings:
+        return Recommendation(
+            command="rein build",
+            kind="fix",
+            reason=f"The machine review has {repairable_findings} blocking finding(s) a task's declared "
+            "scope owns. The build repairs those itself and reads the change again — no gate moves, "
+            "and what it cannot decide reaches you as a Decision Card.",
+            also=("rein ui", "rein pr-stack --restack"),
+        )
+    # And what is left when the loop can repair nothing: a `diverged` claim, an extra behaviour
+    # nobody asked for, a finding no declared scope owns. Recommending the build for these was
+    # recommending a reading that would change nothing and end by saying so — a loop with no exit
+    # until the reader noticed the cards on their own.
+    if stage == "building" and decidable_findings:
+        return Recommendation(
+            command="rein ui",
+            kind="fix",
+            reason=f"The machine review has {decidable_findings} blocking finding(s) the loop may not "
+            "decide: whether the code or the plan is the mistaken half. Answer the Decision Cards — "
+            "`revise_implementation` hands the subject back to `rein build` as a code repair.",
+            also=("rein review generate", f"rein approve {gate} --check"),
+        )
+    also: tuple[str, ...] = (f"rein approve {gate} --check",)
+    if stage == "building":
+        also = ("rein build", *also)
     return Recommendation(
-        command="rein doctor",
-        kind="fix",
-        reason=f"current_phase '{current_phase}' is not in the lifecycle vocabulary; diagnose the SSOT.",
+        command=_stage_command(stage, plan_missing),
+        kind="run_phase",
+        reason=_stage_reason(stage, plan_missing, gate, index),
+        also=also,
+    )
+
+
+#: What the mandate is still missing, in the order a person most naturally fills it: the claims
+#: (`/req`), the approach they rest on (`/design`), then the task DAG that answers them
+#: (`/tasks`). **An order this recommends, never one it enforces** — the three write one mandate
+#: between them and `approve.readiness` asks only whether the mandate is whole, so running them
+#: out of order, together, or not at all is a way of working rather than a violation.
+def _stage_command(stage: str, plan_missing: bool) -> str:
+    if stage == "building":
+        return "/build"
+    return "/req" if plan_missing else "/tasks"
+
+
+def _stage_reason(stage: str, plan_missing: bool, gate: str, index: int) -> str:
+    if stage == "building":
+        return (
+            f"The mandate is approved and the work is inside it; it ends by presenting gate {index} "
+            f"({gate}) for your acceptance decision."
+        )
+    if plan_missing:
+        return (
+            "There is no mandate to approve yet. `/req` turns the brief into claims; `/design` and "
+            "`/tasks` fill in the approach and the task DAG. Run them in whatever order suits the "
+            "change — one approval covers all three."
+        )
+    return (
+        f"A mandate is being written; it ends by presenting gate {index} ({gate}) for your approval. "
+        "What it still needs is a task DAG answering every claim, a measured baseline, and no open "
+        "`[NEEDS CLARIFICATION]`."
     )
 
 
@@ -369,7 +370,7 @@ def next_action(
 _BLOCKED_RECOVERY: tuple[tuple[str, str, str], ...] = (
     (
         "scope_violation",
-        "rein revise --to tasks --impacted {task} --reason <what the scope has to cover>",
+        "rein revise --to mandate --impacted {task} --reason <what the scope has to cover>",
         "{task} tried to change code its declared scope does not cover. Either the work belongs to "
         "another task, or the plan drew this one's scope too small — the second is a scope change to "
         "an approved plan, which is yours to make.",
@@ -897,7 +898,7 @@ def collect_status(
         warnings.append(f"cannot read config.yaml: {exc}")
 
     gates = {g: state.gate_status(g) for g in GATE_ORDER} if state else dict.fromkeys(GATE_ORDER, "pending")
-    current_phase = state.current_phase if state else "brief"
+    stage = state.stage if state else "drafting"
 
     tasks_block: dict[str, object] | None = None
     counts: dict[str, int] | None = None
@@ -919,7 +920,7 @@ def collect_status(
     # queue's rows and `rein events --summary` all read this, so they cannot disagree.
     attention = events_mod.open_conditions(events, task_status)
 
-    # Gate ④'s blocking findings, split by who can act on each. Empty when there is no plan or no
+    # The acceptance gate's blocking findings, split by who can act on each. Empty when there is no plan or no
     # generated review, which `repair.route` answers for itself.
     routing = repair.route(plan, review) if plan is not None else repair.Routing()
 
@@ -928,10 +929,10 @@ def collect_status(
     unsandboxed_profiles = config.unsandboxed_code_profiles() if config else []
     unsandboxed_build_targets = config.unsandboxed_build_targets() if config else []
 
-    # Probe readiness for the gate the *current phase* will present — not merely the first
-    # unapproved one. In `brief` and `done` no gate is in play, and in an uninitialized template
-    # every gate is blocked by the initialization itself, which the recommendation already says.
-    probe_gate = PHASE_GATE.get(current_phase)
+    # Probe readiness for the gate this stage ends with — not merely the first unapproved one. At
+    # `done` no gate is in play, and in an uninitialized template every gate is blocked by the
+    # initialization itself, which the recommendation already says.
+    probe_gate = STAGE_GATE.get(stage)
     gate_blockers: list[str] | None = None
     if probe_gate is not None and state is not None and not uninitialized:
         try:
@@ -940,7 +941,7 @@ def collect_status(
             warnings.append(f"cannot check gate readiness for '{probe_gate}': {exc}")
 
     recommendation = next_action(
-        current_phase=current_phase,
+        stage=stage,
         gates=gates,
         counts=counts,
         attention_count=len(attention),
@@ -970,12 +971,12 @@ def collect_status(
             " session so the /-commands exist in your agent.)",
         )
 
-    # What gate ④ would be asked to read, when that is a question anyone can still act on. Both of
-    # its constraints — the byte budget and coverage — used to be enforced at gate ④, where the
-    # only move left is to raise the number. Confined to the build phase and to an unapproved gate
-    # because it costs a `git diff` over the whole change, and the dashboard polls this object.
+    # What acceptance would be asked to read, when that is a question anyone can still act on. Both of
+    # its constraints — the byte budget and coverage — used to be enforced at acceptance, where the
+    # only move left is to raise the number. Confined to an unapproved acceptance gate because it
+    # costs a `git diff` over the whole change, and the dashboard polls this object.
     outlook: dict[str, object] | None = None
-    if current_phase == "build" and gates.get("build") != "approved" and not template_mode:
+    if stage == "building" and not template_mode:
         from rein import review as review_mod
 
         view = review_mod.outlook(repo)
@@ -994,9 +995,9 @@ def collect_status(
                 "composition": dict(view.composition),
             }
 
-    # What a gate-④ generation is doing right now, when one is (or was last) running. No phase
-    # condition: a review is regenerated after a fix and after `changes_requested`, and a run in
-    # flight is worth seeing whenever there is one. One small JSON read — cheaper than the outlook
+    # What a grounded-review generation is doing right now, when one is (or was last) running. No
+    # stage condition: a review is regenerated after a fix and after `changes_requested`, and a run
+    # in flight is worth seeing whenever there is one. One small JSON read — cheaper than the outlook
     # above, which takes a `git diff`.
     review_run = run_progress.read(repo.root)
 
@@ -1016,15 +1017,14 @@ def collect_status(
         "project": state.project if state else None,
         "cycle_id": state.cycle_id if state else None,
         "branch": config.work_branch if config else None,
-        "current_phase": current_phase,
+        "stage": stage,
         "updated_at": state.raw.get("updated_at") if state else None,
-        "phase_order": list(PHASE_ORDER),
+        "stage_order": list(STAGE_ORDER),
         "gates": [
             {
                 "name": g,
                 "status": gates[g],
                 "index": i + 1,
-                "phase": GATE_PHASE[g],
                 "approval_id": (state.gate_receipt(g) or {}).get("approval_id") if state else None,
             }
             for i, g in enumerate(GATE_ORDER)
@@ -1101,7 +1101,7 @@ def render(status: dict[str, object]) -> str:
     """The human-facing board: where you are, what is approved, what is grounded, what is next."""
     lines = [
         f"project: {status.get('project')}   cycle: {status.get('cycle_id')}   "
-        f"phase: {status.get('current_phase')}   plan: {status.get('plan_status')}",
+        f"stage: {status.get('stage')}   plan: {status.get('plan_status')}",
     ]
     lines += render_pending(status)
     lines += ["", "### Gates"]
@@ -1131,7 +1131,7 @@ def render(status: dict[str, object]) -> str:
         ]
 
     # One line, on the board, for the whole cycle — because both constraints it reports were
-    # otherwise first heard at gate ④, with nothing left to do about either.
+    # otherwise first heard at acceptance, with nothing left to do about either.
     outlook = status.get("review_outlook")
     if isinstance(outlook, dict):
         lines += ["", "### Review outlook", f"- {outlook.get('line')}"]

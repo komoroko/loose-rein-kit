@@ -6,12 +6,37 @@ host runs it with the host's credentials, its SSH agent, its cloud tokens, its d
 `host` execution exists only for trusted, pinned tooling that runs nothing the repository
 produced.
 
-The sandbox is built from a config `executor_profile` and hardened the same way every time:
+**Two kinds of sandbox, because there are two kinds of thing to box in.**
 
-  network       denied, full stop (`--network none`). A profile *may* name a network profile,
-                and a named one is refused: egress is granted only by an experiment with a
-                signed receipt, and no such receipt exists for anything to check. An unenforced
-                knob is worse than a missing one — it reads like a boundary.
+`kind: oci` is for **repository-derived code** — the quality gate's `kind: command` steps
+(`build_loop._run_cmd_step`, which the mechanized acceptance criteria also go through). Code an
+agent wrote has no business phoning out, so this kind is refused egress outright. The dependency
+audit is the deliberate inverse and runs on the host: it reads a published vulnerability database,
+and there is no profile here it could ask for the network from.
+
+`kind: oci-agent` is for **the agent CLI itself** — the implementer, the per-task reviewer, every
+fixer, and the acceptance reading stages (`build_loop._launch`, `review_transport.call`). This kind
+*requires* egress, because an agent that cannot reach its model API does nothing at all. What it is
+worth is therefore not the network: it is that the process writing the code has no HOME, no
+`~/.ssh`, no `~/.aws`, no docker socket, no capabilities, no path out of the mounted worktree, and
+sees exactly the environment variables a profile named. It is not a boundary against exfiltration
+and this module does not claim one — the repository is mounted and the network is open.
+
+Configuring it is one key (`executors.agent_profile`) and it is **optional**: absent, an agent is
+launched as a host process with the operator's credentials, exactly as before, and every surface
+that reports the environment says so. The image has to carry the CLI, and no image this package
+ships can carry every CLI a role might be pointed at. What is gone is the state in between — an
+`implementer_profile` and a `reviewer_profile` the schema required, the docs described as "which
+profile each role runs under", and no launcher ever read. A knob that buys a promise nothing keeps
+is worse than no knob.
+
+Both kinds are hardened identically apart from the network:
+
+  network       `oci`: denied, full stop (`--network none`); a profile that names any network
+                profile is refused, because egress is granted only by an experiment with a signed
+                receipt and no such receipt exists for anything to check. `oci-agent`: the
+                engine's default bridge, **unfiltered**, and it must say `network_profile: egress`
+                so the config states what it is rather than inheriting it.
   filesystem    read-only root (`--read-only`), a size-capped writable tmpfs, the repo or
                 worktree mounted read-only (a reviewer) or read-write (an implementer), and
                 **nothing else** — no HOME, no ~/.ssh, no ~/.aws, no /var/run/docker.sock.
@@ -26,17 +51,22 @@ in change after that review was signed (plan §10.2), so the profile carries
 
 Images are built locally from the Containerfiles the package ships (`data/oci/<profile>/`) via
 :func:`build_image`, which prints the digest to pin. Nothing here reaches a registry: the
-sandbox a review runs in is reproducible from the repository, not fetched.
+sandbox a gate step runs in is reproducible from the repository, not fetched. Two are shipped:
+`python` for the quality gate, and `agent`, which takes the CLI to install as a build argument
+(`rein oci build --profile agent --build-arg AGENT_CLI=...`) because the CLI is the one thing
+about that image this package cannot choose for you.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from rein import common, data, digests, faults, models
+from rein import __version__, common, data, digests, faults, models
 
 # Prefer docker; podman is a drop-in for the flags used here.
 _RUNTIMES = ("docker", "podman")
@@ -54,8 +84,15 @@ class ExecutionSpec:
     profile: models.ExecutorProfile
     mounts: tuple[tuple[Path, str, str], ...] = ()  # (host path, container path, "ro"|"rw")
     env: dict[str, str] = field(default_factory=dict)
+    #: Wiring the runner minted for this launch, passed whatever the profile's `env_allowlist`
+    #: says — the control socket's path inside the container and the capability token scoped to
+    #: this task. The allowlist exists to stop the *host's* environment leaking in; these did not
+    #: come from the host's environment, and a profile that forgot to name them would produce a
+    #: leaf that cannot report its own outcome and no error saying why.
+    env_always: dict[str, str] = field(default_factory=dict)
     workdir: str = "/work"
     timeout_sec: float | None = None
+    stdin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,9 +138,33 @@ class HostExecutor(Executor):
             # default `/work` is the container's, so it is only honoured when a caller sets one.
             cwd=spec.workdir if spec.workdir != "/work" else None,
             timeout=spec.timeout_sec,
-            env={**spec.env} if spec.env else None,
+            env={**spec.env, **spec.env_always} if spec.env or spec.env_always else None,
+            input_text=spec.stdin,
         )
         return ExecutionResult(exit_code=rc, output=out, image_digest="host", timed_out=rc == common.RC_TIMEOUT)
+
+
+def _container_user() -> str:
+    """The uid:gid every sandboxed container runs as — the host user's own.
+
+    Not a constant, and the constant it replaced (`1000:1000`) was a guess that the operator is
+    the first user on a single-seat Linux box. Where that guess was wrong the container ran as a uid
+    that owns nothing it was handed: the worktree is the host user's, and so is the control socket,
+    which `control_plane` binds at 0600 because a socket any local account can write to is not a
+    control plane. A mismatched uid therefore gets EACCES on `rein report` — the leaf does its work
+    and then cannot say what it did, which is the failure shape hardest to read backwards. A CI
+    runner at uid 1001 is the ordinary case, not an exotic one.
+
+    The uid was never the boundary and this does not weaken one: what the box is worth is
+    `--cap-drop ALL`, `no-new-privileges`, `--read-only`, the network decided by `kind`, and the
+    ephemeral HOME. What the uid decides is whether the container can reach the files and sockets
+    the host user already owns, and the only answer that is true on every host is "the same user".
+    An operator running as root gets a root container — their own privilege, not an escalation.
+
+    Read per launch rather than at import so a test can say what the host is; the syscall is free
+    next to the `docker run` it goes into.
+    """
+    return f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "1000:1000"
 
 
 #: What a container the kernel killed exits with (128 + SIGKILL). The cgroup OOM killer is the
@@ -129,7 +190,7 @@ class OciExecutor(Executor):
 
     def run(self, spec: ExecutionSpec) -> ExecutionResult:
         profile = spec.profile
-        if not profile.is_sandboxed:
+        if not profile.runs_contained:
             raise ExecutorError(f"profile {profile.name!r} is a host profile — route it through HostExecutor")
         digest = profile.image_digest
         if not digests.is_digest(digest):
@@ -137,8 +198,17 @@ class OciExecutor(Executor):
                 f"profile {profile.name!r} has no digest-pinned image. A mutable tag would let the "
                 "sandbox change after a review was signed — pin it with `rein oci build`."
             )
-        network = profile.network_profile or "none"
-        if network != "none":
+        network = profile.network_profile or ("egress" if profile.is_agent_sandbox else "none")
+        if profile.is_agent_sandbox:
+            if network != "egress":
+                raise ExecutorError(
+                    f"agent profile {profile.name!r} asks for network {network!r}. An agent CLI that cannot "
+                    "reach its model API does nothing, and a sandbox that guarantees that is a sandbox nobody "
+                    "will keep switched on — so `oci-agent` takes `egress` and nothing else. If what you want "
+                    "is a box with no way out, you want `kind: oci`, which is for running the code rather than "
+                    "writing it."
+                )
+        elif network != "none":
             raise ExecutorError(
                 f"profile {profile.name!r} asks for network {network!r}. Egress from a sandbox is granted "
                 "only by an experiment with a signed receipt, and no such receipt exists to check — so "
@@ -151,7 +221,7 @@ class OciExecutor(Executor):
             raise ExecutorError(problem)
 
         argv = self._argv(spec, reference)
-        rc, out = common.run(argv, timeout=spec.timeout_sec)
+        rc, out = common.run(argv, timeout=spec.timeout_sec, input_text=spec.stdin)
         if rc == _RC_SIGKILL:
             # The kernel's OOM killer, in all but name: a container that exceeds its cgroup limit
             # is SIGKILLed, and rc alone cannot say so. Saying it here is what turns "the step
@@ -164,7 +234,18 @@ class OciExecutor(Executor):
         return ExecutionResult(exit_code=rc, output=out, image_digest=digest, timed_out=rc == common.RC_TIMEOUT)
 
     def _argv(self, spec: ExecutionSpec, reference: str | None = None) -> list[str]:
-        """The full `docker run` argv. Every hardening flag is unconditional, not a knob.
+        """The full `docker run` argv.
+
+        **What a profile may not weaken**: the network (decided by `kind` in `run`, never here),
+        `no-new-privileges`, `--cap-drop ALL`, the host user's uid (`_container_user`, which is what
+        lets the container reach the worktree and the control socket at all), and the ephemeral
+        HOME that keeps the operator's `~/.ssh` and `~/.aws` out. A profile cannot spell any of them
+        differently, because a boundary with a knob beside it is a default, not a boundary.
+
+        **What it may size**: `read_only_root`, `writable_tmp_mb`, `pids_limit`, `memory_mb`,
+        `cpu_count` — the resource envelope. These are declarations about what the work needs, not
+        about what it is allowed to reach, and the values are frozen with the mandate like the rest
+        of `config.yaml`.
 
         `reference` is what `resolve_pinned` found this engine can actually run; it names the
         same digest the profile pins. Absent, the pinned reference is used verbatim.
@@ -175,16 +256,25 @@ class OciExecutor(Executor):
             "run",
             "--rm",
             "--network",
-            "none",  # `run` refuses anything else before reaching here
+            # `run` has already refused every combination but these two: repository code gets no
+            # way out at all, an agent CLI gets the engine's default bridge. The bridge is
+            # *unfiltered* and this module says so rather than implying an allowlist it does not
+            # have — what the agent sandbox is worth is the rest of this argv, not the network.
+            "bridge" if profile.is_agent_sandbox else "none",
             "--security-opt",
             "no-new-privileges",
             "--cap-drop",
             "ALL",
             "--user",
-            "1000:1000",
+            _container_user(),
             "--workdir",
             spec.workdir,
         ]
+        if spec.stdin is not None:
+            # An adapter that takes its prompt on stdin (`Adapter.prompt_on_stdin`) needs the
+            # container's stdin attached. No `-t`: a tty would make the CLI think a human is
+            # watching and some of them change what they emit when they think so.
+            argv += ["--interactive"]
         if profile.raw.get("read_only_root", True):
             argv += ["--read-only"]
         tmp_mb = profile.raw.get("writable_tmp_mb", 512)
@@ -200,10 +290,11 @@ class OciExecutor(Executor):
         argv += ["--cpus", str(common.as_int(profile.raw.get("cpu_count"), 2))]
         # An empty, ephemeral HOME: the container cannot read the host's ~/.ssh, ~/.aws, etc.
         argv += ["--env", "HOME=/tmp"]
-        # …which also means git has no config to find, and the repository it is handed is owned by
-        # whoever owns it on the host rather than by the container's fixed uid. Without this, git
-        # refuses the tree as "dubious ownership" and every gate step that shells out to it fails
-        # for a reason that has nothing to do with the code under test. Passed as config
+        # …which also means git has no config to find, and nothing guarantees the mounted worktree
+        # reads back as owned by the container's uid: `_CONTAINER_USER` makes them agree on Linux,
+        # but a bind mount through a Docker Desktop VM reports whatever that VM decides. Without
+        # this, git refuses the tree as "dubious ownership" and every gate step that shells out to
+        # it fails for a reason that has nothing to do with the code under test. Passed as config
         # environment (not a file) so it cannot outlive the run or reach the host's git.
         argv += ["--env", "GIT_CONFIG_COUNT=1"]
         argv += ["--env", "GIT_CONFIG_KEY_0=safe.directory"]
@@ -215,6 +306,8 @@ class OciExecutor(Executor):
         for name in profile.env_allowlist:
             if name in spec.env:
                 argv += ["--env", f"{name}={spec.env[name]}"]
+        for name, value in sorted(spec.env_always.items()):
+            argv += ["--env", f"{name}={value}"]
         argv.append(reference or profile.image)
         argv += list(spec.command)
         return argv
@@ -244,7 +337,7 @@ def engine_memory_mb(runtime: str) -> int:
 
 def for_profile(profile: models.ExecutorProfile) -> Executor:
     """The executor a profile calls for. The one dispatch point, so the rule lives in one place."""
-    return OciExecutor.create() if profile.is_sandboxed else HostExecutor()
+    return OciExecutor.create() if profile.runs_contained else HostExecutor()
 
 
 # --- image building ------------------------------------------------------------
@@ -260,12 +353,23 @@ def containerfile_names() -> list[str]:
     return sorted(names)
 
 
-def build_image(name: str, *, tag: str | None = None, runtime: str | None = None) -> str:
+def build_image(
+    name: str,
+    *,
+    tag: str | None = None,
+    runtime: str | None = None,
+    build_args: Mapping[str, str] | None = None,
+) -> str:
     """Build the packaged Containerfile `name` locally and return its `sha256:` image digest.
 
     The digest is what a config profile pins. Building is a bootstrap convenience — nothing is
     fetched from a registry — and re-pinning after a rebuild is what keeps the sandbox a review
     ran in reproducible from the repository.
+
+    `build_args` reaches the engine as `--build-arg`. `REIN_VERSION` is filled in here rather than
+    asked for, because the answer is never the operator's to choose: an image whose `rein` is a
+    different version from the host's is two ends of a control socket disagreeing about the
+    protocol, and nothing would notice until a leaf tried to report its outcome.
     """
     if name not in containerfile_names():
         raise ExecutorError(f"no packaged Containerfile named {name!r} (have: {', '.join(containerfile_names())})")
@@ -283,20 +387,12 @@ def build_image(name: str, *, tag: str | None = None, runtime: str | None = None
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(blob)
         iid_file = context / "iid"
-        rc, out = common.run(
-            [
-                engine,
-                "build",
-                "-t",
-                image_tag,
-                "--iidfile",
-                str(iid_file),
-                "-f",
-                str(context / "Containerfile"),
-                str(context),
-            ],
-            timeout=1800,
-        )
+        args = {"REIN_VERSION": __version__, **(build_args or {})}
+        argv = [engine, "build", "-t", image_tag, "--iidfile", str(iid_file)]
+        for key, value in sorted(args.items()):
+            argv += ["--build-arg", f"{key}={value}"]
+        argv += ["-f", str(context / "Containerfile"), str(context)]
+        rc, out = common.run(argv, timeout=1800)
         if rc != 0:
             raise ExecutorError(f"building {name} failed (rc={rc}):\n{out[-2000:]}")
         return _image_digest(engine, image_tag, iid_file)
@@ -306,7 +402,7 @@ def build_image_from_dockerfile(dockerfile: Path, *, tag: str | None = None, run
     """Build a repository-local Containerfile and return its `sha256:` image digest.
 
     A custom OCI profile (`dockerfile:` in config, not the packaged `containerfile:` name) lives
-    in the repository — already a frozen path once gate 3 freezes config.yaml — so unlike
+    in the repository — already a frozen path once the mandate freezes config.yaml — so unlike
     :func:`build_image` there is nothing to extract from package data: the build context is
     simply the Containerfile's own directory on disk.
     """

@@ -12,7 +12,7 @@ wrong reason.
 
 That same group kill is the only way a launch can be ended *early*, which is what
 :class:`Cancellation` exposes. Two things depend on it. A caller that has stopped wanting an
-answer — gate ④'s security stage once its sibling has already failed — can stop paying for it,
+answer — acceptance's security stage once its sibling has already failed — can stop paying for it,
 which `concurrent.futures` cannot express (`Future.cancel()` is a documented no-op once the task
 is running). And a human pressing Ctrl-C can actually stop an agent. The child is in its own
 session, so the terminal's SIGINT reaches this process and not it — while `Popen.__exit__`
@@ -147,7 +147,7 @@ class Heartbeat:
 
     Here rather than in the build loop, which is where it was written and where it was the only
     caller. The property it defends is not the build's: it belongs to any `rein` command that
-    spends minutes inside one captured launch, and gate ④'s composed review — eighteen readings,
+    spends minutes inside one captured launch, and acceptance's composed review — eighteen readings,
     measured at thirteen hours on one run — is now the longer of the two. That run printed four
     lines in eight hours and was killed twice by a host resource heuristic while it was in fact
     progressing. One implementation, so the two cannot drift apart on what a live command sounds

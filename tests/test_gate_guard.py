@@ -20,7 +20,7 @@ import yaml
 
 from rein import event_chain, gate_guard, models, store
 from rein import repo as repo_mod
-from tests._support import DEMO_CYCLE, make_config, make_receipt, make_state, seed_repo
+from tests._support import DEMO_CYCLE, make_config, make_plan, make_receipt, make_state, seed_repo
 
 
 def decide(root: Path, rel: str) -> tuple[bool, str]:
@@ -69,7 +69,7 @@ def test_rule_one_is_not_relaxed_by_template_mode(tmp_path: Path) -> None:
 
 
 def test_rule_one_holds_even_with_every_gate_approved(tmp_path: Path) -> None:
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "approved"), phase="done"))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "approved")))
     allowed, _ = decide(tmp_path, ".rein/events.ndjson")
     assert not allowed
 
@@ -89,7 +89,7 @@ def test_the_guards_own_registration_cannot_be_edited_by_an_agent(tmp_path: Path
     rule mentioned: not rule 1, not rule 2, and not `guard.paths`, which covers deliverable
     directories. Every gate approved makes no difference — there is no phase at which rewriting the
     guard's own registration is the expected next step."""
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "approved"), phase="done"))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "approved")))
     allowed, reason = decide(tmp_path, rel)
     assert not allowed
     assert "switch off edit-stage enforcement" in reason
@@ -125,7 +125,7 @@ def test_a_frozen_plan_pins_its_artifacts(tmp_path: Path, rel: str) -> None:
     seed_repo(tmp_path, state=make_state(plan_status="frozen"))
     allowed, reason = decide(tmp_path, rel)
     assert not allowed
-    assert "rein revise --to tasks" in reason
+    assert "rein revise --to mandate" in reason
 
 
 def test_a_draft_plan_is_editable(tmp_path: Path) -> None:
@@ -139,7 +139,7 @@ def test_pointing_a_role_at_another_agent_does_not_break_a_frozen_plan(tmp_path:
     rewinds nothing — the audit chain's `agents_switched` line is what records it instead.
 
     Contrast the sandbox: flipping a profile to `host` still breaks the freeze here, because that
-    widens what may happen and widening is the judgement a human made at gate ③.
+    widens what may happen and widening is the judgement a human made at the mandate.
     """
     raw = make_config()
     state = make_state(plan_status="frozen")
@@ -155,7 +155,7 @@ def test_pointing_a_role_at_another_agent_does_not_break_a_frozen_plan(tmp_path:
 
     switched["executor_profiles"]["implementer"] = {"kind": "host", "network_profile": "egress"}
     config_path.write_text(yaml.safe_dump(switched, sort_keys=False), encoding="utf-8")
-    assert any("rein revise --to tasks" in f for f in gate_guard._frozen_artifact_failures(repo))
+    assert any("rein revise --to mandate" in f for f in gate_guard._frozen_artifact_failures(repo))
 
 
 def test_an_unreadable_state_fails_closed_on_the_frozen_set(tmp_path: Path) -> None:
@@ -166,37 +166,108 @@ def test_an_unreadable_state_fails_closed_on_the_frozen_set(tmp_path: Path) -> N
     assert "fails closed" in reason
 
 
-# --- rule 3: a deliverable waits for its prerequisite gate --------------------
+# --- rule 3: the product waits for a mandate that covers it -------------------
 
 
-@pytest.mark.parametrize(
-    ("rel", "gate"),
-    [
-        ("docs/20-design.md", "requirements"),
-        ("docs/decisions/ADR-001.md", "requirements"),
-        ("docs/tasks/T-001.md", "design"),
-        ("docs/test/test-plan.md", "build"),
-        ("src/app.py", "tasks"),
-        ("frontend/index.ts", "tasks"),
-    ],
-)
-def test_a_guarded_path_names_its_prerequisite(tmp_path: Path, rel: str, gate: str) -> None:
+@pytest.mark.parametrize("rel", ["src/app.py", "frontend/index.ts", "scripts/run.sh"])
+def test_a_guarded_path_waits_for_a_mandate(tmp_path: Path, rel: str) -> None:
+    """One answer for every guarded path, because there is one thing that authorizes them.
+
+    Each entry used to name which of five phase gates opened it, so the denial said "gate 'design'
+    is not approved" for a task ticket and "gate 'tasks'" for source — a guard enforcing an order.
+    What it enforces now is the delegation: nothing touches the product until a human has said what
+    the loop may change.
+    """
     seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
     allowed, reason = decide(tmp_path, rel)
     assert not allowed
-    assert f"gate '{gate}' is not approved" in reason
+    assert "no mandate is approved" in reason
 
 
-def test_an_approved_gate_opens_its_paths(tmp_path: Path) -> None:
-    seed_repo(tmp_path)  # approved through tasks
+@pytest.mark.parametrize("rel", ["docs/20-design.md", "docs/decisions/ADR-001.md", "docs/tasks/T-001.md"])
+def test_the_mandates_own_material_is_never_guarded(tmp_path: Path, rel: str) -> None:
+    """These are what a mandate is written *from*, so there is nothing for them to wait on.
+
+    They were guarded, each on the phase gate before it, which is what made writing a design before
+    the requirements were signed a rule violation rather than a way of working.
+    """
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    assert decide(tmp_path, rel)[0]
+
+
+def test_an_approved_mandate_opens_the_paths_inside_its_scope(tmp_path: Path) -> None:
+    seed_repo(tmp_path)  # mandate approved, scope unbounded
     assert decide(tmp_path, "src/app.py")[0]
-    assert decide(tmp_path, "docs/20-design.md")[0]
-    assert not decide(tmp_path, "docs/test/test-plan.md")[0]  # build is still pending
+    assert decide(tmp_path, "docs/test/test-plan.md")[0]
+
+
+def test_a_path_outside_the_mandates_scope_is_denied_even_with_it_approved(tmp_path: Path) -> None:
+    """The mechanical half of "the range you may delegate".
+
+    An approved mandate is not a blank cheque over the guarded set: what it authorizes is its own
+    `scope`, and a write outside that is a widening only a human can do.
+    """
+    plan = make_plan()
+    plan["scope"] = {"include": ["src/core/"]}
+    seed_repo(tmp_path, plan=plan)
+    assert decide(tmp_path, "src/core/thing.py")[0]
+    allowed, reason = decide(tmp_path, "src/elsewhere/thing.py")
+    assert not allowed
+    assert "outside the approved mandate's scope" in reason
+    assert "rein revise --to mandate" in reason
+
+
+def test_an_excluded_path_is_denied_even_inside_the_include(tmp_path: Path) -> None:
+    plan = make_plan()
+    plan["scope"] = {"include": ["src/"], "exclude": ["src/vendor/"]}
+    seed_repo(tmp_path, plan=plan)
+    assert decide(tmp_path, "src/core/thing.py")[0]
+    assert not decide(tmp_path, "src/vendor/thing.py")[0]
+
+
+def test_an_exclusion_binds_wherever_it_points(tmp_path: Path) -> None:
+    """`exclude` is a human writing "not this", and it used to be consulted only after
+    `guard.paths` had already let the path through.
+
+    So an entry naming anything outside the guarded set — a vendored tree, a generated directory,
+    the one file this cycle must not touch — guarded nothing at all: rule 3 answered "allowed" for
+    the unguarded path before it ever opened the plan.
+    """
+    plan = make_plan()
+    plan["scope"] = {"include": [], "exclude": ["vendor/"]}
+    seed_repo(tmp_path, plan=plan)
+    assert decide(tmp_path, "src/app.py")[0], "an empty include is unbounded"
+    assert decide(tmp_path, "docs/00-product-brief.md")[0], "unguarded and unexcluded stays open"
+    allowed, reason = decide(tmp_path, "vendor/thing.py")
+    assert not allowed, "unguarded, but a human said not this"
+    assert "excluded by the approved mandate's scope" in reason
+
+
+def test_an_include_does_not_guard_what_guard_paths_never_did(tmp_path: Path) -> None:
+    """The other half of the asymmetry, and deliberate. A repository declares what its product is
+    in `guard.paths`, once; a mandate narrows that to what this cycle may change. Naming a path in
+    `include` is not how an unguarded one becomes guarded — otherwise what the guard covers would
+    be re-decided every cycle, by the document the cycle itself writes."""
+    plan = make_plan()
+    plan["scope"] = {"include": ["src/core/", ".github/workflows/"]}
+    seed_repo(tmp_path, plan=plan)
+    assert not decide(tmp_path, "src/elsewhere/thing.py")[0], "guarded and outside the scope"
+    assert decide(tmp_path, ".github/workflows/ci.yml")[0], "list it in `guard.paths` to guard it"
+
+
+def test_an_unreadable_plan_fails_closed_on_the_scope(tmp_path: Path) -> None:
+    """A guard that cannot determine its scope must not open it — the same posture an unreadable
+    state already had one question earlier."""
+    seed_repo(tmp_path)
+    (tmp_path / ".rein" / "plan.yaml").write_text("a: [1, 2\n", encoding="utf-8")
+    allowed, reason = decide(tmp_path, "src/app.py")
+    assert not allowed
+    assert "fails closed" in reason
 
 
 @pytest.mark.parametrize("rel", ["tests/test_app.py", "docs/00-product-brief.md", "README.md", "makefile"])
 def test_unguarded_paths_stay_open(tmp_path: Path, rel: str) -> None:
-    """tests/ is deliberately unguarded: preparing fixtures while a gate is pending is
+    """tests/ is deliberately unguarded: preparing fixtures while the mandate is pending is
     sanctioned speculative work, and freezing it would just push the work off the record."""
     seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
     assert decide(tmp_path, rel)[0]
@@ -236,22 +307,16 @@ def test_a_path_outside_the_repo_is_not_this_guard_s_business(tmp_path: Path) ->
 # --- rule matching: exact wins over prefix, longest prefix wins ---------------
 
 
-def test_exact_rule_wins_over_a_prefix_rule() -> None:
-    rules = {"docs/": "build", "docs/20-design.md": "requirements"}
-    assert gate_guard.required_gate("docs/20-design.md", rules, repo_mod.Repo(Path.cwd())) == "requirements"
-
-
-def test_the_longest_matching_prefix_wins() -> None:
-    rules = {"src/": "tasks", "src/vendor/": "release"}
+def test_a_prefix_is_anchored_at_a_separator() -> None:
     repo = repo_mod.Repo(Path.cwd())
-    assert gate_guard.required_gate("src/vendor/lib.py", rules, repo) == "release"
-    assert gate_guard.required_gate("src/app.py", rules, repo) == "tasks"
+    assert gate_guard.is_guarded("src/app.py", ("src/",), repo)
+    assert not gate_guard.is_guarded("srcfile.py", ("src/",), repo)
 
 
 def test_config_paths_replace_the_built_in_defaults(tmp_path: Path) -> None:
     seed_repo(
         tmp_path,
-        config=make_config(guard_paths=[{"path": "core/", "requires_gate": "tasks"}]),
+        config=make_config(guard_paths=["core/"]),
         state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
     )
     assert not decide(tmp_path, "core/thing.py")[0]
@@ -287,7 +352,7 @@ def test_a_key_this_release_has_never_heard_of_does_not_disarm_the_guard(tmp_pat
     telling the human to complete /tasks and get a gate approved. The document was intact."""
     seed_repo(
         tmp_path,
-        config=make_config(guard_paths=[{"path": "core/", "requires_gate": "tasks"}]),
+        config=make_config(guard_paths=["core/"]),
         state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
     )
     written = _rewrite_config(tmp_path, lambda d: d.setdefault("review_policy", {}).update(a_key_from_the_future=True))
@@ -295,7 +360,7 @@ def test_a_key_this_release_has_never_heard_of_does_not_disarm_the_guard(tmp_pat
 
     settings = gate_guard.guard_settings(repo_mod.Repo(tmp_path))
     assert settings.unreadable == ""
-    assert settings.paths == {"core/": "tasks"}
+    assert settings.paths == ("core/",)
     assert not decide(tmp_path, "core/thing.py")[0]
     assert decide(tmp_path, "src/app.py")[0]  # still not in this repo's map
 
@@ -338,7 +403,7 @@ def test_a_rule_map_that_cannot_be_read_is_never_replaced_by_the_defaults(tmp_pa
     DEFAULT_GUARD_PATHS, dropping every path a repository had added to its own guard."""
     seed_repo(
         tmp_path,
-        config=make_config(guard_paths=[{"path": "infra/", "requires_gate": "tasks"}]),
+        config=make_config(guard_paths=["infra/"]),
         state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
     )
     _rewrite_config(tmp_path, lambda d: d["guard"].update(paths="infra/"))
@@ -349,16 +414,16 @@ def test_a_rule_map_that_cannot_be_read_is_never_replaced_by_the_defaults(tmp_pa
     assert not decide(tmp_path, "README.md")[0]  # it does not know what it guards, so: all of it
 
 
-def test_a_rule_entry_missing_half_of_itself_is_unreadable_rather_than_dropped(tmp_path: Path) -> None:
-    """The same fail-open one branch further in: an entry with a mistyped `path:` key was filtered
-    out of the map, and a map left with nothing in it fell through to DEFAULT_GUARD_PATHS — so the
-    one rule a product had added to its own guard disappeared over a typo."""
+def test_an_entry_that_is_not_a_path_is_unreadable_rather_than_dropped(tmp_path: Path) -> None:
+    """The same fail-open one branch further in: an entry the guard could not read was filtered out
+    of the set, and a set left with nothing in it fell through to DEFAULT_GUARD_PATHS — so the one
+    rule a product had added to its own guard disappeared over a typo."""
     seed_repo(
         tmp_path,
-        config=make_config(guard_paths=[{"path": "infra/", "requires_gate": "tasks"}]),
+        config=make_config(guard_paths=["infra/"]),
         state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
     )
-    _rewrite_config(tmp_path, lambda d: d["guard"].update(paths=[{"pth": "infra/", "requires_gate": "tasks"}]))
+    _rewrite_config(tmp_path, lambda d: d["guard"].update(paths=[{"path": "infra/"}]))
 
     settings = gate_guard.guard_settings(repo_mod.Repo(tmp_path))
     assert "guard.paths" in settings.unreadable
@@ -371,9 +436,9 @@ def test_a_rule_entry_missing_half_of_itself_is_unreadable_rather_than_dropped(t
 def test_an_edit_that_would_approve_a_gate_names_the_reason(tmp_path: Path) -> None:
     seed_repo(tmp_path)
     current = (tmp_path / ".rein" / "state.yaml").read_text(encoding="utf-8")
-    proposed = current.replace("build:\n    status: pending", "build:\n    status: approved")
+    proposed = current.replace("acceptance:\n    status: pending", "acceptance:\n    status: approved")
     reason = gate_guard.gate_flip_denial({"content": proposed}, repo_mod.Repo(tmp_path))
-    assert "gates.build to approved" in reason
+    assert "gates.acceptance to approved" in reason
     assert "human typed the gate name at a terminal" in reason
 
 
@@ -483,7 +548,7 @@ def test_check_diff_passes_when_the_gate_is_approved(tmp_path: Path) -> None:
 def test_check_diff_catches_a_config_edited_after_the_freeze(tmp_path: Path) -> None:
     """Rule 2 compares content, not just paths — and it covers both frozen artifacts.
 
-    Gate ③ freezes `config.yaml` for the same reason it freezes `plan.yaml`: it pins the sandbox
+    The mandate freezes `config.yaml` for the same reason it freezes `plan.yaml`: it pins the sandbox
     and the quality gate the evidence will be produced in. Checking only the plan left half the
     freeze resting on the path rule, which an edit that is made, reverted and re-applied slips
     straight past.
@@ -507,7 +572,7 @@ def test_check_diff_catches_a_config_edited_after_the_freeze(tmp_path: Path) -> 
 def test_check_diff_catches_a_gate_flip_with_no_event(tmp_path: Path) -> None:
     """A flip smuggled past the editor hook — a shell redirect, `sed -i` — has no
     gate_approved event, and fails here before it can be committed."""
-    seed_repo(tmp_path, state=make_state(gates={"build": "pending"}), git=True)
+    seed_repo(tmp_path, state=make_state(gates={"acceptance": "pending"}), git=True)
     _git(tmp_path, "config", "user.email", "t@e.x")
     _git(tmp_path, "config", "user.name", "T")
     _git(tmp_path, "add", "-A")
@@ -515,32 +580,31 @@ def test_check_diff_catches_a_gate_flip_with_no_event(tmp_path: Path) -> None:
 
     state = tmp_path / ".rein" / "state.yaml"
     state.write_text(
-        state.read_text(encoding="utf-8").replace("build:\n    status: pending", "build:\n    status: approved"),
+        state.read_text(encoding="utf-8").replace(
+            "acceptance:\n    status: pending", "acceptance:\n    status: approved"
+        ),
         encoding="utf-8",
     )
     assert gate_guard.check_diff(repo_mod.Repo(tmp_path)) == 1
 
 
 def _flip_fixture(
-    tmp_path: Path,
-    *,
-    events: list[models.Event],
-    approval_id: str | None = "GA-BUILD-0001",
+    tmp_path: Path, *, events: list[models.Event], approval_id: str | None = "GA-ACCEPTANCE-0001"
 ) -> repo_mod.Repo:
-    """A repo committed with `build` pending, then flipped to approved in the worktree."""
-    state = make_state(gates={"build": "pending"})
+    """A repo committed with `acceptance` pending, then flipped to approved in the worktree."""
+    state = make_state(gates={"acceptance": "pending"})
     seed_repo(tmp_path, state=state, events=events, git=True)
     _git(tmp_path, "config", "user.email", "t@e.x")
     _git(tmp_path, "config", "user.name", "T")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "baseline")
 
-    receipt = make_receipt("build")
+    receipt = make_receipt("acceptance")
     if approval_id is None:
-        state["gates"]["build"] = {"status": "approved", "receipt": None}
+        state["gates"]["acceptance"] = {"status": "approved", "receipt": None}
     else:
         receipt["approval_id"] = approval_id
-        state["gates"]["build"] = {"status": "approved", "receipt": receipt}
+        state["gates"]["acceptance"] = {"status": "approved", "receipt": receipt}
     (tmp_path / ".rein" / "state.yaml").write_bytes(store.dump_yaml(state))
     return repo_mod.Repo(tmp_path)
 
@@ -555,8 +619,8 @@ def _gate_events(*specs: tuple[str, list[str]]) -> list[models.Event]:
     return built
 
 
-_APPROVED = ("gate_approved", ["build", "GA-BUILD-0001"])
-_REVISED = ("gate_revised", ["build"])
+_APPROVED = ("gate_approved", ["acceptance", "GA-ACCEPTANCE-0001"])
+_REVISED = ("gate_revised", ["acceptance"])
 
 
 @pytest.mark.integration
@@ -693,7 +757,7 @@ def test_a_notebook_edit_under_a_guarded_prefix_is_denied(tmp_path: Path) -> Non
     finally:
         sys.stdin, sys.stdout = stdin, stdout
     assert raw, "a NotebookEdit under src/ must produce a decision, not silence"
-    assert "gate 'tasks' is not approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "no mandate is approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_a_denial_is_written_in_every_hosts_dialect_at_once(tmp_path: Path) -> None:
@@ -721,13 +785,13 @@ def test_a_denial_is_written_in_every_hosts_dialect_at_once(tmp_path: Path) -> N
     assert answer["reason"] == answer["hookSpecificOutput"]["permissionDecisionReason"], (
         "two dialects saying different things is worse than one saying nothing"
     )
-    assert "gate 'tasks' is not approved" in answer["reason"]
+    assert "no mandate is approved" in answer["reason"]
 
 
 def test_a_patch_touching_a_guarded_path_is_denied(tmp_path: Path) -> None:
     seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
     reason = codex_hook(tmp_path, _patch("*** Update File: src/app.py\n@@\n-a\n+b\n"))
-    assert "gate 'tasks' is not approved" in reason
+    assert "no mandate is approved" in reason
 
 
 def test_a_patch_touching_nothing_guarded_passes(tmp_path: Path) -> None:
@@ -744,7 +808,7 @@ def test_one_guarded_file_denies_the_whole_patch_and_says_which(tmp_path: Path) 
         _patch("*** Update File: README.md\n@@\n+x\n", "*** Update File: src/app.py\n@@\n+y\n"),
     )
     assert reason.startswith("src/app.py: ")
-    assert "gate 'tasks' is not approved" in reason
+    assert "no mandate is approved" in reason
 
 
 def test_a_patch_may_not_hand_edit_a_machine_written_artifact(tmp_path: Path) -> None:
@@ -775,7 +839,7 @@ def test_patch_paths_resolve_against_the_session_cwd(tmp_path: Path) -> None:
         raw = sys.stdout.getvalue().strip()
     finally:
         sys.stdin, sys.stdout = stdin, stdout
-    assert "gate 'tasks' is not approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "no mandate is approved" in json.loads(raw)["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_a_hosts_own_spelling_of_the_call_is_read_as_well_as_answered(tmp_path: Path) -> None:
@@ -801,7 +865,7 @@ def test_a_hosts_own_spelling_of_the_call_is_read_as_well_as_answered(tmp_path: 
     finally:
         sys.stdin, sys.stdout = stdin, stdout
     assert said, "a payload the guard cannot read is an allow, and this one is readable"
-    assert "gate 'tasks' is not approved" in json.loads(said)["reason"]
+    assert "no mandate is approved" in json.loads(said)["reason"]
 
 
 def test_every_spelling_of_the_call_arguments_finds_the_same_path() -> None:

@@ -132,7 +132,7 @@ def _issue_body(task: dag.Task) -> str:
             f"- blockedBy: {deps}",
             "",
             "> This issue is a **one-way mirror** from plan.yaml. Editing it here changes nothing:",
-            "> the plan is frozen at gate 3 and only `rein revise` can move it.",
+            "> the plan is frozen by the mandate and only `rein revise` can move it.",
             "",
             f"<!-- rein:{task.id} -->",
         ]

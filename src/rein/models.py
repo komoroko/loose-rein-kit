@@ -2,7 +2,7 @@
 
 Four artifacts carry the cycle (plan §5.1) and each has exactly one writer:
 
-  ``plan.yaml``    the Expected Model: one claim per requirement, and the task DAG — frozen at gate ③
+  ``plan.yaml``    the Expected Model: one claim per requirement, and the task DAG — frozen when the mandate is approved
   ``state.yaml``   mutable state only: phase, gate receipts, run status, task status
   ``review.yaml``  the machine review and, separately, the human review
   ``events.ndjson`` the append-only hash-chained audit log
@@ -41,15 +41,33 @@ from rein import common, data, digests, strict_yaml
 RISK_ORDER: tuple[str, ...] = ("low", "medium", "high", "critical")
 RISK_VALUES = frozenset(RISK_ORDER)
 
-#: The forward gate order. A roll back resets a chain of these (plan §16).
-GATE_ORDER: tuple[str, ...] = ("requirements", "design", "tasks", "build", "release")
+#: The two things a human approves, in the order they are approved. A roll back resets a chain of
+#: these (plan §16).
+#:
+#: **Authority, not procedure.** There were five, one per phase, and `approve` advanced
+#: `current_phase` in the same write that flipped a gate — so every question about *permission*
+#: arrived as a question about *order*, and the number of approvals was fixed by the number of
+#: stages rather than by the number of decisions. What a human actually decides is twice:
+#:
+#: * ``mandate`` — what the loop may change, what must become true, and what evidence counts.
+#:   The requirements, the design and the task breakdown are the material it is written from; none
+#:   of them is a thing to approve on its own.
+#: * ``acceptance`` — whether this change, with the evidence now on the record, is taken.
+#:
+#: Everything the five gates enforced survives as a *readiness* check on one of these two
+#: (`approve.readiness`). What does not survive is the claim that the *order* of the work is a
+#: human's to authorize: inside an approved mandate the loop consumes the DAG, reorders what it may
+#: and re-runs what went red without asking. What it may not do is re-cut the plan — `plan.yaml` is
+#: frozen whole, because a task's `acceptance` list lives in it and softening a criterion is
+#: exactly the widening `revise` exists for.
+GATE_ORDER: tuple[str, ...] = ("mandate", "acceptance")
 GATE_VALUES = frozenset(GATE_ORDER)
 GATE_STATUS_VALUES = frozenset({"pending", "approved"})
 
 #: Commands that run, exit zero, and establish nothing. `["true"]` is what the scaffold ships for
 #: its launch step; the others are the same gesture written differently. Shared vocabulary because
 #: two places have to agree on it and neither may import the other: `doctor.check_quality_gate`,
-#: which reports a DoD step that cannot fail, and `brief`, which tells a gate-④ reviewer whether
+#: which reports a DoD step that cannot fail, and `brief`, which tells an acceptance reviewer whether
 #: anything ever started the deliverable. Matched on the **argv**, never on the step's name.
 PLACEHOLDER_COMMANDS: frozenset[tuple[str, ...]] = frozenset(
     {("true",), ("/bin/true",), (":",), ("echo",), ("exit", "0")}
@@ -89,18 +107,16 @@ def is_stack_branch(ref: str) -> bool:
     return STACK_BRANCH_INFIX in ref
 
 
-#: current_phase values in lifecycle order (`brief` precedes gate ①, `done` follows gate ⑤).
-PHASE_ORDER: tuple[str, ...] = ("brief", "requirements", "design", "tasks", "build", "verify", "done")
-PHASE_VALUES = frozenset(PHASE_ORDER)
-
-#: The phase each gate opens the door to — `approve <gate>` advances current_phase to this.
-PHASE_AFTER_GATE: Mapping[str, str] = {
-    "requirements": "design",
-    "design": "tasks",
-    "tasks": "build",
-    "build": "verify",
-    "release": "done",
-}
+#: Where a cycle stands. **Derived from the gates, never stored**, which is the whole repair:
+#: `current_phase` was a second variable written by the same transaction that recorded an approval,
+#: so "what has been permitted" and "how far the work has got" could disagree — and did, after
+#: every hand-edit `doctor` then had to reconcile. There is nothing to reconcile now.
+#:
+#: * ``drafting`` — no mandate yet. The requirements, the design and the task breakdown are
+#:   written here, in any order, as many times as it takes.
+#: * ``building`` — a mandate is approved. The loop implements and verifies inside it.
+#: * ``done`` — the change was accepted.
+STAGE_ORDER: tuple[str, ...] = ("drafting", "building", "done")
 
 PLAN_STATUS_VALUES = frozenset({"draft", "frozen", "invalidated"})
 
@@ -147,7 +163,11 @@ ACCEPTANCE_EVIDENCE_KIND_VALUES = frozenset(ACCEPTANCE_EVIDENCE_KINDS)
 #: The kinds this loop can establish on its own.
 MECHANIZED_EVIDENCE_KINDS = frozenset({"command", "artifact"})
 
-EXECUTOR_VALUES = frozenset({"oci", "host"})
+#: The kinds that run contained — what the schema requires an image and a network profile of, and
+#: what `executors.for_profile` sends to `OciExecutor`. Two rather than one because repository code
+#: and the agent that writes it want opposite things of the network (`ExecutorProfile.kind`).
+SANDBOX_EXECUTOR_VALUES = frozenset({"oci", "oci-agent"})
+EXECUTOR_VALUES = SANDBOX_EXECUTOR_VALUES | {"host"}
 
 # Sandbox knobs (plan §10.2).
 MOUNT_MODE_VALUES = frozenset({"none", "read_only", "read_write"})
@@ -166,7 +186,7 @@ GATE_STAGE_VALUES = frozenset(GATE_STAGE_ORDER)
 #: a task failure under `build_loop.NEGATIVE_CONTROL` instead of as a value here.
 NEGATIVE_CONTROL_VALUES = frozenset({"discriminating", "no_tests_changed", "undetermined"})
 #: What the per-task reviewer may say about a change. `must_fix` sends it back to the implementer
-#: within the review step's own budget; `consider` stops nothing and is carried to gate ④. Neither
+#: within the review step's own budget; `consider` stops nothing and is carried to acceptance. Neither
 #: passes or fails a task on its own — the reviewer reports, and the loop decides what that costs.
 FINDING_SEVERITY_VALUES = frozenset({"must_fix", "consider"})
 AGENT_ROLE_VALUES = frozenset({"implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"})
@@ -184,7 +204,7 @@ COVERAGE_STATUS_VALUES = frozenset({"sufficient", "insufficient"})
 COMPOSITION_WHOLE = "whole"
 COMPOSITION_COMPOSED = "composed"
 COMPOSITION_VALUES = frozenset({COMPOSITION_WHOLE, COMPOSITION_COMPOSED})
-#: What an operator may ask for at gate ④. `composed` is not among them: composing is decided by
+#: What an operator may ask for at acceptance. `composed` is not among them: composing is decided by
 #: whether the plan actually declares task scopes to compose along, never by a preference.
 COMPOSITION_MODE_VALUES = frozenset({"auto", COMPOSITION_WHOLE})
 INTEGRITY_STATUS_VALUES = frozenset({"verified", "failed", "unavailable"})
@@ -228,7 +248,7 @@ DISPOSITION_VALUES = frozenset(
     }
 )
 
-#: How far the human half of the gate ④ review has got. `frozen` is the end state: the answers
+#: How far the human half of the acceptance review has got. `frozen` is the end state: the answers
 #: are sealed and digested, and `rein approve build` is what a human runs next.
 HUMAN_REVIEW_STATUS_ORDER: tuple[str, ...] = ("not_started", "in_progress", "frozen")
 HUMAN_REVIEW_STATUS_VALUES = frozenset(HUMAN_REVIEW_STATUS_ORDER)
@@ -300,7 +320,7 @@ SECURITY_CATEGORY_VALUES = frozenset(
 )
 
 
-#: The gate-④ rail, in order. Three screens and a freeze, because the same finding used to
+#: The acceptance rail, in order. Three screens and a freeze, because the same finding used to
 #: appear on four of them — as a summary count, as a raw gap, as an Expected/Actual row, and
 #: again as the card that actually asked for a decision. Only the last one wanted an answer.
 #:
@@ -371,24 +391,24 @@ EVENT_ORDER: tuple[str, ...] = (
     # judgement, it makes one possible.
     "run_measured",
     # A pinned sandbox image was rebuilt and re-pinned. Outside `ATTENTION_EVENTS`: it asks for no
-    # judgement now — it is what makes gate ④'s "the evidence was produced in an environment the
-    # gate ③ approval never saw" answerable then. Before this, `rein oci build --write-config`
+    # judgement now — it is what makes acceptance's "the evidence was produced in an environment the
+    # the mandate approval never saw" answerable then. Before this, `rein oci build --write-config`
     # rewrote config.yaml with `path.write_text` and the audit chain never heard about it.
     "environment_repinned",
     # A role was pointed at a different agent CLI or model. Deliberately its own name rather than
     # a second meaning for `environment_repinned`: that one says an image was rebuilt, and a
-    # closed vocabulary is closed so the log stays aggregatable. `agents` is outside the gate ③
+    # closed vocabulary is closed so the log stays aggregatable. `agents` is outside the mandate
     # freeze (`Config.frozen_digest`), so a switch needs no approval — which makes this line the
-    # only record that it happened, and the only way gate ④ can be told the evidence in front of
-    # it was produced by a different agent than the one gate ③ saw.
+    # only record that it happened, and the only way acceptance can be told the evidence in front of
+    # it was produced by a different agent than the one the mandate saw.
     "agents_switched",
     "decision_declared",
     # The work branch's quality gate, measured before any task ran. Its own name because it is a
-    # fact about the *tree* rather than about a run: gate ③ freezes it, `rein build` reads it, and
+    # fact about the *tree* rather than about a run: the mandate freezes it, `rein build` reads it, and
     # a task that fails a step the baseline already knew about is stopped rather than sent back to
     # an implementer whose scope does not contain the break.
     "baseline_measured",
-    # The dependency audit ran. Its own name because it is gate ⑤'s one security answer that
+    # The dependency audit ran. Its own name because it is acceptance's one security answer that
     # is not a function of the tree — it expires without anything in the repository moving, so
     # "when it last ran" is a question the log has to be able to answer.
     "dependency_audit_run",
@@ -433,7 +453,7 @@ EVENT_VALUES = frozenset(EVENT_ORDER)
 CONFIRMATION_CHANNELS: tuple[str, ...] = ("terminal", "ui-session")
 CONFIRMATION_CHANNEL_VALUES = frozenset(CONFIRMATION_CHANNELS)
 
-#: A security finding's life. `open` holds gate ④ shut. The two ways out are both facts rather
+#: A security finding's life. `open` holds acceptance shut. The two ways out are both facts rather
 #: than opinions, and neither is the reviewer's: `resolved` is recorded only when the code the
 #: finding anchored to is no longer in the tree (`security_review.resolution_of`), and `disputed`
 #: only when a human contradicted it with a reason that `state.disputed_findings` binds to the
@@ -530,7 +550,14 @@ def sandbox_setup_command(build_targets: Sequence[str]) -> str:
     """
     if len(build_targets) > 1:
         return "rein oci build --all --write-config"
-    return f"rein oci build --profile {build_targets[0]} --write-config" if build_targets else ""
+    if not build_targets:
+        return ""
+    target = build_targets[0]
+    # The agent image is the one that cannot be built from its name alone: which CLI goes in it is
+    # the operator's answer, not the package's. Printing the command without that argument sends a
+    # first-time setup into a build that refuses, with the missing half nowhere on the screen.
+    extra = " --build-arg AGENT_CLI=<npm package>" if target == "agent" else ""
+    return f"rein oci build --profile {target}{extra} --write-config"
 
 
 # --- errors -------------------------------------------------------------------
@@ -709,7 +736,7 @@ class Task(Element):
         Distinct from the shared DoD in two directions. The DoD is the same for every task and
         says the code is *sound*; these say this task in particular did *what it was for*. And a
         criterion here cannot loosen the gate — the DoD runs unchanged either way — because a
-        human froze this list at gate ③, which is exactly what stops it being a knob an
+        human froze this list at the mandate, which is exactly what stops it being a knob an
         implementer turns down on itself.
         """
         value = self.raw.get("acceptance")
@@ -720,13 +747,13 @@ class Task(Element):
         """What this task declares it will require of a person, as the frozen plan states it.
 
         A config key somebody has to set, a schema somebody has to migrate, a dependency somebody
-        has to provide, a signal somebody has to watch. Frozen at gate ③ with the rest of the task,
-        which is what makes it an *Expected* side: at gate ④ the blind extractor's readings are
+        has to provide, a signal somebody has to watch. Frozen at the mandate with the rest of the task,
+        which is what makes it an *Expected* side: at acceptance the blind extractor's readings are
         sorted by whether one of these declarations foresaw them, and the ones nothing foresaw are
         the rows an approver has to look at.
 
         Declaring nothing is allowed and costs nothing to write; it just means every operator-facing
-        reading in that area arrives at gate ④ as undeclared.
+        reading in that area arrives at acceptance as undeclared.
         """
         value = self.raw.get("operator_surface")
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
@@ -740,11 +767,16 @@ _PLAN_SECTIONS: Mapping[str, type[Element]] = {"claims": Claim, "tasks": Task}
 
 @dataclass(frozen=True)
 class Plan:
-    """``plan.yaml`` — the Expected Model, frozen at gate ③ (plan §6.1).
+    """``plan.yaml`` — the Expected Model, frozen when the mandate is approved (plan §6.1).
 
-    Everything a reviewer compares reality against lives here, and after the freeze the only
-    way to change it is `rein revise --to tasks`. The views below are built once in
-    `__post_init__`; `raw` stays the digest subject.
+    Everything a reviewer compares reality against lives here, and after the freeze the only way to
+    change it is `rein revise --to mandate` — **the whole document, `tasks` included**. There was a
+    second digest here that covered `cycle` + `scope` + `claims` only, on the reading that a
+    different decomposition of the same mandate is the same authorization. It is not, and the
+    reason is one field: `tasks[].acceptance` is a task's own bar, and a human freezes that list
+    with the mandate. A digest that skipped `tasks` would have let a criterion be softened under an
+    approval that never covered it — the mandate widened to fit the work, with nothing to notice.
+    The views below are built once in `__post_init__`; `raw` stays the digest subject.
     """
 
     raw: Mapping[str, Any]
@@ -776,6 +808,20 @@ class Plan:
     def digest(self) -> str:
         """The canonical plan digest a gate receipt binds (plan §17.1)."""
         return digests.of(self.raw, drop=digests.VOLATILE_TIMESTAMP_KEYS)
+
+    @property
+    def scope(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """`(include, exclude)` — the paths this mandate authorizes changes to.
+
+        An empty `include` is unbounded, matching a task's own `scope` and for the same reason: a
+        cycle that has not narrowed itself is not a cycle that has forbidden everything.
+        """
+        raw = self.raw.get("scope")
+        raw = raw if isinstance(raw, dict) else {}
+        return (
+            tuple(str(p) for p in raw.get("include", []) if isinstance(p, str)),
+            tuple(str(p) for p in raw.get("exclude", []) if isinstance(p, str)),
+        )
 
     @property
     def cycle(self) -> Mapping[str, Any]:
@@ -853,8 +899,16 @@ class State:
         return _str(self.raw, "cycle_id")
 
     @property
-    def current_phase(self) -> str:
-        return _str(self.raw, "current_phase", "brief")
+    def stage(self) -> str:
+        """Where this cycle stands, read off the gates rather than off a field of its own.
+
+        `drafting` until the mandate is approved, `building` until the change is accepted, `done`
+        after. Nothing writes it, so nothing can write it wrong: a stage that disagreed with the
+        gates was a real failure mode and had its own `doctor` check.
+        """
+        if self.gate_status("acceptance") == "approved":
+            return "done"
+        return "building" if self.gate_status("mandate") == "approved" else "drafting"
 
     @property
     def gates(self) -> Mapping[str, Mapping[str, Any]]:
@@ -889,7 +943,7 @@ class State:
 
     @property
     def plan_config_digest(self) -> str:
-        """What `config.yaml` hashed to when gate ③ froze it. "" before the freeze.
+        """What `config.yaml` hashed to when the mandate froze it. "" before the freeze.
 
         The pair of :attr:`plan_digest`, and specifically :meth:`Config.frozen_digest` — the
         sandbox *decisions* and the quality gate, image pins excluded.
@@ -899,7 +953,7 @@ class State:
 
     @property
     def plan_environment_digest(self) -> str:
-        """The sandbox picture gate ③ saw, pins included. "" before the freeze or on an old freeze.
+        """The sandbox picture the mandate saw, pins included. "" before the freeze or on an old freeze.
 
         Recorded rather than enforced: a rebuilt image is the same sandbox and is allowed to move
         underneath the freeze. Comparing it is how "the evidence was produced somewhere else than
@@ -910,7 +964,7 @@ class State:
 
     @property
     def frozen_sources(self) -> dict[str, str]:
-        """The prose the build reads, as it hashed when gate ③ froze it. Empty before the freeze.
+        """The prose the build reads, as it hashed when the mandate froze it. Empty before the freeze.
 
         `plan.yaml` is bound by a digest and always was; the task tickets and the design document
         an implementer is actually sent to *read* were bound to nothing. This is what makes
@@ -937,7 +991,7 @@ class State:
     def baseline(self) -> Mapping[str, Any]:
         """What the work branch's quality gate said before any task ran, or {} when unmeasured.
 
-        Taken at gate ③ rather than inside `rein build`, because the question it answers — "is
+        Taken at the mandate rather than inside `rein build`, because the question it answers — "is
         this plan implementable against this tree?" — is the one the gate is deciding. Measured
         after the approval, a step that had been red for weeks was discovered by the first task
         to hit it, which then spent its whole send-back budget on a failure it had not caused and
@@ -947,7 +1001,7 @@ class State:
         acceptance evidence and a dispute are, and saying so is the point: the fingerprint is over
         the working tree, and committing content it already covered moves it (measured — an
         untracked file, the same file staged, and the same file committed produce three different
-        digests). Binding gate ③ to equality would refuse an approval after the commit that changed
+        digests). Binding the mandate to equality would refuse an approval after the commit that changed
         no byte, and charge a full quality-gate run to get it back. What it is for is the reader and
         the loop: `build_loop._load_baseline` says out loud when the branch has moved past the tree
         the frozen red steps were measured on.
@@ -1088,6 +1142,21 @@ class Review:
         return _str(self.binding, "change_digest")
 
     @property
+    def host_surface_digest(self) -> str:
+        """The digest of the installed host surfaces this review read.
+
+        The security stage is sent a checkout of the head with `.claude/`, `.codex/`, `.github/` and
+        `.gemini/` in it and is told to review them, while `change_digest` is taken with those paths
+        excluded. So a review is bound to two subjects, and this is the second
+        (`review_reading.host_surface_digest`).
+
+        "" for a review generated before this was measured. That is not the digest of an empty
+        tree and must not be read as one: it means the subject was never measured, so the review
+        is stale rather than silently current.
+        """
+        return _str(self.binding, "host_surface_digest")
+
+    @property
     def effective_risk(self) -> str:
         """The risk this review was generated against (plan §13.5).
 
@@ -1121,7 +1190,7 @@ class Review:
 
     @property
     def blocking_security_findings(self) -> tuple[Mapping[str, Any], ...]:
-        """Findings that still hold gate ④ shut: `blocking`, and not already closed.
+        """Findings that still hold acceptance shut: `blocking`, and not already closed.
 
         A closed finding stays in the document — that is the record of what closed it and how —
         but it is not a blocker any more. There are two ways to close, and this excludes both:
@@ -1170,7 +1239,25 @@ class ExecutorProfile:
 
     @property
     def is_sandboxed(self) -> bool:
+        """A sandbox for **repository-derived code**: the quality gate's command steps, and the
+        mechanized acceptance criteria that run through the same runner. Egress is refused."""
         return self.kind == "oci"
+
+    @property
+    def is_agent_sandbox(self) -> bool:
+        """A sandbox for **an agent CLI**: the thing that writes the code, rather than the code.
+
+        A separate kind because the two want opposite things of the network. Repository code has
+        no business phoning out, so `oci` refuses egress outright; an agent that cannot reach its
+        model API cannot do anything at all, so `oci-agent` requires it. Encoding that as one kind
+        with a knob would have meant a quality-gate profile could be handed egress by a typo.
+        """
+        return self.kind == "oci-agent"
+
+    @property
+    def runs_contained(self) -> bool:
+        """Either sandbox — what decides digest pinning, image builds, and executor dispatch."""
+        return self.is_sandboxed or self.is_agent_sandbox
 
     @property
     def image(self) -> str:
@@ -1259,7 +1346,7 @@ class GateStep:
     def paths(self) -> tuple[str, ...]:
         """Glob patterns scoping this step to matching changed paths (empty: every task).
 
-        Frozen at gate 3 like the rest of config.yaml — a human decision, never a knob a task's
+        Frozen at the mandate like the rest of config.yaml — a human decision, never a knob a task's
         own ticket sets, which is what would let an implementer turn its own gate down. Matching
         happens in `build_loop.GateStep.matches_paths`, against the normalized step this parses
         into.
@@ -1280,7 +1367,7 @@ class GateStep:
 
 #: The per-profile key that names a *build* of the sandbox rather than a decision about it. The
 #: only thing `rein oci build --write-config` rewrites when a dependency changes, and the only
-#: thing gate ③'s freeze lets move underneath it.
+#: thing the mandate's freeze lets move underneath it.
 PIN_KEY = "image"
 
 
@@ -1306,7 +1393,7 @@ def _without_mutable_environment(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class Config:
-    """``config.yaml`` — execution knobs, frozen at gate ③ apart from the image pins and `agents`.
+    """``config.yaml`` — execution knobs, frozen by the mandate apart from the image pins and `agents`.
 
     Read by the guard hook, the build loop, the executors, and doctor. Note what it cannot
     answer: *who* may approve anything. There is no knob for that here — a gate opens only by a
@@ -1325,7 +1412,7 @@ class Config:
         return cls(document)
 
     def frozen_digest(self) -> str:
-        """The part of config.yaml gate ③'s approval covers: everything but the image pins and
+        """The part of config.yaml the mandate's approval covers: everything but the image pins and
         `agents`.
 
         Both exclusions answer the same question — is this a change of *decision*, or a change of
@@ -1334,14 +1421,14 @@ class Config:
         The pin is outside because a task that legitimately adds a dependency makes the pinned
         image wrong — the closure it needs is not baked in, and a `network: none` sandbox fails
         the same way on every retry — so the image has to be rebuilt *during* the cycle. With the
-        whole file frozen, that one digest string cost a `rein revise --to tasks`: the plan
+        whole file frozen, that one digest string cost a `rein revise --to mandate`: the plan
         un-froze, every gate below reset in a chain, and the human re-approved a plan nothing had
         changed.
 
         `agents` is outside for the same reason and by explicit choice: which CLI and which model
         write the code is a running decision an operator may remake mid-cycle — a model is
         deprecated, a CLI is down, a role needs a second opinion from elsewhere — and rewinding an
-        approved plan is a heavy price for it. It is not thereby unchecked. What gate ④'s
+        approved plan is a heavy price for it. It is not thereby unchecked. What acceptance's
         independence check settles on has never been this file: it is the model each launch
         *reports* having answered (`usage.Usage.models`), recorded on the review.
 
@@ -1350,8 +1437,8 @@ class Config:
         budgets, the guard. Flipping a profile from `oci` to `host`, or opening its network, still
         breaks the freeze and still needs a human — those widen what may happen.
 
-        Neither exclusion is unbound: :meth:`environment_digest` covers both, gate ③ records that
-        digest beside this one, and `rein doctor` and the gate ④ brief report when it has moved.
+        Neither exclusion is unbound: :meth:`environment_digest` covers both, the mandate records that
+        digest beside this one, and `rein doctor` and the acceptance brief report when it has moved.
         """
         return digests.of(_without_mutable_environment(self.raw), drop=digests.VOLATILE_TIMESTAMP_KEYS)
 
@@ -1433,12 +1520,43 @@ class Config:
             return {}
         return {name: ExecutorProfile(name, body) for name, body in raw.items() if isinstance(body, dict)}
 
-    def profile_for(self, role: str) -> ExecutorProfile | None:
-        """The sandbox a role runs in ("implementer" / "reviewer" / "quality_gate")."""
+    @property
+    def quality_gate_profile(self) -> ExecutorProfile | None:
+        """The sandbox the quality gate's command steps run in, or None when it does not resolve.
+
+        **The only executor profile that reaches a container.** `executors` carried
+        `implementer_profile` and `reviewer_profile` beside this one, the schema required both, and
+        its own description said "which profile each role runs under" — but `executors.for_profile`
+        is reached from two places (`build_loop._run_cmd_step` and `audit.run`) and an agent CLI is
+        launched from neither. Those two keys never wrapped anything: they were read by the
+        unsandboxed-profile warning, by preflight's image check, and by a string the dossier told
+        the agent about the environment it was in. Configuring them bought a promise nothing kept,
+        which is worse than not offering them, so they are gone.
+
+        None is a *config error* and its caller says so. It used to fall back to a host profile,
+        which meant a misspelt profile name ran the DoD on the machine and said nothing.
+        """
         executors = self.raw.get("executors")
         if not isinstance(executors, dict):
             return None
-        return self.profiles.get(_str(executors, f"{role}_profile"))
+        return self.profiles.get(_str(executors, "quality_gate_profile"))
+
+    @property
+    def agent_profile(self) -> ExecutorProfile | None:
+        """The sandbox an agent CLI is launched in, or None to launch it on the host.
+
+        None is a legitimate answer and stays the default, which is why this key is optional where
+        `quality_gate_profile` is required: the image has to carry the CLI, and no image this
+        package ships can carry every CLI anyone points a role at. What is not legitimate is the
+        state this replaced — an `implementer_profile` that named a sandbox and wrapped nothing, so
+        the operator who configured it believed in a boundary that did not exist. Absent means the
+        agent runs as a host process with the operator's credentials, and every surface that
+        reports the environment says exactly that.
+        """
+        executors = self.raw.get("executors")
+        if not isinstance(executors, dict):
+            return None
+        return self.profiles.get(_str(executors, "agent_profile"))
 
     @property
     def quality_gate(self) -> tuple[GateStep, ...]:
@@ -1466,7 +1584,7 @@ class Config:
 
         Empty when no model is named — the CLI's default cannot be named in advance. What actually
         answered is read back from the launch (`usage.Usage.models`) and recorded on the review, and
-        that is what the gate-④ check is settled on.
+        that is what the acceptance check is settled on.
         """
         adapter, model = self.adapter(role), self.model(role)
         return f"{adapter}/{model}" if adapter and model else ""
@@ -1480,11 +1598,18 @@ class Config:
         return bool(guard.get("template_mode")) if isinstance(guard, dict) else False
 
     @property
-    def guard_paths(self) -> dict[str, str]:
-        """Guarded path → the gate it requires. A trailing "/" makes it a prefix rule."""
+    def guard_paths(self) -> tuple[str, ...]:
+        """The paths a mandate has to authorize before the loop may write them.
+
+        A trailing "/" makes it a prefix rule. Each entry used to carry the gate it required, from
+        a five-gate ladder in which a path's permission was a question about *which phase* — and
+        with one mandate the answer is the same for every entry, so the pairing said nothing.
+        """
         guard = self.raw.get("guard")
-        entries = _maps(guard, "paths") if isinstance(guard, dict) else ()
-        return {_str(e, "path"): _str(e, "requires_gate") for e in entries if _str(e, "path")}
+        entries = guard.get("paths") if isinstance(guard, dict) else None
+        if not isinstance(entries, list):
+            return ()
+        return tuple(p for p in entries if isinstance(p, str) and p)
 
     @property
     def budgets(self) -> dict[str, int]:
@@ -1496,7 +1621,7 @@ class Config:
 
     @property
     def repair_rounds(self) -> int:
-        """How many times gate ④ may repair its own findings before it stops and asks a human.
+        """How many times acceptance may repair its own findings before it stops and asks a human.
 
         Bounded because the failure this has to survive is a *false positive*: repairing a finding
         that was never true converges on nothing, and an unbounded loop would spend a session
@@ -1513,7 +1638,7 @@ class Config:
 
     @property
     def composition(self) -> str:
-        """How gate ④ takes its reading: `auto` composes from the plan's tasks, `whole` never does.
+        """How acceptance takes its reading: `auto` composes from the plan's tasks, `whole` never does.
 
         `auto` is the default because composition is what keeps the peak of one launch at the size
         of one task rather than of a cycle. `whole` is the escape for a repository that would
@@ -1535,6 +1660,10 @@ class Config:
         Reported by `doctor` rather than raised: a freshly initialized repository legitimately
         starts here, and the honest answer is "not compliant yet, here is the command", not a
         crash on first run.
+
+        One profile, not three. It named `implementer` and `reviewer` too, which made the warning
+        say more than the tool could deliver: sandboxing those two changed nothing about where the
+        agent CLIs ran, because nothing ever launched them through an executor.
         """
         return sorted({profile.name for profile in self._unsandboxed_profiles()})
 
@@ -1553,10 +1682,24 @@ class Config:
         return sandbox_setup_command(self.unsandboxed_build_targets())
 
     def _unsandboxed_profiles(self) -> list[ExecutorProfile]:
-        if not isinstance(self.raw.get("executors"), dict):
-            return []
-        profiles = (self.profile_for(role) for role in ("implementer", "reviewer", "quality_gate"))
-        return [p for p in profiles if p is not None and not p.is_sandboxed]
+        """Every profile a command step can actually reach, that is not a sandbox.
+
+        Resolved per step rather than from `executors` alone, because a step may name its own
+        `executor_profile` — and one that names a `host` profile runs repository code on the
+        machine just as surely as the default would. Reading only the `executors` block reported
+        three profiles, two of which nothing ever entered, and missed this one, which anything can.
+        """
+        named = self.profiles
+        reached = {
+            resolved.name: resolved
+            for step in self.quality_gate
+            if step.kind == "command"
+            for resolved in (
+                (named.get(step.executor_profile) if step.executor_profile else None) or self.quality_gate_profile,
+            )
+            if resolved is not None
+        }
+        return [p for p in reached.values() if not p.is_sandboxed]
 
 
 # --- Event ---------------------------------------------------------------------

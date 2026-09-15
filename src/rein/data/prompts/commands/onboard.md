@@ -64,7 +64,7 @@ is always the same; only the intake differs:
 |---|---|
 | No documents at all (implementation only) | `/onboard` alone — the survey is code-driven, so it succeeds; recover intent into the brief (step 3 note), then the next change starts a normal `/req` cycle. |
 | No docs beyond a README, implementation stable | Same as above (link the README etc. from the baseline). |
-| Requirements/design documents exist for not-yet-built work | Run `/req` → `/design` as a **fast intake**: shape each existing document into the deliverable and have the human open gates ①② normally — that approval *is* the adoption of the old document into this system. |
+| Requirements/design documents exist for not-yet-built work | Run `/req` → `/design` as a **fast intake**: shape each existing document into the deliverable and have the human approve the mandate normally — that approval *is* the adoption of the old documents into this system. |
 | Implementation in flight (half-done) | Fast intake as above, then `/tasks`' brownfield note: plan only the **remaining delta**, anchored by an **absorb task** that pins the existing partial implementation green. |
 | Docs and implementation both complete (adopting for future work) | `/onboard` alone; the first delta cycle starts when the next change arrives. |
 

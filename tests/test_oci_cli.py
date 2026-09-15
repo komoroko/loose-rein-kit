@@ -118,11 +118,7 @@ def test_build_targets_are_containerfiles_not_profile_names() -> None:
 
 # --- --write-config: the copy-the-digest-by-hand step ----------------------------
 
-_PINS = {
-    "quality": "localhost/rein-python@sha256:" + "a" * 64,
-    "reviewer": "localhost/rein-reviewer@sha256:" + "b" * 64,
-    "implementer": "localhost/rein-implementer@sha256:" + "c" * 64,
-}
+_PINS = {"quality": "localhost/rein-python@sha256:" + "a" * 64}
 
 
 def _shipped_config() -> str:
@@ -214,9 +210,9 @@ def test_build_refuses_up_front_when_no_container_runtime_exists(
 
 # --- the re-pin reaches the audit chain ---------------------------------------
 #
-# Gate ③ deliberately leaves the image pin outside its freeze, so a rebuilt sandbox costs no
+# The mandate deliberately leaves the image pin outside its freeze, so a rebuilt sandbox costs no
 # rollback. What that permission is paid for with is visibility: the change has to acquire a time
-# and a place in the chain, and gate ④ reads it beside the evidence it produced. Before this,
+# and a place in the chain, and acceptance reads it beside the evidence it produced. Before this,
 # `--write-config` rewrote config.yaml with `path.write_text` and the log never heard about it.
 
 

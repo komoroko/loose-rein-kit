@@ -79,7 +79,7 @@ def test_an_adapter_that_does_not_report_records_unmeasured_rather_than_zero() -
 
 
 def test_every_gate_four_adapter_answers_something_that_parses_as_one_json_object() -> None:
-    """Gate ④'s three stages ask for "one JSON object and no other text" and parse the whole of
+    """Acceptance's three stages ask for "one JSON object and no other text" and parse the whole of
     stdout strictly. A CLI that prints a banner, its reasoning or a stats footer around that object
     has not given a smaller answer — it has given an unreadable one, and every stage reported it as
     the reviewer's fault. Only `claude` had an envelope, so only `claude` ever worked there."""
@@ -114,7 +114,7 @@ def test_a_gemini_run_that_failed_is_not_read_as_an_answer() -> None:
 
 def test_a_codex_stream_answers_with_its_last_agent_message() -> None:
     """The earlier items are the agent talking to itself on the way there. Taking the first would
-    hand gate ④ a paragraph of reasoning where it asked for one JSON object."""
+    hand acceptance a paragraph of reasoning where it asked for one JSON object."""
     from tests._support import codex_events
 
     answer, spent = usage.parse_codex_envelope(codex_events("the answer", input_tokens=7, output_tokens=3))
@@ -194,10 +194,35 @@ def test_a_model_an_adapter_cannot_be_told_to_run_is_refused_not_dropped() -> No
     stop — the independence check is derived from it."""
     from rein import models
 
-    assert adapters.ADAPTER_TABLE["codex"].model_flags == ()
-    config = models.Config({"agents": {"implementer": {"adapter": "codex", "model": "gpt"}}})
+    assert adapters.ADAPTER_TABLE["amp"].model_flags == (), "amp's execute-mode reference documents none"
+    config = models.Config({"agents": {"implementer": {"adapter": "amp", "model": "gpt"}}})
     with pytest.raises(adapters.LaunchRefused, match="cannot tell"):
         adapters.launch_argv(config, "implementer")
+
+
+def test_the_codex_thread_id_is_read_off_the_stream_it_was_always_in() -> None:
+    """`codex exec --json` opens with `thread.started`, whose id `codex exec resume <id>` takes.
+
+    The adapter was recorded as having no session at all on the reading that its resume verb takes
+    only the *last* one — so every retry re-read the ticket, the design slice and the code from
+    cold. The id was in the first line of the stream the envelope parser was already walking.
+    """
+    from tests._support import codex_events
+
+    assert usage.codex_session(codex_events("done")) == "t-1"
+
+
+def test_a_codex_stream_that_names_no_thread_is_cold_rather_than_broken() -> None:
+    """A run that produced an answer has not failed because it cannot be continued."""
+    stream = "\n".join(
+        json.dumps(e)
+        for e in (
+            {"type": "item.completed", "item": {"id": "1", "type": "agent_message", "text": "x"}},
+            {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}},
+        )
+    )
+    assert usage.codex_session(stream) == ""
+    assert usage.parse_codex_envelope(stream)[0] == "x", "and the answer still reads"
 
 
 def test_a_replay_is_not_priced_as_a_bill() -> None:

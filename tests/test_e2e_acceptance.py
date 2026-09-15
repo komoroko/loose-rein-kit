@@ -6,7 +6,7 @@ the code, standing beside a quality gate that only ever answered a different que
 code *sound*, not did it do what it was *for*.
 
 Moving them into the frozen plan makes them checkable without making them an implementer's knob —
-a human freezes the list at gate ③, and the shared DoD still runs unchanged. And it makes room
+a human freezes the list at the mandate, and the shared DoD still runs unchanged. And it makes room
 for the honest third answer: a criterion this loop cannot establish is neither passed nor failed,
 and `awaiting-evidence` is the status that says so instead of rounding to `done`.
 """
@@ -43,7 +43,7 @@ def build_repo(tmp_path: Path, acceptance: list[dict[str, Any]]) -> repo_mod.Rep
         root,
         config=make_config(branch=WORK_BRANCH, quality_gate=GATE, max_parallel=2, launch_retries=0),
         plan=make_plan(tasks=[make_task("T-001", kind="parallel", claim_ids=["C-001"], acceptance=acceptance)]),
-        state=make_state(phase="build", plan_status="frozen"),
+        state=make_state(plan_status="frozen"),
     )
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "seed")
@@ -166,7 +166,7 @@ def test_an_artifact_criterion_requires_the_file_to_exist(tmp_path: Path, monkey
 def test_a_prose_criterion_establishes_nothing_and_blocks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Most criteria are judgement calls. Saying so is honest; gate ④ is where a human reads them."""
+    """Most criteria are judgement calls. Saying so is honest; acceptance is where a human reads them."""
     repo = build_repo(tmp_path, [{"id": "A-1", "statement": "the error message is understandable"}])
     monkeypatch.setattr(build_loop, "_run", writing_agent())
 

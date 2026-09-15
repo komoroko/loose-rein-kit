@@ -45,14 +45,14 @@ def test_the_cli_refuses_without_a_terminal(monkeypatch: pytest.MonkeyPatch, tmp
     """A piped stdin, a CI job, or an agent's captured subprocess must not approve by accident."""
     repo = repo_at(
         tmp_path,
-        state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"),
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
         plan=make_plan(claims=[make_claim("C-001", requirement_ids=["R-1"])]),
     )
     monkeypatch.setattr("sys.stdin", io.StringIO("requirements\n"))  # readable, but not a terminal
-    assert approve.main(["requirements", "--repo", str(tmp_path)]) == 1
+    assert approve.main(["mandate", "--repo", str(tmp_path)]) == 1
 
     state = store_mod.Store(repo).read_state()
-    assert state is not None and state.gate_status("requirements") == "pending"
+    assert state is not None and state.gate_status("mandate") == "pending"
 
 
 class _Tty(io.StringIO):
@@ -63,7 +63,7 @@ class _Tty(io.StringIO):
 
 
 def local_repo(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:
-    kwargs.setdefault("state", make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    kwargs.setdefault("state", make_state(gates=PENDING_ALL, plan_status="draft"))
     kwargs.setdefault("plan", make_plan(claims=[make_claim("C-001", requirement_ids=["R-1"])]))
     return repo_at(tmp_path, **kwargs)
 
@@ -73,14 +73,14 @@ def test_a_yes_at_the_terminal_opens_the_gate(
 ) -> None:
     repo = local_repo(tmp_path)
     monkeypatch.setattr("sys.stdin", _Tty("y\n"))
-    assert approve.main(["requirements", "--repo", str(tmp_path)]) == 0
+    assert approve.main(["mandate", "--repo", str(tmp_path)]) == 0
 
     state = store_mod.Store(repo).read_state()
     assert state is not None
-    assert state.gate_status("requirements") == "approved"
-    assert state.current_phase == "design"
-    receipt = state.gate_receipt("requirements")
-    assert receipt is not None and receipt["approval_id"].startswith("GA-REQUIREMENTS-")
+    assert state.gate_status("mandate") == "approved"
+    assert state.stage == "building"
+    receipt = state.gate_receipt("mandate")
+    assert receipt is not None and receipt["approval_id"].startswith("GA-MANDATE-")
     # The prompt has to say what it is worth, every time — and what it is worth is narrower than
     # "a human approved", which nothing here can establish. Both halves are asserted: what it
     # does not claim, and the property that actually holds.
@@ -92,9 +92,9 @@ def test_a_yes_at_the_terminal_opens_the_gate(
 def test_the_receipt_binds_the_plan_digest_and_the_chain_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = local_repo(tmp_path)
     monkeypatch.setattr("sys.stdin", _Tty("y\n"))
-    approve.main(["requirements", "--repo", str(tmp_path)])
+    approve.main(["mandate", "--repo", str(tmp_path)])
 
-    receipt = (store_mod.Store(repo).read_state() or models.State({})).gate_receipt("requirements") or {}
+    receipt = (store_mod.Store(repo).read_state() or models.State({})).gate_receipt("mandate") or {}
     assert receipt["plan_digest"] and receipt["attested_chain_root"]
     # The root the approval *lands* on, not the one it was confirmed against — this very
     # transaction appends `gate_approved`, so the chain necessarily moves.
@@ -104,27 +104,28 @@ def test_the_receipt_binds_the_plan_digest_and_the_chain_root(tmp_path: Path, mo
 def test_recording_pins_the_event_that_opened_the_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = local_repo(tmp_path)
     monkeypatch.setattr("sys.stdin", _Tty("y\n"))
-    approve.main(["requirements", "--repo", str(tmp_path)])
+    approve.main(["mandate", "--repo", str(tmp_path)])
 
     store = store_mod.Store(repo)
     events = store.read_events()
-    assert [e.event for e in events] == ["gate_approved"]
+    # Two events, because approving the mandate is also what freezes the plan it authorizes.
+    assert [e.event for e in events] == ["gate_approved", "plan_frozen"]
     assert events[0].actor == "local-confirmation"
-    receipt = (store.read_state() or models.State({})).gate_receipt("requirements") or {}
+    receipt = (store.read_state() or models.State({})).gate_receipt("mandate") or {}
     assert receipt["approval_id"] in events[0].subject_ids
-    assert "requirements" in events[0].subject_ids
+    assert "mandate" in events[0].subject_ids
 
 
-@pytest.mark.parametrize("answer", ["\n", "n\n", "no\n", "requirements\n", "  \n"])
+@pytest.mark.parametrize("answer", ["\n", "n\n", "no\n", "mandate\n", "  \n"])
 def test_anything_but_yes_cancels(answer: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A bare Enter is the case that matters: the default must be no, so a stray keystroke in a
     terminal that has been sitting open cannot open a gate."""
     repo = local_repo(tmp_path)
     monkeypatch.setattr("sys.stdin", _Tty(answer))
-    assert approve.main(["requirements", "--repo", str(tmp_path)]) == 1
+    assert approve.main(["mandate", "--repo", str(tmp_path)]) == 1
 
     state = store_mod.Store(repo).read_state()
-    assert state is not None and state.gate_status("requirements") == "pending"
+    assert state is not None and state.gate_status("mandate") == "pending"
 
 
 def test_declining_points_at_the_way_to_record_why(
@@ -134,15 +135,15 @@ def test_declining_points_at_the_way_to_record_why(
     that the next session never saw."""
     local_repo(tmp_path)
     monkeypatch.setattr("sys.stdin", _Tty("n\n"))
-    approve.main(["requirements", "--repo", str(tmp_path)])
-    assert "rein changes add requirements" in caplog.text
+    approve.main(["mandate", "--repo", str(tmp_path)])
+    assert "rein changes add mandate" in caplog.text
 
 
 def test_the_terminal_path_says_which_channel_confirmed_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = local_repo(tmp_path)
     monkeypatch.setattr("sys.stdin", _Tty("y\n"))
-    approve.main(["requirements", "--repo", str(tmp_path)])
-    receipt = (store_mod.Store(repo).read_state() or models.State({})).gate_receipt("requirements") or {}
+    approve.main(["mandate", "--repo", str(tmp_path)])
+    receipt = (store_mod.Store(repo).read_state() or models.State({})).gate_receipt("mandate") or {}
     assert receipt["confirmed_via"] == "terminal"
 
 
@@ -151,11 +152,9 @@ def test_the_terminal_path_says_which_channel_confirmed_it(tmp_path: Path, monke
 
 def test_an_empty_plan_has_nothing_to_approve(tmp_path: Path) -> None:
     repo = repo_at(
-        tmp_path,
-        state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"),
-        plan=make_plan(claims=[], tasks=[]),
+        tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"), plan=make_plan(claims=[], tasks=[])
     )
-    blockers = approve.readiness(repo, "requirements")
+    blockers = approve.readiness(repo, "mandate")
     assert any("states no claims" in b for b in blockers)
 
 
@@ -163,28 +162,29 @@ def test_a_claim_with_no_requirement_id_makes_the_thread_unknown(tmp_path: Path)
     """The false green this replaced: an empty/unlinked plan used to read as a whole thread."""
     repo = repo_at(
         tmp_path,
-        state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"),
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
         plan=make_plan(claims=[make_claim("C-001", requirement_ids=[])], tasks=[]),
     )
-    assert any("unknown, not whole" in b for b in approve.readiness(repo, "requirements"))
+    assert any("unknown, not whole" in b for b in approve.readiness(repo, "mandate"))
 
 
 def test_gates_open_in_order(tmp_path: Path) -> None:
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
-    blockers = approve.readiness(repo, "design")
-    assert any("gate 'requirements' is still pending" in b for b in blockers)
+    """Acceptance cannot be taken on a change nobody authorized."""
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
+    blockers = approve.readiness(repo, "acceptance")
+    assert any("gate 'mandate' is still pending" in b for b in blockers)
 
 
 def test_an_already_approved_gate_is_a_blocker(tmp_path: Path) -> None:
     repo = repo_at(tmp_path)  # approved through tasks
-    assert any("already approved" in b for b in approve.readiness(repo, "tasks"))
+    assert any("already approved" in b for b in approve.readiness(repo, "mandate"))
 
 
 def test_already_approved_blocks_can_be_dropped_for_a_status_board(tmp_path: Path) -> None:
     """A board asking "what stands in this gate's way" must not read a healthy gate as its own
     blocker — that is the one caller `already_approved_blocks=False` exists for."""
     repo = repo_at(tmp_path)  # approved through tasks
-    assert approve.readiness(repo, "tasks", already_approved_blocks=False) == []
+    assert approve.readiness(repo, "mandate", already_approved_blocks=False) == []
 
 
 def test_readiness_reports_every_blocker_not_just_the_first(tmp_path: Path) -> None:
@@ -192,13 +192,13 @@ def test_readiness_reports_every_blocker_not_just_the_first(tmp_path: Path) -> N
     the whole release budgets against."""
     repo = repo_at(
         tmp_path,
-        state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"),
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
         plan=make_plan(claims=[], tasks=[]),
         events=chain("cycle_initialized"),
     )
     log = repo.events
     log.write_text(log.read_text(encoding="utf-8").replace("demo-cycle", "other", 1), encoding="utf-8")
-    blockers = approve.readiness(repo, "requirements")
+    blockers = approve.readiness(repo, "mandate")
     assert any("states no claims" in b for b in blockers)
     assert any("audit chain has" in b for b in blockers)
 
@@ -206,12 +206,12 @@ def test_readiness_reports_every_blocker_not_just_the_first(tmp_path: Path) -> N
 def test_a_damaged_audit_chain_blocks_every_gate(tmp_path: Path) -> None:
     repo = repo_at(
         tmp_path,
-        state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"),
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
         events=chain("cycle_initialized", "task_completed"),
     )
     log = repo.events
     log.write_text(log.read_text(encoding="utf-8").replace("demo-cycle", "other", 1), encoding="utf-8")
-    assert any("audit chain has" in b for b in approve.readiness(repo, "requirements"))
+    assert any("audit chain has" in b for b in approve.readiness(repo, "mandate"))
 
 
 def test_a_tool_behind_the_repository_may_not_write_a_receipt(tmp_path: Path) -> None:
@@ -225,7 +225,7 @@ def test_a_tool_behind_the_repository_may_not_write_a_receipt(tmp_path: Path) ->
     """
     from rein import lock as lock_mod
 
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
     lock_mod.write(repo.lock, lock_mod.new("99.0.0", "git+https://github.com/o/r@v99.0.0"))
     # The documents have to actually fail under this tool's schemas, because that *is* the
     # symptom: a newer release widens one and uses the new key. Checked after the reads, this
@@ -240,7 +240,7 @@ def test_a_tool_behind_the_repository_may_not_write_a_receipt(tmp_path: Path) ->
         assert not [b for b in blockers if "Additional properties" in b], gate
 
     lock_mod.write(repo.lock, lock_mod.new("0.1.0", ""))
-    assert not [b for b in approve.readiness(repo, "requirements") if "written by rein" in b]
+    assert not [b for b in approve.readiness(repo, "mandate") if "written by rein" in b]
 
 
 def test_an_unknown_gate_is_refused(tmp_path: Path) -> None:
@@ -249,37 +249,36 @@ def test_an_unknown_gate_is_refused(tmp_path: Path) -> None:
         approve.readiness(repo, "nonexistent")
 
 
-# --- gate 3: the plan has to be buildable --------------------------------------
+# --- the mandate: the plan has to be buildable --------------------------------------
 
 
 def test_gate_three_needs_a_task_for_every_claim(tmp_path: Path) -> None:
     repo = repo_at(
         tmp_path,
-        state=make_state(gates={"tasks": "pending", "build": "pending", "release": "pending"}, phase="tasks"),
+        state=make_state(gates={"mandate": "pending", "acceptance": "pending"}),
         plan=make_plan(
-            claims=[make_claim("C-001"), make_claim("C-002")],
-            tasks=[make_task("T-001", claim_ids=["C-001"])],
+            claims=[make_claim("C-001"), make_claim("C-002")], tasks=[make_task("T-001", claim_ids=["C-001"])]
         ),
     )
-    assert any("C-002: no task is answerable" in b for b in approve.readiness(repo, "tasks"))
+    assert any("C-002: no task is answerable" in b for b in approve.readiness(repo, "mandate"))
 
 
 def test_gate_three_needs_at_least_one_task(tmp_path: Path) -> None:
     repo = repo_at(
         tmp_path,
-        state=make_state(gates={"tasks": "pending", "build": "pending", "release": "pending"}, phase="tasks"),
+        state=make_state(gates={"mandate": "pending", "acceptance": "pending"}),
         plan=make_plan(claims=[make_claim("C-001")], tasks=[]),
     )
-    assert any("declares no tasks" in b for b in approve.readiness(repo, "tasks"))
+    assert any("declares no tasks" in b for b in approve.readiness(repo, "mandate"))
 
 
-# --- gate 4: a review, not a green test run ------------------------------------
+# --- acceptance: a review, not a green test run ------------------------------------
 
 
 def test_gate_four_needs_a_generated_review(tmp_path: Path) -> None:
     repo = repo_at(tmp_path, state=make_state(tasks={"T-001": "done"}), review=make_review(generated=False))
-    blockers = approve.readiness(repo, "build")
-    assert any("not a green test run" in b for b in blockers)
+    blockers = approve.readiness(repo, "acceptance")
+    assert any("not on a green test run" in b for b in blockers)
 
 
 def test_gate_four_blocks_on_an_insufficient_coverage_manifest(tmp_path: Path) -> None:
@@ -291,7 +290,7 @@ def test_gate_four_blocks_on_an_insufficient_coverage_manifest(tmp_path: Path) -
             generated=True, coverage_status="insufficient", human_status="frozen", effective_risk="high"
         ),
     )
-    assert any("coverage is insufficient" in b for b in approve.readiness(repo, "build"))
+    assert any("coverage is insufficient" in b for b in approve.readiness(repo, "acceptance"))
 
 
 def test_a_review_that_does_not_say_what_it_weighed_gets_the_strict_path(tmp_path: Path) -> None:
@@ -301,7 +300,7 @@ def test_a_review_that_does_not_say_what_it_weighed_gets_the_strict_path(tmp_pat
         state=make_state(tasks={"T-001": "done"}),
         review=make_review(generated=True, coverage_status="insufficient", human_status="frozen"),
     )
-    assert any("coverage is insufficient" in b for b in approve.readiness(repo, "build"))
+    assert any("coverage is insufficient" in b for b in approve.readiness(repo, "acceptance"))
 
 
 def test_an_unread_file_that_bears_no_risk_does_not_hold_gate_four_shut(tmp_path: Path) -> None:
@@ -311,7 +310,7 @@ def test_an_unread_file_that_bears_no_risk_does_not_hold_gate_four_shut(tmp_path
         state=make_state(tasks={"T-001": "done"}),
         review=make_review(generated=True, coverage_status="insufficient", human_status="frozen", effective_risk="low"),
     )
-    assert not [b for b in approve.readiness(repo, "build") if "coverage" in b]
+    assert not [b for b in approve.readiness(repo, "acceptance") if "coverage" in b]
 
 
 def test_gate_four_blocks_on_a_gap_the_comparator_marked_blocking(tmp_path: Path) -> None:
@@ -328,7 +327,7 @@ def test_gate_four_blocks_on_a_gap_the_comparator_marked_blocking(tmp_path: Path
         state=make_state(tasks={"T-001": "done"}),
         review=make_review(generated=True, human_status="frozen", effective_risk="low", gaps=[gap]),
     )
-    assert any("GAP-001" in b for b in approve.readiness(repo, "build"))
+    assert any("GAP-001" in b for b in approve.readiness(repo, "acceptance"))
 
 
 def test_gate_four_blocks_on_a_blocking_security_finding(tmp_path: Path) -> None:
@@ -344,7 +343,7 @@ def test_gate_four_blocks_on_a_blocking_security_finding(tmp_path: Path) -> None
         state=make_state(tasks={"T-001": "done"}),
         review=make_review(generated=True, human_status="frozen", security_findings=[finding]),
     )
-    assert any("SEC-001" in b for b in approve.readiness(repo, "build"))
+    assert any("SEC-001" in b for b in approve.readiness(repo, "acceptance"))
 
 
 def test_gate_four_blocks_until_the_human_review_is_frozen(tmp_path: Path) -> None:
@@ -353,14 +352,14 @@ def test_gate_four_blocks_until_the_human_review_is_frozen(tmp_path: Path) -> No
         state=make_state(tasks={"T-001": "done"}),
         review=make_review(generated=True, human_status="in_progress"),
     )
-    assert any("not 'frozen'" in b for b in approve.readiness(repo, "build"))
+    assert any("not 'frozen'" in b for b in approve.readiness(repo, "acceptance"))
 
 
 def test_gate_four_blocks_while_tasks_are_unfinished(tmp_path: Path) -> None:
     repo = repo_at(
         tmp_path, state=make_state(tasks={"T-001": "todo"}), review=make_review(generated=True, human_status="frozen")
     )
-    assert any("tasks not done: T-001" in b for b in approve.readiness(repo, "build"))
+    assert any("tasks not done: T-001" in b for b in approve.readiness(repo, "acceptance"))
 
 
 def _reviewed_repo(tmp_path: Path) -> tuple[repo_mod.Repo, str, str]:
@@ -406,18 +405,18 @@ def _commit(tmp_path: Path, *paths: str) -> None:
 
 def test_gate_four_refuses_a_review_of_code_that_has_since_moved(tmp_path: Path) -> None:
     """Only the UI pane used to check this: none of the digests re-verified when code did, so
-    generate → commit → approve could open gate ④ over code no reviewer had seen."""
+    generate → commit → approve could open acceptance over code no reviewer had seen."""
     repo, head, change = _reviewed_repo(tmp_path)
 
     fresh = make_review(generated=True, human_status="frozen", effective_risk="low")
     fresh["machine"]["binding"]["subject_head_sha"] = head
     fresh["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=fresh)
-    assert not [b for b in approve.readiness(repo, "build") if "stale" in b or "says nothing" in b]
+    assert not [b for b in approve.readiness(repo, "acceptance") if "stale" in b or "says nothing" in b]
 
     (tmp_path / "product.py").write_text("x = 2\n", encoding="utf-8")
     _commit(tmp_path, "the product moved")
-    assert any("says nothing about the code as it now stands" in b for b in approve.readiness(repo, "build"))
+    assert any("says nothing about the code as it now stands" in b for b in approve.readiness(repo, "acceptance"))
 
 
 def test_recording_a_review_does_not_make_it_stale(tmp_path: Path) -> None:
@@ -438,22 +437,22 @@ def test_recording_a_review_does_not_make_it_stale(tmp_path: Path) -> None:
 
     _commit(tmp_path, "record the review")  # .rein/review.yaml and .rein/state.yaml
     assert repo._git_rc("rev-parse", "HEAD")[1].strip() != head, "HEAD did move"
-    assert not [b for b in approve.readiness(repo, "build") if "says nothing" in b]
+    assert not [b for b in approve.readiness(repo, "acceptance") if "says nothing" in b]
 
 
-# --- what gate 5 carries rather than re-reads -------------------------------------
+# --- what acceptance carries rather than re-reads -------------------------------------
 
 
 def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tmp_path: Path) -> None:
     """`/verify` no longer commissions a second security reading, so these two checks are what
     the release gate's security answer now rests on.
 
-    Re-running the reviewer at gate 5 asked the same reviewer about the same commit and wrote the
+    Re-running the reviewer at acceptance asked the same reviewer about the same commit and wrote the
     answer into a table cell nothing anchors — and the whole-codebase scope it asked for is a
-    different question from "is this change safe", one the cycle never asked. Carrying gate 4's
+    different question from "is this change safe", one the cycle never asked. Carrying acceptance's
     review instead is sound only because of these: a blocking finding holds this gate shut too, and
     a review taken against an older commit is refused rather than trusted. If either stops holding,
-    gate 5 has no security evidence at all, so they are pinned here and not only at gate 4.
+    acceptance has no security evidence at all, so they are pinned here and not only at acceptance.
     """
     finding = {
         "id": "SEC-001",
@@ -468,17 +467,19 @@ def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tm
     blocking["machine"]["binding"]["subject_head_sha"] = head
     blocking["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=blocking)
-    assert any("SEC-001" in b for b in approve.readiness(repo, "release")), "a blocking finding holds gate 5 shut"
+    assert any("SEC-001" in b for b in approve.readiness(repo, "acceptance")), (
+        "a blocking finding holds acceptance shut"
+    )
 
     clean = make_review(generated=True, human_status="frozen", effective_risk="low")
     clean["machine"]["binding"]["subject_head_sha"] = head
     clean["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=clean)
-    assert not [b for b in approve.readiness(repo, "release") if "says nothing" in b]
+    assert not [b for b in approve.readiness(repo, "acceptance") if "says nothing" in b]
 
     (tmp_path / "product.py").write_text("x = 2\n", encoding="utf-8")
     _commit(tmp_path, "the product moved")
-    assert any("says nothing about the code as it now stands" in b for b in approve.readiness(repo, "release")), (
+    assert any("says nothing about the code as it now stands" in b for b in approve.readiness(repo, "acceptance")), (
         "a review about earlier code is not this release's security evidence"
     )
 
@@ -489,11 +490,11 @@ def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tm
 def test_the_subject_binds_the_plan_config_and_chain_root(tmp_path: Path) -> None:
     repo = repo_at(
         tmp_path,
-        state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"),
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
         config=make_config(),
         events=chain("cycle_initialized"),
     )
-    subject = approve.approval_subject(repo, "requirements")
+    subject = approve.approval_subject(repo, "mandate")
     assert digests.is_digest(subject["plan_digest"])
     assert digests.is_digest(subject["config_digest"])
     assert subject["attested_chain_root"] == store_mod.Store(repo).chain_root()
@@ -502,18 +503,14 @@ def test_the_subject_binds_the_plan_config_and_chain_root(tmp_path: Path) -> Non
 
 def test_the_subject_includes_the_review_digests_once_generated(tmp_path: Path) -> None:
     repo = repo_at(tmp_path, state=make_state(tasks={"T-001": "done"}), review=make_review(generated=True))
-    subject = approve.approval_subject(repo, "build")
+    subject = approve.approval_subject(repo, "acceptance")
     assert digests.is_digest(subject["machine_digest"])
     assert digests.is_digest(subject["human_digest"])
 
 
 def test_the_subject_includes_the_artifact_digest_when_the_deliverable_exists(tmp_path: Path) -> None:
-    repo = repo_at(
-        tmp_path,
-        state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"),
-        docs=True,
-    )
-    subject = approve.approval_subject(repo, "requirements")
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"), docs=True)
+    subject = approve.approval_subject(repo, "mandate")
     assert digests.is_digest(subject["artifact_digest"])
 
 
@@ -523,59 +520,59 @@ def test_the_subject_includes_the_artifact_digest_when_the_deliverable_exists(tm
 def test_recording_refuses_when_the_chain_moved_since_the_subject_was_read(tmp_path: Path) -> None:
     """The subject was shown to a human at one chain root; if the chain moved before the
     confirmation was recorded, the approval covers a log that no longer exists."""
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
-    subject = approve.approval_subject(repo, "requirements")
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
+    subject = approve.approval_subject(repo, "mandate")
 
     with store_mod.Store(repo).transaction() as tx:
         tx.append("knowledge_gap", cycle_id="demo-cycle")
 
     with pytest.raises(approve.ApprovalError, match="chain moved"):
-        approve.record_approval(repo, "requirements", subject)
+        approve.record_approval(repo, "mandate", subject)
 
 
 def test_recording_refuses_a_damaged_chain(tmp_path: Path) -> None:
     repo = repo_at(
-        tmp_path,
-        state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"),
-        events=chain("cycle_initialized"),
+        tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"), events=chain("cycle_initialized")
     )
-    subject = approve.approval_subject(repo, "requirements")
+    subject = approve.approval_subject(repo, "mandate")
     repo.events.write_text(repo.events.read_text(encoding="utf-8").replace("demo-cycle", "x", 1), encoding="utf-8")
     with pytest.raises(approve.ApprovalError, match="damaged audit chain"):
-        approve.record_approval(repo, "requirements", subject)
+        approve.record_approval(repo, "mandate", subject)
 
 
-def test_recording_an_approval_writes_a_receipt_and_advances_the_phase(tmp_path: Path) -> None:
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
-    subject = approve.approval_subject(repo, "requirements")
-    approval_id = approve.record_approval(repo, "requirements", subject)
+def test_recording_an_approval_writes_a_receipt_and_the_stage_follows(tmp_path: Path) -> None:
+    """The approval writes the gate and nothing else. Where the cycle stands is read off it.
+
+    It used to write `current_phase` in the same transaction, which made one write the author of
+    two facts — what has been permitted and how far the work has got — that could then disagree.
+    """
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
+    subject = approve.approval_subject(repo, "mandate")
+    approval_id = approve.record_approval(repo, "mandate", subject)
 
     store = store_mod.Store(repo)
     state = store.read_state()
     assert state is not None
-    assert state.gate_status("requirements") == "approved"
-    assert state.current_phase == "design"
-    receipt = state.gate_receipt("requirements")
+    assert state.gate_status("mandate") == "approved"
+    assert state.stage == "building"
+    assert "current_phase" not in state.raw
+    receipt = state.gate_receipt("mandate")
     assert receipt is not None and receipt["approval_id"] == approval_id
 
 
-# --- gate ③ freezes the plan ---------------------------------------------------
+# --- the mandate freezes the plan ---------------------------------------------------
 #
-# This is the half that was missing entirely. Three documents said gate ③ freezes the plan,
+# This is the half that was missing entirely. Three documents said the mandate freezes the plan,
 # `gate_guard` rule 2 keyed off `plan.status == "frozen"`, and `rein build` refused to start
 # against a draft — while no code anywhere ever wrote "frozen". A correctly approved repository
 # could not build, and rule 2 never once engaged.
 
 
 def _tasks_gate_repo(tmp_path: Path) -> repo_mod.Repo:
-    """A repo standing at gate ③, with a plan whose claims all have a task."""
+    """A repo standing at the mandate, with a plan whose claims all have a task."""
     return repo_at(
         tmp_path,
-        state=make_state(
-            gates={"tasks": "pending", "build": "pending", "release": "pending"},
-            phase="tasks",
-            plan_status="draft",
-        ),
+        state=make_state(gates={"mandate": "pending", "acceptance": "pending"}, plan_status="draft"),
         plan=make_plan(claims=[make_claim("C-001")], tasks=[make_task("T-001", claim_ids=["C-001"])]),
     )
 
@@ -586,7 +583,7 @@ def test_approving_gate_three_freezes_the_plan(tmp_path: Path) -> None:
     plan, config = store.read_plan(), store.read_config()
     assert plan is not None and config is not None
 
-    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
 
     state = store.read_state()
     assert state is not None
@@ -607,13 +604,13 @@ def test_the_freeze_keys_are_exactly_the_ones_a_roll_back_clears(tmp_path: Path)
     from rein import revise
 
     repo = _tasks_gate_repo(tmp_path)
-    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
     store = store_mod.Store(repo)
     state = store.read_state()
     assert state is not None
     assert set(state.raw["plan"]) == {"status", *approve.FROZEN_PLAN_KEYS}
 
-    revision = revise.plan_revision(repo, "tasks", [])
+    revision = revise.plan_revision(repo, "mandate", [])
     assert revision["unfreezes_plan"] is True
     revise.apply(repo, revision, "a defect in the task breakdown")
 
@@ -624,7 +621,7 @@ def test_the_freeze_keys_are_exactly_the_ones_a_roll_back_clears(tmp_path: Path)
 
 def test_the_freeze_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
     repo = _tasks_gate_repo(tmp_path)
-    approval_id = approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    approval_id = approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
 
     events = store_mod.Store(repo).read_events()
     assert [e.event for e in events] == ["gate_approved", "plan_frozen"]
@@ -637,7 +634,7 @@ def test_the_freeze_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
 
 def test_a_plan_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path) -> None:
     repo = _tasks_gate_repo(tmp_path)
-    subject = approve.approval_subject(repo, "tasks")
+    subject = approve.approval_subject(repo, "mandate")
     # The human is reading the digest table; meanwhile the plan gains a claim. The chain-root
     # guard does not cover plan.yaml, so without this check the approval would freeze bytes
     # nobody was shown.
@@ -652,24 +649,28 @@ def test_a_plan_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path)
         config=None,
     )
     with pytest.raises(approve.ApprovalError, match="plan.yaml changed while the confirmation"):
-        approve.record_approval(repo, "tasks", subject)
+        approve.record_approval(repo, "mandate", subject)
 
 
 def test_a_config_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path) -> None:
     repo = _tasks_gate_repo(tmp_path)
-    subject = approve.approval_subject(repo, "tasks")
+    subject = approve.approval_subject(repo, "mandate")
     seed_repo(tmp_path, config=make_config(max_parallel=7), state=None, plan=None, review=None)
     with pytest.raises(approve.ApprovalError, match="config.yaml changed while the confirmation"):
-        approve.record_approval(repo, "tasks", subject)
+        approve.record_approval(repo, "mandate", subject)
 
 
-def test_the_other_gates_do_not_touch_the_plan_block(tmp_path: Path) -> None:
-    # Only gate ③ freezes. Gate ① approving a draft plan and leaving it draft is what lets
-    # /design and /tasks keep writing to it.
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
-    approve.record_approval(repo, "requirements", approve.approval_subject(repo, "requirements"))
-    state = store_mod.Store(repo).read_state()
-    assert state is not None and state.plan_status == "draft"
+def test_acceptance_does_not_touch_the_plan_block(tmp_path: Path) -> None:
+    """Only the mandate freezes. Acceptance rests on that freeze rather than taking another."""
+    repo = _tasks_gate_repo(tmp_path)
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    before = store_mod.Store(repo).read_state()
+    assert before is not None and before.plan_status == "frozen"
+    frozen = dict(before.raw["plan"])
+
+    approve.record_approval(repo, "acceptance", approve.approval_subject(repo, "acceptance"))
+    after = store_mod.Store(repo).read_state()
+    assert after is not None and after.raw["plan"] == frozen
 
 
 # --- the prose the build reads, pinned at the freeze ------------------------------
@@ -678,7 +679,7 @@ def test_the_other_gates_do_not_touch_the_plan_block(tmp_path: Path) -> None:
 def test_the_freeze_pins_the_documents_the_build_will_read(tmp_path: Path) -> None:
     """`plan.yaml` was bound by a digest. The tickets an implementer is *sent to read* were not.
 
-    That asymmetry is the whole defect: a ticket edited after gate ③ changed what got built, and
+    That asymmetry is the whole defect: a ticket edited after the mandate changed what got built, and
     nothing anywhere recorded that the thing built was not the thing approved.
     """
     repo = _tasks_gate_repo(tmp_path)
@@ -686,7 +687,7 @@ def test_the_freeze_pins_the_documents_the_build_will_read(tmp_path: Path) -> No
     ticket.parent.mkdir(parents=True, exist_ok=True)
     ticket.write_text("# T-001\n\n## Acceptance criteria\n- [ ] it holds\n", encoding="utf-8")
 
-    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
 
     state = store_mod.Store(repo).read_state()
     assert state is not None
@@ -696,7 +697,7 @@ def test_the_freeze_pins_the_documents_the_build_will_read(tmp_path: Path) -> No
 def test_a_document_that_does_not_exist_is_simply_not_a_source(tmp_path: Path) -> None:
     """A repository without a baseline has one fewer source, not a missing one."""
     repo = _tasks_gate_repo(tmp_path)
-    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
 
     state = store_mod.Store(repo).read_state()
     assert state is not None
@@ -710,9 +711,9 @@ def test_a_roll_back_releases_the_pinned_sources_too(tmp_path: Path) -> None:
     repo = _tasks_gate_repo(tmp_path)
     repo.path("docs/tasks").mkdir(parents=True, exist_ok=True)
     repo.path("docs/tasks/T-001.md").write_text("# T-001\n", encoding="utf-8")
-    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
 
-    revise.apply(repo, revise.plan_revision(repo, "tasks", []), "the ticket was wrong")
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "the ticket was wrong")
 
     state = store_mod.Store(repo).read_state()
     assert state is not None
@@ -732,13 +733,13 @@ def _requirements(repo: repo_mod.Repo, body: str) -> None:
 
 
 def test_a_marker_left_in_the_prose_holds_gate_one_shut(tmp_path: Path) -> None:
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
     _requirements(
         repo,
         "# Requirements\n\n### R-1: export\n- retention: [NEEDS CLARIFICATION: how long?]\n\n"
         "### R-2: import\n- format: [NEEDS CLARIFICATION: csv or json?]\n",
     )
-    blockers = [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+    blockers = [b for b in approve.readiness(repo, "mandate") if "NEEDS CLARIFICATION" in b]
     assert len(blockers) == 1
     # The lines, so the human is not left grepping their own deliverable.
     assert "2 unresolved" in blockers[0]
@@ -748,57 +749,62 @@ def test_a_marker_left_in_the_prose_holds_gate_one_shut(tmp_path: Path) -> None:
 def test_the_scaffolds_own_guidance_does_not_hold_the_gate_shut(tmp_path: Path) -> None:
     """The convention is explained *using* the marker. A check that cannot tell guidance from an
     open question is one nobody can leave switched on — and it would have blocked this very repo."""
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
     _requirements(
         repo,
         "# Requirements\n<!-- While drafting, mark anything undecided as `[NEEDS CLARIFICATION: <what>]`\n"
         "     and resolve every marker before gate 1. -->\n\n### R-1: export\n- retention: 30 days\n",
     )
-    assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+    assert not [b for b in approve.readiness(repo, "mandate") if "NEEDS CLARIFICATION" in b]
 
 
 def test_resolving_the_marker_clears_the_blocker(tmp_path: Path) -> None:
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
     _requirements(repo, "# Requirements\n\n### R-1: export\n- retention: [NEEDS CLARIFICATION: how long?]\n")
-    assert [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+    assert [b for b in approve.readiness(repo, "mandate") if "NEEDS CLARIFICATION" in b]
     _requirements(repo, "# Requirements\n\n### R-1: export\n- retention: 30 days\n")
-    assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+    assert not [b for b in approve.readiness(repo, "mandate") if "NEEDS CLARIFICATION" in b]
 
 
-def test_the_design_document_is_checked_at_its_own_gate(tmp_path: Path) -> None:
-    repo = repo_at(tmp_path, state=make_state(gates={**PENDING_ALL, "requirements": "approved"}, phase="design"))
+def test_every_document_the_mandate_is_written_from_is_swept(tmp_path: Path) -> None:
+    """One gate, so one sweep — over both documents rather than one document per gate.
+
+    A marker in the design used to be checked only at the design gate; with the phases gone there
+    is nowhere later for it to be caught, so the mandate reads all of its own material.
+    """
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
     path = repo.path("docs/20-design.md")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "# Design\n\n### R-1 -> design\n- store: [NEEDS CLARIFICATION: sqlite or postgres?]\n", encoding="utf-8"
     )
-    assert any("docs/20-design.md still carries 1" in b for b in approve.readiness(repo, "design"))
-    # ...and the requirements gate is not judged on the design document.
-    assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+    assert any("docs/20-design.md still carries 1" in b for b in approve.readiness(repo, "mandate"))
+    # ...and acceptance is not judged on it: the mandate that cites it was approved with it whole.
+    assert not [b for b in approve.readiness(repo, "acceptance") if "NEEDS CLARIFICATION" in b]
 
 
 def test_a_missing_document_is_not_this_check_to_report(tmp_path: Path) -> None:
     """Absence is a different failure — `_plan_blockers` refuses a gate with nothing behind it."""
-    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, phase="requirements", plan_status="draft"))
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
     assert not repo.path("docs/10-requirements.md").exists()
-    assert not [b for b in approve.readiness(repo, "requirements") if "NEEDS CLARIFICATION" in b]
+    assert not [b for b in approve.readiness(repo, "mandate") if "NEEDS CLARIFICATION" in b]
 
 
 def test_a_freshness_nobody_could_measure_holds_the_gate_shut(tmp_path: Path) -> None:
     """ "We could not tell" is not "it is current". `freshness` reports the unmeasurable case with
     `fresh=False`, and reading only its `reason` meant `approve` added no blocker at all and
     `doctor` reported nothing — so a review that could not be shown to speak for the code opened
-    gate ④ on silence. An unreadable gate fails closed.
+    acceptance on silence. An unreadable gate fails closed.
     """
     repo, head, change = _reviewed_repo(tmp_path)
     review = make_review(generated=True, human_status="frozen", effective_risk="low")
     review["machine"]["binding"]["subject_head_sha"] = head
     review["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=review)
-    assert not [b for b in approve.readiness(repo, "build") if "could not be measured" in b]
+    assert not [b for b in approve.readiness(repo, "acceptance") if "could not be measured" in b]
 
     # The one input every measurement here rests on, gone.
     import shutil
 
     shutil.rmtree(tmp_path / ".git")
-    assert any("could not be measured" in b for b in approve.readiness(repo, "build"))
+    assert any("could not be measured" in b for b in approve.readiness(repo, "acceptance"))

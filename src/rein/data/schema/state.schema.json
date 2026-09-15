@@ -8,7 +8,6 @@
   "required": [
     "project",
     "cycle_id",
-    "current_phase",
     "gates",
     "plan"
   ],
@@ -24,45 +23,23 @@
       "maxLength": 128,
       "pattern": "^[a-z0-9][a-z0-9-]*$"
     },
-    "current_phase": {
-      "enum": [
-        "brief",
-        "requirements",
-        "design",
-        "tasks",
-        "build",
-        "verify",
-        "done"
-      ]
-    },
     "updated_at": {
       "type": "string",
       "maxLength": 64
     },
     "gates": {
+      "description": "The two things a human approves. `mandate` authorizes what the loop may change and what it must prove; `acceptance` takes the change on the evidence now recorded. There were five, one per phase, and the same transaction that flipped one also advanced a `current_phase` field beside it — so authority and progress were one write and could disagree. Where the cycle stands is now derived from these two (`models.State.stage`) and stored nowhere.",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "requirements",
-        "design",
-        "tasks",
-        "build",
-        "release"
+        "mandate",
+        "acceptance"
       ],
       "properties": {
-        "requirements": {
+        "mandate": {
           "$ref": "#/$defs/gate"
         },
-        "design": {
-          "$ref": "#/$defs/gate"
-        },
-        "tasks": {
-          "$ref": "#/$defs/gate"
-        },
-        "build": {
-          "$ref": "#/$defs/gate"
-        },
-        "release": {
+        "acceptance": {
           "$ref": "#/$defs/gate"
         }
       }
@@ -85,15 +62,15 @@
           "$ref": "#/$defs/digest"
         },
         "config_digest": {
-          "description": "config.yaml as gate 3 froze it, image pins excluded (`models.Config.frozen_digest`). The pin sits outside because a task that legitimately adds a dependency makes the pinned image wrong, and rebuilding it used to cost a full rollback and re-approval of a plan nothing had changed. Everything that is a decision — kind, network_profile, mount_repo, the quality gate, the budgets, the guard — is still in here.",
+          "description": "config.yaml as the mandate froze it, image pins excluded (`models.Config.frozen_digest`). The pin sits outside because a task that legitimately adds a dependency makes the pinned image wrong, and rebuilding it used to cost a full rollback and re-approval of a plan nothing had changed. Everything that is a decision — kind, network_profile, mount_repo, the quality gate, the budgets, the guard — is still in here.",
           "$ref": "#/$defs/digest"
         },
         "environment_digest": {
-          "description": "The sandbox picture the freeze saw: role to profile, and every profile body including its image pin (`models.Config.environment_digest`). Recorded, not enforced — this one is allowed to move within a cycle, and `rein doctor` and the gate 4 brief report when it has.",
+          "description": "The sandbox picture the freeze saw: role to profile, and every profile body including its image pin (`models.Config.environment_digest`). Recorded, not enforced — this one is allowed to move within a cycle, and `rein doctor` and the acceptance brief report when it has.",
           "$ref": "#/$defs/digest"
         },
         "sources": {
-          "description": "The prose the implementation phase reads — the task tickets and the design/requirements documents — digested at the gate ③ freeze, keyed by repo-relative path. plan.yaml is frozen with a digest; the documents an implementer is actually sent to read were bound to nothing, so a ticket edited after the freeze changed what got built with no record that it had. Worse, a parallel leaf is cut from the work branch's tip and reads only what is committed, so an *uncommitted* edit changed nothing at all and said nothing either.",
+          "description": "The prose the implementation phase reads — the task tickets and the design/requirements documents — digested at the mandate freeze, keyed by repo-relative path. plan.yaml is frozen with a digest; the documents an implementer is actually sent to read were bound to nothing, so a ticket edited after the freeze changed what got built with no record that it had. Worse, a parallel leaf is cut from the work branch's tip and reads only what is committed, so an *uncommitted* edit changed nothing at all and said nothing either.",
           "type": "object",
           "maxProperties": 1024,
           "propertyNames": {
@@ -180,7 +157,7 @@
                   "$ref": "#/$defs/digest"
                 },
                 "note": {
-                  "description": "What was observed, and where. A human reads this beside the gate ④ decision.",
+                  "description": "What was observed, and where. A human reads this beside the acceptance decision.",
                   "type": "string",
                   "maxLength": 2000
                 },
@@ -410,7 +387,7 @@
                 }
               },
               "review": {
-                "description": "What the independent reviewer said about the last attempt. Carried so the next launch reads it instead of the reviewer re-deriving the same objection, and so `consider` findings — which stop nothing — still reach the human at gate ④ rather than dying with the session that produced them.",
+                "description": "What the independent reviewer said about the last attempt. Carried so the next launch reads it instead of the reviewer re-deriving the same objection, and so `consider` findings — which stop nothing — still reach the human at acceptance rather than dying with the session that produced them.",
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -533,11 +510,8 @@
           "gate": {
             "description": "Which gate this request stands against.",
             "enum": [
-              "requirements",
-              "design",
-              "tasks",
-              "build",
-              "release"
+              "mandate",
+              "acceptance"
             ]
           },
           "target": {
@@ -612,7 +586,7 @@
       }
     },
     "baseline": {
-      "description": "Which quality-gate steps were already red on the work branch before any task ran, measured over the tree gate 3 was approved for. It used to be taken inside `rein build`, just before the first batch — after the approval that decided the plan was implementable — so a cycle could be approved and started against a tree that had been red for weeks, and the first task to hit the step spent its whole send-back budget on a failure it had not caused. Measured at the gate instead, a red step is something a human freezes deliberately or fixes first. `tree_digest` binds it: a baseline is a statement about one tree, and it lapses when that tree moves.",
+      "description": "Which quality-gate steps were already red on the work branch before any task ran, measured over the tree the mandate was approved for. It used to be taken inside `rein build`, just before the first batch — after the approval that decided the plan was implementable — so a cycle could be approved and started against a tree that had been red for weeks, and the first task to hit the step spent its whole send-back budget on a failure it had not caused. Measured at the gate instead, a red step is something a human freezes deliberately or fixes first. `tree_digest` binds it: a baseline is a statement about one tree, and it lapses when that tree moves.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -657,13 +631,13 @@
           }
         },
         "frozen": {
-          "description": "Whether a human approved gate 3 knowing these steps were red. Absent or false with a non-empty `red_steps` holds gate 3 shut: a known-red baseline is a decision, not a discovery.",
+          "description": "Whether a human approved the mandate knowing these steps were red. Absent or false with a non-empty `red_steps` holds the mandate shut: a known-red baseline is a decision, not a discovery.",
           "type": "boolean"
         }
       }
     },
     "dependency_audit": {
-      "description": "The last dependency audit: when it ran, against which commit, and what it said. Gate 5's one security answer that is not carried from gate 4's review, because it is the one that is not a function of the tree — so it records a date as well as a commit, and expires.",
+      "description": "The last dependency audit: when it ran, against which commit, and what it said. Acceptance's one security answer that is not carried from the grounded review, because it is the one that is not a function of the tree — so it records a date as well as a commit, and expires.",
       "type": "object",
       "additionalProperties": false,
       "required": [

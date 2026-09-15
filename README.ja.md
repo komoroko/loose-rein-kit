@@ -12,22 +12,26 @@
 
 ## 全体の流れ
 
+**人が承認するのは2回だけで、そのどちらも「作業の順序」についての承認ではない。**
+
 ```mermaid
 flowchart LR
     brief["brief<br/>(人が構想を記入)"]:::human
-    req["/req<br/>要件定義"]:::agent
-    g1{"①要件凍結"}:::human
-    design["/design<br/>設計"]:::agent
-    g2{"②技術選定"}:::human
-    tasks["/tasks<br/>タスク分解"]:::agent
-    g3{"③タスク計画"}:::human
+
+    subgraph DRAFT["起草 — 順不同・反復可・承認は1回"]
+        direction TB
+        req["/req<br/>claim"]:::agent
+        design["/design<br/>方針と ADR"]:::agent
+        tasks["/tasks<br/>scope とタスク DAG"]:::agent
+    end
+
+    g1{"① mandate<br/>変更してよい範囲・<br/>満たすべき claim・<br/>必要な証拠"}:::human
     build["/build<br/>実装ループ"]:::agent
-    g4{"④実装完了"}:::human
     verify["/verify<br/>検証"]:::agent
-    g5{"⑤リリース可否"}:::human
+    g2{"② acceptance<br/>変更を受け入れる"}:::human
     done(["done"])
 
-    subgraph TASKS["タスク群(依存グラフ DAG)"]
+    subgraph TASKS["タスク群(依存グラフ DAG) — ループが自由に切り直す"]
         direction TB
         T1["基盤 T-001"]:::agent
         T2["葉 T-002"]:::agent
@@ -42,42 +46,41 @@ flowchart LR
         Tn --> TI
     end
 
-    brief --> req --> g1 --> design --> g2 --> tasks
-    tasks -->|生成| T1
-    TI --> g3
-    g3 -->|"並列(最大3)"| build
-    build --> g4 --> verify --> g5 --> done
+    brief --> DRAFT --> g1
+    g1 -->|"並列(最大3)"| build
+    tasks -.->|生成| T1
+    build --> verify --> g2 --> done
 
     RV(("/revise")):::human
-    g4 -.-> RV
-    g5 -.-> RV
+    g2 -.-> RV
     RV -.-> g1
-    RV -.-> g2
 
     classDef agent fill:#dbeafe,stroke:#2563eb,color:#0b3a6f;
     classDef human fill:#86dfaa,stroke:#0f7a3d,color:#04301a;
+    style DRAFT fill:#f1f6fe,stroke:#c9ddf7,color:#57606a;
     style TASKS fill:#f1f6fe,stroke:#c9ddf7,color:#57606a;
     style done fill:#ffffff,stroke:#9aa0a6,color:#26282b;
-    linkStyle 18,19,20,21 stroke:#dc2626,color:#dc2626,stroke-width:1.5px;
 ```
 
-- **緑** — 人間が判断する箇所。brief、ゲート①〜⑤、`/revise` の3つが該当する。
-- **青** — エージェントが実行する箇所。各フェーズと、そこで処理されるタスク群を指す。
-- **赤い点線の矢印** — 差し戻しを表す。下流のゲートから上流のゲートへ向かう。
+- **緑** — 人間が判断する箇所。brief、2つのゲート、`/revise` が該当する。
+- **青** — エージェントが実行する箇所。各コマンドと、そこで処理されるタスク群を指す。
+- **赤い点線の矢印** — 差し戻しを表し、人間が決めたときにのみ実行される。
 
-流れは左から右へ進む。**前提のゲートが未承認のあいだは、次のフェーズに進めない。** `/build` は
-タスク群を最大3並列で処理する。`/revise` は戻し先から下流のゲートを連鎖的に `pending` へ戻す
-操作であり、これも人間が決めたときにのみ実行される。
+`/req`・`/design`・`/tasks` の3つは、合わせて**1つの mandate** を書く。それぞれが独立したゲートを
+持つのではなく、mandate の材料である。変更の性質に合わせて順不同で走らせてよいし、繰り返しても、
+答えが自明なものを飛ばしてもよい。この3つをまとめて1回で決めるのが `rein approve mandate` であり、
+その承認が `plan.yaml` と `config.yaml` を凍結する。
 
-各フェーズはコマンド1つに対応し、いずれも最後に承認を求めて停止する:
+承認済みの mandate の内側で、`/build` は **mandate の `scope` が覆っていないパスに触れられず**
+(`rein guard` が拒否する)、**mandate が要求する証拠なしには完了できない**。一方で、タスクの分解・
+順序・再実行は自由である。同じ scope と claim を別の切り方で実現するのは同じ委任の範囲内であり、
+誰の承認も要らない。
 
 | 手順 | コマンド | 何が起きるか | 人間の役割 |
 |------|----------|--------------|------------|
-| 要件 | `/req`    | 対話で要件を構造化する | ① 要件を凍結する |
-| 設計 | `/design` | 実装方針と技術選定の選択肢を出す | ② 技術選定を決めて承認する |
-| 分解 | `/tasks`  | テスト方針付きのタスク票を生成する | ③ タスク計画を承認する |
-| 実装 | `/build`  | ループで自律実装する(テスト green が完了条件) | ④ 実装をレビューして承認する |
-| 検証 | `/verify` | 機能テストと非機能テストを実行する | ⑤ リリース可否を判断する |
+| 起草 | `/req` `/design` `/tasks` | claim・方針・scope・タスク DAG を書く(順不同) | ① **mandate** を承認する。scope・claim・受入基準を決める |
+| 実装 | `/build`  | mandate の内側で自律実装する(テスト green が完了条件) | — 何もしない。レビュー指摘は自分で直す |
+| 検証 | `/verify` | 機能・非機能テスト、依存監査、grounded review | ② **acceptance** を承認する。変更を受け入れる |
 
 ## セットアップ
 
@@ -108,7 +111,7 @@ uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # 
 | `adapter:` | 実行ファイル | model 指定 | リトライがセッションを継続 | 消費量の報告 |
 |---|---|---|---|---|
 | `claude` | `claude` | 可 | 可(読解の共有もフォークできる) | 可 |
-| `codex` | `codex` | 不可 | 不可 | 可(`--json`) |
+| `codex` | `codex` | 可 | 可(`codex exec resume <id>`) | 可(`--json`) |
 | `gemini` | `gemini` | 可 | 不可 | 可(`--output-format json`) |
 | `copilot` | `copilot` | 可 | 不可 | 不可 |
 | `cursor` | `cursor-agent` | 可 | 不可 | 不可 |
@@ -116,18 +119,22 @@ uv tool install 'git+https://github.com/komoroko/loose-rein-kit.git@vX.Y.Z'   # 
 | `opencode` | `opencode` | 可 | 不可 | ステップが報告したときのみ |
 
 model を指示できないアダプタに `model:` を書くと、そのアダプタ自身の既定を別のモデル名で
-起動するのではなく、書かれた時点で拒否される。gate ④ の独立性判定は model から導かれるため、
+起動するのではなく、書かれた時点で拒否される。acceptance ゲートの独立性判定は model から導かれるため、
 「書いただけで実行されていない分離」は書かれた場所で止める。用意がない場合、`rein build` は
 起動しない。このとき示されるのは当該 CLI の
 インストールコマンドであって、`rein` が代わりにインストールすることはない。
 
-gate ④ の**レビュアー**役にはもう1つ制約がある。プロンプトの渡し方である。標準入力から読むと
-確認できているのは `claude` だけで、他は各 CLI 自身のリファレンスが示すとおり引数として渡す。
+acceptance ゲートの**レビュアー**役にはもう1つ制約がある。プロンプトの渡し方である。標準入力から読むのは
+`claude` と `codex` の2つで、他は各 CLI 自身のリファレンスが示すとおり引数として渡す。
 引数1つの上限は OS 側で 128 KiB なので、それを超える reading を他のアダプタに渡す場合は
-**起動せず拒否し、逃げ道を2つ名指しする**(gate ④ の役を `claude` に向けるか、
+**起動せず拒否し、逃げ道を2つ名指しする**(レビュアー役を `claude` か `codex` に向けるか、
 `review_policy.budgets.max_diff_bytes` を下げるか)。動く確証のない経路に投げ込むことはしない。
-gate ④ の reading は通常この上限を超えるので、これは例外ではなく既定の帰結である。`claude` 以外の
-アダプタが gate ④ で読めるのは、実際には 128 KiB までの変更に限られる。
+grounded review の reading は通常この上限を超えるので、これは例外ではなく既定の帰結である。この2つ以外の
+アダプタが grounded review で読めるのは、実際には 128 KiB までの変更に限られる。
+
+この2つは**答えの形を指示する**こともできる。`claude --json-schema` はスキーマを値として直接受け取り、
+`codex exec --output-schema` はスキーマを書いたファイルのパスを受け取る。契約そのものはどちらの場合も
+プロンプトが全文述べるので、フラグが買うのは「正しい JSON を散文で包んだ答え」が返らなくなることである。
 
 **4. リポジトリを初期化する** — 新規・既存のどちらでも同じコマンドを使う。既存かどうかは自動で
 判定され、その結果に応じて `init` が書き込む内容が変わる(「既存リポジトリへの導入」):
@@ -154,16 +161,42 @@ rein install gemini         # .gemini/ に commands / skills を書き、.gemini
 これらのファイルはセッションやエディタの起動時にのみ読み込まれることが多い。実行後は**新しい**
 セッションを開く(エディタの場合は再起動する)。
 
-**6. サンドボックスイメージをビルドする** — リポジトリのコードとテストは、ホストではなく
-サンドボックス内で実行する。エージェントが書いたテストを利用者の資格情報つきで実行させないための
-境界である。pin が完了するまで `rein doctor` は FAIL を報告し続ける:
+**6. サンドボックスイメージをビルドする** — 品質ゲートの command ステップは、リポジトリのコードと
+テストをホストではなくサンドボックス内で実行する。エージェントが書いたテストを利用者の資格情報
+つきで実行させないための境界である。pin が完了するまで `rein doctor` は FAIL を報告し続ける:
 
 ```bash
-rein oci build --all --write-config # 3つの同梱イメージをビルドして pin する(docker/podman が必要)
+rein oci build --all --write-config # 同梱イメージをビルドして pin する(docker/podman が必要)
 ```
 
 ウィザードは適切なタイミングでこれを促し、その場で実行することもできる。pin が揃っているかを
 後から確認するのは `rein doctor` の役目である。
+
+**この境界が包むもの。** リポジトリ由来コードの**実行**である。すなわち品質ゲートの `command`
+ステップと、同じランナーを通る受入基準の `command` である。`kind: oci` であり、ネットワークは
+全面的に拒否される。
+
+**エージェント CLI 自身を包む**のは、これとは別の、任意で有効にする2つ目の箱である。ネットワークに
+対する要求が正反対なので、kind も別になっている:
+
+```bash
+rein oci build --profile agent --build-arg AGENT_CLI=@anthropic-ai/claude-code --write-config
+```
+
+これで `kind: oci-agent` のプロファイルが digest 固定され、`executors.agent_profile` が設定される。
+以後、実装者・レビュアー・fixer はすべてその中で起動する。worktree は `/work` に read-write で
+マウントされ、制御ソケットが bind されるのでリーフは自分の成果を報告できる。そして**利用者の HOME も
+~/.ssh も ~/.aws も docker socket も capability も無い**。egress は与えられる —— モデル API に
+到達できないエージェントは何もできない —— ので、これは情報持ち出しに対する境界では**なく**、
+そう主張もしない。買えるのは「コードを書くプロセスが、マシンの他の部分を読めない」ことである。
+
+有効にしないことも正当な選択で、既定はそちらである。イメージが CLI を内包する必要がある以上、
+同梱イメージが任意の CLI を網羅することはできない。設定しなければ `rein` は従来どおりエージェントを
+ホストプロセスとして、利用者のチェックアウト内で、利用者の資格情報のまま起動する。隔離があるとすれば
+その CLI 自身が張るもの(`codex exec` は自前の seccomp/landlock サンドボックスを持ち、`claude -p` は
+プロジェクトの権限設定に従う)だけであり、`rein doctor`・dossier・acceptance の brief がそのいずれで
+あったかを必ず述べる。箱に入れる場合はアダプタ側のサンドボックスを無効化すること。入れ子の
+サンドボックスはエージェントが書き込む地点で失敗するため、`rein doctor` はその組み合わせを警告する。
 
 同梱イメージに入っているのは python・uv・pytest だけで、ネットワークも無い。同梱の既定ゲートを
 動かすには足りるが、それ以上は動かない。**リンタ・型検査・依存関係の解決を要するゲートには専用の
@@ -206,7 +239,7 @@ CLI の一覧は `rein agent --show`)、`rein project add` はダッシュボー
    経路に到達する。receipt には、どちらの手段で確認したかが記録される:
 
    ```bash
-   rein approve build            # readiness を確認したのち:
+   rein approve acceptance            # readiness を確認したのち:
    #   gate 'build' is ready. This approval will cover:
    #     plan_digest          sha256:…
    #     attested_chain_root  sha256:…
@@ -249,7 +282,7 @@ CLI の一覧は `rein agent --show`)、`rein project add` はダッシュボー
    - `rein ui` — ダッシュボードを開く。ライフサイクルがそのままナビゲーションで、5つのゲートが
      左端の spine に並ぶ。判断を待っているゲートは、画面内で唯一の反転ブロックとして示す。
      **Now** はこのキューと次のコマンドを表示する。ゲートを開くとその読み室(`#gate/<name>`)に
-     入る。ゲート④では scope → 何が変わりどうレビューされたか → この変更が人に何を要求するか →
+     入る。acceptance では scope → 何が変わりどうレビューされたか → この変更が人に何を要求するか →
      未決着の claim・gap・finding を1件1枚で示す Decision Card(high/critical のカードが未回答の
      うちは freeze できない)を読み、承認フッターと、承認が束縛するダイジェストを同じ画面で
      確認できる。ほかに **Board**(DAG・レイヤー進行)、**Record**(ハッシュ連鎖したイベント
@@ -265,7 +298,7 @@ CLI の一覧は `rein agent --show`)、`rein project add` はダッシュボー
 
    1 タスク 1 PR の**スタック**として出すこともできる。`rein pr-stack` は、各タスクが着地した
    コミットで作業ブランチを切り分け、スライスごとにブランチを張り、本文を 1 枚ずつ書く。
-   `--push` は端末で確認を取ってから **draft として** PR を開き、`--ready` はゲート④の承認後に
+   `--push` は端末で確認を取ってから **draft として** PR を開き、`--ready` は acceptance の承認後に
    draft を外す。レビュー指摘の修正は、そのコードを入れたスライスにコミットし、`--restack` が
    マージで上へ伝播させる。**スタックを rebase してはならない** — 履歴を書き換えると、
    `completed_commit` とゲート受領証が指すコミットが消えるためである。push 時にスライスは
@@ -276,7 +309,7 @@ CLI の一覧は `rein agent --show`)、`rein project add` はダッシュボー
    存在しないコミットを指すことになる。squash・rebase マージも同じ壊し方をする。全体を一括で
    マージすれば rebase は起きない。
 
-8. **サイクルを閉じる** — ゲート⑤のあと `rein cycle-close --name <slug>` を実行すると、docs が
+8. **サイクルを閉じる** — acceptance のあと `rein cycle-close --name <slug>` を実行すると、docs が
    `docs/archive/<日付>-<slug>/` へアーカイブされ、新しいスキャフォールドが復元され、ゲートと
    フェーズがリセットされる。ゲートを開くのと同様、これも人間の操作である。
 
@@ -389,7 +422,7 @@ head がこれを弱めるプルリクエストは `rein policy-check` が失敗
 - **証拠のない claim は `unknown` であり、散文で埋めない。** `.rein/plan.yaml` は要件
   (`R-N`/`NFR-N`)1件につき claim を1つ凍結する。これが **Expected Model** である。`claim_ids` が
   各タスクを、それが答える claim へ紐づけ、`rein dag --trace` が突き合わせる。
-- **ゲート④は Expected と Actual を突き合わせ、直せるものは直す。** `rein build` は全タスクの
+- **grounded review は Expected と Actual を突き合わせ、直せるものは直す。** `rein build` は全タスクの
   完了後に変更を読み、あるタスクの宣言済み scope が所有するコードに対する blocking な指摘を
   修正し、記憶を持たない読み手にもう一度読ませる。ゲートは1つも動かない。承認済みの scope の
   内側での修正は要件も claim も計画も変えず、`rein guard` が凍結中の `plan.yaml` と
@@ -400,7 +433,7 @@ head がこれを弱めるプルリクエストは `rein policy-check` が失敗
   **ブラインド抽出**(この抽出器には計画を一切渡さず、自分で読みに行けないようリポジトリの外で
   起動する)、構造化されたセキュリティレビュー、そして Expected と Actual の比較である。
   読み取る対象はプロダクトに限られる —
-  `.rein/` も、計画自身の散文(`docs/tasks/`・ADR・ゲート③が凍結した文書)も、`rein install` が
+  `.rein/` も、計画自身の散文(`docs/tasks/`・ADR・mandate が凍結した文書)も、`rein install` が
   書いた面も渡らない。テストはブラインド抽出器にだけ渡らない。テスト名は、その抽出器が読んで
   いないはずの要件を言い換えたものだからである。
 - **変更は一度に読み切るのではなく、読解(reading)に分けて読む。** 計画が scope を宣言した
@@ -433,8 +466,11 @@ head がこれを弱めるプルリクエストは `rein policy-check` が失敗
   での確認・実機・人による確認であれば、作業はマージされ、タスクは `awaiting-evidence` で待機
   する。誰かが観測した内容を `rein evidence record` で記録して初めて先へ進む。その記録は対象の
   ツリーに紐づくため、コードが変われば失効する。
-- **環境も pin する。** リポジトリのコードとテストは OCI サンドボックスで実行し、タグではなく
-  digest で固定する。レビューを実行した環境が、そのレビューの承認後に変わることはない。
+- **環境も pin する。** リポジトリのコードとテストを*実行*する品質ゲートの command ステップは
+  OCI サンドボックスで動かし、イメージはタグではなく digest で固定する。レビューを実行した環境が、
+  そのレビューの承認後に変わることはない。それを*書いた*エージェント CLI 自身にも専用の箱がある
+  (`executors.agent_profile`、`kind: oci-agent`、同じく digest 固定)。イメージが CLI を内包する
+  必要があるため任意設定だが、有効・無効のいずれであるかは必ず報告される。
 - **すべてはハッシュ連鎖のログに記録される。** `.rein/events.ndjson` はあらゆる状態変更とその
   理由を記録し、ゲートの receipt が連鎖のルートを固定する。行を削除・並べ替え・再ハッシュすれば、
   その receipt が依拠する連鎖が壊れる。
@@ -456,15 +492,15 @@ head がこれを弱めるプルリクエストは `rein policy-check` が失敗
   review ステップ(Claude Code ではその host 自身の `/code-review` と `/simplify` を通して問う) → 起動できる成果物であれば実起動の smoke テストとなる(起動できるようになった
   時点で、smoke ステップに `required: true` を設定する)。各ステップにはリトライ予算があり、
   使い切ると `blocked` になる。ステップは `paths:` でスコープを絞れるため、複数スタックが混在する
-  リポジトリでも無関係な分まで毎回実行せずに済む(タスクごとに変えられる設定ではなく、gate ③ で
+  リポジトリでも無関係な分まで毎回実行せずに済む(タスクごとに変えられる設定ではなく、mandate で
   凍結される config 側の判断である)。
 - 並列の葉タスクは `git worktree` で隔離して実行し(最大 `max_parallel`)、タスク id の昇順で
   マージする。解決できないタスクは `blocked`、上流の不備は `needs-revision` としてエスカレーション
-  し、ループは停止する。`gates.build` を開けるのは人間だけで、オーケストレータは操作しない。
+  し、ループは停止する。`gates.acceptance` を開けるのは人間だけで、オーケストレータは操作しない。
 
 ### 無人での再実行
 
-`rein build` の終了コードが、次に何をすべきかを示す。`0` は全タスクの完了(ゲート④へ進む)、
+`rein build` の終了コードが、次に何をすべきかを示す。`0` は全タスクの完了(`/verify` へ進む)、
 `1`/`2` は人間の対応が必要であること(エスカレーションを読むか、指摘箇所を修正する)を意味する。
 `3` は容量切れ・シグナル・他の run がロックを保持中といった一時的な失敗で、タスクの状態を変更せず
 予算も消費していないため、そのまま再試行してよい。`rein build --supervise` は `3` を自動で再試行
@@ -491,10 +527,10 @@ head がこれを弱めるプルリクエストは `rein policy-check` が失敗
 3つの層で担保する:
 
 - コミット段 — **gitleaks** がシークレットのコミットを防ぐ(誤検知は `.gitleaksignore` へ)。
-- 実装完了時 — **構造化セキュリティレビュー**がゲート④の grounded review に組み込まれる。
+- 実装完了時 — **構造化セキュリティレビュー**がgrounded review に組み込まれる。
   `rein review generate` がレビュー対象 HEAD に束ねて実行し、blocking な指摘はゲートを停止させる。
-- `/verify` — **依存パッケージの脆弱性監査**が必須になる。ゲート⑤はコードを読み直さず、
-  ゲート④のレビューを引き継ぐ(readiness が「この HEAD についてのレビューでないもの」を
+- `/verify` — **依存パッケージの脆弱性監査**が必須になる。acceptance はコードを読み直さず、
+  grounded review を引き継ぐ(readiness が「この HEAD についてのレビューでないもの」を
   拒否し、受領証が machine digest を束ねる)。監査だけがツリーの関数ではない —
   コードが動かなくても脆弱性データベースは動くため、ここで取り直す唯一の答えになる。
 
@@ -634,7 +670,9 @@ head がこれを弱めるプルリクエストは `rein policy-check` が失敗
 
 - エージェント連携ファイルの配置は任意で、`rein install claude|copilot|codex|gemini` が行う。これらは
   インストール済みの `rein` CLI を呼び出すため、フックの前提として `uv tool install` が必要になる。
-- Codex 側は **実機で未検証**である。フックのペイロード形式と、skills・subagents の探索パスは、
+- Codex 側は **実機で未検証**である。フックのペイロード形式、skills・subagents の探索パス、
+  およびアダプタのフラグ(`--model`・`--output-schema`・標準入力からのプロンプト・
+  `thread.started` の id を使う `codex exec resume <thread_id>`)は、
   openai/codex のソースと公式ドキュメントから確定させたもので、実際の Codex セッションで観測した
   ものではない。また Codex の project スコープ設定は**プロジェクトを信頼するまで読み込まれない**
   ため、それまではコミット段のチェックだけが適用される。

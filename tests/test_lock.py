@@ -15,6 +15,47 @@ import pytest
 from rein import lock
 from rein import repo as repo_mod
 
+#: The documents a repository owns, and whose shape `lock.FORMAT` is the name of. `event` is not
+#: among them: events are appended by this tool and never read out of an older repository's file
+#: into a newer release's model, so their shape is not what a lock has to agree about.
+_PINNED_DOCUMENTS: tuple[str, ...] = ("plan", "state", "review", "config")
+
+#: Keys that explain a schema rather than constrain a document. Stripped before the pin is taken.
+_PROSE_KEYS = frozenset({"description", "title", "$comment", "examples"})
+
+#: `(lock.FORMAT, :func:`_schema_shapes`)`. Updated by hand, both halves together — see
+#: :func:`test_the_format_string_moves_when_a_document_shape_moves`.
+_FORMAT_PIN: tuple[str, str] = (
+    "rein-grounded-v2",
+    "sha256:ba4d18b53fa5ea4d322058b4e25a3cfb936b1e13df3ae8e3be7653af8eedd643",
+)
+
+
+def _schema_shapes() -> str:
+    """One digest over the *shape* of the four schemas — prose stripped.
+
+    `description` is where these files do most of their explaining, and an explanation is not a
+    shape: hashing the raw bytes made every reworded sentence demand a `lock.FORMAT` bump, which is
+    the fastest way to teach everyone to update the pin without reading why it moved. What is left
+    is what a document is refused for — the keys, the types, the enums, `required`,
+    `additionalProperties`.
+    """
+    import json
+
+    from rein import data as data_mod
+    from rein import digests
+
+    def shape(node: object) -> object:
+        if isinstance(node, dict):
+            return {k: shape(v) for k, v in node.items() if k not in _PROSE_KEYS}
+        if isinstance(node, list):
+            return [shape(v) for v in node]
+        return node
+
+    return digests.of(
+        {name: shape(json.loads(data_mod.read_text(f"schema/{name}.schema.json"))) for name in _PINNED_DOCUMENTS}
+    )
+
 
 def write(path: Path, body: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -51,13 +92,29 @@ def test_a_lock_without_a_format_key_is_refused(tmp_path: Path) -> None:
     with pytest.raises(lock.LockError) as excinfo:
         lock.read(path)
     assert "is in format None" in str(excinfo.value)
-    assert "re-initialize the repository" in str(excinfo.value)
+    assert "`rein init` a fresh one" in str(excinfo.value)
 
 
 def test_a_foreign_format_is_refused(tmp_path: Path) -> None:
-    path = write(tmp_path / "rein.lock", "format: rein-grounded-v2\ntool_version: 1.0.0\n")
-    with pytest.raises(lock.LockError, match="reads 'rein-grounded-v1' only"):
+    path = write(tmp_path / "rein.lock", "format: rein-grounded-v0\ntool_version: 1.0.0\n")
+    with pytest.raises(lock.LockError, match=f"reads '{lock.FORMAT}' only"):
         lock.read(path)
+
+
+def test_the_refusal_names_both_versions_and_both_ways_out(tmp_path: Path) -> None:
+    """The message every verb stops on (`cli._lock_check`), so it has to be the whole answer.
+
+    It used to say "upgrade the tool", which is the wrong advice for the commoner direction: a
+    current tool standing in a repository written by an older one. Naming the version that wrote
+    the lock is what makes "install that one again" a thing an operator can actually do.
+    """
+    path = write(tmp_path / "rein.lock", "format: rein-grounded-v0\ntool_version: 0.4.7\n")
+    with pytest.raises(lock.LockError) as caught:
+        lock.read(path)
+    message = str(caught.value)
+    assert "written by rein 0.4.7" in message
+    assert "there is no\nmigration" in message or "there is no migration" in message
+    assert "rein init" in message and "CHANGELOG.md" in message
 
 
 def test_there_is_no_ordering_to_be_lenient_about() -> None:
@@ -182,3 +239,18 @@ def test_behind_summary_states_the_fact_and_leaves_the_consequence_to_the_caller
     assert "uv tool install --force" in summary
     assert lock.behind_summary(_repo_with(tmp_path, "0.4.0"), "0.4.0") is None
     assert lock.behind_summary(_repo_with(tmp_path, "0.3.0"), "0.4.0") is None
+
+
+def test_the_format_string_moves_when_a_document_shape_moves() -> None:
+    """The mechanism behind :data:`lock.FORMAT`'s docstring, because the instruction alone failed.
+
+    `FORMAT` says which shape of the four SSOT documents this release reads, and a release that
+    changes one of them and leaves this string alone ships a repository a schema will refuse while
+    the lock reports it fine. That is not hypothetical: it went unchanged across 0.3.6–0.3.8 while
+    two keys were renamed, and again through the redesign that collapsed five gates into two.
+
+    So the schemas are pinned here. **When this fails, that is the test working**: read what moved,
+    change `lock.FORMAT`, and put the new digest below in the same commit — never the digest alone,
+    which is the failure this exists to catch wearing a green tick.
+    """
+    assert (lock.FORMAT, _schema_shapes()) == _FORMAT_PIN

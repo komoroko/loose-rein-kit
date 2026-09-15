@@ -9,9 +9,17 @@ Three steps, in this order, none skippable:
      write session is minted only by redeeming the launch link printed to the terminal `rein ui`
      runs in. Two channels of the same kind; the receipt records which.
   3. **Receipt** — one Central Store transaction writes the gate receipt, binding those digests
-     and the audit-chain root (:func:`record_approval`). Gate ③ additionally **freezes the
-     plan** in that same transaction: `state.plan` gains `frozen` plus the digests the freeze
+     and the audit-chain root (:func:`record_approval`). Approving the **mandate** additionally
+     freezes it in that same transaction: `state.plan` gains `frozen` plus the digests the freeze
      covers, which is what `rein build` requires and what `rein guard` rule 2 protects.
+
+**Two gates, because a human decides twice** (`models.GATE_ORDER`). `mandate` says what the loop
+may change and what it must prove; `acceptance` says whether the change, with that evidence, is
+taken. There were five — one per phase — and the same transaction that recorded an approval also
+advanced `current_phase`, so authority and progress were one write and every permission question
+arrived as an ordering question. Every mechanical precondition the five enforced is still here, as
+a readiness check on one of these two; what is gone is the claim that the *order* of the work is a
+human's to authorize.
 
 There is no `--force` and no `--by`: an identity you can type is not an identity, so the
 receipt records that *a* human confirmed, never which one.
@@ -50,11 +58,11 @@ from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
 
-#: The document each gate approves, for the receipt's `artifact_digest`.
-GATE_ARTIFACT: dict[str, str] = {
-    "requirements": "docs/10-requirements.md",
-    "design": "docs/20-design.md",
-}
+#: The documents the mandate is written from, for the receipt's `artifact_digest` and for the
+#: `[NEEDS CLARIFICATION]` sweep. They are *material*, not gates of their own: a human approving a
+#: mandate is approving the scope, the claims and the acceptance criteria it states, and these are
+#: where the reasoning behind them is written down.
+MANDATE_SOURCES: tuple[str, ...] = ("docs/10-requirements.md", "docs/20-design.md")
 
 
 #: The marker a phase agent leaves at the exact spot it would otherwise have guessed.
@@ -98,20 +106,26 @@ def _plan_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> 
             "the plan states no claims — there is nothing to approve. `/req` turns each `R-N` / "
             "`NFR-N` heading into a claim in .rein/plan.yaml."
         )
-    if gate in {"tasks", "build", "release"} and not plan.tasks:
+    if not plan.tasks:
         blockers.append("the plan declares no tasks")
     return blockers
 
 
 def _task_blockers(plan: models.Plan | None, state: models.State | None, gate: str) -> list[str]:
-    if gate not in {"tasks", "build", "release"} or plan is None:
+    """Every claim has somewhere to be answered, and — at acceptance — every task is finished.
+
+    The claim check belongs to the mandate: a claim no task answers is a thing the loop has not
+    been given a way to prove, and that is a defect in what is being authorized rather than in the
+    work. The task check belongs to acceptance, where "is it done" is the question.
+    """
+    if plan is None:
         return []
     try:
         graph = dag.join(plan, state)
     except dag.DagError as exc:
         return [str(exc)]
     blockers = [f"{cid}: no task is answerable for this claim" for cid in graph.claims_without_a_task(plan)]
-    if gate in {"build", "release"}:
+    if gate == "acceptance":
         unfinished = sorted(t.id for t in graph.tasks if not t.is_done)
         if unfinished:
             blockers.append(f"tasks not done: {', '.join(unfinished)}")
@@ -121,26 +135,26 @@ def _task_blockers(plan: models.Plan | None, state: models.State | None, gate: s
 def _review_blockers(
     repo: repo_mod.Repo, review: models.Review | None, state: models.State | None, gate: str
 ) -> list[str]:
-    """Gate ④/⑤ preconditions carried by the machine review (plan §16.8).
+    """The acceptance gate's preconditions carried by the machine review (plan §16.8).
 
     A readiness check that passes because a stage has not been implemented yet is worse than
     no check at all, so an absent review is a blocker rather than a shrug.
 
-    The mechanical half is `review_policy.blocking_reasons` — the module that owns the gate-④
+    The mechanical half is `review_policy.blocking_reasons` — the module that owns the acceptance
     decision — rather than a second copy of the same rules here. Two copies had already drifted:
     this one never looked at `machine.gaps`, so a comparator could mark an actual-coverage gap
     blocking, have it written to `review.yaml`, and watch the gate open anyway.
     """
-    if gate not in {"build", "release"}:
+    if gate != "acceptance":
         return []
     if review is None or not review.is_generated:
         return [
             "no machine review has been generated — run `rein review generate`. "
-            "Gate 4 approves a grounded review, not a green test run."
+            "Acceptance rests on a grounded review, not on a green test run."
         ]
     blockers = review_policy.blocking_reasons(review, review.effective_risk)
     # Three documents say a later commit leaves the review stale. Only the UI pane had ever
-    # checked, so generate → commit → approve opened gate ④ over code no reviewer saw. Asked on
+    # checked, so generate → commit → approve opened acceptance over code no reviewer saw. Asked on
     # the product's content rather than on HEAD's id, because the workflow's own
     # `review.yaml` commit is a later commit and must not invalidate the thing it records
     # (`review_reading.freshness`).
@@ -155,7 +169,7 @@ def _review_blockers(
 
 
 def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Config | None, gate: str) -> list[str]:
-    """Gate ⑤'s one security answer that is not carried from gate ④'s review.
+    """The one security answer acceptance cannot read off the grounded review.
 
     Everything else it needs about security the review already holds, bound to the reviewed HEAD.
     A dependency audit is different in kind: the same commit audited last month and today can
@@ -167,7 +181,7 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
     A project that declares no audit command is told so rather than waved through: "we have no way
     to ask" is not "there is nothing wrong".
     """
-    if gate != "release":
+    if gate != "acceptance":
         return []
     if not audit.configured(config):
         return [
@@ -186,7 +200,7 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
 
 
 def _baseline_blockers(state: models.State, gate: str) -> list[str]:
-    """Gate ③ decides that this plan is implementable against this tree. It has to know the tree.
+    """The mandate decides that this plan is implementable against this tree. It has to know the tree.
 
     The measurement used to live inside `rein build`, taken just before the first batch — which is
     after this approval. So a cycle could be approved and started on a work branch whose `check`
@@ -198,13 +212,13 @@ def _baseline_blockers(state: models.State, gate: str) -> list[str]:
     --freeze` says a human looked at it and started anyway, and the loop then stops a task that
     hits one of those steps rather than sending it back.
     """
-    if gate != "tasks":
+    if gate != "mandate":
         return []
     baseline = state.baseline
     if not baseline:
         return [
-            "no baseline is recorded — gate 3 decides this plan is implementable against this tree, "
-            "and nothing has asked the tree. Run `rein baseline measure`."
+            "no baseline is recorded — approving a mandate says this plan is implementable against "
+            "this tree, and nothing has asked the tree. Run `rein baseline measure`."
         ]
     red = sorted(state.baseline_red())
     if red and baseline.get("frozen") is not True:
@@ -230,7 +244,7 @@ def _change_request_blockers(state: models.State, gate: str) -> list[str]:
 
 
 def _clarification_blockers(repo: repo_mod.Repo, gate: str) -> list[str]:
-    """Unresolved `[NEEDS CLARIFICATION]` markers in the document this gate approves.
+    """Unresolved `[NEEDS CLARIFICATION]` markers in the documents the mandate is written from.
 
     Three documents told the reader this check existed; nothing ran it, so a marker left standing
     opened the gate anyway and the question it named was answered by whatever default the draft
@@ -240,28 +254,32 @@ def _clarification_blockers(repo: repo_mod.Repo, gate: str) -> list[str]:
     marker, and a check that cannot tell guidance from an open question is one nobody can leave
     switched on.
     """
-    artifact = GATE_ARTIFACT.get(gate)
-    if not artifact:
+    if gate != "mandate":
         return []
-    path = repo.path(artifact)
-    if not path.exists():
-        # Absence is a different failure, and not this function's to report: `_plan_blockers`
-        # already refuses a gate with nothing behind it.
-        return []
-    try:
-        body = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        return [f"cannot read {artifact}: {exc}"]
-    lines = [
-        str(n) for n, line in enumerate(mdlite.strip_comments(body).splitlines(), 1) if _CLARIFICATION_RE.search(line)
-    ]
-    if not lines:
-        return []
-    return [
-        f"{artifact} still carries {len(lines)} unresolved `[NEEDS CLARIFICATION]` marker(s) "
-        f"(line {', '.join(lines)}) — ask the human and record the answer under `## Clarifications`, "
-        "or demote it to `## Open questions` with the assumption you wrote the text under."
-    ]
+    blockers: list[str] = []
+    for artifact in MANDATE_SOURCES:
+        path = repo.path(artifact)
+        if not path.exists():
+            # Absence is a different failure, and not this function's to report: `_plan_blockers`
+            # already refuses a gate with nothing behind it.
+            continue
+        try:
+            body = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            blockers.append(f"cannot read {artifact}: {exc}")
+            continue
+        lines = [
+            str(n)
+            for n, line in enumerate(mdlite.strip_comments(body).splitlines(), 1)
+            if _CLARIFICATION_RE.search(line)
+        ]
+        if lines:
+            blockers.append(
+                f"{artifact} still carries {len(lines)} unresolved `[NEEDS CLARIFICATION]` marker(s) "
+                f"(line {', '.join(lines)}) — ask the human and record the answer under `## Clarifications`, "
+                "or demote it to `## Open questions` with the assumption you wrote the text under."
+            )
+    return blockers
 
 
 def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool = True) -> list[str]:
@@ -357,9 +375,13 @@ def approval_subject(repo: repo_mod.Repo, gate: str) -> dict[str, str]:
     if review is not None and review.is_generated:
         subject["machine_digest"] = review.machine_digest()
         subject["human_digest"] = review.human_digest()
-    artifact = GATE_ARTIFACT.get(gate)
-    if artifact and repo.path(artifact).exists():
-        subject["artifact_digest"] = digests.of_file(repo.path(artifact))
+    if gate == "mandate":
+        # One digest over the documents the mandate is written from, in a fixed order, so the
+        # receipt binds the prose a human read and not only the machine-readable plan. Present-only
+        # — a repository with no design document has one fewer source, not a missing one.
+        present = {path: digests.of_file(repo.path(path)) for path in MANDATE_SOURCES if repo.path(path).is_file()}
+        if present:
+            subject["artifact_digest"] = digests.of(present)
     subject["validation_digest"] = digests.of({"gate": gate, "readiness": "clear"})
     return subject
 
@@ -379,9 +401,10 @@ _RECEIPT_DIGESTS = (
     "attested_chain_root",
 )
 
-#: The gate whose approval freezes the Expected Model. Gate ③ approves the plan and the
-#: toolchain it will be built against; everything downstream is measured against that freeze.
-FREEZING_GATE = "tasks"
+#: The gate whose approval freezes the Expected Model. The mandate says what the loop may change,
+#: what must become true, and what it will be built against; everything after is measured against
+#: that freeze.
+FREEZING_GATE = "mandate"
 
 #: The keys `state.plan` carries once frozen — exactly the set `revise.apply` clears on a roll
 #: back. A key written here and not cleared there would survive an un-freeze and let a later
@@ -400,7 +423,7 @@ def implementation_sources(repo: repo_mod.Repo, plan: models.Plan) -> dict[str, 
 
     The gap this closes: `plan.yaml` is frozen by digest, and the documents an implementer is
     actually pointed at — its ticket, the design section covering its claims — were bound to
-    nothing at all. A ticket edited after gate ③ changed what got built, with no record anywhere
+    nothing at all. A ticket edited after the mandate changed what got built, with no record anywhere
     that the thing built was not the thing approved.
 
     Digested over the file's bytes as they sit in the working tree, because that is what a human
@@ -421,7 +444,7 @@ def implementation_sources(repo: repo_mod.Repo, plan: models.Plan) -> dict[str, 
 
 
 def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[str, object]:
-    """`state.plan` as gate ③ freezes it, refusing if the documents moved since `subject`.
+    """`state.plan` as the mandate approval freezes it, refusing if the documents moved since `subject`.
 
     Recomputed here rather than copied from `subject` because `subject` was assembled *before*
     the human read it and typed. If plan.yaml or config.yaml moved in between, freezing the
@@ -432,9 +455,9 @@ def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[
     plan = store.read_plan()
     config = store.read_config()
     if plan is None:
-        raise ApprovalError("gate 'tasks' freezes .rein/plan.yaml, and there is no plan to freeze")
+        raise ApprovalError("approving a mandate freezes .rein/plan.yaml, and there is no plan to freeze")
     if config is None:
-        raise ApprovalError("gate 'tasks' freezes .rein/config.yaml, and there is no config to freeze")
+        raise ApprovalError("approving a mandate freezes .rein/config.yaml, and there is no config to freeze")
 
     for name, current, presented in (
         ("plan.yaml", plan.digest(), subject.get("plan_digest", "")),
@@ -443,7 +466,7 @@ def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[
         if presented and not digests.matches(presented, current):
             raise ApprovalError(
                 f"{name} changed while the confirmation was on screen — the approval would freeze "
-                "bytes other than the ones it was shown. Re-run `rein approve tasks`."
+                "bytes other than the ones it was shown. Re-run `rein approve mandate`."
             )
     return {
         "status": "frozen",
@@ -521,15 +544,19 @@ def record_approval(
         receipt.update({key: subject[key] for key in _RECEIPT_DIGESTS if subject.get(key)})
 
         raw["gates"][gate] = {"status": "approved", "receipt": receipt}
-        raw["current_phase"] = models.PHASE_AFTER_GATE[gate]
+        # And nothing else. This used to write `current_phase` in the same breath, which made one
+        # transaction the author of two facts — what has been permitted, and how far the work has
+        # got — that could then disagree. Where the cycle stands is read off the gates
+        # (`models.State.stage`).
         raw["updated_at"] = event_chain.now_iso()
         # The approval is what closes the change requests it covered: the human read each note
         # beside these digests and decided they were answered. Open ones cannot be here —
         # readiness refuses while any stands.
         change_request.resolve_addressed(raw, gate)
 
-        # Gate ③ is what freezes the plan — the write `gate_guard` rule 2 and `rein build` both
-        # key off, and the only one in the codebase that sets `plan.status = "frozen"`.
+        # Approving the mandate is what freezes the plan — the write `gate_guard` rule 2 and
+        # `rein build` both key off, and the only one in the codebase that sets
+        # `plan.status = "frozen"`.
         if gate == FREEZING_GATE:
             raw["plan"] = _frozen_plan_block(repo, subject)
             tx.append(

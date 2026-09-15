@@ -31,7 +31,7 @@ from rein import events as events_mod
 from rein import repo as repo_mod
 
 _MAX_DELIVERABLE = 300_000  # bytes of one deliverable the pane will render
-_MAX_PATCH = 200_000  # bytes of unified diff for gate ④
+_MAX_PATCH = 200_000  # bytes of unified diff for acceptance
 _GIT_TIMEOUT_SEC = 10
 _GLOB_NAME_RE = re.compile(r"^(T|ADR)-[A-Za-z0-9_.-]+\.md$")
 _TEMPLATE_NAMES = frozenset({"T-template.md", "ADR-template.md"})
@@ -52,16 +52,27 @@ _LEVEL_RANK = {"low": 0, "medium": 1, "high": 2}
 # markdown (tasks.yaml is machine truth — reviewers must see it exactly).
 _SpecItem = str | tuple[str, str] | tuple[str, str, str]
 _GATE_SPEC: dict[str, dict[str, list[_SpecItem]]] = {
-    "requirements": {"main": ["docs/10-requirements.md"], "context": ["docs/00-product-brief.md"]},
-    "design": {
-        "main": ["docs/20-design.md", ("glob", "docs/decisions", "ADR-*.md")],
-        "context": ["docs/10-requirements.md"],
+    # The mandate is one decision over everything that says what the loop may change and must
+    # prove: the plan is the machine truth, the prose beside it is the reasoning. There were three
+    # panes here, one per phase gate, and the split was a property of the ladder rather than of
+    # what a person needs in front of them to decide.
+    "mandate": {
+        "main": [
+            ("code", ".rein/plan.yaml"),
+            "docs/10-requirements.md",
+            "docs/20-design.md",
+            ("glob", "docs/decisions", "ADR-*.md"),
+            ("glob", "docs/tasks", "T-*.md"),
+        ],
+        "context": ["docs/00-product-brief.md"],
     },
-    "tasks": {"main": [("glob", "docs/tasks", "T-*.md"), ("code", ".rein/plan.yaml")], "context": []},
-    # Gate 4 reviews the generated review, not a security-review markdown file: green tests
-    # plus an AI's summary was never the evidence this gate is supposed to weigh.
-    "build": {"main": [("code", ".rein/review.yaml")], "context": []},
-    "release": {"main": ["docs/test/test-plan.md", "docs/retrospective.md"], "context": []},
+    # Acceptance rests on the generated review, not on a security-review markdown file: green tests
+    # plus an AI's summary was never the evidence this decision is supposed to weigh. The test plan
+    # and the retrospective travel with it.
+    "acceptance": {
+        "main": [("code", ".rein/review.yaml")],
+        "context": ["docs/test/test-plan.md", "docs/retrospective.md"],
+    },
 }
 
 
@@ -154,7 +165,7 @@ def _expand(root: Path, spec: list[_SpecItem]) -> list[dict[str, object]]:
     return out
 
 
-# -- gate ④: the work-branch diff and the generated-review freshness --
+# -- acceptance: the work-branch diff and the generated-review freshness --
 
 
 def _git(root: Path, *args: str) -> tuple[int, str]:
@@ -177,7 +188,7 @@ def _default_branch(root: Path) -> str | None:
 
 
 def _diff_block(root: Path) -> dict[str, object]:
-    """The gate-④ change set: merge-base(HEAD, default branch) diff, or an honest fallback.
+    """The acceptance change set: merge-base(HEAD, default branch) diff, or an honest fallback.
 
     Same base definition as the build loop's security-review prompt. When no base exists (no
     default branch, HEAD *is* the base, single-branch repo) the block degrades to the last 20
@@ -219,7 +230,7 @@ def _diff_block(root: Path) -> dict[str, object]:
 def _review_meta(root: Path, head: str | None) -> dict[str, object]:
     """Whether the generated machine review speaks for the code actually under review.
 
-    Gate ④ approves the generated *review.yaml*, and a change to the product since it was
+    The acceptance gate approves the generated *review.yaml*, and a change to the product since it was
     generated leaves it stale (plan §17.5, E2E-08) — the pane must show that rather than imply
     currency. Measured by `review_reading.freshness` on the product's content, which is the same
     question `rein approve` and `rein doctor` ask, so the pane and the gate cannot disagree; and
@@ -282,21 +293,23 @@ def collect_review(root: str | Path, gate: str) -> dict[str, object]:
         "open_escalations": None,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
-    if gate == "build":
+    if gate == "acceptance":
+        # The change itself, and whether the review still speaks for it. Both belong to the one
+        # decision that takes the change — they were split across gates ④ and ⑤, which asked the
+        # same person about the same commit twice.
         diff = _diff_block(root)
         result["diff"] = diff
         head_value = diff.get("head")
         result["review_meta"] = _review_meta(root, head_value if isinstance(head_value, str) else None)
-    if gate == "release":
         events, _ = event_chain.scan(root / ".rein" / "events.ndjson")
         result["open_escalations"] = len(events_mod.open_attention(events, status_api.task_status_of(root)))
     return result
 
 
-# -- gate ④ human review session (plan §14.1, §21.1, §21.2) --
+# -- acceptance human review session (plan §14.1, §21.1, §21.2) --
 
 # The deliverable review above answers "what do I read"; this session answers the harder question
-# gate ④ asks — "what do *you* decide". The stages run scope (what this approval covers) → orient
+# acceptance asks — "what do *you* decide". The stages run scope (what this approval covers) → orient
 # (what was actually built, and under which conditions) → decision (the answers) → diff → freeze.
 # The two reading stages before the questions are the load-bearing part: a reviewer who has to
 # reconstruct the change from a diff before every card spends their attention on reconstruction.
@@ -368,7 +381,7 @@ def scope_block(root: Path, review: models.Review) -> dict[str, object]:
     budget says whether that is a reviewable amount in one sitting.
 
     The reason it is a stage rather than a footnote: an approval covers a boundary, and a reviewer
-    who does not know the boundary cannot know what they approved. Gate ④ binds a human's judgement to
+    who does not know the boundary cannot know what they approved. The acceptance gate binds a human's judgement to
     `trusted_base_sha..subject_head_sha`; that range should be the first thing they read, not
     something reconstructible afterwards from review.yaml.
     """
@@ -479,7 +492,7 @@ def as_built(root: str | Path, path: str) -> dict[str, object]:
     the brief because a body belongs in review.yaml even less than a diff does: the document would
     grow a copy of the repository, and the copy would be the thing that goes stale.
 
-    Read at `binding.subject_head_sha`, never from the working tree. The rest of gate ④ describes
+    Read at `binding.subject_head_sha`, never from the working tree. The rest of acceptance describes
     one commit, and a file from a different one shown beside it is the mistake `stage_data` refuses
     to make when it declines to recompute the brief.
     """

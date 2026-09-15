@@ -1,0 +1,75 @@
+# The agent sandbox: where the CLI that *writes* the code is allowed to run.
+#
+# The other packaged image (`python`) boxes in repository-derived code and is denied the network
+# outright. This one is the opposite case and the difference is the whole point: an agent CLI that
+# cannot reach its model API does nothing, so the runner gives this kind the engine's default
+# bridge. What the box is worth is therefore not the network — it is that the process writing your
+# code has no HOME of yours, no ~/.ssh, no ~/.aws, no docker socket, no capabilities, no way out of
+# the mounted worktree, and exactly the environment variables the profile's `env_allowlist` named.
+# It is not a boundary against exfiltration and nothing here pretends otherwise: the repository is
+# mounted and the network is open.
+#
+# Built with `rein oci build --profile agent --build-arg AGENT_CLI=<npm package>`. The CLI is a
+# build argument because it is the one thing about this image the package cannot choose for you —
+# a role pointed at `codex` and a role pointed at `claude` do not want the same binary, and an
+# image carrying every one of them would be a supply chain nobody asked for.
+#
+# Both halves must be present for the loop to work at all: the agent CLI, and `rein` itself, which
+# is how a leaf reports its outcome and records a decision over the control socket the runner binds
+# in. They are pinned to the same version as the host's `rein` (REIN_VERSION, which
+# `executors.build_image` fills in) because the two speak to each other.
+
+# Pinned by digest, not by tag, for the reason the quality-gate image gives at length: a tag would
+# let the environment an implementer worked in move after the fact.
+FROM docker.io/library/python:3.13-slim-bookworm@sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8d64
+
+ARG AGENT_CLI
+ARG REIN_VERSION
+ARG NODE_MAJOR=22
+
+# A non-root user, and no way to become root: the runner also passes --security-opt
+# no-new-privileges, but defence in depth is cheap here.
+RUN groupadd --gid 1000 runner \
+ && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash runner
+
+# git, because an implementer reads history and stages its own work in the worktree it was handed;
+# ca-certificates, because the model API is reached over TLS and a container that cannot verify it
+# would be reduced to trusting whatever answered.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl git gnupg \
+ && rm -rf /var/lib/apt/lists/*
+
+# Node, for the agent CLIs, which are all distributed on npm.
+RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.28@sha256:0f36cb9361a3346885ca3677e3767016687b5a170c1a6b88465ec14aefec90aa /uv /usr/local/bin/uv
+
+# Refused here rather than at the first launch: an image with no CLI in it builds fine, pins a
+# digest, and then fails inside a container with "command not found" — at which point the profile
+# is already frozen into a mandate.
+RUN test -n "${AGENT_CLI}" || (echo "build with --build-arg AGENT_CLI=<npm package>" >&2; exit 1) \
+ && npm install -g --no-fund --no-audit "${AGENT_CLI}" \
+ && npm cache clean --force
+
+# The same rein the host is running. A leaf's `rein report` and `rein decision add` travel over the
+# control socket to the orchestrator's Store, so the two ends have to agree about the protocol.
+RUN test -n "${REIN_VERSION}" || (echo "build with --build-arg REIN_VERSION=<version>" >&2; exit 1) \
+ && python -m pip install --no-cache-dir --root-user-action=ignore "loose-rein-kit==${REIN_VERSION}"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UV_NO_CACHE=1 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+# HOME is set to /tmp by the runner, which mounts a tmpfs there: an agent CLI writes its own state
+# (caches, a session file) and must have somewhere to do it that does not outlive the launch.
+# A non-root default for anyone who runs this image by hand. `rein` does not use it: every
+# launch passes `--user <the host user's uid:gid>`, because the worktree and the 0600 control
+# socket it mounts in are the host user's and no other uid can reach them.
+USER 1000:1000
+WORKDIR /work
+ENTRYPOINT []
+CMD ["rein", "--version"]

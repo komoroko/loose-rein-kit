@@ -555,7 +555,7 @@ def test_a_finding_whose_anchored_code_is_gone_may_be_dropped(committed_repo: re
     """The case that had no exit. A blocking finding was carried forward while the trusted base
     held — which, on a work branch, is the whole cycle — and dropping it was refused whether or not
     the change had fixed it. Fixing the code therefore made the review unproducible, so one
-    blocking finding shut gate ④ permanently."""
+    blocking finding shut acceptance permanently."""
     head = committed_repo._git("rev-parse", "HEAD").strip()
     blob = committed_repo._git("rev-parse", f"{head}:src/app.py").strip()
     prior = _prior(
@@ -631,7 +631,7 @@ def test_every_value_the_comparator_contract_offers_survives_its_own_validator()
     `reject_self_attestation` refused it unconditionally. A model that read the contract, kept the
     three axes apart and found the evidence sound picked the first offered value and was refused
     for it, on every claim, every run: sixteen of eighteen claims, three launches and 727,272
-    cache-creation tokens discarded per attempt, and gate ④ unreachable.
+    cache-creation tokens discarded per attempt, and acceptance unreachable.
 
     So the assertion is about the class of defect rather than that one field: read the enums out of
     the contract the model is actually sent, and make the validator accept each of them.

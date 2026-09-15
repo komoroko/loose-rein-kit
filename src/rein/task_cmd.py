@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 #: Where a reset may send a task. `done` is absent on purpose: a task is `done` because it
 #: passed the quality gate and landed a commit, and declaring that by hand would forge exactly
-#: the evidence gate ④ reviews.
+#: the evidence acceptance reviews.
 RESETTABLE_TO = ("todo", "needs-revision")
 
 _REASON_MAX = 500

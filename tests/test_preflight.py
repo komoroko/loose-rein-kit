@@ -30,11 +30,7 @@ def _config(**profiles: dict[str, Any]) -> models.Config:
     return models.Config(
         {
             "project": {"name": "demo", "work_branch": "work"},
-            "executors": {
-                "implementer_profile": "impl",
-                "reviewer_profile": "rev",
-                "quality_gate_profile": "quality",
-            },
+            "executors": {"quality_gate_profile": "quality"},
             "executor_profiles": profiles or {"impl": _HOST, "rev": _HOST, "quality": _HOST},
         }
     )
@@ -100,7 +96,7 @@ def test_a_profile_no_step_reaches_is_not_checked() -> None:
     config = models.Config(
         {
             "project": {"name": "demo", "work_branch": "work"},
-            "executors": {"implementer_profile": "impl", "reviewer_profile": "rev"},
+            "executors": {"quality_gate_profile": "quality"},
             "executor_profiles": {"impl": _HOST, "rev": _HOST, "unused": _PINNED},
         }
     )
@@ -201,3 +197,41 @@ def test_an_engine_that_does_not_say_produces_no_problem(monkeypatch: pytest.Mon
 def test_a_profile_that_fits_is_not_a_problem(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(executors, "engine_memory_mb", lambda runtime: 8192)
     assert preflight._capacity_problems(_oci(2048), runtime="docker") == []
+
+
+# --- the agent sandbox is a second path to an executor -------------------------
+
+
+_AGENT = {"kind": "oci-agent", "image": "localhost/rein-agent@sha256:" + "b" * 64, "network_profile": "egress"}
+
+
+def _agent_config() -> models.Config:
+    return models.Config(
+        {
+            "project": {"name": "demo", "work_branch": "work"},
+            "executors": {"quality_gate_profile": "quality", "agent_profile": "agent"},
+            "executor_profiles": {"quality": _HOST, "agent": _AGENT},
+        }
+    )
+
+
+def test_the_agent_sandbox_is_checked_even_though_no_step_names_it() -> None:
+    """It is reached by a launch rather than by a gate step, and walking only the steps meant a
+    missing agent image stayed undiscovered until the launch that needed it — which is after the
+    build has taken the lock and started paying."""
+    problems = preflight.check(_agent_config(), [_step("test")], _ON_PATH, runtime=None)
+    assert [p for p in problems if "'agent'" in p.what], problems
+
+
+def test_an_agent_sandbox_that_resolves_is_not_a_problem(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(executors, "resolve_pinned", lambda profile, runtime=None: (profile.image, ""))
+    monkeypatch.setattr(executors, "engine_memory_mb", lambda runtime: 0)
+    assert preflight.check(_agent_config(), [_step("test")], _ON_PATH, runtime="docker") == []
+
+
+def test_the_remedy_for_a_missing_agent_image_carries_the_argument_it_needs() -> None:
+    """`rein oci build --profile agent` alone refuses: which CLI goes in the image is the
+    operator's answer, and leaving it off the printed command hides the missing half."""
+    problems = preflight.check(_agent_config(), [_step("test")], _ON_PATH, runtime="nonesuch-engine")
+    agent = next(p for p in problems if "'agent'" in p.what)
+    assert "--build-arg AGENT_CLI=" in agent.remedy

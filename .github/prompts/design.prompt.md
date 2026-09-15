@@ -1,5 +1,5 @@
 ---
-description: Phase 2 design. Design from approved requirements, let the human decide technical choices, and ask for approval at gate ②.
+description: Design. Build an approach from the claims and let the human decide the technical choices.
 agent: agent
 ---
 

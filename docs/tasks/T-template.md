@@ -22,7 +22,7 @@
 > sandboxed profile), `artifact` (paths that must exist), `external` (an observation this loop
 > cannot make — a staging check, a device, a person; the task waits at `awaiting-evidence` until
 > somebody records it with `rein evidence record`), or no `evidence` at all, which is honest for
-> a criterion that is genuinely a judgement call and leaves it to the gate ④ review.
+> a criterion that is genuinely a judgement call and leaves it to the grounded review.
 
 - **A-1**: <one thing, stated so that it could be false>
 - **A-2**:
@@ -38,7 +38,7 @@
 -
 
 ## Self-assessment (assumptions, confidence)
-> Material for making low-confidence tasks explicit to the human at gate ③.
+> Material for making low-confidence tasks explicit to the human in the mandate.
 - **Confidence**: high / medium / low
 - **Assumptions made / risks**: <uncertain points, external dependencies, the risk of misreading due to coarse granularity, etc.>
-- **Open questions** (decisions to surface at gate ③):
+- **Open questions** (decisions to surface in the mandate):

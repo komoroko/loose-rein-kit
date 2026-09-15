@@ -200,7 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     recorder = sub.add_parser("record", help="record an observation you made yourself")
     recorder.add_argument("--task", required=True, help="the task (e.g. T-004)")
     recorder.add_argument("--ac", required=True, help="the acceptance criterion (e.g. A-2)")
-    recorder.add_argument("--note", required=True, help="what you observed, and where — a human reads this at gate 4")
+    recorder.add_argument(
+        "--note", required=True, help="what you observed, and where — a human reads this at acceptance"
+    )
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
     common.configure_logging()

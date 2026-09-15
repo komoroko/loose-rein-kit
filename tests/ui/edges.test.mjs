@@ -33,11 +33,11 @@ test("a link to a gate the server refuses settles, and says why", async () => {
 
 test("a read-only page offers no way to write and says where the authority is", async () => {
   const app = await boot({
-    hash: "#gate/build",
+    hash: "#gate/acceptance",
     readOnly: true,
     routes: baseRoutes((url) =>
       url.startsWith("/api/review/")
-        ? { gate: "build", index: 4, status: "pending", is_awaiting: true, deliverables: [], context: [] }
+        ? { gate: "acceptance", index: 4, status: "pending", is_awaiting: true, deliverables: [], context: [] }
         : undefined,
     ),
   });
@@ -45,7 +45,7 @@ test("a read-only page offers no way to write and says where the authority is", 
   await app.push("status", STATUS);
 
   assert.doesNotMatch(app.text("rvFoot"), /Approve gate/);
-  assert.match(app.text("rvFoot"), /rein approve build/);
+  assert.match(app.text("rvFoot"), /rein approve acceptance/);
   await app.go("#console");
   assert.match(app.text("ops"), /nothing here can be run/);
   assert.equal(app.window.document.getElementById("projectSelect"), null, "no projects, no switcher");

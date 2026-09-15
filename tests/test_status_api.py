@@ -33,8 +33,8 @@ PENDING_ALL = dict.fromkeys(models.GATE_ORDER, "pending")
 APPROVED_ALL = dict.fromkeys(models.GATE_ORDER, "approved")
 
 BASE: dict[str, Any] = dict(
-    current_phase="build",
-    gates={g: "approved" for g in ("requirements", "design", "tasks")} | {"build": "pending", "release": "pending"},
+    stage="building",
+    gates={"mandate": "approved", "acceptance": "pending"},
     counts=None,
     attention_count=0,
     chain_defects=0,
@@ -100,30 +100,32 @@ def test_the_recommended_build_names_a_containerfile_not_a_profile() -> None:
 
 
 def test_verify_must_clear_the_events_awaiting_a_decision() -> None:
-    rec = decide(current_phase="verify", attention_count=2)
+    rec = decide(attention_count=2)
     assert rec.command == "rein events --summary"
     assert rec.kind == "resolve"
 
 
-def test_the_brief_comes_before_the_lifecycle() -> None:
-    rec = decide(current_phase="brief", gates=PENDING_ALL)
+def test_with_no_mandate_the_board_points_at_writing_one() -> None:
+    """And says the three commands may be run in any order — one approval covers all of them."""
+    rec = decide(stage="drafting", gates=PENDING_ALL, plan_missing=True)
     assert rec.command == "/req"
+    assert "whatever order" in rec.reason
 
 
 def test_everything_approved_closes_the_cycle() -> None:
-    rec = decide(current_phase="done", gates=APPROVED_ALL)
+    rec = decide(stage="done", gates=APPROVED_ALL)
     assert rec.command.startswith("rein cycle-close")
     assert rec.kind == "close"
 
 
 def test_a_phase_in_progress_points_at_its_own_command() -> None:
-    rec = decide(current_phase="build")
+    rec = decide(stage="building")
     assert rec.command == "/build"
-    assert "rein approve build --check" in rec.also
+    assert "rein approve acceptance --check" in rec.also
 
 
 def test_an_approved_gate_advances_to_the_next_phase() -> None:
-    rec = decide(current_phase="tasks", gates={**BASE["gates"], "tasks": "approved"})  # type: ignore[dict-item]
+    rec = decide(gates={**BASE["gates"], "mandate": "approved"})  # type: ignore[dict-item]
     assert rec.command == "/build"
     assert "rein build" in rec.also
 
@@ -136,8 +138,8 @@ def test_an_approved_gate_advances_to_the_next_phase() -> None:
 
 
 def test_a_ready_gate_is_the_humans_decision_not_another_phase_run() -> None:
-    rec = decide(current_phase="build", gate_ready=True)
-    assert rec.command == "rein approve build"
+    rec = decide(gate_ready=True)
+    assert rec.command == "rein approve acceptance"
     assert rec.kind == "approve_gate"
     assert "rein ui" in rec.also
 
@@ -145,11 +147,11 @@ def test_a_ready_gate_is_the_humans_decision_not_another_phase_run() -> None:
 def test_a_ready_gate_says_the_agent_does_not_run_it() -> None:
     """The recommendation is about to be printed to agents that are built to run the next
     recommended command — so the sentence that stops them travels with it."""
-    assert "an agent never runs it for you" in decide(current_phase="build", gate_ready=True).reason
+    assert "an agent never runs it for you" in decide(gate_ready=True).reason
 
 
 def test_a_blocked_gate_still_points_at_the_phase() -> None:
-    rec = decide(current_phase="build", gate_ready=False)
+    rec = decide(gate_ready=False)
     assert rec.command == "/build"
     assert rec.kind == "run_phase"
 
@@ -157,24 +159,24 @@ def test_a_blocked_gate_still_points_at_the_phase() -> None:
 def test_an_unprobed_gate_is_not_treated_as_ready() -> None:
     """`None` means readiness was not probed, which is not the same as probed-and-clear. A board
     that never looked must not tell a human their gate is waiting on them."""
-    assert decide(current_phase="build", gate_ready=None).kind == "run_phase"
+    assert decide(gate_ready=None).kind == "run_phase"
 
 
 def test_a_ready_gate_makes_the_decision_wait_on_a_human() -> None:
-    rec = decide(current_phase="build", gate_ready=True)
+    rec = decide(gate_ready=True)
     decision = status_api.pending_decision(rec, "build")
     assert decision["waiting_on_human"] is True
     assert decision["kind"] == "approve_gate"
     # The id names the gate, so the notification does not re-fire as an unrelated row appears.
-    assert decision["id"] == "approve_gate:build:rein approve build"
+    assert decision["id"] == "approve_gate:build:rein approve acceptance"
 
 
 def test_the_queue_and_the_recommendation_agree_about_readiness() -> None:
     """Both are derived from the same `gate_blockers`, so a board showing "waiting on your
     decision" and a recommendation saying "run the phase again" cannot coexist."""
-    rec = decide(current_phase="build", gate_ready=True)
+    rec = decide(gate_ready=True)
     queue = status_api.pending_queue(
-        probe_gate="build",
+        probe_gate="acceptance",
         gate_blockers=[],
         chain_defects=0,
         unsandboxed_profiles=[],
@@ -188,18 +190,18 @@ def test_the_queue_and_the_recommendation_agree_about_readiness() -> None:
 
 
 def test_a_missing_plan_mid_lifecycle_is_a_repair() -> None:
-    assert decide(plan_missing=True, current_phase="build").command == "rein doctor"
+    assert decide(plan_missing=True, stage="building").command == "rein doctor"
 
 
-def test_an_off_vocabulary_phase_is_diagnosed_not_guessed() -> None:
-    rec = decide(current_phase="somewhere")
+def test_an_off_vocabulary_stage_is_diagnosed_not_guessed() -> None:
+    rec = decide(stage="somewhere")
     assert rec.command == "rein doctor"
     assert "not in the lifecycle vocabulary" in rec.reason
 
 
 def test_the_table_is_total_over_the_lifecycle() -> None:
-    for phase in models.PHASE_ORDER:
-        assert decide(current_phase=phase, gates=PENDING_ALL).command
+    for stage in models.STAGE_ORDER:
+        assert decide(stage=stage, gates=PENDING_ALL).command
 
 
 # --- the status object --------------------------------------------------------
@@ -212,8 +214,8 @@ def test_status_reports_gates_evidence_and_the_chain(tmp_path: Path) -> None:
     assert status["project"] == "demo"
     assert status["plan_status"] == "frozen"
     gates = status["gates"]
-    assert isinstance(gates, list) and len(gates) == 5
-    assert gates[0]["approval_id"] == "GA-REQUIREMENTS-0001"
+    assert isinstance(gates, list) and len(gates) == 2
+    assert gates[0]["approval_id"] == "GA-MANDATE-0001"
 
     plan = status["plan"]
     assert isinstance(plan, dict) and plan["claims"] == 1
@@ -408,7 +410,7 @@ def test_plan_invalidated_stands_until_the_plan_is_frozen_again(tmp_path: Path) 
 
 
 def test_a_re_freeze_retires_the_plan_invalidated_it_answered(tmp_path: Path) -> None:
-    """The roll back happened, the human re-approved gate ③, and the queue said "waiting for you"
+    """The roll back happened, the human re-approved the mandate, and the queue said "waiting for you"
     about it for the rest of the cycle. `plan_frozen` is the event that undoes exactly the state
     `plan_invalidated` reported, so it is what closes the row — nothing is erased from the log."""
     seed_repo(
@@ -460,11 +462,11 @@ def test_the_queue_is_ordered_by_severity_not_by_discovery() -> None:
 
 def test_an_unprobed_gate_is_not_a_clean_gate() -> None:
     """`None` (not probed) and `[]` (probed, clean) must not render as the same thing."""
-    unprobed = status_api.pending_queue(**{**QUEUE_BASE, "probe_gate": "build", "gate_blockers": None})
-    clean = status_api.pending_queue(**{**QUEUE_BASE, "probe_gate": "build", "gate_blockers": []})
+    unprobed = status_api.pending_queue(**{**QUEUE_BASE, "probe_gate": "acceptance", "gate_blockers": None})
+    clean = status_api.pending_queue(**{**QUEUE_BASE, "probe_gate": "acceptance", "gate_blockers": []})
     assert unprobed == []
     assert [item["kind"] for item in clean] == ["gate_ready"]
-    assert clean[0]["action"] == "rein approve build"
+    assert clean[0]["action"] == "rein approve acceptance"
 
 
 def test_a_repeated_escalation_is_one_decision_however_often_it_was_recorded() -> None:
@@ -507,7 +509,7 @@ def test_a_queue_row_keeps_its_identity_until_what_it_says_changes() -> None:
     assert fixed_the_first[0]["id"] == first[1]["id"]
 
 
-def test_the_queue_asks_readiness_for_the_gate_the_current_phase_will_present(tmp_path: Path) -> None:
+def test_the_queue_asks_readiness_for_the_gate_this_stage_will_present(tmp_path: Path) -> None:
     """The blocking rows come from `approve.readiness` — the same list `approve --check` refuses on.
 
     Deriving them a second way here is how a board ends up disagreeing with the gate it describes.
@@ -520,7 +522,7 @@ def test_the_queue_asks_readiness_for_the_gate_the_current_phase_will_present(tm
         return ["the human review is not frozen"]
 
     status = status_api.collect_status(repo_mod.Repo(tmp_path), readiness_probe=probe)
-    assert asked == ["build"]  # the seed fixture sits in the build phase
+    assert asked == ["acceptance"]  # the seed fixture sits in the build phase
     assert status["pending_deep"] is True
     queue = status["pending"]
     assert isinstance(queue, list)
@@ -628,24 +630,22 @@ def test_surfaces_on_disk_count_even_when_the_lock_records_no_install(tmp_path: 
     assert "No agent surface is installed" not in reason
 
 
-def test_the_gate_and_phase_maps_agree_with_the_vocabulary() -> None:
-    assert set(status_api.PHASE_GATE.values()) == set(models.GATE_ORDER)
-    assert set(status_api.GATE_PHASE) == set(models.GATE_ORDER)
-    assert set(status_api.PHASE_COMMAND) <= set(models.PHASE_ORDER)
+def test_the_stage_map_agrees_with_the_vocabulary() -> None:
+    """One row per stage that ends in an approval — `done` ends in nothing, which is why it is
+    absent rather than mapped to a gate nobody opens."""
+    assert set(status_api.STAGE_GATE.values()) == set(models.GATE_ORDER)
+    assert set(status_api.STAGE_GATE) == set(models.STAGE_ORDER) - {"done"}
 
 
 def test_a_blocking_finding_the_plan_owns_sends_the_build_back_rather_than_a_roll_back() -> None:
-    """A code defect gate ④ found is not a defect in the specification, and routing it through
+    """A code defect acceptance found is not a defect in the specification, and routing it through
     `rein revise` made it one — the task and its dependent closure went `needs-revision`, which
-    demanded a `/tasks` reconcile and a re-approval of gate ③ for a repair that changed no plan."""
+    demanded a `/tasks` reconcile and a re-approval of the mandate for a repair that changed no plan."""
     rec = status_api.next_action(
-        current_phase="build",
+        stage="building",
         gates={
-            "requirements": "approved",
-            "design": "approved",
-            "tasks": "approved",
-            "build": "pending",
-            "release": "pending",
+            "mandate": "approved",
+            "acceptance": "pending",
         },
         counts={"todo": 0, "in-progress": 0, "done": 2, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
         attention_count=0,
@@ -664,13 +664,10 @@ def test_a_blocking_finding_the_plan_owns_sends_the_build_back_rather_than_a_rol
 
 def test_no_finding_leaves_the_build_recommendation_alone() -> None:
     rec = status_api.next_action(
-        current_phase="build",
+        stage="building",
         gates={
-            "requirements": "approved",
-            "design": "approved",
-            "tasks": "approved",
-            "build": "pending",
-            "release": "pending",
+            "mandate": "approved",
+            "acceptance": "pending",
         },
         counts={"todo": 1, "in-progress": 0, "done": 0, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
         attention_count=0,
@@ -754,13 +751,13 @@ def test_the_status_carries_a_generation_in_flight(tmp_path: Path) -> None:
     assert live["stale"] is False, "a file written a moment ago is not stale"
 
 
-# --- the tree gate 3 approves over --------------------------------------------
+# --- the tree the mandate approves over --------------------------------------------
 
 
 def _tasks_phase(**over: object) -> dict[str, object]:
     return {
-        "current_phase": "tasks",
-        "gates": {"requirements": "approved", "design": "approved", "tasks": "pending"},
+        "stage": "drafting",
+        "gates": {"mandate": "pending"},
         "counts": {"todo": 1},
         "attention_count": 0,
         "chain_defects": 0,
@@ -773,7 +770,7 @@ def _tasks_phase(**over: object) -> dict[str, object]:
 
 
 def test_an_unmeasured_baseline_is_named_rather_than_left_to_the_first_task() -> None:
-    """Gate 3 decides this plan is implementable against this tree. `/tasks` does not ask the tree,
+    """The mandate decides this plan is implementable against this tree. `/tasks` does not ask the tree,
     so recommending it would send the human round a loop that cannot answer the blocker."""
     rec = status_api.next_action(**_tasks_phase(baseline="missing"))  # type: ignore[arg-type]
     assert rec.command == "rein baseline measure"
@@ -800,7 +797,7 @@ def test_a_scope_violation_is_the_plans_to_widen_not_a_retry() -> None:
     """The task did what it was asked and the plan drew its boundary too small. Resetting it buys
     the same refusal; widening an approved scope is a human's decision."""
     rec = status_api.blocked_recovery(_blocked({"escalation": {"kind": "scope_violation"}}))
-    assert rec is not None and rec.command.startswith("rein revise --to tasks --impacted T-001")
+    assert rec is not None and rec.command.startswith("rein revise --to mandate --impacted T-001")
 
 
 def test_an_attempt_that_produced_nothing_needs_a_fresh_reset() -> None:
@@ -830,8 +827,8 @@ def test_a_blocked_task_is_recommended_before_the_phase_command() -> None:
     """There was no row for it at all: `rein build` escalated and stopped while this went on
     saying "the build phase is in progress — run /build", which re-ran into the same wall."""
     rec = status_api.next_action(
-        current_phase="build",
-        gates={"requirements": "approved", "design": "approved", "tasks": "approved", "build": "pending"},
+        stage="building",
+        gates={"mandate": "approved", "acceptance": "pending"},
         counts={"todo": 0, "blocked": 1, "done": 1},
         attention_count=0,
         chain_defects=0,
@@ -850,13 +847,10 @@ def test_nothing_blocked_recommends_nothing() -> None:
 
 def _build_phase(**extra: object) -> status_api.Recommendation:
     return status_api.next_action(
-        current_phase="build",
+        stage="building",
         gates={
-            "requirements": "approved",
-            "design": "approved",
-            "tasks": "approved",
-            "build": "pending",
-            "release": "pending",
+            "mandate": "approved",
+            "acceptance": "pending",
         },
         counts={"todo": 0, "in-progress": 0, "done": 2, "blocked": 0, "needs-revision": 0, "awaiting-evidence": 0},
         attention_count=0,

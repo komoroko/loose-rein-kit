@@ -1,6 +1,6 @@
 # Retrospective
 
-> `/verify` generates/updates this at gate ⑤ approval / reaching `done`. It recovers the process metacognition and
+> `/verify` generates/updates this at acceptance approval / reaching `done`. It recovers the process metacognition and
 > leaves learning for the next cycle (next product / next iteration).
 > It **closes the open items** of each log in the phase deliverables (escalation, speculative work).
 

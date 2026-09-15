@@ -1,5 +1,5 @@
 # yaml-language-server: $schema=schema/config.schema.json
-# .rein/config.yaml — the execution knobs, frozen wholesale at gate 3.
+# .rein/config.yaml — the execution knobs, frozen wholesale when the mandate is approved.
 #
 # What may NOT go in this file matters as much as what may: no principal, no role, no
 # authority, no provider executable path, no credential. Those live OUTSIDE the repository
@@ -19,21 +19,44 @@ execution:
   command_timeout_sec: 1800
   agent_timeout_sec: 0        # 0 = no limit; a clock cannot tell working from stuck
 
-# Which sandbox each role runs in. The bodies are below.
+# Which sandbox the quality gate's command steps run in. The bodies are below.
+#
+# One key, because one path reaches an executor. This block also carried `implementer_profile` and
+# `reviewer_profile`, and they wrapped nothing: every agent CLI — implementer, reviewer, every
+# fixer — is launched as a host process from `rein` itself, and the only calls into the executor
+# are the quality gate's command steps and the dependency audit. Setting them bought a sandbox
+# nobody entered, and told the agent, in its dossier, that it was inside one.
 executors:
-  implementer_profile: implementer
-  reviewer_profile: reviewer
   quality_gate_profile: quality
 
 # ---------------------------------------------------------------------------
 # SANDBOXES.
 #
-# A fresh repository ships `kind: host`, which is NOT policy-compliant: anything that runs
-# repository-derived code, tests, or build scripts must run under an `oci` profile regardless
-# of risk (a test file is code an agent wrote, and it runs with your credentials).
-# `rein doctor` reports this as a FAIL until you fix it, and `rein init` offers to do it for you.
+# **What this isolates, exactly.** The quality gate's `kind: command` steps and the acceptance
+# criteria that go through the same runner — the places this tool *executes* repository-derived
+# code. That is the rule: a test file is code an agent wrote, and running it on the host runs it
+# with your credentials. A fresh repository ships `kind: host`, which is NOT policy-compliant;
+# `rein doctor` reports it as a FAIL until you fix it, and `rein init` offers to do it for you.
 #
-#     rein oci build --all --write-config   # build all three and pin them here
+# **The agent CLI that wrote that code is the other box, and an optional one.** Set
+# `executors.agent_profile` to a `kind: oci-agent` profile and every implementer, reviewer and
+# fixer is launched inside it: the worktree mounted read-write at /work, the control socket bound
+# in so a leaf can still report what it did, and no HOME of yours, no ~/.ssh, no ~/.aws, no docker
+# socket, no capabilities. That kind IS granted egress — an agent that cannot reach its model API
+# does nothing — so it is not a boundary against exfiltration and does not claim to be; what it
+# buys is that the process writing your code cannot read the rest of your machine.
+#
+#     rein oci build --profile agent --build-arg AGENT_CLI=@anthropic-ai/claude-code --write-config
+#
+# The CLI is a build argument because it is the one thing this package cannot choose for you, and
+# that is also why the key is optional: leaving it unset launches the agent on the host with your
+# credentials, isolated only by whatever the adapter establishes for itself (`codex exec`
+# establishes seccomp/landlock around its work; `claude -p` carries the project's permissions).
+# Either way `rein doctor`, the dossier and the acceptance brief say which it was. When you do box
+# it, configure the adapter NOT to sandbox itself: two nested sandboxes fail at the point the agent
+# writes, and `rein doctor` warns about exactly that combination.
+#
+#     rein oci build --all --write-config   # build the packaged image and pin it here
 #
 # That is the whole setup, and it is what `rein next`, `rein doctor` and the dashboard all
 # recommend. It needs docker or podman on PATH; it builds each packaged Containerfile, writes the
@@ -43,10 +66,8 @@ executors:
 # `containerfile:` key says (`rein oci list` prints the whole set):
 #
 #     rein oci build --profile python --write-config       # the quality-gate image
-#     rein oci build --profile reviewer --write-config
-#     rein oci build --profile implementer --write-config
 #
-# Without `--write-config` each prints a digest to paste in by hand. The pinned digest — never a
+# Without `--write-config` it prints a digest to paste in by hand. The pinned digest — never a
 # tag — is what stops the environment a review ran in from changing after that review was approved.
 #
 # Pinning is not the whole job: the image has to be able to RUN the step you point at it. The
@@ -88,17 +109,19 @@ executor_profiles:
     # memory_mb: 1024
     # cpu_count: 2
 
-  reviewer:
-    kind: host
-    containerfile: reviewer
-    # A reviewer container never mounts the canonical store or the gate receipts: an AI that
-    # can edit the record does not need to convince anyone of anything.
-    # env_allowlist: [MODEL_API_KEY]
-
-  implementer:
-    kind: host
-    containerfile: implementer
-    # mount_repo: read_write
+  # The agent box. Commented out because it is optional and because the image has to carry your
+  # CLI — uncomment after `rein oci build --profile agent --build-arg AGENT_CLI=... --write-config`
+  # and point `executors.agent_profile` at it. `network_profile: egress` is the only value this
+  # kind takes, and `none` is the only value `kind: oci` takes; the runner refuses the other way
+  # round, which is why the two are separate kinds rather than one kind with a knob.
+  # agent:
+  #   kind: oci-agent
+  #   containerfile: agent
+  #   image: localhost/rein-agent@sha256:<rein oci build prints this>
+  #   network_profile: egress
+  #   env_allowlist: [ANTHROPIC_API_KEY]   # the model credential, and nothing else
+  #   memory_mb: 4096
+  #   cpu_count: 4
 
 agents:
   implementer:
@@ -171,15 +194,15 @@ security:
   # Everything else it needs it already has: the structured review is bound to the reviewed HEAD
   # and its blocking findings hold this gate shut too. A dependency audit is different in kind —
   # the same commit audited last month and today can differ, because the database moved while the
-  # code did not. So it is the one thing that must actually be RUN at gate 5, and the one piece of
+  # code did not. So it is the one thing that must actually be RUN at acceptance, and the one piece of
   # evidence here that expires without anything in the repository changing.
   #
   # `rein audit run` runs this and records what it said, bound to a digest over this tree's
   # manifests and lockfiles — so editing source does not retire the answer, and changing a
-  # dependency does. Gate 5 refuses a release with no audit, a stale one, or a failing one.
+  # dependency does. Acceptance refuses a change with no audit, a stale one, or a failing one.
   #
   # Replace the command with your ecosystem's: pip-audit, `npm audit --audit-level=high`,
-  # `cargo audit`, `make audit`. A project that declares none is told at gate 5 that it has no
+  # `cargo audit`, `make audit`. A project that declares none is told at acceptance that it has no
   # dependency answer at all, which is not the same as having a clean one.
   dependency_audit:
     command: [uv, run, pip-audit, --strict]
@@ -193,7 +216,7 @@ security:
     max_age_days: 7
 
 review_policy:
-  # How gate 4 takes its reading. `auto` composes it from the plan's task scopes — one reading
+  # How acceptance takes its reading. `auto` composes it from the plan's task scopes — one reading
   # per scoped task, plus the seam over what two scopes share or none covers — so one launch
   # holds one task's slice rather than a whole cycle, and a review regenerated after a fix
   # re-reads only the task whose code moved. `whole` never composes and pays for one reading of
@@ -202,18 +225,18 @@ review_policy:
   # in one tree, and `coverage.composition` says so rather than hiding it.
   #
   # A plan whose tasks declare no `scope` has nothing to compose along and is read whole either
-  # way. `rein dag --render` says which of the two this plan will get, at gate 3, while it can
+  # way. `rein dag --render` says which of the two this plan will get, at the mandate, while it can
   # still be changed.
   composition: auto
   # Exceeding a budget SPLITS THE SCOPE. It never lengthens the review screen: a reviewer
   # asked to hold 80 statements in their head is not reviewing, they are skimming.
   #
-  # The first three bound what one PERSON holds at gate 4, and are measured over the whole
+  # The first three bound what one PERSON holds at acceptance, and are measured over the whole
   # review. `max_diff_bytes` bounds what one LAUNCH reads, so it is measured against a single
   # reading — under `composition: auto` that is one task's slice, never the cycle. A change too
-  # big for one reading is a task whose scope is too broad, which is a thing to fix at gate 3
+  # big for one reading is a task whose scope is too broad, which is a thing to fix at the mandate
   # while splitting is still a move that exists.
-  # How many times gate 4 may repair its own blocking findings and read the change again before
+  # How many times acceptance may repair its own blocking findings and read the change again before
   # it stops and asks. A finding is repaired only when a task's declared scope owns the code it
   # anchored to and the fix changes no claim, criterion or requirement — and the NEXT reading is
   # what decides whether it closed, never the fixer's account of it. Bounded because the failure
@@ -231,21 +254,25 @@ guard:
   # product deliverables). `rein init` writes false for products — that is when the
   # editor-hook guard goes live.
   template_mode: true
-  # Each path guards the file it names and everything beneath it; the trailing "/" is optional
-  # punctuation. The prefix is anchored at a separator, so `src` guards src/a.py and never
-  # srcfile.py, and the most specific entry wins. tests/ is deliberately NOT guarded: preparing
-  # fixtures while a gate is pending is sanctioned speculative work.
+  # What a mandate authorizes changes to. Each path guards the file it names and everything beneath
+  # it; the trailing "/" is optional punctuation. The prefix is anchored at a separator, so `src`
+  # guards src/a.py and never srcfile.py, and the most specific entry wins.
+  #
+  # Writing one of these needs two things: an approved mandate, and that mandate's own
+  # `scope` in plan.yaml covering the path. Entries used to name which of five phase gates opened
+  # them (`{ path: src/, requires_gate: tasks }`) — a guard enforcing an order. The documents were
+  # in here too, each waiting on the phase before it; they are the material a mandate is written
+  # from, so there is nothing for them to wait on.
+  #
+  # tests/ is deliberately NOT guarded: preparing fixtures while the mandate is open is
+  # sanctioned speculative work.
   paths:
-    - { path: docs/20-design.md, requires_gate: requirements }
-    - { path: docs/decisions/, requires_gate: requirements }
-    - { path: docs/tasks/, requires_gate: design }
-    - { path: docs/test/, requires_gate: build }
-    - { path: src/, requires_gate: tasks }
-    - { path: lib/, requires_gate: tasks }
-    - { path: app/, requires_gate: tasks }
-    - { path: backend/, requires_gate: tasks }
-    - { path: frontend/, requires_gate: tasks }
-    - { path: scripts/, requires_gate: tasks }
+    - src/
+    - lib/
+    - app/
+    - backend/
+    - frontend/
+    - scripts/
 
 github:
   enabled: false        # off by default: offline-safe. The plan stays the SSOT either way.

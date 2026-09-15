@@ -90,8 +90,8 @@ def readiness(repo: repo_mod.Repo) -> list[str]:
     if state is None:
         return ["no .rein/state.yaml — there is no cycle to close"]
 
-    if state.gate_status("release") != "approved":
-        blockers.append("the release gate (5) is not approved — a cycle closes on a signed release decision")
+    if state.gate_status("acceptance") != "approved":
+        blockers.append("the acceptance gate is not approved — a cycle closes on a signed decision to take the change")
     events, defects = event_chain.scan(repo.events)
     if defects:
         blockers.append(f"the audit chain has {len(defects)} defect(s); the archive would record an unreadable log")
@@ -167,7 +167,6 @@ def next_state(previous: models.State, slug: str) -> dict[str, object]:
     return {
         "project": previous.project,
         "cycle_id": slug,
-        "current_phase": "brief",
         "updated_at": event_chain.now_iso(),
         "gates": {gate: {"status": "pending", "receipt": None} for gate in models.GATE_ORDER},
         "plan": {"status": "draft"},

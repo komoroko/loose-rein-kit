@@ -24,9 +24,9 @@ status, attempts, retry budget, handoff — and stops the run, because the next 
 the same way. What that buys is not tidiness: `blocked` takes a task off the frontier, so a task
 blocked for a machine's reason never reaches the salvage/restore path in :mod:`rein.build_git`
 that exists to continue it, and the run's `task_failed` + `knowledge_gap` sit in an append-only
-chain that gate ⑤ counts as unresolved escalations forever.
+chain that acceptance counts as unresolved escalations forever.
 
-**The loop produces no gate-④ evidence.** Gate ④ approves a *grounded review* — a blind
+**The loop produces no acceptance-gate evidence.** The acceptance gate approves a *grounded review* — a blind
 actual-behaviour extraction compared against the frozen plan, with a coverage manifest — and a
 green test run is not a substitute. When the tasks finish, this prints what remains and stops.
 
@@ -105,7 +105,7 @@ from rein import usage as usage_mod
 
 logger = logging.getLogger(__name__)
 
-#: Where a gate-④ repair stands when this cycle ships as a stack: a throwaway worktree on the slice
+#: Where an acceptance repair stands when this cycle ships as a stack: a throwaway worktree on the slice
 #: branch that introduced the code. Its own name rather than `pr_stack.RESTACK_WORKTREE`, because
 #: the propagation that follows creates that one and git refuses the same path twice.
 _GATE4_WORKTREE = "_gate4"
@@ -182,6 +182,11 @@ _DIRTY_PATHS_SHOWN = 20
 #: working directory cannot disagree about where the repository is.
 _SANDBOX_WORKDIR = "/work"
 
+#: Where the control socket is bound inside an agent sandbox. A fixed path rather than the host's,
+#: because the host's lives under `/run/user/<uid>` and a container that mounted *that* would be
+#: handed every other socket in it.
+_SANDBOX_CONTROL_SOCKET = "/run/rein/control.sock"
+
 
 def _worktree_common_git_dir(checkout: Path) -> Path | None:
     """The main repository's `.git` for a linked worktree, or None for an ordinary checkout.
@@ -251,7 +256,7 @@ class GateStep:
     agent_role: str = ""
     agent_argv: tuple[str, ...] = ()
     #: Glob patterns (fnmatch-style) restricting this step to a matching diff. Empty: every
-    #: task, unconditionally — frozen at gate 3 alongside the rest of config.yaml, never a knob
+    #: task, unconditionally — frozen by the mandate alongside the rest of config.yaml, never a knob
     #: a task's own ticket sets (`models.GateStep.matches_paths`).
     paths: tuple[str, ...] = ()
     #: Where this step runs: `task`, `integration`, or `both`. Never "whether" — every configured
@@ -758,7 +763,7 @@ class Orchestrator:
         self.root = str(self.repo.root)
         self.store = store_mod.Store(self.repo)
         self.state = self.store.read_state()
-        # The frozen Expected Model. Read once: it cannot change during a run (gate ③ froze it,
+        # The frozen Expected Model. Read once: it cannot change during a run (the mandate froze it,
         # and `rein guard` denies a write while it is frozen), and every dossier needs it.
         self._plan = self.store.read_plan()
         self.cycle_id = self.state.cycle_id if self.state else ""
@@ -793,7 +798,7 @@ class Orchestrator:
         # established, outside the working tree. Off in a dry run (nothing is established) and
         # off when the operator says so. A miss only ever costs a re-run.
         self.ledger = evidence.Ledger.for_repo(self.repo, enabled=not dry_run and evidence.cache_enabled_by_env())
-        #: Set once a gate-④ warm-up could not be taken. Retrying it per task would spend a session
+        #: Set once an acceptance warm-up could not be taken. Retrying it per task would spend a session
         #: limit on an optimization, and the gate takes the reading either way (`_warm_reading`).
         self._warming_off = False
         # What each task's gate steps were established green against, keyed by task id. Written
@@ -820,7 +825,7 @@ class Orchestrator:
         self._stops: dict[str, str] = {}
         # DoD steps already red on the work branch before any task ran, and what they said. A task
         # that fails one of these is not sent back to an implementer: `_load_baseline` reads the
-        # record gate ③ froze.
+        # record the mandate froze.
         self._baseline_red: dict[str, str] = {}
         self._baseline_taken = False
 
@@ -958,7 +963,7 @@ class Orchestrator:
         A task can be read twice — by its own reviewer in its worktree, and by the integration
         reviewer once it has merged — and the two are different observations of different trees.
         Replacing the key would silently drop whichever arrived first, which for the per-task
-        reviewer is the one whose findings `brief.residual_findings` carries to gate ④.
+        reviewer is the one whose findings `brief.residual_findings` carries to acceptance.
         """
         if self.dry_run or not task_id:
             return
@@ -1026,6 +1031,7 @@ class Orchestrator:
         adapter = argv[0] if argv else ""
         record = adapters.adapter_for(argv)
         prompt_bytes = sum(len(part.encode("utf-8")) for part in argv)
+        contained = self._agent_sandbox()
         while True:
             # Counted per attempt, inside the loop, because a retry is another launch: the same
             # argv goes to the provider again and is paid for again. Counting once per `_launch`
@@ -1034,7 +1040,10 @@ class Orchestrator:
             # the billed one said 3.
             self._spend(role or where, prompt_bytes, resumed=resumed)
             with common.Heartbeat(where):
-                rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
+                if contained is None:
+                    rc, out = _run(argv, cwd=cwd, timeout=self.config.timeout_agent, env=env)
+                else:
+                    rc, out = self._launch_contained(contained, argv, cwd=cwd, where=where, env=env)
             if rc == 0:
                 try:
                     said, spent = record.read_output(out) if record else (out, usage_mod.Usage.unavailable())
@@ -1045,6 +1054,11 @@ class Orchestrator:
                     rc, out, said, spent = 1, f"{exc}\n{out}", "", usage_mod.Usage.unavailable()
                 self._spend_usage(role or where, spent)
                 if rc == 0:
+                    # What session this launch *opened*, for a CLI that mints its own id and reports
+                    # it (`Adapter.session_from_envelope`). Set on every successful launch, never
+                    # only when someone might want it, so a caller can never read a stale one from
+                    # an earlier launch on this thread. "" for a CLI that names no session.
+                    self._local.session_opened = record.session_of(out) if record else ""
                     note = agent_launch_note(role=role or where, adapter=adapter, rc=0, output=said, session=session)
                     self._note_diagnostic(task_id, {"last_agent": note})
                     return said
@@ -1136,7 +1150,7 @@ class Orchestrator:
                 "role": role,
                 "task_id": task.id,
                 "run_id": self.run_id,
-                "sandbox": self._profile_for_role(role),
+                "sandbox": self._launch_environment(),
                 "control_plane": self.control is not None,
             },
         )
@@ -1144,16 +1158,99 @@ class Orchestrator:
         self._spend_handover(role, dossier.handover_bytes(document, written, self.repo.path))
         return f"{dossier.RELATIVE_PATH}/{task.id}.json"
 
-    def _profile_for_role(self, role: str) -> str:
-        """The executor profile's kind for `role` — what the agent is actually running inside.
+    def _agent_sandbox(self) -> models.ExecutorProfile | None:
+        """The profile an agent CLI is launched in, or None to launch it on the host.
 
-        Handed to the agent so it stops having to infer its own environment from the shape of its
-        prompt, and so a `codex` told it is already inside an OCI profile can stop trying to build
-        a second sandbox around itself.
+        None is the configured default and an honest one: the image has to carry the CLI, so no
+        packaged image can cover every role anyone points at a CLI. What is refused is the third
+        state — `executors.agent_profile` naming a profile that is not a sandbox. That reads like
+        a boundary in the file a human approved, so it fails here rather than running the agent on
+        the machine and saying nothing, which is precisely what `implementer_profile` used to do.
         """
-        key = {"implementer": "implementer", "code_reviewer": "reviewer"}.get(role, "quality_gate")
-        profile = self.config.raw.profile_for(key)
-        return profile.kind if profile is not None else "host"
+        profile = self.config.raw.agent_profile
+        if profile is None or profile.is_agent_sandbox:
+            return profile
+        raise common.ReinError(
+            f"executors.agent_profile names {profile.name!r}, which is `kind: {profile.kind}`. An agent "
+            "launch needs `kind: oci-agent` — the kind that is granted egress, because an agent that "
+            "cannot reach its model API does nothing. Build one with `rein oci build --profile agent "
+            "--build-arg AGENT_CLI=<npm package> --write-config`, or drop the key and the agent runs on "
+            "the host."
+        )
+
+    def _launch_contained(
+        self,
+        profile: models.ExecutorProfile,
+        argv: list[str],
+        *,
+        cwd: str,
+        where: str,
+        env: dict[str, str] | None,
+    ) -> tuple[int, str]:
+        """One agent launch inside `profile`, with the worktree and the control socket bound in.
+
+        The worktree is mounted read-write because an implementer's whole job is to change it, and
+        at the same absolute path rules as a gate step (`_mounts_for`) so a leaf's `.git` redirect
+        resolves. The control socket is bound at a fixed path and the leaf is told that path, which
+        is the one thing that has to be rewritten between the host's environment and the
+        container's: the host's socket lives under `/run/user/<uid>/rein/<id>`, and mounting that
+        directory would hand the container every other socket in it.
+
+        `HOME` is the container's ephemeral tmpfs, not the operator's, so the CLI's own state dies
+        with the launch. That is also why an adapter's `own_sandbox` has to be switched off in here
+        — a second sandbox inside this one fails at the point it tries to write, and `doctor` says
+        so before a run finds out.
+        """
+        spec = executors.ExecutionSpec(
+            command=tuple(argv),
+            profile=profile,
+            mounts=self._mounts_for(profile, cwd),
+            env=dict(env or os.environ),
+            env_always=self._contained_wiring(env),
+            workdir=_SANDBOX_WORKDIR,
+            timeout_sec=self.config.timeout_agent,
+        )
+        try:
+            result = executors.for_profile(profile).run(spec)
+        except executors.ExecutorError as exc:
+            raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
+        return result.exit_code, result.output
+
+    @staticmethod
+    def _contained_wiring(env: dict[str, str] | None) -> dict[str, str]:
+        """The control-plane variables as the container must see them.
+
+        `REIN_CONTROL_SOCKET` is rewritten to the bound path; everything else the orchestrator
+        minted travels as-is. Empty when there is no control plane (a dry run), which leaves the
+        leaf with no socket and a `rein report` that refuses rather than writing into a worktree
+        about to be deleted — the same behaviour a host launch has.
+        """
+        if not env or control_plane.SOCKET_ENV not in env:
+            return {}
+        wiring = {
+            name: value for name, value in env.items() if name.startswith("REIN_") and name != control_plane.SOCKET_ENV
+        }
+        wiring[control_plane.SOCKET_ENV] = _SANDBOX_CONTROL_SOCKET
+        return wiring
+
+    def _launch_environment(self) -> str:
+        """What the agent is actually running inside, so it stops inferring it from its prompt.
+
+        Derived from where the launch will really happen, never from a config key that says where
+        it ought to. This used to report `executors.implementer_profile`'s `kind`, and since no
+        launcher read that key, a repository that had pinned its images told the agent it was
+        inside an OCI sandbox while the process ran on the machine.
+
+        `own_sandbox` is the other thing that can change the answer, and it is the adapter's doing:
+        `codex exec` establishes seccomp/landlock isolation around its own work. Saying which it is
+        matters in both directions — an agent told it is already sandboxed does not try to build a
+        second one, and an agent told it is not does not assume the tree is disposable.
+        """
+        profile = self.config.raw.agent_profile
+        if profile is not None and profile.is_agent_sandbox:
+            return f"oci-agent ({profile.name}; egress open, repository mounted at {_SANDBOX_WORKDIR})"
+        adapter = self._implementer_adapter
+        return f"host ({adapter.name} sandboxes itself)" if adapter and adapter.own_sandbox else "host"
 
     def _history_for(self, task: dag.Task) -> list[dict[str, Any]]:
         """One line per past attempt: which step went red and why, oldest first.
@@ -1209,6 +1306,17 @@ class Orchestrator:
         adapter = self._implementer_adapter
         return bool(adapter and adapter.resumable)
 
+    @property
+    def _implementer_mints_its_own_session(self) -> bool:
+        """Whether the implementer CLI names the session rather than being told one.
+
+        The two shapes need different handling here and nowhere else: a caller-chosen id exists
+        before the first launch, a CLI-chosen one exists only after it. "Start a fresh session" is
+        therefore "mint a new uuid" for the first and "forget the one we were given" for the second.
+        """
+        adapter = self._implementer_adapter
+        return bool(adapter and adapter.session_from_envelope and adapter.resume_argv)
+
     def _invoke_implementer(
         self,
         task: dag.Task,
@@ -1217,28 +1325,33 @@ class Orchestrator:
         session: str = "",
         resume: bool = False,
         base: str = "",
-    ) -> None:
+    ) -> str:
         """One headless implementer launch; `session`/`resume` thread retry-session continuity.
 
-        With a session id, the first launch stamps it (--session-id) and a retry resumes it
-        (--resume) so the implementer keeps its own context across its retries instead of
-        re-reading ticket/design/code cold. A failed resume falls back to one fresh launch
-        (session files can expire) rather than stopping the loop on a continuity optimization —
-        but only when a fresh launch could plausibly do better. An exhausted session limit or a
-        CLI that is not on PATH gets no second attempt: nothing was going to launch.
+        Returns the session this launch is continuing or opened, "" when there is none — which is
+        how a CLI that mints its own id gets one back to the caller (`Adapter.session_of`).
+
+        With a session, the implementer keeps its own context across its retries instead of
+        re-reading ticket/design/code cold. How it is carried depends on the CLI: claude is *told*
+        an id (`--session-id` then `--resume`), codex *reports* one and is resumed by verb
+        (`codex exec resume <id>`). `adapters.command` places either; this only decides which
+        session the next launch should continue.
+
+        A failed resume falls back to one fresh launch (session files can expire) rather than
+        stopping the loop on a continuity optimization — but only when a fresh launch could
+        plausibly do better. An exhausted session limit or a CLI that is not on PATH gets no second
+        attempt: nothing was going to launch.
         """
         if self.dry_run:
             print(f"    [dry-run] launch implementer (cwd={cwd}) task={task.id}")
-            return
+            return ""
         prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, base, "implementer"))
         where = f"{task.id}: implementer"
-        adapter = self._implementer_adapter
-        flags: list[str] = []
-        if session and adapter is not None:
-            flags += [*(adapter.resume_flags if resume else adapter.session_flags), session]
         try:
             self._launch(
-                adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE, extra=flags),
+                adapters.command(
+                    self.config.adapter_argv, prompt, access=adapters.WRITE, session=session, resume=resume
+                ),
                 cwd=cwd,
                 where=where,
                 env=self._leaf_env(task),
@@ -1247,7 +1360,7 @@ class Orchestrator:
                 session=session,
                 resumed=resume,
             )
-            return
+            return session or getattr(self._local, "session_opened", "")
         except EnvironmentFault as fault:
             # The case this branch is most worth having is a session that outgrew the model's
             # window: what did not fit is its own accumulated context, and a cold launch is exactly
@@ -1267,6 +1380,7 @@ class Orchestrator:
             task_id=task.id,
             role="implementer",
         )
+        return getattr(self._local, "session_opened", "")
 
     def _leaf_env(self, task: dag.Task, role: str = "implementer") -> dict[str, str] | None:
         """The environment an implementer runs with: the control socket, a scoped token, and who it is.
@@ -1302,7 +1416,7 @@ class Orchestrator:
             "REIN_ROLE": role,
             "REIN_TASK_ID": task.id,
             "REIN_RUN_ID": self.run_id,
-            "REIN_SANDBOX": self._profile_for_role(role),
+            "REIN_SANDBOX": self._launch_environment(),
         }
 
     @property
@@ -1316,7 +1430,7 @@ class Orchestrator:
         `stage: both` is the default and what every step has always done. Naming `task` or
         `integration` moves *when* a step runs, never whether: a whole suite re-established from
         scratch on each attempt of each task, and again over the join, is the same confidence
-        bought several times. An operator decides that at gate ③; no task can.
+        bought several times. An operator decides that at the mandate; no task can.
         """
         return tuple(step for step in self._steps_effective if step.stage in {stage, "both"})
 
@@ -1324,7 +1438,7 @@ class Orchestrator:
         """The gate steps for one task: this stage's DoD, minus any step whose `paths:` this
         task's diff does not touch.
 
-        Still not a knob an implementer can turn: `paths:` and `stage:` are frozen at gate 3 in
+        Still not a knob an implementer can turn: `paths:` and `stage:` are frozen by the mandate in
         config.yaml alongside every other DoD step, not read from the task or its ticket. A step
         naming no `paths:` — every packaged step ships this way — runs for every task exactly as
         before. The diff is computed fresh (`_review_scope`, the same source the review prompt's
@@ -1492,7 +1606,7 @@ class Orchestrator:
         Command steps only. A merge resolution is judged on whether the tree still holds up, and
         that is what an exit status answers; spending a reviewer agent on merge glue would be a
         different question asked at several times the price. The steps themselves are the frozen
-        ones — `stage` and `paths` came from gate ③ like every other part of the DoD.
+        ones — `stage` and `paths` came from the mandate like every other part of the DoD.
         """
         for step in self._steps_at("task"):
             if step.kind != "command" or not step.command:
@@ -1598,15 +1712,29 @@ class Orchestrator:
         )
 
     def _profile_for(self, step: GateStep) -> models.ExecutorProfile:
-        """The profile a step runs in: its own, else `executors.quality_gate_profile`, else host.
+        """The profile a step runs in: its own if it names one, else `executors.quality_gate_profile`.
 
-        Falling back to a host profile rather than refusing keeps a repository that has not built
-        its images working — `doctor` is what says the code is running unsandboxed, in one place,
-        instead of every step failing with the same message.
+        **A name that resolves to nothing raises.** It used to fall back to a bare host profile, so
+        a misspelt `executor_profile`, or a `quality_gate_profile` naming a profile that is not in
+        `executor_profiles`, ran the step on the machine and reported nothing — the one outcome the
+        setting exists to prevent, reached by a typo. The schema requires `quality_gate_profile`
+        and `rein doctor` checks that it resolves, so arriving here with nothing is a config that
+        was edited past both.
         """
         config = self.config.raw
-        named = config.profiles.get(step.executor_profile) if step.executor_profile else None
-        return named or config.profile_for("quality_gate") or models.ExecutorProfile("host", {"kind": "host"})
+        if step.executor_profile:
+            if named := config.profiles.get(step.executor_profile):
+                return named
+            raise common.ReinError(
+                f"quality-gate step {step.name!r} names executor_profile "
+                f"{step.executor_profile!r}, which is not in executor_profiles"
+            )
+        if profile := config.quality_gate_profile:
+            return profile
+        raise common.ReinError(
+            "executors.quality_gate_profile names no profile in executor_profiles — "
+            "a step would otherwise run repository code on this machine without saying so"
+        )
 
     def _mounts_for(self, profile: models.ExecutorProfile, cwd: str) -> tuple[tuple[Path, str, str], ...]:
         """The repository mount a sandboxed gate step needs to have something to test.
@@ -1627,10 +1755,15 @@ class Orchestrator:
         This is the sandbox's boundary widening by exactly one directory: with `--network none`
         still in force, a step can now write the repository it is already building (a leaf
         commits to its own branch anyway) and nothing else.
+
+        An agent sandbox takes the same mounts plus the control socket, and takes them read-write
+        whatever `mount_repo` says: an agent that cannot write the checkout it was handed cannot do
+        the one thing it was launched for, so a `read_only` there would be a config error dressed
+        as a preference.
         """
-        if not profile.is_sandboxed:
+        if not profile.runs_contained:
             return ()
-        mode = str(profile.raw.get("mount_repo", "read_write"))
+        mode = "read_write" if profile.is_agent_sandbox else str(profile.raw.get("mount_repo", "read_write"))
         if mode == "none":
             return ()
         access = "ro" if mode == "read_only" else "rw"
@@ -1638,6 +1771,8 @@ class Orchestrator:
         git_dir = _worktree_common_git_dir(Path(cwd))
         if git_dir is not None:
             mounts.append((git_dir, str(git_dir), access))
+        if profile.is_agent_sandbox and self.control is not None:
+            mounts.append((Path(self.control.socket_path), _SANDBOX_CONTROL_SOCKET, "rw"))
         return tuple(mounts)
 
     def _run_pipeline(self, task: dag.Task, cwd: str, base: str = "") -> tuple[str | None, str]:
@@ -1838,7 +1973,7 @@ class Orchestrator:
         for entry in task.acceptance:
             evidence_spec = entry.get("evidence")
             if not isinstance(evidence_spec, dict):
-                continue  # prose only, and honest about it: gate ④ is where a human reads it
+                continue  # prose only, and honest about it: acceptance is where a human reads it
             kind = str(evidence_spec.get("kind", ""))
             if kind not in models.MECHANIZED_EVIDENCE_KINDS:
                 continue
@@ -1879,7 +2014,7 @@ class Orchestrator:
         self._current_acceptance.append({"id": ac_id, "kind": kind, "reused": reused})
 
     def _warm_reading(self, task: dag.Task) -> review_reading.ReadOut | None:
-        """Take gate ④'s reading of this task now, while its diff is one task wide.
+        """Take acceptance's reading of this task now, while its diff is one task wide.
 
         The gate reads the change in the readings the plan's task scopes describe
         (`review_reading.plan_readings`), and it asks each one the same question this does — same
@@ -1905,7 +2040,7 @@ class Orchestrator:
 
         **The `ReadOut` is the point of the return type.** This launched a security reviewer over
         the task's slice and then threw its answer away: the finding was paid for here and first
-        read at gate ④, several tasks later, by which time the code it names has been built on.
+        read at acceptance, several tasks later, by which time the code it names has been built on.
         `_repair_warm_findings` reads it. `None` means no reading was taken — a skip, or an
         adapter that would not answer — which is not the same as a reading that found nothing.
         """
@@ -1931,7 +2066,7 @@ class Orchestrator:
             if models.risk_at_least(effective, "critical"):
                 self._warming_off = True
                 print(
-                    f"    [review] {task.id}: the change is {effective} — gate ④ reads it whole, "
+                    f"    [review] {task.id}: the change is {effective} — acceptance reads it whole, "
                     "so no per-task reading is warmed from here on"
                 )
                 return None
@@ -1944,6 +2079,7 @@ class Orchestrator:
                 exclude=exclude,
                 limits=limits,
                 risk_floor=risk_floor,
+                host_surface=review_reading.host_surface_digest(self.repo, head),
                 config=self.config.raw,
                 cache=review_cache.StageCache(self.repo.root),
             )
@@ -1954,7 +2090,7 @@ class Orchestrator:
             OSError,
         ) as exc:
             self._warming_off = True
-            print(f"    [review] {task.id}: the gate-④ reading was not taken here ({exc}); the gate will take it")
+            print(f"    [review] {task.id}: the acceptance reading was not taken here ({exc}); the gate will take it")
             return None
 
     def _repair_warm_findings(self, task: dag.Task, readout: review_reading.ReadOut | None) -> bool:
@@ -1962,15 +2098,15 @@ class Orchestrator:
 
         **The reading was already taken and already paid for** (`_warm_reading`); until now its
         answer was written to the stage cache and read by nobody. So a security finding about
-        code this task wrote was first seen at gate ④ — after every later task had been built on
+        code this task wrote was first seen at acceptance — after every later task had been built on
         top of it, and after the implementer that wrote it was long gone. Reading it here costs
         nothing that was not already spent, and the judge is still a different one: the finding
         comes from the security reviewer's own launch, validated by
         `security_review.run_security_review`, and the fixer is an implementer.
 
         **Only findings this task's declared scope owns.** Attribution is `findings.owner_of_path`
-        — the same function gate ④ routes by — so nothing is guessed: a finding anchored in
-        another task's territory, or in none, travels to gate ④ where a human can see the whole
+        — the same function acceptance routes by — so nothing is guessed: a finding anchored in
+        another task's territory, or in none, travels to acceptance where a human can see the whole
         picture. It would be refused here anyway, by the scope check every repair goes through
         (`_accept_repair`).
 
@@ -1978,7 +2114,7 @@ class Orchestrator:
         positive, where repairing converges on nothing; a single round at the task boundary is
         cheap and bounded, and whatever still stands is exactly what `review_policy.repair_rounds`
         is for. Whether the finding closed is not this launch's account of itself either: the
-        re-warm below reads the slice again from cold, and gate ④ reads it once more after that.
+        re-warm below reads the slice again from cold, and acceptance reads it once more after that.
 
         True when it repaired, which is the caller's cue to write the status again: the evidence
         beside it has been re-pointed at the repaired tree, and the recorded commit follows the
@@ -2003,7 +2139,7 @@ class Orchestrator:
             return False
         print(
             f"    [review] {task.id}: the security review of this task found {len(owned)} blocking "
-            "finding(s) in its own scope — repairing them here rather than at gate ④"
+            "finding(s) in its own scope — repairing them here rather than at acceptance"
         )
         self._repair(task, repair_mod.Repair(task.id, tuple(owned)), where="review")
         # The repair moved this slice's content, so the answer just cached for it is about a tree
@@ -2021,7 +2157,7 @@ class Orchestrator:
         to go and look at — a staging deployment, a device, a screen — and none of that is
         observable about code that only exists on an unmerged leaf branch. So the code merges
         (it passed the entire DoD; nothing about it is in question) and only the *task* waits,
-        which is enough: gate ④ cannot open while a task is not done.
+        which is enough: acceptance cannot open while a task is not done.
 
         It also makes the fingerprints line up. The observation a human records is about the tree
         they can actually see — the canonical checkout — and so is this check.
@@ -2149,7 +2285,7 @@ class Orchestrator:
                 "The plan says where this task's work belongs; landing it elsewhere is a scope change, "
                 "and a scope change to an approved plan is a human's decision. Either the change "
                 "belongs to another task, or the plan drew this one's scope too small — the second "
-                "is answered with `rein revise --to tasks`, widening `scope.include`, and a "
+                "is answered with `rein revise --to mandate`, widening `scope.include`, and a "
                 "re-approval, never by editing the frozen plan in place.",
             )
 
@@ -2172,7 +2308,7 @@ class Orchestrator:
         is the *observation* instead, which is tool-agnostic and exact:
 
           **It was already red.** The step failed on the work branch before any task ran
-          (the baseline gate ③ froze). Sending an implementer back to fix a break it did not cause, in
+          (the baseline the mandate froze). Sending an implementer back to fix a break it did not cause, in
           a scope that does not contain it, is three launches spent on a question nobody asked.
 
           **Nothing moved.** The same step failed with byte-identical output over a tree with the
@@ -2267,11 +2403,17 @@ class Orchestrator:
             budgets = {name: min(left, inherited.get(name, left)) for name, left in budgets.items()}
         if failure_log:
             print(f"    [handoff] {task.id}: resuming after a failed '{handoff.get('failed_step', '?')}' step")
-        # Retry-session continuity (claude preset only): the implementer resumes its own session
-        # across its retries. A step's final retry is forced fresh — a resumed session re-reads
-        # its own failed reasoning, and the last attempt deserves an unanchored mind working from
-        # the compact failure summary alone. The review agent step is never resumed (independence).
-        session = str(uuid.uuid4()) if self._resume_capable and not self.dry_run else ""
+        # Retry-session continuity: the implementer resumes its own session across its retries. A
+        # step's final retry is forced fresh — a resumed session re-reads its own failed reasoning,
+        # and the last attempt deserves an unanchored mind working from the compact failure summary
+        # alone. The review agent step is never resumed (independence).
+        #
+        # Who names the session decides what "fresh" costs. A CLI told an id (claude) gets a new
+        # uuid; a CLI that names its own (codex) gets "" and is handed back whatever id its next
+        # launch opens. Both are continuity — the distinction is only about *when* the id exists.
+        continuity = self._resume_capable and not self.dry_run
+        mints_own = self._implementer_mints_its_own_session
+        session = str(uuid.uuid4()) if continuity and not mints_own else ""
         resume = False
         # (step, failure digest, tree fingerprint) of the previous round — what `_futile` compares
         # this round against. "" for the fingerprint means "unknown", which never matches.
@@ -2289,7 +2431,7 @@ class Orchestrator:
             self._stop_before_the_gate(task, kind, message, tree=tree, futile=futile)
             return False, message
         while True:
-            self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume, base=base)
+            session = self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume, base=base)
             if not self.dry_run:
                 changed, _ = self._review_scope(task, cwd, base)
                 violations = self._gate_violations(changed)
@@ -2338,8 +2480,8 @@ class Orchestrator:
                 )
             if left <= 0:
                 return False, failure_log
-            if session and budgets[failed] <= 0:  # final retry for this step → fresh session
-                session, resume = str(uuid.uuid4()), False
+            if continuity and budgets[failed] <= 0:  # final retry for this step → fresh session
+                session, resume = ("" if mints_own else str(uuid.uuid4())), False
             else:
                 resume = bool(session)
 
@@ -2435,11 +2577,11 @@ class Orchestrator:
         Its `must_fix` findings go back to the integration fixer within this step's own retries,
         the same shape a red command step takes; unresolved ones stop the batch rather than being
         reported as passed. Its `consider` findings are attributed to the merged task whose
-        declared scope owns the anchor — the same derivation gate ④ uses to decide which task
+        declared scope owns the anchor — the same derivation acceptance uses to decide which task
         answers a finding (`findings.owner_of_path`) — so they reach the human through
         `brief.residual_findings` beside that task's own review, stamped with the tree they were
         made against. A finding no task's scope owns is printed rather than filed against a task
-        that does not own it: gate ④'s seam reading covers exactly that region, and inventing an
+        that does not own it: acceptance's seam reading covers exactly that region, and inventing an
         owner here is the guess `findings` refuses to make.
         """
         ids = ",".join(t.id for t in tasks)
@@ -2575,7 +2717,7 @@ class Orchestrator:
 
         Read from the audit log, not configured: `pr-stack` records every pull request it opens,
         and that record is what says a task's next commit belongs on a slice branch rather than on
-        the work branch. A slice already *ready* is excluded — past gate ④ a change is a human's
+        the work branch. A slice already *ready* is excluded — past acceptance a change is a human's
         call, not something a re-run lands on quietly. Empty when no stack has been published,
         which is every first build, and why nothing about that path changes.
         """
@@ -2670,7 +2812,7 @@ class Orchestrator:
 
         `run_aborted` is deliberately not one of `events.ATTENTION_EVENTS`: it asks nobody to
         judge the work, it asks for a re-run. A `knowledge_gap` here would leave a permanent
-        "unresolved escalation" on gate ⑤'s screen for a machine's bad afternoon, in a log that
+        "unresolved escalation" on acceptance's screen for a machine's bad afternoon, in a log that
         is append-only by design.
         """
         logger.error(fault.summary())
@@ -2695,15 +2837,15 @@ class Orchestrator:
         if self.state is None:
             logger.error("no .rein/state.yaml — run `rein init` first")
             return common.EXIT_CANNOT_PROCEED
-        if self.state.gate_status("tasks") != "approved":
+        if self.state.gate_status("mandate") != "approved":
             logger.error(
-                "gate 3 (tasks) is not approved, so there is no frozen plan to build against. "
+                "the mandate is not approved, so there is no frozen plan to build against. "
                 "Finish /tasks and get the plan approved first."
             )
             return common.EXIT_CANNOT_PROCEED
         if self.state.plan_status != "frozen":
             logger.error(
-                f"the plan is '{self.state.plan_status}', not 'frozen'. Gate 3's approval freezes it; "
+                f"the plan is '{self.state.plan_status}', not 'frozen'. The mandate's approval freezes it; "
                 "building against a draft would implement a plan nobody signed for."
             )
             return common.EXIT_CANNOT_PROCEED
@@ -2819,11 +2961,11 @@ class Orchestrator:
         )
 
     def _source_problems(self) -> list[str]:
-        """Why the prose this build would read is not the prose gate ③ approved.
+        """Why the prose this build would read is not the prose the mandate approved.
 
         A ticket edited after the freeze changes what gets built, and `plan.yaml` being
         digest-frozen said nothing about it. Refusing here is the same posture `rein guard`
-        already takes towards a frozen document — the way forward is `rein revise --to tasks`
+        already takes towards a frozen document — the way forward is `rein revise --to mandate`
         and a re-approval, not an edit nobody recorded.
 
         A source that is merely *uncommitted* is caught earlier and more widely by
@@ -2840,9 +2982,9 @@ class Orchestrator:
         moved = [path for path, frozen in sorted(pinned.items()) if self._live_digest(path) != frozen]
         if moved:
             return [
-                f"{len(moved)} document(s) the build reads changed since gate 3 froze them: "
+                f"{len(moved)} document(s) the build reads changed since the mandate froze them: "
                 f"{', '.join(moved)}. Building now would implement text nobody approved — "
-                "roll back with `rein revise --to tasks`, re-approve, and run again."
+                "roll back with `rein revise --to mandate`, re-approve, and run again."
             ]
         return []
 
@@ -2864,7 +3006,7 @@ class Orchestrator:
             — the exact failure `no_implementation` exists to catch, defeated from the other side;
           * it reaches the reviewer as part of the change under review;
           * and `finalize_commit`'s `git add -A` lands it inside `T-NNN: <title>`, so the commit the
-            gate ④ record names contains work no task claimed. That one does not wash out on the
+            acceptance record names contains work no task claimed. That one does not wash out on the
             next run — it is in the history.
 
         So the tree is a precondition, not something to compensate for afterwards. Subtracting a
@@ -2937,7 +3079,7 @@ class Orchestrator:
         The loop could not tell those apart from a real regression because it had never asked the
         one question that separates them: *was this step red before the task touched anything?*
 
-        It is asked here, and **at gate ③ rather than inside the build**. Taken just before the
+        It is asked here, and **at the mandate rather than inside the build**. Taken just before the
         first batch, it was taken after the approval that had already decided this plan was
         implementable against this tree — so a cycle could be approved and started on a tree that
         had been red for weeks, and the discovery was the first task's to make and to pay for. The
@@ -2966,7 +3108,7 @@ class Orchestrator:
         }
 
     def _load_baseline(self) -> None:
-        """Read the baseline gate ③ froze. Refuse the run when there is none to read.
+        """Read the baseline the mandate froze. Refuse the run when there is none to read.
 
         A pure read: the measurement belongs to the gate, and re-taking it here would measure
         whatever tree this run happens to be resuming into — a tree with tasks already landed in
@@ -2980,7 +3122,7 @@ class Orchestrator:
             raise StopLoop(
                 "no baseline is recorded for this work branch, so a step that was already red "
                 "cannot be told apart from one this run broke. Measure it with "
-                "`rein baseline measure` — gate ③ is what it belongs to.",
+                "`rein baseline measure` — the mandate is what it belongs to.",
                 code=common.EXIT_HUMAN_NEEDED,
             )
         self._baseline_red = dict(self.state.baseline_red() if self.state else {})
@@ -2988,12 +3130,12 @@ class Orchestrator:
         moved = tree and recorded.get("tree_digest") and tree != recorded["tree_digest"]
         if self._baseline_red:
             print(
-                f"    [baseline] frozen red at gate ③: {', '.join(sorted(self._baseline_red))}"
+                f"    [baseline] frozen red at the mandate: {', '.join(sorted(self._baseline_red))}"
                 + (" (measured over a tree this branch has since moved past)" if moved else "")
             )
 
     def _run_loop(self) -> int:
-        """Consume the DAG, then close gate ④. One handler for both, which is the point.
+        """Consume the DAG, then close acceptance. One handler for both, which is the point.
 
         `StopLoop` and `EnvironmentFault` used to be caught per batch, inside the `while` — so the
         two calls that are *not* in a batch, `_load_baseline` and `_close_gate4`, had nowhere to
@@ -3010,7 +3152,7 @@ class Orchestrator:
         except EnvironmentFault as fault:
             # Never start the next batch into the same broken environment: whatever stopped this
             # launch would stop the next one, one wasted task at a time. The same answer serves
-            # gate ④, where no task is running and there is nothing to mark either way.
+            # acceptance, where no task is running and there is nothing to mark either way.
             return self._abort_run(fault)
 
     def _consume(self) -> int:
@@ -3041,7 +3183,7 @@ class Orchestrator:
 
             mode, tasks = batch
             # Here rather than at the top of the run: a `rein build` that finds every task done goes
-            # straight to gate ④, and a full gate run at the root to answer a question no task is
+            # straight to acceptance, and a full gate run at the root to answer a question no task is
             # going to ask is exactly the waste this exists to end.
             self._load_baseline()
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
@@ -3106,7 +3248,7 @@ class Orchestrator:
             # implementer has not committed, this finalizes the diff (no-op otherwise).
             if not self.ws.finalize_commit(self.root, f"{task.id}: {task.title}"):
                 # The tree on the work branch keeps the diff, but the task must not be marked done
-                # without its commit (one commit = one task is the record gate ④ reviews).
+                # without its commit (one commit = one task is the record acceptance reviews).
                 self._set_status(task.id, "blocked")
                 raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
             self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
@@ -3281,11 +3423,11 @@ class Orchestrator:
             raise fault
 
     def _warn_on_review_outlook(self) -> None:
-        """Say it at task 9 of 17, not at gate ④, when the change outgrows what a review can read.
+        """Say it at task 9 of 17, not at acceptance, when the change outgrows what a review can read.
 
         The loop already knows the diff after each task lands, and it said nothing: a cycle with a
         reading past `max_diff_bytes` and a cycle carrying a committed binary both went the whole
-        way to gate ④ before anyone heard, and by gate ④ narrowing the scope of the task that
+        way to acceptance before anyone heard, and by acceptance narrowing the scope of the task that
         reading covers is not a move that exists — every task is merged and `done`.
 
         A warning, never a stop. A task that passed its gate has earned its merge; what this
@@ -3302,14 +3444,14 @@ class Orchestrator:
             print(
                 f"    [outlook] {view.line()}\n"
                 f"              no single launch can read {view.unit} — narrow its scope, or split "
-                "the task, at gate ③. Once every task is merged that stops being possible."
+                "the task, at the mandate. Once every task is merged that stops being possible."
                 + (f"\n              {view.made_of()}" if view.made_of() else "")
             )
         if view.unreadable:
             print(
                 f"    [outlook] {len(view.unreadable)} binary/unsupported file(s) in this change make "
                 f"coverage `insufficient`"
-                + (f", which blocks gate ④ at {view.effective_risk} risk" if view.coverage_blocks_gate else "")
+                + (f", which blocks acceptance at {view.effective_risk} risk" if view.coverage_blocks_gate else "")
                 + f": {', '.join(view.unreadable[:5])}"
             )
 
@@ -3318,13 +3460,13 @@ class Orchestrator:
     def _close_gate4(self, graph: dag.Graph) -> int:
         """All tasks done: read the change, repair what this loop may, present the rest.
 
-        **Inside a task, judging and repairing were both automated; at gate ④ only judging was.**
+        **Inside a task, judging and repairing were both automated; at acceptance only judging was.**
         `_run_agent_step` runs a reviewer, hands its `must_fix` findings to an implementer, and
-        has the reviewer look again — no human in it. Gate ④ produced findings and printed three
+        has the reviewer look again — no human in it. The acceptance gate produced findings and printed three
         commands for somebody to type, and the only route back into the code was `rein revise
         --to build --from-review`, which marks the task *and its whole dependent closure*
         `needs-revision` — the status reserved for a defect in the specification. `status_api`
-        then demanded a `/tasks` reconcile and a re-approval of gate ③, for a repair that changes
+        then demanded a `/tasks` reconcile and a re-approval of the mandate, for a repair that changes
         no requirement, no claim and no plan. Reset, salvage, re-approve, round again.
 
         So the same shape runs here: read, repair what a task's declared scope owns, read again
@@ -3338,7 +3480,7 @@ class Orchestrator:
         * A repair that reaches outside the task's declared scope blocks rather than lands, by the
           same check every task's work goes through.
         * A repair cannot become a plan change: `gate_guard` denies a write to `plan.yaml` or
-          `config.yaml` while the plan is frozen, which it is from gate ③ onward.
+          `config.yaml` while the plan is frozen, which it is from the mandate onward.
         * Whether a finding closed is decided by the *next* round's review — a blind reading with
           no memory of having raised it — never by the fixer's account of its own work.
 
@@ -3369,17 +3511,17 @@ class Orchestrator:
             # `repair_rounds: 0` says this loop does not repair its own findings, and reading the
             # change here would then buy nothing it could act on — the human runs `rein review
             # generate` and reads it in the dashboard, exactly as before this loop existed.
-            print("\n[gate 4] `review_policy.repair_rounds` is 0 — this run takes no reading.")
+            print("\n[acceptance] `review_policy.repair_rounds` is 0 — this run takes no reading.")
             return self._present_gate4(routing, rounds, read=False)
 
         # The same frozen baseline every task ran against. `_consume` reads it before a batch, and
         # a run that finds every task already done never reaches that line — which is exactly the
-        # run that repairs here. Without it `_repair` has no record of which steps gate ③ approved
+        # run that repairs here. Without it `_repair` has no record of which steps the mandate approved
         # as already red, and it stops the loop over a failure the plan was approved on top of.
         self._load_baseline()
         repaired, read = 0, False
         for round_no in range(rounds + 1):
-            print(f"\n[gate 4] reading the change ({'first reading' if not round_no else f'round {round_no}'})")
+            print(f"\n[acceptance] reading the change ({'first reading' if not round_no else f'round {round_no}'})")
             if not self._generate_review():
                 break
             read = True
@@ -3390,7 +3532,9 @@ class Orchestrator:
             for item in routing.code:
                 owner = next((t for t in graph.tasks if t.id == item.task_id), None)
                 if owner is None:  # a finding attributed to a task the graph no longer has
-                    print(f"    [gate 4] {item.task_id} is not in the plan any more — leaving its findings to a human")
+                    print(
+                        f"    [acceptance] {item.task_id} is not in the plan any more — leaving its findings to a human"
+                    )
                     continue
                 self._repair(owner, item)
                 repaired += len(item.items)
@@ -3402,7 +3546,7 @@ class Orchestrator:
         **A reading that fails does not un-finish the build.** The tasks are done, their evidence
         is recorded, and the review is a separate question asked afterwards — so anything but a
         capacity stop is reported and handed over exactly as it was before this loop existed. The
-        gate stays shut either way: `approve.readiness` refuses a gate ④ with no generated review,
+        gate stays shut either way: `approve.readiness` refuses an acceptance with no generated review,
         so nothing here can turn a failed reading into an approval.
 
         A capacity stop is the one thing worth waiting for, and it is `main`'s to wait on:
@@ -3421,7 +3565,7 @@ class Orchestrator:
                     "answered is cached. Re-run `rein build` (or `rein review generate --supervise`).",
                     code=common.EXIT_RETRY_LATER,
                 ) from None
-            print(f"\n[gate 4] the reading could not be taken: {failure}")
+            print(f"\n[acceptance] the reading could not be taken: {failure}")
         except (
             review_reading.ReviewError,
             review_policy.ReviewPolicyError,
@@ -3430,11 +3574,11 @@ class Orchestrator:
             models.DocumentError,
             store_mod.StoreError,
         ) as exc:
-            print(f"\n[gate 4] the reading could not be taken: {exc}")
+            print(f"\n[acceptance] the reading could not be taken: {exc}")
         print("Run `rein review generate` yourself once that is repaired — the gate needs one either way.")
         return False
 
-    def _repair(self, task: dag.Task, item: repair_mod.Repair, *, where: str = "gate 4") -> None:
+    def _repair(self, task: dag.Task, item: repair_mod.Repair, *, where: str = "acceptance") -> None:
         """One implementer launch against one task's share of the review's findings, then the DoD.
 
         **Where the fix is committed is decided by whether this cycle is shipping as a stack.**
@@ -3453,14 +3597,14 @@ class Orchestrator:
         So the slice's branch is checked out in a scratch worktree, the implementer runs *there*,
         and `pr_stack.restack` walks it up the chain into the work branch. The DoD then runs at the
         root, over the merged result — because what the quality gate is asked about is the tree the
-        gate ④ reading will read, never the slice in isolation.
+        acceptance reading will read, never the slice in isolation.
 
         It takes the `dag.Task` rather than the graph because both callers already hold one: gate
         ④ resolves the id against the graph before it calls this, and the task boundary
         (`_repair_warm_findings`) has the task in hand. The graph was an argument for one lookup.
 
         `where` is which of those two called, and it is only ever a label: every line this path
-        printed said `[gate 4]`, including the ones a task-boundary repair produced several tasks
+        printed said `[acceptance]`, including the ones a task-boundary repair produced several tasks
         before the gate was reached. A log that names the wrong phase is a log that has to be
         read against the code to be believed.
         """
@@ -3472,7 +3616,7 @@ class Orchestrator:
             self._repair_on_work_branch(task, item, where=where)
         self._restate_evidence(task.id, self._gate_after_repair(task, where=where))
 
-    def _slice_branch(self, task_id: str, *, where: str = "gate 4") -> str:
+    def _slice_branch(self, task_id: str, *, where: str = "acceptance") -> str:
         """The stack branch that introduced this task's code, or "" when this is not a stack.
 
         Read from the same `pr_stack.derive` the stack itself is cut with, and only counting a
@@ -3495,7 +3639,7 @@ class Orchestrator:
             return ""
         return found.branch if review_reading.commit_exists(self.repo, found.branch) else ""
 
-    def _repair_on_work_branch(self, task: dag.Task, item: repair_mod.Repair, *, where: str = "gate 4") -> None:
+    def _repair_on_work_branch(self, task: dag.Task, item: repair_mod.Repair, *, where: str = "acceptance") -> None:
         """The single-pull-request case: repair where everything is already merged."""
         before = self.ws.head()
         self._launch(
@@ -3511,7 +3655,9 @@ class Orchestrator:
         )
         self._accept_repair(task, self.root, before, where=where)
 
-    def _repair_on_slice(self, task: dag.Task, item: repair_mod.Repair, branch: str, *, where: str = "gate 4") -> None:
+    def _repair_on_slice(
+        self, task: dag.Task, item: repair_mod.Repair, branch: str, *, where: str = "acceptance"
+    ) -> None:
         """The stacked case: repair on the slice that introduced the code, then merge it upward."""
         print(f"    [{where}] {task.id}: on its own slice {branch}, then up the stack")
         with build_git.scratch_worktree(self.repo, self.config.worktree_dir, _GATE4_WORKTREE, branch, common.run) as (
@@ -3532,7 +3678,7 @@ class Orchestrator:
             self._accept_repair(task, path, before, where=where)
         self._propagate(task, where=where)
 
-    def _accept_repair(self, task: dag.Task, cwd: str, before: str, *, where: str = "gate 4") -> None:
+    def _accept_repair(self, task: dag.Task, cwd: str, before: str, *, where: str = "acceptance") -> None:
         """Check what the repair touched, then commit it. Raises rather than letting either slide.
 
         **The next reading is over committed history**, so an uncommitted repair is one that never
@@ -3563,7 +3709,7 @@ class Orchestrator:
                 code=common.EXIT_HUMAN_NEEDED,
             )
 
-    def _propagate(self, task: dag.Task, *, where: str = "gate 4") -> None:
+    def _propagate(self, task: dag.Task, *, where: str = "acceptance") -> None:
         """Carry a slice's repair up the stack by merging, never by rewriting.
 
         The same walk `rein pr-stack --restack` performs, run here because the repair is only half
@@ -3590,10 +3736,10 @@ class Orchestrator:
             )
         print(f"    [{where}] {task.id}: {len(result.merged)} branch(es) advanced to carry the repair up the stack")
 
-    def _gate_after_repair(self, task: dag.Task, *, where: str = "gate 4") -> list[dict[str, Any]]:
+    def _gate_after_repair(self, task: dag.Task, *, where: str = "acceptance") -> list[dict[str, Any]]:
         """The task-stage DoD over the work branch, which is where the repair has now landed.
 
-        A step the baseline froze red at gate ③ is not this repair's to answer: it was red before
+        A step the baseline froze red at the mandate is not this repair's to answer: it was red before
         any task ran, a human approved the plan over it on the record, and stopping the run here
         would re-stage the discovery that the frozen baseline exists to prevent.
 
@@ -3607,7 +3753,7 @@ class Orchestrator:
                 continue
             if failure := self._run_cmd_step(step, self.root):
                 if step.name in self._baseline_red:
-                    print(f"    [{where}] '{step.name}' is red, and was already red at gate ③ — not this repair's")
+                    print(f"    [{where}] '{step.name}' is red, and was already red at the mandate — not this repair's")
                     continue
                 raise StopLoop(
                     f"{task.id}: the repair left '{step.name}' red:\n{failure}",
@@ -3649,7 +3795,7 @@ class Orchestrator:
         This deliberately does not invite an approval. The review is read in the dashboard, the
         Decision Cards are answered there, and the gate is opened at a terminal by a person.
         """
-        print("\n========== gate 4 ==========")
+        print("\n========== acceptance ==========")
         # An empty routing means two different things and only one of them is "nothing blocking":
         # a reading that was taken and found nothing, and a reading that could not be taken at all.
         # Printing the first over the second put the reassurance two lines under the failure.
@@ -3674,7 +3820,7 @@ class Orchestrator:
             "\nAn answer of `revise_implementation` on a card hands that subject back to this loop: it\n"
             "says the code is what is wrong, which is the one thing the review cannot decide for itself.\n"
             "Re-run `rein build` afterwards and it will be repaired like any other finding.\n"
-            "\nThis loop cannot open gate 4, and neither can anything but a human: a gate opens only on\n"
+            "\nThis loop cannot open acceptance, and neither can anything but a human: a gate opens only on\n"
             "the gate name typed at an interactive terminal, recorded by `rein approve` itself."
         )
         return common.EXIT_DONE
@@ -3760,7 +3906,7 @@ if __name__ == "__main__":
 def baseline_main(argv: list[str] | None = None) -> int:
     """`rein baseline measure` — what the work branch's quality gate says before any task runs.
 
-    Its own verb, and gate ③'s rather than the build's, because the question is about the *tree*:
+    Its own verb, and the mandate's rather than the build's, because the question is about the *tree*:
     is this plan implementable against what is here now? Taken inside `rein build` it was taken
     after the approval that had already answered that, so a cycle could start on a tree that had
     been red for weeks and the first task paid three implementer launches to find out.
@@ -3775,7 +3921,7 @@ def baseline_main(argv: list[str] | None = None) -> int:
     measure.add_argument(
         "--freeze",
         action="store_true",
-        help="approve the red steps as known and expected — without it a red baseline holds gate 3 shut",
+        help="approve the red steps as known and expected — without it a red baseline holds the mandate shut",
     )
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -3823,11 +3969,11 @@ def baseline_main(argv: list[str] | None = None) -> int:
         return 0
     names = ", ".join(row["name"] for row in red)
     if record["frozen"]:
-        print(f"baseline: {names} already red, frozen as known. Gate 3 may be approved over this.")
+        print(f"baseline: {names} already red, frozen as known. The mandate may be approved over this.")
         return 0
     print(
         f"baseline: {names} already red on the work branch.\n"
-        "Gate 3 stays shut until this is a decision rather than a discovery: fix it, or re-run "
+        "The mandate stays shut until this is a decision rather than a discovery: fix it, or re-run "
         "with `--freeze` to approve it as known — a task that then fails one of these is stopped "
         "instead of being sent back to an implementer whose scope does not contain the break."
     )

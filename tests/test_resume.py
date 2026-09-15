@@ -26,7 +26,7 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     seed_repo(
         root,
-        state=make_state(project="rt", gates=dict.fromkeys(models.GATE_ORDER, "pending"), phase="build"),
+        state=make_state(project="rt", gates=dict.fromkeys(models.GATE_ORDER, "pending")),
         config=make_config(profiles=SANDBOXED_PROFILES),
     )
     return root
@@ -114,7 +114,10 @@ def test_what_is_waiting_is_not_only_what_wrote_an_event(repo: Path) -> None:
     """
     _log(repo, "task_completed")
     text = resume.run(repo)
-    assert "waiting on you" in text and "blocking" in text
+    assert "waiting on you" in text
+    # …and it is the gate, which appended nothing: the log holds one `task_completed` and no
+    # event about the approval that is actually being waited on.
+    assert "rein approve mandate" in text
 
 
 def test_the_packet_names_the_one_decision_waiting_on_a_human(repo: Path) -> None:
@@ -142,7 +145,7 @@ def test_a_run_the_machine_stopped_gets_a_headline() -> None:
     for the machine's reasons and left every task where it was — the board looks unchanged, so
     nothing else in the packet would say so."""
     assert "re-runnable" in resume.HEADLINE_EVENTS["run_aborted"]
-    # And gate ④'s pipeline, for the same reason and with more at stake: a composed review that
+    # And acceptance's pipeline, for the same reason and with more at stake: a composed review that
     # stopped on a session limit kept every reading it had taken, so re-running is cheap — which
     # is exactly what a returning operator cannot tell from a board that looks unchanged.
     assert "re-runnable" in resume.HEADLINE_EVENTS["review_aborted"]

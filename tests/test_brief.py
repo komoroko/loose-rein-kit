@@ -1,4 +1,4 @@
-"""The gate ④ orientation brief: derived from the SSOT, and honest about what it does not know.
+"""The acceptance orientation brief: derived from the SSOT, and honest about what it does not know.
 
 Two properties carry the whole module, and both are pinned here rather than left to review:
 
@@ -9,7 +9,7 @@ Two properties carry the whole module, and both are pinned here rather than left
   emitted empty, so "no migrations changed" never reads the same as "migrations were not looked at".
 
 The residual findings get their own pin: they were made against one task's tree at one moment, and
-carrying them to gate ④ without that stamp would turn a per-task observation into a claim about the
+carrying them to acceptance without that stamp would turn a per-task observation into a claim about the
 merged review.
 """
 
@@ -40,7 +40,7 @@ def test_delivered_lists_landed_tasks_in_plan_order() -> None:
     plan = _plan(tasks=[make_task("T-002", claim_ids=["C-001"]), make_task("T-001", claim_ids=["C-001"])])
     state = _state(tasks={"T-001": "done", "T-002": "done"})
     delivered = brief.derive(plan=plan, state=state, config=None)["delivered"]
-    # Plan order, not completion order: the plan is what a human froze at gate ③.
+    # Plan order, not completion order: the plan is what a human froze at the mandate.
     assert [row["task_id"] for row in delivered] == ["T-002", "T-001"]
     assert delivered[0]["claim_ids"] == ["C-001"]
 
@@ -70,7 +70,7 @@ def test_the_network_line_reports_what_the_sandbox_enforced() -> None:
     rows = {row["step"]: row for row in sections["execution_boundary"]}
     assert rows["test"]["sandbox"] == "oci"
     assert rows["test"]["network"] == "none"
-    assert rows["test"]["image"].startswith("localhost/rein-quality@sha256:")
+    assert rows["test"]["image"].startswith("localhost/rein-python@sha256:")
     assert rows["test"]["command"] == ["make", "test"]
 
 
@@ -90,8 +90,8 @@ def test_a_step_naming_a_profile_that_does_not_exist_claims_no_boundary() -> Non
 
 
 def test_the_sandbox_moving_since_gate_three_is_reported() -> None:
-    """Gate ③ freezes config.yaml without its image pins, so a rebuilt sandbox blocks nothing. The
-    approver at gate ④ signs over evidence produced in the later one, which is a fact about that
+    """The mandate freezes config.yaml without its image pins, so a rebuilt sandbox blocks nothing. The
+    approver at acceptance signs over evidence produced in the later one, which is a fact about that
     evidence rather than something they should have to go and look for."""
     config = _config(profiles=SANDBOXED_PROFILES)
     state = models.State({**make_state(), "plan": {"status": "frozen", "environment_digest": "sha256:" + "e" * 64}})

@@ -54,6 +54,9 @@ ENV PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 
 RUN python -m pip install --no-cache-dir --root-user-action=ignore "pytest==9.0.3"
 
+# A non-root default for anyone who runs this image by hand. `rein` does not use it: every
+# launch passes `--user <the host user's uid:gid>`, because the worktree and the 0600 control
+# socket it mounts in are the host user's and no other uid can reach them.
 USER 1000:1000
 WORKDIR /work
 ENTRYPOINT []

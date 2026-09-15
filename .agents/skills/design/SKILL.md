@@ -1,6 +1,6 @@
 ---
 name: design
-description: Phase 2 design. Design from approved requirements, let the human decide technical choices, and ask for approval at gate ②.
+description: Design. Build an approach from the claims and let the human decide the technical choices.
 ---
 
 Read the file `.rein/prompts/commands/design.md` and execute that procedure exactly. Capability terms resolve per the capability mapping in `.codex/rein.md`.

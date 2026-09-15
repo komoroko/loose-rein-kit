@@ -395,8 +395,8 @@ def test_cli_trace_test_plan_flags_a_missing_requirement(tmp_path: Path) -> None
 
 
 def test_the_render_says_how_gate_four_will_read_the_plan() -> None:
-    """Said at gate ③ because that is where it can still be changed: a plan whose tasks declare no
-    scope is read in one launch holding the whole cycle, and by gate ④ the only remedy left is to
+    """Said at the mandate because that is where it can still be changed: a plan whose tasks declare no
+    scope is read in one launch holding the whole cycle, and by acceptance the only remedy left is to
     split the scope and re-approve."""
     unscoped = dag.Graph.from_tasks([dag.Task(id="T-001", title="a", kind="foundation")])
     text = dag.render(unscoped)
@@ -415,7 +415,7 @@ def test_the_render_says_how_gate_four_will_read_the_plan() -> None:
 
 
 def test_a_critical_task_says_the_gate_will_read_the_change_whole() -> None:
-    """Said at gate ③, where it can still be acted on.
+    """Said with the mandate, where it can still be acted on.
 
     Effective risk is the max of every contributor and a task's own risk is one of them, so a
     critical task settles the reading before the scopes do — and it is the one case where declaring
@@ -430,7 +430,7 @@ def test_a_critical_task_says_the_gate_will_read_the_change_whole() -> None:
     )
     rendered = dag.render(graph)
     assert "one reading of the whole change" in rendered
-    assert "T-001" in rendered.split("How gate ④ will read this")[1]
+    assert "T-001" in rendered.split("How acceptance will read this")[1]
 
 
 def test_a_scoped_plan_below_critical_is_read_one_task_at_a_time() -> None:

@@ -228,6 +228,41 @@ def test_version_short_circuits_the_lock_check(chdir_tmp: Path, capsys: pytest.C
     assert "is in format" in capsys.readouterr().err
 
 
+def test_only_a_forced_sync_gets_past_the_lock_check(chdir_tmp: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`sync --force` is the one verb that repairs a lock this check refuses, so stopping it here
+    left a repository that crossed a `lock.FORMAT` bump with nothing it could run. The exemption is
+    the flag that says "discard what is recorded", never the verb: plain `sync` still hard-stops."""
+    (chdir_tmp / ".rein").mkdir()
+    (chdir_tmp / ".rein" / "rein.lock").write_text("format: rein-grounded-v0\n", encoding="utf-8")
+    assert cli.main(["sync"]) == 1
+    assert "is in format" in capsys.readouterr().err
+    assert cli.main(["sync", "--force"]) == 0
+    printed = capsys.readouterr()
+    assert "is in format" not in printed.err, "the dispatcher let it through"
+    assert (chdir_tmp / ".rein" / "schema" / "state.schema.json").is_file(), "and it did the work"
+
+
+def test_a_lock_the_head_wrote_cannot_stop_the_base_side_verifier(
+    chdir_tmp: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`policy-check` is run by a release older than the tree it reads — that is what base-side is.
+
+    CI installs it from the trusted base commit and hands it two SHAs; it reads everything with
+    `git show <sha>:<path>` and never opens the lock. Gating it here let the head decide whether
+    the verifier may start, and the first `lock.FORMAT` bump did exactly that on its own pull
+    request. It must get far enough to answer about the SHAs, not die on a file it never reads.
+    """
+    (chdir_tmp / ".rein").mkdir()
+    (chdir_tmp / ".rein" / "rein.lock").write_text("format: rein-grounded-v0\n", encoding="utf-8")
+    assert cli.main(["sync"]) == 1, "an ordinary verb still hard-stops"
+    assert "is in format" in capsys.readouterr().err
+
+    assert cli.main(["policy-check", "--base-sha", "deadbeef", "--head-sha", "cafebabe"]) == 1
+    printed = capsys.readouterr()
+    assert "is in format" not in printed.err, "the dispatcher stopped it on the head's lock"
+    assert "not an exact 40-hex commit SHA" in printed.err, "it ran and judged what it was given"
+
+
 @pytest.mark.parametrize("spelling", ["version", "--version", "-V"])
 def test_the_conventional_version_spellings_all_answer(spelling: str, capsys: pytest.CaptureFixture[str]) -> None:
     """`rein --version` used to answer `unknown verb '--version'` with exit 2.

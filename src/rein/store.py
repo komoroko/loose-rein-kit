@@ -80,7 +80,7 @@ class DocumentBehindError(models.DocumentError):
 
     "Invalid" and "behind" are different facts with different repairs, and only one of them is
     about the document. A newer release widens a schema; this tool has the narrow one and rejects
-    a key the repository is entitled to carry. Sending a human to `rein revise --to tasks` there
+    a key the repository is entitled to carry. Sending a human to `rein revise --to mandate` there
     asks them to rewind an approved gate — the most expensive move the workflow has — to fix
     nothing.
 
@@ -269,7 +269,7 @@ class _NoAliasDumper(yaml.SafeDumper):
     same document, `yaml.safe_dump` emitted `&id001` / `*id001` and the next load raised. It was
     not hypothetical. `review.assemble` hands the security findings to `decision_cards.derive_cards`
     and also stores them under `security.findings`, so *any* review with a security finding wrote a
-    `review.yaml` that could never be parsed again — gate ④ unreadable, and the loader pointing at
+    `review.yaml` that could never be parsed again — acceptance unreadable, and the loader pointing at
     a line rather than at the cause.
 
     Repeating the object is the right resolution rather than deep-copying at each composition site:

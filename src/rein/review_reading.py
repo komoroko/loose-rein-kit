@@ -1,7 +1,7 @@
 """What a reviewer is allowed to read, and the reading of one unit of the change.
 
 Split out of ``review.py`` because two callers need it and only one of them assembles a review.
-``review.generate`` composes a gate-④ document out of readings; ``build_loop`` takes a reading the
+``review.generate`` composes an acceptance document out of readings; ``build_loop`` takes a reading the
 moment a task lands, while its diff is small and the tree that produced it is the one in front of
 it. Keeping the reading here is what lets the second caller exist without importing the first.
 
@@ -45,15 +45,70 @@ logger = logging.getLogger(__name__)
 #: One stage's validated result — whatever `cached_stage` was handed a runner for.
 T = TypeVar("T")
 
-#: The unit name of a reading that covers the whole change. The only shape gate ④ had before a
+#: The unit name of a reading that covers the whole change. The only shape acceptance had before a
 #: review could be composed, and still the shape it takes when nothing asks for another. Read from
 #: `models` so the vocabulary and the schema that enforces it cannot drift.
 WHOLE = models.COMPOSITION_WHOLE
 
 #: The plan's own prose that lives outside `plan.sources`: the task tickets and the ADRs. Named as
-#: directories as well as read from the freeze because a ticket written or amended after gate ③ is
+#: directories as well as read from the freeze because a ticket written or amended after the mandate is
 #: still the answer sheet, and `plan.sources` only knows the ones the freeze hashed.
 _PLAN_PROSE_DIRS: tuple[str, ...] = ("docs/tasks/", "docs/decisions/")
+
+
+def host_surface(repo: repo_mod.Repo) -> tuple[str, ...]:
+    """The surfaces `rein install <agent>` wrote: the phase commands, the role prompts, the hooks
+    and the settings each host reads before it reads its prompt.
+
+    Two readers want this set and they want opposite things from it, which is why it is named here
+    rather than living inside `not_the_product`:
+
+    - The **blind extractor and the comparator** must not see it. It is this tool's own
+      orchestration text — the command bodies say what each gate expects, the role prompts say how
+      each stage is meant to answer — and handing it to a reader whose whole job is to say what the
+      code does, without having read the plan, is handing over the plan in another file's clothes.
+    - The **security reviewer** is told to read it, in as many words: a pre-authorized command, a
+      hook, an MCP server or an instruction added to these paths is a finding
+      (`security_review.contract`). That reviewer is launched into a checkout of the head, whole.
+
+    So this set is excluded from the product's digest *and* is a subject the security stage is a
+    function of. `host_surface_digest` is what makes the second half true; before it existed, a
+    commit that only widened `permissions.allow` moved no key, replayed the cached answer, never
+    launched a reviewer, and left the review reporting itself fresh.
+
+    **Measured on the repository, not only on the record.** `rein.lock` is where `install` wrote
+    down which paths it created, and that record can be behind the tree: a lock rewritten across a
+    `lock.FORMAT` bump records no integrations while every surface it once named is still on disk,
+    and so does a repository whose lock was restored from an older commit. Reading only the record
+    turned that into an empty surface — the extractor gets this tool's own orchestration text and
+    the security stage keys on the digest of an empty tree, both reporting themselves fine. So the
+    answer is the union: what the lock recorded, plus what each integration's own spec says it
+    writes and is actually present. The settings file is recorded apart from `files` because
+    install *merges* into it rather than owning it; which file that is comes off the spec either
+    way.
+
+    Not in here: `.mcp.json` and the root `AGENTS.md` / `CLAUDE.md` / `GEMINI.md`. `install` does
+    not write them, so they are not excluded from the product in the first place — they are already
+    in the diff and already in `change_digest`.
+    """
+    paths: set[str] = set()
+    for name, spec in install_mod.INTEGRATIONS.items():
+        if present := install_mod.present_surfaces(repo, name):
+            paths |= set(present)
+            if spec.settings and repo.path(spec.settings).is_file():
+                paths.add(spec.settings)
+    # And what the lock recorded but the tree no longer has: a surface deleted in the working tree
+    # is still in the commit this digest is taken at, and `present_surfaces` cannot see it there.
+    integrations = (lock_mod.read(repo.lock) or {}).get("integrations")
+    if isinstance(integrations, dict):
+        for name, record in integrations.items():
+            if not isinstance(record, dict):
+                continue
+            paths |= {str(path) for path in (record.get("files") or {})}
+            recorded = install_mod.INTEGRATIONS.get(str(name))
+            if isinstance(record.get("settings"), dict) and recorded is not None and recorded.settings:
+                paths.add(recorded.settings)
+    return tuple(sorted(paths))
 
 
 def not_the_product(repo: repo_mod.Repo, state: models.State | None) -> tuple[str, ...]:
@@ -65,43 +120,32 @@ def not_the_product(repo: repo_mod.Repo, state: models.State | None) -> tuple[st
 
     - **`.rein/`**, which is bound by its own digests — a review that wrote `review.yaml` would
       otherwise invalidate itself (plan §17.3).
-    - **The Expected Model's prose.** `state.plan.sources` names the documents gate ③ froze as
+    - **The Expected Model's prose.** `state.plan.sources` names the documents the mandate froze as
       "the prose the build reads": the requirements, the design, the ADRs, every task ticket. The
       blind extractor was being handed all of it. `actual_extraction.assert_blind` guards against
       the plan being *given* to it and cannot notice the plan arriving inside the diff, so on any
-      cycle that touched a requirement or a ticket the Expected/Actual independence gate ④ rests on
+      cycle that touched a requirement or a ticket the Expected/Actual independence acceptance rests on
       was not established — and "extra behaviours: 0" means very little from a reader that has read
       the tickets. Measured on one cycle: `docs/` was 658,850 of 2,141,194 bytes, 31%, of which
       422 KB was the Expected side verbatim.
-    - **The surfaces `rein install <agent>` wrote.** The phase command bodies describe what each
-      gate expects; the role prompts describe how each stage is meant to answer. They are this
-      tool's own orchestration text, handed to the reviewer as if somebody had written it as code.
-      The exact paths are in `rein.lock`, because `install` recorded every one of them.
+    - **The surfaces `rein install <agent>` wrote** (`host_surface`).
 
     The rest of `docs/` stays in: a README and an operator guide are deliverables, and a blanket
     `docs` exclusion would hide user-facing documentation from the only reader it gets.
 
+    **This answers "what is the product" for the diff and for `change_digest`, and it is not the
+    whole answer to "what does a reviewer read".** The security stage is sent a checkout of the head
+    with `host_surface` in it and is told to review it, so that stage is keyed on
+    `host_surface_digest` as well. Keeping the two questions in two functions is the repair: one
+    set could not say "hide this from the extractor" and "measure this for the security reviewer"
+    at the same time, and the second half was simply lost.
+
     A directory keeps its trailing slash and a file does not — `digests.filter_tree` and
     `repo.pathspec_excluding` both read the difference.
     """
-    paths: set[str] = {repo_mod.SSOT_DIR, *_PLAN_PROSE_DIRS}
+    paths: set[str] = {repo_mod.SSOT_DIR, *_PLAN_PROSE_DIRS, *host_surface(repo)}
     if state is not None:
         paths |= set(state.frozen_sources)
-    lock_data = lock_mod.read(repo.lock) or {}
-    integrations = lock_data.get("integrations")
-    if isinstance(integrations, dict):
-        for name, record in integrations.items():
-            if not isinstance(record, dict):
-                continue
-            paths |= {str(path) for path in (record.get("files") or {})}
-            # The settings file is recorded apart from `files` because install *merges* into it
-            # rather than owning it. It is still a surface this tool wrote, so it is still not the
-            # product. Which file that is comes off the host's own record: this named
-            # `.claude/settings.json` for every integration, which was right only while claude was
-            # the only host that had one.
-            spec = install_mod.INTEGRATIONS.get(str(name))
-            if isinstance(record.get("settings"), dict) and spec is not None and spec.settings:
-                paths.add(spec.settings)
     return tuple(sorted(paths))
 
 
@@ -121,11 +165,35 @@ def change_digest(repo: repo_mod.Repo, commit: str, exclude: Sequence[str], *, i
     and nothing else — which is what lets a reading taken while one task landed survive every task
     that lands after it.
     """
+    entries = digests.filter_tree(_tree_at(repo, commit), exclude_prefixes=exclude, include_prefixes=include)
+    return digests.tree_digest(entries)
+
+
+def host_surface_digest(repo: repo_mod.Repo, commit: str) -> str:
+    """The digest of the host surfaces at `commit` — the second half of what a review is bound to.
+
+    `change_digest` answers "has the product moved". This answers "has the change moved anything the
+    security stage is told to review but the product digest cannot see". They are separate digests
+    because they are separate subjects with separate readers, and folding them into one would put
+    `.claude/` back into the blind extractor's key for no reason and undo the exclusion's own point.
+
+    A repository with nothing installed has no host surface and this is the digest of an empty
+    tree — a constant, which is the honest answer: there is no surface, so nothing about it can
+    change.
+    """
+    surfaces = host_surface(repo)
+    if not surfaces:
+        return digests.tree_digest([])
+    entries = digests.filter_tree(_tree_at(repo, commit), exclude_prefixes=(), include_prefixes=surfaces)
+    return digests.tree_digest(entries)
+
+
+def _tree_at(repo: repo_mod.Repo, commit: str) -> list[digests.TreeEntry]:
+    """Every blob in the committed tree at `commit`, unfiltered."""
     rc, out = repo._git_rc("ls-tree", "-r", "-z", commit)
     if rc != 0:
         raise ReviewError(f"cannot read the tree at {commit}: {out.strip()}")
-    entries = digests.filter_tree(digests.parse_ls_tree(out), exclude_prefixes=exclude, include_prefixes=include)
-    return digests.tree_digest(entries)
+    return digests.parse_ls_tree(out)
 
 
 @dataclass(frozen=True)
@@ -154,9 +222,17 @@ def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.S
 
     So this compares `binding.change_digest` — the committed tree minus `not_the_product`, which
     `review.assemble` already records — against the same digest taken now. A commit that touches
-    only the SSOT, the frozen prose or the installed surfaces moves no byte the reviewers read,
-    and the review goes on speaking for exactly what it read. A commit that touches a line of the
-    product invalidates it, which is the whole point and is now the *only* thing that does.
+    only the SSOT or the frozen prose moves no byte the reviewers read, and the review goes on
+    speaking for exactly what it read.
+
+    **And it compares `binding.host_surface_digest`, because the product is not the whole of what
+    was reviewed.** The security stage is launched into a checkout of the head with the installed
+    surfaces in it and is told to review them — a pre-authorized command, a hook, an MCP server
+    added to `.claude/`, `.codex/`, `.github/` or `.gemini/` is a finding. Those paths are outside
+    `not_the_product`'s answer, so on one digest a commit that added nothing but a
+    `permissions.allow` entry left this reporting `fresh=True` over a review that had never read
+    it. Two digests, because there are two subjects; `.rein/` is in neither, which is what keeps
+    committing `review.yaml` from invalidating the review it records.
 
     `subject_head_sha` keeps its own job: it is the commit every anchor and blob in the document
     is resolved against. It is reported here so a reader can go and look at it.
@@ -166,7 +242,7 @@ def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.S
     *is* generated and cannot be checked against the tree is reported with a reason and
     `fresh=False`: "we could not tell" is not "it is current", and an unreadable gate fails closed.
     Without that, `approve` added no blocker and `doctor` reported nothing at all, so a git that
-    could not answer opened gate ④ over a review nobody could show still spoke for the code. There
+    could not answer opened acceptance over a review nobody could show still spoke for the code. There
     is no case for a generated review that records no digest — the schema requires
     `binding.change_digest` and `store.read_review` refuses a document that fails it — so reaching
     that branch means the repository, not the document, is what could not be read.
@@ -191,17 +267,26 @@ def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.S
         return unmeasurable
     try:
         current = change_digest(repo, head, not_the_product(repo, state))
+        current_surface = host_surface_digest(repo, head)
     except ReviewError as exc:
         return replace(unmeasurable, reason=f"the review's freshness could not be measured: {exc}. Run `rein doctor`.")
-    if current == recorded:
+    moved = ""
+    if current != recorded:
+        moved = "the product has changed since"
+    elif current_surface != review.host_surface_digest:
+        # A binding that names no host surface has not measured one, and "" is not the digest of an
+        # empty tree — so it reads as moved. That is the right way round: a document that cannot
+        # say what its security stage was bound to has not said it is still bound to it.
+        moved = "the host surfaces the security review reads have changed since"
+    if not moved:
         return Freshness(fresh=True, reviewed_head=reviewed_head, head=head, reason="")
     return Freshness(
         fresh=False,
         reviewed_head=reviewed_head,
         head=head,
         reason=(
-            f"the machine review was generated against {reviewed_head[:12] or 'an unnamed commit'} and the "
-            f"product has changed since — it says nothing about the code as it now stands. "
+            f"the machine review was generated against {reviewed_head[:12] or 'an unnamed commit'} and "
+            f"{moved} — it says nothing about the code as it now stands. "
             "Re-run `rein review generate`."
         ),
     )
@@ -257,14 +342,14 @@ def diff_of(
     the SSOT out, and the diff every reviewer read put it back in — schema payloads, the frozen
     plan, task state, the event log, all of it handed over as if it were code somebody wrote. A
     field report measured it at 27% of a normal cycle's diff, and the extractor's request went past
-    the model's hard context ceiling on the strength of it, which is a gate ④ that cannot be
+    the model's hard context ceiling on the strength of it, which is an acceptance that cannot be
     produced at all.
 
     Not a fold, which is what a lockfile gets: a folded file is still *in* the change and the
     Coverage Manifest goes on reporting its body as unread. `.rein/` is not in the change, so
     reporting it unread would be a coverage gap invented out of something nobody was ever meant
     to review — and `_default_status` turns any generated file into `insufficient`, which at
-    high risk is a gate ④ block whose instruction ("split the unreadable part out of this scope")
+    high risk is an acceptance block whose instruction ("split the unreadable part out of this scope")
     cannot be carried out on the orchestration state itself.
     """
     width = () if context is None else (f"-U{context}",)
@@ -662,7 +747,7 @@ def reviewable_of(
             return made(text, folded, applied)
     # Over the ceiling even at git's default width. Refusing here would be a second budget nobody
     # approved: `refuse_over_budget` has already passed on this diff, and the answer to a reading
-    # too big to read is a narrower scope at gate ③, not a narrower window onto it.
+    # too big to read is a narrower scope at the mandate, not a narrower window onto it.
     text, folded = fold_bodies(plain, files, signalled=signalled)
     return made(text, folded, (PLAIN_CONTEXT, PLAIN_CONTEXT))
 
@@ -694,7 +779,7 @@ def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str 
         "review budget exceeded before the pipeline ran — split the scope, do not grow the "
         f"screen: max_diff_bytes is {ceiling} and {subject}'s diff is "
         f"{diff_bytes} bytes. Reduce what this cycle claims through `/revise` and review the "
-        "remainder in its own gate ④ round, or raise the limit in `review_policy.budgets` as a "
+        "remainder in its own acceptance round, or raise the limit in `review_policy.budgets` as a "
         "deliberate, recorded decision about how much one person can hold at once."
     )
 
@@ -708,7 +793,7 @@ class Reading:
 
     `unit` is what the record calls it — :data:`WHOLE`, a task id, or the seam a composition
     leaves. `include` is the slice of the product it covers, as git pathspecs; empty means the
-    whole change, and that is the reading gate ④ has always taken.
+    whole change, and that is the reading acceptance has always taken.
 
     The unit is not decoration. When a review is composed out of several readings, every Actual
     Statement carries the unit it was read out of, so "extra behaviours: 0" can never be read as a
@@ -1026,6 +1111,7 @@ def reading_keys(
     ceiling: int,
     risk_floor: str,
     prior_blocking: Sequence[str],
+    host_surface: str,
     unit: str = WHOLE,
 ) -> dict[str, str]:
     """What each reviewer stage is a function of, for one reading, one key per stage (`review_cache`).
@@ -1043,10 +1129,17 @@ def reading_keys(
     are named instead. `environment_digest` describes the OCI sandbox, and a reviewer stage does
     not run in one: `review_transport` launches the CLI on the host, in an empty directory.
 
+    **`host_surface` is in the security stage's key and in no other.** That stage is launched into
+    a checkout of the head with the installed surfaces in it and is told to review them, so it is a
+    function of them; the extractor and the comparator never see them. It is the repair for a real
+    hole: `change_digest` is taken with those paths excluded, so a commit that added a
+    pre-authorized command and nothing else moved no key, replayed the cached answer, launched no
+    reviewer — and `freshness`, measuring the same one digest, called the review current.
+
     And `subject_head_sha`, by the same reasoning one step further: a stage is not a function of
-    HEAD's name. `change_digest` is taken over the committed tree with `not_the_product` already
-    applied, so it identifies the reviewed content exactly, and the diff, the file facts and the
-    anchorable blobs all derive from it and `trusted_base_sha`. Keying on the sha meant a commit
+    HEAD's name. `change_digest` and `host_surface_digest` between them identify the reviewed
+    content exactly, and the diff, the file facts and the anchorable blobs all derive from them and
+    `trusted_base_sha`. Keying on the sha meant a commit
     that provably could not change the payload — anything under `.rein/`, `docs/tasks/`,
     `docs/decisions/`, a `.gitignore` edit — threw away a half-megabyte extraction anyway. Not
     "one changed line invalidates the lot" but zero changed lines invalidating it, which is what
@@ -1087,6 +1180,8 @@ def reading_keys(
                 # A finding the previous review left blocking is in the request, and the validator
                 # refuses an answer that drops one — so it changes what a valid answer is.
                 "prior_blocking_ids": sorted(prior_blocking),
+                # The checkout this stage alone is given, which `change_digest` cannot see.
+                "host_surface_digest": host_surface,
             },
         ),
     }
@@ -1182,7 +1277,7 @@ def plan_readings(
     mode: str = "auto",
     risk: str = "low",
 ) -> list[Reading]:
-    """The readings gate ④ takes, derived from the frozen plan's task scopes.
+    """The readings acceptance takes, derived from the frozen plan's task scopes.
 
     `[WHOLE_READING]` — one reading of everything — whenever composition has nothing to compose
     along: the operator asked for `whole`, there is no plan, or no task declares a scope. An
@@ -1196,8 +1291,8 @@ def plan_readings(
     instead. Neither happened: the caller had `effective` in hand one line above this call and did
     not pass it, so a critical change was read in slices and then blocked for having been. The
     remedy the block named ("re-read the change whole") had no way to be carried out — the mode
-    lives in `review_policy`, which is inside gate ③'s frozen digest, and `rein review generate`
-    has no override — so the only exit was `rein revise --to tasks` and a re-approval of a plan
+    lives in `review_policy`, which is inside the mandate's frozen digest, and `rein review generate`
+    has no override — so the only exit was `rein revise --to mandate` and a re-approval of a plan
     nothing had changed. Deciding it here makes the documented behaviour the real one and leaves
     `coverage_blocks` as what it should always have been: a backstop over a document, not the
     place the policy is enforced.
@@ -1205,7 +1300,7 @@ def plan_readings(
     Otherwise one reading per scoped task, in plan order, plus :data:`SEAM`.
 
     **A task's reading is its declared scope, never the paths that happened to change.** The scope
-    was frozen at gate ③ and does not move, so the reading taken while that task landed is still
+    was frozen by the mandate and does not move, so the reading taken while that task landed is still
     the answer to the same question after every later task has landed — which is the whole reason a
     composed review costs less to regenerate than a whole one.
 
@@ -1463,7 +1558,7 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
             f"this cycle's readings produced {len(statements)} actual statement(s) and "
             f"{len(findings)} security finding(s), past what one review may carry "
             f"({MAX_STATEMENTS} and {MAX_FINDINGS}). Reduce what this cycle claims through "
-            "`/revise` and review the remainder in its own gate ④ round — a list cut to fit is a "
+            "`/revise` and review the remainder in its own acceptance round — a list cut to fit is a "
             "review that says less than it read."
         )
     return Composition(
@@ -1483,6 +1578,7 @@ def keys_for(
     trusted_base: str,
     ceiling: int,
     risk_floor: str,
+    host_surface: str,
     prior_blocking: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, str]:
     """This reading's stage keys, from what the reading measured about itself.
@@ -1506,6 +1602,7 @@ def keys_for(
         trusted_base=trusted_base,
         ceiling=ceiling,
         risk_floor=risk_floor,
+        host_surface=host_surface,
         prior_blocking=[str(f.get("id", "")) for f in prior_blocking],
         unit=measured.reading.unit,
     )
@@ -1521,10 +1618,11 @@ def warm(
     exclude: Sequence[str],
     limits: Mapping[str, int],
     risk_floor: str,
+    host_surface: str,
     config: models.Config | None,
     cache: review_cache.StageCache,
 ) -> ReadOut:
-    """Take one reading now, so gate ④ finds it already answered.
+    """Take one reading now, so acceptance finds it already answered.
 
     Called when a task lands, where the reading is one task wide and the tree that produced it is
     the one in front of the caller. It answers the *same question* the gate will ask — same
@@ -1539,7 +1637,8 @@ def warm(
     reading, because that is what the gate will send and a warm-up that asks a different question
     is a warm-up nobody reuses. It is taken by the caller rather than here: the same analysis
     answers whether the gate will compose at all, and a caller that has to ask that first should
-    not pay for the diff twice.
+    not pay for the diff twice. `host_surface` travels the same way and for the same reason — it is
+    a fact about the tree, not about this reading, and the caller already has the tree in hand.
     """
     measured = read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits)
     keys = keys_for(
@@ -1548,6 +1647,7 @@ def warm(
         trusted_base=base,
         ceiling=limits["max_diff_bytes"],
         risk_floor=risk_floor,
+        host_surface=host_surface,
     )
     return read_one(
         repo,

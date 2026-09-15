@@ -1,4 +1,4 @@
-// Gate ④'s five stages. It reviews a generated grounded review, and what it asks for is a
+// Acceptance's five stages. It reviews a generated grounded review, and what it asks for is a
 // judgement, not a reading — so every stage but `scope` and `diff` ends in a form that records one.
 //
 // The stage order and completion are the server's (models.REVIEW_STAGE_ORDER,
@@ -195,7 +195,7 @@ function RequirementsOnPeople({ section, onAsBuilt }) {
             ))}
           </Table>
           <Warn>
-            No task declared these at gate ③, so nobody decided they would be somebody's job. That is what this
+            No task declared these in the mandate, so nobody decided they would be somebody's job. That is what this
             row is: not a defect, a decision that has not been made.
           </Warn>
         </>
@@ -213,7 +213,7 @@ function RequirementsOnPeople({ section, onAsBuilt }) {
           <div className="subhead" style={{ marginTop: ".8rem" }}>As declared</div>
           <Table>
             <tr>
-              <td>foreseen at gate ③ and present</td>
+              <td>foreseen in the mandate and present</td>
               <td>{declared.count}</td>
             </tr>
           </Table>
@@ -341,10 +341,10 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
 
       {b.environment_drift ? (
         <>
-          <Subhead spaced>The sandbox moved since gate ③</Subhead>
+          <Subhead spaced>The sandbox moved since the mandate</Subhead>
           <Table>
             <tr>
-              <td>approved at gate ③</td>
+              <td>approved with the mandate</td>
               <td className="mono">{b.environment_drift.approved_at_gate_three}</td>
             </tr>
             <tr>
@@ -353,7 +353,7 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
             </tr>
           </Table>
           <p className="note">
-            Allowed, and not a blocker: gate ③ freezes config.yaml without its image pins, so a task that adds a
+            Allowed, and not a blocker: the mandate freezes config.yaml without its image pins, so a task that adds a
             dependency can have its sandbox rebuilt without re-approving a plan nothing changed. You are approving
             over evidence produced in the later one.
           </p>
@@ -862,7 +862,7 @@ export function StageBody({ data, review, session, asBuilt, onAsBuilt, onPost, o
   if (data.generated === false) {
     return (
       <Warn>
-        No machine review has been generated. Gate ④ approves a grounded review, not a green test run — run{" "}
+        No machine review has been generated. Acceptance approves a grounded review, not a green test run — run{" "}
         <code>rein review generate</code> first.
       </Warn>
     );

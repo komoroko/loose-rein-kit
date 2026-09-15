@@ -80,7 +80,7 @@ def graph_of(done: tuple[str, ...] = ()) -> dag.Graph:
 
 
 def build_repo(tmp_path: Path, **kwargs: object) -> Path:
-    """A repo ready to build: gate 3 approved, plan frozen, four tasks."""
+    """A repo ready to build: the mandate approved, plan frozen, four tasks."""
     kwargs.setdefault(
         "plan",
         make_plan(
@@ -90,7 +90,7 @@ def build_repo(tmp_path: Path, **kwargs: object) -> Path:
             ]
         ),
     )
-    kwargs.setdefault("state", make_state(phase="build", plan_status="frozen"))
+    kwargs.setdefault("state", make_state(plan_status="frozen"))
     seed_repo(tmp_path, **kwargs)  # type: ignore[arg-type]
     return tmp_path
 
@@ -405,15 +405,15 @@ def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: st
 def test_the_review_transport_is_granted_a_read_and_no_more(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, adapter: str
 ) -> None:
-    """A gate-④ stage is handed its request, answers on stdout, and changes nothing.
+    """A acceptance stage is handed its request, answers on stdout, and changes nothing.
 
     That is `READ`, which is not the same as passing no flags — and the difference is the whole
     reason the level exists. `codex exec` reads without being told, so its launch stays bare;
     `copilot` grants no tool at all without one, so an ungranted launch could not open the checkout
     the security stage is given to read. Neither gets a grant that could change anything.
 
-    The request itself goes where that CLI takes one (`review_transport.prompt_call`): neither of
-    these reads stdin, so the payload is the last thing on the line, after the grant.
+    The request itself goes where that CLI takes one (`review_transport.prompt_call`): `codex exec`
+    reads it on stdin, `copilot -p` takes it as the flag's value.
     """
     from rein import common, review_transport
 
@@ -435,7 +435,8 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
 
     record = adapters.ADAPTER_TABLE[adapter]
     payload = json.dumps({"request": "x"})
-    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ), *record.prompt_argv(payload)]
+    tail = () if record.prompt_on_stdin else record.prompt_argv(payload)
+    assert launched[0] == [*record.launch_argv(), *record.access_flags(adapters.READ), *tail]
     assert not set(launched[0]) & set(record.access_flags(adapters.WRITE)) - set(record.launch_argv())
 
 
@@ -673,26 +674,26 @@ def test_a_serial_task_with_nothing_to_repair_is_recorded_once(tmp_path: Path, m
 def test_a_repair_is_labelled_by_what_asked_for_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Every line of the repair path said `[gate 4]`, including the ones a repair at a task
+    """Every line of the repair path said `[acceptance]`, including the ones a repair at a task
     boundary printed several tasks before the gate was reached. A log that names the wrong phase
     has to be read against the code to be believed."""
     loop = orchestrator(tmp_path)
     task = dag.Task(id="T-001", title="leaf", kind="parallel")
     item = repair.Repair("T-001", (findings_mod.Attribution("SEC-001", "security", "T-001", "alpha/mod.py"),))
-    monkeypatch.setattr(loop, "_slice_branch", lambda task_id, where="gate 4": "")
-    monkeypatch.setattr(loop, "_repair_on_work_branch", lambda t, i, where="gate 4": None)
-    monkeypatch.setattr(loop, "_gate_after_repair", lambda t, where="gate 4": [])
+    monkeypatch.setattr(loop, "_slice_branch", lambda task_id, where="acceptance": "")
+    monkeypatch.setattr(loop, "_repair_on_work_branch", lambda t, i, where="acceptance": None)
+    monkeypatch.setattr(loop, "_gate_after_repair", lambda t, where="acceptance": [])
     monkeypatch.setattr(loop, "_restate_evidence", lambda task_id, steps: None)
 
     loop._repair(task, item, where="review")
     assert "[review] T-001: 1 finding(s)" in capsys.readouterr().out
     loop._repair(task, item)
-    assert "[gate 4] T-001: 1 finding(s)" in capsys.readouterr().out
+    assert "[acceptance] T-001: 1 finding(s)" in capsys.readouterr().out
 
 
 def test_a_task_boundary_repair_commits_as_what_it_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The commit subject named the gate too, so a repair made at a task boundary landed on the
-    branch calling itself a gate-4 repair."""
+    branch calling itself an acceptance repair."""
     loop = orchestrator(tmp_path)
     subjects: list[str] = []
     monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
@@ -708,7 +709,7 @@ def test_a_task_boundary_repair_commits_as_what_it_is(tmp_path: Path, monkeypatc
     loop._accept_repair(task, str(loop.root), "a" * 40, where="review")
     loop._accept_repair(task, str(loop.root), "a" * 40)
 
-    assert subjects == ["T-001: review repair", "T-001: gate-4 repair"]
+    assert subjects == ["T-001: review repair", "T-001: acceptance repair"]
 
 
 def test_the_gate_after_a_repair_reports_what_it_re_ran(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -806,15 +807,15 @@ def test_an_off_vocabulary_status_is_refused(tmp_path: Path) -> None:
 
 
 def test_the_loop_refuses_while_gate_three_is_pending(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    root = build_repo(tmp_path, state=make_state(gates={"tasks": "pending"}, phase="tasks", plan_status="draft"))
+    root = build_repo(tmp_path, state=make_state(gates={"mandate": "pending"}, plan_status="draft"))
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 2
     assert "no frozen plan to build against" in capsys.readouterr().err
 
 
 def test_the_loop_refuses_to_build_against_a_draft_plan(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Gate 3's approval is what freezes the plan; building against a draft would implement a
+    """The mandate's approval is what freezes the plan; building against a draft would implement a
     plan nobody signed for."""
-    root = build_repo(tmp_path, state=make_state(phase="build", plan_status="draft"))
+    root = build_repo(tmp_path, state=make_state(plan_status="draft"))
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 2
     assert "not 'frozen'" in capsys.readouterr().err
 
@@ -823,7 +824,7 @@ def test_approving_gate_three_is_what_lets_the_loop_start(tmp_path: Path, capsys
     """The two halves of the precondition above, joined.
 
     Regression for the gap where nothing in the codebase ever wrote `plan.status: frozen`: a
-    repository whose gate ③ was properly approved still could not build, because the freeze
+    repository whose the mandate was properly approved still could not build, because the freeze
     existed only in prose. Asserting the refusal (the test above) passed happily while the
     approval that clears it did not exist — so the pair is what pins the behaviour.
     """
@@ -831,13 +832,12 @@ def test_approving_gate_three_is_what_lets_the_loop_start(tmp_path: Path, capsys
     from rein import repo as repo_mod
 
     root = build_repo(
-        tmp_path,
-        state=make_state(gates={"tasks": "pending", "build": "pending"}, phase="tasks", plan_status="draft"),
+        tmp_path, state=make_state(gates={"mandate": "pending", "acceptance": "pending"}, plan_status="draft")
     )
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 2
 
     repo = repo_mod.Repo(root)
-    approve.record_approval(repo, "tasks", approve.approval_subject(repo, "tasks"))
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
     capsys.readouterr()  # drop the refusal above
 
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
@@ -901,14 +901,14 @@ def test_the_handover_says_what_was_not_established(tmp_path: Path, capsys: pyte
     out = capsys.readouterr().out
     assert "did NOT establish" in out
     assert "grounded review" in out
-    assert "cannot open gate 4" in out
+    assert "cannot open acceptance" in out
 
 
 def test_the_handover_does_not_offer_to_approve(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root = build_repo(tmp_path)
     build_loop.main(["--dry-run", "--repo", str(root)])
     out = capsys.readouterr().out
-    assert "security review" not in out.lower()  # not this step's gate-4 evidence
+    assert "security review" not in out.lower()  # not this step's acceptance evidence
     assert "interactive terminal" in out
 
 
@@ -1037,7 +1037,7 @@ def test_the_task_pipeline_is_the_configured_dod(tmp_path: Path) -> None:
     assert [s.name for s in loop._steps_for(task)] == ["test", "check"]
 
 
-# --- path-scoped quality-gate steps (frozen at gate 3, never an implementer's choice) ----------
+# --- path-scoped quality-gate steps (frozen at the mandate, never an implementer's choice) ----------
 
 
 def _paths_scoped_config() -> dict[str, object]:
@@ -1465,7 +1465,7 @@ def test_there_is_no_resolve_verb() -> None:
 
 def test_a_task_left_in_progress_is_reset_to_todo(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """The frontier only picks up `todo`, so an interrupted task would deadlock the loop."""
-    root = build_repo(tmp_path, state=make_state(phase="build", tasks={"T-001": "in-progress"}))
+    root = build_repo(tmp_path, state=make_state(tasks={"T-001": "in-progress"}))
     repo = repo_mod.Repo(root)
     loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
     loop._recover_in_progress()
@@ -1703,7 +1703,7 @@ def test_a_launch_the_machine_failed_still_says_why(tmp_path: Path, monkeypatch:
 
 def test_a_launch_failure_writes_no_verdict_into_the_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`task_failed` and `knowledge_gap` are both `ATTENTION_EVENTS`, and the chain is
-    append-only: a machine's bad afternoon would sit on gate ⑤'s screen as an unresolved
+    append-only: a machine's bad afternoon would sit on acceptance's screen as an unresolved
     escalation for the life of the repository."""
     loop = orchestrator(tmp_path, config=make_config(launch_retries=0))
     monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT))
@@ -1948,11 +1948,37 @@ def test_every_adapter_declares_what_it_can_do() -> None:
     assert codex.access_flags(adapters.WRITE) == ("--sandbox", "workspace-write")
     assert codex.access_flags(adapters.READ) == (), "codex exec reads without being asked"
     assert codex.own_sandbox, "codex sandboxes itself — the fact the nested-sandbox check needs"
-    assert not codex.resumable, "codex resumes the *last* session, which parallel leaves cannot name"
+    # Resumable by the *other* mechanism: the CLI mints the thread id and reports it in the `--json`
+    # stream, and `codex exec resume <id>` continues that one. It was recorded as having no session
+    # at all on the reading that its resume verb takes only the last one, which it does not.
+    assert codex.resumable and not codex.session_flags
+    assert codex.session_from_envelope is not None and codex.resume_argv == ("resume", "{session}")
+    assert codex.resume_verb("T-1") == ("resume", "T-1")
 
     claude = adapters.ADAPTER_TABLE["claude"]
     assert claude.resumable and not claude.own_sandbox
+    assert claude.resume_argv == (), "claude is told an id; it does not name one"
     assert not any(claude.access_flags(level) for level in (adapters.READ, adapters.REVIEW, adapters.WRITE))
+
+
+def test_the_two_shapes_of_session_land_in_different_places() -> None:
+    """A caller-chosen id is a flag and is appended; a CLI-minted one is a verb and follows `argv`.
+
+    `claude --resume <id>` and `codex exec resume <id>` are not the same grammar, and putting the
+    verb where the flag goes makes codex read `resume` as the prompt. So the placement is a
+    property of the record, not of the call site.
+    """
+    claude = adapters.ADAPTER_TABLE["claude"]
+    line = adapters.command(claude.launch_argv(), "P", access=adapters.WRITE, session="S", resume=True)
+    assert line[-3:] == ["--resume", "S", "P"]
+    assert adapters.command(claude.launch_argv(), "P", session="S")[-3:] == ["--session-id", "S", "P"]
+
+    codex = adapters.ADAPTER_TABLE["codex"]
+    line = adapters.command(codex.launch_argv(), "P", access=adapters.WRITE, session="S", resume=True)
+    assert line[:4] == ["codex", "exec", "resume", "S"], "the verb follows the CLI's own argv"
+    assert line[-1] == "P" and "--json" in line
+    # And a first launch is bare: codex names the session, so there is nothing to stamp.
+    assert adapters.command(codex.launch_argv(), "P", session="S") == adapters.command(codex.launch_argv(), "P")
 
 
 def test_an_adapter_named_differently_from_its_binary_is_still_found() -> None:
@@ -2069,7 +2095,7 @@ def test_a_step_with_no_stage_runs_everywhere_as_it_always_did(tmp_path: Path) -
 def test_the_run_measures_its_own_prompt_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The loop composes every prompt, so this is the one number it can know exactly.
 
-    Gate ④'s review budget is measured rather than declared for the same reason; the build side
+    Acceptance's review budget is measured rather than declared for the same reason; the build side
     of the run had no number at all, which is why "we are re-sending too much" could only ever be
     an impression.
     """
@@ -2399,7 +2425,7 @@ def test_a_dry_run_reads_no_baseline(tmp_path: Path) -> None:
 def test_the_baseline_is_measured_once_for_the_gate_not_once_per_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The measurement belongs to gate ③, and `rein build` only reads what it froze.
+    """The measurement belongs to the mandate, and `rein build` only reads what it froze.
 
     Taken inside the build it was taken after the approval that had already decided this plan was
     implementable against this tree — and on a resumed run it would have measured a tree with
@@ -2495,7 +2521,7 @@ def test_the_landing_map_comes_from_the_audit_log(tmp_path: Path) -> None:
 
 
 def test_a_slice_already_ready_is_not_landed_on(tmp_path: Path) -> None:
-    """Past gate ④ a change is a human's call, not something a re-run puts there quietly."""
+    """Past acceptance a change is a human's call, not something a re-run puts there quietly."""
     loop = orchestrator(tmp_path)
     slice_ = pr_stack.Slice(
         index=2,
@@ -2692,8 +2718,8 @@ def test_an_agent_step_declared_at_the_integration_stage_runs_there(
 def test_the_integration_reviewers_findings_go_to_the_task_whose_scope_owns_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A finding about the join is carried to gate ④ beside the task that owns the code it names —
-    the same derivation gate ④ uses — and one nobody owns is said out loud rather than filed
+    """A finding about the join is carried to acceptance beside the task that owns the code it names —
+    the same derivation acceptance uses — and one nobody owns is said out loud rather than filed
     against a task that does not own it."""
     loop = orchestrator(tmp_path)
     monkeypatch.setattr(common, "run", fake_git())
@@ -2724,7 +2750,7 @@ def test_a_second_review_of_a_task_does_not_discard_the_first(tmp_path: Path) ->
 
 def test_a_task_with_no_declared_scope_is_not_warmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An undeclared scope means unbounded, so its reading would be the whole change — neither one
-    task wide nor the question gate ④ will ask."""
+    task wide nor the question acceptance will ask."""
     loop = orchestrator(tmp_path)
     warmed: list[str] = []
     monkeypatch.setattr(review_reading, "warm", lambda *a, **k: warmed.append("yes"))
@@ -2772,7 +2798,7 @@ def _sec(fid: str, path: str, *, blocking: bool = True) -> dict[str, object]:
 
 def _warm_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_loop.Orchestrator, list[str]]:
     """A loop whose T-001 owns `alpha/`, with `_repair` recorded rather than run. What is recorded is
-    `<finding>@<where>`: a repair the loop makes here is not gate ④'s, and the label it carries is
+    `<finding>@<where>`: a repair the loop makes here is not acceptance's, and the label it carries is
     what the log and the repair's own commit subject are written from."""
     loop = orchestrator(
         tmp_path,
@@ -2790,7 +2816,7 @@ def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The warm-up launched a security reviewer over this slice and the answer was written to the
-    stage cache and read by nobody: the finding was first *seen* at gate ④, after every later task
+    stage cache and read by nobody: the finding was first *seen* at acceptance, after every later task
     had been built on the code it names. Reading it here costs nothing that was not already spent.
     """
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
@@ -2800,7 +2826,7 @@ def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
 
 
 def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Attribution is `findings.owner_of_path` — the same function gate ④ routes by — so nothing
+    """Attribution is `findings.owner_of_path` — the same function acceptance routes by — so nothing
     is guessed. A finding no declared scope owns means the plan does not say, and a human decides
     with the whole picture in front of them."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
@@ -3045,11 +3071,12 @@ def test_a_gate_four_stage_reaches_a_cli_that_does_not_read_stdin() -> None:
     """
     from rein import review_transport
 
-    claude = adapters.ADAPTER_TABLE["claude"]
-    argv, stdin = review_transport.prompt_call(claude, ["claude", "-p"], "PAYLOAD")
-    assert (argv, stdin) == (["claude", "-p"], "PAYLOAD"), "the one CLI whose stdin is established"
+    for name in ("claude", "codex"):
+        record = adapters.ADAPTER_TABLE[name]
+        argv, stdin = review_transport.prompt_call(record, list(record.argv), "PAYLOAD")
+        assert (argv, stdin) == (list(record.argv), "PAYLOAD"), f"{name} takes its prompt on stdin"
 
-    for name in ("gemini", "copilot", "amp", "opencode", "codex", "cursor"):
+    for name in ("gemini", "copilot", "amp", "opencode", "cursor"):
         record = adapters.ADAPTER_TABLE[name]
         argv, stdin = review_transport.prompt_call(record, list(record.argv), "PAYLOAD")
         assert argv[-1] == "PAYLOAD", f"{name} was launched without its question"
@@ -3180,7 +3207,7 @@ def test_the_lock_answers_before_the_working_tree_does(tmp_path: Path, caplog: p
     assert "package-lock.json" not in caplog.text
 
 
-# --- gate 4 repairs what a task's scope owns ----------------------------------
+# --- acceptance repairs what a task's scope owns ----------------------------------
 
 
 def _scoped_repo(tmp_path: Path, rounds: int) -> build_loop.Orchestrator:
@@ -3208,9 +3235,9 @@ def _blocking(fid: str = "SEC-001", path: str = "src/api/client.py") -> dict[str
 
 def test_gate_four_reads_repairs_and_reads_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The half that was missing. Inside a task the reviewer's must-fix findings go to an
-    implementer and the reviewer looks again; at gate ④ the findings were printed and the human
+    implementer and the reviewer looks again; at acceptance the findings were printed and the human
     typed `rein revise --to build --from-review`, which marked the task and its whole dependent
-    closure `needs-revision` and demanded a re-approval of gate ③ for a repair that changed no
+    closure `needs-revision` and demanded a re-approval of the mandate for a repair that changed no
     plan.
 
     The second reading is the judge, not the fixer: it is a blind reading with no memory of having
@@ -3270,7 +3297,7 @@ def test_a_reading_that_cannot_be_taken_does_not_un_finish_the_build(
 ) -> None:
     """The tasks are done and their evidence is recorded. Anything but a capacity stop is reported
     and handed over — and the gate stays shut either way, because `approve.readiness` refuses a
-    gate 4 with no generated review."""
+    acceptance with no generated review."""
     loop = _scoped_repo(tmp_path, rounds=2)
     monkeypatch.setattr(loop, "_generate_review", lambda: False)
     monkeypatch.setattr(loop, "_repair", lambda graph, item: pytest.fail("nothing was read to repair"))
@@ -3279,7 +3306,7 @@ def test_a_reading_that_cannot_be_taken_does_not_un_finish_the_build(
 
 
 def _repair_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_loop.Orchestrator, list[str]]:
-    """A gate-4 repair with everything around the commit stubbed out: one launch, in scope, green."""
+    """A acceptance repair with everything around the commit stubbed out: one launch, in scope, green."""
     loop = _scoped_repo(tmp_path, rounds=2)
     committed: list[str] = []
     monkeypatch.setattr(loop, "_launch", lambda *a, **k: None)
@@ -3310,7 +3337,7 @@ def test_a_gate_four_repair_is_committed_before_the_next_reading(
     loop, committed = _repair_loop(tmp_path, monkeypatch)
     found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
     loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
-    assert committed == ["T-001: gate-4 repair"]
+    assert committed == ["T-001: acceptance repair"]
 
 
 def test_a_cycle_that_is_not_a_stack_repairs_on_the_work_branch(
@@ -3322,7 +3349,7 @@ def test_a_cycle_that_is_not_a_stack_repairs_on_the_work_branch(
     found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
     loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
 
-    assert committed == ["T-001: gate-4 repair"]
+    assert committed == ["T-001: acceptance repair"]
     assert "no stack to place this on" in capsys.readouterr().out
 
 
@@ -3339,7 +3366,7 @@ def test_a_repair_that_cannot_be_committed_stops_the_loop(tmp_path: Path, monkey
 def test_gate_four_reads_the_baseline_gate_three_froze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`_consume` reads it before a batch, and a run that finds every task already done never
     reaches that line — which is exactly the run that repairs here. Without it a step frozen red at
-    gate ③ stops the repair over a failure the plan was approved on top of."""
+    the mandate stops the repair over a failure the plan was approved on top of."""
     loop = _scoped_repo(tmp_path, rounds=2)
     frozen = {
         "measured_at": "2026-01-01T00:00:00+00:00",
@@ -3382,3 +3409,134 @@ def test_a_reading_that_could_not_be_taken_is_not_reported_as_nothing_blocking(
     out = capsys.readouterr().out
     assert "no reading was taken" in out
     assert "nothing blocking" not in out
+
+
+# --- the agent sandbox: containing the CLI that writes the code -----------------
+#
+# The quality gate boxes in what an agent wrote. Until `executors.agent_profile` existed there was
+# nothing that boxed in the writing of it: every implementer, reviewer and fixer was a host process
+# holding the operator's credentials, and the config keys that looked like they said otherwise
+# (`implementer_profile`, `reviewer_profile`) reached no launch at all.
+
+
+AGENT_PROFILE = {"kind": "oci-agent", "image": "localhost/rein-agent@sha256:" + "b" * 64, "network_profile": "egress"}
+
+
+def agent_loop(tmp_path: Path, **profile_overrides: object) -> build_loop.Orchestrator:
+    return orchestrator(
+        tmp_path,
+        config=make_config(
+            agent_profile="agent",
+            profiles={
+                "quality": {"kind": "host", "containerfile": "python"},
+                "agent": {**AGENT_PROFILE, **profile_overrides},
+            },
+        ),
+    )
+
+
+def test_without_an_agent_profile_the_launch_stays_on_the_host(tmp_path: Path) -> None:
+    """The default, and an honest one: no packaged image can carry every CLI a role might be
+    pointed at, so the absence of a box is a fact to report rather than a gap to paper over."""
+    loop = orchestrator(tmp_path)
+    assert loop._agent_sandbox() is None
+    assert loop._launch_environment() == "host"
+
+
+def test_an_agent_profile_that_is_not_a_sandbox_stops_the_run(tmp_path: Path) -> None:
+    """The state this key exists to make impossible. `implementer_profile` named a profile, read
+    like a boundary, and ran the agent on the machine anyway — so a key that cannot deliver what
+    it says fails here rather than silently meaning nothing."""
+    loop = orchestrator(
+        tmp_path,
+        config=make_config(
+            agent_profile="quality",
+            profiles={"quality": {"kind": "host", "containerfile": "python"}},
+        ),
+    )
+    with pytest.raises(common.ReinError, match="oci-agent"):
+        loop._agent_sandbox()
+
+
+def test_the_agent_is_told_which_box_it_is_in(tmp_path: Path) -> None:
+    """Derived from where the launch will really happen, never from a key that says where it
+    ought to: this used to report a profile's `kind` while the process ran on the host."""
+    assert "oci-agent (agent" in agent_loop(tmp_path)._launch_environment()
+
+
+def test_an_agent_sandbox_mounts_the_worktree_read_write(tmp_path: Path) -> None:
+    """`mount_repo: read_only` is a legitimate answer for a gate that only inspects, and a config
+    error for an agent: writing the checkout is the one thing it was launched to do."""
+    loop = agent_loop(tmp_path, mount_repo="read_only")
+    mounts = loop._mounts_for(loop.config.raw.profiles["agent"], cwd="/repo/worktree")
+    assert (Path("/repo/worktree"), "/work", "rw") in mounts
+
+
+def test_the_control_socket_is_bound_at_a_fixed_path_not_the_host_s(tmp_path: Path) -> None:
+    """The host's socket lives under /run/user/<uid>/rein/<id>, and mounting that directory would
+    hand the container every other socket in it."""
+
+    class _Control:
+        socket_path = Path("/run/user/1000/rein/abc/control.sock")
+        secret = b"s"
+
+    loop = agent_loop(tmp_path)
+    loop.control = _Control()  # type: ignore[assignment]
+    mounts = loop._mounts_for(loop.config.raw.profiles["agent"], cwd="/repo/worktree")
+    bound = [m for m in mounts if m[1] == build_loop._SANDBOX_CONTROL_SOCKET]
+    assert bound == [(_Control.socket_path, "/run/rein/control.sock", "rw")]
+    assert not any(str(m[1]).startswith("/run/user") for m in mounts)
+
+
+def test_the_leaf_is_told_the_bound_socket_path_and_keeps_its_other_wiring() -> None:
+    """Rewriting `REIN_CONTROL_SOCKET` is the one thing that has to differ between a host launch
+    and a contained one. Everything else the orchestrator minted travels unchanged, and the host's
+    own environment does not travel at all."""
+    wiring = build_loop.Orchestrator._contained_wiring(
+        {
+            "REIN_CONTROL_SOCKET": "/run/user/1000/rein/abc/control.sock",
+            "REIN_CAPABILITY_TOKEN": "tok",
+            "REIN_TASK_ID": "T-001",
+            "PATH": "/usr/bin",
+            "AWS_SECRET_ACCESS_KEY": "leak",
+        }
+    )
+    assert wiring["REIN_CONTROL_SOCKET"] == build_loop._SANDBOX_CONTROL_SOCKET
+    assert wiring["REIN_CAPABILITY_TOKEN"] == "tok"
+    assert wiring["REIN_TASK_ID"] == "T-001"
+    assert "PATH" not in wiring
+    assert "AWS_SECRET_ACCESS_KEY" not in wiring
+
+
+def test_with_no_control_plane_there_is_no_wiring_to_pass() -> None:
+    """A dry run has no socket. The leaf then has none either, and its `rein report` refuses
+    rather than writing into a worktree about to be deleted — the same as a host launch."""
+    assert build_loop.Orchestrator._contained_wiring(None) == {}
+    assert build_loop.Orchestrator._contained_wiring({"REIN_TASK_ID": "T-001"}) == {}
+
+
+def test_a_launch_goes_through_the_executor_when_a_box_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point of the whole change: with a profile set, no agent argv reaches `common.run`."""
+    loop = agent_loop(tmp_path)
+    seen: dict[str, executors.ExecutionSpec] = {}
+
+    class _Executor:
+        def run(self, spec: executors.ExecutionSpec) -> executors.ExecutionResult:
+            seen["spec"] = spec
+            return executors.ExecutionResult(
+                exit_code=0, output=agent_output(["claude"], "done"), image_digest="sha256:" + "b" * 64
+            )
+
+    monkeypatch.setattr(executors, "for_profile", lambda profile: _Executor())
+    monkeypatch.setattr(build_loop, "_run", _never_called)
+    loop._launch(["claude", "-p", "do it"], cwd=str(tmp_path), where="T-001: implementer", role="implementer")
+    spec = seen["spec"]
+    assert spec.command == ("claude", "-p", "do it")
+    assert spec.profile.name == "agent"
+    assert spec.workdir == build_loop._SANDBOX_WORKDIR
+
+
+def _never_called(*args: object, **kwargs: object) -> tuple[int, str]:
+    raise AssertionError("an agent launch reached the host while a sandbox was configured")

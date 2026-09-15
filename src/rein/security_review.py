@@ -2,7 +2,7 @@
 
 A security review is a list of `findings[]`, each with a severity, an attack scenario and
 optional code anchors. Structured so the gate can act on it mechanically: while any blocking
-finding stands, gate 4 does not open (plan §12.5), and no amount of reviewer prose can wave it
+finding stands, acceptance does not open (plan §12.5), and no amount of reviewer prose can wave it
 through.
 
 **Which findings those are is not the reviewer's to say.** The contract used to carry a
@@ -22,7 +22,7 @@ clear its own block — plan §12.7).
 had one, a finding's only state was presence in the newest generated list, so "the change fixed
 it" and "the reviewer forgot it" arrived as the same observation and the policy — correctly, given
 what it could see — refused both. That left no way through at all: on a work branch the trusted
-base does not move, so a blocking finding was carried forward for the life of the cycle and gate ④
+base does not move, so a blocking finding was carried forward for the life of the cycle and acceptance
 became unreachable the moment one was filed. :func:`resolution_of` settles it on something neither
 the reviewer nor this process can talk its way past: the anchors the finding itself named are
 re-checked against the committed tree, and the finding is `resolved` only when none of them
@@ -47,8 +47,18 @@ SEVERITY_VALUES = frozenset({"low", "medium", "high", "critical"})
 FINDING_ID_RE = re.compile(review_policy.review_schema_pattern("securityFindingId"))
 
 
-class SecurityReviewError(RuntimeError):
-    """The security review produced output that could not be trusted."""
+class SecurityReviewError(review_policy.ReviewPolicyError):
+    """The security review produced output that could not be trusted.
+
+    A `ReviewPolicyError` because that is exactly what it is, and because the two recovery paths
+    that exist for untrusted reviewer output both catch by that type: `review_reading.cached_stage`
+    drops a stored answer that no longer validates and re-reads, and `_run_once_more_if_refused`
+    re-launches once when a stage is refused. As a bare `RuntimeError` this was a sibling rather
+    than a child, so neither reached it — a security stage whose answer failed validation escaped
+    both, and a stale cache entry under a tightened validator wedged the whole review instead of
+    being dropped. That is the accident `_run_once_more_if_refused` exists for, arriving through
+    the one stage it did not cover.
+    """
 
 
 def categories() -> tuple[str, ...]:
@@ -110,7 +120,7 @@ def contract(discipline: str = "") -> str:
         "- A finding must state an attack scenario. A category on its own says nothing anybody "
         "can act on.\n"
         "- There is no `blocking` field, and you are not asked for one. Whether a finding holds "
-        f"gate 4 shut is decided from its severity by the policy engine (at {review_policy.BLOCKING_FLOOR} "
+        f"acceptance shut is decided from its severity by the policy engine (at {review_policy.BLOCKING_FLOOR} "
         "and above), so state the severity the attack scenario actually carries — a finding you "
         "re-state may not come back at a lower severity than the one it was carried forward at, "
         "and that is checked.\n"
@@ -393,7 +403,7 @@ def run_security_review(
     any other risk in this pipeline.
 
     What the refusal used to have no answer for is the finding the change *did* fix. Dropping it
-    was refused just the same, so a blocking finding shut gate ④ for the rest of the cycle. A drop
+    was refused just the same, so a blocking finding shut acceptance for the rest of the cycle. A drop
     is now settled by :func:`resolution_of` against the committed tree: a finding whose anchored
     code is gone from this head is carried into the document as `status: resolved` — kept in this
     generation's findings, and named in `resolved` so the caller can record it in the audit chain,

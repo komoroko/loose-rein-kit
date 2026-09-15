@@ -1,6 +1,6 @@
 """Decision Cards and the statements their options mean — derived, not asked for.
 
-Gate ④ asks a human to *decide*, not to read. The schema carries `decision_cards` and
+The acceptance gate asks a human to *decide*, not to read. The schema carries `decision_cards` and
 `statements`, but nothing in `review.assemble` produces them — it emits claims, gaps,
 extra behaviours and security findings and stops. Left there, the gate inverts:
 `completion_blockers` demands an answer to every high/critical card (a comprehension check)
@@ -251,7 +251,7 @@ def derive_cards(
 
     So the answer is the one `review_reading.merge` already gives for statements and findings: a
     list cut to fit is a review that says less than it read. The remedy is the budget's own —
-    reduce what this cycle claims and review the remainder in its own gate ④ round.
+    reduce what this cycle claims and review the remainder in its own acceptance round.
     """
     minter = _IdMinter(first_statement)
     statements: list[dict[str, Any]] = []
@@ -261,7 +261,7 @@ def derive_cards(
         raise review_policy.ReviewPolicyError(
             f"this review leaves {len(subjects)} decisions for a human, past the {MAX_CARDS} one "
             "review may carry. Reduce what this cycle claims through `/revise` and review the "
-            "remainder in its own gate ④ round — a list cut to fit is a review that says less "
+            "remainder in its own acceptance round — a list cut to fit is a review that says less "
             "than it read."
         )
     for subject in subjects:

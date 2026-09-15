@@ -1,7 +1,7 @@
 """Tests for agent_cli.py — pointing the AI roles at an adapter.
 
 The behaviour worth protecting is the independence report. A setup where the actual extractor
-and the comparator share a model will be blocked at gate ④ as an unexplained failure; saying
+and the comparator share a model will be blocked at acceptance as an unexplained failure; saying
 so at configuration time is the difference between a tool that surprises you and one that
 tells you what it is about to do.
 """
@@ -189,9 +189,9 @@ def test_copilot_is_selectable_for_every_role(tmp_path: Path) -> None:
 
 
 def test_a_switch_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
-    """`agents` is outside the gate ③ freeze, so nothing asks a human before this file moves —
-    which makes the chain the only place the change survives, and the only way gate ④ can be told
-    the evidence in front of it came from a different agent than the one gate ③ saw."""
+    """`agents` is outside the mandate's freeze, so nothing asks a human before this file moves —
+    which makes the chain the only place the change survives, and the only way acceptance can be told
+    the evidence in front of it came from a different agent than the one the mandate saw."""
     from rein import event_chain
 
     root = seed_repo(tmp_path)
@@ -220,22 +220,22 @@ def test_a_model_the_adapter_cannot_be_told_to_run_is_refused_before_it_is_writt
 ) -> None:
     """Schema-valid is not launchable, and the write is the moment that can still say so.
 
-    `codex` takes no model flag this release knows, so the config below is one every launcher
+    `amp` takes no model flag this release knows, so the config below is one every launcher
     refuses. It used to be written anyway, exit 0, and discovered at `rein build`.
     """
     seed_repo(tmp_path)
     before = (tmp_path / ".rein/config.yaml").read_text(encoding="utf-8")
-    assert agent_cli.main(["codex", "--role", "comparator", "--model", "o1", "--repo", str(tmp_path)]) == 2
-    assert "cannot tell 'codex' which model to run" in capsys.readouterr().err
+    assert agent_cli.main(["amp", "--role", "comparator", "--model", "o1", "--repo", str(tmp_path)]) == 2
+    assert "cannot tell 'amp' which model to run" in capsys.readouterr().err
     assert (tmp_path / ".rein/config.yaml").read_text(encoding="utf-8") == before, "nothing is written"
 
 
 def test_a_bulk_switch_onto_an_adapter_with_no_model_flag_is_refused(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`rein agent codex` on the scaffold: three review roles already name a model `codex` cannot take."""
+    """`rein agent amp` on the scaffold: three review roles already name a model `amp` cannot take."""
     seed_repo(tmp_path)
-    assert agent_cli.main(["codex", "--repo", str(tmp_path)]) == 2
+    assert agent_cli.main(["amp", "--repo", str(tmp_path)]) == 2
     err = capsys.readouterr().err
     for role in ("actual_extractor", "comparator", "security_reviewer"):
         assert f"agents.{role}.model" in err, role

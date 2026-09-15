@@ -1,16 +1,21 @@
-"""`rein revise --to <phase>` — rewind approval, in a chain.
+"""`rein revise --to <gate>` — rewind approval, in a chain.
 
 Rewinding approval is a human privilege, never automatic (AGENTS.md "Roll back"). What this
 command mechanizes is the part humans get wrong: an upstream gate returning to `pending` must
 never leave a downstream gate `approved`, because a downstream approval standing on a
-withdrawn decision is the stale-approval inconsistency the whole gate ladder exists to
-prevent. So the reset always runs forward from the target through gate ⑤.
+withdrawn decision is the stale-approval inconsistency the gates exist to prevent. So the reset
+always runs forward from the target through the last gate.
+
+The target is a **gate**, not a phase. It was a phase, and the mapping from one to the other was a
+table here — which only existed because approving a gate also advanced a phase. What a human
+withdraws is an authorization: `--to mandate` says the scope, the claims or the acceptance criteria
+were wrong; `--to acceptance` says the change should not have been taken.
 
 A roll back has three consequences beyond the gate lines themselves:
 
-  **The plan un-freezes.** Rewinding to `tasks` or earlier sets `plan.status` back to `draft`,
-  which is what makes `plan.yaml` and `config.yaml` editable again — the gate guard denies
-  those writes while the plan is frozen.
+  **The plan un-freezes.** Rewinding to `mandate` sets `plan.status` back to `draft`, which is
+  what makes `plan.yaml` and `config.yaml` editable again — the gate guard denies those writes
+  while the plan is frozen.
 
   **Approvals stop applying.** A receipt binds digests; once the artifacts move, it covers
   bytes nobody will read again. The receipts are cleared with the gate — but the
@@ -26,12 +31,19 @@ Missing an impacted task is the dangerous direction, so the whole closure is mar
 mechanically; "this one is actually fine" is a deliberate human reclassification during the
 `/tasks` reconcile, never a silent default.
 
+**Re-decomposing the work does come here**, and only the *order* does not. The breakdown reads
+like the loop's own business until you notice where it is written: `tasks[].acceptance` is in
+`plan.yaml` with the claims, so a re-cut is a shape a softened criterion travels in, and the
+freeze covers the document whole rather than trying to tell an honest re-cut from that. What
+withdraws no authorization is consuming the DAG — the order, the parallelism, the re-runs — which
+is not written down anywhere to be frozen.
+
 **This is for a defect in the specification, and nothing else.** There used to be a
-`--from-review` that derived the impacted tasks from gate ④'s blocking findings, which was the
+`--from-review` that derived the impacted tasks from acceptance's blocking findings, which was the
 only route a machine-found *code* defect had back into the code. It marked the task and its whole
 dependent closure `needs-revision` — a status about the plan — so `status_api` then demanded a
-`/tasks` reconcile and a re-approval of gate ③, for a repair that changed no requirement, no claim
-and no plan. Reset, salvage, re-approve, round again. Gate ④ repairs its own findings now
+`/tasks` reconcile and a re-approval of the mandate, for a repair that changed no requirement, no claim
+and no plan. Reset, salvage, re-approve, round again. The acceptance gate repairs its own findings now
 (`repair.route`, `build_loop._close_gate4`), and what reaches here is what a human decided *is* a
 specification defect — answering a Decision Card with `revise_design` or `revise_requirement`,
 which is a different sentence from "the code is wrong".
@@ -49,26 +61,18 @@ from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
 
-#: Roll-back target phase → the gate the chain reset starts at. `verify` is not a target: it
-#: precedes gate ⑤, so rewinding "to verify" would reset nothing.
-PHASE_GATE: dict[str, str] = {
-    "requirements": "requirements",
-    "design": "design",
-    "tasks": "tasks",
-    "build": "build",
-}
-
-#: Rewinding to these re-opens the frozen plan and its pinned toolchain (plan §16.4).
-UNFREEZES_PLAN = frozenset({"requirements", "design", "tasks"})
+#: Rewinding to this re-opens the frozen plan and its pinned toolchain (plan §16.4). Only the
+#: mandate does: it is what the freeze records, and `acceptance` sits on top of it.
+UNFREEZES_PLAN = frozenset({"mandate"})
 
 
 class ReviseError(RuntimeError):
     """The roll back cannot be performed."""
 
 
-def gates_to_reset(target_phase: str, state: models.State) -> list[str]:
-    """Every currently-approved gate from `target_phase`'s gate onward. Empty = nothing to do."""
-    start = models.GATE_ORDER.index(PHASE_GATE[target_phase])
+def gates_to_reset(target_gate: str, state: models.State) -> list[str]:
+    """Every currently-approved gate from `target_gate` onward. Empty = nothing to do."""
+    start = models.GATE_ORDER.index(target_gate)
     return [g for g in models.GATE_ORDER[start:] if state.gate_status(g) == "approved"]
 
 
@@ -80,14 +84,14 @@ def impacted_closure(plan: models.Plan, state: models.State | None, seeds: list[
     return valid, sorted(graph.dependents_closure(valid))
 
 
-def plan_revision(repo: repo_mod.Repo, target_phase: str, seeds: list[str]) -> dict[str, object]:
+def plan_revision(repo: repo_mod.Repo, target_gate: str, seeds: list[str]) -> dict[str, object]:
     """Everything the roll back would change, as data — so `--dry-run` and the real run agree.
 
     Computing the plan once and rendering it twice is what keeps a dry run honest; two code
     paths that "do the same thing" are two code paths that eventually do not.
     """
-    if target_phase not in PHASE_GATE:
-        raise ReviseError(f"unknown target phase {target_phase!r} (one of {', '.join(PHASE_GATE)})")
+    if target_gate not in models.GATE_VALUES:
+        raise ReviseError(f"unknown target gate {target_gate!r} (one of {', '.join(models.GATE_ORDER)})")
 
     store = store_mod.Store(repo)
     state = store.read_state()
@@ -95,7 +99,7 @@ def plan_revision(repo: repo_mod.Repo, target_phase: str, seeds: list[str]) -> d
         raise ReviseError("no .rein/state.yaml — nothing to roll back")
     plan = store.read_plan()
 
-    resets = gates_to_reset(target_phase, state)
+    resets = gates_to_reset(target_gate, state)
     unknown_seeds = list(seeds)
     marked: list[str] = []
     ripple: list[str] = []
@@ -107,9 +111,9 @@ def plan_revision(repo: repo_mod.Repo, target_phase: str, seeds: list[str]) -> d
         marked = sorted(set(valid) | set(ripple))
 
     return {
-        "target_phase": target_phase,
+        "target_gate": target_gate,
         "gates_reset": resets,
-        "unfreezes_plan": target_phase in UNFREEZES_PLAN and state.plan_status == "frozen",
+        "unfreezes_plan": target_gate in UNFREEZES_PLAN and state.plan_status == "frozen",
         "invalidates_review": bool(resets),
         "cleared_receipts": [g for g in resets if state.gate_receipt(g) is not None],
         "marked_tasks": marked,
@@ -120,7 +124,7 @@ def plan_revision(repo: repo_mod.Repo, target_phase: str, seeds: list[str]) -> d
 
 
 def render(revision: dict[str, object]) -> str:
-    lines = [f"Roll back to phase '{revision['target_phase']}':"]
+    lines = [f"Roll back to gate '{revision['target_gate']}':"]
     resets = revision["gates_reset"]
     assert isinstance(resets, list)
     lines.append(f"- gates reset to pending (in a chain): {', '.join(resets) or '(none — already pending)'}")
@@ -169,7 +173,9 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
     assert isinstance(resets, list)
     for gate in resets:
         raw["gates"][gate] = {"status": "pending", "receipt": None}
-    raw["current_phase"] = revision["target_phase"]
+    # Where the cycle now stands follows from those gates and is not written beside them
+    # (`models.State.stage`). It used to be a second field this transaction set, which is how a
+    # roll back could leave a phase and a gate set disagreeing.
     raw["updated_at"] = event_chain.now_iso()
 
     if revision["unfreezes_plan"]:
@@ -220,15 +226,15 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
             "gate_revised",
             cycle_id=state.cycle_id,
             subject_ids=[*resets, *marked],
-            detail={"target_phase": revision["target_phase"], "reason": reason},
+            detail={"target_gate": revision["target_gate"], "reason": reason},
         )
         if revision["unfreezes_plan"]:
             tx.append("plan_invalidated", cycle_id=state.cycle_id, detail={"reason": reason})
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="roll back: reset gates from a target phase onward, in a chain")
-    parser.add_argument("--to", required=True, metavar="PHASE", help=f"one of: {', '.join(PHASE_GATE)}")
+    parser = argparse.ArgumentParser(description="roll back: reset gates from a target gate onward, in a chain")
+    parser.add_argument("--to", required=True, metavar="GATE", help=f"one of: {', '.join(models.GATE_ORDER)}")
     parser.add_argument("--reason", default="", help="why (recorded in the audit chain)")
     parser.add_argument("--impacted", default="", help="comma-separated task ids directly affected")
     parser.add_argument("--dry-run", action="store_true", help="print what would change; write nothing")
@@ -265,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ReviseError, store_mod.StoreError) as exc:
         logger.error(str(exc))
         return 1
-    print("\nRolled back. Reconcile the marked tasks in /tasks before re-approving.")
+    print("\nRolled back. Reconcile the marked tasks in /tasks before re-approving the mandate.")
     return 0
 
 

@@ -15,6 +15,6 @@ Starting from `docs/00-product-brief.md`, distill the vague vision into verifiab
 
 ## Output
 A requirements draft following the scaffold structure of `docs/10-requirements.md` (with `[NEEDS CLARIFICATION]` markers left in place), the coverage report, plus a list of questions for the human to close.
-**Do not finalize the requirements** — finalization is done by the human at gate ①. Do not delve into code or design.
+**Do not finalize the requirements** — finalization is done by the human at the mandate gate. Do not delve into code or design.
 
 Write the deliverable in the user's language (the project's primary language).

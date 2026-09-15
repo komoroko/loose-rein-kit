@@ -23,18 +23,18 @@ ALL_APPROVED = dict.fromkeys(models.GATE_ORDER, "approved")
 
 
 def finished_repo(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:
-    """A repo whose release gate is approved, each gate carrying a schema-valid receipt."""
-    seed_repo(tmp_path, state=make_state(gates=ALL_APPROVED, phase="done"), docs=True, **kwargs)  # type: ignore[arg-type]
+    """A repo whose acceptance gate is approved, each gate carrying a schema-valid receipt."""
+    seed_repo(tmp_path, state=make_state(gates=ALL_APPROVED), docs=True, **kwargs)  # type: ignore[arg-type]
     return repo_mod.Repo(tmp_path)
 
 
 # --- readiness ----------------------------------------------------------------
 
 
-def test_an_unapproved_release_gate_blocks(tmp_path: Path) -> None:
-    seed_repo(tmp_path, state=make_state(gates={"release": "pending"}))
+def test_an_unapproved_acceptance_gate_blocks(tmp_path: Path) -> None:
+    seed_repo(tmp_path, state=make_state(gates={"acceptance": "pending"}))
     blockers = cycle.readiness(repo_mod.Repo(tmp_path))
-    assert any("release gate (5) is not approved" in b for b in blockers)
+    assert any("acceptance gate is not approved" in b for b in blockers)
 
 
 def test_a_damaged_chain_blocks(tmp_path: Path) -> None:
@@ -94,7 +94,7 @@ def test_the_next_state_carries_only_the_project_identity(tmp_path: Path) -> Non
     fresh = cycle.next_state(previous, "payment-2")
     assert fresh["project"] == previous.project
     assert fresh["cycle_id"] == "payment-2"
-    assert fresh["current_phase"] == "brief"
+    assert "current_phase" not in fresh, "where a cycle stands is derived from the gates"
     assert fresh["plan"] == {"status": "draft"}
     assert fresh["tasks"] == {}
     gates = fresh["gates"]
@@ -143,7 +143,7 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
     state = store_mod.Store(repo).read_state()
     assert state is not None
     assert state.cycle_id == "payment"
-    assert state.current_phase == "brief"
+    assert state.stage == "drafting"
     assert state.approved_gates == ()
 
     # The closing event is the last entry of the chain being archived; the new chain opens with
@@ -182,7 +182,7 @@ def test_the_reset_state_is_schema_valid_and_lands_with_its_event(tmp_path: Path
 
 @pytest.mark.integration
 def test_close_refuses_when_not_ready(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    seed_repo(tmp_path, state=make_state(gates={"release": "pending"}), docs=True, git=True)
+    seed_repo(tmp_path, state=make_state(gates={"acceptance": "pending"}), docs=True, git=True)
     assert cycle.main(["--name", "payment", "--repo", str(tmp_path)]) == 1
     assert "cannot close this cycle" in capsys.readouterr().err
 

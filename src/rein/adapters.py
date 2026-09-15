@@ -1,7 +1,7 @@
 """What each agent CLI this release can launch is able to do, as data rather than as branches.
 
 Every launch in the system goes through one of these records: the build loop launches
-implementers, fixers and quality-gate agent steps; the review pipeline launches the three gate-④
+implementers, fixers and quality-gate agent steps; the review pipeline launches the three acceptance
 reviewer stages. They ask the same three questions — how do I start this CLI, may it write, and
 can it tell me what the launch cost — so the answers live here rather than inside either caller.
 
@@ -12,7 +12,7 @@ dodge the import cycle that reach created. The cycle was never the problem; the 
 One rule is enforced here rather than at each launch site: a role whose adapter this release does
 not know, or whose configured `model` this release cannot pass to that CLI, is **refused**
 (`launch_refusal`, `launch_argv`). Launching the CLI's default under another model's name would
-declare a separation nothing performs, and the gate-④ independence check is derived from exactly
+declare a separation nothing performs, and the acceptance independence check is derived from exactly
 that name.
 """
 
@@ -40,7 +40,7 @@ SECURITY = "security"
 #: What a launch is allowed to do. Three levels, because the loop makes exactly three kinds of
 #: launch and used to be able to name two of them:
 #:
-#: * ``READ`` — the gate-④ stages. They are handed their request (on stdin or as the prompt
+#: * ``READ`` — the acceptance stages. They are handed their request (on stdin or as the prompt
 #:   argument, per `prompt_on_stdin`), answer on stdout, and must change nothing. Not the same as
 #:   "no flags": a CLI whose tools are all deny-by-default without a grant cannot even open the
 #:   file it was sent to read.
@@ -87,14 +87,27 @@ class Adapter:
     #: code" is an enforced fact under `copilot` and a convention (plus the loop's before/after
     #: fingerprint) everywhere else.
     scoped_write: tuple[str, ...] = ()
-    #: How to stamp a launch with a session id, and how to resume that id. Both empty means the
-    #: CLI gets a fresh launch per retry: it re-reads its ticket, its design slice and the code
-    #: from cold every time, which is the single largest avoidable cost in a long build.
-    #: `codex` is empty on purpose and not for lack of a resume verb — it has one, but it resumes
-    #: *the last session*, and with `max_parallel` leaves in flight there is no way to say which
-    #: session that is. Guessing would hand one leaf another leaf's context.
+    #: How to stamp a launch with a session id, and how to resume that id. Both empty means this
+    #: CLI does not take a *caller-chosen* id — which is one of two ways to have a session, not the
+    #: absence of one (see `resume_argv`). With neither mechanism the CLI gets a fresh launch per
+    #: retry: it re-reads its ticket, its design slice and the code from cold every time, which is
+    #: the single largest avoidable cost in a long build.
     session_flags: tuple[str, ...] = ()
     resume_flags: tuple[str, ...] = ()
+    #: The other shape of session, and the reason `resumable` is not just "has two flags": a CLI
+    #: that **mints the id itself and reports it back**. `session_from_envelope` reads that id out
+    #: of the launch's own output, and `resume_argv` is the argv that resumes it — a *verb*, not a
+    #: flag (`codex exec resume <id>`), so it is inserted immediately after the CLI's own `argv`
+    #: rather than appended like `resume_flags`. `str.format`-ed with `session=`.
+    #:
+    #: `codex` was left with no session at all on the reading that its resume verb "resumes *the
+    #: last session*, and with `max_parallel` leaves in flight there is no way to say which session
+    #: that is". That is not what the CLI does: `codex exec --json` opens with a `thread.started`
+    #: event carrying the `thread_id` ("can be used to resume the thread later"), and
+    #: `codex exec resume <thread_id>` resumes that one and no other. The id was there to be read;
+    #: nothing read it. Guessing was never the alternative — asking was.
+    session_from_envelope: Callable[[str], str] | None = None
+    resume_argv: tuple[str, ...] = ()
     #: Whether the CLI establishes its own process isolation (seccomp/landlock/bwrap) around the
     #: work it does. Two nested sandboxes is not twice as safe: the inner one needs kernel
     #: features the outer one has already dropped, and it fails at the point where the agent tries
@@ -109,7 +122,7 @@ class Adapter:
     envelope: Callable[[str], tuple[str, usage_mod.Usage]] | None = None
     #: How to tell this CLI which model to run. Empty for one whose flag this release has not
     #: verified — and an unapplied model is not a small thing here: `agents.<role>.model` is what
-    #: the gate-④ independence check is derived from, so a config naming a model the launcher
+    #: the acceptance independence check is derived from, so a config naming a model the launcher
     #: cannot pass would declare a separation nothing performs. `launch_argv` refuses that
     #: combination rather than launching the CLI's default under another model's name.
     model_flags: tuple[str, ...] = ()
@@ -145,8 +158,9 @@ class Adapter:
     #: argument at all.
     prompt_flags: tuple[str, ...] = ()
     #: Whether this CLI reads its prompt from **stdin** when the command line names none. True only
-    #: where that is established, and it is established for exactly one: `claude -p`, which is what
-    #: gate ④'s transport has always used and what ships working today.
+    #: where that is established, and it is established for two: `claude -p`, which is what acceptance's
+    #: transport has always used, and `codex exec`, whose prompt is an optional positional that
+    #: upstream documents as read from stdin when it is absent or given as `-`.
     #:
     #: It is a field rather than an assumption because the transport used to make the assumption for
     #: everybody. `review_transport` hands a stage its request on stdin with no prompt argument at
@@ -159,19 +173,27 @@ class Adapter:
     #: it takes one — as an argument — and a payload too large for one argument is *refused*
     #: (`review_transport.prompt_call`). Asserting stdin here to dodge that refusal would be
     #: declaring a channel nobody has run, which is the same class of claim `model_flags` refuses.
+    #: The bar is the CLI's own reference saying so, which is why `codex` is here and the rest
+    #: are not.
     prompt_on_stdin: bool = False
     #: How to constrain this CLI's output to a JSON Schema, `str.format`-ed with `schema=` (the
     #: schema as one JSON string). Empty for a CLI whose mechanism this release has not verified —
     #: the same rule `model_flags` follows, and it costs nothing to leave empty: the answer is
     #: parsed and validated either way.
     #:
-    #: What it buys is that the failure stops being possible. A gate-④ stage's whole contract is
+    #: What it buys is that the failure stops being possible. A acceptance stage's whole contract is
     #: "one JSON object and no other text", enforced only by the prompt saying so — and a field run
     #: lost several launches to a comparator returning correct JSON inside a ```json frame, again
     #: and again, because nothing but a sentence had ever asked it not to. `review_policy` now
     #: unwraps exactly that frame, which is the floor for every CLI; this is the ceiling for the
     #: ones that can be told the shape instead of asked for it.
     output_schema_flags: tuple[str, ...] = ()
+    #: Whether `output_schema_flags` takes the schema as a **file path** rather than inline. `codex
+    #: exec --output-schema` names a file; `claude --json-schema` takes the JSON itself. Writing a
+    #: temporary file is the caller's job (`review_transport`), and getting this backwards would
+    #: send a CLI a half-kilobyte of JSON where it expected a path — which it reads as a filename
+    #: that does not exist.
+    output_schema_is_path: bool = False
     #: What keeps a launch from reading the *working directory's* configuration — the settings,
     #: hooks, pre-authorizations and MCP servers a CLI loads before it reads its prompt. Empty for
     #: a CLI where this release has not verified such a mechanism, and that emptiness is load-
@@ -198,7 +220,14 @@ class Adapter:
 
     @property
     def resumable(self) -> bool:
-        return bool(self.session_flags and self.resume_flags)
+        """Whether a retry can continue the previous launch instead of reading everything again.
+
+        Either mechanism will do, and they are genuinely different: the caller names the session
+        (`session_flags` + `resume_flags`), or the CLI names it and says so
+        (`session_from_envelope` + `resume_argv`). Requiring the first was what recorded `codex` as
+        having no session.
+        """
+        return bool(self.session_flags and self.resume_flags) or bool(self.session_from_envelope and self.resume_argv)
 
     @property
     def forkable(self) -> bool:
@@ -215,6 +244,16 @@ class Adapter:
         """
         chosen = (*self.model_flags, model) if model and self.model_flags else ()
         return self.argv + chosen + self.usage_flags
+
+    def session_of(self, output: str) -> str:
+        """The session id this launch opened, for a CLI that mints its own. "" for one that does not."""
+        if self.session_from_envelope is None:
+            return ""
+        return self.session_from_envelope(output)
+
+    def resume_verb(self, session: str) -> tuple[str, ...]:
+        """What to insert after `argv` so the launch resumes `session`. () when that is not the shape."""
+        return tuple(part.format(session=session) for part in self.resume_argv) if self.resume_argv else ()
 
     def access_flags(self, level: str, writable: str = "") -> tuple[str, ...]:
         """What to pass so a launch at `level` can do its job — and nothing past it.
@@ -251,7 +290,7 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         # needed just as much when the payload arrives on stdin (the review transport), and the
         # prompt is then a plain positional.
         argv=("claude", "-p"),
-        # The one CLI whose stdin-as-prompt is established: it is what gate ④'s transport has run
+        # The one CLI whose stdin-as-prompt is established: it is what acceptance's transport has run
         # since it existed, and it is what makes a half-megabyte reading possible at all — no argv
         # element holds that (Linux caps one at 128 KiB).
         prompt_on_stdin=True,
@@ -299,6 +338,19 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         usage_flags=usage_mod.CODEX_JSONL_FLAGS,
         envelope=usage_mod.parse_codex_envelope,
         install_hint="npm install -g @openai/codex",
+        # The CLI mints the session and reports it: `--json` opens with `thread.started` carrying
+        # the `thread_id`, and `codex exec resume <thread_id>` continues that thread and no other.
+        # A verb rather than a flag, which is why it has its own field (`resume_argv`).
+        session_from_envelope=usage_mod.codex_session,
+        resume_argv=("resume", "{session}"),
+        model_flags=("--model",),
+        # `--output-schema <path>`: a **file** holding the JSON Schema, not the schema itself.
+        output_schema_flags=("--output-schema", "{schema}"),
+        output_schema_is_path=True,
+        # The prompt is an optional positional, and upstream states that instructions are read from
+        # stdin when it is absent (or given as `-`). That is what lets an acceptance reading past the
+        # 128 KiB one argv element may carry reach this CLI at all.
+        prompt_on_stdin=True,
     ),
     "gemini": Adapter(
         name="gemini",
@@ -318,7 +370,7 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         name="copilot",
         # `--no-ask-user` because a launch from this loop has no human at the other end: without
         # it the agent may pause for input and the run hangs until `agent_timeout_sec` (default:
-        # no limit) rather than failing. `-s` because gate ④ asks its stages for "one JSON object
+        # no limit) rather than failing. `-s` because acceptance asks its stages for "one JSON object
         # and no other text" and parses the whole of stdout strictly — a stats footer around the
         # object is not a smaller answer, it is an unreadable one. It is what the CLI's own
         # programmatic reference offers for exactly this ("outputting only the agent's response").
@@ -338,10 +390,12 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         scoped_write=("--allow-tool", "write({path})"),
         # Everything below is empty on purpose, and each for its own reason:
         #
-        # `session_flags` / `resume_flags` / `fork_flags` — `--resume` picks a session
-        # interactively and there is no flag that stamps one, so with `max_parallel` leaves in
-        # flight there is no way to say which session a retry means. The same reason `codex` is
-        # empty: guessing would hand one leaf another leaf's context. Every retry is a fresh read.
+        # `session_flags` / `resume_flags` / `session_from_envelope` / `resume_argv` / `fork_flags`
+        # — neither shape of session is available here. `--resume` picks one *interactively*, no
+        # flag stamps one, and with no machine-readable envelope (below) there is nothing to read
+        # a minted id out of either. So with `max_parallel` leaves in flight there is no way to say
+        # which session a retry means, and guessing would hand one leaf another leaf's context.
+        # Every retry is a fresh read.
         #
         # `usage_flags` / `envelope` — the programmatic reference documents no machine-readable
         # envelope, so a launch is recorded as *unmeasured* rather than as zero. `-s` above is
@@ -367,14 +421,15 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         usage_flags=usage_mod.CURSOR_JSON_FLAGS,
         envelope=usage_mod.parse_cursor_envelope,
         install_hint="curl https://cursor.com/install -fsS | bash",
-        # `--resume [chatId]` resumes an existing chat and there is no flag that stamps a new one,
-        # so a retry cannot be told which of `max_parallel` leaves it belongs to — the same reason
-        # `codex` and `copilot` are cold on every retry.
+        # `--resume [chatId]` resumes an existing chat and there is no flag that stamps a new one.
+        # The other shape would work — a chat id this loop read back off a launch — but the JSON
+        # envelope this adapter parses carries no chat id, so there is nothing to read. A retry
+        # therefore cannot be told which of `max_parallel` leaves it belongs to, and is cold.
     ),
     "amp": Adapter(
         name="amp",
         # `-x` takes the message as its value, so it goes last. Execute mode "prints its final
-        # message and exits", which is already the shape gate ④ parses — no envelope needed, and
+        # message and exits", which is already the shape acceptance parses — no envelope needed, and
         # none offered: nothing here reports what a launch cost, so it is recorded as unmeasured.
         argv=("amp",),
         prompt_flags=("-x",),
@@ -395,7 +450,10 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         envelope=usage_mod.parse_opencode_envelope,
         install_hint="npm install -g opencode-ai",
         # `--session <id>` and `--continue` resume an existing session; neither creates one under
-        # an id this loop chose, so there is nothing to stamp and nothing to resume by name.
+        # an id this loop chose. The other shape is within reach — the `--format json` stream
+        # carries a `sessionID` on every event — but `parse_opencode_envelope` reads it for nothing
+        # and this release has not run a resume against it, so it stays empty rather than declaring
+        # a mechanism nobody has exercised.
     ),
 }
 
@@ -442,7 +500,7 @@ def launch_refusal(config: models.Config | None, role: str) -> str:
     if model and not record.model_flags:
         return (
             f"agents.{role}.model is {model!r} and this release cannot tell {adapter!r} which model "
-            "to run, so the launch would take the CLI's default under that name. The gate-④ "
+            "to run, so the launch would take the CLI's default under that name. The acceptance "
             "independence check is derived from the model, so that is a separation nothing performs "
             "— drop the model, or point the role at an adapter whose model flag is known."
         )
@@ -458,21 +516,44 @@ def disciplines_for(argv: Sequence[str]) -> Mapping[str, str]:
 
 
 def command(
-    argv: Sequence[str], prompt: str, *, access: str = READ, writable: str = "", extra: Sequence[str] = ()
+    argv: Sequence[str],
+    prompt: str,
+    *,
+    access: str = READ,
+    writable: str = "",
+    extra: Sequence[str] = (),
+    session: str = "",
+    resume: bool = False,
 ) -> list[str]:
-    """The whole command line for one launch: `argv`, the access it needs, then the prompt.
+    """The whole command line for one launch: `argv`, the access it needs, the session, the prompt.
 
     The one place that knows the prompt goes last and that `prompt_flags` goes immediately before
     it. Assembling it at each launch site is what let the access flags be appended *after* a
     prompt-introducing flag, which no CLI but claude survives (`Adapter.prompt_flags`).
 
     `access` is one of `READ` / `REVIEW` / `WRITE`; `writable` is the one file a `REVIEW` launch
-    must produce. `extra` carries the caller's own flags (the session id a retry resumes).
+    must produce. `extra` carries the caller's own flags.
+
+    **`session` is placed by the shape the CLI has, and the two shapes go in different places.** A
+    caller-chosen id is a flag and is appended (`claude --resume <id>`). A CLI-minted id is resumed
+    by a *verb* and belongs immediately after the CLI's own `argv` (`codex exec resume <id> …`) —
+    `launch_argv` builds every argv as `record.argv + model flags + usage flags`, so that position
+    is the length of `record.argv`. Putting the verb anywhere else makes `codex` read `resume` as
+    a flag's value or as the prompt.
     """
     record = adapter_for(argv)
+    head = list(argv)
+    stamp: tuple[str, ...] = ()
+    if record is not None and session:
+        if resume and record.resume_argv:
+            head[len(record.argv) : len(record.argv)] = record.resume_verb(session)
+        elif resume and record.resume_flags:
+            stamp = (*record.resume_flags, session)
+        elif not resume and record.session_flags:
+            stamp = (*record.session_flags, session)
     granted = record.access_flags(access, writable) if record is not None else ()
     tail = record.prompt_argv(prompt) if record is not None else (prompt,)
-    return [*argv, *granted, *extra, *tail]
+    return [*head, *granted, *stamp, *extra, *tail]
 
 
 def adapter_for_role(config: models.Config | None, role: str) -> Adapter:

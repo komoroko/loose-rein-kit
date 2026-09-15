@@ -355,7 +355,7 @@ def test_escalate_never_touches_a_gate(colliding: Callable[..., dict[str, Any]])
     after = store_mod.Store(bundle["repo"]).read_state()
     assert after is not None
     assert {g: after.gate_status(g) for g in models.GATE_ORDER} == {g: before.gate_status(g) for g in models.GATE_ORDER}
-    assert after.current_phase == before.current_phase
+    assert after.stage == before.stage
 
 
 def test_the_gate_output_reaches_the_recorded_gap(colliding: Callable[..., dict[str, Any]]) -> None:

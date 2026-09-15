@@ -60,9 +60,9 @@ def render(graph: Graph) -> str:
 
 
 def _how_gate_four_will_read(graph: Graph) -> list[str]:
-    """How many readings gate ④ will take of this plan, decided by the scopes it freezes.
+    """How many readings acceptance will take of this plan, decided by the scopes it freezes.
 
-    Said at gate ③ because that is where it can still be changed. Gate ④ reads the change in the
+    Said at the mandate because that is where it can still be changed. The acceptance gate reads the change in the
     readings the task scopes describe (`review_reading.plan_readings`), so a plan whose tasks
     declare their scope is read one task at a time and one whose tasks do not is read in a single
     launch holding the whole cycle — which is the shape that runs into a session limit, and by the
@@ -72,13 +72,13 @@ def _how_gate_four_will_read(graph: Graph) -> list[str]:
     a number invented for it would be the kind of confident guess this tool exists to refuse.
 
     **A `critical` task settles it before the scopes do.** Effective risk is the max of every
-    contributor, a task's own risk is one of them, and at critical gate ④ reads the change whole
+    contributor, a task's own risk is one of them, and at critical acceptance reads the change whole
     whatever the scopes say — composition cannot rule out behaviour that exists only once two
     slices are in one tree. That is knowable here, from the plan alone, and it is the one case
     where declaring more scopes changes nothing. (A claim's risk and the detector's floor can push
     a plan there later; this names the half that is already decided.)
     """
-    lines = ["### How gate ④ will read this"]
+    lines = ["### How acceptance will read this"]
     if not graph.tasks:
         return [*lines, "- (no tasks)"]
     critical = [t.id for t in graph.tasks if models.risk_at_least(t.risk, "critical")]
@@ -90,7 +90,7 @@ def _how_gate_four_will_read(graph: Graph) -> list[str]:
             "appears only once two slices are in one tree cannot be read in slices. So the *whole* "
             "change has to fit `review_policy.budgets.max_diff_bytes` on its own — splitting these "
             "scopes does not make that one reading any smaller. The two levers are what this cycle "
-            "claims and the budget itself, and both are decided here rather than at gate ④, where "
+            "claims and the budget itself, and both are decided here rather than at acceptance, where "
             "the tasks are already implemented and merged.",
         ]
     scoped = [t for t in graph.tasks if t.scope_include]
@@ -98,7 +98,7 @@ def _how_gate_four_will_read(graph: Graph) -> list[str]:
     if not scoped:
         return [
             *lines,
-            "- **one reading of the whole cycle** — no task declares a `scope`, so gate ④ has "
+            "- **one reading of the whole cycle** — no task declares a `scope`, so acceptance has "
             "nothing to read the change along. One launch holds every task's diff at once.",
         ]
     lines.append(f"- {len(scoped)} task reading(s) plus the seam between them, one launch each")

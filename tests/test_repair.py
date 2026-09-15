@@ -1,9 +1,9 @@
-"""Which of gate ④'s findings the loop repairs, and which reach a human.
+"""Which of acceptance's findings the loop repairs, and which reach a human.
 
-Inside a task, judging and repairing were both automated. At gate ④ only judging was, and the one
+Inside a task, judging and repairing were both automated. At acceptance only judging was, and the one
 route a machine-found *code* defect had back into the code was `rein revise --to build
 --from-review` — which marked the task and its whole dependent closure `needs-revision`, a status
-about the *plan*, and so demanded a `/tasks` reconcile and a re-approval of gate ③ for a repair
+about the *plan*, and so demanded a `/tasks` reconcile and a re-approval of the mandate for a repair
 that changed no requirement, no claim and no plan.
 
 These pin the routing that replaced it: a finding goes where it goes because of what repairing it

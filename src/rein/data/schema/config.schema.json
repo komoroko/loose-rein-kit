@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/komoroko/loose-rein-kit/schema/config.schema.json",
   "title": "Loose Rein config.yaml (rein-grounded-v1)",
-  "description": "Execution knobs, frozen wholesale at gate 3. What this file may NOT contain matters as much as what it may: no principal, no provider executable path, no credential, no PATH lookup — a pull request cannot widen its own permissions by editing a file it also ships. Unknown keys are rejected everywhere: a typo that was inert would silently mean 'the knob you thought you set is not set'.",
+  "description": "Execution knobs, frozen wholesale when the mandate is approved. What this file may NOT contain matters as much as what it may: no principal, no provider executable path, no credential, no PATH lookup — a pull request cannot widen its own permissions by editing a file it also ships. Unknown keys are rejected everywhere: a typo that was inert would silently mean 'the knob you thought you set is not set'.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -64,27 +64,24 @@
       }
     },
     "executors": {
-      "description": "Which profile each role runs under. The profile bodies live in executor_profiles; the indirection is what lets one sandbox be shared and audited once.",
+      "description": "Where the two kinds of thing run. `quality_gate_profile` is required and boxes in repository-derived code: the quality gate's command steps, which the mechanized acceptance criteria also go through. `agent_profile` is optional and boxes in the agent CLI itself — absent, an implementer, a reviewer and every fixer are launched as host processes with the operator's credentials, which is the honest default because the image has to carry the CLI and no packaged image can carry every CLI a role might be pointed at. What this block no longer has is `implementer_profile` and `reviewer_profile`: they were required here and described as \"which profile each role runs under\", and they wrapped nothing at all. Configuring them bought a promise nothing kept.",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "implementer_profile",
-        "reviewer_profile"
+        "quality_gate_profile"
       ],
       "properties": {
-        "implementer_profile": {
-          "$ref": "#/$defs/profileName"
-        },
-        "reviewer_profile": {
-          "$ref": "#/$defs/profileName"
-        },
         "quality_gate_profile": {
+          "$ref": "#/$defs/profileName"
+        },
+        "agent_profile": {
+          "description": "The `kind: oci-agent` profile every agent launch runs in. Absent: the agent runs on the host, and `rein doctor`, the dossier and the status board all say so.",
           "$ref": "#/$defs/profileName"
         }
       }
     },
     "executor_profiles": {
-      "description": "Sandbox definitions. Any command that runs repository-derived code, tests, or build scripts must use an `oci` profile regardless of risk; `host` is reserved for trusted tooling that runs no repository code (plan 10.1).",
+      "description": "Sandbox definitions. Any command step that runs repository-derived code, tests, or build scripts must use an `oci` profile regardless of risk; `host` is reserved for trusted tooling that runs no repository code (plan 10.1). What this covers is the quality gate's command steps and the acceptance criteria that go through the same runner — it is not isolation around the agent CLI that wrote that code, which runs as a host process from rein itself and is isolated only by whatever the adapter establishes for itself (`adapters.Adapter.own_sandbox`).",
       "type": "object",
       "minProperties": 1,
       "maxProperties": 32,
@@ -168,7 +165,7 @@
             "type": "boolean"
           },
           "paths": {
-            "description": "Glob patterns (fnmatch-style: `*` matches any run of characters, including `/`) restricting this step to tasks whose changed files match at least one. Absent or empty: every task runs it — the default, and the only knob here, frozen at gate 3 like the rest of config.yaml, never something a task's own ticket sets.",
+            "description": "Glob patterns (fnmatch-style: `*` matches any run of characters, including `/`) restricting this step to tasks whose changed files match at least one. Absent or empty: every task runs it — the default, and the only knob here, frozen with the mandate like the rest of config.yaml, never something a task's own ticket sets.",
             "type": "array",
             "maxItems": 32,
             "items": {
@@ -176,7 +173,7 @@
             }
           },
           "stage": {
-            "description": "Where in the run this step belongs. `task` runs it per task only; `integration` runs it only on the merged work branch; `both` (the default) does what every step has always done. This is what lets a fast focused suite guard each task while the whole suite runs once over the join — the same total confidence, an order of magnitude less of it re-established per attempt. Frozen at gate 3, so it is an operator's decision about the DoD's shape and never a task's opt-out: every step still runs, the question is only how often.",
+            "description": "Where in the run this step belongs. `task` runs it per task only; `integration` runs it only on the merged work branch; `both` (the default) does what every step has always done. This is what lets a fast focused suite guard each task while the whole suite runs once over the join — the same total confidence, an order of magnitude less of it re-established per attempt. Frozen with the mandate, so it is an operator's decision about the DoD's shape and never a task's opt-out: every step still runs, the question is only how often.",
             "enum": [
               "task",
               "integration",
@@ -229,12 +226,12 @@
       }
     },
     "security": {
-      "description": "The security answers that are not a function of the tree. Everything else gate 5 carries from gate 4's review, bound to the reviewed HEAD; a dependency audit is the exception, because the same commit audited last month and today can differ — the vulnerability database moved while the code did not. That also means it expires without anything changing in the repository, which is what `max_age_days` is for.",
+      "description": "The security answers that are not a function of the tree. Everything else acceptance carries from the grounded review, bound to the reviewed HEAD; a dependency audit is the exception, because the same commit audited last month and today can differ — the vulnerability database moved while the code did not. That also means it expires without anything changing in the repository, which is what `max_age_days` is for.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "dependency_audit": {
-          "description": "How to audit this project's dependencies. An argv array, never a shell string, run in an executor profile like any other command that touches the repository. Absent means gate 5 has no dependency answer and says so.",
+          "description": "How to audit this project's dependencies. An argv array, never a shell string, run in an executor profile like any other command that touches the repository. Absent means acceptance has no dependency answer and says so.",
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -269,7 +266,7 @@
       "additionalProperties": false,
       "properties": {
         "composition": {
-          "description": "How gate 4 takes its reading. `auto` composes it from the plan's task scopes — one reading per task plus the seam between them — so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
+          "description": "How acceptance takes its reading. `auto` composes it from the plan's task scopes — one reading per task plus the seam between them — so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
           "enum": [
             "auto",
             "whole"
@@ -295,7 +292,7 @@
               "maximum": 100
             },
             "max_diff_bytes": {
-              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one task's scope, so a large cycle passes and a task too broad to read in one launch is refused by name, at gate 3, while splitting it is still possible.",
+              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one task's scope, so a large cycle passes and a task too broad to read in one launch is refused by name, at the mandate, while splitting it is still possible.",
               "type": "integer",
               "minimum": 4096,
               "maximum": 8388608
@@ -303,7 +300,7 @@
           }
         },
         "repair_rounds": {
-          "description": "How many times gate 4 may repair its own blocking findings and read the change again before it stops and asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",
+          "description": "How many times acceptance may repair its own blocking findings and read the change again before it stops and asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",
           "type": "integer",
           "minimum": 0,
           "maximum": 5
@@ -319,30 +316,11 @@
           "type": "boolean"
         },
         "paths": {
-          "description": "Each path guards the file it names and everything beneath it; a trailing '/' is optional punctuation and changes nothing. The prefix is anchored at a separator, so `src` guards `src/a.py` and never `srcfile.py`. The most specific entry wins, so key order does not decide.",
+          "description": "Paths the loop may not write without an approved mandate whose scope covers them. Each guards the file it names and everything beneath it; a trailing '/' is optional punctuation and changes nothing. The prefix is anchored at a separator, so `src` guards `src/a.py` and never `srcfile.py`. Each entry used to carry a `requires_gate` naming which of five phase gates opened it, which is gone with the phases: what a human authorizes is a scope, not an order, so the question is whether a mandate covering this path has been approved. This list is what the repository calls the product, once and for every cycle; `plan.scope.include` narrows it to what the current mandate may change. A path named in neither is not guarded, so a repository whose CI config or packaging manifest is part of the product lists it here — `plan.scope.exclude`, which is a human saying \"not this\", is the one half that binds wherever it points.",
           "type": "array",
           "maxItems": 128,
           "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "path",
-              "requires_gate"
-            ],
-            "properties": {
-              "path": {
-                "$ref": "#/$defs/repoPath"
-              },
-              "requires_gate": {
-                "enum": [
-                  "requirements",
-                  "design",
-                  "tasks",
-                  "build",
-                  "release"
-                ]
-              }
-            }
+            "$ref": "#/$defs/repoPath"
           }
         }
       }
@@ -406,8 +384,10 @@
       ],
       "properties": {
         "kind": {
+          "description": "What this profile boxes in. `oci` is for repository-derived code — the quality gate's command steps and the mechanized acceptance criteria — and is denied egress outright. `oci-agent` is for the agent CLI that *writes* that code, and requires egress, because an agent that cannot reach its model API does nothing; what it is worth is the rest of the box (no HOME of yours, no ~/.ssh, no ~/.aws, no docker socket, no capabilities, no path out of the mounted worktree), not the network, and nothing here claims the network is filtered. `host` is for trusted pinned tooling that runs nothing the repository produced.",
           "enum": [
             "oci",
+            "oci-agent",
             "host"
           ]
         },
@@ -424,7 +404,7 @@
           "pattern": "^[a-z0-9][a-z0-9_-]*$"
         },
         "dockerfile": {
-          "description": "Repository-relative path to a custom Containerfile (e.g. .rein/oci/custom/Containerfile), built locally by `rein oci build --profile <name>` instead of a packaged one. Already a frozen path once gate 3 freezes config.yaml. Mutually exclusive with `containerfile`; the pinned `image` digest above stays the binding fact.",
+          "description": "Repository-relative path to a custom Containerfile (e.g. .rein/oci/custom/Containerfile), built locally by `rein oci build --profile <name>` instead of a packaged one. Already a frozen path once the mandate freezes config.yaml. Mutually exclusive with `containerfile`; the pinned `image` digest above stays the binding fact.",
           "$ref": "#/$defs/repoPath"
         },
         "mount_repo": {
@@ -442,7 +422,8 @@
         "network_profile": {
           "type": "string",
           "maxLength": 64,
-          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "description": "The one network each sandbox kind will start with, stated rather than inherited: `none` for `oci` (any other value is refused — egress is granted only by an experiment with a signed receipt, and no such receipt exists to check) and `egress` for `oci-agent`, which is the engine's default bridge, unfiltered."
         },
         "env_allowlist": {
           "type": "array",
@@ -475,7 +456,10 @@
           "if": {
             "properties": {
               "kind": {
-                "const": "oci"
+                "enum": [
+                  "oci",
+                  "oci-agent"
+                ]
               }
             },
             "required": [

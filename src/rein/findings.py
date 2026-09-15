@@ -1,6 +1,6 @@
 """Which task has to answer each blocking finding of the grounded review.
 
-Gate ④ produces findings against *code*, and the loop repairs *tasks*. Somebody has been closing
+The acceptance gate produces findings against *code*, and the loop repairs *tasks*. Somebody has been closing
 that gap by hand — reading a security finding's anchor, deciding which ticket owns that file, and
 typing the id into `rein revise --impacted`. Everything needed to derive it is already recorded:
 each finding is grounded in a code anchor whose path was validated against the committed tree
