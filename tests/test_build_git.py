@@ -160,11 +160,14 @@ def test_the_review_excludes_more_than_the_tree_does(tmp_path: Path) -> None:
     plan's own prose is the answer sheet, and handing it to the blind extractor is the failure
     `assert_blind` cannot see, because the plan arrives inside the diff rather than beside it.
     """
+    import rein
+    from rein import lock as lock_mod
     from rein import review
     from tests._support import make_state
 
     (tmp_path / ".rein").mkdir()
     repo = repo_mod.Repo(tmp_path)
+    lock_mod.write(repo.lock, lock_mod.new(rein.__version__, ""))
     raw = make_state()
     raw["plan"]["sources"] = {"docs/10-requirements.md": "sha256:" + "a" * 64}
     state = models.State(raw)
@@ -174,6 +177,24 @@ def test_the_review_excludes_more_than_the_tree_does(tmp_path: Path) -> None:
     assert "docs/10-requirements.md" in exclude, "the frozen prose the mandate pinned"
     assert "docs/tasks/" in exclude and "docs/decisions/" in exclude, "tickets and ADRs"
     assert not any(e == "docs/" for e in exclude), "a README is a deliverable and stays reviewable"
+
+
+def test_the_surfaces_are_measured_on_the_tree_not_only_on_the_lock(tmp_path: Path) -> None:
+    """`rein.lock` is the record of what `install` wrote, and a record can be behind the tree — a
+    lock rewritten across a `lock.FORMAT` bump names no integrations while every surface it once
+    named is still there. Reading only the record made that an empty surface, which hands the blind
+    extractor this tool's own orchestration text and keys the security stage on a constant."""
+    from rein import install, review
+    from tests._support import make_state
+
+    (tmp_path / ".rein").mkdir()
+    for dest, _ in install._dest_sources(install.INTEGRATIONS["claude"].files):
+        (tmp_path / dest).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / dest).write_text("x", encoding="utf-8")
+
+    repo = repo_mod.Repo(tmp_path)  # no lock at all: nothing recorded, everything present
+    exclude = review.not_the_product(repo, models.State(make_state()))
+    assert any(e.startswith(".claude/") for e in exclude), exclude
 
 
 def test_the_diff_of_a_dirty_tree_carries_a_file_git_has_never_seen(

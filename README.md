@@ -30,7 +30,7 @@ flowchart LR
     g2{"② acceptance<br/>take the change"}:::human
     done(["done"])
 
-    subgraph TASKS["task set (dependency graph DAG) — the loop re-cuts this freely"]
+    subgraph TASKS["task set (dependency graph DAG) — frozen with the mandate; the loop picks the order"]
         direction TB
         T1["foundation T-001"]:::agent
         T2["leaf T-002"]:::agent
@@ -72,8 +72,9 @@ it is what freezes `plan.yaml` and `config.yaml`.
 
 Inside an approved mandate, `/build` **cannot touch a path the mandate's `scope` does not cover**
 (`rein guard` denies it) and **cannot finish without the evidence the mandate requires**. What it
-*can* do freely is decompose, reorder and re-run: a different task breakdown of the same scope and
-claims is the same authorization, so it needs nobody.
+does freely is consume the DAG — the order, the parallelism, the re-runs after a red step. What it
+cannot do is re-cut it: each task's acceptance criteria sit in `plan.yaml` beside the claims, and
+that document is frozen whole, so a new breakdown is `/revise --to mandate`.
 
 | Step | Command | What happens | Your role |
 |------|----------|--------------|-----------|

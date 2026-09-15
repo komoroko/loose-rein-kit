@@ -492,6 +492,11 @@ def _adapter_reviewer(
     # itself. And the checkout is what the question is *about*, not how it is asked, so making the
     # subject conditional on the host's command inventory meant every CLI but one reviewed a
     # different change from the one the contract described.
+    #
+    # It does not widen the set today: `claude` is still the only adapter that declares
+    # `config_isolation`, so it is still the only CLI handed a checkout. What it changes is what
+    # the set is a function of — a CLI that gains such a flag gets the checkout by declaring it,
+    # rather than by also happening to carry a `/security-review` command.
     wants_checkout = role == _CHECKOUT_ROLE and bool(record.config_isolation)
     if wants_checkout:
         role_argv = (*role_argv, *record.config_isolation)

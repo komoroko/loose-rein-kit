@@ -67,8 +67,10 @@ discovered by the first task to spend its send-back budget on it.
 whitelist, never phase execution). At `done`, `/verify` records `docs/retrospective.md`. An
 ongoing repo repeats the lifecycle as **delta cycles**, closed with `rein cycle-close`
 (mechanics: the rules module). **Widening what the loop may change — a new scope path, a new claim,
-a relaxed acceptance criterion — goes through `/revise` or the next cycle, never silently.
-Re-cutting the tasks inside an approved mandate is not that, and needs no approval.**
+a relaxed acceptance criterion — goes through `/revise` or the next cycle, never silently. So does
+re-cutting the tasks, because a task's acceptance criteria are in the plan with them: the freeze is
+`plan.yaml` whole.** What needs nobody is the *order* — consuming the DAG, reordering what the
+dependencies allow, re-running what went red.
 
 ## Single Source of Truth (SSOT)
 
@@ -105,8 +107,10 @@ Four documents, distinct roles — do not conflate them:
    record a `knowledge-gap`/escalation event, and raise it to the human.
 4. **Do not widen the mandate to fit the work.** Reaching outside its `scope`, adding a claim, or
    softening an acceptance criterion is a change to what was authorized, and `/revise` is how it is
-   asked for. Re-cutting the tasks to do the same authorized work differently is not — that is the
-   loop's to decide, and needs nobody.
+   asked for — **and re-cutting the task DAG is one of these, not an exception to it.** A task's
+   `acceptance` list lives in `plan.yaml` beside the claims, so "just a different decomposition" is
+   a shape a softened criterion travels in; the freeze covers the whole document and `rein guard`
+   refuses an edit to it. What the loop decides alone is the order it consumes that DAG in.
 
 Enforcement is layered: `rein guard` denies violations in code at edit/commit/merge
 stage; unreadable gates and an unreadable scope **fail closed**. **A guard denial marks a boundary

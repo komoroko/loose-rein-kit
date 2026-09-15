@@ -524,8 +524,36 @@ def _print_plan(
             print(f"  {item.op:<13} {item.rel}{note}")
 
 
-def _lock_or_new(repo: repo_mod.Repo) -> dict[str, Any]:
-    data = lock_mod.read(repo.lock)
+def _lock_or_new(repo: repo_mod.Repo, *, force: bool = False) -> dict[str, Any]:
+    """The lock, or a fresh skeleton when there is none — and, under `force`, when it is refused.
+
+    A `LockError` normally stops every verb at the dispatcher (`cli._lock_check`), which is the
+    posture a foreign format deserves: the recorded hashes describe a layout this release does not
+    have, and reading them would be the first line of a migration nobody wrote. But `sync --force`
+    is the one operation that needs none of them — it overwrites every materialized file from the
+    packaged payload — and without this it was also the one operation that could never happen,
+    which left a repository that crossed a `lock.FORMAT` bump with no way back short of hand-editing
+    a machine-written file the guard denies.
+
+    Nothing is translated, and nothing is invented either: `format` versions the four SSOT
+    documents' shape, not this file's own, so the fields that are about the lock — `source`,
+    `created_at`, which integration surfaces exist — are read as they stand
+    (`lock.read_unchecked`). Starting from a bare skeleton instead lost the install source and the
+    integration record, which is information no migration would have had to guess at.
+
+    The repository's own documents are still checked against this release's schemas further down,
+    and a `sync` that finds them in the older shape declines to advance the lock — so this repairs
+    the lock of a repository whose documents already read, and refuses the rest exactly as before.
+    """
+    try:
+        data = lock_mod.read(repo.lock)
+    except lock_mod.LockError:
+        if not force:
+            raise
+        logger.warning(f"sync --force: {lock_mod.LOCK_NAME} is in a format this release does not read — rewriting it.")
+        data = lock_mod.read_unchecked(repo.lock)
+        if data is not None:
+            data["format"] = lock_mod.FORMAT
     return data if data is not None else lock_mod.new(rein.__version__, "")
 
 
@@ -649,7 +677,7 @@ def _documents_invalid(repo: repo_mod.Repo) -> list[str]:
 def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> int:
     """Materialize prompts/schema/rules from the package payload (see the module docstring)."""
     desired = _dest_map(MATERIALIZED)
-    data = _lock_or_new(repo)
+    data = _lock_or_new(repo, force=force)
     prompts = data.get("prompts") if isinstance(data.get("prompts"), dict) else {}
     recorded_raw = prompts.get("files") if isinstance(prompts, dict) else {}
     recorded = {".rein/" + k: str(v) for k, v in (recorded_raw or {}).items()}

@@ -81,7 +81,7 @@ def test_a_healthy_repo_validates_all_four_documents(tmp_path: Path) -> None:
 
 def test_the_lock_format_is_reported(tmp_path: Path) -> None:
     repo = healthy(tmp_path)
-    assert any("rein-grounded-v1" in f.message for f in doctor.check_lock(repo))
+    assert any(lock_mod.FORMAT in f.message for f in doctor.check_lock(repo))
 
 
 def test_a_lock_without_a_format_key_fails(tmp_path: Path) -> None:
@@ -527,10 +527,12 @@ def _no_adapter_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda name: None if name == "claude" else f"/usr/bin/{name}")
 
 
-def test_a_missing_adapter_only_warns_before_the_build_phase(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_missing_adapter_only_warns_before_the_mandate_is_approved(monkeypatch: pytest.MonkeyPatch) -> None:
     """`rein build` is the only implementation path, but nothing has needed the CLI yet."""
     _no_adapter_on_path(monkeypatch)
-    results = doctor.check_adapters(models.Config(make_config()), models.State({"current_phase": "tasks"}))
+    drafting = models.State(make_state(gates={"mandate": "pending"}))
+    assert drafting.stage == "drafting"
+    results = doctor.check_adapters(models.Config(make_config()), drafting)
     assert [f.level for f in results] == ["WARN"]
     assert "rein agent <cli>" in results[0].message
 
@@ -546,7 +548,7 @@ def test_a_missing_adapter_names_the_install_command_and_runs_nothing(monkeypatc
     it is then allowed to reach, is theirs to choose. Saying *Install it* and stopping there left
     them to go and find out how; the adapter carries the command, and doctor prints it."""
     _no_adapter_on_path(monkeypatch)
-    results = doctor.check_adapters(models.Config(make_config()), models.State({"current_phase": "build"}))
+    results = doctor.check_adapters(models.Config(make_config()), models.State(make_state()))
     assert adapters.ADAPTER_TABLE["claude"].install_hint in results[0].message
     assert all(a.install_hint for a in adapters.ADAPTER_TABLE.values()), "every adapter can say how"
 
@@ -554,7 +556,7 @@ def test_a_missing_adapter_names_the_install_command_and_runs_nothing(monkeypatc
 def test_an_adapter_this_release_cannot_launch_fails_whatever_is_on_path() -> None:
     config = make_config()
     config["agents"]["implementer"]["adapter"] = "nonesuch"  # type: ignore[index]
-    results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
+    results = doctor.check_adapters(models.Config(config), models.State(make_state()))
     assert results[0].level == "FAIL"
     assert "'nonesuch'" in results[0].message
 
@@ -563,7 +565,7 @@ def test_a_model_the_adapter_cannot_be_told_to_run_fails() -> None:
     """The launchers refuse it; doctor is where that is meant to be found, not `rein build`."""
     config = make_config()
     config["agents"]["comparator"] = {"adapter": "amp", "model": "o1"}  # type: ignore[index]
-    results = doctor.check_adapters(models.Config(config), models.State({"current_phase": "tasks"}))
+    results = doctor.check_adapters(models.Config(config), models.State(make_state()))
     assert [f.level for f in results if f.level == "FAIL"], results
     assert any("cannot tell 'amp' which model to run" in f.message for f in results)
 

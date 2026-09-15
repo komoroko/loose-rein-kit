@@ -1,13 +1,13 @@
 # .rein/rein.lock — machine-written by `rein init|sync|install|uninstall|upgrade`.
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
-format: rein-grounded-v1
-tool_version: 0.4.7
+format: rein-grounded-v2
+tool_version: 0.5.0
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.4.7
+  version: 0.5.0
   files:
-    AGENTS.rein.md: sha256:a2cee1f13de9e7241e531658c8eed91f0cb6c64c109711fa722b898bf6a509be
+    AGENTS.rein.md: sha256:1e5d07ef5cfad81155dc57b401db8e2e626a4ea0cbd51dcc12b75e46bdff3071
     oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
     prompts/agents/adversarial-reviewer.md: sha256:def31d1c80a0ca162db971339009ee1ef3c425f3cdadf8d55e975c0146bec741
     prompts/agents/architect.md: sha256:826809a3f08c63dc9fb9e89f7fbaf7f9916448a851dbad0be58b27d502a6ea1e
@@ -17,12 +17,12 @@ prompts:
     prompts/commands/design.md: sha256:e2e4b7cf27a5982aeab0b43b2fc1a043da4b9595260f147842c8901d227a9b94
     prompts/commands/onboard.md: sha256:8f7fb990edecf93c16c9812ef123ff9653d69ebe3cdb568b58256e774fadd339
     prompts/commands/req.md: sha256:597f5630c6a4b31d9c94d710304b59752fdf6a107c62128a180028ac58cff161
-    prompts/commands/revise.md: sha256:417f5b22301112cc032adc22d7c44659d9ca581b40970765ccb0937355c533af
+    prompts/commands/revise.md: sha256:c4c9f03a03f012822cf64ce1c78a4e18e43574383d422b6f133a14d9e6ca9cb7
     prompts/commands/status.md: sha256:df741e3a9d925dcd1527e497a7f762b8ee8d3f594460147f0af33173ca7c5e79
-    prompts/commands/tasks.md: sha256:c2ce0035be4577f337c90fb0d4fc5301c5302bb2ec0da01c011af031cdd999ed
+    prompts/commands/tasks.md: sha256:94c4e6861e79c8528582d0fffc6411118bc71681f19df6e0870cfa111c9470be
     prompts/commands/verify.md: sha256:1dbe22637a09c84c28ef69e5f46b57d7faf38bb439bba15f64f00a6e5dd97d73
     prompts/rules/gate-workflow.md: sha256:7a55d756a7c08a725c241b2319ef4d1dd034165124f6ed4344934ddc50060ffa
-    schema/config.schema.json: sha256:47b44bd00939265eb12eb2d5e0a4f8c2b336c1987763c1135c6688204c424332
+    schema/config.schema.json: sha256:fd755a8286ad31d863c23503b5a55644fe70f152fdaafb99d82292794c528248
     schema/event.schema.json: sha256:3bbffbe976bdae34821314919d5a830e3bd978b04f98b0af6e75dde0e418c675
     schema/plan.schema.json: sha256:9399831601aba26d9976e7d5e856042582e62b98077ddc4bfa640b53f41ba0d8
     schema/review.schema.json: sha256:c220c6f8dda9fc2adaebfb26bf62e06d01f2680258d70ba5bc01e96b295e59b4
@@ -30,75 +30,75 @@ prompts:
     oci/agent/Containerfile: sha256:c5a93acd5458150a448828e550711754182cb97f3339b466c3903012faf1c0f8
 integrations:
   claude:
-    version: 0.4.7
+    version: 0.5.0
     installed_at: '2026-08-04'
     files:
-      .claude/agents/adversarial-reviewer.md: sha256:d420f000ac6892cba6f1d753f5a3894018c0e334ad1df77cf2b0904b237ad430
+      .claude/agents/adversarial-reviewer.md: sha256:a4fd4c68f39502bad42327168e79fbb43402d7ddff17788237ffb0d32eab4d8f
       .claude/agents/architect.md: sha256:1e2741a798214f280a12c08acd3d8459611a0fbc1da60223ed5a6021a0d364c1
       .claude/agents/implementer.md: sha256:149053480e7daee81f1de0ea6ea8eece70f77bfb8b2a8d6706c9b714b8ee425a
       .claude/agents/requirements-analyst.md: sha256:485e3ab2a53565ab57aeb79d0377cca2bf5841006c68ae153267c62445dcaca3
-      .claude/commands/build.md: sha256:a6ab1c54fea7ea878c45f9981ad91aa6d230c5a04e4a694db6079176742f6cf7
-      .claude/commands/design.md: sha256:6791ceb2702b407d07cd965b4a71f48099f0152418c708d33ba498d498a8960f
+      .claude/commands/build.md: sha256:26343a3335a991530fb418122d43613911315f7ca1e9d55d5f04d640cc4148e3
+      .claude/commands/design.md: sha256:56bd3c30279fe14431cd278bce406b605d776f670c9d07aaf78fb60f34b77155
       .claude/commands/onboard.md: sha256:a0729659686db58949fcaabf4ba363731d094f5ae804892535120b43a47576c7
-      .claude/commands/req.md: sha256:07a60e8ce4a80459c4dada309924a10e984ea9cb9dd00dc2d0726beb3c34bd15
+      .claude/commands/req.md: sha256:0fe3efc61e2fc744b84d0c6745559a56d608efea854fe30040192c4aa1ab163c
       .claude/commands/revise.md: sha256:3aa6c07e8bc44187696a77dc0190bd351578e3747ce735698081ecc4c1de3ed5
       .claude/commands/status.md: sha256:c0ffd6b956e0466a0197f6bb65fc1efaddbdd0a51af8c6d58b826c5cd33bb3de
-      .claude/commands/tasks.md: sha256:340c69cc9902deb1dcff2977f57eeb0230acee7dff4f82318d58cc623a97e744
-      .claude/commands/verify.md: sha256:6dffcfe1fcc16a7ea639d2f177558cc3c0961e1a0bf4eef1634905aabc3a448d
+      .claude/commands/tasks.md: sha256:25b212881aa0aba2c2481a626693128e035e074c135ce29983ecb519aee7cb77
+      .claude/commands/verify.md: sha256:7ae87a8b00b4459ad4e6593a1076c9de83edbf048621026e6ab4b0ac9d7d4c14
     settings:
       created: false
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.4.7
+    version: 0.5.0
     installed_at: '2026-08-04'
     files:
-      .agents/skills/build/SKILL.md: sha256:fe72706426bcbb74f939842df53b792ca5c1bba52d3bf1909cb74b0e0ed0f09c
-      .agents/skills/design/SKILL.md: sha256:a2cf5158ad10c9405c5d48f964efd89683f3bdba48bbd85583d9ab842423834e
+      .agents/skills/build/SKILL.md: sha256:1faced739cd80c70a96c30fdf3fa7bb4992ccaffdcad2a2e16277c09f0859c5e
+      .agents/skills/design/SKILL.md: sha256:8693f49998d883986c1484f34b49d9f4dcf4cd0db722d2a431a2ef65f05f3141
       .agents/skills/onboard/SKILL.md: sha256:5db6e1e3941273e6bcf3f1e3bbd67b58182a5232e5b26275dfce833df4371aa6
-      .agents/skills/req/SKILL.md: sha256:fae6c760594e9f041cef373f6b3493101ee1a44eacb5cf5f888b468c96d41876
+      .agents/skills/req/SKILL.md: sha256:cbc32395c271b762ab958578b48442e557e15180768806bc60907831023355fb
       .agents/skills/revise/SKILL.md: sha256:f441d48f534a1ffebe63377dd00087f20d7652a02679e4c967d3f21a8ec324d8
       .agents/skills/status/SKILL.md: sha256:71c33d96e7ca17ddc47a8e41a13cbbb0a08c18ad9420d22d4f20bcea9da505e6
-      .agents/skills/tasks/SKILL.md: sha256:fd50ee9da77c515843528ef09d87cedb01509d091eeda11f15c018973310a0aa
-      .agents/skills/verify/SKILL.md: sha256:877ba961f15fb0deaad01df8a62d28191adbc6de1b3caddaffee913083e3d4b7
-      .codex/agents/adversarial-reviewer.toml: sha256:eedceeefa9ec3cee62459d24471a5730c5b507733888ceda3c78ccae99842431
+      .agents/skills/tasks/SKILL.md: sha256:e1a0b38f015ab26c03ea08ec6c3018b277e696bcbba5bbab7955449790cc6f69
+      .agents/skills/verify/SKILL.md: sha256:8ffe337011890fa4c37b1457ecb2f71080aab838b4071feb346d42cd30ab316e
+      .codex/agents/adversarial-reviewer.toml: sha256:7cee534d7c6a33bd8e8a8c99af3961a4150164711d237b6ad37664ed5bbe1c35
       .codex/agents/architect.toml: sha256:c32102f7103bc4a9fcdfc50fac3cc1985b1682963adad7017ccd721339556bd1
       .codex/agents/implementer.toml: sha256:1c93b60464227ec637eed7290f3bb6d2a6f8c5d39bb904f131557a2ebf780b6b
       .codex/agents/requirements-analyst.toml: sha256:9249d1d6d8632d2fec155ec3577b802e723ea3b2235c8ae87389d08cde865038
       .codex/hooks.json: sha256:7b64f50c947287ac882d04f0816a79df4d8c7c6b3060137cfb9014d274af0909
-      .codex/rein.md: sha256:c1368f428f56fe4b8de861a657d2d0be6863eed44db136da79d68798300141e6
+      .codex/rein.md: sha256:470c417f84ca4659e0bc93ab44f07470e6e68bf07dc385bf5a7257128e3ccc26
   copilot:
-    version: 0.4.7
+    version: 0.5.0
     installed_at: '2026-08-04'
     files:
-      .github/agents/adversarial-reviewer.agent.md: sha256:6a9126f67cd68da0494217e0b47a2c2344031ec0573e04d45d70feb250c7c68d
+      .github/agents/adversarial-reviewer.agent.md: sha256:7007cdf39b9475bbb9875091056f792d14b0c9d87bf4e9f451f84d3d53029199
       .github/agents/architect.agent.md: sha256:76cd9b5960d25d7a275aaedfe6fa4f0effd07fe8179f671663dc4c43d3ea003d
       .github/agents/implementer.agent.md: sha256:b1953ab17a6c7ef6b671c8fa148746ca3864ab40499503eba21ec1f8b3e05921
       .github/agents/requirements-analyst.agent.md: sha256:b73ca2bbc692eabb91767be46efcdb5bead1cb876d6602f90fb58d2980faeed5
       .github/hooks/rein.json: sha256:49f8842b143fe5c96e17fb0000ab5cd1a57d9586899f39fd2dbcd06ee6bf129a
-      .github/instructions/rein.instructions.md: sha256:214ebf125b7d3df8567632369867fc07a3a435098c60562c722980e61e60e8c6
-      .github/prompts/build.prompt.md: sha256:11e784509cfc9694d9256f3299e36663452a4b89aab03377027b0f04d14636e5
-      .github/prompts/design.prompt.md: sha256:0e899f78a22a8671e7e5bb991727d461418887fbb24b4cfecfdd8ff667b65544
+      .github/instructions/rein.instructions.md: sha256:2c6a43a160747b0bffe36a0a3fc50bcb0c537abad27fc397683b5ba662982e4f
+      .github/prompts/build.prompt.md: sha256:ef1bd8a5332f0c720840afe5cc1052881ade3d15a378d48074b64b904e77dca4
+      .github/prompts/design.prompt.md: sha256:dbae2ee0ca8030944e473314f8ed84ba497b2b8a1881df14c910e85933482a22
       .github/prompts/onboard.prompt.md: sha256:6c590a600ebd0e5b4a17121e5b4eef4931a3d110ad88abffdcc4bb0b0594be6e
-      .github/prompts/req.prompt.md: sha256:3159467287083c947e6bce166e19dded4075f47b8440617ed79c82330d67d0d5
+      .github/prompts/req.prompt.md: sha256:dfe6cd6a78049f347a564f2d1f5b30ae9c24e28bb4c69d518911851ed43aaed0
       .github/prompts/revise.prompt.md: sha256:e4823567b188530c5e18e6070b6189027adc30eb2de05fd27892748edf4c47b9
       .github/prompts/status.prompt.md: sha256:2d6c78b176a66af1c6a5e93ce98c0d6482aec6e71576772806e603a8fcaf3496
-      .github/prompts/tasks.prompt.md: sha256:73713a15f2a2f683dc6212d466a90e16fb0a14518f1f8b5d0d37eac0a4f2520e
-      .github/prompts/verify.prompt.md: sha256:452f320ee581d03264adcb3b2facbf58080440a03262747327e2db84c8b5ef48
+      .github/prompts/tasks.prompt.md: sha256:090fcd0790776db37ce0839676a580c1592a97f5c352b9eb60507e9be2a6500e
+      .github/prompts/verify.prompt.md: sha256:715158e2e17ebe65f6969fef87a7d7b326a90f04f9d4a2452302df56801157fd
   gemini:
-    version: 0.4.7
+    version: 0.5.0
     installed_at: '2026-09-03'
     files:
-      .gemini/commands/build.toml: sha256:106963f31be528aa749819ba4c915d81871496e27bd4c606e0abc979874b21a6
-      .gemini/commands/design.toml: sha256:c23d19880d355994bc8f4b87980175effd876d3b0b1703441878c7fdd1186a99
+      .gemini/commands/build.toml: sha256:77d029397582376f3f8bba02f3acd3064bfda91cf1a63e2221765e64705be7b8
+      .gemini/commands/design.toml: sha256:7f14b64d227f40d1d3c9233bb3d913805e4a133a15202006d75e54bc637381ad
       .gemini/commands/onboard.toml: sha256:32cc7d9efca91dfd3d4b91f5fa31fbde2c3e99e88d17aa74d1f10d9ab832c171
-      .gemini/commands/req.toml: sha256:5f7c4659c6601773722f73850ab7041c31183c295a3876dcb84a9097922966f4
+      .gemini/commands/req.toml: sha256:71f0055fd249e5cf5c3302fd3fbd7760463a671203d8bda56cb357e14b820b23
       .gemini/commands/revise.toml: sha256:3a102597ef57eb45fce1c7deab610cc417a7414563e1a4c6ee7d872c0c7c7de1
       .gemini/commands/status.toml: sha256:84b5ed2015a4318e4cdcbfb3f078a22274de48c3bc6c293e729746249a0fdb40
-      .gemini/commands/tasks.toml: sha256:8271ee6dc5ba4bca6e2e864e99d487b27354134624ac2905b3cb7cadad7b6db6
-      .gemini/commands/verify.toml: sha256:f47a22f25f82f49ff0bc9efb06229deef2d0f8f426e7960a03e35f3b974aab79
-      .gemini/rein.md: sha256:97bb491459bf9186d34d0e8640ec301e0a7881de325b7ee8279de3da38070744
-      .gemini/skills/adversarial-reviewer/SKILL.md: sha256:bf972e7da1c6ec8b382cf62f24466135bc845df98ef4821db4959d67bfa0a1b4
+      .gemini/commands/tasks.toml: sha256:bc361c1ef71c87f24d2f0d64e5bc13d2c385daf0b4614cc5883e191ab3ce61e5
+      .gemini/commands/verify.toml: sha256:7ae164d84f479c61ddd1f0aaa9387247fb10c138a88550ee71f385a1d4de2b7a
+      .gemini/rein.md: sha256:5d8eb47eed642ed5a5fdf95ce3164b87c3e5e6804cb9f2958d041a40bd0ea9dc
+      .gemini/skills/adversarial-reviewer/SKILL.md: sha256:be1e42cce07dc1efaf0cf159b0a7e5bd6be481812cfdf71880034da01657a48f
       .gemini/skills/architect/SKILL.md: sha256:58134244c61d8748a4e74af6caeefb7f90e7774b5bd34e211318f95bf8f17892
       .gemini/skills/implementer/SKILL.md: sha256:23623fcd81a0520a53d29a8a156b2b9e535c3036d3247d84d0c6be83674a21be
       .gemini/skills/requirements-analyst/SKILL.md: sha256:6d273f14a53d2367f7b0907cd68a46fd2c9e9844b3c440ebd86daf89e2da8566

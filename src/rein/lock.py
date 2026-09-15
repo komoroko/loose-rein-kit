@@ -44,10 +44,13 @@ from rein import repo as repo_mod
 #: **This string is about the four SSOT documents' shape, not about the release.** It went
 #: unchanged across 0.3.6–0.3.8 while `config.yaml` renamed two keys and `review.yaml` changed the
 #: type of one — so a repository crossing those releases had a format string saying it was fine
-#: and a schema refusing to read it. Change this whenever a repo-owned document's shape changes;
-#: what a repository does about the refusal is `install.sync`'s guard, which prints the renames
-#: for the versions crossed and declines to advance the lock past a document it cannot read.
-FORMAT = "rein-grounded-v1"
+#: and a schema refusing to read it. Change this whenever a repo-owned document's shape changes.
+#:
+#: Remembering to is not the mechanism, because forgetting is exactly what happened: `v2` is this
+#: string's second value and the first bump it ever got, taken when the five gates became two.
+#: `tests/test_lock.py` pins it to the digest of the four schemas, so a shape change that leaves
+#: this alone fails there rather than in someone's repository.
+FORMAT = "rein-grounded-v2"
 LOCK_NAME = ".rein/rein.lock"
 
 _HEADER = (
@@ -81,12 +84,15 @@ def new(version: str, source: str) -> dict[str, Any]:
     }
 
 
-def read(path: Path) -> dict[str, Any] | None:
-    """The lock mapping, or None when the file does not exist. LockError when unusable.
+def read_unchecked(path: Path) -> dict[str, Any] | None:
+    """The lock mapping with the `format` check skipped — None when the file does not exist.
 
-    A lock in any other format — a missing `format` key included — is refused outright.
-    "Proceed and guess" is how a repository gets silently corrupted by a tool that does not
-    understand it.
+    For the one caller that has a reason not to ask: `install.sync --force`, rewriting a lock this
+    release refuses. What `format` versions is **the four SSOT documents' shape**, not this file's
+    own — so the fields here that are about the lock itself (`source`, `created_at`, and the record
+    of which integration surfaces exist) are readable whatever it says, and dropping them was
+    losing information no migration would have had to invent. A malformed or non-mapping file is
+    still refused; there is nothing to skip a check on.
     """
     from rein import strict_yaml  # lazy: keep `import lock` cheap on the hook path
 
@@ -97,15 +103,38 @@ def read(path: Path) -> dict[str, Any] | None:
     except OSError as exc:
         raise LockError(f"cannot read {path}: {exc}") from None
     try:
-        data = strict_yaml.load_mapping(text, what=str(path))
+        return strict_yaml.load_mapping(text, what=str(path))
     except strict_yaml.StrictParseError as exc:
         raise LockError(f"{exc} — machine-written; restore it from git") from None
 
+
+def read(path: Path) -> dict[str, Any] | None:
+    """The lock mapping, or None when the file does not exist. LockError when unusable.
+
+    A lock in any other format — a missing `format` key included — is refused outright.
+    "Proceed and guess" is how a repository gets silently corrupted by a tool that does not
+    understand it.
+    """
+    data = read_unchecked(path)
+    if data is None:
+        return None
+
     found = data.get("format")
     if found != FORMAT:
+        # Both versions, because the refusal is symmetric and the message used to assume one
+        # direction: it said "upgrade the tool", which is the wrong advice for the commoner case —
+        # a current tool standing in a repository whose documents are in the older shape. This is
+        # the message every verb stops on (`cli._lock_check`), so it carries where the repository
+        # came from and what the two ways out are, rather than naming one of them.
+        was = tool_version_of(data)
+        wrote = f", written by rein {was}" if was else ""
+        back = f"install rein {was} again to finish this cycle on it" if was else "install the rein that wrote it"
         raise LockError(
-            f"{path} is in format {found!r}, but this rein reads {FORMAT!r} only — "
-            f"upgrade the tool ({_upgrade_hint()}) or re-initialize the repository"
+            f"{path} is in format {found!r}{wrote}; this rein reads {FORMAT!r} only. The "
+            "repository's documents are in a shape this release does not read and there is no "
+            f"migration — {back}, or `rein init` a fresh one. CHANGELOG.md names what moved "
+            "between them. (`rein sync --force` rewrites the lock, and is for a repository whose "
+            "documents already read.)"
         )
     return data
 

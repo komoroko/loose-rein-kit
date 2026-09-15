@@ -228,6 +228,20 @@ def test_version_short_circuits_the_lock_check(chdir_tmp: Path, capsys: pytest.C
     assert "is in format" in capsys.readouterr().err
 
 
+def test_only_a_forced_sync_gets_past_the_lock_check(chdir_tmp: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """`sync --force` is the one verb that repairs a lock this check refuses, so stopping it here
+    left a repository that crossed a `lock.FORMAT` bump with nothing it could run. The exemption is
+    the flag that says "discard what is recorded", never the verb: plain `sync` still hard-stops."""
+    (chdir_tmp / ".rein").mkdir()
+    (chdir_tmp / ".rein" / "rein.lock").write_text("format: rein-grounded-v0\n", encoding="utf-8")
+    assert cli.main(["sync"]) == 1
+    assert "is in format" in capsys.readouterr().err
+    assert cli.main(["sync", "--force"]) == 0
+    printed = capsys.readouterr()
+    assert "is in format" not in printed.err, "the dispatcher let it through"
+    assert (chdir_tmp / ".rein" / "schema" / "state.schema.json").is_file(), "and it did the work"
+
+
 @pytest.mark.parametrize("spelling", ["version", "--version", "-V"])
 def test_the_conventional_version_spellings_all_answer(spelling: str, capsys: pytest.CaptureFixture[str]) -> None:
     """`rein --version` used to answer `unknown verb '--version'` with exit 2.

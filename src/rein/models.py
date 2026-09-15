@@ -55,10 +55,11 @@ RISK_VALUES = frozenset(RISK_ORDER)
 #: * ``acceptance`` — whether this change, with the evidence now on the record, is taken.
 #:
 #: Everything the five gates enforced survives as a *readiness* check on one of these two
-#: (`approve.readiness`). What does not survive is the claim that the order of the work is a
-#: human's to authorize: inside an approved mandate the loop may decompose and re-decompose,
-#: reorder, and re-run, because none of that changes what it is allowed to touch or what it has
-#: to prove.
+#: (`approve.readiness`). What does not survive is the claim that the *order* of the work is a
+#: human's to authorize: inside an approved mandate the loop consumes the DAG, reorders what it may
+#: and re-runs what went red without asking. What it may not do is re-cut the plan — `plan.yaml` is
+#: frozen whole, because a task's `acceptance` list lives in it and softening a criterion is
+#: exactly the widening `revise` exists for.
 GATE_ORDER: tuple[str, ...] = ("mandate", "acceptance")
 GATE_VALUES = frozenset(GATE_ORDER)
 GATE_STATUS_VALUES = frozenset({"pending", "approved"})
@@ -769,10 +770,13 @@ class Plan:
     """``plan.yaml`` — the Expected Model, frozen when the mandate is approved (plan §6.1).
 
     Everything a reviewer compares reality against lives here, and after the freeze the only way to
-    change it is `rein revise --to mandate`. Two halves, and they are not the same kind of thing:
-    `cycle` + `scope` + `claims` are the **mandate** a human authorized (`mandate_digest`), while
-    `tasks` is the decomposition that answers it. The views below are built once in
-    `__post_init__`; `raw` stays the digest subject.
+    change it is `rein revise --to mandate` — **the whole document, `tasks` included**. There was a
+    second digest here that covered `cycle` + `scope` + `claims` only, on the reading that a
+    different decomposition of the same mandate is the same authorization. It is not, and the
+    reason is one field: `tasks[].acceptance` is a task's own bar, and a human freezes that list
+    with the mandate. A digest that skipped `tasks` would have let a criterion be softened under an
+    approval that never covered it — the mandate widened to fit the work, with nothing to notice.
+    The views below are built once in `__post_init__`; `raw` stays the digest subject.
     """
 
     raw: Mapping[str, Any]
@@ -804,20 +808,6 @@ class Plan:
     def digest(self) -> str:
         """The canonical plan digest a gate receipt binds (plan §17.1)."""
         return digests.of(self.raw, drop=digests.VOLATILE_TIMESTAMP_KEYS)
-
-    def mandate_digest(self) -> str:
-        """The digest of the part a human authorized: the cycle, the scope and the claims.
-
-        **Not the tasks.** What a mandate says is what the loop may change and what it must make
-        true; how the work is cut up to do that is the loop's to derive and re-derive, so a
-        different decomposition of the same mandate is the same authorization. `digest()` still
-        covers the whole document, and is what the freeze binds — the two answer different
-        questions and both are worth asking.
-        """
-        return digests.of(
-            {key: self.raw[key] for key in ("cycle", "scope", "claims") if key in self.raw},
-            drop=digests.VOLATILE_TIMESTAMP_KEYS,
-        )
 
     @property
     def scope(self) -> tuple[tuple[str, ...], tuple[str, ...]]:

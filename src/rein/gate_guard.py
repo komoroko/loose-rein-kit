@@ -16,10 +16,14 @@ Four rules, in order of severity:
    definitions, and the materialized prompts/schema are pinned by the receipt the human confirmed.
    Changing them goes through `rein revise --to mandate`, which resets the downstream
    gates in a chain (plan §16.4).
-3. **A deliverable waits for its prerequisite gate.** docs/20-design.md needs `requirements`,
-   docs/tasks/ needs `design`, src/ needs `tasks`, docs/test/ needs `build`. Configurable per
-   repo via `guard.paths`; `tests/` is deliberately unguarded, because preparing fixtures
-   while a gate is pending is sanctioned speculative work.
+3. **Changing the product needs an approved mandate that covers the path.** Not "which gate does
+   this path wait for" — that question was the five phases wearing a guard's clothes, and it
+   guarded the mandate's own material (the design document, the task tickets) against the gate
+   before it. What is guarded is the product: `guard.paths` says which paths that is, once and for
+   every cycle, and `plan.scope.include` narrows it to what *this* mandate may change.
+   `plan.scope.exclude` is the one half that binds wherever it points, guarded or not — it is a
+   human writing "not this". `tests/` is deliberately unguarded, because preparing fixtures while
+   the mandate is pending is sanctioned speculative work.
 4. **Only humans open gates.** Any edit whose *result* would turn a gate `approved` is denied.
 
 **There is no escape hatch**, and an `enforce_hook`-style key is rejected by the config schema.
@@ -291,12 +295,12 @@ def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = 
             )
         return True, ""
 
-    # Rule 3 — deliverables wait for their prerequisite gate.
+    # Rule 3 — the product waits for a mandate that covers it.
     return _rule_three(repo, file_path)
 
 
 def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
-    """Rule 3 alone: a deliverable waits for its prerequisite gate."""
+    """Rule 3 alone: changing the product needs an approved mandate that covers the path."""
     settings = guard_settings(repo)
     rel = repo.rel(file_path)
     if settings.unreadable and rel != CONFIG_PATH:
@@ -314,64 +318,70 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
             " `rein doctor` reports what is wrong with it. There is deliberately no flag that"
             " turns this guard off."
         )
-    if not is_guarded(file_path, settings.paths, repo):
-        return True, ""
     if settings.template_mode:
         return True, ""
     state = _read_state(repo)
+    if state is not None and state.gate_status("mandate") == "approved":
+        return _inside_the_mandate(repo, rel, settings.paths)
+    if not is_guarded(file_path, settings.paths, repo):
+        return True, ""
     if state is None:
         return False, (
             "Blocked: cannot read the gates from .rein/state.yaml (missing or malformed), so the"
             " gate guard fails closed. Repair state.yaml — restore it from git. There is deliberately"
             " no flag that turns this guard off."
         )
-    if state.gate_status("mandate") != "approved":
-        return False, (
-            "Blocked: no mandate is approved, and this path is one a mandate authorizes changes to."
-            " Write what the change is for and what would make it true (/req, /design, /tasks — in"
-            " whatever order suits it), then get the human's approval with `rein approve mandate`."
-        )
-    # The mandate is open; the remaining question is whether it covers *this* path. An empty
-    # `include` is unbounded, so a cycle that has not narrowed itself is not one that has forbidden
-    # everything (`models.Plan.scope`).
-    outside = _outside_the_mandate(repo, file_path)
-    if outside:
-        return False, outside
-    return True, ""
+    return False, (
+        "Blocked: no mandate is approved, and this path is one a mandate authorizes changes to."
+        " Write what the change is for and what would make it true (/req, /design, /tasks — in"
+        " whatever order suits it), then get the human's approval with `rein approve mandate`."
+    )
 
 
-def _outside_the_mandate(repo: repo_mod.Repo, file_path: str) -> str:
-    """Why this path is outside the approved mandate's scope, or "" when it is inside.
+def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[str]) -> tuple[bool, str]:
+    """(allowed, why not) for a write under an approved mandate, measured against `plan.scope`.
 
     Read off `plan.yaml`, which the mandate approval froze — so the scope a write is measured
     against is the one a human read. A plan that cannot be read denies, for the same reason an
     unreadable state does: a guard that cannot determine its scope must not open it.
+
+    **`exclude` is absolute; `include` narrows the guarded set.** They are not symmetric and the
+    asymmetry is the repair. `include` says which of the product's paths this cycle may change, so
+    it has nothing to say about a path that was never guarded — a repository declares what its
+    product is in `guard.paths`, once, rather than per cycle. `exclude` is a human writing "not
+    this", and it used to be consulted only after `guard.paths` had already let the path through:
+    an `exclude` entry naming anything outside the guarded set — a vendored tree, a generated
+    directory, the one file this cycle must not touch — silently guarded nothing at all.
+
+    An empty `include` is unbounded, so a cycle that has not narrowed itself is not one that has
+    forbidden everything (`models.Plan.scope`).
     """
-    rel = repo.rel(file_path)
     if rel is None:
-        return ""
+        return True, ""
     try:
         text = repo.plan.read_text(encoding="utf-8")
         document = strict_yaml.load_mapping(text, what="plan.yaml")
     except (OSError, strict_yaml.StrictParseError) as exc:
-        return (
+        return False, (
             "Blocked: the mandate's scope lives in .rein/plan.yaml and it could not be read"
             f" ({exc}), so the gate guard fails closed. Restore it from git; `rein doctor` reports"
             " what is wrong with it."
         )
     include, exclude = models.Plan(document).scope
     if common.longest_cover(rel, {p: p for p in exclude}) is not None:
-        return (
+        return False, (
             f"Blocked: {rel} is excluded by the approved mandate's scope. Widening what the loop"
             " may change is a human's decision — `rein revise --to mandate` re-opens it."
         )
+    if not common.longest_cover(rel, {p: p for p in guarded}):
+        return True, ""
     if include and common.longest_cover(rel, {p: p for p in include}) is None:
-        return (
+        return False, (
             f"Blocked: {rel} is outside the approved mandate's scope ({', '.join(include)})."
             " Widening what the loop may change is a human's decision — `rein revise --to mandate`"
             " re-opens it."
         )
-    return ""
+    return True, ""
 
 
 def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:

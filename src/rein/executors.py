@@ -210,7 +210,17 @@ class OciExecutor(Executor):
         return ExecutionResult(exit_code=rc, output=out, image_digest=digest, timed_out=rc == common.RC_TIMEOUT)
 
     def _argv(self, spec: ExecutionSpec, reference: str | None = None) -> list[str]:
-        """The full `docker run` argv. Every hardening flag is unconditional, not a knob.
+        """The full `docker run` argv.
+
+        **What a profile may not weaken**: the network (decided by `kind` in `run`, never here),
+        `no-new-privileges`, `--cap-drop ALL`, the unprivileged uid, and the ephemeral HOME that
+        keeps the operator's `~/.ssh` and `~/.aws` out. A profile cannot spell any of them
+        differently, because a boundary with a knob beside it is a default, not a boundary.
+
+        **What it may size**: `read_only_root`, `writable_tmp_mb`, `pids_limit`, `memory_mb`,
+        `cpu_count` — the resource envelope. These are declarations about what the work needs, not
+        about what it is allowed to reach, and the values are frozen with the mandate like the rest
+        of `config.yaml`.
 
         `reference` is what `resolve_pinned` found this engine can actually run; it names the
         same digest the profile pins. Absent, the pinned reference is used verbatim.

@@ -10,9 +10,12 @@ an acceptance criterion that cannot be met, a `scope` that never covered the thi
 frozen environment that has to change. That is `--to mandate`, and it re-opens `plan.yaml`.
 `--to acceptance` withdraws a change that was already taken.
 
+**Also for re-cutting the task DAG** — splitting, merging or re-scoping tasks. It reads like a
+decomposition detail and is not one: `tasks[].acceptance` is in `plan.yaml` with the claims, so a
+new breakdown can carry a softened criterion, and the freeze covers the whole document. What needs
+no roll back is the *order* the loop consumes the DAG in, which is not written down anywhere.
+
 **Not for any of these**, which need no approval and no roll back:
-- Re-cutting the task DAG, reordering it, splitting or merging tasks. A different decomposition of
-  the same mandate is the same mandate.
 - A code defect the grounded review found. `rein build` repairs every blocking finding a task's
   declared scope owns and reads the change again, moving no gate (`repair.route`).
 - A defect `/verify` finds in the code. Add the task; the mandate already authorizes fixing it.

@@ -225,6 +225,36 @@ def test_an_excluded_path_is_denied_even_inside_the_include(tmp_path: Path) -> N
     assert not decide(tmp_path, "src/vendor/thing.py")[0]
 
 
+def test_an_exclusion_binds_wherever_it_points(tmp_path: Path) -> None:
+    """`exclude` is a human writing "not this", and it used to be consulted only after
+    `guard.paths` had already let the path through.
+
+    So an entry naming anything outside the guarded set — a vendored tree, a generated directory,
+    the one file this cycle must not touch — guarded nothing at all: rule 3 answered "allowed" for
+    the unguarded path before it ever opened the plan.
+    """
+    plan = make_plan()
+    plan["scope"] = {"include": [], "exclude": ["vendor/"]}
+    seed_repo(tmp_path, plan=plan)
+    assert decide(tmp_path, "src/app.py")[0], "an empty include is unbounded"
+    assert decide(tmp_path, "docs/00-product-brief.md")[0], "unguarded and unexcluded stays open"
+    allowed, reason = decide(tmp_path, "vendor/thing.py")
+    assert not allowed, "unguarded, but a human said not this"
+    assert "excluded by the approved mandate's scope" in reason
+
+
+def test_an_include_does_not_guard_what_guard_paths_never_did(tmp_path: Path) -> None:
+    """The other half of the asymmetry, and deliberate. A repository declares what its product is
+    in `guard.paths`, once; a mandate narrows that to what this cycle may change. Naming a path in
+    `include` is not how an unguarded one becomes guarded — otherwise what the guard covers would
+    be re-decided every cycle, by the document the cycle itself writes."""
+    plan = make_plan()
+    plan["scope"] = {"include": ["src/core/", ".github/workflows/"]}
+    seed_repo(tmp_path, plan=plan)
+    assert not decide(tmp_path, "src/elsewhere/thing.py")[0], "guarded and outside the scope"
+    assert decide(tmp_path, ".github/workflows/ci.yml")[0], "list it in `guard.paths` to guard it"
+
+
 def test_an_unreadable_plan_fails_closed_on_the_scope(tmp_path: Path) -> None:
     """A guard that cannot determine its scope must not open it — the same posture an unreadable
     state already had one question earlier."""

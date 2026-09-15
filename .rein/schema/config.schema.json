@@ -316,7 +316,7 @@
           "type": "boolean"
         },
         "paths": {
-          "description": "Paths the loop may not write without an approved mandate whose scope covers them. Each guards the file it names and everything beneath it; a trailing '/' is optional punctuation and changes nothing. The prefix is anchored at a separator, so `src` guards `src/a.py` and never `srcfile.py`. Each entry used to carry a `requires_gate` naming which of five phase gates opened it, which is gone with the phases: what a human authorizes is a scope, not an order, so the question is whether a mandate covering this path has been approved.",
+          "description": "Paths the loop may not write without an approved mandate whose scope covers them. Each guards the file it names and everything beneath it; a trailing '/' is optional punctuation and changes nothing. The prefix is anchored at a separator, so `src` guards `src/a.py` and never `srcfile.py`. Each entry used to carry a `requires_gate` naming which of five phase gates opened it, which is gone with the phases: what a human authorizes is a scope, not an order, so the question is whether a mandate covering this path has been approved. This list is what the repository calls the product, once and for every cycle; `plan.scope.include` narrows it to what the current mandate may change. A path named in neither is not guarded, so a repository whose CI config or packaging manifest is part of the product lists it here — `plan.scope.exclude`, which is a human saying \"not this\", is the one half that binds wherever it points.",
           "type": "array",
           "maxItems": 128,
           "items": {

@@ -76,25 +76,38 @@ def host_surface(repo: repo_mod.Repo) -> tuple[str, ...]:
     commit that only widened `permissions.allow` moved no key, replayed the cached answer, never
     launched a reviewer, and left the review reporting itself fresh.
 
-    The exact paths come off `rein.lock`, because `install` recorded every one of them. The
-    settings file is recorded apart from `files` because install *merges* into it rather than
-    owning it; which file that is comes off the host's own spec.
+    **Measured on the repository, not only on the record.** `rein.lock` is where `install` wrote
+    down which paths it created, and that record can be behind the tree: a lock rewritten across a
+    `lock.FORMAT` bump records no integrations while every surface it once named is still on disk,
+    and so does a repository whose lock was restored from an older commit. Reading only the record
+    turned that into an empty surface — the extractor gets this tool's own orchestration text and
+    the security stage keys on the digest of an empty tree, both reporting themselves fine. So the
+    answer is the union: what the lock recorded, plus what each integration's own spec says it
+    writes and is actually present. The settings file is recorded apart from `files` because
+    install *merges* into it rather than owning it; which file that is comes off the spec either
+    way.
 
     Not in here: `.mcp.json` and the root `AGENTS.md` / `CLAUDE.md` / `GEMINI.md`. `install` does
     not write them, so they are not excluded from the product in the first place — they are already
     in the diff and already in `change_digest`.
     """
     paths: set[str] = set()
-    lock_data = lock_mod.read(repo.lock) or {}
-    integrations = lock_data.get("integrations")
+    for name, spec in install_mod.INTEGRATIONS.items():
+        if present := install_mod.present_surfaces(repo, name):
+            paths |= set(present)
+            if spec.settings and repo.path(spec.settings).is_file():
+                paths.add(spec.settings)
+    # And what the lock recorded but the tree no longer has: a surface deleted in the working tree
+    # is still in the commit this digest is taken at, and `present_surfaces` cannot see it there.
+    integrations = (lock_mod.read(repo.lock) or {}).get("integrations")
     if isinstance(integrations, dict):
         for name, record in integrations.items():
             if not isinstance(record, dict):
                 continue
             paths |= {str(path) for path in (record.get("files") or {})}
-            spec = install_mod.INTEGRATIONS.get(str(name))
-            if isinstance(record.get("settings"), dict) and spec is not None and spec.settings:
-                paths.add(spec.settings)
+            recorded = install_mod.INTEGRATIONS.get(str(name))
+            if isinstance(record.get("settings"), dict) and recorded is not None and recorded.settings:
+                paths.add(recorded.settings)
     return tuple(sorted(paths))
 
 

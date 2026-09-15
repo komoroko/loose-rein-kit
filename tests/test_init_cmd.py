@@ -16,9 +16,9 @@ from rein import lock as lock_mod
 _STATE = """---
 project: "<enter the product name>"
 branch: "<enter the work branch name>"  # e.g. build/<product>. Implement on this branch.
-current_phase: brief
 gates:
-  requirements: pending
+  mandate: pending
+  acceptance: pending
 updated_at: "<YYYY-MM-DD>"
 ---
 # board
@@ -51,7 +51,6 @@ def test_fill_state_fills_placeholders_and_keeps_comments() -> None:
         "# a comment that must survive\n"
         'project: "product"\n'
         "cycle_id: cycle-1                      # lowercase slug\n"
-        "current_phase: brief\n"
         'updated_at: ""\n'
     )
     filled = init_cmd.fill_state(scaffold, "demo", "demo-cycle", "2026-07-23")

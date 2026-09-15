@@ -31,9 +31,12 @@ Missing an impacted task is the dangerous direction, so the whole closure is mar
 mechanically; "this one is actually fine" is a deliberate human reclassification during the
 `/tasks` reconcile, never a silent default.
 
-Reordering or re-decomposing the work is **not** a roll back and does not come here. Inside an
-approved mandate the task breakdown is the loop's to derive: it changes no claim, no acceptance
-criterion and no scope, so no authorization is withdrawn by changing it.
+**Re-decomposing the work does come here**, and only the *order* does not. The breakdown reads
+like the loop's own business until you notice where it is written: `tasks[].acceptance` is in
+`plan.yaml` with the claims, so a re-cut is a shape a softened criterion travels in, and the
+freeze covers the document whole rather than trying to tell an honest re-cut from that. What
+withdraws no authorization is consuming the DAG — the order, the parallelism, the re-runs — which
+is not written down anywhere to be frozen.
 
 **This is for a defect in the specification, and nothing else.** There used to be a
 `--from-review` that derived the impacted tasks from acceptance's blocking findings, which was the

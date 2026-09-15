@@ -293,6 +293,14 @@ def main(argv: list[str] | None = None) -> int:
     #
     # version answers the question "what is installed here", which is the first thing anyone asks
     # of a lock the tool refuses to read. Hard-stopping on it would report a broken install.
+    #
+    # `sync --force` is the one verb that repairs a lock this check refuses: it overwrites every
+    # materialized file from the packaged payload and needs nothing the old lock recorded
+    # (`install._lock_or_new`). Stopping it here is what left a repository that crossed a
+    # `lock.FORMAT` bump with no way back. Plain `sync` is not exempt — the exemption is the flag
+    # that says "discard what is recorded", not the verb.
+    if verb == "sync" and "--force" in rest:
+        return _resolve(VERBS[verb].spec)(rest)
     if verb not in ("guard", "doctor", "version"):
         rc = _lock_check(repo_flag)
         if rc != 0:
