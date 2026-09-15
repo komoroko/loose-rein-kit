@@ -188,7 +188,7 @@ def _default_branch(root: Path) -> str | None:
 
 
 def _diff_block(root: Path) -> dict[str, object]:
-    """The gate-④ change set: merge-base(HEAD, default branch) diff, or an honest fallback.
+    """The acceptance change set: merge-base(HEAD, default branch) diff, or an honest fallback.
 
     Same base definition as the build loop's security-review prompt. When no base exists (no
     default branch, HEAD *is* the base, single-branch repo) the block degrades to the last 20

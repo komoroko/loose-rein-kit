@@ -107,7 +107,7 @@ function Agents({ agents, onApply }) {
         </tbody>
       </table>
       <p className="note">
-        A switch rewinds no approval. It does move the environment digest, so gate ④ shows it beside
+        A switch rewinds no approval. It does move the environment digest, so acceptance shows it beside
         the evidence that was produced before it.
       </p>
     </>

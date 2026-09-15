@@ -249,7 +249,7 @@ def test_an_unknown_gate_is_refused(tmp_path: Path) -> None:
         approve.readiness(repo, "nonexistent")
 
 
-# --- gate 3: the plan has to be buildable --------------------------------------
+# --- the mandate: the plan has to be buildable --------------------------------------
 
 
 def test_gate_three_needs_a_task_for_every_claim(tmp_path: Path) -> None:
@@ -272,7 +272,7 @@ def test_gate_three_needs_at_least_one_task(tmp_path: Path) -> None:
     assert any("declares no tasks" in b for b in approve.readiness(repo, "mandate"))
 
 
-# --- gate 4: a review, not a green test run ------------------------------------
+# --- acceptance: a review, not a green test run ------------------------------------
 
 
 def test_gate_four_needs_a_generated_review(tmp_path: Path) -> None:
@@ -405,7 +405,7 @@ def _commit(tmp_path: Path, *paths: str) -> None:
 
 def test_gate_four_refuses_a_review_of_code_that_has_since_moved(tmp_path: Path) -> None:
     """Only the UI pane used to check this: none of the digests re-verified when code did, so
-    generate → commit → approve could open gate ④ over code no reviewer had seen."""
+    generate → commit → approve could open acceptance over code no reviewer had seen."""
     repo, head, change = _reviewed_repo(tmp_path)
 
     fresh = make_review(generated=True, human_status="frozen", effective_risk="low")
@@ -440,19 +440,19 @@ def test_recording_a_review_does_not_make_it_stale(tmp_path: Path) -> None:
     assert not [b for b in approve.readiness(repo, "acceptance") if "says nothing" in b]
 
 
-# --- what gate 5 carries rather than re-reads -------------------------------------
+# --- what acceptance carries rather than re-reads -------------------------------------
 
 
 def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tmp_path: Path) -> None:
     """`/verify` no longer commissions a second security reading, so these two checks are what
     the release gate's security answer now rests on.
 
-    Re-running the reviewer at gate 5 asked the same reviewer about the same commit and wrote the
+    Re-running the reviewer at acceptance asked the same reviewer about the same commit and wrote the
     answer into a table cell nothing anchors — and the whole-codebase scope it asked for is a
-    different question from "is this change safe", one the cycle never asked. Carrying gate 4's
+    different question from "is this change safe", one the cycle never asked. Carrying acceptance's
     review instead is sound only because of these: a blocking finding holds this gate shut too, and
     a review taken against an older commit is refused rather than trusted. If either stops holding,
-    gate 5 has no security evidence at all, so they are pinned here and not only at gate 4.
+    acceptance has no security evidence at all, so they are pinned here and not only at acceptance.
     """
     finding = {
         "id": "SEC-001",
@@ -467,7 +467,9 @@ def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tm
     blocking["machine"]["binding"]["subject_head_sha"] = head
     blocking["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=blocking)
-    assert any("SEC-001" in b for b in approve.readiness(repo, "acceptance")), "a blocking finding holds gate 5 shut"
+    assert any("SEC-001" in b for b in approve.readiness(repo, "acceptance")), (
+        "a blocking finding holds acceptance shut"
+    )
 
     clean = make_review(generated=True, human_status="frozen", effective_risk="low")
     clean["machine"]["binding"]["subject_head_sha"] = head
@@ -558,16 +560,16 @@ def test_recording_an_approval_writes_a_receipt_and_the_stage_follows(tmp_path: 
     assert receipt is not None and receipt["approval_id"] == approval_id
 
 
-# --- gate ③ freezes the plan ---------------------------------------------------
+# --- the mandate freezes the plan ---------------------------------------------------
 #
-# This is the half that was missing entirely. Three documents said gate ③ freezes the plan,
+# This is the half that was missing entirely. Three documents said the mandate freezes the plan,
 # `gate_guard` rule 2 keyed off `plan.status == "frozen"`, and `rein build` refused to start
 # against a draft — while no code anywhere ever wrote "frozen". A correctly approved repository
 # could not build, and rule 2 never once engaged.
 
 
 def _tasks_gate_repo(tmp_path: Path) -> repo_mod.Repo:
-    """A repo standing at gate ③, with a plan whose claims all have a task."""
+    """A repo standing at the mandate, with a plan whose claims all have a task."""
     return repo_at(
         tmp_path,
         state=make_state(gates={"mandate": "pending", "acceptance": "pending"}, plan_status="draft"),
@@ -677,7 +679,7 @@ def test_acceptance_does_not_touch_the_plan_block(tmp_path: Path) -> None:
 def test_the_freeze_pins_the_documents_the_build_will_read(tmp_path: Path) -> None:
     """`plan.yaml` was bound by a digest. The tickets an implementer is *sent to read* were not.
 
-    That asymmetry is the whole defect: a ticket edited after gate ③ changed what got built, and
+    That asymmetry is the whole defect: a ticket edited after the mandate changed what got built, and
     nothing anywhere recorded that the thing built was not the thing approved.
     """
     repo = _tasks_gate_repo(tmp_path)
@@ -792,7 +794,7 @@ def test_a_freshness_nobody_could_measure_holds_the_gate_shut(tmp_path: Path) ->
     """ "We could not tell" is not "it is current". `freshness` reports the unmeasurable case with
     `fresh=False`, and reading only its `reason` meant `approve` added no blocker at all and
     `doctor` reported nothing — so a review that could not be shown to speak for the code opened
-    gate ④ on silence. An unreadable gate fails closed.
+    acceptance on silence. An unreadable gate fails closed.
     """
     repo, head, change = _reviewed_repo(tmp_path)
     review = make_review(generated=True, human_status="frozen", effective_risk="low")

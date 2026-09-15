@@ -210,9 +210,9 @@ def test_build_refuses_up_front_when_no_container_runtime_exists(
 
 # --- the re-pin reaches the audit chain ---------------------------------------
 #
-# Gate ③ deliberately leaves the image pin outside its freeze, so a rebuilt sandbox costs no
+# The mandate deliberately leaves the image pin outside its freeze, so a rebuilt sandbox costs no
 # rollback. What that permission is paid for with is visibility: the change has to acquire a time
-# and a place in the chain, and gate ④ reads it beside the evidence it produced. Before this,
+# and a place in the chain, and acceptance reads it beside the evidence it produced. Before this,
 # `--write-config` rewrote config.yaml with `path.write_text` and the log never heard about it.
 
 

@@ -1,7 +1,7 @@
 """Tests for agent_cli.py — pointing the AI roles at an adapter.
 
 The behaviour worth protecting is the independence report. A setup where the actual extractor
-and the comparator share a model will be blocked at gate ④ as an unexplained failure; saying
+and the comparator share a model will be blocked at acceptance as an unexplained failure; saying
 so at configuration time is the difference between a tool that surprises you and one that
 tells you what it is about to do.
 """
@@ -189,9 +189,9 @@ def test_copilot_is_selectable_for_every_role(tmp_path: Path) -> None:
 
 
 def test_a_switch_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
-    """`agents` is outside the gate ③ freeze, so nothing asks a human before this file moves —
-    which makes the chain the only place the change survives, and the only way gate ④ can be told
-    the evidence in front of it came from a different agent than the one gate ③ saw."""
+    """`agents` is outside the mandate's freeze, so nothing asks a human before this file moves —
+    which makes the chain the only place the change survives, and the only way acceptance can be told
+    the evidence in front of it came from a different agent than the one the mandate saw."""
     from rein import event_chain
 
     root = seed_repo(tmp_path)

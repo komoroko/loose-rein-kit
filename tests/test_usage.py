@@ -79,7 +79,7 @@ def test_an_adapter_that_does_not_report_records_unmeasured_rather_than_zero() -
 
 
 def test_every_gate_four_adapter_answers_something_that_parses_as_one_json_object() -> None:
-    """Gate ④'s three stages ask for "one JSON object and no other text" and parse the whole of
+    """Acceptance's three stages ask for "one JSON object and no other text" and parse the whole of
     stdout strictly. A CLI that prints a banner, its reasoning or a stats footer around that object
     has not given a smaller answer — it has given an unreadable one, and every stage reported it as
     the reviewer's fault. Only `claude` had an envelope, so only `claude` ever worked there."""
@@ -114,7 +114,7 @@ def test_a_gemini_run_that_failed_is_not_read_as_an_answer() -> None:
 
 def test_a_codex_stream_answers_with_its_last_agent_message() -> None:
     """The earlier items are the agent talking to itself on the way there. Taking the first would
-    hand gate ④ a paragraph of reasoning where it asked for one JSON object."""
+    hand acceptance a paragraph of reasoning where it asked for one JSON object."""
     from tests._support import codex_events
 
     answer, spent = usage.parse_codex_envelope(codex_events("the answer", input_tokens=7, output_tokens=3))

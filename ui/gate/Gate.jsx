@@ -4,9 +4,9 @@
 // is somewhere you can link to and come back to. The spine is the only rendering of gate state on
 // the page, so this module draws no gate list of its own.
 //
-// Gates ①②③⑤ are deliverable review: a document list on the left, rendered markdown on the right.
-// Gate ④ is different in kind — it reviews a generated grounded review, and what it asks for is a
-// judgement, so its left rail is the review stages and its body is a form at every stage.
+// The mandate is deliverable review: a document list on the left, rendered markdown on the right.
+// Acceptance is different in kind — it reviews a generated grounded review, and what it asks for is
+// a judgement, so its left rail is the review stages and its body is a form at every stage.
 //
 // The pane used to repaint in two grains, because rebuilding the body from strings would wipe a
 // form the reviewer was half way through — so a status push repainted only the heading and the
@@ -23,7 +23,7 @@ import { StageBody, StageList } from "./stages.jsx";
 
 // Opened documents are a client-side memory aid that outlives a visit to the room, so they live
 // beside the module rather than in component state. Nothing in the approval path consults this: what
-// a gate-④ tick means instead is human_review.stage_settled, a judgement the repository can show
+// an acceptance tick means instead is human_review.stage_settled, a judgement the repository can show
 // afterwards.
 const openedSets = {};
 function openedSet(project, gate) {

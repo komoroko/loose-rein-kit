@@ -12,7 +12,7 @@
   (公開脆弱性データベースを読むが、どのプロファイルにも egress が無いため)
 
 エージェント CLI —— 実装者・タスクごとのレビュアー・review fixer・conflict fixer・
-integration fixer・gate ④ の3ステージ —— は、いずれも `common.run` でホストプロセスとして
+integration fixer・acceptance の3ステージ —— は、いずれも `common.run` でホストプロセスとして
 起動する。cwd はリポジトリか git worktree で、資格情報は利用者のものそのままである。
 
 ## この回で直したこと

@@ -108,7 +108,7 @@ test("the Record screen fetches only when the log moved and someone is looking",
   assert.equal(feeds(), 2, "a log that moves while nobody is looking asks for nothing");
 });
 
-// --- a gate-④ generation in flight -------------------------------------------
+// --- an acceptance generation in flight -------------------------------------------
 //
 // The line reaches the page on the SSE `status` push and nowhere else. The gate pane fetches
 // `/api/review/session` once per gate and never polls, so a progress figure hung off that payload

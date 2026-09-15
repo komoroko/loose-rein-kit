@@ -237,7 +237,7 @@ def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = 
 
     ``edit`` (the hook) applies all of rules 1–3. ``commit`` applies rule 3 only, because
     rules 1 and 2 forbid *hand edits*, not commits: the Central Store writes `state.yaml` and
-    a gate-3 freeze writes `plan.yaml`, and those writes have to be committable or the very
+    the mandate freeze writes `plan.yaml`, and those writes have to be committable or the very
     first `git commit` after `rein init` would be blocked by the guard.
 
     Nothing is lost by that. At commit stage the same two properties are checked more

@@ -41,7 +41,7 @@ loop decomposes, reorders and re-runs as it needs to.
    the strong one, a fact about every test in the change at once; a **red** one says the test half
    is not inert against the old code and no more, since it cannot separate a failed assertion from
    an import the base never had. A task that changed no test file has no control to take, which is
-   **recorded, not passed**, and the record is read: the the acceptance gate orientation counts the tasks whose
+   **recorded, not passed**, and the record is read: the acceptance orientation counts the tasks whose
    control answered and **names the ones where it could not be taken**, so "this task's green rests
    on tests nobody wrote for it" reaches the approver instead of sitting in a file. Then the task's own **`acceptance`** criteria are established the same way — a
    failing one returns through the same channel a red gate step does, inheriting the send-back
@@ -102,7 +102,7 @@ repository root and its change is derived as "the commits since the pre-task HEA
 tree", so an edit already sitting there is attributed to the first task that runs: it counts
 against that task's declared scope, fills the empty-diff check that exists to catch an implementer
 which wrote nothing, reaches the reviewer as part of the change under review, and `git add -A`
-lands it inside `T-NNN: <title>` — in the history the the acceptance gate record names. A parallel leaf never
+lands it inside `T-NNN: <title>` — in the history the acceptance record names. A parallel leaf never
 had this problem: `git worktree add` hands it a clean checkout, so everything it finds afterwards
 is its own. The refusal is how a serial task gets the same guarantee. Commit or stash first.
 
@@ -321,7 +321,7 @@ is the point; never fold them into the implementer's session.
    outlives a document the next generation rewrites. Fixing it is the way through, and re-stating
    it is refused only while the code is still there. One that named no anchor is closed by a
    human's `dispute_finding` in the review, never by the reviewer omitting it.
-3. `notify-and-wait`: tell the human the gate-④ approval is pending.
+3. `notify-and-wait`: tell the human the acceptance approval is pending.
    - **(Only with GitHub integration)** Run `rein issue-sync` to reflect each task's
      latest status (done → close, etc.) to Issues. Best-effort; do not stop the gate if it
      fails (auto-skips if `github.enabled: false` / gh/remote absent). It stays outside the
@@ -336,7 +336,7 @@ is the point; never fold them into the implementer's session.
    the review itself and read there. Say where it is, not what it says. The human review is
    completed in `rein ui` — the stage rail walks the reviewer from the scope through the orient
    brief and the Decision Cards to the freeze button
-   (`.rein/prompts/rules/gate-workflow.md` "The the acceptance gate human review") — and frozen
+   (`.rein/prompts/rules/gate-workflow.md` "The human review before acceptance") — and frozen
    there or with `rein review complete` before the gate can be requested. Unanswered
    high/critical Decision Cards block the freeze; say so rather than presenting the gate.
    - **Smoke-step check**: if the deliverable is runnable (CLI, server, …) and

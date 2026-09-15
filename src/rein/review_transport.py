@@ -1,4 +1,4 @@
-"""How a gate-④ reviewer stage is actually launched, and what the launching costs.
+"""How an acceptance reviewer stage is actually launched, and what the launching costs.
 
 Everything above this file — the pipeline in `review`, the three stage validators — is about what
 a review *is*. This is about getting a request to an agent CLI and an answer back: which CLI
@@ -334,7 +334,7 @@ _READING_ROLES: tuple[str, ...] = ("actual_extractor", "security_reviewer")
 #: name of its own. Folding it into either role would make that role's cost a fiction.
 _SHARED_READING_ROLE = "shared_reading"
 
-#: Every role the gate-④ pipeline launches, each with its own adapter (§12.4) — the roles of the
+#: Every role the acceptance pipeline launches, each with its own adapter (§12.4) — the roles of the
 #: one stage→role map, so a stage the pipeline asks for always has a launcher here.
 _STAGE_ROLES: tuple[str, ...] = tuple(review_policy.STAGE_ROLE.values())
 
@@ -473,7 +473,7 @@ def _adapter_reviewer(
     if config is None:
         config = store_mod.Store(repo).read_config()
     record = adapters.adapter_for_role(config, role)
-    # `READ` and never more: a gate-④ stage is handed its request, answers on stdout, and must
+    # `READ` and never more: an acceptance stage is handed its request, answers on stdout, and must
     # change nothing. That is not the same as passing no flags — a CLI whose tools are
     # deny-by-default without a grant cannot open the checkout the security stage is given to
     # read. How the request reaches it — stdin, or an argument — is `prompt_call`'s question.
@@ -564,7 +564,7 @@ def _adapter_reviewer(
 
 
 class StagedReviewers:
-    """The reviewer for each gate-④ role, and what launching them has cost so far.
+    """The reviewer for each acceptance role, and what launching them has cost so far.
 
     Each stage gets its own launch of its own configured adapter: one callable serving every stage
     would mean the same session answers as the Actual Extractor and as the Comparator, the

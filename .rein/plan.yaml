@@ -1,4 +1,4 @@
-# .rein/plan.yaml — the EXPECTED MODEL: what this cycle is supposed to do. Frozen at gate 3;
+# .rein/plan.yaml — the EXPECTED MODEL: what this cycle is supposed to do. Frozen at the mandate;
 # after that, changing it goes through `rein revise --to tasks`, which invalidates the
 # downstream gates in a chain.
 #

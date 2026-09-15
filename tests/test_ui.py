@@ -62,7 +62,7 @@ def test_action_argv_whitelist() -> None:
 
 
 def test_the_agent_action_is_the_switch_a_human_would_have_typed() -> None:
-    """Pointing a role at another CLI is not a gate ③ decision — `agents` is outside the config
+    """Pointing a role at another CLI is not a mandate decision — `agents` is outside the config
     digest the freeze covers — so the dashboard may run it, and `rein agent` is what refuses a
     combination the loop could not launch."""
     assert ui.action_argv("agent", {"role": "implementer", "adapter": "copilot"}) == [
@@ -112,7 +112,7 @@ def test_the_dashboard_never_runs_an_installer() -> None:
         ("cycle_close", {"slug": "x; rm -rf /"}),  # injection attempt
         # `tests` ran `make test` — this repository's own pytest, never a product's DoD, and in a
         # product repository no makefile at all. Gone rather than repaired: the DoD's test step is
-        # re-run by the build loop and its result is on the record gate ④ reads.
+        # re-run by the build loop and its result is on the record acceptance reads.
         ("tests", {}),
         ("agent", {"role": "nobody", "adapter": "claude"}),  # not a role the config declares
         ("agent", {"role": "implementer", "adapter": "cluade"}),  # not an adapter this release launches
@@ -565,7 +565,7 @@ def test_post_unknown_action_is_400(server: ui.DashboardServer) -> None:
 #
 # The doctrine this replaces said "a localhost click is not authentication" while embedding the
 # CSRF token in the served page — so anything able to `curl` that page could write, including the
-# gate-④ human-review writes the gate requires. The correction is not about proving a human,
+# acceptance human-review writes the gate requires. The correction is not about proving a human,
 # which nothing here can do. It is about the channel the capability travels over: the launch link
 # is printed to the terminal `rein ui` runs in, and a captured subprocess cannot read that.
 
@@ -939,7 +939,7 @@ def test_get_review_unknown_gate_is_404(server: ui.DashboardServer, path: str) -
     assert _request(server, "GET", path)[0] == 404
 
 
-# --- the gate ④ human review (plan §21.1, §21.2) --------------------------------
+# --- the acceptance human review (plan §21.1, §21.2) --------------------------------
 
 
 def _generated_review_with_card() -> dict[str, object]:
@@ -1088,7 +1088,7 @@ def test_an_answer_naming_no_machine_review_is_refused(review_server: ui.Dashboa
 
 
 def test_a_decision_card_can_be_answered_from_the_pane(review_server: ui.DashboardServer) -> None:
-    """The judgement gate ④ asks for had a schema slot, an id validator and no endpoint at all."""
+    """The judgement acceptance asks for had a schema slot, an id validator and no endpoint at all."""
     body: dict[str, object] = {
         "card_id": "DC-001",
         "choice": "A",
@@ -1145,7 +1145,7 @@ def test_a_stage_tick_means_a_recorded_judgement_not_a_visit(review_server: ui.D
 
 
 def test_a_dashboard_behind_the_repository_refuses_to_freeze(review_server: ui.DashboardServer) -> None:
-    """The one gate-④ precondition that does not pass `approve.readiness`, and the one process
+    """The one acceptance precondition that does not pass `approve.readiness`, and the one process
     whose answer changes while it runs.
 
     The `rein sync` that materialises a newer release's schema happens in another terminal, and

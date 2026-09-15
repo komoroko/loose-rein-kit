@@ -40,7 +40,7 @@ def _review(*, machine: dict[str, Any] | None = None, human: dict[str, Any] | No
 
 
 def _card(cid: str, *, risk: str = "high", claim_ids: list[str] | None = None) -> dict[str, Any]:
-    """A high/critical Decision Card — the unit whose answer gate ④ will not let lapse.
+    """A high/critical Decision Card — the unit whose answer acceptance will not let lapse.
 
     `evidence` is carried on the card and served with it. It used to be stripped until the reviewer
     had recorded an unprimed guess about the same card; the tests below pin that it no longer is.
@@ -205,7 +205,7 @@ def test_options_of_cards_nobody_has_to_answer_are_not_the_reviewers_workload() 
     `derive` mints one statement per *option* of every card at every risk, and only high and
     critical cards must be answered — so two decisions somebody owed could arrive over the
     30-statement ceiling behind five low-risk cards nobody was obliged to read. The instruction
-    attached to that ceiling is "split the scope", which is not a move that exists at gate ④.
+    attached to that ceiling is "split the scope", which is not a move that exists at acceptance.
     """
     statements = [{"id": f"STMT-{i:03d}", "text": "x", "epistemic_status": "machine_inferred"} for i in range(1, 36)]
 
@@ -336,7 +336,7 @@ def test_completion_is_blocked_on_an_ungenerated_review() -> None:
 
 def test_a_clean_review_can_freeze() -> None:
     review = _review(machine={"decision_cards": [_card("DC-001")]})
-    # The decision is the whole of what gate ④ demands: a review cannot freeze having read the
+    # The decision is the whole of what acceptance demands: a review cannot freeze having read the
     # evidence and settled nothing.
     human = human_review.record_decision(review, dict(review.human), "DC-001", "A", confidence="high")
     assert human_review.completion_blockers(review, human) == []
@@ -364,7 +364,7 @@ def _unreadable_coverage() -> dict[str, Any]:
 def test_one_unreadable_file_does_not_shut_a_low_risk_review() -> None:
     """The dead end `review_policy.coverage_gap_risk` exists to have broken, reinstated at the
     freeze: an `insufficient` manifest blocked unconditionally here while the gate itself priced
-    the same gap by risk. A low-risk cycle carrying one binary asset then had no way through gate ④
+    the same gap by risk. A low-risk cycle carrying one binary asset then had no way through acceptance
     at all — splitting the scope included, since splitting never removes the file."""
     review = _review(machine={"coverage": _unreadable_coverage(), "effective_risk": "low"})
     assert human_review.completion_blockers(review, dict(review.human)) == []

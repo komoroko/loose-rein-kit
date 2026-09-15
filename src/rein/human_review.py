@@ -306,7 +306,7 @@ def completion_blockers(
         return ["no machine review has been generated — run `rein review generate`"]
     human = human if human is not None else dict(review.human)
 
-    # Everything the *machine* half says about this review, from the module that owns the gate-④
+    # Everything the *machine* half says about this review, from the module that owns the acceptance
     # decision — one function, one wording, one set of rules. This used to be four blocks copied
     # into this function (coverage, blocking gaps, blocking extra behaviours, standing security
     # findings), phrased differently from the originals, and the copies had already drifted: only

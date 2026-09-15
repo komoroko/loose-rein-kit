@@ -46,7 +46,7 @@ RELATIVE_PATH = ".rein/work"
 #: Where the reviewer writes its findings, beside the dossier it read. A file rather than stdout:
 #: an agent CLI interleaves its own chatter with whatever it means to say, and the one thing that
 #: must not be ambiguous is the boundary between "the reviewer's verdict" and "the reviewer
-#: thinking aloud". `review.py`'s gate-④ transport had to move its payload off argv for the same
+#: thinking aloud". `review.py`'s acceptance transport had to move its payload off argv for the same
 #: family of reason.
 FINDINGS_SUFFIX = ".findings.json"
 

@@ -230,7 +230,7 @@ class ChangeOutlook:
       launch holds one reading — so what it is measured against here is the largest reading, named.
       Measured over the whole change instead, it was a wall in front of a quantity nobody reads:
       two consecutive release cycles of this repository came to 662 KB and 754 KB against a 512 KiB
-      ceiling, and one field cycle met it at 2,141,194 bytes, whose only exit was a gate-③ rollback
+      ceiling, and one field cycle met it at 2,141,194 bytes, whose only exit was a mandate's rollback
       to raise the limit to 1,584,559. Per reading the lever is a real one and it is upstream —
       a task whose scope is too broad to read is a task to split at the mandate, while splitting is
       still a move that exists.
@@ -413,7 +413,7 @@ def generate(
 
     **A failure records itself.** Every `raise` below used to leave the audit chain with nothing in
     it: `events.ATTENTION_EVENTS` listed `review_failed` and `actual_extraction_failed` as things
-    needing a human decision and no code path anywhere emitted either, so a acceptance that could not
+    needing a human decision and no code path anywhere emitted either, so an acceptance that could not
     be produced reported "needing a human decision: 0". The whole log exists so that no state
     change goes unexplained, and the review pipeline's own failure was the state change it could
     not explain.

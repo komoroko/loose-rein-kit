@@ -432,7 +432,7 @@ def test_sync_refuses_to_advance_the_lock_past_a_document_it_cannot_read(
 
 def test_sync_rematerializes_the_review_stub_while_it_holds_no_review(repo: repo_mod.Repo) -> None:
     """The scaffold is written once at `init` and never migrated, so a release that changes the
-    document's shape strands every repo that has not reached gate ④ — on a file whose entire
+    document's shape strands every repo that has not reached acceptance — on a file whose entire
     content is "nothing has happened here"."""
     review_path = repo.path(".rein/review.yaml")
     review_path.write_text("machine:\n  status: not_generated\n  coverage: []\n", encoding="utf-8")

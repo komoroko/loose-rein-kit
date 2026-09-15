@@ -215,7 +215,7 @@ class Graph:
         return result
 
     def claims_without_a_task(self, plan: models.Plan) -> list[str]:
-        """Claims no task is answerable for — a the mandate readiness failure (plan §16.4).
+        """Claims no task is answerable for — a mandate readiness failure (plan §16.4).
 
         A claim with no owning task is a promise the build cannot keep, and it would surface at
         acceptance as an unexplained `missing` verdict rather than as the planning gap it is.

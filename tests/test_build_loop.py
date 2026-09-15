@@ -80,7 +80,7 @@ def graph_of(done: tuple[str, ...] = ()) -> dag.Graph:
 
 
 def build_repo(tmp_path: Path, **kwargs: object) -> Path:
-    """A repo ready to build: gate 3 approved, plan frozen, four tasks."""
+    """A repo ready to build: the mandate approved, plan frozen, four tasks."""
     kwargs.setdefault(
         "plan",
         make_plan(
@@ -405,7 +405,7 @@ def test_the_prompt_is_the_last_thing_on_every_command_line(name: str, model: st
 def test_the_review_transport_is_granted_a_read_and_no_more(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, adapter: str
 ) -> None:
-    """A gate-④ stage is handed its request, answers on stdout, and changes nothing.
+    """A acceptance stage is handed its request, answers on stdout, and changes nothing.
 
     That is `READ`, which is not the same as passing no flags — and the difference is the whole
     reason the level exists. `codex exec` reads without being told, so its launch stays bare;
@@ -674,15 +674,15 @@ def test_a_serial_task_with_nothing_to_repair_is_recorded_once(tmp_path: Path, m
 def test_a_repair_is_labelled_by_what_asked_for_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Every line of the repair path said `[gate 4]`, including the ones a repair at a task
+    """Every line of the repair path said `[acceptance]`, including the ones a repair at a task
     boundary printed several tasks before the gate was reached. A log that names the wrong phase
     has to be read against the code to be believed."""
     loop = orchestrator(tmp_path)
     task = dag.Task(id="T-001", title="leaf", kind="parallel")
     item = repair.Repair("T-001", (findings_mod.Attribution("SEC-001", "security", "T-001", "alpha/mod.py"),))
-    monkeypatch.setattr(loop, "_slice_branch", lambda task_id, where="gate 4": "")
-    monkeypatch.setattr(loop, "_repair_on_work_branch", lambda t, i, where="gate 4": None)
-    monkeypatch.setattr(loop, "_gate_after_repair", lambda t, where="gate 4": [])
+    monkeypatch.setattr(loop, "_slice_branch", lambda task_id, where="acceptance": "")
+    monkeypatch.setattr(loop, "_repair_on_work_branch", lambda t, i, where="acceptance": None)
+    monkeypatch.setattr(loop, "_gate_after_repair", lambda t, where="acceptance": [])
     monkeypatch.setattr(loop, "_restate_evidence", lambda task_id, steps: None)
 
     loop._repair(task, item, where="review")
@@ -693,7 +693,7 @@ def test_a_repair_is_labelled_by_what_asked_for_it(
 
 def test_a_task_boundary_repair_commits_as_what_it_is(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The commit subject named the gate too, so a repair made at a task boundary landed on the
-    branch calling itself a acceptance repair."""
+    branch calling itself an acceptance repair."""
     loop = orchestrator(tmp_path)
     subjects: list[str] = []
     monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
@@ -813,7 +813,7 @@ def test_the_loop_refuses_while_gate_three_is_pending(tmp_path: Path, capsys: py
 
 
 def test_the_loop_refuses_to_build_against_a_draft_plan(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Gate 3's approval is what freezes the plan; building against a draft would implement a
+    """The mandate's approval is what freezes the plan; building against a draft would implement a
     plan nobody signed for."""
     root = build_repo(tmp_path, state=make_state(plan_status="draft"))
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 2
@@ -824,7 +824,7 @@ def test_approving_gate_three_is_what_lets_the_loop_start(tmp_path: Path, capsys
     """The two halves of the precondition above, joined.
 
     Regression for the gap where nothing in the codebase ever wrote `plan.status: frozen`: a
-    repository whose gate ③ was properly approved still could not build, because the freeze
+    repository whose the mandate was properly approved still could not build, because the freeze
     existed only in prose. Asserting the refusal (the test above) passed happily while the
     approval that clears it did not exist — so the pair is what pins the behaviour.
     """
@@ -908,7 +908,7 @@ def test_the_handover_does_not_offer_to_approve(tmp_path: Path, capsys: pytest.C
     root = build_repo(tmp_path)
     build_loop.main(["--dry-run", "--repo", str(root)])
     out = capsys.readouterr().out
-    assert "security review" not in out.lower()  # not this step's gate-4 evidence
+    assert "security review" not in out.lower()  # not this step's acceptance evidence
     assert "interactive terminal" in out
 
 
@@ -1037,7 +1037,7 @@ def test_the_task_pipeline_is_the_configured_dod(tmp_path: Path) -> None:
     assert [s.name for s in loop._steps_for(task)] == ["test", "check"]
 
 
-# --- path-scoped quality-gate steps (frozen at gate 3, never an implementer's choice) ----------
+# --- path-scoped quality-gate steps (frozen at the mandate, never an implementer's choice) ----------
 
 
 def _paths_scoped_config() -> dict[str, object]:
@@ -1703,7 +1703,7 @@ def test_a_launch_the_machine_failed_still_says_why(tmp_path: Path, monkeypatch:
 
 def test_a_launch_failure_writes_no_verdict_into_the_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`task_failed` and `knowledge_gap` are both `ATTENTION_EVENTS`, and the chain is
-    append-only: a machine's bad afternoon would sit on gate ⑤'s screen as an unresolved
+    append-only: a machine's bad afternoon would sit on acceptance's screen as an unresolved
     escalation for the life of the repository."""
     loop = orchestrator(tmp_path, config=make_config(launch_retries=0))
     monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT))
@@ -2095,7 +2095,7 @@ def test_a_step_with_no_stage_runs_everywhere_as_it_always_did(tmp_path: Path) -
 def test_the_run_measures_its_own_prompt_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The loop composes every prompt, so this is the one number it can know exactly.
 
-    Gate ④'s review budget is measured rather than declared for the same reason; the build side
+    Acceptance's review budget is measured rather than declared for the same reason; the build side
     of the run had no number at all, which is why "we are re-sending too much" could only ever be
     an impression.
     """
@@ -2425,7 +2425,7 @@ def test_a_dry_run_reads_no_baseline(tmp_path: Path) -> None:
 def test_the_baseline_is_measured_once_for_the_gate_not_once_per_build(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The measurement belongs to gate ③, and `rein build` only reads what it froze.
+    """The measurement belongs to the mandate, and `rein build` only reads what it froze.
 
     Taken inside the build it was taken after the approval that had already decided this plan was
     implementable against this tree — and on a resumed run it would have measured a tree with
@@ -2521,7 +2521,7 @@ def test_the_landing_map_comes_from_the_audit_log(tmp_path: Path) -> None:
 
 
 def test_a_slice_already_ready_is_not_landed_on(tmp_path: Path) -> None:
-    """Past gate ④ a change is a human's call, not something a re-run puts there quietly."""
+    """Past acceptance a change is a human's call, not something a re-run puts there quietly."""
     loop = orchestrator(tmp_path)
     slice_ = pr_stack.Slice(
         index=2,
@@ -2718,8 +2718,8 @@ def test_an_agent_step_declared_at_the_integration_stage_runs_there(
 def test_the_integration_reviewers_findings_go_to_the_task_whose_scope_owns_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A finding about the join is carried to gate ④ beside the task that owns the code it names —
-    the same derivation gate ④ uses — and one nobody owns is said out loud rather than filed
+    """A finding about the join is carried to acceptance beside the task that owns the code it names —
+    the same derivation acceptance uses — and one nobody owns is said out loud rather than filed
     against a task that does not own it."""
     loop = orchestrator(tmp_path)
     monkeypatch.setattr(common, "run", fake_git())
@@ -2750,7 +2750,7 @@ def test_a_second_review_of_a_task_does_not_discard_the_first(tmp_path: Path) ->
 
 def test_a_task_with_no_declared_scope_is_not_warmed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An undeclared scope means unbounded, so its reading would be the whole change — neither one
-    task wide nor the question gate ④ will ask."""
+    task wide nor the question acceptance will ask."""
     loop = orchestrator(tmp_path)
     warmed: list[str] = []
     monkeypatch.setattr(review_reading, "warm", lambda *a, **k: warmed.append("yes"))
@@ -2798,7 +2798,7 @@ def _sec(fid: str, path: str, *, blocking: bool = True) -> dict[str, object]:
 
 def _warm_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_loop.Orchestrator, list[str]]:
     """A loop whose T-001 owns `alpha/`, with `_repair` recorded rather than run. What is recorded is
-    `<finding>@<where>`: a repair the loop makes here is not gate ④'s, and the label it carries is
+    `<finding>@<where>`: a repair the loop makes here is not acceptance's, and the label it carries is
     what the log and the repair's own commit subject are written from."""
     loop = orchestrator(
         tmp_path,
@@ -2816,7 +2816,7 @@ def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The warm-up launched a security reviewer over this slice and the answer was written to the
-    stage cache and read by nobody: the finding was first *seen* at gate ④, after every later task
+    stage cache and read by nobody: the finding was first *seen* at acceptance, after every later task
     had been built on the code it names. Reading it here costs nothing that was not already spent.
     """
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
@@ -2826,7 +2826,7 @@ def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
 
 
 def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Attribution is `findings.owner_of_path` — the same function gate ④ routes by — so nothing
+    """Attribution is `findings.owner_of_path` — the same function acceptance routes by — so nothing
     is guessed. A finding no declared scope owns means the plan does not say, and a human decides
     with the whole picture in front of them."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
@@ -3207,7 +3207,7 @@ def test_the_lock_answers_before_the_working_tree_does(tmp_path: Path, caplog: p
     assert "package-lock.json" not in caplog.text
 
 
-# --- gate 4 repairs what a task's scope owns ----------------------------------
+# --- acceptance repairs what a task's scope owns ----------------------------------
 
 
 def _scoped_repo(tmp_path: Path, rounds: int) -> build_loop.Orchestrator:
@@ -3235,9 +3235,9 @@ def _blocking(fid: str = "SEC-001", path: str = "src/api/client.py") -> dict[str
 
 def test_gate_four_reads_repairs_and_reads_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The half that was missing. Inside a task the reviewer's must-fix findings go to an
-    implementer and the reviewer looks again; at gate ④ the findings were printed and the human
+    implementer and the reviewer looks again; at acceptance the findings were printed and the human
     typed `rein revise --to build --from-review`, which marked the task and its whole dependent
-    closure `needs-revision` and demanded a re-approval of gate ③ for a repair that changed no
+    closure `needs-revision` and demanded a re-approval of the mandate for a repair that changed no
     plan.
 
     The second reading is the judge, not the fixer: it is a blind reading with no memory of having
@@ -3297,7 +3297,7 @@ def test_a_reading_that_cannot_be_taken_does_not_un_finish_the_build(
 ) -> None:
     """The tasks are done and their evidence is recorded. Anything but a capacity stop is reported
     and handed over — and the gate stays shut either way, because `approve.readiness` refuses a
-    gate 4 with no generated review."""
+    acceptance with no generated review."""
     loop = _scoped_repo(tmp_path, rounds=2)
     monkeypatch.setattr(loop, "_generate_review", lambda: False)
     monkeypatch.setattr(loop, "_repair", lambda graph, item: pytest.fail("nothing was read to repair"))
@@ -3366,7 +3366,7 @@ def test_a_repair_that_cannot_be_committed_stops_the_loop(tmp_path: Path, monkey
 def test_gate_four_reads_the_baseline_gate_three_froze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`_consume` reads it before a batch, and a run that finds every task already done never
     reaches that line — which is exactly the run that repairs here. Without it a step frozen red at
-    gate ③ stops the repair over a failure the plan was approved on top of."""
+    the mandate stops the repair over a failure the plan was approved on top of."""
     loop = _scoped_repo(tmp_path, rounds=2)
     frozen = {
         "measured_at": "2026-01-01T00:00:00+00:00",

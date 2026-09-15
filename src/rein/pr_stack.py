@@ -448,7 +448,7 @@ def preconditions(
 ) -> Preconditions:
     """What has to hold before `mode` may run. Errors stop the run; warnings are printed and passed.
 
-    The gate-④ split is the load-bearing one. `--push` and `--restack` are how a change gets *to*
+    The acceptance split is the load-bearing one. `--push` and `--restack` are how a change gets *to*
     a reviewer, so they belong to the window before the gate opens; `--ready` and `--merge` are what
     say a human approved, so they may not run before one has. Changing code after acceptance is approved
     is rewinding an approval, which is a human's privilege (AGENTS.md) — hence `--restack` refuses

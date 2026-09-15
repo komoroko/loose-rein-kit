@@ -457,7 +457,7 @@ class Ledger:
     """What a run's launches have cost, by role. Written from every thread that launches.
 
     One object rather than a dict the caller owns and every layer mutates. Two of these are kept
-    while a gate-④ review runs — what the transport paid, and what a replayed stage cost when it
+    while an acceptance review runs — what the transport paid, and what a replayed stage cost when it
     was first taken — and both are written from the two threads the pipeline runs its stages on.
     `merged` above is a read-modify-write, which is not one operation on any interpreter that is
     not holding a global lock for us: a lost row would under-report a role rather than fail loudly.

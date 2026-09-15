@@ -139,7 +139,7 @@ def test_pointing_a_role_at_another_agent_does_not_break_a_frozen_plan(tmp_path:
     rewinds nothing — the audit chain's `agents_switched` line is what records it instead.
 
     Contrast the sandbox: flipping a profile to `host` still breaks the freeze here, because that
-    widens what may happen and widening is the judgement a human made at gate ③.
+    widens what may happen and widening is the judgement a human made at the mandate.
     """
     raw = make_config()
     state = make_state(plan_status="frozen")

@@ -66,7 +66,7 @@ GATE_STATUS_VALUES = frozenset({"pending", "approved"})
 #: Commands that run, exit zero, and establish nothing. `["true"]` is what the scaffold ships for
 #: its launch step; the others are the same gesture written differently. Shared vocabulary because
 #: two places have to agree on it and neither may import the other: `doctor.check_quality_gate`,
-#: which reports a DoD step that cannot fail, and `brief`, which tells a gate-④ reviewer whether
+#: which reports a DoD step that cannot fail, and `brief`, which tells an acceptance reviewer whether
 #: anything ever started the deliverable. Matched on the **argv**, never on the step's name.
 PLACEHOLDER_COMMANDS: frozenset[tuple[str, ...]] = frozenset(
     {("true",), ("/bin/true",), (":",), ("echo",), ("exit", "0")}
@@ -315,7 +315,7 @@ SECURITY_CATEGORY_VALUES = frozenset(
 )
 
 
-#: The gate-④ rail, in order. Three screens and a freeze, because the same finding used to
+#: The acceptance rail, in order. Three screens and a freeze, because the same finding used to
 #: appear on four of them — as a summary count, as a raw gap, as an Expected/Actual row, and
 #: again as the card that actually asked for a decision. Only the last one wanted an answer.
 #:
@@ -1548,7 +1548,7 @@ class Config:
 
         Empty when no model is named — the CLI's default cannot be named in advance. What actually
         answered is read back from the launch (`usage.Usage.models`) and recorded on the review, and
-        that is what the gate-④ check is settled on.
+        that is what the acceptance check is settled on.
         """
         adapter, model = self.adapter(role), self.model(role)
         return f"{adapter}/{model}" if adapter and model else ""

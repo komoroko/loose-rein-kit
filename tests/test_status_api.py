@@ -410,7 +410,7 @@ def test_plan_invalidated_stands_until_the_plan_is_frozen_again(tmp_path: Path) 
 
 
 def test_a_re_freeze_retires_the_plan_invalidated_it_answered(tmp_path: Path) -> None:
-    """The roll back happened, the human re-approved gate ③, and the queue said "waiting for you"
+    """The roll back happened, the human re-approved the mandate, and the queue said "waiting for you"
     about it for the rest of the cycle. `plan_frozen` is the event that undoes exactly the state
     `plan_invalidated` reported, so it is what closes the row — nothing is erased from the log."""
     seed_repo(
@@ -638,9 +638,9 @@ def test_the_stage_map_agrees_with_the_vocabulary() -> None:
 
 
 def test_a_blocking_finding_the_plan_owns_sends_the_build_back_rather_than_a_roll_back() -> None:
-    """A code defect gate ④ found is not a defect in the specification, and routing it through
+    """A code defect acceptance found is not a defect in the specification, and routing it through
     `rein revise` made it one — the task and its dependent closure went `needs-revision`, which
-    demanded a `/tasks` reconcile and a re-approval of gate ③ for a repair that changed no plan."""
+    demanded a `/tasks` reconcile and a re-approval of the mandate for a repair that changed no plan."""
     rec = status_api.next_action(
         stage="building",
         gates={
@@ -751,7 +751,7 @@ def test_the_status_carries_a_generation_in_flight(tmp_path: Path) -> None:
     assert live["stale"] is False, "a file written a moment ago is not stale"
 
 
-# --- the tree gate 3 approves over --------------------------------------------
+# --- the tree the mandate approves over --------------------------------------------
 
 
 def _tasks_phase(**over: object) -> dict[str, object]:
@@ -770,7 +770,7 @@ def _tasks_phase(**over: object) -> dict[str, object]:
 
 
 def test_an_unmeasured_baseline_is_named_rather_than_left_to_the_first_task() -> None:
-    """Gate 3 decides this plan is implementable against this tree. `/tasks` does not ask the tree,
+    """The mandate decides this plan is implementable against this tree. `/tasks` does not ask the tree,
     so recommending it would send the human round a loop that cannot answer the blocker."""
     rec = status_api.next_action(**_tasks_phase(baseline="missing"))  # type: ignore[arg-type]
     assert rec.command == "rein baseline measure"

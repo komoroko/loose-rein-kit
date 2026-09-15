@@ -1,4 +1,4 @@
-"""Verify decision_cards.py: the derived judgement surface of gate ④.
+"""Verify decision_cards.py: the derived judgement surface of acceptance.
 
 These cards are the one artefact the human is answerable for, so what matters here is that they are
 *derivations* — every finding that needs a decision produces one, none is invented, and the option

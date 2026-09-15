@@ -214,7 +214,7 @@ def codex_events(text: str, *, input_tokens: int = 100, output_tokens: int = 20)
     """What `codex exec --json` streams: JSONL, the answer in the last `agent_message` item.
 
     The reasoning item is here on purpose — taking the *first* agent message, or any item, would
-    hand gate ④ a paragraph of thinking where it asked for one JSON object.
+    hand acceptance a paragraph of thinking where it asked for one JSON object.
     """
     import json
 
@@ -391,7 +391,7 @@ def make_config(
 ) -> dict[str, Any]:
     """A config document. `repair_rounds` defaults to **0**, unlike the product's own default of 2.
 
-    A build that ends by reading the change launches the gate-④ reviewers, and a test about task
+    A build that ends by reading the change launches the acceptance reviewers, and a test about task
     consumption has no business paying for that — the PATH stub would refuse it anyway, which
     would make every such test fail for a reason it is not about. Tests that *are* about the
     repair loop ask for rounds explicitly, which also makes it visible which ones those are.

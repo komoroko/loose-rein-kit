@@ -598,7 +598,7 @@ def independence_observed(review: models.Review, effective: str) -> list[str]:
     return []
 
 
-# --- blocking (the gate-4 decision) -------------------------------------------
+# --- blocking (the acceptance decision) -------------------------------------------
 
 #: The severity at which a finding holds acceptance shut. One number, in one place, because
 #: `blocking` is a policy question and the three reviewer stages used to be asked it directly:

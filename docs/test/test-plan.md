@@ -1,7 +1,7 @@
 # Test Plan
 
 > `/verify` runs and records functional tests (bugs) and non-functional requirement tests following this plan.
-> Material for the human's release decision at **gate ⑤**.
+> Material for the human's decision at **acceptance**.
 
 ## 1. Functional tests (requirement satisfaction)
 
@@ -49,7 +49,7 @@ Legend: ✅ pass / ❌ fail / ⬜ not run
 ## 3. Manual verification checklist (human-run acceptance)
 
 Acceptance that automated tests can't cover — a human runs these and records the result. Make it concrete for
-your product; unrun items become remaining issues at gate ⑤.
+your product; unrun items become remaining issues at acceptance.
 
 | Check | How | Result | Notes |
 |-------|-----|--------|-------|

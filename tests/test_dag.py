@@ -395,8 +395,8 @@ def test_cli_trace_test_plan_flags_a_missing_requirement(tmp_path: Path) -> None
 
 
 def test_the_render_says_how_gate_four_will_read_the_plan() -> None:
-    """Said at gate ③ because that is where it can still be changed: a plan whose tasks declare no
-    scope is read in one launch holding the whole cycle, and by gate ④ the only remedy left is to
+    """Said at the mandate because that is where it can still be changed: a plan whose tasks declare no
+    scope is read in one launch holding the whole cycle, and by acceptance the only remedy left is to
     split the scope and re-approve."""
     unscoped = dag.Graph.from_tasks([dag.Task(id="T-001", title="a", kind="foundation")])
     text = dag.render(unscoped)

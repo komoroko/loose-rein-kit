@@ -401,7 +401,7 @@ def test_restack_is_refused_once_acceptance_is_approved(cycle: Callable[..., dic
 
 
 def test_push_after_approval_warns_instead_of_dead_ending(cycle: Callable[..., dict[str, Any]]) -> None:
-    """A stack first pushed after gate ④ opened must still be publishable.
+    """A stack first pushed after acceptance opened must still be publishable.
 
     `--ready` refuses a slice with no pull request, so a `--push` that refused an approved gate
     would leave the cycle with no way out at all.
@@ -975,7 +975,7 @@ def test_the_prompt_says_the_pull_requests_are_drafts(
 
 
 def approved_stack(bundle: dict[str, Any], run: Any) -> tuple[pr_stack.Documents, list[pr_stack.Slice], list[str]]:
-    """A published stack whose gate ④ is approved and whose review binds the current head."""
+    """A published stack whose acceptance is approved and whose review binds the current head."""
     repo = bundle["repo"]
     docs = documents(bundle)
     slices = pr_stack.derive(repo, docs, base="main")
@@ -1753,7 +1753,7 @@ def test_merge_links_the_stack_rather_than_trusting_push_to_have_done_it(
     assert calls.index(links[0]) < calls.index(merges[0])  # linked before merged
 
 
-# --- gate ④'s repairs go where a review fix goes ------------------------------
+# --- acceptance's repairs go where a review fix goes ------------------------------
 
 
 def test_a_gate_four_repair_is_committed_onto_the_slice_that_introduced_the_code(

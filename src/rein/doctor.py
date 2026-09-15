@@ -1424,7 +1424,7 @@ def check_last_run(repo: repo_mod.Repo) -> list[Finding]:
 
 
 def check_last_review_run(repo: repo_mod.Repo) -> list[Finding]:
-    """Did the last gate-④ generation stop for a machine reason, and has none succeeded since?
+    """Did the last acceptance generation stop for a machine reason, and has none succeeded since?
 
     The same question :func:`check_last_run` asks about the build, and it has to be asked
     separately because moving a transient review failure out of `events.ATTENTION_EVENTS` is
@@ -1501,7 +1501,7 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
     Both answers were being given at acceptance, where nothing can be done about either: a reading over
     `max_diff_bytes` is a task whose scope is too broad to read in one launch, told about after
     every task is merged and `done`, and a single committed binary makes coverage `insufficient` —
-    a gate-④ block at high risk — after the whole reading pipeline has been paid for. Neither needs
+    an acceptance block at high risk — after the whole reading pipeline has been paid for. Neither needs
     a model. Both are `git diff`.
 
     Reported as WARN rather than FAIL: this is an outlook on a cycle still being built, and a

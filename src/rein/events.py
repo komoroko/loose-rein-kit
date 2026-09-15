@@ -42,7 +42,7 @@ _TASK_SCOPED = frozenset({"task_failed", "knowledge_gap"})
 #: `ATTENTION_EVENTS` that a later event in the same chain answers, and which event answers them.
 #: Not an inference about what somebody decided — each pair is a thing that *undoes* the state the
 #: first event reported: a plan that was invalidated has since been re-frozen, and a review
-#: pipeline that could not produce a acceptance has since produced one.
+#: pipeline that could not produce an acceptance has since produced one.
 #:
 #: The gap this closes: these three had no retirement condition at all, so the queue carried
 #: "waiting for you" rows for a rollback that was re-approved weeks ago, and for a generation that

@@ -1,4 +1,4 @@
-"""The reading half of gate ④: what a reviewer is shown, and how a composed review says so.
+"""The reading half of acceptance: what a reviewer is shown, and how a composed review says so.
 
 `review_reading` decides which bytes reach a reviewer. These pin the two properties that make a
 review readable in slices without making it dishonest: a reading is a function of its *own* content
@@ -589,7 +589,7 @@ def test_a_critical_change_is_read_whole_whatever_the_configuration_says() -> No
     would simply be read whole there. Neither happened: `generate` had the effective risk one line
     above this call and did not pass it, so a critical change was read in slices and then blocked
     for having been — and the remedy the block named ("re-read it whole") could not be carried out,
-    because the mode lives inside gate ③'s frozen digest and `rein review generate` has no override.
+    because the mode lives inside the mandate's frozen digest and `rein review generate` has no override.
     """
     plan, changed = _scoped_plan(), ["alpha/mod.py", "alpha/shared.py"]
     assert [r.unit for r in review_reading.plan_readings(plan, changed)] != [review_reading.WHOLE]

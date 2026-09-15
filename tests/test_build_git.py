@@ -171,7 +171,7 @@ def test_the_review_excludes_more_than_the_tree_does(tmp_path: Path) -> None:
     exclude = review.not_the_product(repo, state)
 
     assert repo_mod.SSOT_DIR in exclude
-    assert "docs/10-requirements.md" in exclude, "the frozen prose gate ③ pinned"
+    assert "docs/10-requirements.md" in exclude, "the frozen prose the mandate pinned"
     assert "docs/tasks/" in exclude and "docs/decisions/" in exclude, "tickets and ADRs"
     assert not any(e == "docs/" for e in exclude), "a README is a deliverable and stays reviewable"
 

@@ -1,7 +1,7 @@
 """What a reviewer is allowed to read, and the reading of one unit of the change.
 
 Split out of ``review.py`` because two callers need it and only one of them assembles a review.
-``review.generate`` composes a gate-④ document out of readings; ``build_loop`` takes a reading the
+``review.generate`` composes an acceptance document out of readings; ``build_loop`` takes a reading the
 moment a task lands, while its diff is small and the tree that produced it is the one in front of
 it. Keeping the reading here is what lets the second caller exist without importing the first.
 
@@ -329,14 +329,14 @@ def diff_of(
     the SSOT out, and the diff every reviewer read put it back in — schema payloads, the frozen
     plan, task state, the event log, all of it handed over as if it were code somebody wrote. A
     field report measured it at 27% of a normal cycle's diff, and the extractor's request went past
-    the model's hard context ceiling on the strength of it, which is a acceptance that cannot be
+    the model's hard context ceiling on the strength of it, which is an acceptance that cannot be
     produced at all.
 
     Not a fold, which is what a lockfile gets: a folded file is still *in* the change and the
     Coverage Manifest goes on reporting its body as unread. `.rein/` is not in the change, so
     reporting it unread would be a coverage gap invented out of something nobody was ever meant
     to review — and `_default_status` turns any generated file into `insufficient`, which at
-    high risk is a acceptance block whose instruction ("split the unreadable part out of this scope")
+    high risk is an acceptance block whose instruction ("split the unreadable part out of this scope")
     cannot be carried out on the orchestration state itself.
     """
     width = () if context is None else (f"-U{context}",)

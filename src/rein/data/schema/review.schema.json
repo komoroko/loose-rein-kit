@@ -1064,7 +1064,7 @@
           }
         },
         "brief": {
-          "description": "The gate-4 orientation: what this cycle delivered and under what conditions, derived from the SSOT by `brief.derive` and bound to `binding.subject_head_sha` like everything else here. It authors no sentence of its own — ids, paths, commands and image references only — and where it carries a sentence somebody else wrote, the confidence and the code anchor travel with it, because that was always the rule rather than the indirection through an id. An absent section reports nothing rather than reporting an empty finding.",
+          "description": "The acceptance orientation: what this cycle delivered and under what conditions, derived from the SSOT by `brief.derive` and bound to `binding.subject_head_sha` like everything else here. It authors no sentence of its own — ids, paths, commands and image references only — and where it carries a sentence somebody else wrote, the confidence and the code anchor travel with it, because that was always the rule rather than the indirection through an id. An absent section reports nothing rather than reporting an empty finding.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -1188,7 +1188,7 @@
               }
             },
             "environment_drift": {
-              "description": "Present only when the sandbox the evidence was produced in is not the one gate 3 approved. Gate 3 freezes config.yaml without its image pins, so rebuilding a pinned image mid-cycle — which a task that legitimately adds a dependency forces — costs no rollback. This is what that permission is paid for with: the approver signing at gate 4 is told, rather than left to find out.",
+              "description": "Present only when the sandbox the evidence was produced in is not the one the mandate approved. The mandate freezes config.yaml without its image pins, so rebuilding a pinned image mid-cycle — which a task that legitimately adds a dependency forces — costs no rollback. This is what that permission is paid for with: the approver signing at acceptance is told, rather than left to find out.",
               "type": "object",
               "additionalProperties": false,
               "required": [
@@ -1205,7 +1205,7 @@
               }
             },
             "requirements_on_people": {
-              "description": "What this change now requires of a person, sorted by whether anyone foresaw it. The operator-facing readings a blind extractor took out of the code are matched against the `operator_surface` entries a human froze at gate 3 — by category equality and path coverage, never by comparing one piece of prose to another. Ordered by decision value: what nobody declared, then what was declared and never read out, then a count of the foreseen ones.",
+              "description": "What this change now requires of a person, sorted by whether anyone foresaw it. The operator-facing readings a blind extractor took out of the code are matched against the `operator_surface` entries a human froze with the mandate — by category equality and path coverage, never by comparing one piece of prose to another. Ordered by decision value: what nobody declared, then what was declared and never read out, then a count of the foreseen ones.",
               "type": "object",
               "additionalProperties": false,
               "properties": {
@@ -1433,7 +1433,7 @@
           }
         },
         "review_budget": {
-          "description": "Exceeding a budget splits the scope; it never lengthens the screen (plan 14.10). The first three bound what one person holds at gate 4 and are measured over the whole review; `max_diff_bytes` bounds what one launch reads and is measured against the largest single reading.",
+          "description": "Exceeding a budget splits the scope; it never lengthens the screen (plan 14.10). The first three bound what one person holds at acceptance and are measured over the whole review; `max_diff_bytes` bounds what one launch reads and is measured against the largest single reading.",
           "type": "array",
           "maxItems": 32,
           "items": {

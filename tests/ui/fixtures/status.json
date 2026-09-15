@@ -298,7 +298,7 @@
     "id": "reconcile:reconcile:/tasks",
     "waiting_on_human": true,
     "kind": "reconcile",
-    "headline": "needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve gate 3. (No agent surface is installed \u2014 run `rein install <agent>`, then open a new session so the /-commands exist in your agent.)",
+    "headline": "needs-revision tasks exist; reconcile them (keep / modify / obsolete / new) and re-approve the mandate. (No agent surface is installed \u2014 run `rein install <agent>`, then open a new session so the /-commands exist in your agent.)",
     "action": "/tasks",
     "blocking": 2,
     "open": 5
@@ -317,7 +317,7 @@
       "severity": "blocking",
       "kind": "gate_blocker",
       "subject": "build",
-      "headline": "no machine review has been generated \u2014 run `rein review generate`. Gate 4 approves a grounded review, not a green test run.",
+      "headline": "no machine review has been generated \u2014 run `rein review generate`. Acceptance approves a grounded review, not a green test run.",
       "action": "rein approve build --check"
     },
     {

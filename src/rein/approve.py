@@ -140,7 +140,7 @@ def _review_blockers(
     A readiness check that passes because a stage has not been implemented yet is worse than
     no check at all, so an absent review is a blocker rather than a shrug.
 
-    The mechanical half is `review_policy.blocking_reasons` — the module that owns the gate-④
+    The mechanical half is `review_policy.blocking_reasons` — the module that owns the acceptance
     decision — rather than a second copy of the same rules here. Two copies had already drifted:
     this one never looked at `machine.gaps`, so a comparator could mark an actual-coverage gap
     blocking, have it written to `review.yaml`, and watch the gate open anyway.

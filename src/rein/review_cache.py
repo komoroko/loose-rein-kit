@@ -1,4 +1,4 @@
-"""Per-stage reuse for the gate-④ pipeline: what a stage answered, keyed by what it was asked.
+"""Per-stage reuse for the acceptance pipeline: what a stage answered, keyed by what it was asked.
 
 The pipeline used to reuse at the wrong granularity. One `subject` digest — the tree, the plan,
 the config, the sandbox, the coverage manifest and the task facts, all in one key — decided
@@ -16,7 +16,7 @@ and the bytes and nothing else, which conflated four different identities — th
 stage's key), the answer, the launch that produced it, and the human judgement built on top. The
 cost of that conflation was not bookkeeping: `review._independence_record` reads the model id off
 the launch's own usage report, so a replayed stage contributed none, `binding.independence` lost
-its `model`, and `review_policy.independence_observed` — the gate-④ check that a provider did not
+its `model`, and `review_policy.independence_observed` — the acceptance check that a provider did not
 silently serve one model to both halves of a critical review — went quiet. A cache that disables a
 safety check when it hits is not a cache, it is a hole. So the launch's `usage.Usage` travels with
 the answer and is replayed with it, into a ledger kept separate from what this run actually paid.

@@ -1,4 +1,4 @@
-// Deliverable review (gates ①②③⑤): a document list on the left, rendered markdown on the right.
+// Deliverable review (the mandate): a document list on the left, rendered markdown on the right.
 //
 // The document bodies arrive pre-rendered from the server (mdlite, escape-first). They are the only
 // server HTML this page inserts as HTML, and they are marked as such at both of the two sites that

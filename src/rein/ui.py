@@ -245,7 +245,7 @@ _WATCHED = (
     ".rein/config.yaml",
     ".rein/events.ndjson",
     ".rein/rein.lock",
-    # A gate-④ generation writes here as each stage lands (`run_progress`), and nothing else in
+    # A acceptance generation writes here as each stage lands (`run_progress`), and nothing else in
     # this list moves while it runs — a composed review measured at thirteen hours would otherwise
     # be a dashboard saying "no machine review has been generated" for all of it. It is the one
     # path here that is not SSOT: it is a live figure, not a document, which is why it lives under

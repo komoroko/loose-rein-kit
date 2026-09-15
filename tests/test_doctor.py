@@ -355,7 +355,7 @@ def test_a_matching_freeze_passes() -> None:
 
 def test_a_rebuilt_image_is_reported_and_never_failed() -> None:
     """The pin is deliberately outside `frozen_digest`, so a rebuilt sandbox image no longer costs
-    a rollback of a plan nothing changed. What it must not do is pass in silence: gate ④ approves
+    a rollback of a plan nothing changed. What it must not do is pass in silence: acceptance approves
     over evidence produced here, and the freeze recorded a different environment."""
     plan_doc, config_doc = make_plan(), make_config(profiles=SANDBOXED_PROFILES)
     repinned = make_config(profiles=_repinned(SANDBOXED_PROFILES))
@@ -377,7 +377,7 @@ def test_opening_a_sandbox_still_breaks_the_freeze() -> None:
 
 
 def test_a_config_edited_after_the_freeze_is_a_fail() -> None:
-    """The reported case: pinning a sandbox digest and adding a `guard.paths` entry after gate ③.
+    """The reported case: pinning a sandbox digest and adding a `guard.paths` entry after the mandate.
     `rein doctor` kept printing `0 FAIL` against a config nobody had approved."""
     plan_doc, config_doc = make_plan(), make_config()
     state = _frozen(plan_doc, config_doc)
@@ -469,7 +469,7 @@ def test_check_sandbox_warns_when_the_pinned_image_is_not_built_locally(monkeypa
 
 def test_check_sandbox_fails_when_the_local_image_does_not_match_the_pin(monkeypatch: pytest.MonkeyPatch) -> None:
     """A local image exists under a different digest than the pin — the config drifted from what
-    gate 3 froze (or was rebuilt without re-pinning), and doctor must not need a human to already
+    the mandate froze (or was rebuilt without re-pinning), and doctor must not need a human to already
     suspect that before it says so."""
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker" if name == "docker" else None)
     installed = "sha256:" + "b" * 64
@@ -1014,7 +1014,7 @@ def test_a_retryable_stop_still_within_the_window_stays_informational(tmp_path: 
 
 
 def review_aborted_chain(*, hours_ago: float = 0.0, then: tuple[str, ...] = ()) -> list[models.Event]:
-    """A gate-④ generation that stopped for a machine reason, optionally backdated."""
+    """A acceptance generation that stopped for a machine reason, optionally backdated."""
     from dataclasses import replace
     from datetime import datetime, timedelta, timezone
 
@@ -1292,7 +1292,7 @@ def test_a_tracked_runtime_artifact_warns_that_the_ignore_rule_is_inert(tmp_path
 def test_a_schema_invalid_document_is_reported_with_the_command_that_repairs_it(tmp_path: Path) -> None:
     """`build.md` promises exactly that, and these four were reported with none — an upgrade that
     renamed `config.yaml` keys left a repo with FAILs, no command, and a repair (`rein revise --to
-    tasks`) that is not guessable, because the keys are frozen at gate ③."""
+    tasks`) that is not guessable, because the keys are frozen at the mandate."""
     (tmp_path / ".rein").mkdir()
     (tmp_path / ".rein" / "config.yaml").write_text("not_a_known_key: 1\n", encoding="utf-8")
     findings, _ = doctor.check_documents(repo_mod.Repo(tmp_path))

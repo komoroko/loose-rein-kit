@@ -74,10 +74,10 @@ export function paths(list) {
 
 export const short = (sha) => (sha ? String(sha).slice(0, 12) : "");
 
-// What a gate-④ generation is doing right now (`run_progress`, on `status.review_run`). It reaches
+// What an acceptance generation is doing right now (`run_progress`, on `status.review_run`). It reaches
 // the page through the SSE `status` push and nothing else: the gate pane fetches
 // `/api/review/session` once per gate and never polls, so a progress line hung off that payload
-// would never move. Both places that draw it — Now and the gate ④ reading room, which otherwise
+// would never move. Both places that draw it — Now and the acceptance reading room, which otherwise
 // says "no machine review has been generated" for however long a run takes — already have `status`
 // in hand, so this needs no new endpoint, fetch, or timer.
 //

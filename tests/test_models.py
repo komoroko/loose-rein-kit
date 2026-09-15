@@ -498,7 +498,7 @@ def test_the_human_half_no_longer_accepts_a_challenge_answer() -> None:
 
 # --- config: the two digests ----------------------------------------------------
 #
-# Gate ③ freezes a config.yaml with its image pins taken out, and records the whole sandbox
+# The mandate freezes a config.yaml with its image pins taken out, and records the whole sandbox
 # picture beside it. The split is what lets a task that legitimately adds a dependency have its
 # sandbox rebuilt without re-approving a plan nothing changed — and the second digest is what stops
 # that permission from being a hole nobody can see through.
@@ -529,7 +529,7 @@ def test_a_rebuilt_image_does_not_move_the_frozen_digest() -> None:
 
 def test_opening_a_sandbox_moves_the_frozen_digest() -> None:
     """Only the pin moved out. `kind` and `network_profile` widen what may happen, and widening is
-    the judgement a human made at gate ③."""
+    the judgement a human made at the mandate."""
     pinned = _config(impl=_PINNED, rev=_PINNED)
     for change in ({"kind": "host"}, {"network_profile": "egress"}, {"mount_repo": "read_write"}):
         opened = _config(impl={**_PINNED, **change}, rev=_PINNED)
@@ -550,7 +550,7 @@ def test_switching_an_agent_does_not_move_the_frozen_digest() -> None:
     """Which CLI and model a role launches is a running choice, not a term of the approved plan.
 
     It used to be inside the freeze, so `rein agent copilot` mid-cycle made the next `rein guard`
-    say "config.yaml has changed since gate 3 froze it — roll back with `rein revise --to tasks`":
+    say "config.yaml has changed since the mandate froze it — roll back with `rein revise --to tasks`":
     a rewound approval for a plan nobody had touched.
     """
     before = _config(impl=_PINNED, rev=_PINNED)
@@ -625,7 +625,7 @@ def test_event_round_trips_through_a_mapping() -> None:
 
 
 def test_a_task_reads_back_the_operator_surface_the_plan_froze() -> None:
-    """The Expected side of gate ④'s "what does this now require of somebody" comparison."""
+    """The Expected side of acceptance's "what does this now require of somebody" comparison."""
     plan = models.Plan(
         make_plan(
             tasks=[

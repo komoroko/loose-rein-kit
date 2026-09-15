@@ -1,4 +1,4 @@
-"""review_api: gate → fixed deliverable set, split-out self-assessment, and the gate-④ diff.
+"""review_api: gate → fixed deliverable set, split-out self-assessment, and the acceptance diff.
 
 The reach-safety class matters most: the module decides *server-side* which files the review pane
 may read, so these tests pin the template exclusion, the containment check on symlinks, the size
@@ -371,7 +371,7 @@ class TestAsBuilt:
     """The as-built view: one declared surface as it *ends up*, read at the reviewed commit.
 
     Two properties, and the second is the security one. It must read the reviewed commit rather
-    than the working tree, or gate ④ shows a file from a tree its findings are not about. And it
+    than the working tree, or acceptance shows a file from a tree its findings are not about. And it
     must serve only what the stored brief published — the route reads blobs out of the repository,
     so what it may read has to come from the review, never from the request.
     """

@@ -81,7 +81,7 @@ def implementer_prompt(
         else ""
     )
     # Name the claims this task is answerable for. The implementer must know what it is being
-    # measured against, and the gate-③ frozen quality_gate is the judgement boundary — not a
+    # measured against, and the mandate's frozen quality_gate is the judgement boundary — not a
     # command the implementer chose.
     task_test_ref = (
         f"This task is answerable for: {', '.join(task.claim_ids)} (see .rein/plan.yaml).\n" if task.claim_ids else ""

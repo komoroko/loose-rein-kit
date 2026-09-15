@@ -71,7 +71,7 @@ def test_starting_over_is_a_separate_decision_and_is_recorded_as_one(tmp_path: P
 
 
 def test_a_task_cannot_be_declared_done_by_hand(tmp_path: Path) -> None:
-    """`done` means it passed the quality gate and landed a commit — the evidence gate ④ reads."""
+    """`done` means it passed the quality gate and landed a commit — the evidence acceptance reads."""
     repo = repo_with_a_blocked_task(tmp_path)
     with pytest.raises(ValueError, match="not 'done'"):
         task_cmd.reset(repo, "T-001", status="done", reason="looks fine to me")

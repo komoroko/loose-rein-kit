@@ -1073,7 +1073,7 @@ def test_the_ssot_is_not_in_the_diff_the_reviewers_read(review_repo: Path) -> No
     `change_digest` has always left `.rein/` out — as do the tree fingerprint and every task commit
     — while `_diff` handed the whole of it over as if a schema payload and an event log were code
     somebody wrote. A field report measured that at 27% of a normal cycle's diff, and it pushed the
-    blind extractor's request past the model's hard context ceiling: a gate ④ that could not be
+    blind extractor's request past the model's hard context ceiling: an acceptance that could not be
     produced at all.
     """
     seed = _git(review_repo, "rev-parse", "HEAD")
@@ -2011,7 +2011,7 @@ def test_regenerating_an_unmoved_subject_appends_no_artefact_event(review_repo: 
 
 
 def test_regenerating_an_unmoved_subject_keeps_the_human_answers(review_repo: Path) -> None:
-    """The expensive half of the waste: a reviewer part-way through gate ④ who ran the command
+    """The expensive half of the waste: a reviewer part-way through acceptance who ran the command
     again lost everything they had recorded, about a change that had not moved."""
     repo = repo_mod.Repo(review_repo)
     review.generate(repo, _reviewers(_fake_reviewer))
@@ -2229,7 +2229,7 @@ def test_a_moved_head_is_re_read(review_repo: Path) -> None:
 @pytest.mark.integration
 def test_a_review_that_could_not_be_produced_says_so_in_the_audit_log(review_repo: Path) -> None:
     """`events.ATTENTION_EVENTS` counts `actual_extraction_failed` and `review_failed` as things
-    needing a human decision, and nothing anywhere emitted either — so every failure of gate ④'s
+    needing a human decision, and nothing anywhere emitted either — so every failure of acceptance's
     own machinery left the log reporting "needing a human decision: 0".
 
     The extractor is the stage failed here because it is the one with an event of its own: its
@@ -2421,7 +2421,7 @@ def test_a_deletion_is_not_a_coverage_gap_and_not_a_read_file() -> None:
 
     `fold_bodies` withholds a deleted body, so the manifest may not call it analyzed; and a
     deletion is not unread either, since the path states the change in full. Recording it as
-    unsupported shut gate ④ on a cycle whose only unreadable files had been *removed* — a block
+    unsupported shut acceptance on a cycle whose only unreadable files had been *removed* — a block
     whose stated remedy ("split the unreadable part out of this scope") does not exist for a
     deletion.
     """
@@ -2742,8 +2742,8 @@ def test_splitting_a_diff_with_no_tests_costs_nothing() -> None:
 
 
 def test_the_outlook_says_what_gate_4_would_be_asked_to_read(review_repo: Path) -> None:
-    """Both of gate ④'s refusals are derivable from git at any moment, and both were first heard
-    at gate ④ — where "split the scope" is not a move that exists, because everything is merged."""
+    """Both of acceptance's refusals are derivable from git at any moment, and both were first heard
+    at acceptance — where "split the scope" is not a move that exists, because everything is merged."""
     (review_repo / "src.py").write_text("x = 1\n", encoding="utf-8")
     (review_repo / "smoke.wav").write_bytes(b"RIFF\x00\x01\x02\x03binary")
     _git(review_repo, "add", "-A")
@@ -2798,8 +2798,8 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
 
 def test_an_over_budget_reading_names_the_task_whose_scope_is_too_broad(review_repo: Path) -> None:
     """`max_diff_bytes` bounds one launch, so what is over it is a reading — and the reading has a
-    name. "Split the scope" pointed at the cycle, which at gate ④ is merged; the task's scope is
-    still a thing a human can narrow at gate ③."""
+    name. "Split the scope" pointed at the cycle, which at acceptance is merged; the task's scope is
+    still a thing a human can narrow at the mandate."""
     outlook = review.ChangeOutlook(
         diff_bytes=600_000,
         total_bytes=2_141_194,
@@ -2837,7 +2837,7 @@ def test_a_big_cycle_read_in_slices_is_not_over_budget(review_repo: Path) -> Non
 
 
 def _composed_repo(root: Path) -> str:
-    """A repo whose plan scopes two tasks, so gate ④ composes. Returns the base commit."""
+    """A repo whose plan scopes two tasks, so acceptance composes. Returns the base commit."""
     seed_repo(
         root,
         state=make_state(project="rv"),

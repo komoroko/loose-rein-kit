@@ -1,7 +1,7 @@
 """What each agent CLI this release can launch is able to do, as data rather than as branches.
 
 Every launch in the system goes through one of these records: the build loop launches
-implementers, fixers and quality-gate agent steps; the review pipeline launches the three gate-④
+implementers, fixers and quality-gate agent steps; the review pipeline launches the three acceptance
 reviewer stages. They ask the same three questions — how do I start this CLI, may it write, and
 can it tell me what the launch cost — so the answers live here rather than inside either caller.
 
@@ -12,7 +12,7 @@ dodge the import cycle that reach created. The cycle was never the problem; the 
 One rule is enforced here rather than at each launch site: a role whose adapter this release does
 not know, or whose configured `model` this release cannot pass to that CLI, is **refused**
 (`launch_refusal`, `launch_argv`). Launching the CLI's default under another model's name would
-declare a separation nothing performs, and the gate-④ independence check is derived from exactly
+declare a separation nothing performs, and the acceptance independence check is derived from exactly
 that name.
 """
 
@@ -40,7 +40,7 @@ SECURITY = "security"
 #: What a launch is allowed to do. Three levels, because the loop makes exactly three kinds of
 #: launch and used to be able to name two of them:
 #:
-#: * ``READ`` — the gate-④ stages. They are handed their request (on stdin or as the prompt
+#: * ``READ`` — the acceptance stages. They are handed their request (on stdin or as the prompt
 #:   argument, per `prompt_on_stdin`), answer on stdout, and must change nothing. Not the same as
 #:   "no flags": a CLI whose tools are all deny-by-default without a grant cannot even open the
 #:   file it was sent to read.
@@ -122,7 +122,7 @@ class Adapter:
     envelope: Callable[[str], tuple[str, usage_mod.Usage]] | None = None
     #: How to tell this CLI which model to run. Empty for one whose flag this release has not
     #: verified — and an unapplied model is not a small thing here: `agents.<role>.model` is what
-    #: the gate-④ independence check is derived from, so a config naming a model the launcher
+    #: the acceptance independence check is derived from, so a config naming a model the launcher
     #: cannot pass would declare a separation nothing performs. `launch_argv` refuses that
     #: combination rather than launching the CLI's default under another model's name.
     model_flags: tuple[str, ...] = ()
@@ -181,7 +181,7 @@ class Adapter:
     #: the same rule `model_flags` follows, and it costs nothing to leave empty: the answer is
     #: parsed and validated either way.
     #:
-    #: What it buys is that the failure stops being possible. A gate-④ stage's whole contract is
+    #: What it buys is that the failure stops being possible. A acceptance stage's whole contract is
     #: "one JSON object and no other text", enforced only by the prompt saying so — and a field run
     #: lost several launches to a comparator returning correct JSON inside a ```json frame, again
     #: and again, because nothing but a sentence had ever asked it not to. `review_policy` now
@@ -348,7 +348,7 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         output_schema_flags=("--output-schema", "{schema}"),
         output_schema_is_path=True,
         # The prompt is an optional positional, and upstream states that instructions are read from
-        # stdin when it is absent (or given as `-`). That is what lets a gate-④ reading past the
+        # stdin when it is absent (or given as `-`). That is what lets an acceptance reading past the
         # 128 KiB one argv element may carry reach this CLI at all.
         prompt_on_stdin=True,
     ),
@@ -500,7 +500,7 @@ def launch_refusal(config: models.Config | None, role: str) -> str:
     if model and not record.model_flags:
         return (
             f"agents.{role}.model is {model!r} and this release cannot tell {adapter!r} which model "
-            "to run, so the launch would take the CLI's default under that name. The gate-④ "
+            "to run, so the launch would take the CLI's default under that name. The acceptance "
             "independence check is derived from the model, so that is a separation nothing performs "
             "— drop the model, or point the role at an adapter whose model flag is known."
         )

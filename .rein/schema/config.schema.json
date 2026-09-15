@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/komoroko/loose-rein-kit/schema/config.schema.json",
   "title": "Loose Rein config.yaml (rein-grounded-v1)",
-  "description": "Execution knobs, frozen wholesale at gate 3. What this file may NOT contain matters as much as what it may: no principal, no provider executable path, no credential, no PATH lookup — a pull request cannot widen its own permissions by editing a file it also ships. Unknown keys are rejected everywhere: a typo that was inert would silently mean 'the knob you thought you set is not set'.",
+  "description": "Execution knobs, frozen wholesale when the mandate is approved. What this file may NOT contain matters as much as what it may: no principal, no provider executable path, no credential, no PATH lookup — a pull request cannot widen its own permissions by editing a file it also ships. Unknown keys are rejected everywhere: a typo that was inert would silently mean 'the knob you thought you set is not set'.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -161,7 +161,7 @@
             "type": "boolean"
           },
           "paths": {
-            "description": "Glob patterns (fnmatch-style: `*` matches any run of characters, including `/`) restricting this step to tasks whose changed files match at least one. Absent or empty: every task runs it — the default, and the only knob here, frozen at gate 3 like the rest of config.yaml, never something a task's own ticket sets.",
+            "description": "Glob patterns (fnmatch-style: `*` matches any run of characters, including `/`) restricting this step to tasks whose changed files match at least one. Absent or empty: every task runs it — the default, and the only knob here, frozen with the mandate like the rest of config.yaml, never something a task's own ticket sets.",
             "type": "array",
             "maxItems": 32,
             "items": {
@@ -169,7 +169,7 @@
             }
           },
           "stage": {
-            "description": "Where in the run this step belongs. `task` runs it per task only; `integration` runs it only on the merged work branch; `both` (the default) does what every step has always done. This is what lets a fast focused suite guard each task while the whole suite runs once over the join — the same total confidence, an order of magnitude less of it re-established per attempt. Frozen at gate 3, so it is an operator's decision about the DoD's shape and never a task's opt-out: every step still runs, the question is only how often.",
+            "description": "Where in the run this step belongs. `task` runs it per task only; `integration` runs it only on the merged work branch; `both` (the default) does what every step has always done. This is what lets a fast focused suite guard each task while the whole suite runs once over the join — the same total confidence, an order of magnitude less of it re-established per attempt. Frozen with the mandate, so it is an operator's decision about the DoD's shape and never a task's opt-out: every step still runs, the question is only how often.",
             "enum": [
               "task",
               "integration",
@@ -222,12 +222,12 @@
       }
     },
     "security": {
-      "description": "The security answers that are not a function of the tree. Everything else gate 5 carries from gate 4's review, bound to the reviewed HEAD; a dependency audit is the exception, because the same commit audited last month and today can differ — the vulnerability database moved while the code did not. That also means it expires without anything changing in the repository, which is what `max_age_days` is for.",
+      "description": "The security answers that are not a function of the tree. Everything else acceptance carries from the grounded review, bound to the reviewed HEAD; a dependency audit is the exception, because the same commit audited last month and today can differ — the vulnerability database moved while the code did not. That also means it expires without anything changing in the repository, which is what `max_age_days` is for.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "dependency_audit": {
-          "description": "How to audit this project's dependencies. An argv array, never a shell string, run in an executor profile like any other command that touches the repository. Absent means gate 5 has no dependency answer and says so.",
+          "description": "How to audit this project's dependencies. An argv array, never a shell string, run in an executor profile like any other command that touches the repository. Absent means acceptance has no dependency answer and says so.",
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -262,7 +262,7 @@
       "additionalProperties": false,
       "properties": {
         "composition": {
-          "description": "How gate 4 takes its reading. `auto` composes it from the plan's task scopes — one reading per task plus the seam between them — so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
+          "description": "How acceptance takes its reading. `auto` composes it from the plan's task scopes — one reading per task plus the seam between them — so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
           "enum": [
             "auto",
             "whole"
@@ -288,7 +288,7 @@
               "maximum": 100
             },
             "max_diff_bytes": {
-              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one task's scope, so a large cycle passes and a task too broad to read in one launch is refused by name, at gate 3, while splitting it is still possible.",
+              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one task's scope, so a large cycle passes and a task too broad to read in one launch is refused by name, at the mandate, while splitting it is still possible.",
               "type": "integer",
               "minimum": 4096,
               "maximum": 8388608
@@ -296,7 +296,7 @@
           }
         },
         "repair_rounds": {
-          "description": "How many times gate 4 may repair its own blocking findings and read the change again before it stops and asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",
+          "description": "How many times acceptance may repair its own blocking findings and read the change again before it stops and asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",
           "type": "integer",
           "minimum": 0,
           "maximum": 5
@@ -398,7 +398,7 @@
           "pattern": "^[a-z0-9][a-z0-9_-]*$"
         },
         "dockerfile": {
-          "description": "Repository-relative path to a custom Containerfile (e.g. .rein/oci/custom/Containerfile), built locally by `rein oci build --profile <name>` instead of a packaged one. Already a frozen path once gate 3 freezes config.yaml. Mutually exclusive with `containerfile`; the pinned `image` digest above stays the binding fact.",
+          "description": "Repository-relative path to a custom Containerfile (e.g. .rein/oci/custom/Containerfile), built locally by `rein oci build --profile <name>` instead of a packaged one. Already a frozen path once the mandate freezes config.yaml. Mutually exclusive with `containerfile`; the pinned `image` digest above stays the binding fact.",
           "$ref": "#/$defs/repoPath"
         },
         "mount_repo": {

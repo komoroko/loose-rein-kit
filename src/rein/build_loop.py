@@ -105,7 +105,7 @@ from rein import usage as usage_mod
 
 logger = logging.getLogger(__name__)
 
-#: Where a gate-④ repair stands when this cycle ships as a stack: a throwaway worktree on the slice
+#: Where an acceptance repair stands when this cycle ships as a stack: a throwaway worktree on the slice
 #: branch that introduced the code. Its own name rather than `pr_stack.RESTACK_WORKTREE`, because
 #: the propagation that follows creates that one and git refuses the same path twice.
 _GATE4_WORKTREE = "_gate4"
@@ -793,7 +793,7 @@ class Orchestrator:
         # established, outside the working tree. Off in a dry run (nothing is established) and
         # off when the operator says so. A miss only ever costs a re-run.
         self.ledger = evidence.Ledger.for_repo(self.repo, enabled=not dry_run and evidence.cache_enabled_by_env())
-        #: Set once a gate-④ warm-up could not be taken. Retrying it per task would spend a session
+        #: Set once an acceptance warm-up could not be taken. Retrying it per task would spend a session
         #: limit on an optimization, and the gate takes the reading either way (`_warm_reading`).
         self._warming_off = False
         # What each task's gate steps were established green against, keyed by task id. Written
@@ -1997,7 +1997,7 @@ class Orchestrator:
             OSError,
         ) as exc:
             self._warming_off = True
-            print(f"    [review] {task.id}: the gate-④ reading was not taken here ({exc}); the gate will take it")
+            print(f"    [review] {task.id}: the acceptance reading was not taken here ({exc}); the gate will take it")
             return None
 
     def _repair_warm_findings(self, task: dag.Task, readout: review_reading.ReadOut | None) -> bool:
@@ -2752,7 +2752,7 @@ class Orchestrator:
             return common.EXIT_CANNOT_PROCEED
         if self.state.plan_status != "frozen":
             logger.error(
-                f"the plan is '{self.state.plan_status}', not 'frozen'. Gate 3's approval freezes it; "
+                f"the plan is '{self.state.plan_status}', not 'frozen'. The mandate's approval freezes it; "
                 "building against a draft would implement a plan nobody signed for."
             )
             return common.EXIT_CANNOT_PROCEED
@@ -3453,7 +3453,7 @@ class Orchestrator:
         **A reading that fails does not un-finish the build.** The tasks are done, their evidence
         is recorded, and the review is a separate question asked afterwards — so anything but a
         capacity stop is reported and handed over exactly as it was before this loop existed. The
-        gate stays shut either way: `approve.readiness` refuses a acceptance with no generated review,
+        gate stays shut either way: `approve.readiness` refuses an acceptance with no generated review,
         so nothing here can turn a failed reading into an approval.
 
         A capacity stop is the one thing worth waiting for, and it is `main`'s to wait on:
@@ -3876,11 +3876,11 @@ def baseline_main(argv: list[str] | None = None) -> int:
         return 0
     names = ", ".join(row["name"] for row in red)
     if record["frozen"]:
-        print(f"baseline: {names} already red, frozen as known. Gate 3 may be approved over this.")
+        print(f"baseline: {names} already red, frozen as known. The mandate may be approved over this.")
         return 0
     print(
         f"baseline: {names} already red on the work branch.\n"
-        "Gate 3 stays shut until this is a decision rather than a discovery: fix it, or re-run "
+        "The mandate stays shut until this is a decision rather than a discovery: fix it, or re-run "
         "with `--freeze` to approve it as known — a task that then fails one of these is stopped "
         "instead of being sent back to an implementer whose scope does not contain the break."
     )

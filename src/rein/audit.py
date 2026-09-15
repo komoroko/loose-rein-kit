@@ -16,7 +16,7 @@ promise: `/verify` could be completed, acceptance approved, and the release ship
 having been "done" in a chat window.
 
 **Its findings are not this loop's to repair, and that is the routing rule rather than a shortcut.**
-A dependency bump changes the closure the gate-③ pinned sandbox image was built from — so it is a
+A dependency bump changes the closure the mandate's pinned sandbox image was built from — so it is a
 change to the frozen environment, which `repair.route` classifies as a *plan* change and puts in a
 human's hands. What this does is make the answer exist, bind it, and expire it.
 """

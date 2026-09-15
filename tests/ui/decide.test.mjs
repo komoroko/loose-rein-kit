@@ -150,7 +150,7 @@ test("a half-typed reason survives the server speaking", async () => {
 });
 
 test("the console names the agent behind each role and switches one without a confirm", async () => {
-  // Pointing a role at another CLI is not a gate ③ decision — `agents` sits outside the config
+  // Pointing a role at another CLI is not a mandate decision — `agents` sits outside the config
   // digest the freeze covers — so it takes no roll-back dialog, unlike the two commands above it.
   const posts = [];
   const app = await boot({
