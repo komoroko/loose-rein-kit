@@ -320,8 +320,8 @@ def test_the_container_runs_as_the_host_user_not_a_fixed_uid(monkeypatch: pytest
     laptop and red on a CI runner at 1001 — so this test says the host, rather than repeating a
     number that happens to match on the machine it runs on.
     """
-    monkeypatch.setattr(executors.os, "getuid", lambda: 4242)
-    monkeypatch.setattr(executors.os, "getgid", lambda: 4343)
+    monkeypatch.setattr(os, "getuid", lambda: 4242)
+    monkeypatch.setattr(os, "getgid", lambda: 4343)
     for profile in (_oci_profile(), _agent_profile()):
         joined = " ".join(executors.OciExecutor(runtime="docker")._argv(_spec(profile)))
         assert "--user 4242:4343" in joined
