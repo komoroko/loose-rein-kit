@@ -67,7 +67,7 @@ acceptance の brief が「ホストで動いた」と述べる。**黙って ho
 `tests/test_control_plane.py::test_a_container_can_reach_the_control_plane_over_the_bound_socket`
 (`integration` マーカー、docker が無ければ skip)が、実際のコンテナから実際の制御プレーンへ
 実際のプロトコルで `knowledge_gap.create` を投げ、ホスト側の `events.ndjson` に着地することを
-確認する。`--user 1000:1000` / `--cap-drop ALL` / `--read-only` / `--network none` を全部
+確認する。`--user <ホストの uid:gid>` / `--cap-drop ALL` / `--read-only` / `--network none` を全部
 掛けた状態で bind した unix socket が通るかは argv からは読めないので、ここだけは実機で確かめる。
 
 **未検証**: 実際のエージェント CLI を入れたイメージのビルドと、その中からのモデル API 呼び出し。

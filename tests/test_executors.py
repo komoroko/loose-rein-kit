@@ -7,6 +7,7 @@ test that actually builds an image is behind the `integration` marker.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ def test_argv_carries_every_hardening_flag() -> None:
     assert "--security-opt no-new-privileges" in joined
     assert "--cap-drop ALL" in joined
     assert "--read-only" in joined
-    assert "--user 1000:1000" in joined
+    assert f"--user {os.getuid()}:{os.getgid()}" in joined
     assert "--pids-limit" in joined
     assert "--memory" in joined
     assert "--cpus" in joined
@@ -299,10 +300,32 @@ def test_an_agent_sandbox_is_given_the_bridge_and_every_other_hardening_flag() -
     joined = " ".join(executors.OciExecutor(runtime="docker")._argv(_spec(_agent_profile())))
     assert "--network bridge" in joined
     assert "--network none" not in joined
-    for flag in ("--security-opt no-new-privileges", "--cap-drop ALL", "--user 1000:1000", "HOME=/tmp"):
+    for flag in (
+        "--security-opt no-new-privileges",
+        "--cap-drop ALL",
+        f"--user {os.getuid()}:{os.getgid()}",
+        "HOME=/tmp",
+    ):
         assert flag in joined
     for forbidden in ("/var/run/docker.sock", ".ssh", ".aws", "/root"):
         assert forbidden not in joined
+
+
+def test_the_container_runs_as_the_host_user_not_a_fixed_uid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The uid is not a hardening knob — it is what makes the box reachable.
+
+    `control_plane` binds its socket at 0600 and the worktree is the host user's, so a container
+    on any other uid gets EACCES on `rein report`: the leaf works, then cannot say what it did.
+    The constant this replaced was `1000:1000`, which is why the suite was green on a developer
+    laptop and red on a CI runner at 1001 — so this test says the host, rather than repeating a
+    number that happens to match on the machine it runs on.
+    """
+    monkeypatch.setattr(executors.os, "getuid", lambda: 4242)
+    monkeypatch.setattr(executors.os, "getgid", lambda: 4343)
+    for profile in (_oci_profile(), _agent_profile()):
+        joined = " ".join(executors.OciExecutor(runtime="docker")._argv(_spec(profile)))
+        assert "--user 4242:4343" in joined
+        assert "1000:1000" not in joined
 
 
 def test_an_agent_sandbox_without_egress_is_refused() -> None:

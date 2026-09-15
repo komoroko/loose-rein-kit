@@ -60,6 +60,7 @@ about that image this package cannot choose for you.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -143,6 +144,29 @@ class HostExecutor(Executor):
         return ExecutionResult(exit_code=rc, output=out, image_digest="host", timed_out=rc == common.RC_TIMEOUT)
 
 
+def _container_user() -> str:
+    """The uid:gid every sandboxed container runs as — the host user's own.
+
+    Not a constant, and the constant it replaced (`1000:1000`) was a guess that the operator is
+    the first user on a single-seat Linux box. Where that guess was wrong the container ran as a uid
+    that owns nothing it was handed: the worktree is the host user's, and so is the control socket,
+    which `control_plane` binds at 0600 because a socket any local account can write to is not a
+    control plane. A mismatched uid therefore gets EACCES on `rein report` — the leaf does its work
+    and then cannot say what it did, which is the failure shape hardest to read backwards. A CI
+    runner at uid 1001 is the ordinary case, not an exotic one.
+
+    The uid was never the boundary and this does not weaken one: what the box is worth is
+    `--cap-drop ALL`, `no-new-privileges`, `--read-only`, the network decided by `kind`, and the
+    ephemeral HOME. What the uid decides is whether the container can reach the files and sockets
+    the host user already owns, and the only answer that is true on every host is "the same user".
+    An operator running as root gets a root container — their own privilege, not an escalation.
+
+    Read per launch rather than at import so a test can say what the host is; the syscall is free
+    next to the `docker run` it goes into.
+    """
+    return f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "1000:1000"
+
+
 #: What a container the kernel killed exits with (128 + SIGKILL). The cgroup OOM killer is the
 #: overwhelmingly common cause under `--memory`, and it is the one this names.
 _RC_SIGKILL = 137
@@ -213,8 +237,9 @@ class OciExecutor(Executor):
         """The full `docker run` argv.
 
         **What a profile may not weaken**: the network (decided by `kind` in `run`, never here),
-        `no-new-privileges`, `--cap-drop ALL`, the unprivileged uid, and the ephemeral HOME that
-        keeps the operator's `~/.ssh` and `~/.aws` out. A profile cannot spell any of them
+        `no-new-privileges`, `--cap-drop ALL`, the host user's uid (`_container_user`, which is what
+        lets the container reach the worktree and the control socket at all), and the ephemeral
+        HOME that keeps the operator's `~/.ssh` and `~/.aws` out. A profile cannot spell any of them
         differently, because a boundary with a knob beside it is a default, not a boundary.
 
         **What it may size**: `read_only_root`, `writable_tmp_mb`, `pids_limit`, `memory_mb`,
@@ -241,7 +266,7 @@ class OciExecutor(Executor):
             "--cap-drop",
             "ALL",
             "--user",
-            "1000:1000",
+            _container_user(),
             "--workdir",
             spec.workdir,
         ]
@@ -265,10 +290,11 @@ class OciExecutor(Executor):
         argv += ["--cpus", str(common.as_int(profile.raw.get("cpu_count"), 2))]
         # An empty, ephemeral HOME: the container cannot read the host's ~/.ssh, ~/.aws, etc.
         argv += ["--env", "HOME=/tmp"]
-        # …which also means git has no config to find, and the repository it is handed is owned by
-        # whoever owns it on the host rather than by the container's fixed uid. Without this, git
-        # refuses the tree as "dubious ownership" and every gate step that shells out to it fails
-        # for a reason that has nothing to do with the code under test. Passed as config
+        # …which also means git has no config to find, and nothing guarantees the mounted worktree
+        # reads back as owned by the container's uid: `_CONTAINER_USER` makes them agree on Linux,
+        # but a bind mount through a Docker Desktop VM reports whatever that VM decides. Without
+        # this, git refuses the tree as "dubious ownership" and every gate step that shells out to
+        # it fails for a reason that has nothing to do with the code under test. Passed as config
         # environment (not a file) so it cannot outlive the run or reach the host's git.
         argv += ["--env", "GIT_CONFIG_COUNT=1"]
         argv += ["--env", "GIT_CONFIG_KEY_0=safe.directory"]

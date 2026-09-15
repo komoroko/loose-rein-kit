@@ -294,6 +294,14 @@ def main(argv: list[str] | None = None) -> int:
     # version answers the question "what is installed here", which is the first thing anyone asks
     # of a lock the tool refuses to read. Hard-stopping on it would report a broken install.
     #
+    # policy-check is exempt for a reason none of the others share: it is *defined* to be run by a
+    # release older than the tree it reads. CI installs it from the trusted base commit and hands
+    # it two SHAs; everything it judges it reads with `git show <sha>:<path>`, and it never opens
+    # `.rein/rein.lock` at all. Gating it on the format of a lock the head wrote is the head
+    # deciding whether the base-side verifier may run — which it did: the first `lock.FORMAT` bump
+    # made the verifier refuse to start on its own pull request, and every later one would have.
+    # The working tree is not this verb's subject, so nothing in it may stop it.
+    #
     # `sync --force` is the one verb that repairs a lock this check refuses: it overwrites every
     # materialized file from the packaged payload and needs nothing the old lock recorded
     # (`install._lock_or_new`). Stopping it here is what left a repository that crossed a
@@ -301,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
     # that says "discard what is recorded", not the verb.
     if verb == "sync" and "--force" in rest:
         return _resolve(VERBS[verb].spec)(rest)
-    if verb not in ("guard", "doctor", "version"):
+    if verb not in ("guard", "doctor", "version", "policy-check"):
         rc = _lock_check(repo_flag)
         if rc != 0:
             return rc

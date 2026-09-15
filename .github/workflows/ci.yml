@@ -146,6 +146,24 @@ jobs:
         with:
           fetch-depth: 0 # policy-check reads both the base and head trees
 
+      # The last piece of head-written state in this job's environment: its working directory.
+      #
+      # `policy-check` reads nothing from the checkout — every tree it judges it reads with
+      # `git show <sha>:<path>` off the two SHAs the event gave it, which is why the module says
+      # "from the head tree, not the checkout". But the process still *starts* in whatever the
+      # checkout left there, and that is not nothing: a `rein` older than the head refused to run
+      # at all on a `.rein/rein.lock` the head had written in a newer format, so a one-line change
+      # to a file this check never reads stopped the check. Fixed in `rein` too, but the fix ships
+      # in the head and this job runs the base — which is the same reason the job exists.
+      #
+      # So stand the verifier in the default branch. Not `base.sha`: a stacked pull request's base
+      # is the slice below it, a commit the head's author wrote, which is the same reason
+      # `trusted_base` will not measure a stack against it. Detaching removes no object and no
+      # remote ref, and the SHAs are still passed explicitly below: the verdict is unchanged, only
+      # the ground the verifier stands on is one the head did not write.
+      - name: Stand in the default branch, not the head's tree
+        run: git checkout --detach "origin/${{ github.event.repository.default_branch }}"
+
       # Bootstrap note (plan §29.3): the commit that FIRST introduces this check has no prior base
       # verifier to check it, so that one run is not self-verified. Every later PR is checked by the
       # base side. The exact SHAs come from the event, so the head cannot declare its own base.

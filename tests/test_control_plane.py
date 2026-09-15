@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from rein import build_loop, common, control_plane, models
+from rein import build_loop, common, control_plane, executors, models
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import make_plan, make_state, make_task, seed_repo
@@ -477,7 +477,7 @@ def test_a_container_can_reach_the_control_plane_over_the_bound_socket(repo: rep
 
     Everything else about `kind: oci-agent` is a flag this suite asserts without a runtime. This is
     not: whether a leaf inside the box can still record what it did depends on a bind-mounted unix
-    socket surviving `--user 1000:1000`, `--cap-drop ALL`, `--read-only` and a container's own
+    socket surviving the launch uid, `--cap-drop ALL`, `--read-only` and a container's own
     namespace — and if it does not, an implementer works normally and then loses its outcome, which
     is the failure shape hardest to read backwards from. So this speaks the real protocol, through
     the real server, from inside a real container.
@@ -511,7 +511,10 @@ def test_a_container_can_reach_the_control_plane_over_the_bound_socket(repo: rep
             runtime, "run", "--rm", "--interactive",
             # The same hardening an agent launch gets. If any of it closed the socket, the whole
             # mechanism would be unusable and this is where that shows.
-            "--network", "none", "--user", "1000:1000", "--cap-drop", "ALL",
+            # The launch uid comes from the executor, not from a literal: the socket is 0600 and
+            # owned by whoever runs this, so a hardcoded number passes only where it happens to
+            # match. That is exactly how this test was green locally and red on a CI runner.
+            "--network", "none", "--user", executors._container_user(), "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges", "--read-only",
             "--tmpfs", "/tmp:size=64m,mode=1777", "--env", "HOME=/tmp",
             "--mount",

@@ -8,7 +8,7 @@ prompts:
   version: 0.5.0
   files:
     AGENTS.rein.md: sha256:1e5d07ef5cfad81155dc57b401db8e2e626a4ea0cbd51dcc12b75e46bdff3071
-    oci/python/Containerfile: sha256:eb0791d07241909b50f951e9357cc7c6a31d7f58f38555973710539a64a3d05b
+    oci/python/Containerfile: sha256:9e311e179f5794659968fe7bb0d14ef9831c28c818afd3d10f3abe3b87b7afd7
     prompts/agents/adversarial-reviewer.md: sha256:def31d1c80a0ca162db971339009ee1ef3c425f3cdadf8d55e975c0146bec741
     prompts/agents/architect.md: sha256:826809a3f08c63dc9fb9e89f7fbaf7f9916448a851dbad0be58b27d502a6ea1e
     prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64
@@ -27,7 +27,7 @@ prompts:
     schema/plan.schema.json: sha256:9399831601aba26d9976e7d5e856042582e62b98077ddc4bfa640b53f41ba0d8
     schema/review.schema.json: sha256:c220c6f8dda9fc2adaebfb26bf62e06d01f2680258d70ba5bc01e96b295e59b4
     schema/state.schema.json: sha256:056f72c80ce39b1bf4e60e1583829650fb10dcf227cff61ed1befe093d51e33a
-    oci/agent/Containerfile: sha256:c5a93acd5458150a448828e550711754182cb97f3339b466c3903012faf1c0f8
+    oci/agent/Containerfile: sha256:724870d2f55ce6903144039a6f9f9ad2587e7837e76705ef4049fa62a26599ee
 integrations:
   claude:
     version: 0.5.0

@@ -78,6 +78,24 @@ which is claude's shape. Codex is the other one — the CLI mints a `thread_id`,
 `--output-schema` by path and prompts on stdin. Not exercised against a live codex; the flags and
 the envelope field are read from upstream sources, and both READMEs say so.
 
+**Every sandboxed container runs as the host user, not as uid 1000.** `--user 1000:1000` was a
+guess that the operator is the first account on a single-seat Linux box, and where the guess was
+wrong the container ran as a uid that owns nothing it was handed. `control_plane` binds its socket
+at 0600 — a control plane any local account may write to is not one — so a leaf on a mismatched uid
+got `EACCES` on `rein report`: it does the work, then cannot say what it did, which is the failure
+shape hardest to read backwards from. The uid was never the boundary (`--cap-drop ALL`,
+`no-new-privileges`, `--read-only`, the network by `kind`, the ephemeral HOME are), so nothing is
+weakened by making it true instead of lucky. The suite pinned the same literal, which is why it was
+green on a laptop at uid 1000 and red on a CI runner at 1001; it now says the host.
+
+**`policy-check` is exempt from the startup lock check.** It is the one verb *defined* to be run by
+a release older than the tree it reads: CI installs it from the trusted base commit, hands it two
+SHAs, and it reads every tree it judges with `git show <sha>:<path>` without ever opening
+`.rein/rein.lock`. Gating it there let the head decide whether the base-side verifier may start, and
+the `rein-grounded-v2` bump above did exactly that on its own pull request. The workflow completes
+the same thought: the policy job now stands in the default branch rather than in the head's
+checkout, so no file the head wrote is even in the verifier's ambient environment.
+
 ## [0.4.7] - 2026-09-13
 
 **A dependency change was read, so coverage stops calling it unread.**
