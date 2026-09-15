@@ -555,6 +555,44 @@ def test_check_version_changelog_green_and_drifts() -> None:
     assert "no `## [x.y.z]`" in template_lint.check_version_changelog("0.2.0", "# Changelog\n")[0]
 
 
+def test_check_required_status_covers_every_job(tmp_path: Path) -> None:
+    """The single required status has to wait on every job *and* test each result.
+
+    Both halves failed in this repository already: `integration` was outside the aggregate while
+    it was the only thing proving the sandbox claim, and `checks` was outside it when a mypy
+    failure reported green beside it in the same run.
+    """
+
+    def lint(workflow: str) -> list[str]:
+        directory = tmp_path / ".github" / "workflows"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "ci.yml").write_text(workflow, encoding="utf-8")
+        # Explicitly typed: `template_lint` is loaded from its path, so mypy sees `Any`.
+        found: list[str] = template_lint.check_required_status_covers_every_job(tmp_path)
+        return found
+
+    covered = (
+        "jobs:\n"
+        "  unit:\n    steps: []\n"
+        "  lint:\n    steps: []\n"
+        "  tests:\n"
+        "    needs: [unit, lint]\n"
+        "    steps:\n"
+        "      - run: |\n"
+        '          test "${{ needs.unit.result }}" = "success"\n'
+        '          test "${{ needs.lint.result }}" = "success"\n'
+    )
+    assert lint(covered) == []
+
+    not_waited = covered.replace("    needs: [unit, lint]", "    needs: [unit]")
+    assert "'lint' is not in `tests.needs`" in lint(not_waited)[0]
+
+    not_asserted = covered.replace('          test "${{ needs.lint.result }}" = "success"\n', "")
+    assert "its result is never tested" in lint(not_asserted)[0]
+
+    assert "no `tests` job" in lint("jobs:\n  unit:\n    steps: []\n")[0]
+
+
 # --- against the live repo (the actual CI gate) ------------------------------------
 
 

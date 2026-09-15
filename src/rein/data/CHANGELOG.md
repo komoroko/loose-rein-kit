@@ -96,6 +96,16 @@ the `rein-grounded-v2` bump above did exactly that on its own pull request. The 
 the same thought: the policy job now stands in the default branch rather than in the head's
 checkout, so no file the head wrote is even in the verifier's ambient environment.
 
+**The required CI status waits on every job, and a canary keeps it that way.** Branch protection
+requires one name and the workflow has five jobs, so whatever the required one does not wait on can
+go red while it reports success. That is not hypothetical twice over: `integration` sat outside the
+aggregate while it was the only thing proving the sandbox claim, and `checks` sat outside it while
+a mypy failure reported green beside it in the same run. `tests` now waits on all four and tests
+each result — `needs` makes a job waited on, the script body is what makes its failure a failure —
+and `template_lint.check_required_status_covers_every_job` fails when a job is added and not named
+there. The lint/type/drift/frontend job is called `checks` rather than `pre-commit`, because it
+runs `make check` whole and a frontend failure under the old name read as a lint failure.
+
 ## [0.4.7] - 2026-09-13
 
 **A dependency change was read, so coverage stops calling it unread.**

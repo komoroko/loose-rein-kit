@@ -14,8 +14,11 @@ permissions:
   contents: read
 
 jobs:
-  pre-commit:
-    name: pre-commit (lint / format / type-check)
+  # `make check` and nothing else, so what CI runs and what a contributor runs before pushing
+  # cannot drift. The name says what the target covers rather than naming one of its hooks: a
+  # frontend failure under a job called "pre-commit" reads as a lint failure.
+  checks:
+    name: checks (lint / types / drift / frontend)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -181,17 +184,23 @@ jobs:
           --base-ref "${{ github.event.pull_request.base.ref }}"
           --default-branch "origin/${{ github.event.repository.default_branch }}"
 
-  # Aggregate gate over the unit matrix. Branch protection requires the single stable name "tests".
+  # The one status branch protection requires, so it has to wait on *every* other job in this
+  # workflow. Twice now a job has been left out and gone red without blocking anything: the
+  # integration layer, which is what proves the sandbox claim, and then `checks`, which failed on
+  # mypy in the very run that proved the point — `tests` reported success beside it. Leaving a job
+  # out is not a smaller gate, it is no gate for that job, so `scripts/template_lint.py`
+  # (`check_required_status_covers_every_job`) fails when a job is added and not named here.
   tests:
     name: tests
-    # The integration layer is what exercises the OCI sandbox against a real container runtime, and
-    # sandbox isolation is the central security claim this tool makes. Leaving it out of the single
-    # required status meant the one check that proves that claim was the one nothing insisted on.
-    needs: [unit, integration]
+    needs: [checks, unit, integration, policy]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Every required job succeeded
         run: |
+          test "${{ needs.checks.result }}" = "success"
           test "${{ needs.unit.result }}" = "success"
           test "${{ needs.integration.result }}" = "success"
+          # `policy` is a pull-request job; on a push to a branch it is skipped, and skipped is the
+          # right answer there. On a pull request nothing but success is.
+          test "${{ needs.policy.result }}" = "success" || test "${{ github.event_name }}" != "pull_request"

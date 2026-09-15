@@ -188,7 +188,6 @@ def agent_output(cmd: list[str], text: str = "") -> str:
 
 def gemini_envelope(text: str, *, prompt_tokens: int = 100, candidates_tokens: int = 20) -> str:
     """What `gemini --output-format json` answers with: one object, the answer under `response`."""
-    import json
 
     return json.dumps(
         {
@@ -216,7 +215,6 @@ def codex_events(text: str, *, input_tokens: int = 100, output_tokens: int = 20)
     The reasoning item is here on purpose — taking the *first* agent message, or any item, would
     hand acceptance a paragraph of thinking where it asked for one JSON object.
     """
-    import json
 
     return "\n".join(
         json.dumps(event)
@@ -245,7 +243,6 @@ def agent_envelope(text: str, *, input_tokens: int = 100, output_tokens: int = 2
     each fake keeps the shape in one place — and a fake that answered in the old bare-text shape
     would be testing a transport nothing uses.
     """
-    import json
 
     return json.dumps(
         {
@@ -262,7 +259,6 @@ def agent_envelope(text: str, *, input_tokens: int = 100, output_tokens: int = 2
 def cursor_envelope(text: str) -> str:
     """What `cursor-agent -p --output-format json` answers with: claude's object shape, and its
     own reference is explicit that it carries no token counts."""
-    import json
 
     return json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text})
 
@@ -270,7 +266,6 @@ def cursor_envelope(text: str) -> str:
 def opencode_events(text: str) -> str:
     """What `opencode run --format json` streams. A `text` event is emitted only once its part is
     finished, so the last one is the answer; the reasoning event is here to prove it is skipped."""
-    import json
 
     return "\n".join(
         json.dumps(event)
@@ -551,10 +546,6 @@ def chain(*names: str, cycle_id: str = DEMO_CYCLE) -> list[models.Event]:
         built.append(linked)
         previous = linked
     return built
-
-
-def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 # --- git fake -----------------------------------------------------------------

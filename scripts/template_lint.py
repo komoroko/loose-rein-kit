@@ -915,6 +915,57 @@ def check_distribution_name(root: Path) -> list[str]:
     return []
 
 
+#: The workflow, and the job in it whose name branch protection requires. Everything else in the
+#: file has to be reachable from that one job, or a red check blocks nothing.
+CI_WORKFLOW = ".github/workflows/ci.yml"
+REQUIRED_STATUS_JOB = "tests"
+
+
+def check_required_status_covers_every_job(root: Path) -> list[str]:
+    """Every CI job is waited on *and asserted* by the single required status.
+
+    Branch protection requires a name, and a workflow has many jobs. Whatever the required job
+    does not wait on may go red while the required one reports success, which is not a
+    hypothetical: `integration` was left out until the sandbox claim had nothing insisting on it,
+    and `checks` was left out until a mypy failure sat green beside it in the same run.
+
+    Two conditions, because `needs` alone is not the gate. `needs` makes the job *wait*; the body
+    is what makes a result a failure. A job listed in `needs` and never named in the script is
+    waited on and then ignored, which looks covered from the outside and is not.
+    """
+    text = (root / CI_WORKFLOW).read_text(encoding="utf-8")
+    try:
+        document = strict_yaml.load_mapping(text, what=CI_WORKFLOW)
+    except strict_yaml.StrictParseError as exc:
+        return [f"{CI_WORKFLOW} does not parse: {exc}"]
+    jobs = document.get("jobs")
+    if not isinstance(jobs, dict):
+        return [f"{CI_WORKFLOW} has no `jobs` mapping"]
+    required = jobs.get(REQUIRED_STATUS_JOB)
+    if not isinstance(required, dict):
+        return [f"{CI_WORKFLOW} has no `{REQUIRED_STATUS_JOB}` job — that is the name protection requires"]
+
+    needs = required.get("needs")
+    waited = {str(n) for n in (needs if isinstance(needs, list) else [needs] if needs else [])}
+    body = " ".join(str(step.get("run", "")) for step in required.get("steps", []) if isinstance(step, dict))
+    failures = []
+    for name in jobs:
+        if name == REQUIRED_STATUS_JOB:
+            continue
+        if name not in waited:
+            failures.append(
+                f"{CI_WORKFLOW} job {name!r} is not in `{REQUIRED_STATUS_JOB}.needs` — it can go "
+                f"red without blocking the merge, because {REQUIRED_STATUS_JOB} is the only "
+                "required status"
+            )
+        elif f"needs.{name}.result" not in body:
+            failures.append(
+                f"{CI_WORKFLOW} job {name!r} is waited on by `{REQUIRED_STATUS_JOB}` but its "
+                "result is never tested — waiting is not asserting"
+            )
+    return failures
+
+
 def check_rein_lock_version(version: str, lock_text: str) -> list[str]:
     """`.rein/rein.lock` records the release that wrote this repository's materialized artifacts.
 
@@ -1004,6 +1055,7 @@ def main(argv: list[str] | None = None) -> int:
         failures += check_rein_lock_version(version, (root / ".rein" / "rein.lock").read_text(encoding="utf-8"))
         failures += check_upgrade_command(root)
         failures += check_distribution_name(root)
+        failures += check_required_status_covers_every_job(root)
     except OSError as exc:
         logger.error(f"template-lint failed: {exc}")
         return 1
