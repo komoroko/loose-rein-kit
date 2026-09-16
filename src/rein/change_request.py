@@ -29,7 +29,7 @@ import logging
 import sys
 from collections.abc import Mapping, Sequence
 
-from rein import common, event_chain, models
+from rein import common, event_chain, models, observations
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -112,6 +112,12 @@ def add(repo: repo_mod.Repo, gate: str, target: str, reason: str) -> str:
             subject_ids=[gate, request_id, target.strip()],
             detail={"reason": reason.strip()},
         )
+    # After the transaction, and only for a decision id. A change request aimed at `D-00n` on the
+    # mandate is the human saying the loop's reading of the reach was wrong: it called the decision
+    # cheap to undo, and the person who would pay disagreed. That is the one quantity that
+    # falsifies selection-by-reach, so it is the one recorded.
+    if gate == "mandate" and target.strip().startswith("D-"):
+        observations.record("reach_overruled", project=repo.root.name, cycle_id=state.cycle_id, subject=target.strip())
     return request_id
 
 

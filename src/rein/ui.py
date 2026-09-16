@@ -1034,6 +1034,19 @@ def open_mode(no_open: bool, term_program: str | None) -> str:
     return "browser"
 
 
+def _cycle_id(root: Path) -> str:
+    """Best effort: the wait is recorded against the cycle it was spent on, and a store that cannot
+    be read is a reason to record the wait without the cycle, never to drop the wait."""
+    from rein import repo as repo_module
+    from rein import store as store_module
+
+    try:
+        state = store_module.Store(repo_module.Repo(root)).read_state()
+    except Exception:
+        return ""
+    return state.cycle_id if state is not None else ""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="local dashboard for the Loose Rein SSOT")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
@@ -1103,6 +1116,7 @@ def main(argv: list[str] | None = None) -> int:
         project=root.name,
         url=base,
         stop=server.closing,
+        cycle_id=_cycle_id(root),
     )
     watcher.start()
     if notify.read_command() is None:

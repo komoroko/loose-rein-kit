@@ -50,6 +50,7 @@ from rein import (
     event_chain,
     mdlite,
     models,
+    observations,
     review_policy,
     review_reading,
 )
@@ -280,6 +281,21 @@ def _clarification_blockers(repo: repo_mod.Repo, gate: str) -> list[str]:
                 "or demote it to `## Open questions` with the assumption you wrote the text under."
             )
     return blockers
+
+
+def _unknowns_admitted(repo: repo_mod.Repo) -> int:
+    """How many decisions this mandate admits it has no answer to.
+
+    Counted because the claim it tests is one this harness makes loudly: that saying `unknown` at
+    the mandate is what buys fewer interventions during the build. The other half of that pair is
+    `judgement_raised`. A mandate that admitted nothing and then raised a dozen judgements is the
+    shape that would falsify it.
+    """
+    try:
+        plan = store_mod.Store(repo).read_plan()
+    except models.DocumentError:
+        return 0
+    return sum(1 for d in plan.decisions if d.status == "unknown") if plan is not None else 0
 
 
 def _decision_blockers(plan: models.Plan | None, gate: str) -> list[str]:
@@ -534,6 +550,9 @@ def record_approval(
         raise ApprovalError("no .rein/state.yaml to record the approval in")
     seen = store_mod.read_digest(state)
     approval_id = f"GA-{gate.upper()}-{event_chain.new_id()[:8].upper()}"
+    # Read before the transaction, recorded after it: an observation must never be able to fail an
+    # approval, and the plan it counts is the one this approval is about to freeze.
+    admitted = _unknowns_admitted(repo) if gate == FREEZING_GATE else 0
 
     # Everything below runs under the store lock. The chain-root binding is only meaningful if
     # nothing can append between the check and the receipt that pins it, and a gate approval
@@ -597,6 +616,10 @@ def record_approval(
             )
 
         tx.write("state", raw, expect_digest=seen)
+    if gate == FREEZING_GATE:
+        observations.record(
+            "unknown_at_mandate", project=repo.root.name, cycle_id=state.cycle_id, value=admitted, subject=approval_id
+        )
     return approval_id
 
 

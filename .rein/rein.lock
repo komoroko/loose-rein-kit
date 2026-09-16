@@ -2,12 +2,12 @@
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
 format: rein-grounded-v4
-tool_version: 0.10.0
+tool_version: 0.11.0
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.10.0
+  version: 0.11.0
   files:
-    AGENTS.rein.md: sha256:d87fec0f653911c81f10e4ff652205e01f1ea1e601905c5572ae605ce63bc689
+    AGENTS.rein.md: sha256:7a0bbaa7795c25a4c9a015b3a8803c6cf1920f1056da8803f3a765836f1d6b4d
     oci/python/Containerfile: sha256:9e311e179f5794659968fe7bb0d14ef9831c28c818afd3d10f3abe3b87b7afd7
     prompts/agents/adversarial-reviewer.md: sha256:551a16b4d6b95930c0ceb8ce942e9a1a9e1ea848818d171f9903ceac2b205d47
     prompts/agents/architect.md: sha256:719aaa7bd29675164d3732995195bb7fa529a04e48c73f0c0c15375479f15353
@@ -30,7 +30,7 @@ prompts:
     oci/agent/Containerfile: sha256:724870d2f55ce6903144039a6f9f9ad2587e7837e76705ef4049fa62a26599ee
 integrations:
   claude:
-    version: 0.10.0
+    version: 0.11.0
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:a4fd4c68f39502bad42327168e79fbb43402d7ddff17788237ffb0d32eab4d8f
@@ -50,7 +50,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.10.0
+    version: 0.11.0
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:1faced739cd80c70a96c30fdf3fa7bb4992ccaffdcad2a2e16277c09f0859c5e
@@ -68,7 +68,7 @@ integrations:
       .codex/hooks.json: sha256:7b64f50c947287ac882d04f0816a79df4d8c7c6b3060137cfb9014d274af0909
       .codex/rein.md: sha256:470c417f84ca4659e0bc93ab44f07470e6e68bf07dc385bf5a7257128e3ccc26
   copilot:
-    version: 0.10.0
+    version: 0.11.0
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:7007cdf39b9475bbb9875091056f792d14b0c9d87bf4e9f451f84d3d53029199
@@ -86,7 +86,7 @@ integrations:
       .github/prompts/tasks.prompt.md: sha256:090fcd0790776db37ce0839676a580c1592a97f5c352b9eb60507e9be2a6500e
       .github/prompts/verify.prompt.md: sha256:715158e2e17ebe65f6969fef87a7d7b326a90f04f9d4a2452302df56801157fd
   gemini:
-    version: 0.10.0
+    version: 0.11.0
     installed_at: '2026-09-03'
     files:
       .gemini/commands/build.toml: sha256:77d029397582376f3f8bba02f3acd3064bfda91cf1a63e2221765e64705be7b8

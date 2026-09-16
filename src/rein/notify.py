@@ -32,12 +32,14 @@ import logging
 import shlex
 import subprocess
 import threading
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from rein import observations
 from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
@@ -143,14 +145,17 @@ class Watcher:
         project: str,
         url: str,
         stop: threading.Event,
+        cycle_id: str = "",
         interval: float = POLL_SECONDS,
     ) -> None:
         self._status = status
         self._project = project
+        self._cycle_id = cycle_id
         self._url = url
         self._stop = stop
         self._interval = interval
         self._last_id: str | None = None
+        self._since: float = 0.0
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -170,12 +175,25 @@ class Watcher:
             logger.debug(f"could not derive the pending decision: {exc}")
             return False
         if not isinstance(decision, Mapping) or not decision.get("waiting_on_human"):
+            # The decision was answered (or went away). The gap between deriving it and this tick
+            # is the wait it cost, which is the quantity the whole channel exists to shrink — the
+            # gates say how *often* the work stops, and nothing else says for how long.
+            if self._last_id is not None and self._since:
+                observations.record(
+                    "waited_seconds",
+                    project=self._project,
+                    cycle_id=self._cycle_id,
+                    value=max(0.0, time.monotonic() - self._since),
+                    subject=self._last_id,
+                )
             self._last_id = None  # nothing is waiting; the next thing that waits is news again
+            self._since = 0.0
             return False
         current = str(decision.get("id") or "")
         if not current or current == self._last_id:
             return False
         self._last_id = current
+        self._since = time.monotonic()
         return send(render(decision, project=self._project, url=self._url))
 
     def _run(self) -> None:

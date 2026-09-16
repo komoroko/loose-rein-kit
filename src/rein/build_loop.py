@@ -83,6 +83,7 @@ from rein import (
     gate_guard,
     human_review,
     models,
+    observations,
     pr_stack,
     preflight,
     review_cache,
@@ -3527,6 +3528,17 @@ class Orchestrator:
             read = True
             routing = repair_mod.route(self._plan or models.Plan({}), self.store.read_review())
             print(routing.render())
+            # The other half of `unknown_at_mandate`. Findings the loop could not sort into code or
+            # plan are the ones a human has to judge, and the claim being tested is that admitting
+            # what the mandate did not know is what makes this number small. Recorded per round
+            # because that is when the number exists; never read back by anything here.
+            if routing.judgement or routing.unowned:
+                observations.record(
+                    "judgement_raised",
+                    project=self.repo.root.name,
+                    cycle_id=self.cycle_id,
+                    value=len(routing.judgement) + len(routing.unowned),
+                )
             if not routing.repairable or round_no == rounds:
                 break
             for item in routing.code:

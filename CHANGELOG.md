@@ -4,6 +4,44 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.11.0] - 2026-09-16
+
+**The harness measures what would falsify the rules it follows.** Several of those rules already
+rested on a measurement nobody was taking. "Counted, never capped" is the shape of the lens
+library's retirement rule and of the reasoning that removed the acceptance budget; `rein lens
+--stats` counts one of those things, and the rest were arguments about numbers that existed nowhere.
+
+`rein.observations` records five, each attached to a claim this harness makes about itself and each
+the quantity that would move if the claim were false. `reach_overruled`: a `local` decision a human
+overruled at the mandate — the loop called it cheap to undo and the person who would pay disagreed.
+`unknown_at_mandate` beside `judgement_raised`: mandates that admitted what they did not know,
+against findings that came back needing a human to sort code from plan. `acceptance_reopened`: the
+heaviest row, an acceptance approved and then rolled back — somebody said yes to something they
+turned out not to have understood. `waited_seconds`: from the decision being derived to it being
+answered, which is what the notification channel exists to shrink.
+
+Measured is what would move if a decision here were wrong, never what was easy to collect. A general
+event log answers "what happened" and says nothing about whether a rule was a good one, and a pile
+of metrics nobody reads fails the way an unfiltered lens library does — the figures that matter get
+lost among the ones that were merely available. So the vocabulary is closed, and `rein observe`
+prints each number beside the claim it tests, because a figure with no claim attached is one
+somebody reads as a score.
+
+**Nothing reads the store back.** No gate, no review, no build: a cycle's outcome must not depend on
+what earlier cycles happened to record, or the same repository answers differently on another
+machine. That constraint is also what makes the store safe to keep **across projects**, beside the
+project registry — it holds counts and classes, never a requirement's text, never a diff, never a
+path. Whatever needs the content is in that cycle's own archive, and every observation carries the
+cycle id that finds it.
+
+**No thresholds, and none are coming.** A number with a ceiling on it gets managed instead of read
+— which is what this repository's own acceptance budget demonstrated before it was removed in
+0.6.0: the ceiling's instruction was impossible to follow, so the ceiling moved twice and the thing
+it measured never did.
+
+New verb `rein observe` (`--project`, `--prune`). Recording never raises: every caller is doing
+something else, and a store that could fail a gate would be an input to the thing it measures.
+
 ## [0.10.0] - 2026-09-16
 
 **A review lens is a record with a condition, not a paragraph in a prompt.**

@@ -92,6 +92,10 @@ VERBS: dict[str, Verb] = {
     "knowledge-gap": Verb("control_plane:knowledge_gap_main", "record what could not be found out", human=False),
     "evidence": Verb("evidence_cmd", "acceptance evidence this loop cannot obtain (record what you saw)", human=False),
     "dag": Verb("dag", "derive/inspect the task DAG (read-only; /tasks & /status use it)", human=False),
+    "observe": Verb(
+        "observe_cmd",
+        "the figures this harness keeps about itself, each beside the claim it tests",
+    ),
     "lens": Verb(
         "lens_cmd",
         "the review lens library: --list what exists, --select what applies, --stats what it found",

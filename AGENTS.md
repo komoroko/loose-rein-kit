@@ -99,6 +99,13 @@ Four documents, distinct roles — do not conflate them:
   until somebody writes down when it applies. Sending a reviewer at a failure that cannot occur
   here costs a pass over the deliverable and returns nothing, while the findings that *are*
   possible compete with it for attention. Over-reviewing is not thorough.
+- **What the harness measures about itself is what would falsify a rule it follows.** Not what is
+  easy to collect: a pile of metrics nobody reads loses the figures that matter among the ones that
+  were merely available. `rein observe` prints each figure beside the claim it tests —
+  `reach_overruled` against selection by reach, `unknown_at_mandate` beside `judgement_raised`,
+  `acceptance_reopened`, `waited_seconds`. No thresholds, and none are coming: a number with a
+  ceiling gets managed instead of read. **Nothing reads the store back.** A cycle's outcome must
+  not depend on what earlier cycles recorded, or the same repository answers differently elsewhere.
 - **A lens earns its place the second time, and loses it by never finding.** A one-off finding is
   recorded `unclassified` — once is an incident, twice is what tells you the condition. The reverse
   rule is `rein lens --stats`: applied and found counts per lens, across archived cycles, naming
