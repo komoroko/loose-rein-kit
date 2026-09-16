@@ -837,26 +837,27 @@ def check_stack_extension() -> list[Finding]:
     """Is `gh stack` available? Only `rein pr-stack` needs it, and only to ship a stack.
 
     INFO rather than WARN when it is missing: a cycle that ships as one pull request never touches
-    it. What it is *for* is the merge — `--merge` lands the stack in one atomic operation, and
-    without the extension the alternative is merging the pull requests by hand, where merging a
-    subset silently rebases everything above the cut off its recorded commits.
+    it. `--push` uses it to register the pull requests as a stack (`gh stack link`), and landing
+    that stack — which is the human's, not the harness's — is `gh stack merge` on the top pull
+    request. Without the extension the alternative is merging by hand, where merging a subset
+    silently rebases everything above the cut off its recorded commits.
     """
     if shutil.which("gh") is None:
         return []  # already reported by the `gh` row above; a second line about its extension helps nobody
     rc, out = common.run(["gh", "extension", "list"], timeout=30)
     if rc != 0:
-        return [Finding("INFO", "env", "could not list gh extensions — `rein pr-stack --merge` may be unavailable")]
+        return [Finding("INFO", "env", "could not list gh extensions — `gh stack` may be unavailable")]
     # The owner too, not just the name: `gh extension list` prints `owner/repo`, and a bare
     # `gh-stack` also matches a fork or a same-named extension from anybody else — which would
-    # report a `gh stack merge` this module has never been measured against as installed.
+    # report a `gh stack` this module has never been measured against as installed.
     if "github/gh-stack" in out:
-        return [Finding("PASS", "env", "gh-stack extension installed (`rein pr-stack --merge` can land a stack)")]
+        return [Finding("PASS", "env", "gh-stack extension installed (`gh stack merge` can land a stack whole)")]
     return [
         Finding(
             "INFO",
             "env",
-            "gh-stack extension not installed — `rein pr-stack` still opens the stack, but `--merge` "
-            "cannot land it atomically. Install it with `gh extension install github/gh-stack`.",
+            "gh-stack extension not installed — `rein pr-stack` still opens the stack, but it cannot be "
+            "landed atomically by hand. Install it with `gh extension install github/gh-stack`.",
         )
     ]
 

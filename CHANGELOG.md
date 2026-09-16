@@ -4,6 +4,25 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.7.0] - 2026-09-16
+
+**Merging into the base is outside this harness.** `rein pr-stack --merge` ran `gh stack merge`
+after acceptance, behind its own terminal confirmation. That confirmation asked for a decision a
+human had already made: the acceptance gate is the approval to take the change, and the push to the
+base is the same decision wearing a second prompt. One approval, not two.
+
+Gone: `--merge`, `merge_stack`, `merge_command`, `_confirm_merge`, the `merged` field on the
+ledger record and the `merged` action it was written from. `MODES` is `push`, `restack`, `ready`.
+The harness takes a change to acceptance and leaves it reviewable; whoever owns the base lands it.
+
+What does **not** go is the constraint the record depends on, because dropping the command does not
+drop the hazard. A stack merged in part makes GitHub rebase the pull requests above the cut onto
+the new base with new commit ids, and every `completed_commit` and gate receipt above it then names
+a commit in no branch's history — squash and rebase merges strand them the same way. So each
+pull-request body now says it to whoever presses the button, `rein pr-stack --ready` ends by saying
+it, and `rein doctor` still reports whether `gh-stack` is installed — no longer because `--merge`
+needs it, but because `gh stack merge <top> --merge` is how a person lands one atomically.
+
 ## [0.6.0] - 2026-09-16
 
 **Acceptance has no ceiling on what a human is asked to hold.** `human_review` carried a review

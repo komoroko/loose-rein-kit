@@ -240,16 +240,19 @@ not "the answer is bad" (detail: build.md, verify.md).
   use worktree branches (`<branch>-T-NNN`) and route every decision through the control plane so a
   worktree's record survives its deletion.
 - Per-task commits **`T-NNN: <summary>`**; commit each phase's deliverables at its gate approval.
-- **Push / PR / merge to main are outward-facing** — human approval only, same for GitHub Issues.
+- **Push and PR are outward-facing** — human approval only, same for GitHub Issues.
+- **Merging into the base is outside this harness.** It takes a change to acceptance and leaves it
+  reviewable; acceptance approved the change, not the push to the base, and asking a second time
+  for the same decision is one approval too many. Whoever owns the base lands it.
 - A cycle may ship as **one pull request** (`rein pr-draft` assembles the body) or as a **stack of
-  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before acceptance and is lifted
-  by `rein pr-stack --ready` once a human approves it, and landed by `rein pr-stack --merge`. All
-  three confirm at a terminal first and none may be pre-authorized. The slices are registered as a
-  **GitHub stack**, and `--merge` lands the whole of it in one atomic `gh stack merge`.
-- **A stack is merged whole, never in part.** Merging a subset makes GitHub rebase the pull
-  requests above the cut onto the new base with new commit ids, so every `completed_commit` above
-  it names a commit in no branch's history. Squash and rebase merges strand them the same way.
-  Merged atomically, nothing is rebased and the commits the build produced are the ones that land.
+  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before acceptance and is
+  lifted by `rein pr-stack --ready` once a human approves it. Both confirm at a terminal first and
+  neither may be pre-authorized. The slices are registered as a **GitHub stack** at push time.
+- **A stack is merged whole, never in part.** This is the harness's to *say*, not to do: merging a
+  subset makes GitHub rebase the pull requests above the cut onto the new base with new commit ids,
+  so every `completed_commit` above it names a commit in no branch's history. Squash and rebase
+  merges strand them the same way. `gh stack merge <top> --merge` lands the whole of it atomically,
+  and nothing is rebased. The pull-request body carries this warning to whoever presses the button.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
   `completed_commit` and gate receipt on commits that no longer exist. The grounded review's own repairs follow
@@ -257,7 +260,7 @@ not "the answer is bad" (detail: build.md, verify.md).
   owning slice's branch and merged upward, never at the work branch's tip.
 - `command-preauthorization` of known-safe commands cuts repeated prompts **without touching
   gates** (generic commands in the installed settings; product-specific ones in the product's
-  own) — never pre-authorize push / PR / **merge to main** / `cycle-close` / `pr-stack`, nor `rein
+  own) — never pre-authorize push / PR / `cycle-close` / `pr-stack`, nor `rein
   approve` (gate rule 2). A worktree merge into the work branch is not one of those: the build
   loop does it, so it is pre-authorized. `rein doctor` checks the gate-opening verbs in code,
   including in the gitignored local settings file.

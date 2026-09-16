@@ -295,7 +295,7 @@ Then, per cycle:
      speaks only when it moves, so an idle dashboard costs a handful of `stat` calls a second.
      Optional notifications fire on a waiting decision. Actions are a fixed whitelist — reads,
      diagnostics, and decision recording (approve / resolve / revise / cycle-close); phase
-     execution and push/PR/merge are not available here.
+     execution and push/PR are not available here.
    - `rein dag --mermaid` — render the task dependency diagram
 
 7. **Ship as a PR** — `rein pr-draft` assembles the PR body from the SSOT into
@@ -308,11 +308,14 @@ Then, per cycle:
    introduced the code and carried upward by `--restack`, which merges — **a stack is never
    rebased**, because rewriting history strands every `completed_commit` and gate receipt on
    commits that no longer exist. The slices are registered as a **GitHub stack** when they are
-   pushed, and `--merge` lands the whole of it in one atomic `gh stack merge` (needs
+   pushed. **Landing the stack is yours, not the harness's** — acceptance approved the change, not
+   the push to the base, and the harness does not ask a second time for the same decision.
+   `gh stack merge <top> --merge` lands the whole of it atomically (needs
    `gh extension install github/gh-stack`; `rein doctor` says whether you have it). **Never merge
    part of a stack**: GitHub rebases the pull requests above the cut onto the new base with new
    commit ids, and every `completed_commit` above it then names a commit in no branch's history.
-   Squash and rebase merges strand them the same way. Merged whole, nothing is rebased.
+   Squash and rebase merges strand them the same way. Merged whole, nothing is rebased. Each
+   pull-request body carries this warning to whoever presses the button.
 
 8. **Close the cycle** — after acceptance, `rein cycle-close --name <slug>` archives to
    `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human

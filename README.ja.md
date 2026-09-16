@@ -302,12 +302,14 @@ CLI の一覧は `rein agent --show`)、`rein project add` はダッシュボー
    draft を外す。レビュー指摘の修正は、そのコードを入れたスライスにコミットし、`--restack` が
    マージで上へ伝播させる。**スタックを rebase してはならない** — 履歴を書き換えると、
    `completed_commit` とゲート受領証が指すコミットが消えるためである。push 時にスライスは
-   **GitHub の stack** として登録され、`--merge` はその全体を1回の atomic な `gh stack merge` で
-   着地させる(`gh extension install github/gh-stack` が要る。導入済みかは `rein doctor` が示す)。
+   **GitHub の stack** として登録される。**本流へ着地させるのはハーネスの仕事ではない** —
+   acceptance が承認したのは変更であって base への push ではなく、同じ判断を二度求めることは
+   しない。全体を一括で着地させるのは `gh stack merge <top> --merge` である
+   (`gh extension install github/gh-stack` が要る。導入済みかは `rein doctor` が示す)。
    **スタックを部分的にマージしてはならない** — 切れ目より上の PR が新しい base に rebase され、
    コミット ID が変わる。その結果、上位タスクの `completed_commit` はどのブランチの履歴にも
    存在しないコミットを指すことになる。squash・rebase マージも同じ壊し方をする。全体を一括で
-   マージすれば rebase は起きない。
+   マージすれば rebase は起きない。この注意書きは各 PR の本文が、ボタンを押す人に向けて伝える。
 
 8. **サイクルを閉じる** — acceptance のあと `rein cycle-close --name <slug>` を実行すると、docs が
    `docs/archive/<日付>-<slug>/` へアーカイブされ、新しいスキャフォールドが復元され、ゲートと
