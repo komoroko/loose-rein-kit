@@ -330,8 +330,9 @@ class TestScopeStage:
         coverage = scope["coverage"]
         assert coverage["analyzed_files"] == 11 and coverage["analyzed_bytes"] == 421888
         assert scope["decisions_required"] == 0  # no cards recorded, so nothing is outstanding
-        names = {row["name"] for row in scope["budget"]}
-        assert "max_diff_bytes" in names
+        # No budget row: acceptance carries no ceiling on what a human is asked to hold. The reading
+        # budget is refused before a launch, and named at the mandate by `rein doctor`.
+        assert "budget" not in scope and "scope_split_required" not in scope
 
     def test_what_the_review_could_not_read_is_named_by_path(self, make_repo: MakeRepo) -> None:
         """A count cannot be acted on; "ui.min.js was never parsed" can."""

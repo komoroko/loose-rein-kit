@@ -135,7 +135,6 @@ def assemble(
     security: Mapping[str, Any] | None = None,
     effective_risk: str = "",
     plan: models.Plan | None = None,
-    budget_limits: Mapping[str, int] | None = None,
     brief_sections: Mapping[str, Any] | None = None,
     residual_findings: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
@@ -205,14 +204,6 @@ def assemble(
         machine["statements"] = statements
     if cards:
         machine["decision_cards"] = cards
-    if budget_limits:
-        machine["review_budget"] = decision_cards.derive_review_budget(
-            limits=budget_limits,
-            diff_bytes=review_reading.largest_reading_bytes(coverage),
-            decision_cards=cards,
-            statements=statements,
-            gaps=gaps,
-        )
     return machine
 
 
@@ -699,7 +690,6 @@ def generate(
                 blob_facts=_blob_facts(repo, head),
             ),
             residual_findings=brief.residual_findings(state),
-            budget_limits=limits,
         )
 
         entered("write")

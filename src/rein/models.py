@@ -359,14 +359,6 @@ RUN_STATUS_VALUES = frozenset({"idle", "running", "waiting_for_review", "blocked
 # `state.yaml` could only ever disagree with them: it was written in two places (a new cycle, a
 # roll back), read in none, and its six values named states nothing could produce.
 
-BUDGET_NAMES: tuple[str, ...] = (
-    "max_critical_decisions",
-    "max_human_statements",
-    "max_unresolved_low_medium_unknowns",
-    "max_diff_bytes",
-)
-BUDGET_NAME_VALUES = frozenset(BUDGET_NAMES)
-
 # --- event vocabulary (plan §25) ----------------------------------------------
 
 EVENT_ORDER: tuple[str, ...] = (
@@ -1617,7 +1609,10 @@ class Config:
         raw = policy.get("budgets") if isinstance(policy, dict) else None
         if not isinstance(raw, dict):
             return {}
-        return {k: v for k, v in raw.items() if isinstance(v, int) and k in BUDGET_NAME_VALUES}
+        # `config.schema.json` closes this object, so an unknown key never reaches here. The only
+        # budget left is `max_diff_bytes`: what one reviewer launch may be asked to hold, refused
+        # by `review_reading.read_facts` before a launch is paid for.
+        return {k: v for k, v in raw.items() if isinstance(v, int) and not isinstance(v, bool)}
 
     @property
     def repair_rounds(self) -> int:

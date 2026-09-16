@@ -244,9 +244,6 @@ review_policy:
   # nothing. 0 turns it off, and `rein build` then takes no reading at all.
   repair_rounds: 2
   budgets:
-    max_critical_decisions: 5
-    max_human_statements: 30
-    max_unresolved_low_medium_unknowns: 5
     max_diff_bytes: 524288
 
 guard:

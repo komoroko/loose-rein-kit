@@ -305,7 +305,6 @@ def make_review(
     gaps: list[dict[str, Any]] | None = None,
     analyzed_bytes: int = 0,
     unsupported_files: list[dict[str, Any]] | None = None,
-    review_budget: list[dict[str, Any]] | None = None,
     base_sha: str = "",
     head_sha: str = "",
     brief: dict[str, Any] | None = None,
@@ -342,8 +341,6 @@ def make_review(
     }
     if unsupported_files:
         machine["coverage"]["unsupported_files"] = unsupported_files
-    if review_budget:
-        machine["review_budget"] = review_budget
     if base_sha:
         machine["binding"]["trusted_base_sha"] = base_sha
     if head_sha:

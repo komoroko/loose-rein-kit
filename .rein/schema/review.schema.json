@@ -1431,42 +1431,6 @@
               }
             }
           }
-        },
-        "review_budget": {
-          "description": "Exceeding a budget splits the scope; it never lengthens the screen (plan 14.10). The first three bound what one person holds at acceptance and are measured over the whole review; `max_diff_bytes` bounds what one launch reads and is measured against the largest single reading.",
-          "type": "array",
-          "maxItems": 32,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "name",
-              "limit",
-              "actual",
-              "exceeded"
-            ],
-            "properties": {
-              "name": {
-                "enum": [
-                  "max_critical_decisions",
-                  "max_human_statements",
-                  "max_unresolved_low_medium_unknowns",
-                  "max_diff_bytes"
-                ]
-              },
-              "limit": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "actual": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "exceeded": {
-                "type": "boolean"
-              }
-            }
-          }
         }
       }
     },

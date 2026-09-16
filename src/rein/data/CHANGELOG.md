@@ -4,6 +4,39 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.6.0] - 2026-09-16
+
+**Acceptance has no ceiling on what a human is asked to hold.** `human_review` carried a review
+budget: five critical decisions, thirty answerable statements, five unresolved low/medium unknowns,
+and 512 KiB of reading. Exceeding one blocked the freeze with `scope_split_required`, whose
+instruction was to split the scope. That move does not exist at acceptance, where every task is
+implemented, merged and `done` — so the ceiling was never obeyed, it was raised. This file records
+both occasions: `max_human_statements` was re-based from every minted statement to the ones
+attached to a mandatory card because two owed decisions arrived over the ceiling behind five
+optional ones, and `max_diff_bytes` was re-based from the whole change to the largest single
+reading because two consecutive release cycles came to 662 KB and 754 KB against a 512 KiB limit.
+Each time the measurement moved and the ceiling stayed. A number whose only available response is
+to raise it is not a boundary, and the screen it guards is a symptom: the cause is a mandate that
+was too big, and that is where a limit can still be acted on.
+
+So `max_critical_decisions`, `max_human_statements` and `max_unresolved_low_medium_unknowns` are
+gone, with `budget_report`, `budget_actuals`, `recorded_limits`, `scope_split_required`,
+`answerable_statements`, `derive_review_budget`, the `machine.review_budget` snapshot and the
+dashboard's "Review budget" card. What blocks a freeze is what it was always for: an unanswered
+high/critical Decision Card, an undischarged expertise gap, and the machine half's own blocking
+reasons. A count never blocks.
+
+`review_policy.budgets.max_diff_bytes` survives because it is the one budget enforced where the
+remedy still exists. `review_reading.read_facts` refuses an over-budget reading *before* a launch
+is paid for, and `doctor.check_review_outlook` names the too-broad task as a WARN while the mandate
+can still be split. Nothing about that changed; what went is the copy of it at the freeze screen,
+which could only ever report a fact about a mandate already approved.
+
+`lock.FORMAT` moves to `rein-grounded-v3`: `review.yaml` no longer carries `review_budget` and
+`config.yaml`'s `review_policy.budgets` holds one key. There is no migration, as ever — install the
+recorded version to finish a cycle on it, or `rein init` a fresh one. A repository whose documents
+already read this shape is what `rein sync --force` is for.
+
 ## [0.5.0] - 2026-09-15
 
 **A human approves a mandate and an acceptance, not five phases.** `approve.record_approval` wrote

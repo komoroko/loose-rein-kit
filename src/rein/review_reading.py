@@ -761,11 +761,10 @@ def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str 
     instruction — the operator paid three model launches to be told "the adapter exited 1", and
     the sentence that would have said what to do about it lived behind the failure.
 
-    It is the same wall either way. A diff over this limit cannot be frozen once generated, so
-    nothing is refused here that would have been allowed later; what changes is that it is refused
-    before the launches rather than after them, and with the budget's own name on it. Measured
-    over the whole diff, exactly as `human_review.budget_actuals` measures it, so passing here and
-    blowing it at the freeze is not a thing that can happen.
+    This is the wall. Acceptance carries no ceiling of its own — one there named "split the scope"
+    as its remedy, which is not a move that exists once every task is merged and `done` — so a
+    reading is refused here, before the launches are paid for, with the budget's own name on it.
+    `doctor.check_review_outlook` says the same thing earlier still, while the mandate can be split.
 
     `unit` names the reading when a review is composed out of several, so a refusal says which one
     is too big rather than only that something was. A whole-change reading names nothing, which is

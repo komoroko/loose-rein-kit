@@ -50,7 +50,7 @@ from rein import repo as repo_mod
 #: string's second value and the first bump it ever got, taken when the five gates became two.
 #: `tests/test_lock.py` pins it to the digest of the four schemas, so a shape change that leaves
 #: this alone fails there rather than in someone's repository.
-FORMAT = "rein-grounded-v2"
+FORMAT = "rein-grounded-v3"
 LOCK_NAME = ".rein/rein.lock"
 
 _HEADER = (

@@ -158,21 +158,8 @@ def test_derived_review_is_schema_valid() -> None:
                 }
             ]
         },
-        budget_limits=human_review.DEFAULT_BUDGET,
     )
     assert models.schema_errors({"machine": machine, "human": {"status": "not_started"}}, "review") == []
-
-
-def test_review_budget_snapshot_matches_the_live_measurement() -> None:
-    """The recorded snapshot and human_review's live report must not be able to disagree."""
-    machine = _machine(
-        claims=[_claim(f"C-{n:03d}", "diverged") for n in range(1, 4)],
-        budget_limits=human_review.DEFAULT_BUDGET,
-    )
-    recorded = {row["name"]: row["actual"] for row in machine["review_budget"]}
-    live = human_review.budget_actuals(_review(machine), {})
-    for name in ("max_critical_decisions", "max_human_statements"):
-        assert recorded[name] == live[name], name
 
 
 # --- recording an answer ---------------------------------------------------------

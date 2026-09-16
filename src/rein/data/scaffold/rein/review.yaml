@@ -27,7 +27,6 @@ machine:
   extra_behaviors: []  # behaviour no claim accounts for
   security: { findings: [] }
   decision_cards: []   # the one screen that asks for anything; evidence withheld until answered
-  review_budget: []
 
 human:
   status: not_started  # not_started | in_progress | frozen

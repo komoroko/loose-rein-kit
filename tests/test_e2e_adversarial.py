@@ -153,8 +153,10 @@ def test_e2e_29_chain_rewrite_changes_the_root() -> None:
     assert event_chain.chain_root(rewritten) != pinned_root
 
 
-# E2E-30: a blown review budget requires a scope split, not a longer screen.
-def test_e2e_30_review_budget_blocks() -> None:
+# E2E-30: acceptance has no ceiling on what a human is asked to hold. A ceiling here named a
+# remedy — split the scope — that does not exist once every task is implemented, merged and `done`,
+# so it was raised rather than obeyed. What blocks the freeze is an unanswered judgement, never a count.
+def test_e2e_30_no_count_blocks_acceptance() -> None:
     cards = [
         {
             "id": f"DC-{i:03d}",
@@ -164,8 +166,12 @@ def test_e2e_30_review_budget_blocks() -> None:
         }
         for i in range(1, 7)
     ]
-    review = _review({"decision_cards": cards})
-    assert human_review.scope_split_required(review, dict(review.human)) == ["max_critical_decisions"]
+    human = {
+        "status": "in_progress",
+        "decisions": [{"card_id": f"DC-{i:03d}", "chosen_option_id": "A", "confidence": "high"} for i in range(1, 7)],
+    }
+    review = _review({"decision_cards": cards}, human)
+    assert human_review.completion_blockers(review, dict(review.human)) == []
 
 
 # --- scenarios exercising the real tree (git) --------------------------------
