@@ -1,7 +1,8 @@
 """The human review is a decision procedure, so every rule here is a fixed fact (plan §14, §30).
 
 These tests never open a browser: they build a `review.yaml` in memory and pin the decision that
-cannot lapse, the expertise routing (E2E-05), the budget block (E2E-30), and the machine-digest
+cannot lapse, the expertise routing (E2E-05), the absence of any acceptance-time ceiling, and the
+machine-digest
 staleness that refuses a raced write (E2E-08) while leaving a human-only update non-staling
 (E2E-09). They also pin the absence of the old challenge-first sequence: a card's evidence is
 served with the card, and nothing asks the reviewer to guess before reading it.
@@ -162,10 +163,18 @@ def test_familiar_domain_is_never_a_gap() -> None:
     assert human_review.expertise_gaps(review, dict(review.human)) == []
 
 
-# --- review budget (plan §14.10, E2E-30) --------------------------------------
+# --- no ceiling at acceptance (plan §14.10) -----------------------------------
+#
+# Acceptance carries no budget on how much a human may be asked to read or decide. A ceiling here
+# named "split the scope" as its remedy, which is not a move that exists once every task is
+# implemented, merged and `done` — so it was raised rather than obeyed, twice, before it came out.
+# What bounds a reading is `review_policy.budgets.max_diff_bytes`, enforced where the remedy still
+# exists: `review_reading.read_facts` refuses a reading before a launch is paid for, and
+# `doctor.check_review_outlook` names the too-broad task while the mandate can still be split.
 
 
-def test_too_many_critical_decisions_requires_a_scope_split() -> None:
+def test_a_large_number_of_answered_cards_does_not_block_the_freeze() -> None:
+    """Six critical cards used to be one over a ceiling of five. Answered, they are not a blocker."""
     cards = [
         {
             "id": f"DC-{i:03d}",
@@ -173,91 +182,38 @@ def test_too_many_critical_decisions_requires_a_scope_split() -> None:
             "risk": "critical",
             "options": [{"id": "A", "statement_id": "STMT-001"}, {"id": "B", "statement_id": "STMT-002"}],
         }
-        for i in range(1, 7)  # six critical cards, limit is five
+        for i in range(1, 7)
     ]
-    review = _review(machine={"decision_cards": cards})
-    blown = human_review.scope_split_required(review, dict(review.human))
-    assert blown == ["max_critical_decisions"]
-
-
-def test_budget_within_limits_is_not_blown() -> None:
-    review = _review(machine={"scenarios": [{"id": "SCN-001", "kind": "happy_path", "statement_ids": ["STMT-001"]}]})
-    assert human_review.scope_split_required(review, dict(review.human)) == []
-
-
-def test_a_config_limit_overrides_the_default() -> None:
-    statements = [{"id": f"STMT-{i:03d}", "text": "x", "epistemic_status": "machine_inferred"} for i in range(1, 4)]
-    card = {
-        "id": "DC-001",
-        "question": "?",
-        "risk": "high",
-        "options": [{"id": letter, "statement_id": f"STMT-{n:03d}"} for n, letter in enumerate("ABC", start=1)],
+    human = {
+        "status": "in_progress",
+        "decisions": [{"card_id": f"DC-{i:03d}", "chosen_option_id": "A", "confidence": "high"} for i in range(1, 7)],
     }
-    review = _review(machine={"statements": statements, "decision_cards": [card]})
-    assert human_review.scope_split_required(review, dict(review.human)) == []
-    blown = human_review.scope_split_required(review, dict(review.human), {"max_human_statements": 2})
-    assert blown == ["max_human_statements"]
+    review = _review(machine={"decision_cards": cards}, human=human)
+    assert human_review.completion_blockers(review, dict(review.human)) == []
 
 
-def test_options_of_cards_nobody_has_to_answer_are_not_the_reviewers_workload() -> None:
-    """The budget is named for the reviewer's workload and measured the generator's output.
+def test_a_diff_too_large_for_one_sitting_does_not_block_acceptance() -> None:
+    """The refusal belongs before the launch and at the mandate, not on the freeze screen.
 
-    `derive` mints one statement per *option* of every card at every risk, and only high and
-    critical cards must be answered — so two decisions somebody owed could arrive over the
-    30-statement ceiling behind five low-risk cards nobody was obliged to read. The instruction
-    attached to that ceiling is "split the scope", which is not a move that exists at acceptance.
-    """
-    statements = [{"id": f"STMT-{i:03d}", "text": "x", "epistemic_status": "machine_inferred"} for i in range(1, 36)]
-
-    def card(index: int, risk: str) -> dict[str, object]:
-        first = index * 5 - 4
-        return {
-            "id": f"DC-{index:03d}",
-            "question": "?",
-            "risk": risk,
-            "options": [{"id": letter, "statement_id": f"STMT-{first + n:03d}"} for n, letter in enumerate("ABCDE")],
-        }
-
-    cards = [card(1, "high"), card(2, "high"), *(card(i, "low") for i in range(3, 8))]
-    review = _review(machine={"statements": statements, "decision_cards": cards})
-
-    assert len(statements) == 35, "over the default ceiling of 30, as the old measurement counted it"
-    assert human_review.budget_actuals(review, dict(review.human))["max_human_statements"] == 10
-    assert human_review.scope_split_required(review, dict(review.human)) == []
-
-
-def test_a_diff_too_large_for_one_sitting_blows_its_budget() -> None:
-    """A hardcoded actual of 0 for `max_diff_bytes` would mean it never fires.
-
-    The reasoning was that partitioning enforced the limit upstream — but nothing ever partitioned
-    anything, so the one budget denominated in bytes could not be exceeded by a change of any size.
-    The whole point of the budget is that a change too large to hold in one head splits, so it has
-    to be measurable.
+    A change measured over `max_diff_bytes` at acceptance is a fact about a mandate that was
+    already approved and tasks that are already merged. Blocking here offers the reviewer no move
+    it is still possible to make.
     """
     coverage = {
         "diff_digest": "sha256:" + "d" * 64,
         "analyzed_files": 400,
-        "analyzed_bytes": 900_000,  # the default ceiling is 524288
+        "analyzed_bytes": 900_000,  # well past the 512 KiB reading budget
         "coverage_status": "sufficient",
     }
     review = _review(machine={"coverage": coverage})
-    assert human_review.scope_split_required(review, dict(review.human)) == ["max_diff_bytes"]
-    blocker = next(b for b in human_review.completion_blockers(review, dict(review.human)) if "budget" in b)
-    assert "/revise" in blocker and "review_policy.budgets" in blocker
-    assert not human_review.can_freeze(review, dict(review.human))
+    assert human_review.completion_blockers(review, dict(review.human)) == []
+    assert human_review.can_freeze(review, dict(review.human))
 
 
-def test_the_budget_is_measured_over_the_whole_change() -> None:
-    """One manifest, one whole diff — the actual is the size of the change, not of a fragment."""
-    coverage = {
-        "diff_digest": "sha256:" + "d" * 64,
-        "analyzed_files": 10,
-        "analyzed_bytes": 300_000,
-        "coverage_status": "sufficient",
-    }
-    review = _review(machine={"coverage": coverage})
-    assert human_review.budget_actuals(review, dict(review.human))["max_diff_bytes"] == 300_000
-    assert human_review.scope_split_required(review, dict(review.human)) == []
+def test_an_unanswered_critical_card_still_blocks() -> None:
+    """Removing the ceilings must not remove the one thing acceptance actually asks a human for."""
+    review = _critical_decision_review({"status": "in_progress"})
+    assert any("unanswered high/critical decision cards" in b for b in human_review.completion_blockers(review, {}))
 
 
 def test_a_coverage_manifest_that_measured_nothing_is_refused_rather_than_read_as_zero() -> None:
@@ -270,36 +226,6 @@ def test_a_coverage_manifest_that_measured_nothing_is_refused_rather_than_read_a
     with pytest.raises(models.DocumentError) as caught:
         models.Review.parse(json.dumps(document))
     assert "analyzed_bytes" in str(caught.value)
-
-
-def test_the_screen_uses_the_ceilings_the_review_was_generated_against() -> None:
-    """A configured budget must reach the freeze check, or the human signs a different review.
-
-    `review generate` merges `review_policy.budgets` into the `review_budget` snapshot the receipt
-    binds. Recomputing the report against the hardcoded defaults meant a project that deliberately
-    raised a limit was still blocked at the default.
-    """
-    statements = [{"id": f"STMT-{i:03d}", "text": "x", "epistemic_status": "machine_inferred"} for i in range(1, 41)]
-    # Attached to cards a reviewer must answer — the budget is about workload, and a statement no
-    # card obliges anybody to read is not part of it (`answerable_statements`).
-    cards = [
-        {
-            "id": f"DC-{i:03d}",
-            "question": "?",
-            "risk": "high",
-            "options": [{"id": letter, "statement_id": f"STMT-{i * 4 - 3 + n:03d}"} for n, letter in enumerate("ABCD")],
-        }
-        for i in range(1, 11)
-    ]
-    machine = {"statements": statements, "decision_cards": cards}
-    snapshot = [{"name": "max_human_statements", "limit": 60, "actual": 40, "exceeded": False}]
-    review = _review(machine={**machine, "review_budget": snapshot})
-    assert human_review.recorded_limits(review) == {"max_human_statements": 60}
-    assert human_review.scope_split_required(review, dict(review.human)) == []
-
-    # …and without the snapshot the same review is over the default ceiling of 30.
-    default_ceilings = _review(machine=machine)
-    assert human_review.scope_split_required(default_ceilings, dict(default_ceilings.human)) == ["max_human_statements"]
 
 
 # --- staleness / optimistic concurrency (plan §17.5, E2E-08/09) ---------------

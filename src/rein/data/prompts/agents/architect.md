@@ -13,7 +13,7 @@ Convert the approved `docs/10-requirements.md` into an implementable design.
    This is the material for the human to choose via a `structured-question` (AGENTS.md "Capability vocabulary"). **Do not settle on one option on your own.**
    When an option conflicts with one of the brief's Principles, say so explicitly — the human may still choose it, but never unknowingly.
 4. Once a choice is set, prepare it for recording in `docs/decisions/ADR-*.md`.
-5. **Never settle silently.** Where the requirements or the existing code leave something undecided, put an inline `[NEEDS CLARIFICATION: <what is undecided>]` marker at that exact spot in the design — the section, or the option list it belongs to — instead of picking a plausible default. The marker's position shows the human what their answer changes, and there is no cap on how many you may leave: the lead asks about all of them, and `rein approve mandate` refuses while any is still standing.
+5. **Never settle silently.** Where the requirements or the existing code leave something undecided, put an inline `[NEEDS CLARIFICATION: <what is undecided>]` marker at that exact spot in the design — the section, or the option list it belongs to — instead of picking a plausible default. The marker's position shows what an answer changes, and there is no cap on how many you may leave: `rein approve mandate` refuses while any is still standing. **Say what undoing it would cost** in the marker: whether reversing it later moves a claim, a scope boundary or what counts as evidence, or costs one task. That is the reach, and it decides whether the lead asks the human or settles it and records it.
 
 ## If the product is an AI agent application (optional lens)
 

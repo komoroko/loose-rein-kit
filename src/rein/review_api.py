@@ -414,8 +414,6 @@ def scope_block(root: Path, review: models.Review) -> dict[str, object]:
         # How much of a judgement this session will actually ask for. Only high/critical cards
         # block the freeze, so the card total is not what a reviewer is about to be answerable for.
         "decisions_required": len(human_review.unanswered_decisions(review, review.human)),
-        "budget": human_review.budget_report(review, review.human),
-        "scope_split_required": human_review.scope_split_required(review, review.human),
     }
 
 
@@ -447,8 +445,6 @@ def review_session(root: str | Path) -> dict[str, object]:
         "scope": scope_block(root, review),
         "unanswered_decisions": human_review.unanswered_decisions(review, human),
         "expertise_gaps": human_review.expertise_gaps(review, human),
-        "budget": human_review.budget_report(review, human),
-        "scope_split_required": human_review.scope_split_required(review, human),
         "completion_blockers": human_review.completion_blockers(review, human),
         "can_freeze": human_review.can_freeze(review, human),
         "stages": stages,

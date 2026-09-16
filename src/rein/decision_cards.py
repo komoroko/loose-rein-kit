@@ -244,14 +244,13 @@ def derive_cards(
 
     **Past :data:`MAX_CARDS` this refuses rather than truncates.** It used to write
     `subjects[:max_cards]` and say in its own docstring that truncating would hide decisions —
-    while the safety net it named could not have caught anything: `derive_review_budget` counts
-    the cards this function *returns*, so the decisions dropped here were dropped before the
-    budget that was supposed to notice them ever saw them. Sixty-five findings produced a review
-    that said sixty-four, silently, in the artefact a human signs.
+    and nothing downstream could have noticed, because every count was taken over the cards this
+    function *returns*. Sixty-five findings produced a review that said sixty-four, silently, in
+    the artefact a human signs.
 
     So the answer is the one `review_reading.merge` already gives for statements and findings: a
-    list cut to fit is a review that says less than it read. The remedy is the budget's own —
-    reduce what this cycle claims and review the remainder in its own acceptance round.
+    list cut to fit is a review that says less than it read. The remedy is to reduce what this
+    cycle claims and review the remainder in its own acceptance round.
     """
     minter = _IdMinter(first_statement)
     statements: list[dict[str, Any]] = []
@@ -301,48 +300,3 @@ def _is_domain(value: object) -> bool:
     review unstorable — the schema would reject the whole document for one bad string.
     """
     return isinstance(value, str) and bool(_DOMAIN_RE.match(value))
-
-
-def derive_review_budget(
-    *,
-    limits: Mapping[str, int],
-    diff_bytes: int,
-    decision_cards: Sequence[Mapping[str, Any]] = (),
-    statements: Sequence[Mapping[str, Any]] = (),
-    gaps: Sequence[Mapping[str, Any]] = (),
-) -> list[dict[str, Any]]:
-    """The budget snapshot recorded with the review, measured the same way `human_review` measures it.
-
-    Recording it is what lets a receipt say which ceilings were in force when the review was
-    signed; `human_review.budget_report` recomputes the live values for the screen, and the two agree
-    because both read `models.BUDGET_NAMES` and the same definitions.
-
-    `diff_bytes` is the manifest's **largest reading** (`review_reading.largest_reading_bytes`) and
-    is required for the same reason the schema requires the measure: a constant actual would make
-    `max_diff_bytes` a budget no change of any size could exceed. It used to be hard-coded to 0
-    here, on the grounds that the detector partitioned large diffs — it never did; and it was then
-    the whole change, which measured a cycle against a budget that bounds a launch.
-    """
-    from rein import human_review
-
-    actuals = {
-        "max_critical_decisions": sum(1 for c in decision_cards if _risk_of(c) == "critical"),
-        # The statements attached to a card somebody must answer, not every statement minted. One
-        # card carries four or five options and only high/critical cards are mandatory, so the old
-        # `len(statements)` measured the generator's output rather than the reviewer's workload —
-        # and put two owed decisions over a 30-statement ceiling behind five optional cards.
-        "max_human_statements": human_review.answerable_statements(decision_cards, statements),
-        "max_unresolved_low_medium_unknowns": sum(
-            1 for g in gaps if _risk_of(g) in ("low", "medium") and g.get("blocking") is not True
-        ),
-        "max_diff_bytes": diff_bytes,
-    }
-    return [
-        {
-            "name": name,
-            "limit": int(limits.get(name, 0)),
-            "actual": actuals[name],
-            "exceeded": actuals[name] > int(limits.get(name, 0)),
-        }
-        for name in models.BUDGET_NAMES
-    ]

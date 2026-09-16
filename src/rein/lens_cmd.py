@@ -1,0 +1,213 @@
+"""`rein lens` — read the library, see what this cycle would apply, and count what it found.
+
+Three questions, and the third is the one that keeps the library from rotting. `--list` is what
+exists. `--select <stage>` is what would be pointed at this cycle's deliverable and what a human is
+being asked about. `--stats` is how often each lens was applied and how often it found something,
+read out of the audit chain across every cycle this repository has archived.
+
+The stats have no threshold attached and never will. A ceiling on how many lenses may exist gets
+answered by deleting whichever is cheapest to delete, not whichever has stopped earning its place;
+what a person needs is the name of the lens that has been applied eleven times and found nothing,
+so they can look at it and decide whether the condition is wrong or the cause is gone.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+
+from rein import common, event_chain, lenses, models
+from rein import events as events_mod
+from rein import repo as repo_mod
+from rein import store as store_mod
+
+logger = logging.getLogger(__name__)
+
+
+def stats(events: Sequence[models.Event]) -> dict[str, dict[str, int]]:
+    """Per lens: how many times it was applied, and how many of those found something."""
+    counts: dict[str, dict[str, int]] = defaultdict(lambda: {"applied": 0, "found": 0})
+    for event in events:
+        if event.event != "lens_applied":
+            continue
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        lens_id = str(detail.get("lens") or "")
+        if not lens_id:
+            continue
+        counts[lens_id]["applied"] += 1
+        if detail.get("found") is True:
+            counts[lens_id]["found"] += 1
+    return dict(counts)
+
+
+def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lenses.Lens]) -> str:
+    known = {lens.id: lens for lens in library}
+    rows = sorted(counts.items(), key=lambda kv: (-kv[1]["applied"], kv[0]))
+    if not rows:
+        return "no lens has been applied yet — nothing to say about which ones earn their place"
+    lines = [f"{'lens':<32} {'applied':>8} {'found':>6}  condition"]
+    for lens_id, count in rows:
+        lens = known.get(lens_id)
+        where = lens.applies_when if lens is not None else "(no longer in the library)"
+        lines.append(f"{lens_id:<32} {count['applied']:>8} {count['found']:>6}  {where}")
+    silent = [lens_id for lens_id, c in rows if c["applied"] >= 2 and c["found"] == 0]
+    if silent:
+        lines.append("")
+        lines.append(
+            f"{len(silent)} lens(es) applied and never found anything: {', '.join(silent)}. "
+            "Either the condition is wider than the failure, or the cause is gone. Narrow it in "
+            f"{lenses.library_path()}, or drop it."
+        )
+    return "\n".join(lines)
+
+
+def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str) -> int:
+    """Print the selection for `stage`, freezing it into the plan the first time it is resolved.
+
+    The library is user-global and a person edits it between cycles. If the reviewer at the code
+    stage re-derived its own list, a change to one line of an overlay would change what this cycle
+    was reviewed for, with nothing in the audit chain saying so — and the same repository would
+    answer differently on another laptop. So the selection is resolved once, against the plan, and
+    written into the plan, where the mandate freezes it with everything else.
+
+    Before the freeze that write is re-done on every call, because the facts it is resolved against
+    grow: `/req` runs with no tasks in the plan yet and `/tasks` runs with all of them. The last
+    write before the mandate is the one that gets frozen. After the freeze nothing is re-derived.
+    """
+    store = store_mod.Store(repo)
+    try:
+        plan = store.read_plan()
+    except models.DocumentError as exc:
+        logger.error(str(exc))
+        return 2
+    if plan is None:
+        logger.error("no .rein/plan.yaml — the selection is resolved against the plan")
+        return 2
+    state = store.read_state()
+    frozen_plan = state is not None and "mandate" in state.approved_gates
+
+    if not frozen_plan:
+        resolved = lenses.resolve(library, lenses.Facts.of(plan))
+        if resolved != [dict(entry.raw) for entry in plan.lenses]:
+            raw = json.loads(json.dumps(dict(plan.raw)))
+            raw["lenses"] = resolved
+            with store.transaction() as tx:
+                tx.write("plan", raw, expect_digest=store_mod.read_digest(plan))
+                tx.append(
+                    "lens_selected",
+                    cycle_id=state.cycle_id if state is not None else "",
+                    subject_ids=sorted({entry["id"] for entry in resolved}),
+                    detail={"count": len(resolved), "stages": sorted({e["stage"] for e in resolved})},
+                )
+            plan = store.read_plan()
+            if plan is None:  # written and then unreadable: a defect, not a selection
+                logger.error("the plan could not be read back after writing the lens selection")
+                return 2
+
+    applied_ids, proposed_ids = lenses.frozen(plan, stage=stage)
+    applied, missing_applied = lenses.by_id(library, applied_ids)
+    proposed, missing_proposed = lenses.by_id(library, proposed_ids)
+
+    where = "frozen with the mandate" if frozen_plan else "resolved against this plan and written into it"
+    print(f"{stage}: {len(applied)} applied, {len(proposed)} proposed ({where})")
+    if applied:
+        print("\napplied (the condition is decidable, so nobody is asked):")
+        print(lenses.render(applied))
+    if proposed:
+        print("\nproposed (deciding the condition takes judgement — keep or drop at the mandate):")
+        print(lenses.render(proposed))
+    off = [lens.id for lens in library if lens.stage == stage and lens.lens_class == lenses.CLASS_UNCLASSIFIED]
+    if off:
+        print(f"\noff, no condition written down yet: {', '.join(off)}")
+    if frozen_plan and not plan.lenses:
+        logger.warning(
+            "this mandate froze no lens selection, so there is nothing to read back. The review "
+            "runs without lenses rather than against whatever the library says today; `rein revise "
+            "--to mandate` reopens the plan if this cycle should have had them."
+        )
+    for lens_id in missing_applied + missing_proposed:
+        # Named, never skipped. The frozen list is the record of what this cycle was reviewed for,
+        # and an id the library no longer holds is precisely the drift the freeze exists to expose.
+        logger.warning(f"{lens_id} was frozen into this plan and is no longer in the library — it cannot be applied")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="the review lens library: what exists, what applies, what it found")
+    parser.add_argument("--list", action="store_true", help="every lens in the library, packaged and your own")
+    parser.add_argument("--select", metavar="STAGE", help=f"what would apply at a stage ({', '.join(lenses.STAGES)})")
+    parser.add_argument("--stats", action="store_true", help="applied/found counts per lens, across archived cycles")
+    parser.add_argument("--record", metavar="LENS", help="record that this lens was applied (with --found)")
+    parser.add_argument("--found", choices=("yes", "no"), help="whether --record's lens found anything")
+    parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    args = parser.parse_args(argv)
+    common.configure_logging()
+
+    library = lenses.library()
+    if args.list:
+        print(f"{len(library)} lens(es) — packaged: {lenses.packaged_path()}, yours: {lenses.library_path()}")
+        for lens_class in (lenses.CLASS_STANDARD, lenses.CLASS_CONDITIONAL, lenses.CLASS_UNCLASSIFIED):
+            chosen = [lens for lens in library if lens.lens_class == lens_class]
+            if chosen:
+                print(f"\n{lens_class} ({len(chosen)}):")
+                print(lenses.render(chosen))
+        return 0
+
+    try:
+        repo = repo_mod.get(args.repo)
+    except repo_mod.RepoNotFoundError as exc:
+        logger.error(str(exc))
+        return 1
+
+    if args.select:
+        if args.select not in lenses.STAGE_VALUES:
+            logger.error(f"unknown stage {args.select!r} — one of {', '.join(lenses.STAGES)}")
+            return 2
+        return _select(repo, library, args.select)
+
+    if args.record:
+        if args.found is None:
+            logger.error("--record needs --found yes|no — an application nobody scored says nothing about the lens")
+            return 2
+        known = {lens.id for lens in library}
+        if args.record not in known:
+            # Refused rather than recorded: a count against an id no library holds can never be
+            # read back beside a condition, which is the only thing the count is for.
+            logger.error(f"unknown lens {args.record!r} — `rein lens --list` names the ones that exist")
+            return 2
+        store = store_mod.Store(repo)
+        state = store.read_state()
+        if state is None:
+            logger.error("no .rein/state.yaml — run `rein init` first")
+            return 2
+        with store.transaction() as tx:
+            tx.append(
+                "lens_applied",
+                cycle_id=state.cycle_id,
+                subject_ids=[args.record],
+                detail={"lens": args.record, "found": args.found == "yes"},
+            )
+        print(f"recorded: {args.record} applied, found={args.found}")
+        return 0
+
+    if args.stats:
+        # Across archived cycles too. A lens that has stopped earning its place stopped doing so
+        # over several cycles, and `cycle-close` moves the chain that would show it into the
+        # archive — reading only the live one makes the answer go blank exactly when it matters.
+        live, _ = event_chain.scan(repo.events)
+        sources, unreadable = events_mod.cost_sources(repo, live)
+        every = [event for _, chain in sources for event in chain]
+        print(render_stats(stats(every), library))
+        for rel in unreadable:
+            logger.warning(f"{rel} could not be verified, so its lens counts are not included")
+        return 0
+
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

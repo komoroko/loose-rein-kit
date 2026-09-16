@@ -89,6 +89,7 @@ from rein import (
     event_chain,
     human_review,
     models,
+    notify,
     review_api,
     run_progress,
     security_review,
@@ -1033,6 +1034,19 @@ def open_mode(no_open: bool, term_program: str | None) -> str:
     return "browser"
 
 
+def _cycle_id(root: Path) -> str:
+    """Best effort: the wait is recorded against the cycle it was spent on, and a store that cannot
+    be read is a reason to record the wait without the cycle, never to drop the wait."""
+    from rein import repo as repo_module
+    from rein import store as store_module
+
+    try:
+        state = store_module.Store(repo_module.Repo(root)).read_state()
+    except Exception:
+        return ""
+    return state.cycle_id if state is not None else ""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="local dashboard for the Loose Rein SSOT")
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default 127.0.0.1)")
@@ -1094,6 +1108,25 @@ def main(argv: list[str] | None = None) -> int:
     if not args.read_only:
         print("  This link grants this browser write access (gate approval included) and works once.")
         print(f"  Anything opening {base} without it gets a read-only page.")
+    # Watching starts here, not inside a request handler: the point of it is the hours when no tab
+    # is open. It stops with the server (`closing`), and it starts whether or not a channel is
+    # configured — without one it notifies nothing and still times each wait, which is the arm the
+    # configured case gets compared against.
+    watcher = notify.Watcher(
+        status=lambda: _collect_status(server.root).get("decision"),
+        project=root.name,
+        url=base,
+        stop=server.closing,
+        # Called per observation, not read once: this server outlives cycles.
+        cycle_id=lambda: _cycle_id(root),
+    )
+    watcher.start()
+    if notify.read_channel() is None:
+        print(f"  No notification channel — set `command:` in {notify.config_path()} to be told when it is your turn.")
+    else:
+        print("  Notifications on: the channel is run when the decision waiting on you changes.")
+        print("  A notification says it is your turn and where; answering still needs this browser's session.")
+
     if open_mode(args.no_open, os.environ.get("TERM_PROGRAM")) == "vscode":
         print("  VS Code detected — open it inside the editor: Ctrl+Shift+P → 'Simple Browser: Show'")
         print("  and paste the URL above (or use the PORTS panel's 'Preview in Editor').")

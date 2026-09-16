@@ -37,7 +37,7 @@ import json
 import logging
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from rein import (
@@ -50,6 +50,7 @@ from rein import (
     event_chain,
     mdlite,
     models,
+    observations,
     review_policy,
     review_reading,
 )
@@ -282,6 +283,61 @@ def _clarification_blockers(repo: repo_mod.Repo, gate: str) -> list[str]:
     return blockers
 
 
+def _unknowns_admitted(repo: repo_mod.Repo) -> int:
+    """How many decisions this mandate admits it has no answer to.
+
+    Counted because the claim it tests is one this harness makes loudly: that saying `unknown` at
+    the mandate is what buys fewer interventions during the build. The other half of that pair is
+    `judgement_raised`. A mandate that admitted nothing and then raised a dozen judgements is the
+    shape that would falsify it.
+    """
+    try:
+        plan = store_mod.Store(repo).read_plan()
+    except models.DocumentError:
+        return 0
+    return sum(1 for d in plan.decisions if d.status == "unknown") if plan is not None else 0
+
+
+def _decision_blockers(plan: models.Plan | None, gate: str) -> list[str]:
+    """A `mandate`-reach decision the gate cannot be opened over. Two of them.
+
+    `plan.decisions` records how each thing the drafting phase met was settled, and by whom. The
+    ones that reach the mandate are the ones whose reversal would collapse the scope; the rest the
+    loop settled itself, on the reading that undoing them later costs one task. A `mandate`
+    decision still `unknown` is one state the gate cannot be opened over: the loop would be told
+    what it may change while what it may change is the undecided thing. A `mandate` decision the
+    loop *settled* is the other, and it is the same defect read from the opposite side — the
+    record classified it as a human's to make and then made it anyway. Neither is left to the gate
+    screen, where the only way to object is to notice a line and speak up.
+
+    Deliberately not a count. Any number of `unknown` decisions the loop owns is fine and is
+    recorded rather than guessed at; one that the mandate rests on is not, however few there are.
+    The exits are both `/req`'s: narrow the mandate so it does not cover the undecided thing, or
+    make finding the answer this cycle's scope, with claims about what will be established rather
+    than what will be built.
+    """
+    if gate != "mandate" or plan is None:
+        return []
+    out: list[str] = []
+    unknown = [d for d in plan.decisions if d.reach == "mandate" and d.status == "unknown"]
+    if unknown:
+        listed = "; ".join(f"{d.id} ({d.subject})" for d in unknown)
+        out.append(
+            f"{len(unknown)} decision(s) the mandate rests on are still `unknown`: {listed}. "
+            "A scope cannot be delegated while what it covers is the undecided thing. Either narrow "
+            "the mandate so it does not reach them, or make answering them this cycle's scope."
+        )
+    unasked = [d for d in plan.decisions if d.settled_without_asking]
+    if unasked:
+        listed = "; ".join(f"{d.id} ({d.subject})" for d in unasked)
+        out.append(
+            f"{len(unasked)} decision(s) reach the mandate and the loop settled them itself: {listed}. "
+            "`reach: mandate` is the record saying a human settles this one; answer each and set "
+            "`settled_by: human`, or change the reach and say in `rationale` why undoing it stays local."
+        )
+    return out
+
+
 def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool = True) -> list[str]:
     """Every mechanical reason `gate` cannot be approved. Empty means a request may be issued.
 
@@ -333,6 +389,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _audit_blockers(repo, state, config, gate)
     blockers += _change_request_blockers(state, gate)
     blockers += _clarification_blockers(repo, gate)
+    blockers += _decision_blockers(plan, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
     blockers += _review_blockers(repo, review, state, gate)
@@ -505,6 +562,9 @@ def record_approval(
         raise ApprovalError("no .rein/state.yaml to record the approval in")
     seen = store_mod.read_digest(state)
     approval_id = f"GA-{gate.upper()}-{event_chain.new_id()[:8].upper()}"
+    # Read before the transaction, recorded after it: an observation must never be able to fail an
+    # approval, and the plan it counts is the one this approval is about to freeze.
+    admitted = _unknowns_admitted(repo) if gate == FREEZING_GATE else 0
 
     # Everything below runs under the store lock. The chain-root binding is only meaningful if
     # nothing can append between the check and the receipt that pins it, and a gate approval
@@ -568,6 +628,10 @@ def record_approval(
             )
 
         tx.write("state", raw, expect_digest=seen)
+    if gate == FREEZING_GATE:
+        observations.record(
+            "unknown_at_mandate", project=repo.root.name, cycle_id=state.cycle_id, value=admitted, subject=approval_id
+        )
     return approval_id
 
 
@@ -620,6 +684,14 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
             "Run this in your shell — there is deliberately no flag that skips it."
         )
     print(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
+    unasked = _unasked_decisions(repo, gate)
+    if unasked:
+        # The one thing on this screen that is not a digest. Everything else says what was decided
+        # with this human; this says what was decided without them, which is the part an approval
+        # silently ratifies unless it is put in front of somebody.
+        print(f"{len(unasked)} decision(s) the loop settled without asking you:")
+        print(render_unasked(unasked) + "")
+        print("  Overruling one now costs a task. After the mandate it costs `/revise`.\n")
     addressed = addressed_requests(repo, gate)
     if addressed:
         # Read before deciding, not after. These are the changes this human asked for last time;
@@ -633,6 +705,36 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
             f"survives this session and holds the gate shut until it is answered:\n"
             f"  rein changes add {gate} --target <docs/...#R-3 | T-004> --reason <what is wrong>"
         )
+
+
+def _unasked_decisions(repo: repo_mod.Repo, gate: str) -> list[models.Decision]:
+    """What the loop settled on its own reading that undoing it later stays local.
+
+    Only at the mandate: it is the gate that freezes the plan, so it is the last moment at which
+    disagreeing with that reading is a cheap edit rather than a `/revise`.
+    """
+    if gate != FREEZING_GATE:
+        return []
+    try:
+        plan = store_mod.Store(repo).read_plan()
+    except models.DocumentError:
+        return []  # a plan that does not parse is `_plan_blockers`' to report, not this screen's
+    # `local` only. A `mandate`-reach decision the loop settled by itself is not a line on this
+    # screen to be overruled — it is `_decision_blockers`' business, because the reach already
+    # said a human settles it.
+    return [d for d in plan.decisions if d.unasked and d.is_local] if plan is not None else []
+
+
+def render_unasked(decisions: Sequence[models.Decision]) -> str:
+    lines: list[str] = []
+    for d in decisions:
+        lines.append(f"  - {d.id} {d.subject}")
+        lines.append(f"      settled: {d.answer or '(no answer recorded)'}")
+        # `rationale` is required for `local` by the schema, so "(none recorded)" can only appear
+        # under a plan nothing validated. Printed rather than skipped: the reach claim with no
+        # reasoning behind it is the one most worth looking at, not the one to leave off the list.
+        lines.append(f"      local because: {d.rationale or '(none recorded — the reach claim is unsupported)'}")
+    return "\n".join(lines)
 
 
 def approve_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> int:

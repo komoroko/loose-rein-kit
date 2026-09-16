@@ -41,8 +41,6 @@ export function ScopeStage({ data }) {
   const c = s.counts || {};
   const unsupported = cov.unsupported_files || [];
   const generated = cov.generated_files || [];
-  const budget = s.budget || [];
-  const blown = s.scope_split_required || [];
 
   return (
     <>
@@ -112,28 +110,6 @@ export function ScopeStage({ data }) {
         ) : !unsupported.length && !generated.length ? (
           <OkLine>✓ every changed file was parsed.</OkLine>
         ) : null}
-      </div>
-
-      <div className="card">
-        <div className="subhead">Review budget</div>
-        <Table head={["Budget", "Limit", "Actual"]}>
-          {budget.map((b) => (
-            <tr key={b.name}>
-              <td className="mono">{b.name}</td>
-              <td>{b.limit}</td>
-              <td className={"mono" + (b.exceeded ? " over" : "")}>{b.actual}</td>
-            </tr>
-          ))}
-        </Table>
-        {blown.length ? (
-          <Warn>
-            Over budget: {blown.join(", ")}. A blown budget splits the scope; it never lengthens this screen. The
-            freeze stays blocked until the scope is reduced or the limit is deliberately raised in{" "}
-            <code>review_policy.budgets</code>.
-          </Warn>
-        ) : (
-          <OkLine>✓ this change fits one review session.</OkLine>
-        )}
       </div>
     </>
   );

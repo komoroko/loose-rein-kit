@@ -82,7 +82,9 @@ from rein import (
     faults,
     gate_guard,
     human_review,
+    lenses,
     models,
+    observations,
     pr_stack,
     preflight,
     review_cache,
@@ -766,6 +768,11 @@ class Orchestrator:
         # The frozen Expected Model. Read once: it cannot change during a run (the mandate froze it,
         # and `rein guard` denies a write while it is frozen), and every dossier needs it.
         self._plan = self.store.read_plan()
+        # Resolved once per run from what the mandate froze, never from the library on this
+        # machine. `rein lens --select` wrote it into the plan while the plan was still a draft;
+        # re-deriving it here would make a reviewer's inputs a function of a user-global file that
+        # anybody may have edited since the gate, with nothing in the chain to show it.
+        self._code_lenses = self._frozen_code_lenses()
         self.cycle_id = self.state.cycle_id if self.state else ""
         self.branch = config.branch
         # The git/worktree layer (build_git.py); the runner is late-bound through _run above.
@@ -1489,7 +1496,26 @@ class Orchestrator:
             # step may name its own `agent_argv`, and offering a discipline the launched CLI does
             # not have is the dangling reference this replaced.
             disciplines=adapters.disciplines_for(argv or self.config.adapter_argv),
+            lenses_applied=self._code_lenses[0],
+            lenses_proposed=self._code_lenses[1],
         )
+
+    def _frozen_code_lenses(self) -> tuple[list[str], list[str]]:
+        """`(applied, proposed)` as one line each, for the code-stage reviewers."""
+        applied_ids, proposed_ids = lenses.frozen(self._plan, stage="code")
+        library = lenses.library()
+        applied, missing_a = lenses.by_id(library, applied_ids)
+        proposed, missing_p = lenses.by_id(library, proposed_ids)
+        for lens_id in missing_a + missing_p:
+            logger.warning(
+                f"{lens_id} was frozen into this plan and is no longer in the lens library — "
+                "this cycle's code review runs without it"
+            )
+
+        def line(lens: lenses.Lens) -> str:
+            return f"**{lens.id}** — {' '.join(lens.attack.split())}"
+
+        return ([line(lens) for lens in applied], [line(lens) for lens in proposed])
 
     def _fingerprint(self, cwd: str) -> str:
         """The content digest of the tree at `cwd` ("" when it cannot be computed)."""
@@ -2599,6 +2625,8 @@ class Orchestrator:
                         diff_cmd=f"git diff {before_join}..HEAD",
                         findings_path=findings_rel,
                         disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
+                        lenses_applied=self._code_lenses[0],
+                        lenses_proposed=self._code_lenses[1],
                     ),
                     access=adapters.REVIEW,
                     writable=findings_rel,
@@ -3527,6 +3555,17 @@ class Orchestrator:
             read = True
             routing = repair_mod.route(self._plan or models.Plan({}), self.store.read_review())
             print(routing.render())
+            # The other half of `unknown_at_mandate`. Findings the loop could not sort into code or
+            # plan are the ones a human has to judge, and the claim being tested is that admitting
+            # what the mandate did not know is what makes this number small. Recorded per round
+            # because that is when the number exists; never read back by anything here.
+            if routing.judgement or routing.unowned:
+                observations.record(
+                    "judgement_raised",
+                    project=self.repo.root.name,
+                    cycle_id=self.cycle_id,
+                    value=len(routing.judgement) + len(routing.unowned),
+                )
             if not routing.repairable or round_no == rounds:
                 break
             for item in routing.code:

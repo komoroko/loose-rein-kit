@@ -56,6 +56,8 @@
         "environment_repinned",
         "agents_switched",
         "decision_declared",
+        "lens_applied",
+        "lens_selected",
         "baseline_measured",
         "dependency_audit_run",
         "coverage_generated",

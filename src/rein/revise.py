@@ -55,7 +55,7 @@ import argparse
 import json
 import logging
 
-from rein import approve, common, dag, event_chain, models
+from rein import approve, common, dag, event_chain, models, observations
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -218,6 +218,7 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
         if review is not None and review.human_status != "not_started":
             stale_review = {**review.raw, "human": {"status": "not_started"}}
 
+    was_accepted = state.gate_status("acceptance") == "approved"
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=seen)
         if stale_review is not None:
@@ -230,6 +231,18 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
         )
         if revision["unfreezes_plan"]:
             tx.append("plan_invalidated", cycle_id=state.cycle_id, detail={"reason": reason})
+
+    # After the transaction, never inside it: an observation that could abort a roll back would be
+    # an input to the thing it measures. An approved acceptance being rolled back is the heaviest
+    # row in the store — somebody said yes to something they turned out not to have understood, and
+    # the claim it tests is that comprehension comes out of deciding rather than out of reading.
+    if was_accepted:
+        observations.record(
+            "acceptance_reopened",
+            project=repo.root.name,
+            cycle_id=state.cycle_id,
+            subject=str(revision["target_gate"]),
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

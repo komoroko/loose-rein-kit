@@ -23,6 +23,14 @@ or a way of running something — with these neutral capabilities, never an agen
 | `phase-invocation` | run a phase procedure (`/req` … `/status`) | read the command body, execute it |
 | `structured-question` | batched multiple-choice questions | numbered chat options, then wait |
 | `notify-and-wait` | flag a pending decision, then stop | state it, end the turn |
+
+`notify-and-wait` is how *you* hand a decision back. Reaching the person who is not looking is
+not yours and does not degrade with the host: `rein ui` watches the SSOT for as long as it runs
+and runs the channel configured in `$XDG_CONFIG_HOME/rein/notify.yaml` when the decision waiting
+on a human changes. The two gates say how often the work stops; this is what decides how long
+each stop lasts, so it is the harness's and not the CLI's. A notification carries what is waited
+on and where — never the evidence, and never a way to answer: the page it names is read-only
+unless that browser already holds a session.
 | `approval-presentation` | present a deliverable for approval | ask for an explicit "approve" |
 | `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
 | `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |
@@ -77,8 +85,43 @@ dependencies allow, re-running what went red.
 Four documents, distinct roles — do not conflate them:
 
 - **`.rein/plan.yaml`** — the frozen **Expected Model**: one claim per requirement
-  (`R-N`/`NFR-N`), and the task DAG. `claim_ids` threads each task back to the claim it
-  answers, cross-checked by `rein dag --trace`. Frozen when the mandate is approved.
+  (`R-N`/`NFR-N`), the task DAG, and the `decisions` record. `claim_ids` threads each task back to
+  the claim it answers, cross-checked by `rein dag --trace`. Frozen when the mandate is approved.
+- **What reaches a human is decided by reach, never by "would I otherwise use a default".** Each
+  decision drafting meets carries `reach: mandate | local`. `mandate` means undoing it later moves
+  a claim, a scope boundary or what counts as evidence — a human settles it. `local` means undoing
+  it costs one task and no claim — **the loop settles it and records the reasoning**, and the
+  mandate screen shows the human what they were *not* asked, which is where that reasoning is
+  overruled while overruling it is still cheap. The wider criterion asks about nearly every choice
+  a design contains and spends the drafting phase before the irreversible ones come up.
+- **A review lens is a record with a condition, not a paragraph.** `rein lens --select <stage>`
+  gives the reviewer the lenses whose condition holds for *this* change; a `standard` one applies
+  without asking, a `conditional` one is proposed at the mandate gate, an `unclassified` one is off
+  until somebody writes down when it applies. A `standard` lens with no machine-decidable condition
+  is loaded as `unclassified` — "applied without asking" is licensed by a condition, not by the
+  field being empty. The selection is resolved once and **frozen into `plan.yaml`**: the library is
+  user-global, and a review whose inputs move with it would answer differently on another laptop. Sending a reviewer at a failure that cannot occur
+  here costs a pass over the deliverable and returns nothing, while the findings that *are*
+  possible compete with it for attention. Over-reviewing is not thorough.
+- **What the harness measures about itself is what would falsify a rule it follows.** Not what is
+  easy to collect: a pile of metrics nobody reads loses the figures that matter among the ones that
+  were merely available. `rein observe` prints each figure beside the claim it tests —
+  `reach_overruled` against selection by reach, `unknown_at_mandate` beside `judgement_raised`,
+  `acceptance_reopened`, `waited_seconds` in both arms — the wait is timed whether or not a
+  notification channel is configured, because "the channel shortens it" is a comparison and one
+  arm cannot make it. No thresholds, and none are coming: a number with a
+  ceiling gets managed instead of read. **Nothing reads the store back.** A cycle's outcome must
+  not depend on what earlier cycles recorded, or the same repository answers differently elsewhere.
+- **A lens earns its place the second time, and loses it by never finding.** A one-off finding is
+  recorded `unclassified` — once is an incident, twice is what tells you the condition. The reverse
+  rule is `rein lens --stats`: applied and found counts per lens, across archived cycles, naming
+  the ones that keep applying and never find. Counted, never capped — a ceiling on how many lenses
+  may exist gets answered by deleting whichever is cheapest to delete.
+- **`status: unknown` is an answer.** Record it rather than filling it in with a default, and never
+  write a claim for it: a claim nothing can make true cannot be judged. A `mandate` decision left
+  `unknown` is refused by `rein approve mandate` — narrow the mandate so it does not reach it, or
+  make answering it this cycle's scope. Relabelling it `local` to clear the check is falsifying the
+  record.
 - **`.rein/state.yaml`** — phase, gate approvals, task status. `gates.<name>` is
   `pending`|`approved` — **the only write path to `approved` is a human approval `rein`
   recorded**, and the receipt binds the digests that approval covered. The mandate approval also pins the
@@ -240,16 +283,19 @@ not "the answer is bad" (detail: build.md, verify.md).
   use worktree branches (`<branch>-T-NNN`) and route every decision through the control plane so a
   worktree's record survives its deletion.
 - Per-task commits **`T-NNN: <summary>`**; commit each phase's deliverables at its gate approval.
-- **Push / PR / merge to main are outward-facing** — human approval only, same for GitHub Issues.
+- **Push and PR are outward-facing** — human approval only, same for GitHub Issues.
+- **Merging into the base is outside this harness.** It takes a change to acceptance and leaves it
+  reviewable; acceptance approved the change, not the push to the base, and asking a second time
+  for the same decision is one approval too many. Whoever owns the base lands it.
 - A cycle may ship as **one pull request** (`rein pr-draft` assembles the body) or as a **stack of
-  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before acceptance and is lifted
-  by `rein pr-stack --ready` once a human approves it, and landed by `rein pr-stack --merge`. All
-  three confirm at a terminal first and none may be pre-authorized. The slices are registered as a
-  **GitHub stack**, and `--merge` lands the whole of it in one atomic `gh stack merge`.
-- **A stack is merged whole, never in part.** Merging a subset makes GitHub rebase the pull
-  requests above the cut onto the new base with new commit ids, so every `completed_commit` above
-  it names a commit in no branch's history. Squash and rebase merges strand them the same way.
-  Merged atomically, nothing is rebased and the commits the build produced are the ones that land.
+  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before acceptance and is
+  lifted by `rein pr-stack --ready` once a human approves it. Both confirm at a terminal first and
+  neither may be pre-authorized. The slices are registered as a **GitHub stack** at push time.
+- **A stack is merged whole, never in part.** This is the harness's to *say*, not to do: merging a
+  subset makes GitHub rebase the pull requests above the cut onto the new base with new commit ids,
+  so every `completed_commit` above it names a commit in no branch's history. Squash and rebase
+  merges strand them the same way. `gh stack merge <top> --merge` lands the whole of it atomically,
+  and nothing is rebased. The pull-request body carries this warning to whoever presses the button.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
   `completed_commit` and gate receipt on commits that no longer exist. The grounded review's own repairs follow
@@ -257,7 +303,7 @@ not "the answer is bad" (detail: build.md, verify.md).
   owning slice's branch and merged upward, never at the work branch's tip.
 - `command-preauthorization` of known-safe commands cuts repeated prompts **without touching
   gates** (generic commands in the installed settings; product-specific ones in the product's
-  own) — never pre-authorize push / PR / **merge to main** / `cycle-close` / `pr-stack`, nor `rein
+  own) — never pre-authorize push / PR / `cycle-close` / `pr-stack`, nor `rein
   approve` (gate rule 2). A worktree merge into the work branch is not one of those: the build
   loop does it, so it is pre-authorized. `rein doctor` checks the gate-opening verbs in code,
   including in the gitignored local settings file.

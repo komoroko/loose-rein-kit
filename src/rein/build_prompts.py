@@ -170,6 +170,30 @@ def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: boo
     return note
 
 
+def lens_note(applied: Sequence[str], proposed: Sequence[str]) -> str:
+    """The lenses this cycle's mandate froze for the code stage, handed to the reviewer.
+
+    Handed rather than listed in the prompt for the same reason the drafting reviewers are handed
+    theirs: a lens whose condition does not hold here attacks a failure this change cannot have, and
+    it costs a pass over the diff and comes back "attacked, nothing" while the findings that *are*
+    possible compete with it for the reader's attention. The set is the one `plan.lenses` holds, so
+    a reviewer launched today reads for what the gate screen said it would.
+    """
+    if not applied and not proposed:
+        return ""
+    note = "\n**Lenses this cycle froze for the code stage — work through exactly these:**\n"
+    for line in applied:
+        note += f"- {line}\n"
+    for line in proposed:
+        note += f"- (proposed at the gate, apply if it holds here) {line}\n"
+    note += (
+        "A lens you were not handed is not an oversight: its condition does not hold for this "
+        "change. Report anything you find that no lens covers, and say so — it is recorded as an "
+        "unclassified lens and earns a condition the second time the same cause comes back.\n"
+    )
+    return note
+
+
 def review_prompt(
     task: dag.Task,
     *,
@@ -179,6 +203,8 @@ def review_prompt(
     dossier_path: str = "",
     findings_path: str = "",
     disciplines: Mapping[str, str] | None = None,
+    lenses_applied: Sequence[str] = (),
+    lenses_proposed: Sequence[str] = (),
 ) -> str:
     # Scope the reviewer's read to the task's actual diff: it runs in a fresh context (independent
     # verification — deliberately not the implementer's session), and without this hint it must
@@ -218,6 +244,7 @@ def review_prompt(
         "scope; a requirements/design defect is a finding like any other, not something to work "
         "around.\n"
         f"{_disciplines_note(disciplines)}"
+        f"{lens_note(lenses_applied, lenses_proposed)}"
         "\n"
         "**Then read the tests as evidence, not as code that passes.** The caller re-establishes the "
         "gate's command steps over the base with only this change's test half applied, which can show "
@@ -406,6 +433,8 @@ def integration_review_prompt(
     diff_cmd: str,
     findings_path: str,
     disciplines: Mapping[str, str] | None = None,
+    lenses_applied: Sequence[str] = (),
+    lenses_proposed: Sequence[str] = (),
 ) -> str:
     """Review the tree the merge produced, which no per-task reviewer ever saw.
 
@@ -442,6 +471,7 @@ def integration_review_prompt(
         "places, an abstraction one task introduced that the next worked around, anything no ticket's "
         "acceptance criteria require.\n"
         f"{_disciplines_note(disciplines, at_the_join=True)}"
+        f"{lens_note(lenses_applied, lenses_proposed)}"
         "\n"
         "Do not re-review either task against its own ticket — that already happened, on its own "
         f"branch. Do not run {cmds}: the caller has just run them over this exact tree and decides by "

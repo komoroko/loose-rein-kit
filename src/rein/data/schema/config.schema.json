@@ -276,28 +276,14 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "max_critical_decisions": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
-            },
-            "max_human_statements": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500
-            },
-            "max_unresolved_low_medium_unknowns": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 100
-            },
             "max_diff_bytes": {
               "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one task's scope, so a large cycle passes and a task too broad to read in one launch is refused by name, at the mandate, while splitting it is still possible.",
               "type": "integer",
               "minimum": 4096,
               "maximum": 8388608
             }
-          }
+          },
+          "description": "What one reviewer launch may be asked to hold. There is deliberately no ceiling on how much a human may be asked to read or decide at acceptance: such a ceiling named \"split the scope\" as its remedy, which is not a move that exists once every task is implemented, merged and done, so it was raised rather than obeyed. `max_diff_bytes` survives because it is enforced where the remedy exists — `read_facts` refuses a reading before a launch is paid for, and `rein doctor` names a too-broad task while the mandate can still be split."
         },
         "repair_rounds": {
           "description": "How many times acceptance may repair its own blocking findings and read the change again before it stops and asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",

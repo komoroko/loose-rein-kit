@@ -11,7 +11,7 @@ capability vocabulary onto Claude Code's mechanisms.
 |---|---|
 | `phase-invocation` | slash commands `/req` `/design` `/tasks` `/build` `/verify` `/status` `/revise` `/onboard` (`.claude/commands/*.md`) |
 | `structured-question` | `AskUserQuestion` (up to 4 questions per call, multiple-choice with a recommended option). Four is what one round carries, **not** a cap on how many things get confirmed — keep asking in further rounds |
-| `notify-and-wait` | `PushNotification`, then end the turn |
+| `notify-and-wait` | `PushNotification`, then end the turn (how *you* hand a decision back; reaching a person who is not looking is `rein ui`'s own channel, not this) |
 | `approval-presentation` | plan mode + `ExitPlanMode`; outside plan mode, present the summary and ask for an explicit "approve" |
 | `session-compaction` | `/compact` (human-run; the agent only suggests it) |
 | `role-delegation` | subagents in `.claude/agents/` (`requirements-analyst`, `architect`, `adversarial-reviewer`) |

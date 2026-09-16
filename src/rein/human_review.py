@@ -11,8 +11,14 @@ building — so each rule is a fixed fact a test can pin without a browser:
 - **Expertise** (§14.9, E2E-05). High/critical work in a domain the reviewer declared `partial` or
   `unfamiliar` cannot be closed by a general reviewer's risk acceptance; it needs an expert, an
   experiment, a scope reduction, a safe-default revision, or the behaviour removed.
-- **Budget** (§14.10, E2E-30). Past a budget the answer is to *split the scope*, never to lengthen
-  the screen — so exceeding one blocks completion with `scope_split_required` instead of scrolling.
+- **No ceiling on the screen.** Acceptance carries no budget on how much a human may be asked to
+  read or decide. A ceiling here named a remedy — split the scope — that does not exist at
+  acceptance, where every task is implemented, merged and `done`, so its only exit was to raise the
+  number, and this module raised it twice before the ceiling came out. What bounds a reading is
+  `review_policy.budgets.max_diff_bytes`, and it is enforced where the remedy exists: `read_facts`
+  refuses a reading before a launch is paid for, and `doctor.check_review_outlook` names the
+  too-broad task while the mandate can still be split. A screen that is too big is a symptom; the
+  cause is a mandate that was too big, and that is where the limit belongs.
 
 **What this module no longer does is ask the reviewer a question it already knows the answer to.**
 A high/critical card used to withhold its evidence until the reviewer had recorded an unprimed
@@ -35,15 +41,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from rein import models, review_policy, review_reading
+from rein import models, review_policy
 
-# The standard review budget (plan §14.10). A machine review may carry its own measured
-# `review_budget`, but these are the limits the loop enforces when the config does not override
-# them — the numbers past which a screen must become a scope split.
+# What one reviewer *launch* may be asked to hold — the only ceiling left anywhere in this flow,
+# and it is on the machine. Nothing here bounds a human: this is never read at the freeze. The
+# readers are `review.py` and `build_loop.py`, which hand it to `review_reading.read_facts`, and
+# that refuses an over-budget reading *before* a launch is paid for, where narrowing the task is
+# still a move. `review_policy.budgets` overrides it; `refuse_over_budget` says why one would.
 DEFAULT_BUDGET: dict[str, int] = {
-    "max_critical_decisions": 5,
-    "max_human_statements": 30,
-    "max_unresolved_low_medium_unknowns": 5,
     "max_diff_bytes": 524288,
 }
 
@@ -173,128 +178,10 @@ def expertise_gaps(review: models.Review, human: Mapping[str, Any]) -> list[dict
 # -- review budget (plan §14.10, E2E-30) --------------------------------------
 
 
-def answerable_statements(
-    decision_cards: Sequence[Mapping[str, Any]], statements: Sequence[Mapping[str, Any]], *, floor: str = "high"
-) -> int:
-    """How many statements belong to a card somebody actually has to answer.
-
-    `max_human_statements` is named for the reviewer's workload and was measured as
-    `len(machine.statements)` — every statement `decision_cards.derive` mints, which is one per
-    *option* of every card at every risk. A card carries four or five options, and only high and
-    critical cards must be answered (:func:`unanswered_decisions`), so two decisions a person owed
-    could arrive over the 30-statement ceiling behind five low-risk cards nobody was obliged to
-    read. The instruction attached to that ceiling is "split the scope", which is not a move that
-    exists at acceptance, so the only exit was to raise the number.
-
-    Counted here instead: the statements attached, through `applicability.subject_id`, to the
-    cards the floor makes mandatory. A low-risk card is still worth reading and still costs
-    nothing against a budget about what must be decided.
-
-    Shared by `human_review.budget_actuals` and `decision_cards.derive_review_budget` for the same
-    reason they already share `models.BUDGET_NAMES`: the snapshot recorded with the review and the
-    live figure on the screen have to be the same measurement.
-    """
-    wanted: set[str] = set()
-    for card in decision_cards:
-        if not models.risk_at_least(_risk(card), floor):
-            continue
-        options = card.get("options")
-        if not isinstance(options, list):
-            continue
-        wanted |= {
-            str(option.get("statement_id", ""))
-            for option in options
-            if isinstance(option, Mapping) and option.get("statement_id")
-        }
-    return sum(1 for statement in statements if str(statement.get("id", "")) in wanted)
-
-
-def _unresolved_low_medium_unknowns(review: models.Review, human: Mapping[str, Any]) -> int:
-    """Low/medium non-blocking gaps with no human disposition — the ones a budget bounds."""
-    disposed = {str(d.get("subject_id")) for d in _human_list(human, "dispositions")}
-    count = 0
-    for gap in _machine_list(review, "gaps"):
-        risk = _risk(gap)
-        if risk in ("low", "medium") and gap.get("blocking") is not True and str(gap.get("id")) not in disposed:
-            count += 1
-    return count
-
-
-def _diff_bytes(review: models.Review) -> int:
-    """The largest single reading in this review, in bytes — what one launch was asked to hold.
-
-    Not the whole change. `max_diff_bytes` bounds what a *reviewer* can read in one launch, and
-    under a composed review no reviewer ever reads the whole change: each reading is measured,
-    widened and refused on its own (`review_reading.read_facts`). Measuring the whole here made the
-    budget a function of how much a cycle shipped, and its own instruction — split the scope — is
-    not a move that exists at acceptance, where every task is implemented, merged and `done`. Measured
-    on this repository, two consecutive release cycles came to 662 KB and 754 KB against a 512 KiB
-    ceiling, so the only exit was raising the number.
-    """
-    return review_reading.largest_reading_bytes(review.coverage)
-
-
-def budget_actuals(review: models.Review, human: Mapping[str, Any]) -> dict[str, int]:
-    """The measured value for each budget line, derived from the review content (plan §14.10).
-
-    `max_diff_bytes` is measured from the coverage manifest, not assumed enforced upstream: a
-    constant actual here would make the one byte-denominated budget impossible to exceed by a
-    change of any size. It is the *largest reading* (`_diff_bytes`), which is what that budget
-    bounds — so it is a backstop over the document rather than the wall, and the wall is
-    `review_reading.read_facts`, which refuses a reading before anything is launched.
-    """
-    return {
-        "max_critical_decisions": sum(1 for c in _machine_list(review, "decision_cards") if _risk(c) == "critical"),
-        "max_human_statements": answerable_statements(
-            _machine_list(review, "decision_cards"), _machine_list(review, "statements")
-        ),
-        "max_unresolved_low_medium_unknowns": _unresolved_low_medium_unknowns(review, human),
-        "max_diff_bytes": _diff_bytes(review),
-    }
-
-
-def recorded_limits(review: models.Review) -> dict[str, int]:
-    """The ceilings this review was *generated* against (`machine.review_budget`).
-
-    `review.py` merges `review_policy.budgets` from config.yaml into the snapshot it writes at
-    generation time, and that snapshot is what the gate receipt binds. Reading it back here is what
-    makes a configured budget reach the screen: recomputing against `DEFAULT_BUDGET` alone would
-    block a project that deliberately raised a limit at the default anyway — and the review a human
-    signed would disagree with the review they were shown.
-    """
-    limits: dict[str, int] = {}
-    for row in _machine_list(review, "review_budget"):
-        name, limit = str(row.get("name", "")), row.get("limit")
-        if name in models.BUDGET_NAME_VALUES and isinstance(limit, int) and not isinstance(limit, bool):
-            limits[name] = limit
-    return limits
-
-
-def budget_report(
-    review: models.Review, human: Mapping[str, Any], limits: Mapping[str, int] | None = None
-) -> list[dict[str, Any]]:
-    """One row per budget: name, limit, measured actual, and whether it is exceeded."""
-    ceilings = {**DEFAULT_BUDGET, **recorded_limits(review), **(limits or {})}
-    actuals = budget_actuals(review, human)
-    return [
-        {"name": name, "limit": ceilings[name], "actual": actuals[name], "exceeded": actuals[name] > ceilings[name]}
-        for name in models.BUDGET_NAMES
-    ]
-
-
-def scope_split_required(
-    review: models.Review, human: Mapping[str, Any], limits: Mapping[str, int] | None = None
-) -> list[str]:
-    """The budgets that are blown — non-empty means the scope must be split, not the screen grown."""
-    return [row["name"] for row in budget_report(review, human, limits) if row["exceeded"]]
-
-
 # -- completion readiness (plan §21.5) ----------------------------------------
 
 
-def completion_blockers(
-    review: models.Review | None, human: Mapping[str, Any] | None = None, *, limits: Mapping[str, int] | None = None
-) -> list[str]:
+def completion_blockers(review: models.Review | None, human: Mapping[str, Any] | None = None) -> list[str]:
     """Every reason the human review cannot be frozen — the approve button's disabled reasons.
 
     Exhaustive rather than short-circuiting, like approve.readiness: handing the reviewer one
@@ -327,15 +214,6 @@ def completion_blockers(
         blockers.append(
             "high/critical domains need an expert, an experiment, or a smaller scope: "
             + ", ".join(f"{g['domain']} ({g['level']})" for g in gaps)
-        )
-
-    blown = scope_split_required(review, human, limits)
-    if blown:
-        blockers.append(
-            f"review budget exceeded — split the scope, do not grow the screen: {', '.join(blown)}. "
-            "Reduce what this cycle claims through `/revise` and review the remainder in its own "
-            "acceptance round, or raise the limit in `review_policy.budgets` as a deliberate, recorded "
-            "decision about how much one person can hold at once"
         )
 
     return blockers
@@ -478,15 +356,13 @@ def request_expert(
     return out
 
 
-def freeze(
-    review: models.Review, human: Mapping[str, Any], *, limits: Mapping[str, int] | None = None
-) -> dict[str, Any]:
+def freeze(review: models.Review, human: Mapping[str, Any]) -> dict[str, Any]:
     """Move the human half to `frozen`, refusing if any completion blocker remains.
 
     Freezing is the precondition the gate approval is built on — so it must fail
     closed on the same wall approve.readiness re-checks, never on a subset of it.
     """
-    blockers = completion_blockers(review, human, limits=limits)
+    blockers = completion_blockers(review, human)
     if blockers:
         raise ValueError("cannot freeze the human review:\n  - " + "\n  - ".join(blockers))
     out = _human_base(human)

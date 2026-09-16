@@ -295,7 +295,7 @@ Then, per cycle:
      speaks only when it moves, so an idle dashboard costs a handful of `stat` calls a second.
      Optional notifications fire on a waiting decision. Actions are a fixed whitelist — reads,
      diagnostics, and decision recording (approve / resolve / revise / cycle-close); phase
-     execution and push/PR/merge are not available here.
+     execution and push/PR are not available here.
    - `rein dag --mermaid` — render the task dependency diagram
 
 7. **Ship as a PR** — `rein pr-draft` assembles the PR body from the SSOT into
@@ -308,11 +308,14 @@ Then, per cycle:
    introduced the code and carried upward by `--restack`, which merges — **a stack is never
    rebased**, because rewriting history strands every `completed_commit` and gate receipt on
    commits that no longer exist. The slices are registered as a **GitHub stack** when they are
-   pushed, and `--merge` lands the whole of it in one atomic `gh stack merge` (needs
+   pushed. **Landing the stack is yours, not the harness's** — acceptance approved the change, not
+   the push to the base, and the harness does not ask a second time for the same decision.
+   `gh stack merge <top> --merge` lands the whole of it atomically (needs
    `gh extension install github/gh-stack`; `rein doctor` says whether you have it). **Never merge
    part of a stack**: GitHub rebases the pull requests above the cut onto the new base with new
    commit ids, and every `completed_commit` above it then names a commit in no branch's history.
-   Squash and rebase merges strand them the same way. Merged whole, nothing is rebased.
+   Squash and rebase merges strand them the same way. Merged whole, nothing is rebased. Each
+   pull-request body carries this warning to whoever presses the button.
 
 8. **Close the cycle** — after acceptance, `rein cycle-close --name <slug>` archives to
    `docs/archive/<date>-<slug>/`, restores fresh scaffolds, and resets gates/phase. A human
@@ -515,6 +518,36 @@ steps keep their ceiling (`command_timeout_sec`) — their runtime is knowable.
 > can actually run — it carries python, uv and pytest and has no network. `rein init` fills
 > detected commands in a brownfield repo; otherwise substitute yours, and point the profile at
 > your own image with `dockerfile:` when they need more than that.
+
+## Being told it is your turn
+
+Two gates say how often the work stops. How long each stop lasts is set by how soon you find out,
+so the channel is the harness's own rather than the agent CLI's: `rein ui` watches the SSOT for as
+long as it runs — no browser needed — and runs your command when the decision waiting on you
+changes.
+
+```yaml
+# $XDG_CONFIG_HOME/rein/notify.yaml   (~/.config/rein/notify.yaml)
+command: notify-send "rein"
+```
+
+The command is run with `REIN_PROJECT`, `REIN_DECISION_ID`, `REIN_HEADLINE`, `REIN_ACTION` and
+`REIN_URL` in its environment, on top of an allowlist of the variables a command needs to *be* a
+command here — `PATH`, `HOME`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` and a few more — and nothing
+that carries a credential. It lives in your user config, not `.rein/config.yaml`, because that one
+is frozen by the mandate and where your pings go is not a thing a mandate should freeze.
+
+One decision, one notification: the id changes only when the decision does. A notification carries
+what is waited on and where to answer — never the evidence, and never the launch secret, which is
+stripped from `REIN_URL` even if one is handed in. So it may leave the machine without widening
+anything, and the other side of that is real: **the page it points at is read-only unless that
+browser already holds a session.** Answering is still the launch link from the terminal, or a
+terminal. `rein doctor` says whether a channel is configured and whether its command can actually
+run, resolved the same way the watcher will resolve it.
+
+The watcher runs whether or not you have configured a channel. Without one it notifies nothing and
+still times each wait, in the `silent` arm — which is what the `notified` arm gets compared against
+when you ask `rein observe` whether the channel helped.
 
 ## Security review
 

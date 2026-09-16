@@ -45,6 +45,7 @@ from rein import (
     gitignore,
     install,
     models,
+    notify,
     policy_check,
     review_reading,
     strict_yaml,
@@ -830,33 +831,73 @@ def check_binaries() -> list[Finding]:
         else:
             findings.append(Finding(level, "env", f"{name} not found on PATH — {why}"))
     findings.extend(check_stack_extension())
+    findings.extend(check_notification_channel())
     return findings
+
+
+def check_notification_channel() -> list[Finding]:
+    """Is there a path by which "it is your turn" reaches somebody who is not looking?
+
+    Two gates say how often the work stops; they say nothing about how long each stop lasts, and
+    that is set by how soon the person finds out. Reported as INFO, not WARN: running without a
+    channel is supported — the dashboard still badges its tab and `rein next` still prints the
+    decision — and a harness that nagged about an unconfigured convenience would be one more thing
+    to stop reading. What it must not do is leave somebody assuming a ping is coming.
+    """
+    channel = notify.read_channel()
+    if channel is None:
+        return [
+            Finding(
+                "INFO",
+                "env",
+                f"no notification channel — nothing tells you a decision is waiting unless the "
+                f"dashboard is open. Set `command:` in {notify.config_path()}. The wait is still "
+                "timed while there is none (`rein observe`), which is what the configured case "
+                "gets compared against.",
+            )
+        ]
+    program = channel.program()
+    # Resolved through `notify.resolve`, which is what the runner uses. A check that looked the
+    # name up in this process's own PATH would report PASS for a command the watcher launches with
+    # a different one, which is exactly the silence this WARN exists to prevent.
+    if notify.resolve(program) is None:
+        return [
+            Finding(
+                "WARN",
+                "env",
+                f"the notification command `{program}` cannot be found in the environment the "
+                "watcher runs it in — every notification will fail silently, which is worse than "
+                "having no channel because you would be waiting for one.",
+            )
+        ]
+    return [Finding("PASS", "env", f"notification channel: `{' '.join(channel.argv)}`")]
 
 
 def check_stack_extension() -> list[Finding]:
     """Is `gh stack` available? Only `rein pr-stack` needs it, and only to ship a stack.
 
     INFO rather than WARN when it is missing: a cycle that ships as one pull request never touches
-    it. What it is *for* is the merge — `--merge` lands the stack in one atomic operation, and
-    without the extension the alternative is merging the pull requests by hand, where merging a
-    subset silently rebases everything above the cut off its recorded commits.
+    it. `--push` uses it to register the pull requests as a stack (`gh stack link`), and landing
+    that stack — which is the human's, not the harness's — is `gh stack merge` on the top pull
+    request. Without the extension the alternative is merging by hand, where merging a subset
+    silently rebases everything above the cut off its recorded commits.
     """
     if shutil.which("gh") is None:
         return []  # already reported by the `gh` row above; a second line about its extension helps nobody
     rc, out = common.run(["gh", "extension", "list"], timeout=30)
     if rc != 0:
-        return [Finding("INFO", "env", "could not list gh extensions — `rein pr-stack --merge` may be unavailable")]
+        return [Finding("INFO", "env", "could not list gh extensions — `gh stack` may be unavailable")]
     # The owner too, not just the name: `gh extension list` prints `owner/repo`, and a bare
     # `gh-stack` also matches a fork or a same-named extension from anybody else — which would
-    # report a `gh stack merge` this module has never been measured against as installed.
+    # report a `gh stack` this module has never been measured against as installed.
     if "github/gh-stack" in out:
-        return [Finding("PASS", "env", "gh-stack extension installed (`rein pr-stack --merge` can land a stack)")]
+        return [Finding("PASS", "env", "gh-stack extension installed (`gh stack merge` can land a stack whole)")]
     return [
         Finding(
             "INFO",
             "env",
-            "gh-stack extension not installed — `rein pr-stack` still opens the stack, but `--merge` "
-            "cannot land it atomically. Install it with `gh extension install github/gh-stack`.",
+            "gh-stack extension not installed — `rein pr-stack` still opens the stack, but it cannot be "
+            "landed atomically by hand. Install it with `gh extension install github/gh-stack`.",
         )
     ]
 
@@ -1556,8 +1597,10 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
                 "WARN",
                 "review",
                 f"{view.line()} — `max_diff_bytes` bounds what one launch may read, and no launch "
-                f"can read {view.unit}. Narrow its scope or split the task at the mandate, or raise "
-                "`review_policy.budgets.max_diff_bytes` as a deliberate decision."
+                f"can read {view.unit}. Said here, while the mandate can still be split: narrow "
+                "that task's scope or cut it in two. Raising "
+                "`review_policy.budgets.max_diff_bytes` is the other exit, and it is a claim about "
+                "this adapter's context window rather than about the reading."
                 + (f"\n  {view.made_of()}" if view.made_of() else ""),
             )
         )
