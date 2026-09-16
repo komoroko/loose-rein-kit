@@ -4,231 +4,53 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
-## [0.12.0] - 2026-09-16
+## [0.6.0] - 2026-09-16
 
-**What an adversarial pass over 0.6.0–0.11.0 found: three of those changes declared something the
-code did not do.** Each is fixed at the declaration or at the mechanism, whichever was wrong.
+Six changes with one rule behind them: **what a human is asked is decided by the nature of the
+question, never by a count.** How many times is the result, not the input. No compatibility layer;
+what each one replaced is deleted.
 
-**A gate screen built out of an optional field can go silently blank.** `plan.yaml`'s `decisions`
-required only `id`, `subject`, `reach` and `status`, while "the decisions the loop settled without
-asking you" was derived from `settled_by`, and `reach: local`'s claim was justified by `rationale`.
-Both were required by a paragraph in a prompt and by nothing else — and nothing in `plan.yaml` is
-written by hand. An omitted `settled_by` emptied the list the whole record exists to produce, with
-`doctor` none the wiser. The schema now requires `settled_by` on every `settled` decision, forbids
-it on an `unknown` one, and requires `rationale` on every `local` one. `Decision.unasked` reads
-"settled, and not by a human", so the remaining failure mode shows a human one decision too many
-rather than one too few. And `rein approve mandate` now refuses a `reach: mandate` decision
-carrying `settled_by: loop`: the reach is the record saying a human settles that one, so answering
-it yourself is the same defect as leaving it `unknown`, reached from the other side.
+### Acceptance has no ceiling on what a human is asked to hold
 
-**The lens selection is frozen into the plan, which is what 0.10.0 said and did not do.** The
-library is user-global; the selection was re-derived from it on every call, so one line changed in
-an overlay changed what a cycle was reviewed for, with nothing in the audit chain to show it.
-`rein lens --select` now resolves the whole selection against the plan and writes it to
-`plan.lenses` while the plan is a draft, and reads it back once the mandate has frozen it. New
-event kind `lens_selected`. A frozen id the library no longer holds is named, never skipped.
+`human_review` carried a review budget: five critical decisions, thirty answerable statements, five
+unresolved low/medium unknowns, and 512 KiB of reading. Exceeding one blocked the freeze with
+`scope_split_required`, whose instruction was to split the scope. That move does not exist at
+acceptance, where every task is implemented, merged and `done` — so the ceiling was never obeyed,
+it was raised. This file records both occasions: `max_human_statements` was re-based from every
+minted statement to the ones attached to a mandatory card because two owed decisions arrived over
+the ceiling behind five optional ones, and `max_diff_bytes` was re-based from the whole change to
+the largest single reading because two consecutive release cycles came to 662 KB and 754 KB against
+a 512 KiB limit. Each time the measurement moved and the ceiling stayed. A number whose only
+available response is to raise it is not a boundary, and the screen it guards is a symptom: the
+cause is a mandate that was too big, and that is where a limit can still be acted on.
 
-**A `standard` lens now has to carry a machine-decidable condition.** All nineteen shipped lenses
-had an empty one, which made `standard` mean "applied to everything" — the always-on list the
-library replaced, re-entering through an empty field. The condition vocabulary was the reason: it
-could only express paths and risk, and a requirements-stage lens has neither. It now also carries
-`min_claims`, `min_tasks` and `requires` over a closed set of plan facts (`nfr_claims`,
-`parallel_tasks`, `task_dependencies`), so every packaged lens states a condition that is checked;
-a `standard` lens with no `when:` block is loaded as `unclassified`, and a test holds that line.
-`L-DES-NFR-HOLES`, `L-TASK-COLLISION` and `L-TASK-MISSING-EDGE` become `standard` on real
-conditions, while `L-REQ-FAILURE-MODES` and `L-DES-FAILURE-WALK` become `conditional` because
-theirs is not decidable from the plan.
+So `max_critical_decisions`, `max_human_statements` and `max_unresolved_low_medium_unknowns` are
+gone, with `budget_report`, `budget_actuals`, `recorded_limits`, `scope_split_required`,
+`answerable_statements`, `derive_review_budget`, the `machine.review_budget` snapshot and the
+dashboard's "Review budget" card. What blocks a freeze is what it was always for: an unanswered
+high/critical Decision Card, an undischarged expertise gap, and the machine half's own blocking
+reasons. A count never blocks.
 
-**Six code-stage lenses, and the reviewers that receive them.** `STAGES` declared `code` and
-`acceptance` with no lens in either and no command selecting for them. `code` is now populated —
-schema drift, dependency surface, CI authority, test inertness, error paths, concurrency — and the
-per-task and integration reviewers are handed the frozen set (`build_prompts.lens_note`). Their
-conditions are the sharpest in the library, because at that stage the plan already says which files
-may be touched. `acceptance` is gone: acceptance reads the change through the grounded pipeline,
-and a stage nothing selects for is the unfinished record the class system exists to refuse.
+**One ceiling survives, and it is not on a human.** `review_policy.budgets.max_diff_bytes` bounds a
+*model launch* — how much diff one reviewer can be handed and still read rather than truncate.
+Handed too much, a launch does not report that; it exits non-zero, or answers about the part it
+saw. That is the `config.repair_rounds` shape, a ceiling on the side that cannot tell it has
+failed, which is the only side a ceiling protects. And it fires where its remedy exists:
+`review_reading.read_facts` refuses before a launch is paid for, and `doctor.check_review_outlook`
+names the too-broad task while the mandate can still be split. Its message used to end "about how
+much one person can hold at once"; it now names the launch, and raising the number is what it
+actually is — a statement about the adapter's context window.
 
-**The notification command ran with its environment wiped, so most channels could not start.**
-`env={payload}` means `argv[0]` is resolved against `os.defpath` (`/bin:/usr/bin`) alone — nothing
-from pipx, npm, Homebrew or `~/bin` is found — while `doctor` resolved the same name against the
-real `PATH` and reported PASS. Even when it launched, `notify-send` had no `DBUS_SESSION_BUS_ADDRESS`
-and a shell script had no `HOME`. Now an allowlist: the variables a command needs to be a command
-on this machine, the payload layered over them, and nothing carrying a credential. `doctor` and the
-watcher resolve the program through the same function. `render` strips a launch link from the URL
-it is handed rather than trusting its caller not to pass one.
+### Merging into the base is outside this harness
 
-**`waited_seconds` could not answer the question it was added for.** The watcher only ran when a
-channel was configured, so the claim "a channel shortens the wait" had one arm; it recorded a wait
-only on the way to idle, so the usual case — answer one gate, the next opens — dropped every wait
-but the last; and it read the cycle id once at server start, although the server outlives cycles.
-The watcher now always runs, each wait carries the arm it was spent in (`notified` / `silent`) and
-`rein observe` reports the two apart, the wait closes when the decision changes, and the cycle id
-is read when the wait ends.
+`rein pr-stack --merge` ran `gh stack merge` after acceptance, behind its own terminal
+confirmation. That confirmation asked for a decision a human had already made: the acceptance gate
+is the approval to take the change, and the push to the base is the same decision wearing a second
+prompt. One approval, not two.
 
-**`reach_overruled` counted the claim's successes into the figure that falsifies it.** Any change
-request whose free-text target began with `D-` was counted, including `docs/D-spec.md`, and
-including requests against `reach: mandate` decisions — which are the loop routing a question to a
-human correctly. It now resolves the target against `plan.decisions` and counts only a `local` one.
-
-**`observations.read` raised on a line its docstring promised to skip.** `float(raw["value"])` sat
-outside the `try`, so one well-formed JSON line with a non-numeric value took down both `rein
-observe` and `--prune`. `record` had the same conversion outside its own guard, against a "never
-raises" contract. Both are inside now.
-
-**The one ceiling this harness keeps now says whose it is.** `refuse_over_budget`'s message ended
-"about how much one person can hold at once" — a claim about a person, in the release that removed
-every such claim. `max_diff_bytes` bounds a *model launch*: handed more than it can hold, a launch
-does not report that, it answers about the part it saw. That is the `repair_rounds` shape, a
-ceiling on the side that cannot tell it has failed, and it fires where its remedy still exists.
-The message, the `doctor` WARN and the module docstrings now all say that, and none of them
-describes a human.
-
-Also: `Config.budgets` reads its one key by name instead of filtering for ints; `models` gained
-`LENS_STAGE_ORDER` and `LENS_SELECTION_STATUS_VALUES` and the `DECISION_*` vocabularies are now
-what `Decision`'s accessors fail closed against; a watcher that cannot derive the decision warns
-once and then debugs, instead of going permanently silent at DEBUG.
-
-`lock.FORMAT` moves to `rein-grounded-v5`: `plan.yaml` gained `lenses` and three conditional
-requirements on `decisions`, and `event.schema.json` gained `lens_selected`. No migration, as ever.
-
-## [0.11.0] - 2026-09-16
-
-**The harness measures what would falsify the rules it follows.** Several of those rules already
-rested on a measurement nobody was taking. "Counted, never capped" is the shape of the lens
-library's retirement rule and of the reasoning that removed the acceptance budget; `rein lens
---stats` counts one of those things, and the rest were arguments about numbers that existed nowhere.
-
-`rein.observations` records five, each attached to a claim this harness makes about itself and each
-the quantity that would move if the claim were false. `reach_overruled`: a `local` decision a human
-overruled at the mandate — the loop called it cheap to undo and the person who would pay disagreed.
-`unknown_at_mandate` beside `judgement_raised`: mandates that admitted what they did not know,
-against findings that came back needing a human to sort code from plan. `acceptance_reopened`: the
-heaviest row, an acceptance approved and then rolled back — somebody said yes to something they
-turned out not to have understood. `waited_seconds`: from the decision being derived to it being
-answered, which is what the notification channel exists to shrink.
-
-Measured is what would move if a decision here were wrong, never what was easy to collect. A general
-event log answers "what happened" and says nothing about whether a rule was a good one, and a pile
-of metrics nobody reads fails the way an unfiltered lens library does — the figures that matter get
-lost among the ones that were merely available. So the vocabulary is closed, and `rein observe`
-prints each number beside the claim it tests, because a figure with no claim attached is one
-somebody reads as a score.
-
-**Nothing reads the store back.** No gate, no review, no build: a cycle's outcome must not depend on
-what earlier cycles happened to record, or the same repository answers differently on another
-machine. That constraint is also what makes the store safe to keep **across projects**, beside the
-project registry — it holds counts and classes, never a requirement's text, never a diff, never a
-path. Whatever needs the content is in that cycle's own archive, and every observation carries the
-cycle id that finds it.
-
-**No thresholds, and none are coming.** A number with a ceiling on it gets managed instead of read
-— which is what this repository's own acceptance budget demonstrated before it was removed in
-0.6.0: the ceiling's instruction was impossible to follow, so the ceiling moved twice and the thing
-it measured never did.
-
-New verb `rein observe` (`--project`, `--prune`). Recording never raises: every caller is doing
-something else, and a store that could fail a gate would be an input to the thing it measures.
-
-## [0.10.0] - 2026-09-16
-
-**A review lens is a record with a condition, not a paragraph in a prompt.**
-`adversarial-reviewer.md` carried three fixed lists and told the reviewer to work through every
-lens in the set, reporting each as a finding or as "attacked — no finding". A concurrency lens over
-a change with no concurrency, an injection lens over a change that touches no store: each costs a
-pass over the deliverable and returns nothing. And the cost is not only the time — findings compete
-with each other for a reader's attention, so a reviewer sent after failures that cannot occur here
-brings back the ones that can *plus* noise. Over-reviewing is not thorough.
-
-`rein.lenses` makes the condition the thing that decides. A `standard` lens is decidable from the
-mandate (the paths a task declares, the risk its claims carry) and applies without anybody being
-asked. A `conditional` one states its case at the mandate gate, where a human keeps or drops it in
-the pass they are already making. An `unclassified` one is **off** — that is what "nothing has been
-written down about when this applies" means. There is deliberately no always-on class: a lens with
-no condition cannot be told apart from one whose condition is "always", and the first is unfinished.
-
-**The library is the person's, the selection is the repository's.** `$XDG_CONFIG_HOME/rein/lenses.yaml`
-overlays the packaged set by id, so narrowing one lens does not mean adopting the whole file. The
-selection is what the reviewer is handed, and a review's inputs must not depend on machine-local
-state or the same repository reviewed elsewhere answers differently. Sharing lenses across
-repositories is safe for the same reason the classes exist: `standard` names what must be in the
-change, `conditional` states its case, `unclassified` is off. There is no path by which a lens fires
-where its failure cannot happen.
-
-**Earning a place, and losing one.** A lens earns its place the way a bug earns a regression test:
-not the first time, but when the same cause comes back — once is an incident, twice is what tells
-you the condition, which is why a one-off goes to `unclassified` with nothing yet to write in
-`applies_when`. The reverse rule is the new `lens_applied` event and `rein lens --stats`, which
-counts applications and finds per lens across archived cycles and names the ones that keep applying
-and never find: the condition is wider than the failure, or the cause is gone. Counted, never
-capped. A ceiling on how many lenses may exist gets answered by deleting whichever is cheapest to
-delete, not whichever has stopped earning its place.
-
-New verb `rein lens` (`--list`, `--select <stage>`, `--record <id> --found yes|no`, `--stats`).
-
-## [0.9.0] - 2026-09-16
-
-**The harness owns the channel that says "it's your turn".** Two gates say how *often* the work
-stops. Nothing said how long each stop lasts, and that is set by how soon the person finds out —
-which was somebody else's job: each agent CLI realized `notify-and-wait` its own way (Claude Code
-has a push notification, Codex and Gemini "say so and end the turn"), and the dashboard signalled
-through the browser tab, which has to be open to signal anything. The one number a Human-on-the-Loop
-harness exists to keep small was set outside it, by which CLI was in use and whether a window was up.
-
-`rein.notify.Watcher` runs inside `rein ui` for as long as the server does — no browser required —
-re-derives the same `status.decision` the page and `rein next` derive, and runs a configured command
-when the decision *changes*. One decision, one notification: the id is a function of the decision,
-so a busy minute underneath an unchanged one is silent, and a decision that goes away and comes back
-announces itself again, correctly, because it is waiting again. A channel that is down is logged and
-never raised: the watcher's job is the next notification too.
-
-**The channel is the person's, not the repository's.** It lives in `$XDG_CONFIG_HOME/rein/notify.yaml`
-beside the project registry, for the same reason principals and credentials do — `.rein/config.yaml`
-is frozen by the mandate, and where somebody's pings go is not a thing a mandate should freeze.
-
-**A notification is not an approval.** It carries what is waited on, which decision, and where to
-answer: never the evidence, never the launch secret, never a way to answer. Answering still goes
-through the dashboard's write authority or a terminal, so the signal may leave the machine without
-widening anything. `rein doctor` reports the channel — INFO when none is set (running without one is
-supported), WARN when the configured command is not runnable, which is worse than having none
-because you would be waiting for it.
-
-## [0.8.0] - 2026-09-16
-
-**What reaches a human is decided by reach, not by whether the loop has a default.** `/req` and
-`/design` asked about every `[NEEDS CLARIFICATION]` marker the analyst and the architect left, and
-they were told to leave one wherever they would otherwise have settled on a plausible default. That
-is nearly every choice a document contains. The ordering was by impact × uncertainty and there was
-no cap, so the list was worked top to bottom — and a human who runs out of patience stops answering
-somewhere in the middle of it, which puts the irreversible questions behind the reversible ones.
-
-The criterion is now *irreversibility × blast radius*. `plan.yaml` gains a `decisions` record, and
-each entry carries `reach`: `mandate` when undoing it later moves a claim, a scope boundary or what
-counts as evidence, `local` when undoing it costs one task and no claim. A human is asked about the
-first. The loop settles the second itself and records a `rationale` for the reach.
-
-**And the gate shows what was not asked.** `rein approve mandate` now lists every decision the loop
-settled on its own reading, with its reasoning, before the confirmation. An approval ratifies those
-defaults either way; the difference is whether anybody saw them. The mandate is the last moment at
-which disagreeing is an edit rather than a `/revise`, so it is the only gate that shows them.
-
-**`status: unknown` is an answer.** A decision nobody has an answer to is recorded as one rather
-than filled in with a default, and never becomes a claim — a claim nothing can make true cannot be
-judged. A `mandate` decision left `unknown` is refused by the gate, naming them: a scope cannot be
-delegated while what it covers is the undecided thing. The exits are to narrow the mandate so it
-does not reach it, or to make answering it this cycle's scope. Deliberately not a count: any number
-of `unknown` decisions the loop owns is fine, and one the mandate rests on is not, however few.
-
-`lock.FORMAT` moves to `rein-grounded-v4` for the new `plan.yaml` section. No migration, as ever.
-
-## [0.7.0] - 2026-09-16
-
-**Merging into the base is outside this harness.** `rein pr-stack --merge` ran `gh stack merge`
-after acceptance, behind its own terminal confirmation. That confirmation asked for a decision a
-human had already made: the acceptance gate is the approval to take the change, and the push to the
-base is the same decision wearing a second prompt. One approval, not two.
-
-Gone: `--merge`, `merge_stack`, `merge_command`, `_confirm_merge`, the `merged` field on the
-ledger record and the `merged` action it was written from. `MODES` is `push`, `restack`, `ready`.
-The harness takes a change to acceptance and leaves it reviewable; whoever owns the base lands it.
+Gone: `--merge`, `merge_stack`, `merge_command`, `_confirm_merge`, the `merged` field on the ledger
+record and the `merged` action it was written from. `MODES` is `push`, `restack`, `ready`. The
+harness takes a change to acceptance and leaves it reviewable; whoever owns the base lands it.
 
 What does **not** go is the constraint the record depends on, because dropping the command does not
 drop the hazard. A stack merged in part makes GitHub rebase the pull requests above the cut onto
@@ -238,38 +60,186 @@ pull-request body now says it to whoever presses the button, `rein pr-stack --re
 it, and `rein doctor` still reports whether `gh-stack` is installed — no longer because `--merge`
 needs it, but because `gh stack merge <top> --merge` is how a person lands one atomically.
 
-## [0.6.0] - 2026-09-16
+### What reaches a human is decided by reach, not by whether the loop has a default
 
-**Acceptance has no ceiling on what a human is asked to hold.** `human_review` carried a review
-budget: five critical decisions, thirty answerable statements, five unresolved low/medium unknowns,
-and 512 KiB of reading. Exceeding one blocked the freeze with `scope_split_required`, whose
-instruction was to split the scope. That move does not exist at acceptance, where every task is
-implemented, merged and `done` — so the ceiling was never obeyed, it was raised. This file records
-both occasions: `max_human_statements` was re-based from every minted statement to the ones
-attached to a mandatory card because two owed decisions arrived over the ceiling behind five
-optional ones, and `max_diff_bytes` was re-based from the whole change to the largest single
-reading because two consecutive release cycles came to 662 KB and 754 KB against a 512 KiB limit.
-Each time the measurement moved and the ceiling stayed. A number whose only available response is
-to raise it is not a boundary, and the screen it guards is a symptom: the cause is a mandate that
-was too big, and that is where a limit can still be acted on.
+`/req` and `/design` asked about every `[NEEDS CLARIFICATION]` marker the analyst and the architect
+left, and they were told to leave one wherever they would otherwise have settled on a plausible
+default. That is nearly every choice a document contains. The ordering was by impact × uncertainty
+and there was no cap, so the list was worked top to bottom — and a human who runs out of patience
+stops answering somewhere in the middle of it, which puts the irreversible questions behind the
+reversible ones.
 
-So `max_critical_decisions`, `max_human_statements` and `max_unresolved_low_medium_unknowns` are
-gone, with `budget_report`, `budget_actuals`, `recorded_limits`, `scope_split_required`,
-`answerable_statements`, `derive_review_budget`, the `machine.review_budget` snapshot and the
-dashboard's "Review budget" card. What blocks a freeze is what it was always for: an unanswered
-high/critical Decision Card, an undischarged expertise gap, and the machine half's own blocking
-reasons. A count never blocks.
+The criterion is now *irreversibility × blast radius*. `plan.yaml` gains a `decisions` record, and
+each entry carries `reach`: `mandate` when undoing it later moves a claim, a scope boundary or what
+counts as evidence, `local` when undoing it costs one task and no claim. A human is asked about the
+first. The loop settles the second itself and records a `rationale` for the reach.
 
-`review_policy.budgets.max_diff_bytes` survives because it is the one budget enforced where the
-remedy still exists. `review_reading.read_facts` refuses an over-budget reading *before* a launch
-is paid for, and `doctor.check_review_outlook` names the too-broad task as a WARN while the mandate
-can still be split. Nothing about that changed; what went is the copy of it at the freeze screen,
-which could only ever report a fact about a mandate already approved.
+**And the gate shows what was not asked.** `rein approve mandate` lists every `local` decision the
+loop settled on its own reading, with its reasoning, before the confirmation. An approval ratifies
+those defaults either way; the difference is whether anybody saw them. The mandate is the last
+moment at which disagreeing is an edit rather than a `/revise`, so it is the only gate that shows
+them.
 
-`lock.FORMAT` moves to `rein-grounded-v3`: `review.yaml` no longer carries `review_budget` and
-`config.yaml`'s `review_policy.budgets` holds one key. There is no migration, as ever — install the
-recorded version to finish a cycle on it, or `rein init` a fresh one. A repository whose documents
-already read this shape is what `rein sync --force` is for.
+**`status: unknown` is an answer.** A decision nobody has an answer to is recorded as one rather
+than filled in with a default, and never becomes a claim — a claim nothing can make true cannot be
+judged. A `mandate` decision left `unknown` is refused by the gate, naming them: a scope cannot be
+delegated while what it covers is the undecided thing. The exits are to narrow the mandate so it
+does not reach it, or to make answering it this cycle's scope. Deliberately not a count: any number
+of `unknown` decisions the loop owns is fine, and one the mandate rests on is not, however few.
+
+**The same refusal from the other side.** A `reach: mandate` decision carrying `settled_by: loop`
+also holds the gate shut. The reach is the record saying a human settles that one, so answering it
+alone is the same defect as leaving it `unknown`; left to the gate screen it would be ratified by
+not being objected to.
+
+**And the schema requires what the screen is built from**, because nothing in `plan.yaml` is
+written by hand. `settled_by` is required on every `settled` decision and forbidden on an `unknown`
+one; `rationale` is required on every `local` one. Left optional, one omission emptied the unasked
+list silently, which is the single failure the whole record exists to prevent. `Decision.unasked`
+reads "settled, and not by a human", so what remains fails toward showing a human one decision too
+many rather than one too few.
+
+### The harness owns the channel that says "it's your turn"
+
+Two gates say how *often* the work stops. Nothing said how long each stop lasts, and that is set by
+how soon the person finds out — which was somebody else's job: each agent CLI realized
+`notify-and-wait` its own way (Claude Code has a push notification, Codex and Gemini "say so and
+end the turn"), and the dashboard signalled through the browser tab, which has to be open to signal
+anything. The one number a Human-on-the-Loop harness exists to keep small was set outside it, by
+which CLI was in use and whether a window was up.
+
+`rein.notify.Watcher` runs inside `rein ui` for as long as the server does — no browser required —
+re-derives the same `status.decision` the page and `rein next` derive, and runs a configured
+command when the decision *changes*. One decision, one notification: the id is a function of the
+decision, so a busy minute underneath an unchanged one is silent, and a decision that goes away and
+comes back announces itself again, correctly, because it is waiting again. A channel that is down
+is logged and never raised: the watcher's job is the next notification too.
+
+The command runs in an **allowlisted environment**, not an empty one — `PATH`, `HOME`, `DISPLAY`,
+`DBUS_SESSION_BUS_ADDRESS` and the rest of what a command needs to *be* a command here, with the
+payload layered over it and nothing carrying a credential. An empty environment resolves `argv[0]`
+against `os.defpath` alone, so nothing installed by pipx, npm, Homebrew or into `~/bin` is ever
+found. `doctor` and the watcher resolve the program through the same `notify.resolve`, so a PASS
+means the command the watcher will launch.
+
+**The channel is the person's, not the repository's.** It lives in
+`$XDG_CONFIG_HOME/rein/notify.yaml` beside the project registry, for the same reason principals and
+credentials do — `.rein/config.yaml` is frozen by the mandate, and where somebody's pings go is not
+a thing a mandate should freeze.
+
+**A notification is not an approval.** It carries what is waited on, which decision, and where to
+answer: never the evidence, never the launch secret — `render` strips one out of the URL it is
+handed rather than trusting its caller — and never a way to answer. The other side of that is
+stated plainly in both READMEs: the page it points at is read-only unless that browser already
+holds a session. `rein doctor` reports the channel — INFO when none is set (running without one is
+supported), WARN when the configured command is not runnable, which is worse than having none
+because you would be waiting for it.
+
+### A review lens is a record with a condition, not a paragraph in a prompt
+
+`adversarial-reviewer.md` carried three fixed lists and told the reviewer to work through every
+lens in the set, reporting each as a finding or as "attacked — no finding". A concurrency lens over
+a change with no concurrency, an injection lens over a change that touches no store: each costs a
+pass over the deliverable and returns nothing. And the cost is not only the time — findings compete
+with each other for a reader's attention, so a reviewer sent after failures that cannot occur here
+brings back the ones that can *plus* noise. Over-reviewing is not thorough.
+
+`rein.lenses` makes the condition the thing that decides. A `standard` lens is decidable from the
+plan and applies without anybody being asked. A `conditional` one states its case at the mandate
+gate, where a human keeps or drops it in the pass they are already making. An `unclassified` one is
+**off** — that is what "nothing has been written down about when this applies" means.
+
+**A `standard` lens has to carry a machine-decidable condition**, or the class means nothing:
+"applied without asking anybody" is licensed by a condition, not by a field being empty. So the
+condition vocabulary reaches the early stages, where there are no paths to match on — `min_claims`,
+`min_tasks`, and `requires` over a closed set of plan facts (`nfr_claims`, `parallel_tasks`,
+`task_dependencies`) alongside `paths` and `claim_risk`. A `standard` lens with no `when:` block is
+loaded as `unclassified`, and a test holds that line over the packaged set. A few conditions are
+satisfied by any cycle that reaches the gate at all (`min_claims: 1` is "this cycle states
+something", and ambiguity is worth attacking in any requirement ever written); those are
+conditions, written down and checked, not omissions.
+
+Twenty-five packaged lenses over four stages. The code stage has six of its own — schema drift,
+dependency surface, CI authority, test inertness, error paths, concurrency — handed to the per-task
+and integration reviewers by `build_prompts.lens_note`; their conditions are the sharpest in the
+set, because by then the plan already says which files may be touched. There is no `acceptance`
+stage: acceptance reads the change through the grounded pipeline, and a stage no lens belongs to
+and no command selects for is the same unfinished record the class system exists to refuse.
+
+**The library is the person's, the selection is the repository's.**
+`$XDG_CONFIG_HOME/rein/lenses.yaml` overlays the packaged set by id, so narrowing one lens does not
+mean adopting the whole file. The selection is **resolved once against the plan and written into
+`plan.yaml`**, where the mandate freezes it; after the freeze `rein lens --select` reads that list
+back and never re-derives it. A review's inputs must not depend on machine-local state, or the same
+repository reviewed on another laptop — or after one line of an overlay changed — answers
+differently with nothing in the audit chain to show it. New event kind `lens_selected`; a frozen id
+the library no longer holds is named rather than silently skipped.
+
+**Earning a place, and losing one.** A lens earns its place the way a bug earns a regression test:
+not the first time, but when the same cause comes back — once is an incident, twice is what tells
+you the condition, which is why a one-off goes to `unclassified` with nothing yet to write in
+`when:`. The reverse rule is the new `lens_applied` event and `rein lens --stats`, which counts
+applications and finds per lens across archived cycles and names the ones that keep applying and
+never find: the condition is wider than the failure, or the cause is gone. Counted, never capped. A
+ceiling on how many lenses may exist gets answered by deleting whichever is cheapest to delete, not
+whichever has stopped earning its place.
+
+New verb `rein lens` (`--list`, `--select <stage>`, `--record <id> --found yes|no`, `--stats`).
+
+### The harness measures what would falsify the rules it follows
+
+Several of the rules above rested on a measurement nobody was taking. "Counted, never capped" is
+the shape of the lens library's retirement rule and of the reasoning that removed the acceptance
+budget; `rein lens --stats` counts one of those things, and the rest were arguments about numbers
+that existed nowhere.
+
+`rein.observations` records five, each attached to a claim this harness makes about itself and each
+the quantity that would move if the claim were false. `reach_overruled`: a `local` decision a human
+overruled at the mandate — the loop called it cheap to undo and the person who would pay disagreed.
+Resolved against `plan.decisions` and counted for a `local` decision only: a request against a
+`mandate` one is the loop routing a question correctly, and counting it would put the claim's
+successes into the figure that exists to falsify it. `unknown_at_mandate` beside
+`judgement_raised`: mandates that admitted what they did not know, against findings that came back
+needing a human to sort code from plan. `acceptance_reopened`: the heaviest row, an acceptance
+approved and then rolled back — somebody said yes to something they turned out not to have
+understood. `waited_seconds`: from the decision being derived to it being answered, **in both
+arms** — the watcher runs whether or not a channel is configured, each wait carries the arm it was
+spent in (`notified` / `silent`), and `rein observe` reports the two apart. "A channel shortens the
+wait" is a comparison, and a quantity recorded only when the channel is on has one arm, which is a
+number rather than evidence.
+
+Measured is what would move if a decision here were wrong, never what was easy to collect. A
+general event log answers "what happened" and says nothing about whether a rule was a good one, and
+a pile of metrics nobody reads fails the way an unfiltered lens library does — the figures that
+matter get lost among the ones that were merely available. So the vocabulary is closed, and `rein
+observe` prints each number beside the claim it tests, because a figure with no claim attached is
+one somebody reads as a score.
+
+**Nothing reads the store back.** No gate, no review, no build: a cycle's outcome must not depend
+on what earlier cycles happened to record, or the same repository answers differently on another
+machine. That constraint is also what makes the store safe to keep **across projects**, beside the
+project registry — it holds counts and classes, never a requirement's text, never a diff, never a
+path. Whatever needs the content is in that cycle's own archive, and every observation carries the
+cycle id that finds it, read when the wait ends rather than when the server started.
+
+**No thresholds, and none are coming.** A number with a ceiling on it gets managed instead of read
+— which is what this repository's own acceptance budget demonstrated before it was removed above:
+the ceiling's instruction was impossible to follow, so the ceiling moved twice and the thing it
+measured never did.
+
+New verb `rein observe` (`--project`, `--prune`). Recording never raises — including on a value
+that is not a number, and `read` skips a well-formed line carrying one rather than refusing the
+file: every caller is doing something else, and a store that could fail a gate would be an input to
+the thing it measures.
+
+### Format
+
+`lock.FORMAT` moves to `rein-grounded-v3`. `review.yaml` no longer carries `review_budget`,
+`config.yaml`'s `review_policy.budgets` holds one key, `plan.yaml` gains `decisions` and `lenses`
+along with three conditional requirements on a decision, and `event.schema.json` gains
+`lens_applied` and `lens_selected`. There is no migration, as ever — install the recorded version
+to finish a cycle on it, or `rein init` a fresh one. A repository whose documents already read this
+shape is what `rein sync --force` is for.
 
 ## [0.5.0] - 2026-09-15
 

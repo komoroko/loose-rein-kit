@@ -26,7 +26,7 @@ _PROSE_KEYS = frozenset({"description", "title", "$comment", "examples"})
 #: `(lock.FORMAT, :func:`_schema_shapes`)`. Updated by hand, both halves together — see
 #: :func:`test_the_format_string_moves_when_a_document_shape_moves`.
 _FORMAT_PIN: tuple[str, str] = (
-    "rein-grounded-v5",
+    "rein-grounded-v3",
     "sha256:74dc415ebed8ff56f6d00db57e067ee9ed2935a5cb645380705a0cec0374db8b",
 )
 
