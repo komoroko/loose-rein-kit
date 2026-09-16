@@ -844,28 +844,33 @@ def check_notification_channel() -> list[Finding]:
     decision — and a harness that nagged about an unconfigured convenience would be one more thing
     to stop reading. What it must not do is leave somebody assuming a ping is coming.
     """
-    argv = notify.read_command()
-    if argv is None:
+    channel = notify.read_channel()
+    if channel is None:
         return [
             Finding(
                 "INFO",
                 "env",
                 f"no notification channel — nothing tells you a decision is waiting unless the "
-                f"dashboard is open. Set `command:` in {notify.config_path()}.",
+                f"dashboard is open. Set `command:` in {notify.config_path()}. The wait is still "
+                "timed while there is none (`rein observe`), which is what the configured case "
+                "gets compared against.",
             )
         ]
-    program = argv[0]
-    if shutil.which(program) is None and not Path(program).exists():
+    program = channel.program()
+    # Resolved through `notify.resolve`, which is what the runner uses. A check that looked the
+    # name up in this process's own PATH would report PASS for a command the watcher launches with
+    # a different one, which is exactly the silence this WARN exists to prevent.
+    if notify.resolve(program) is None:
         return [
             Finding(
                 "WARN",
                 "env",
-                f"the notification command `{program}` is not on PATH and is not a file — every "
-                "notification will fail silently, which is worse than having no channel because "
-                "you would be waiting for one.",
+                f"the notification command `{program}` cannot be found in the environment the "
+                "watcher runs it in — every notification will fail silently, which is worse than "
+                "having no channel because you would be waiting for one.",
             )
         ]
-    return [Finding("PASS", "env", f"notification channel: `{' '.join(argv)}`")]
+    return [Finding("PASS", "env", f"notification channel: `{' '.join(channel.argv)}`")]
 
 
 def check_stack_extension() -> list[Finding]:
@@ -1592,8 +1597,10 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
                 "WARN",
                 "review",
                 f"{view.line()} — `max_diff_bytes` bounds what one launch may read, and no launch "
-                f"can read {view.unit}. Narrow its scope or split the task at the mandate, or raise "
-                "`review_policy.budgets.max_diff_bytes` as a deliberate decision."
+                f"can read {view.unit}. Said here, while the mandate can still be split: narrow "
+                "that task's scope or cut it in two. Raising "
+                "`review_policy.budgets.max_diff_bytes` is the other exit, and it is a claim about "
+                "this adapter's context window rather than about the reading."
                 + (f"\n  {view.made_of()}" if view.made_of() else ""),
             )
         )

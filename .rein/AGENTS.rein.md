@@ -29,7 +29,8 @@ not yours and does not degrade with the host: `rein ui` watches the SSOT for as 
 and runs the channel configured in `$XDG_CONFIG_HOME/rein/notify.yaml` when the decision waiting
 on a human changes. The two gates say how often the work stops; this is what decides how long
 each stop lasts, so it is the harness's and not the CLI's. A notification carries what is waited
-on and where — never the evidence, and never a way to answer.
+on and where — never the evidence, and never a way to answer: the page it names is read-only
+unless that browser already holds a session.
 | `approval-presentation` | present a deliverable for approval | ask for an explicit "approve" |
 | `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
 | `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |
@@ -96,14 +97,19 @@ Four documents, distinct roles — do not conflate them:
 - **A review lens is a record with a condition, not a paragraph.** `rein lens --select <stage>`
   gives the reviewer the lenses whose condition holds for *this* change; a `standard` one applies
   without asking, a `conditional` one is proposed at the mandate gate, an `unclassified` one is off
-  until somebody writes down when it applies. Sending a reviewer at a failure that cannot occur
+  until somebody writes down when it applies. A `standard` lens with no machine-decidable condition
+  is loaded as `unclassified` — "applied without asking" is licensed by a condition, not by the
+  field being empty. The selection is resolved once and **frozen into `plan.yaml`**: the library is
+  user-global, and a review whose inputs move with it would answer differently on another laptop. Sending a reviewer at a failure that cannot occur
   here costs a pass over the deliverable and returns nothing, while the findings that *are*
   possible compete with it for attention. Over-reviewing is not thorough.
 - **What the harness measures about itself is what would falsify a rule it follows.** Not what is
   easy to collect: a pile of metrics nobody reads loses the figures that matter among the ones that
   were merely available. `rein observe` prints each figure beside the claim it tests —
   `reach_overruled` against selection by reach, `unknown_at_mandate` beside `judgement_raised`,
-  `acceptance_reopened`, `waited_seconds`. No thresholds, and none are coming: a number with a
+  `acceptance_reopened`, `waited_seconds` in both arms — the wait is timed whether or not a
+  notification channel is configured, because "the channel shortens it" is a comparison and one
+  arm cannot make it. No thresholds, and none are coming: a number with a
   ceiling gets managed instead of read. **Nothing reads the store back.** A cycle's outcome must
   not depend on what earlier cycles recorded, or the same repository answers differently elsewhere.
 - **A lens earns its place the second time, and loses it by never finding.** A one-off finding is

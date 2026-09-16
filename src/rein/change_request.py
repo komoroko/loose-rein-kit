@@ -112,13 +112,38 @@ def add(repo: repo_mod.Repo, gate: str, target: str, reason: str) -> str:
             subject_ids=[gate, request_id, target.strip()],
             detail={"reason": reason.strip()},
         )
-    # After the transaction, and only for a decision id. A change request aimed at `D-00n` on the
-    # mandate is the human saying the loop's reading of the reach was wrong: it called the decision
-    # cheap to undo, and the person who would pay disagreed. That is the one quantity that
-    # falsifies selection-by-reach, so it is the one recorded.
-    if gate == "mandate" and target.strip().startswith("D-"):
-        observations.record("reach_overruled", project=repo.root.name, cycle_id=state.cycle_id, subject=target.strip())
+    # After the transaction, and only for a `local` decision that actually exists in this plan.
+    # A change request aimed at such a decision is the human saying the loop's reading of the reach
+    # was wrong: it called the decision cheap to undo, and the person who would pay disagreed. That
+    # is what falsifies selection-by-reach.
+    #
+    # A request aimed at a `mandate` decision is the opposite reading — the loop routed it to a
+    # human and the human is using the route — and counting it here would put the claim's successes
+    # into the figure that exists to falsify it. Nor is a bare `D-` prefix enough: `target` is free
+    # text, so `docs/D-spec.md` would be counted as an overruled decision that no plan contains.
+    if gate == "mandate":
+        overruled = _overruled_local_decision(store, target.strip())
+        if overruled is not None:
+            observations.record("reach_overruled", project=repo.root.name, cycle_id=state.cycle_id, subject=overruled)
     return request_id
+
+
+def _overruled_local_decision(store: store_mod.Store, target: str) -> str | None:
+    """The id of the `local` decision `target` names, or None when it names something else.
+
+    Resolved against `plan.decisions` rather than pattern-matched on the string: the quantity is
+    only meaningful if every reading of it is a decision the loop really did settle on its own.
+    An unreadable plan yields None — an observation is never worth failing a change request over,
+    and a guess would be worse than a gap.
+    """
+    try:
+        plan = store.read_plan()
+    except models.DocumentError:
+        return None
+    if plan is None:
+        return None
+    decision = next((d for d in plan.decisions if d.id == target), None)
+    return decision.id if decision is not None and decision.is_local else None
 
 
 def address(repo: repo_mod.Repo, request_id: str, note: str) -> str:

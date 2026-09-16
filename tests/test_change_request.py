@@ -12,10 +12,18 @@ from pathlib import Path
 
 import pytest
 
-from rein import approve, change_request, models, status_api
+from rein import approve, change_request, models, observations, status_api
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import SANDBOXED_PROFILES, make_claim, make_config, make_plan, make_state, seed_repo
+from tests._support import (
+    SANDBOXED_PROFILES,
+    make_claim,
+    make_config,
+    make_decision,
+    make_plan,
+    make_state,
+    seed_repo,
+)
 
 PENDING_ALL = dict.fromkeys(models.GATE_ORDER, "pending")
 
@@ -230,3 +238,58 @@ def test_resolved_requests_are_out_of_the_way_unless_asked_for(
     assert "no change requests" in capsys.readouterr().out
     assert change_request.main(["list", "--all", *at]) == 0
     assert request_id in capsys.readouterr().out
+
+
+# --- what a change request falsifies (plan §K) -------------------------------------
+
+
+@pytest.fixture
+def observation_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    return tmp_path / "xdg" / "rein" / observations.STORE_NAME
+
+
+def _repo_with_decisions(tmp_path: Path) -> repo_mod.Repo:
+    seed_repo(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            claims=[make_claim("C-001", requirement_ids=["R-1"])],
+            decisions=[
+                make_decision("D-001", reach="local"),
+                make_decision("D-002", reach="mandate", settled_by="human", rationale=None),
+            ],
+        ),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+    )
+    return repo_mod.Repo(tmp_path)
+
+
+def test_overruling_a_local_decision_is_what_gets_counted(tmp_path: Path, observation_store: Path) -> None:
+    """The quantity that falsifies selection-by-reach: the loop called this one cheap to undo, and
+    the person who would pay disagreed."""
+    repo = _repo_with_decisions(tmp_path)
+    change_request.add(repo, "mandate", "D-001", "swapping the serializer is not local at all")
+
+    counted = [o for o in observations.read() if o.kind == "reach_overruled"]
+    assert [o.subject for o in counted] == ["D-001"]
+
+
+def test_a_request_against_a_mandate_decision_is_not_an_overruled_reach(
+    tmp_path: Path, observation_store: Path
+) -> None:
+    """The opposite reading: the loop routed this to a human and the human is using the route.
+    Counting it would put the claim's successes into the figure that exists to falsify it."""
+    repo = _repo_with_decisions(tmp_path)
+    change_request.add(repo, "mandate", "D-002", "the answer I gave was wrong")
+
+    assert [o for o in observations.read() if o.kind == "reach_overruled"] == []
+
+
+def test_a_target_that_merely_starts_with_d_is_not_a_decision(tmp_path: Path, observation_store: Path) -> None:
+    """`target` is free text. Resolved against `plan.decisions` rather than pattern-matched, or a
+    documentation path becomes an overruled decision no plan ever held."""
+    repo = _repo_with_decisions(tmp_path)
+    change_request.add(repo, "mandate", "docs/D-spec.md", "the spec contradicts R-1")
+
+    assert [o for o in observations.read() if o.kind == "reach_overruled"] == []

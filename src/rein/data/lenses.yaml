@@ -1,16 +1,26 @@
 # The packaged lens library. `$XDG_CONFIG_HOME/rein/lenses.yaml` overlays it by id.
 #
-# Every lens carries a condition, because a lens with no condition is one nobody can tell apart
-# from a lens whose condition is "always" — the first is unfinished and the second is rare. The
-# class says how confidently the condition can be decided, and that is what sets the behaviour:
+# Every lens carries a condition. The class says how confidently that condition can be decided,
+# and that is what sets the behaviour:
 #
-#   standard      decidable from the mandate — applied when it holds, nobody is asked
-#   conditional   there is a condition but deciding it takes judgement — proposed at the gate
+#   standard      decidable from the plan — applied when it holds, nobody is asked
+#   conditional   there is a condition, and deciding it means reading the deliverable — proposed
+#                 at the gate, where a human keeps or drops it
 #   unclassified  nothing written down about when it applies — off until somebody says otherwise
 #
-# `applies_when` is prose for the human who reads the gate screen. `paths` and `claim_risk` are the
-# machine-decidable part: `paths` are fnmatch patterns against the change, `claim_risk` is the floor
-# a claim's risk must reach. Both empty means the condition does not turn on that axis.
+# `applies_when` is prose for the human who reads the gate screen. `when:` is the machine half, and
+# **a `standard` lens with no `when:` block is loaded as `unclassified`** — a lens applied to every
+# change without asking anybody is the always-on list this library replaced. The axes:
+#
+#   paths        fnmatch patterns against the union of the tasks' `scope.include`
+#   claim_risk   the floor some claim's risk must reach
+#   min_claims   how many claims this cycle must state
+#   min_tasks    how many tasks the plan must hold
+#   requires     named facts, from a closed set: nfr_claims, parallel_tasks, task_dependencies
+#
+# Several early-stage conditions are `min_claims: 1` — "this cycle states something". That is a
+# condition, checked like any other, and it is honest about being satisfied by every cycle that
+# reaches the gate: two readings of one sentence is a defect in any requirement ever written.
 lenses:
   # --- requirements ----------------------------------------------------------
   - id: L-REQ-TESTABILITY
@@ -19,22 +29,29 @@ lenses:
     attack: >-
       For each acceptance criterion, attempt an implementation that satisfies its letter while
       betraying its intent. If you succeed, the criterion is too weak.
-    applies_when: any requirement states an acceptance criterion
+    applies_when: the cycle states a claim, which is what carries the criterion
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-REQ-AMBIGUITY
     stage: requirements
     class: standard
     attack: >-
       Exhibit two materially different readings of the same requirement that both fit the text.
-    applies_when: always — two readings of one sentence is a defect in any requirement
+    applies_when: the cycle states a requirement — two readings of one sentence is a defect in any
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-REQ-FAILURE-MODES
     stage: requirements
-    class: standard
+    class: conditional
     attack: >-
       Empty, concurrent, oversized, failing-dependency and malicious inputs the requirements never
       mention.
-    applies_when: the requirements describe anything that takes input from outside itself
+    applies_when: the requirements describe something that takes input from outside itself. Nothing
+      in the plan says whether they do; it takes reading them.
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-REQ-HIDDEN-ASSUMPTIONS
     stage: requirements
@@ -42,7 +59,9 @@ lenses:
     attack: >-
       What must be true for a requirement to make sense that nothing in the brief or the
       requirements states.
-    applies_when: always — an unstated premise is invisible by construction
+    applies_when: the cycle states a requirement — an unstated premise is invisible by construction
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-REQ-CONTRADICTIONS
     stage: requirements
@@ -50,14 +69,18 @@ lenses:
     attack: >-
       Requirement against requirement, requirement against brief, a Must against the out-of-scope
       list.
-    applies_when: the cycle states more than one requirement
+    applies_when: the cycle states more than one claim. One claim contradicts nothing.
+    when:
+      min_claims: 2
     origin: packaged
   - id: L-REQ-SCOPE
     stage: requirements
     class: standard
     attack: >-
       A Must the brief does not actually need; a need the brief implies that no R-x covers.
-    applies_when: always — both directions of the brief-to-requirement thread
+    applies_when: the cycle states a claim — both directions of the brief-to-requirement thread
+    when:
+      min_claims: 1
     origin: packaged
 
   # --- design ----------------------------------------------------------------
@@ -67,22 +90,29 @@ lenses:
     attack: >-
       An `R-x → design` section that, built exactly as written, would not satisfy R-x's acceptance
       criteria.
-    applies_when: always — this is the design's own claim about itself
+    applies_when: the cycle states a claim — this is the design's own claim about itself
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-DES-FAILURE-WALK
     stage: design
-    class: standard
+    class: conditional
     attack: >-
       Make each component fail, slow down, or run concurrently. What breaks, and does the design
       say so?
-    applies_when: the design names more than one component, a process boundary, or a dependency
+    applies_when: the design names more than one component, a process boundary, or a dependency.
+      The plan cannot see that; the design document can.
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-DES-INFEASIBILITY
     stage: design
     class: standard
     attack: >-
       Sketch the hardest implementation step and name the blocking unknown the design glosses over.
-    applies_when: always — the step nobody sketched is the one that stops the build
+    applies_when: the cycle states a claim — the step nobody sketched is the one that stops the build
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-DES-UNSTATED-ASSETS
     stage: design
@@ -90,7 +120,9 @@ lenses:
     attack: >-
       Unstated assumptions about existing assets, libraries or environments the design silently
       relies on.
-    applies_when: always
+    applies_when: the cycle states a claim
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-DES-YAGNI
     stage: design
@@ -98,42 +130,52 @@ lenses:
     attack: >-
       A design element no requirement forces. Name the requirement that would justify it, or flag
       it.
-    applies_when: always — the cheapest defect to remove is the one nothing asked for
+    applies_when: the cycle states a claim — the cheapest defect to remove is the one nothing asked for
+    when:
+      min_claims: 1
     origin: packaged
   - id: L-DES-NFR-HOLES
     stage: design
-    class: conditional
+    class: standard
     attack: >-
       Security, performance and operability gaps measured against the NFR-x criteria — never
       against generic best practice.
-    applies_when: the cycle declares NFR requirements. With none declared there is nothing to
-      measure against, and the lens degrades into generic advice.
-    claim_risk: medium
+    applies_when: the cycle declares NFR claims. With none declared there is nothing to measure
+      against, and the lens degrades into generic advice.
+    when:
+      requires: [nfr_claims]
     origin: packaged
   - id: L-DES-ADR
     stage: design
     class: conditional
     attack: >-
       Is a chosen option's downside underplayed relative to the rejected options' downsides?
-    applies_when: the design records an ADR with rejected options
+    applies_when: the design records an ADR with rejected options. Whether it does is in
+      `docs/decisions/`, which the plan does not index.
+    when:
+      min_claims: 1
     origin: packaged
 
   # --- task plan -------------------------------------------------------------
   - id: L-TASK-MISSING-EDGE
     stage: tasks
-    class: conditional
+    class: standard
     attack: >-
       Two tasks where building one without the other in place fails — shared file, shared schema,
       runtime dependency — yet no `blocked_by` edge exists.
-    applies_when: the plan has more than one task. A single-task plan has no edge to miss.
+    applies_when: the plan holds more than one task. A single-task plan has no edge to miss.
+    when:
+      min_tasks: 2
     origin: packaged
   - id: L-TASK-COLLISION
     stage: tasks
-    class: conditional
+    class: standard
     attack: >-
       Parallel leaves whose tickets imply touching the same files — the merge-conflict predictor.
       Name the files.
-    applies_when: the plan has parallel leaves. Serial plans collide with nothing.
+    applies_when: the plan holds two or more `parallel` tasks. Serial plans collide with nothing.
+    when:
+      requires: [parallel_tasks]
     origin: packaged
   - id: L-TASK-UNTESTABLE-ACCEPTANCE
     stage: tasks
@@ -142,7 +184,9 @@ lenses:
       A ticket whose acceptance criteria cannot objectively decide green — a vague criterion, or
       `evidence` naming a command that would pass trivially. Target cases that would not go red if
       the described behaviour were wrong.
-    applies_when: always — a criterion that cannot fail is the DoD not applying to this task
+    applies_when: the plan holds a task — a criterion that cannot fail is the DoD not applying to it
+    when:
+      min_tasks: 1
     origin: packaged
   - id: L-TASK-SCOPE
     stage: tasks
@@ -150,7 +194,9 @@ lenses:
     attack: >-
       Work in a ticket that no covered requirement forces, or a requirement facet its covering
       ticket's acceptance criteria never exercise.
-    applies_when: always — both directions of the claim-to-task thread
+    applies_when: the plan holds a task — both directions of the claim-to-task thread
+    when:
+      min_tasks: 1
     origin: packaged
   - id: L-TASK-CUTOVER
     stage: tasks
@@ -158,7 +204,10 @@ lenses:
     attack: >-
       A plan that splits the removal of shared infrastructure across intermediate tasks. Show the
       task that would fail its own DoD mid-sequence.
-    applies_when: the cycle removes or replaces something more than one task depends on
+    applies_when: the cycle removes or replaces something more than one task depends on. The edges
+      say which tasks depend on which; whether the change is a removal takes reading the tickets.
+    when:
+      requires: [task_dependencies]
     origin: packaged
   - id: L-TASK-UNREADABLE-PLAN
     stage: tasks
@@ -166,5 +215,77 @@ lenses:
     attack: >-
       Tasks whose `scope` is missing or so wide that it covers most of the repository. The finding
       is not that it is untidy — it is that this cycle's review cannot be taken in slices.
-    applies_when: always — acceptance reads the change along the scopes this plan freezes
+    applies_when: the plan holds a task — acceptance reads the change along the scopes it freezes
+    when:
+      min_tasks: 1
+    origin: packaged
+
+  # --- code ------------------------------------------------------------------
+  # The per-task and integration reviewers get these. Their conditions are the sharpest in the
+  # library, because at this stage the plan already says which files the change may touch: a
+  # migration lens over a change that touches no migration is exactly the wasted pass the class
+  # system exists to prevent, and here the machine can tell.
+  - id: L-CODE-SCHEMA-DRIFT
+    stage: code
+    class: standard
+    attack: >-
+      A schema changed without the code that reads it: a field now required that an existing
+      document omits, an enum narrowed past a value already written, a constant that no longer
+      matches. Name the document this change makes unreadable.
+    applies_when: the change touches a schema file
+    when:
+      paths: ["**/*.schema.json", "**/schema/*.json", "**/*.proto", "**/migrations/**"]
+    origin: packaged
+  - id: L-CODE-DEP-SURFACE
+    stage: code
+    class: standard
+    attack: >-
+      A dependency added or moved: what it does on failure, what it pulls in, whether the pin
+      admits a version this code has never run against.
+    applies_when: the change touches a manifest or a lockfile
+    when:
+      paths:
+        ["pyproject.toml", "uv.lock", "package.json", "pnpm-lock.yaml", "requirements*.txt",
+         "Cargo.toml", "go.mod", "**/pyproject.toml", "**/package.json"]
+    origin: packaged
+  - id: L-CODE-CI-AUTHORITY
+    stage: code
+    class: standard
+    attack: >-
+      A workflow change that widens permissions, makes a required check skippable, or runs
+      untrusted input with a token. Show the pull request that would pass without the check.
+    applies_when: the change touches CI configuration or a hook
+    when:
+      paths: [".github/workflows/**", ".github/actions/**", "**/.pre-commit-config.yaml", "**/hooks/**"]
+    origin: packaged
+  - id: L-CODE-TEST-INERTNESS
+    stage: code
+    class: standard
+    attack: >-
+      For each test added: change the behaviour it names to something wrong and say whether this
+      test would go red. An assertion that holds for any output is not a test.
+    applies_when: the change adds or edits tests
+    when:
+      paths: ["tests/**", "**/test_*.py", "**/*_test.go", "**/*.test.ts", "**/*.test.tsx", "**/*_spec.rb"]
+    origin: packaged
+  - id: L-CODE-ERROR-PATH
+    stage: code
+    class: conditional
+    attack: >-
+      Every error this change can raise: who handles it, and what the caller sees. An exception
+      caught and logged is a failure the caller was told did not happen.
+    applies_when: the change adds error handling. Whether it does takes reading the diff.
+    when:
+      min_tasks: 1
+    origin: packaged
+  - id: L-CODE-CONCURRENCY
+    stage: code
+    class: conditional
+    attack: >-
+      Interleave the change against itself: two processes, a retry, a signal mid-write. Name the
+      state that ends up wrong.
+    applies_when: the change introduces a thread, a subprocess, a lock, a timer, or shared mutable
+      state. The paths do not say; the diff does.
+    when:
+      min_tasks: 1
     origin: packaged

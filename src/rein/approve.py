@@ -299,13 +299,16 @@ def _unknowns_admitted(repo: repo_mod.Repo) -> int:
 
 
 def _decision_blockers(plan: models.Plan | None, gate: str) -> list[str]:
-    """A decision the scope rests on that nobody has an answer to yet.
+    """A `mandate`-reach decision the gate cannot be opened over. Two of them.
 
     `plan.decisions` records how each thing the drafting phase met was settled, and by whom. The
     ones that reach the mandate are the ones whose reversal would collapse the scope; the rest the
     loop settled itself, on the reading that undoing them later costs one task. A `mandate`
-    decision still `unknown` is the one state the gate cannot be opened over: the loop would be
-    told what it may change while what it may change is the undecided thing.
+    decision still `unknown` is one state the gate cannot be opened over: the loop would be told
+    what it may change while what it may change is the undecided thing. A `mandate` decision the
+    loop *settled* is the other, and it is the same defect read from the opposite side — the
+    record classified it as a human's to make and then made it anyway. Neither is left to the gate
+    screen, where the only way to object is to notice a line and speak up.
 
     Deliberately not a count. Any number of `unknown` decisions the loop owns is fine and is
     recorded rather than guessed at; one that the mandate rests on is not, however few there are.
@@ -315,15 +318,24 @@ def _decision_blockers(plan: models.Plan | None, gate: str) -> list[str]:
     """
     if gate != "mandate" or plan is None:
         return []
-    blocked = [d for d in plan.decisions if d.blocks_mandate]
-    if not blocked:
-        return []
-    listed = "; ".join(f"{d.id} ({d.subject})" for d in blocked)
-    return [
-        f"{len(blocked)} decision(s) the mandate rests on are still `unknown`: {listed}. "
-        "A scope cannot be delegated while what it covers is the undecided thing. Either narrow "
-        "the mandate so it does not reach them, or make answering them this cycle's scope."
-    ]
+    out: list[str] = []
+    unknown = [d for d in plan.decisions if d.reach == "mandate" and d.status == "unknown"]
+    if unknown:
+        listed = "; ".join(f"{d.id} ({d.subject})" for d in unknown)
+        out.append(
+            f"{len(unknown)} decision(s) the mandate rests on are still `unknown`: {listed}. "
+            "A scope cannot be delegated while what it covers is the undecided thing. Either narrow "
+            "the mandate so it does not reach them, or make answering them this cycle's scope."
+        )
+    unasked = [d for d in plan.decisions if d.settled_without_asking]
+    if unasked:
+        listed = "; ".join(f"{d.id} ({d.subject})" for d in unasked)
+        out.append(
+            f"{len(unasked)} decision(s) reach the mandate and the loop settled them itself: {listed}. "
+            "`reach: mandate` is the record saying a human settles this one; answer each and set "
+            "`settled_by: human`, or change the reach and say in `rationale` why undoing it stays local."
+        )
+    return out
 
 
 def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool = True) -> list[str]:
@@ -707,15 +719,21 @@ def _unasked_decisions(repo: repo_mod.Repo, gate: str) -> list[models.Decision]:
         plan = store_mod.Store(repo).read_plan()
     except models.DocumentError:
         return []  # a plan that does not parse is `_plan_blockers`' to report, not this screen's
-    return [d for d in plan.decisions if d.unasked] if plan is not None else []
+    # `local` only. A `mandate`-reach decision the loop settled by itself is not a line on this
+    # screen to be overruled — it is `_decision_blockers`' business, because the reach already
+    # said a human settles it.
+    return [d for d in plan.decisions if d.unasked and d.is_local] if plan is not None else []
 
 
 def render_unasked(decisions: Sequence[models.Decision]) -> str:
     lines: list[str] = []
     for d in decisions:
         lines.append(f"  - {d.id} {d.subject}")
-        lines.append(f"      settled: {d.answer or '(unstated)'}")
-        lines.append(f"      local because: {d.rationale or '(unstated)'}")
+        lines.append(f"      settled: {d.answer or '(no answer recorded)'}")
+        # `rationale` is required for `local` by the schema, so "(none recorded)" can only appear
+        # under a plan nothing validated. Printed rather than skipped: the reach claim with no
+        # reasoning behind it is the one most worth looking at, not the one to leave off the list.
+        lines.append(f"      local because: {d.rationale or '(none recorded — the reach claim is unsupported)'}")
     return "\n".join(lines)
 
 

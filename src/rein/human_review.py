@@ -43,9 +43,11 @@ from typing import Any
 
 from rein import models, review_policy
 
-# What one reviewer launch may be asked to hold. Not a ceiling on the human: the readers of this
-# are `review.py` and `build_loop.py`, which hand it to `review_reading.read_facts`, and that
-# refuses an over-budget reading *before* a launch is paid for. `review_policy.budgets` overrides it.
+# What one reviewer *launch* may be asked to hold — the only ceiling left anywhere in this flow,
+# and it is on the machine. Nothing here bounds a human: this is never read at the freeze. The
+# readers are `review.py` and `build_loop.py`, which hand it to `review_reading.read_facts`, and
+# that refuses an over-budget reading *before* a launch is paid for, where narrowing the task is
+# still a move. `review_policy.budgets` overrides it; `refuse_over_budget` says why one would.
 DEFAULT_BUDGET: dict[str, int] = {
     "max_diff_bytes": 524288,
 }

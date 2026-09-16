@@ -14,6 +14,7 @@ so they can look at it and decide whether the condition is wrong or the cause is
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -63,6 +64,77 @@ def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lens
     return "\n".join(lines)
 
 
+def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str) -> int:
+    """Print the selection for `stage`, freezing it into the plan the first time it is resolved.
+
+    The library is user-global and a person edits it between cycles. If the reviewer at the code
+    stage re-derived its own list, a change to one line of an overlay would change what this cycle
+    was reviewed for, with nothing in the audit chain saying so — and the same repository would
+    answer differently on another laptop. So the selection is resolved once, against the plan, and
+    written into the plan, where the mandate freezes it with everything else.
+
+    Before the freeze that write is re-done on every call, because the facts it is resolved against
+    grow: `/req` runs with no tasks in the plan yet and `/tasks` runs with all of them. The last
+    write before the mandate is the one that gets frozen. After the freeze nothing is re-derived.
+    """
+    store = store_mod.Store(repo)
+    try:
+        plan = store.read_plan()
+    except models.DocumentError as exc:
+        logger.error(str(exc))
+        return 2
+    if plan is None:
+        logger.error("no .rein/plan.yaml — the selection is resolved against the plan")
+        return 2
+    state = store.read_state()
+    frozen_plan = state is not None and "mandate" in state.approved_gates
+
+    if not frozen_plan:
+        resolved = lenses.resolve(library, lenses.Facts.of(plan))
+        if resolved != [dict(entry.raw) for entry in plan.lenses]:
+            raw = json.loads(json.dumps(dict(plan.raw)))
+            raw["lenses"] = resolved
+            with store.transaction() as tx:
+                tx.write("plan", raw, expect_digest=store_mod.read_digest(plan))
+                tx.append(
+                    "lens_selected",
+                    cycle_id=state.cycle_id if state is not None else "",
+                    subject_ids=sorted({entry["id"] for entry in resolved}),
+                    detail={"count": len(resolved), "stages": sorted({e["stage"] for e in resolved})},
+                )
+            plan = store.read_plan()
+            if plan is None:  # written and then unreadable: a defect, not a selection
+                logger.error("the plan could not be read back after writing the lens selection")
+                return 2
+
+    applied_ids, proposed_ids = lenses.frozen(plan, stage=stage)
+    applied, missing_applied = lenses.by_id(library, applied_ids)
+    proposed, missing_proposed = lenses.by_id(library, proposed_ids)
+
+    where = "frozen with the mandate" if frozen_plan else "resolved against this plan and written into it"
+    print(f"{stage}: {len(applied)} applied, {len(proposed)} proposed ({where})")
+    if applied:
+        print("\napplied (the condition is decidable, so nobody is asked):")
+        print(lenses.render(applied))
+    if proposed:
+        print("\nproposed (deciding the condition takes judgement — keep or drop at the mandate):")
+        print(lenses.render(proposed))
+    off = [lens.id for lens in library if lens.stage == stage and lens.lens_class == lenses.CLASS_UNCLASSIFIED]
+    if off:
+        print(f"\noff, no condition written down yet: {', '.join(off)}")
+    if frozen_plan and not plan.lenses:
+        logger.warning(
+            "this mandate froze no lens selection, so there is nothing to read back. The review "
+            "runs without lenses rather than against whatever the library says today; `rein revise "
+            "--to mandate` reopens the plan if this cycle should have had them."
+        )
+    for lens_id in missing_applied + missing_proposed:
+        # Named, never skipped. The frozen list is the record of what this cycle was reviewed for,
+        # and an id the library no longer holds is precisely the drift the freeze exists to expose.
+        logger.warning(f"{lens_id} was frozen into this plan and is no longer in the library — it cannot be applied")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="the review lens library: what exists, what applies, what it found")
     parser.add_argument("--list", action="store_true", help="every lens in the library, packaged and your own")
@@ -94,27 +166,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.select not in lenses.STAGE_VALUES:
             logger.error(f"unknown stage {args.select!r} — one of {', '.join(lenses.STAGES)}")
             return 2
-        try:
-            plan = store_mod.Store(repo).read_plan()
-        except models.DocumentError as exc:
-            logger.error(str(exc))
-            return 2
-        risks = [claim.risk for claim in plan.claims] if plan is not None else []
-        changed = sorted({path for task in (plan.tasks if plan is not None else ()) for path in task.scope_include})
-        applied, proposed = lenses.select(library, stage=args.select, changed=changed, risks=risks)
-        print(f"{args.select}: {len(applied)} applied, {len(proposed)} proposed")
-        if applied:
-            print("\napplied (the condition is decidable, so nobody is asked):")
-            print(lenses.render(applied))
-        if proposed:
-            print("\nproposed (deciding the condition takes judgement — keep or drop at the mandate):")
-            print(lenses.render(proposed))
-        off = [
-            lens.id for lens in library if lens.stage == args.select and lens.lens_class == lenses.CLASS_UNCLASSIFIED
-        ]
-        if off:
-            print(f"\noff, no condition written down yet: {', '.join(off)}")
-        return 0
+        return _select(repo, library, args.select)
 
     if args.record:
         if args.found is None:

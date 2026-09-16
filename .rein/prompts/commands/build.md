@@ -224,6 +224,11 @@ is the point; never fold them into the implementer's session.
   `.rein/work/T-NNN.findings.json`; the implementer resolves the `must_fix` ones within the
   step's own `retries` budget and the reviewer looks again. A review whose findings cannot be read
   stops the step: an unreadable answer is not an answer that found nothing.
+  **The code-stage lenses this cycle's mandate froze reach it too** (`plan.lenses`, written by
+  `rein lens --select code` before the gate). They are conditioned on the paths the plan declares,
+  so a schema lens over a change that touches no schema is not asked for — a reviewer sent to
+  attack a failure this change cannot carry costs a pass over the diff and returns "attacked,
+  nothing" while the findings that *are* possible compete with it for attention.
   Both disciplines are **named to the host that has them**: under Claude Code the reviewer is
   pointed at `/code-review` and `/simplify`, which read the branch it is on — with the two rules
   those commands do not carry themselves, that `/simplify`'s fix-applying phase must not run here

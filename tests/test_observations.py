@@ -48,7 +48,7 @@ def test_recording_never_raises_even_when_the_store_cannot_be_written(
 ) -> None:
     """Every caller is doing something else — opening a gate, finishing a review. A store that can
     fail a gate would be an input to the thing it is measuring."""
-    monkeypatch.setattr(observations.Path, "mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+    monkeypatch.setattr("rein.observations.Path.mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
     assert observations.record("reach_overruled", project="p", cycle_id="c") is False
 
 
@@ -65,13 +65,32 @@ def test_a_torn_line_is_skipped_rather_than_refusing_the_file(store: Path) -> No
     assert kinds == ["reach_overruled", "judgement_raised"]
 
 
+def test_a_well_formed_line_carrying_an_unaveragable_value_is_skipped_too(store: Path) -> None:
+    """JSON that parses is not a reading that counts. `float(None)` raises, and it was raising
+    outside the try — one such line and both `rein observe` and `--prune` fell over, against a
+    docstring promising the opposite."""
+    observations.record("reach_overruled", project="p", cycle_id="c-1")
+    with store.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"kind": "waited_seconds", "project": "p", "cycle_id": "c", "value": None}) + "\n")
+
+    assert [entry.kind for entry in observations.read()] == ["reach_overruled"]
+    assert observations.prune(1) == 0
+
+
+def test_recording_a_value_that_is_not_a_number_is_refused_rather_than_raised(store: Path) -> None:
+    """ "Never raises" has to survive the caller that hands this a None it computed from a clock
+    that was not running. The reading is lost; the gate the caller was opening is not."""
+    assert observations.record("waited_seconds", project="p", cycle_id="c", value=None) is False  # type: ignore[arg-type]
+    assert observations.read() == []
+
+
 def test_the_store_holds_counts_and_classes_never_content(store: Path) -> None:
     """It is user-global and crosses projects, so what is in it has to be safe to keep there.
     Whatever needs the content is in that cycle's own archive, which the cycle id finds."""
     observations.record("judgement_raised", project="demo", cycle_id="c-1", value=2, subject="T-004")
     written = json.loads(store.read_text(encoding="utf-8").strip())
 
-    assert set(written) == {"kind", "project", "cycle_id", "value", "at", "subject"}
+    assert set(written) == {"kind", "project", "cycle_id", "value", "at", "subject", "arm"}
     assert isinstance(written["value"], (int, float))
 
 

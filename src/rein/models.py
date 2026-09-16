@@ -132,6 +132,17 @@ DECISION_STATUS_VALUES = frozenset({"settled", "unknown"})
 #: Who settled it. Empty while `status` is `unknown`, because nobody did.
 DECISION_SETTLED_BY_VALUES = frozenset({"human", "loop"})
 
+# Where a review lens can be pointed, earliest-first — which is also the order of preference: a
+# lens belongs at the earliest stage whose deliverable could carry the failure it looks for.
+# Defined here rather than in `lenses.py` because `plan.yaml` freezes the selection and this is
+# where the plan's vocabulary lives; `lenses.STAGES` is this tuple.
+LENS_STAGE_ORDER: tuple[str, ...] = ("requirements", "design", "tasks", "code")
+LENS_STAGE_VALUES = frozenset(LENS_STAGE_ORDER)
+#: What the frozen selection says happened to a lens. `proposed` is recorded as well as `applied`
+#: because dropping one at the gate is a decision, and a decision nothing records is one the next
+#: cycle silently re-makes.
+LENS_SELECTION_STATUS_VALUES = frozenset({"applied", "proposed"})
+
 # Task vocabulary. `kind` is the DAG role that drives build orchestration (consumption order,
 # parallelism, merge) — deliberately not collapsed into a single "implementation", because
 # build_loop derives layers and the critical path from it.
@@ -413,6 +424,11 @@ EVENT_ORDER: tuple[str, ...] = (
     # or has outlived its cause, and neither is visible from any one cycle — which is exactly
     # why the count lives in the chain rather than in a process that ends with the run.
     "lens_applied",
+    # The lens selection was resolved against the plan and written into it. Its own kind because it
+    # is the moment a user-global, editable library becomes a fixed input to this cycle's review:
+    # without the record, a selection that changed between the gate screen and the reviewer would
+    # leave nothing behind saying it had.
+    "lens_selected",
     # The work branch's quality gate, measured before any task ran. Its own name because it is a
     # fact about the *tree* rather than about a run: the mandate freezes it, `rein build` reads it, and
     # a task that fails a step the baseline already knew about is stopped rather than sent back to
@@ -790,11 +806,21 @@ class Decision(Element):
 
     @property
     def reach(self) -> str:
-        return _str(self.raw, "reach")
+        """`mandate` or `local`. Anything else reads as `mandate`.
+
+        Fail-closed, and the direction matters: the cost of reading an unrecognized reach as
+        `mandate` is one extra line on a gate screen, and the cost of reading it as `local` is a
+        decision the loop keeps to itself because its record was malformed. `plan.schema.json`
+        closes the enum, so this only fires on a document nothing validated.
+        """
+        value = _str(self.raw, "reach")
+        return value if value in DECISION_REACH_VALUES else "mandate"
 
     @property
     def status(self) -> str:
-        return _str(self.raw, "status")
+        """`settled` or `unknown`. Anything else reads as `unknown`, which blocks rather than hides."""
+        value = _str(self.raw, "status")
+        return value if value in DECISION_STATUS_VALUES else "unknown"
 
     @property
     def rationale(self) -> str:
@@ -810,13 +836,23 @@ class Decision(Element):
 
         What it separates is a default the loop took from a default a human looked at and kept.
         Both read as settled afterwards, and only the first is a thing the gate has to show.
+        `plan.schema.json` requires it on every `settled` decision and forbids it on an `unknown`
+        one, for exactly that reason.
         """
-        return _str(self.raw, "settled_by")
+        value = _str(self.raw, "settled_by")
+        return value if value in DECISION_SETTLED_BY_VALUES else ""
 
     @property
     def unasked(self) -> bool:
-        """Settled by the loop on its own reading of the reach — the list the gate screen shows."""
-        return self.status == "settled" and self.settled_by == "loop"
+        """Settled by the loop on its own reading of the reach — the list the gate screen shows.
+
+        Read as "settled, and not by a human" rather than "settled by the loop". The two differ on
+        one input: a record whose `settled_by` is missing. The schema requires it, so that record
+        is invalid — and the failure has to fall on the side of showing a human one decision they
+        did make themselves, never on the side of a silently shorter list. This list is the whole
+        reason the record exists; a list that can go empty by omission answers nothing.
+        """
+        return self.status == "settled" and self.settled_by != "human"
 
     @property
     def is_local(self) -> bool:
@@ -824,16 +860,52 @@ class Decision(Element):
 
     @property
     def blocks_mandate(self) -> bool:
-        """A decision the scope rests on that nobody has an answer to.
+        """A `mandate`-reach decision the gate cannot be opened over. Two ways to get here.
 
-        Not a thing to fill in with a default, and not a thing to delegate around: the loop cannot
-        be told what it may change when what it may change is what is undecided. `/req` splits the
-        mandate to exclude it, or makes finding the answer the cycle's own scope.
+        **Nobody has an answer** (`unknown`). Not a thing to fill in with a default, and not a
+        thing to delegate around: the loop cannot be told what it may change when what it may
+        change is what is undecided. `/req` splits the mandate to exclude it, or makes finding the
+        answer the cycle's own scope.
+
+        **The loop answered it itself** (`settled_by: loop`). Same field, opposite failure: the
+        reach says a human settles this one, and the record says one did not. Left to the gate
+        screen it would be ratified by not being objected to, which is the shape of approval this
+        whole record exists to replace — so it blocks, and the human answers it.
         """
-        return self.reach == "mandate" and self.status == "unknown"
+        if self.reach != "mandate":
+            return False
+        return self.status == "unknown" or self.settled_by == "loop"
+
+    @property
+    def settled_without_asking(self) -> bool:
+        """The loop answered a decision whose reach says a human had to. Blocks; never a screen item."""
+        return self.reach == "mandate" and self.status == "settled" and self.settled_by != "human"
 
 
-_PLAN_SECTIONS: Mapping[str, type[Element]] = {"claims": Claim, "tasks": Task, "decisions": Decision}
+@dataclass(frozen=True)
+class LensSelection(Element):
+    """One lens the mandate froze into this cycle's review, and what was decided about it.
+
+    The library is user-global and a person edits it between cycles; this record is what stops that
+    from silently changing what a review looked for. `rein lens --select` writes it while the plan
+    is a draft and reads it back once the mandate has frozen the plan.
+    """
+
+    @property
+    def stage(self) -> str:
+        return _str(self.raw, "stage")
+
+    @property
+    def status(self) -> str:
+        return _str(self.raw, "status")
+
+
+_PLAN_SECTIONS: Mapping[str, type[Element]] = {
+    "claims": Claim,
+    "tasks": Task,
+    "decisions": Decision,
+    "lenses": LensSelection,
+}
 
 
 # --- documents ----------------------------------------------------------------
@@ -930,6 +1002,10 @@ class Plan:
     @property
     def decisions(self) -> tuple[Decision, ...]:
         return self._section("decisions")
+
+    @property
+    def lenses(self) -> tuple[LensSelection, ...]:
+        return self._section("lenses")
 
     # -- lookup ---------------------------------------------------------------
 
@@ -1695,10 +1771,13 @@ class Config:
         raw = policy.get("budgets") if isinstance(policy, dict) else None
         if not isinstance(raw, dict):
             return {}
-        # `config.schema.json` closes this object, so an unknown key never reaches here. The only
-        # budget left is `max_diff_bytes`: what one reviewer launch may be asked to hold, refused
-        # by `review_reading.read_facts` before a launch is paid for.
-        return {k: v for k, v in raw.items() if isinstance(v, int) and not isinstance(v, bool)}
+        # Named, not filtered. There is one budget — `max_diff_bytes`, what a single reviewer
+        # launch may be asked to read — and `config.schema.json` closes the object around it, so a
+        # generic "keep the ints" pass would only ever be preparing for a key that cannot arrive.
+        ceiling = raw.get("max_diff_bytes")
+        if isinstance(ceiling, bool) or not isinstance(ceiling, int):
+            return {}
+        return {"max_diff_bytes": ceiling}
 
     @property
     def repair_rounds(self) -> int:

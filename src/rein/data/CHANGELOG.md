@@ -4,6 +4,92 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.12.0] - 2026-09-16
+
+**What an adversarial pass over 0.6.0–0.11.0 found: three of those changes declared something the
+code did not do.** Each is fixed at the declaration or at the mechanism, whichever was wrong.
+
+**A gate screen built out of an optional field can go silently blank.** `plan.yaml`'s `decisions`
+required only `id`, `subject`, `reach` and `status`, while "the decisions the loop settled without
+asking you" was derived from `settled_by`, and `reach: local`'s claim was justified by `rationale`.
+Both were required by a paragraph in a prompt and by nothing else — and nothing in `plan.yaml` is
+written by hand. An omitted `settled_by` emptied the list the whole record exists to produce, with
+`doctor` none the wiser. The schema now requires `settled_by` on every `settled` decision, forbids
+it on an `unknown` one, and requires `rationale` on every `local` one. `Decision.unasked` reads
+"settled, and not by a human", so the remaining failure mode shows a human one decision too many
+rather than one too few. And `rein approve mandate` now refuses a `reach: mandate` decision
+carrying `settled_by: loop`: the reach is the record saying a human settles that one, so answering
+it yourself is the same defect as leaving it `unknown`, reached from the other side.
+
+**The lens selection is frozen into the plan, which is what 0.10.0 said and did not do.** The
+library is user-global; the selection was re-derived from it on every call, so one line changed in
+an overlay changed what a cycle was reviewed for, with nothing in the audit chain to show it.
+`rein lens --select` now resolves the whole selection against the plan and writes it to
+`plan.lenses` while the plan is a draft, and reads it back once the mandate has frozen it. New
+event kind `lens_selected`. A frozen id the library no longer holds is named, never skipped.
+
+**A `standard` lens now has to carry a machine-decidable condition.** All nineteen shipped lenses
+had an empty one, which made `standard` mean "applied to everything" — the always-on list the
+library replaced, re-entering through an empty field. The condition vocabulary was the reason: it
+could only express paths and risk, and a requirements-stage lens has neither. It now also carries
+`min_claims`, `min_tasks` and `requires` over a closed set of plan facts (`nfr_claims`,
+`parallel_tasks`, `task_dependencies`), so every packaged lens states a condition that is checked;
+a `standard` lens with no `when:` block is loaded as `unclassified`, and a test holds that line.
+`L-DES-NFR-HOLES`, `L-TASK-COLLISION` and `L-TASK-MISSING-EDGE` become `standard` on real
+conditions, while `L-REQ-FAILURE-MODES` and `L-DES-FAILURE-WALK` become `conditional` because
+theirs is not decidable from the plan.
+
+**Six code-stage lenses, and the reviewers that receive them.** `STAGES` declared `code` and
+`acceptance` with no lens in either and no command selecting for them. `code` is now populated —
+schema drift, dependency surface, CI authority, test inertness, error paths, concurrency — and the
+per-task and integration reviewers are handed the frozen set (`build_prompts.lens_note`). Their
+conditions are the sharpest in the library, because at that stage the plan already says which files
+may be touched. `acceptance` is gone: acceptance reads the change through the grounded pipeline,
+and a stage nothing selects for is the unfinished record the class system exists to refuse.
+
+**The notification command ran with its environment wiped, so most channels could not start.**
+`env={payload}` means `argv[0]` is resolved against `os.defpath` (`/bin:/usr/bin`) alone — nothing
+from pipx, npm, Homebrew or `~/bin` is found — while `doctor` resolved the same name against the
+real `PATH` and reported PASS. Even when it launched, `notify-send` had no `DBUS_SESSION_BUS_ADDRESS`
+and a shell script had no `HOME`. Now an allowlist: the variables a command needs to be a command
+on this machine, the payload layered over them, and nothing carrying a credential. `doctor` and the
+watcher resolve the program through the same function. `render` strips a launch link from the URL
+it is handed rather than trusting its caller not to pass one.
+
+**`waited_seconds` could not answer the question it was added for.** The watcher only ran when a
+channel was configured, so the claim "a channel shortens the wait" had one arm; it recorded a wait
+only on the way to idle, so the usual case — answer one gate, the next opens — dropped every wait
+but the last; and it read the cycle id once at server start, although the server outlives cycles.
+The watcher now always runs, each wait carries the arm it was spent in (`notified` / `silent`) and
+`rein observe` reports the two apart, the wait closes when the decision changes, and the cycle id
+is read when the wait ends.
+
+**`reach_overruled` counted the claim's successes into the figure that falsifies it.** Any change
+request whose free-text target began with `D-` was counted, including `docs/D-spec.md`, and
+including requests against `reach: mandate` decisions — which are the loop routing a question to a
+human correctly. It now resolves the target against `plan.decisions` and counts only a `local` one.
+
+**`observations.read` raised on a line its docstring promised to skip.** `float(raw["value"])` sat
+outside the `try`, so one well-formed JSON line with a non-numeric value took down both `rein
+observe` and `--prune`. `record` had the same conversion outside its own guard, against a "never
+raises" contract. Both are inside now.
+
+**The one ceiling this harness keeps now says whose it is.** `refuse_over_budget`'s message ended
+"about how much one person can hold at once" — a claim about a person, in the release that removed
+every such claim. `max_diff_bytes` bounds a *model launch*: handed more than it can hold, a launch
+does not report that, it answers about the part it saw. That is the `repair_rounds` shape, a
+ceiling on the side that cannot tell it has failed, and it fires where its remedy still exists.
+The message, the `doctor` WARN and the module docstrings now all say that, and none of them
+describes a human.
+
+Also: `Config.budgets` reads its one key by name instead of filtering for ints; `models` gained
+`LENS_STAGE_ORDER` and `LENS_SELECTION_STATUS_VALUES` and the `DECISION_*` vocabularies are now
+what `Decision`'s accessors fail closed against; a watcher that cannot derive the decision warns
+once and then debugs, instead of going permanently silent at DEBUG.
+
+`lock.FORMAT` moves to `rein-grounded-v5`: `plan.yaml` gained `lenses` and three conditional
+requirements on `decisions`, and `event.schema.json` gained `lens_selected`. No migration, as ever.
+
 ## [0.11.0] - 2026-09-16
 
 **The harness measures what would falsify the rules it follows.** Several of those rules already

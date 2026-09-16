@@ -65,6 +65,9 @@ KINDS: tuple[str, ...] = (
 )
 KIND_VALUES = frozenset(KINDS)
 
+#: Kinds whose claim is a comparison, so their readings are grouped by `arm` and never pooled.
+ARMED_KINDS = frozenset({"waited_seconds"})
+
 #: Why each kind exists, printed beside the figure — a number whose claim is not on screen beside
 #: it is one somebody will read as a score.
 CLAIMS: Mapping[str, str] = {
@@ -72,10 +75,19 @@ CLAIMS: Mapping[str, str] = {
     "unknown_at_mandate": "honesty at the mandate is what buys fewer interventions later",
     "judgement_raised": "...measured against this: findings that needed a human to sort code from plan",
     "acceptance_reopened": "comprehension is a by-product of deciding — a reopened acceptance says it was not",
-    "waited_seconds": "the harness owns waiting: how long a decision sat before it was answered",
+    "waited_seconds": "the harness owns waiting: how long a decision sat, with a channel and without one",
 }
 
 STORE_NAME = "observations.ndjson"
+
+
+#: The two conditions a `waited_seconds` reading can be taken under. A measurement with no
+#: control is a number, not evidence: "the harness owns waiting" is a claim that waits are shorter
+#: *with* a channel than without one, and that comparison needs both arms recorded. Closed, and
+#: used by `waited_seconds` alone — every other kind is a count whose claim needs no comparison.
+ARM_NOTIFIED = "notified"
+ARM_SILENT = "silent"
+ARM_VALUES = frozenset({"", ARM_NOTIFIED, ARM_SILENT})
 
 
 @dataclass(frozen=True)
@@ -88,6 +100,7 @@ class Observation:
     value: float
     at: str
     subject: str = ""
+    arm: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -99,7 +112,7 @@ def store_path() -> Path:
     return store_mod.config_home() / "rein" / STORE_NAME
 
 
-def record(kind: str, *, project: str, cycle_id: str, value: float = 1.0, subject: str = "") -> bool:
+def record(kind: str, *, project: str, cycle_id: str, value: float = 1.0, subject: str = "", arm: str = "") -> bool:
     """Append one observation. False when it was refused or could not be written.
 
     Never raises. Every caller is doing something else — opening a gate, finishing a review — and
@@ -108,13 +121,24 @@ def record(kind: str, *, project: str, cycle_id: str, value: float = 1.0, subjec
     if kind not in KIND_VALUES:
         logger.warning(f"unknown observation kind {kind!r} — not recorded")
         return False
+    if arm not in ARM_VALUES:
+        logger.warning(f"unknown observation arm {arm!r} — not recorded")
+        return False
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        # "Never raises" has to survive the caller that hands this a None it computed from a clock
+        # that was not running. The reading is lost; the gate the caller was opening is not.
+        logger.warning(f"observation {kind!r} carried a non-numeric value {value!r} — not recorded")
+        return False
     entry = Observation(
         kind=kind,
         project=project,
         cycle_id=cycle_id,
-        value=float(value),
+        value=numeric,
         at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         subject=subject,
+        arm=arm,
     )
     path = store_path()
     try:
@@ -152,28 +176,46 @@ def read(path: Path | None = None) -> list[Observation]:
             continue
         if not isinstance(raw, Mapping) or raw.get("kind") not in KIND_VALUES:
             continue
+        try:
+            value = float(raw.get("value", 1))
+        except (TypeError, ValueError):
+            # Well-formed JSON carrying a value nothing can average. Skipped for the same reason a
+            # torn line is: one unreadable row must not cost every reading taken before it.
+            continue
+        arm = str(raw.get("arm", ""))
         out.append(
             Observation(
                 kind=str(raw["kind"]),
                 project=str(raw.get("project", "")),
                 cycle_id=str(raw.get("cycle_id", "")),
-                value=float(raw.get("value", 1)),
+                value=value,
                 at=str(raw.get("at", "")),
                 subject=str(raw.get("subject", "")),
+                arm=arm if arm in ARM_VALUES else "",
             )
         )
     return out
 
 
 def summarize(entries: Sequence[Observation], *, project: str = "") -> dict[str, dict[str, float]]:
-    """`{kind: {count, total, mean}}` — totals only, which is all counts and classes can support."""
+    """`{key: {count, total, mean}}` — totals only, which is all counts and classes can support.
+
+    `waited_seconds` is reported per arm (`waited_seconds/notified`, `waited_seconds/silent`) and
+    never pooled. Pooling them would answer "how long do people wait" when the question is whether
+    the channel changes that, and the pooled mean moves with whichever arm was recorded more.
+    """
     chosen = [e for e in entries if not project or e.project == project]
     out: dict[str, dict[str, float]] = {}
     for kind in KINDS:
-        values = [e.value for e in chosen if e.kind == kind]
-        if not values:
+        of_kind = [e for e in chosen if e.kind == kind]
+        if not of_kind:
             continue
-        out[kind] = {"count": len(values), "total": sum(values), "mean": sum(values) / len(values)}
+        groups: dict[str, list[float]] = {}
+        for entry in of_kind:
+            key = f"{kind}/{entry.arm}" if kind in ARMED_KINDS and entry.arm else kind
+            groups.setdefault(key, []).append(entry.value)
+        for key, values in sorted(groups.items()):
+            out[key] = {"count": len(values), "total": sum(values), "mean": sum(values) / len(values)}
     return out
 
 
@@ -185,12 +227,24 @@ def render(summary: Mapping[str, Mapping[str, float]]) -> str:
             "are for, which are all about whether a rule in this harness was a good one."
         )
     lines: list[str] = []
-    for kind, figures in summary.items():
-        if kind == "waited_seconds":
-            lines.append(f"{kind:<22} {figures['count']:>5} waits, mean {figures['mean'] / 60:.1f} min")
+    seen_claims: set[str] = set()
+    for key, figures in summary.items():
+        kind = key.split("/", 1)[0]
+        if kind in ARMED_KINDS:
+            lines.append(f"{key:<30} {figures['count']:>5} waits, mean {figures['mean'] / 60:.1f} min")
         else:
-            lines.append(f"{kind:<22} {int(figures['total']):>5}")
-        lines.append(f"  {CLAIMS[kind]}")
+            lines.append(f"{key:<30} {int(figures['total']):>5}")
+        if kind not in seen_claims:
+            lines.append(f"  {CLAIMS[kind]}")
+            seen_claims.add(kind)
+    if any(key.startswith("waited_seconds") for key in summary) and not all(
+        f"waited_seconds/{arm}" in summary for arm in (ARM_NOTIFIED, ARM_SILENT)
+    ):
+        lines.append("")
+        lines.append(
+            "  Only one arm of `waited_seconds` has readings. The claim is that a channel shortens "
+            "the wait, and one arm cannot say: run some cycles with `command:` unset too."
+        )
     lines.append("")
     lines.append(
         "No thresholds, and none are coming. These are the material for deciding whether a rule "

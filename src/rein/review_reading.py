@@ -753,18 +753,25 @@ def reviewable_of(
 
 
 def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str = "") -> None:
-    """Refuse a reading whose diff is already past the one byte-denominated budget.
+    """Refuse a reading no single reviewer launch can take.
 
-    `max_diff_bytes` was measurable only *after* the pipeline ran: `human_review` reads it off the
-    finished coverage manifest, at the freeze. So a change big enough that the
-    three reviewer stages cannot be run against it at all never reached the budget's own
-    instruction — the operator paid three model launches to be told "the adapter exited 1", and
-    the sentence that would have said what to do about it lived behind the failure.
+    **This is the one ceiling this harness keeps, and it is worth saying exactly why.** The rule
+    everywhere else is that a limit on the side that *can* judge degrades quality: a human asked to
+    hold five decisions instead of seven does not understand the change better, and a cap whose own
+    remedy does not exist at the point it fires has one exit, which is to raise the number. The
+    acceptance budget was that, and the record of it being raised twice is in this repository.
 
-    This is the wall. Acceptance carries no ceiling of its own — one there named "split the scope"
-    as its remedy, which is not a move that exists once every task is merged and `done` — so a
-    reading is refused here, before the launches are paid for, with the budget's own name on it.
-    `doctor.check_review_outlook` says the same thing earlier still, while the mandate can be split.
+    `max_diff_bytes` is the other kind. What it bounds is a *model launch* — how much diff one
+    reviewer can be handed and still read rather than truncate — and a launch cannot judge that
+    for itself. Handed too much it does not report "this was too much for me"; it exits non-zero,
+    or worse, answers about the part it saw. That is the same shape as `config.repair_rounds`: a
+    ceiling on the side that cannot tell it has failed, which is the only side a ceiling protects.
+
+    And it fires where its remedy exists. Before any launch is paid for, so the sentence naming
+    what to do arrives instead of "the adapter exited 1"; and `doctor.check_review_outlook` says it
+    earlier still, while the mandate can still be split. Raising it is a statement about the
+    adapter's context window, not about how much a person can hold — nothing here is a claim about
+    a person, and acceptance carries no ceiling of any kind.
 
     `unit` names the reading when a review is composed out of several, so a refusal says which one
     is too big rather than only that something was. A whole-change reading names nothing, which is
@@ -775,11 +782,12 @@ def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str 
         return
     subject = f"the reading of {unit}" if unit and unit != WHOLE else "this change"
     raise ReviewError(
-        "review budget exceeded before the pipeline ran — split the scope, do not grow the "
-        f"screen: max_diff_bytes is {ceiling} and {subject}'s diff is "
-        f"{diff_bytes} bytes. Reduce what this cycle claims through `/revise` and review the "
-        "remainder in its own acceptance round, or raise the limit in `review_policy.budgets` as a "
-        "deliberate, recorded decision about how much one person can hold at once."
+        f"no single reviewer launch can read this: `max_diff_bytes` is {ceiling} and {subject}'s "
+        f"diff is {diff_bytes} bytes. This bounds what one model launch is handed, not what a "
+        "person is asked — a launch given more than it can hold does not say so, it answers about "
+        "the part it saw. Narrow the task's scope or split it through `/revise` so the change is "
+        "read in slices that are each read whole; or, if this adapter's context really did grow, "
+        "raise `review_policy.budgets.max_diff_bytes` to match it."
     )
 
 

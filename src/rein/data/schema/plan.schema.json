@@ -55,6 +55,14 @@
       "items": {
         "$ref": "#/$defs/decision"
       }
+    },
+    "lenses": {
+      "description": "The review lenses this cycle applies, frozen with the mandate. Written by `rein lens --select` while the plan is still a draft and read back by it afterwards, so the reviewer at the code stage is handed the same set the gate screen showed.",
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/lensSelection"
+      }
     }
   },
   "$defs": {
@@ -383,7 +391,7 @@
       }
     },
     "decision": {
-      "description": "One thing that had to be settled before the loop could build, and how it was settled. `reach` is the criterion that decides who settles it: a decision whose reversal would collapse the scope is `mandate` and a human settles it before the gate; one whose reversal stays local is `local` and the loop settles it and records it here. Asking about every default the loop would otherwise take is the wider net and it spends the drafting phase; asking about what cannot be undone locally is the one that pays. `status: unknown` is the honest answer when nobody has one — recorded rather than filled in with a default, and never turned into a claim, because a claim nothing can make true cannot be judged. A `mandate` decision left `unknown` is what `rein approve mandate` refuses: the scope is not yet defined enough to delegate.",
+      "description": "One thing that had to be settled before the loop could build, and how it was settled. `reach` is the criterion that decides who settles it: a decision whose reversal would collapse the scope is `mandate` and a human settles it before the gate; one whose reversal stays local is `local` and the loop settles it and records it here. Asking about every default the loop would otherwise take is the wider net and it spends the drafting phase; asking about what cannot be undone locally is the one that pays. `status: unknown` is the honest answer when nobody has one — recorded rather than filled in with a default, and never turned into a claim, because a claim nothing can make true cannot be judged. A `mandate` decision left `unknown` is what `rein approve mandate` refuses: the scope is not yet defined enough to delegate.\n\nThree conditional requirements, because the gate screen is built out of these fields and a field nothing requires is a screen that can go silently blank. A `settled` decision must name `settled_by`: the list a human reads at the gate is every decision the *loop* settled, so an omitted `settled_by` would drop an entry from the one list the record exists to produce. An `unknown` decision must *not* carry one, because nobody settled it. And a `local` decision must carry a `rationale`: the reach claim is that reversing it later costs one task, and the rationale is the only material a human has for overruling that claim.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -414,10 +422,11 @@
           ]
         },
         "rationale": {
-          "description": "Why this reach. Required for `local`: the claim being made is that reversing it later costs one task, and that claim is the thing a human overrules at the gate.",
+          "description": "Why this reach. Required for `local` (see the conditional requirements above): the claim being made is that reversing it later costs one task, and that claim is the thing a human overrules at the gate.",
           "$ref": "#/$defs/text"
         },
         "settled_by": {
+          "description": "Who settled it. Required when `status` is `settled`, forbidden when it is `unknown`. What it separates is a default the loop took from a default a human looked at and kept: both read as settled afterwards, and only the first is a thing the gate shows.",
           "enum": [
             "human",
             "loop"
@@ -434,6 +443,92 @@
             "maxLength": 32,
             "pattern": "^(R|NFR)-[0-9]+$"
           }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "settled"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "settled_by"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "settled_by"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reach": {
+                "const": "local"
+              }
+            },
+            "required": [
+              "reach"
+            ]
+          },
+          "then": {
+            "required": [
+              "rationale"
+            ]
+          }
+        }
+      ]
+    },
+    "lensSelection": {
+      "description": "One lens this cycle's review will use, resolved against this plan and frozen with it. The library the ids come from is user-global and mutable; this list is not. Without it a review's inputs would be a function of whatever `$XDG_CONFIG_HOME/rein/lenses.yaml` happened to say when the reviewer ran — the same repository would be reviewed differently on another laptop, or after one line of an overlay changed, with nothing in the audit chain to show it. `status: applied` is a lens whose condition the machine settled; `proposed` is one a human keeps or drops at the gate, recorded because dropping it is a decision.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "stage",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "stage": {
+          "enum": [
+            "requirements",
+            "design",
+            "tasks",
+            "code"
+          ]
+        },
+        "status": {
+          "enum": [
+            "applied",
+            "proposed"
+          ]
         }
       }
     }

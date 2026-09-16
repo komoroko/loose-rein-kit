@@ -532,13 +532,22 @@ command: notify-send "rein"
 ```
 
 The command is run with `REIN_PROJECT`, `REIN_DECISION_ID`, `REIN_HEADLINE`, `REIN_ACTION` and
-`REIN_URL` in its environment. It lives in your user config, not `.rein/config.yaml`, because that
-one is frozen by the mandate and where your pings go is not a thing a mandate should freeze.
+`REIN_URL` in its environment, on top of an allowlist of the variables a command needs to *be* a
+command here — `PATH`, `HOME`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` and a few more — and nothing
+that carries a credential. It lives in your user config, not `.rein/config.yaml`, because that one
+is frozen by the mandate and where your pings go is not a thing a mandate should freeze.
 
 One decision, one notification: the id changes only when the decision does. A notification carries
-what is waited on and where to answer — never the evidence, and never the launch secret, so it may
-leave the machine without widening anything. `rein doctor` says whether a channel is configured and
-whether its command can actually run.
+what is waited on and where to answer — never the evidence, and never the launch secret, which is
+stripped from `REIN_URL` even if one is handed in. So it may leave the machine without widening
+anything, and the other side of that is real: **the page it points at is read-only unless that
+browser already holds a session.** Answering is still the launch link from the terminal, or a
+terminal. `rein doctor` says whether a channel is configured and whether its command can actually
+run, resolved the same way the watcher will resolve it.
+
+The watcher runs whether or not you have configured a channel. Without one it notifies nothing and
+still times each wait, in the `silent` arm — which is what the `notified` arm gets compared against
+when you ask `rein observe` whether the channel helped.
 
 ## Security review
 

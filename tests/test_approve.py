@@ -14,6 +14,7 @@ import io
 from pathlib import Path
 
 import pytest
+import yaml
 
 from rein import approve, digests, models, review_reading
 from rein import repo as repo_mod
@@ -868,6 +869,73 @@ def test_the_decision_check_is_the_mandates_alone(tmp_path: Path) -> None:
         ),
     )
     assert not [b for b in approve.readiness(repo, "acceptance") if "still `unknown`" in b]
+
+
+def test_a_mandate_decision_the_loop_settled_itself_holds_the_gate_shut(tmp_path: Path) -> None:
+    """The same defect as `unknown`, read from the other side: the record classified this one as a
+    human's to make and then made it anyway. Left to the gate screen it would be ratified by not
+    being objected to, which is the shape of approval this record exists to replace."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            decisions=[make_decision("D-001", reach="mandate", settled_by="loop", rationale=None)],
+        ),
+    )
+    blockers = [b for b in approve.readiness(repo, "mandate") if "settled them itself" in b]
+
+    assert len(blockers) == 1
+    assert "D-001" in blockers[0]
+
+
+def test_a_mandate_decision_a_human_settled_opens_the_gate(tmp_path: Path) -> None:
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            decisions=[make_decision("D-001", reach="mandate", settled_by="human", rationale=None)],
+        ),
+    )
+    assert not [b for b in approve.readiness(repo, "mandate") if "settled them itself" in b]
+
+
+def test_a_settled_decision_must_say_who_settled_it(tmp_path: Path) -> None:
+    """The field the gate screen is built out of. Nothing in `plan.yaml` is written by hand — an
+    LLM writes it from a prose instruction — so a field that only a paragraph requires is one that
+    goes missing, and the list of decisions nobody was asked about goes silently empty with it."""
+    with pytest.raises(models.DocumentError) as exc:
+        models.Plan.parse(
+            yaml.safe_dump(make_plan(decisions=[make_decision("D-001", settled_by=None)])),
+            cross_reference=False,
+        )
+    assert "settled_by" in str(exc.value)
+
+
+def test_an_unknown_decision_may_not_claim_somebody_settled_it(tmp_path: Path) -> None:
+    with pytest.raises(models.DocumentError) as exc:
+        models.Plan.parse(
+            yaml.safe_dump(make_plan(decisions=[make_decision("D-001", status="unknown", settled_by="loop")])),
+            cross_reference=False,
+        )
+    assert "settled_by" in str(exc.value)
+
+
+def test_a_local_decision_must_carry_the_reasoning_a_human_would_overrule(tmp_path: Path) -> None:
+    """`reach: local` is a claim that reversing this later costs one task. The rationale is the
+    only material a human has for disagreeing with that claim at the gate."""
+    with pytest.raises(models.DocumentError) as exc:
+        models.Plan.parse(
+            yaml.safe_dump(make_plan(decisions=[make_decision("D-001", reach="local", rationale=None)])),
+            cross_reference=False,
+        )
+    assert "rationale" in str(exc.value)
+
+
+def test_a_settled_decision_with_no_recorded_settler_is_shown_rather_than_hidden() -> None:
+    """Fail-closed, and the direction matters. Showing a human one decision they did make costs a
+    line; hiding one the loop made costs the whole point of the record."""
+    decision = models.Decision({"id": "D-001", "subject": "x", "reach": "local", "status": "settled"})
+    assert decision.unasked is True
 
 
 def test_the_confirmation_lists_what_the_loop_settled_without_asking(tmp_path: Path) -> None:
