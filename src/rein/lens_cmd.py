@@ -64,7 +64,7 @@ def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lens
     return "\n".join(lines)
 
 
-def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str) -> int:
+def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str, task_id: str = "") -> int:
     """Print the selection for `stage`, freezing it into the plan the first time it is resolved.
 
     The library is user-global and a person edits it between cycles. If the reviewer at the code
@@ -89,30 +89,83 @@ def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str) -> 
     state = store.read_state()
     frozen_plan = state is not None and "mandate" in state.approved_gates
 
+    # What the scope entries in this plan actually cover. `None` is git failing to answer, which is
+    # said out loud rather than passed on as an empty listing: a path condition decided against no
+    # files at all holds nowhere, and a selection that quietly lost its path lenses is the failure
+    # this whole hand-off exists to stop.
+    tracked: tuple[str, ...] = ()
+    if not frozen_plan or task_id:  # the only two readings that resolve a `paths` condition
+        listing = repo.tracked_paths()
+        if listing is None:
+            logger.warning(
+                "git could not list this repository's files, so a lens condition on `paths` is decided "
+                "against the scope entries alone and may hold for fewer tasks than it should."
+            )
+        tracked = listing or ()
+
     if not frozen_plan:
-        resolved = lenses.resolve(library, lenses.Facts.of(plan))
-        if resolved != [dict(entry.raw) for entry in plan.lenses]:
-            raw = json.loads(json.dumps(dict(plan.raw)))
-            raw["lenses"] = resolved
+        resolved = lenses.resolve(library, lenses.Facts.of(plan, tracked=tracked))
+        lens_changed = resolved != [dict(entry.raw) for entry in plan.lenses]
+        # The reaches this draft carries right now, against the last ones rein saw. This verb is
+        # where the snapshot lives because it is the one plan-reading command every drafting
+        # command already runs (`/req`, `/design`, `/tasks`), and it is the only "before" the
+        # freeze can be compared against: a human moving a decision from `mandate` to `local` edits
+        # the file, and nothing else in the harness is watching when they do.
+        reaches = {d.id: d.reach for d in plan.decisions}
+        live, _ = event_chain.scan(repo.events)
+        reach_changed = reaches != event_chain.derived_reaches(live)
+        if lens_changed or reach_changed:
+            cycle_id = state.cycle_id if state is not None else ""
             with store.transaction() as tx:
-                tx.write("plan", raw, expect_digest=store_mod.read_digest(plan))
-                tx.append(
-                    "lens_selected",
-                    cycle_id=state.cycle_id if state is not None else "",
-                    subject_ids=sorted({entry["id"] for entry in resolved}),
-                    detail={"count": len(resolved), "stages": sorted({e["stage"] for e in resolved})},
-                )
-            plan = store.read_plan()
-            if plan is None:  # written and then unreadable: a defect, not a selection
-                logger.error("the plan could not be read back after writing the lens selection")
-                return 2
+                # Only when the selection actually moved. A snapshot of the reaches is a record
+                # *about* the draft and changes nothing in it, so pairing it with a plan write
+                # would re-write the document every time a decision was added.
+                if lens_changed:
+                    raw = json.loads(json.dumps(dict(plan.raw)))
+                    raw["lenses"] = resolved
+                    tx.write("plan", raw, expect_digest=store_mod.read_digest(plan))
+                    tx.append(
+                        "lens_selected",
+                        cycle_id=cycle_id,
+                        subject_ids=sorted({entry["id"] for entry in resolved}),
+                        detail={"count": len(resolved), "stages": sorted({e["stage"] for e in resolved})},
+                    )
+                if reach_changed:
+                    tx.append(
+                        "decisions_derived",
+                        cycle_id=cycle_id,
+                        subject_ids=sorted(reaches),
+                        detail={"reaches": reaches},
+                    )
+            if lens_changed:
+                plan = store.read_plan()
+                if plan is None:  # written and then unreadable: a defect, not a selection
+                    logger.error("the plan could not be read back after writing the lens selection")
+                    return 2
 
     applied_ids, proposed_ids = lenses.frozen(plan, stage=stage)
     applied, missing_applied = lenses.by_id(library, applied_ids)
     proposed, missing_proposed = lenses.by_id(library, proposed_ids)
 
     where = "frozen with the mandate" if frozen_plan else "resolved against this plan and written into it"
-    print(f"{stage}: {len(applied)} applied, {len(proposed)} proposed ({where})")
+    narrowed = ""
+    if task_id:
+        task = next((t for t in plan.tasks if t.id == task_id), None)
+        if task is None:
+            # Refused rather than falling back to the whole list: a reviewer that asked for one
+            # task's lenses and silently got every task's would be reviewing against a wider
+            # selection than it thinks, with nothing on screen saying so.
+            logger.error(f"no task {task_id!r} in this plan — `rein dag` names the ones it holds")
+            return 2
+        before = len(applied) + len(proposed)
+        applied = lenses.for_task(applied, task, tracked=tracked)
+        proposed = lenses.for_task(proposed, task, tracked=tracked)
+        dropped = before - len(applied) - len(proposed)
+        narrowed = f", narrowed to {task_id}"
+        if dropped:
+            narrowed += f" — {dropped} dropped, their paths are outside this task's scope"
+
+    print(f"{stage}: {len(applied)} applied, {len(proposed)} proposed ({where}{narrowed})")
     if applied:
         print("\napplied (the condition is decidable, so nobody is asked):")
         print(lenses.render(applied))
@@ -139,6 +192,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="the review lens library: what exists, what applies, what it found")
     parser.add_argument("--list", action="store_true", help="every lens in the library, packaged and your own")
     parser.add_argument("--select", metavar="STAGE", help=f"what would apply at a stage ({', '.join(lenses.STAGES)})")
+    parser.add_argument(
+        "--task",
+        metavar="T-NNN",
+        default="",
+        help="narrow --select to one task: lenses whose paths are outside its scope are dropped",
+    )
     parser.add_argument("--stats", action="store_true", help="applied/found counts per lens, across archived cycles")
     parser.add_argument("--record", metavar="LENS", help="record that this lens was applied (with --found)")
     parser.add_argument("--found", choices=("yes", "no"), help="whether --record's lens found anything")
@@ -162,11 +221,15 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
+    if args.task and not args.select:
+        logger.error("--task narrows --select; on its own it names a task with nothing to narrow")
+        return 2
+
     if args.select:
         if args.select not in lenses.STAGE_VALUES:
             logger.error(f"unknown stage {args.select!r} — one of {', '.join(lenses.STAGES)}")
             return 2
-        return _select(repo, library, args.select)
+        return _select(repo, library, args.select, args.task)
 
     if args.record:
         if args.found is None:

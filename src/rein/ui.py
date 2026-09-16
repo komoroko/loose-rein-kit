@@ -538,6 +538,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "ok": not blockers,
                 "blockers": blockers,
                 "covers": subject,
+                # What the approval would ratify without being asked. The terminal route prints
+                # this before its [y/N]; this route had only the digests, so a human approving here
+                # could ratify the loop's reach calls without them ever being on screen. The
+                # decisions are plan content and this endpoint already serves `.rein/plan.yaml`
+                # whole; the lens *text* is not — it is read from the user-global library — so it
+                # goes only to a reader holding the write session, which is the one who can approve.
+                "naming": approve.naming(repo, gate, include_library=self._authorized()),
                 "writable": self._authorized() and not self.server.read_only,
             },
         )

@@ -124,7 +124,13 @@ def add(repo: repo_mod.Repo, gate: str, target: str, reason: str) -> str:
     if gate == "mandate":
         overruled = _overruled_local_decision(store, target.strip())
         if overruled is not None:
-            observations.record("reach_overruled", project=repo.root.name, cycle_id=state.cycle_id, subject=overruled)
+            observations.record(
+                "reach_overruled",
+                project=repo.root.name,
+                cycle_id=state.cycle_id,
+                subject=overruled,
+                arm=observations.ARM_TOO_LOCAL,
+            )
     return request_id
 
 

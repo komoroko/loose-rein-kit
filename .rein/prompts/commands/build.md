@@ -224,18 +224,25 @@ is the point; never fold them into the implementer's session.
   `.rein/work/T-NNN.findings.json`; the implementer resolves the `must_fix` ones within the
   step's own `retries` budget and the reviewer looks again. A review whose findings cannot be read
   stops the step: an unreadable answer is not an answer that found nothing.
-  **The code-stage lenses this cycle's mandate froze reach it too** (`plan.lenses`, written by
-  `rein lens --select code` before the gate). They are conditioned on the paths the plan declares,
-  so a schema lens over a change that touches no schema is not asked for — a reviewer sent to
-  attack a failure this change cannot carry costs a pass over the diff and returns "attacked,
-  nothing" while the findings that *are* possible compete with it for attention.
+  **The code-stage lenses this cycle's mandate froze reach it too** — `rein lens --select code
+  --task <T-NNN>`, read back from `plan.lenses` and narrowed to the task in hand. The selection is
+  resolved once against the whole plan, because most conditions count what the plan states rather
+  than what one task changes; `--task` then drops the ones whose `paths` fall outside that task's
+  own scope — resolved against the files that scope covers, since an entry names a subtree and a
+  lens pattern matches a file, and a task that declares no scope is unbounded and keeps all of them. Without it a single task touching a schema file would put the schema lens on every
+  other task's review, and a reviewer sent to attack a failure this change cannot carry costs a
+  pass over the diff and returns "attacked, nothing" while the findings that *are* possible compete
+  with it for attention. The narrowing only ever removes: a path matching one task's scope matches
+  the union too, so nothing outside the frozen selection can reach a reviewer through it.
   Both disciplines are **named to the host that has them**: under Claude Code the reviewer is
   pointed at `/code-review` and `/simplify`, which read the branch it is on — with the two rules
   those commands do not carry themselves, that `/simplify`'s fix-applying phase must not run here
   (whoever judges does not repair) and that findings come back through the findings file and never
   through a printed report. The questions are written out in the prompt regardless, so a host
   without them asks exactly the same thing (`adapters.Adapter.disciplines`).
-  **Declared `stage: integration`, it reads the tree the merge produced instead** — the thing no
+  **Declared `stage: integration`, it reads the tree the merge produced instead** — and takes the
+  selection unnarrowed (`rein lens --select code`, no `--task`), because the union of every task's
+  scope is exactly what it is reading. The thing no
   per-task reviewer can see, because each was right to stay inside its own task's scope:
   duplication between what two tasks added, one responsibility now in two places, an abstraction
   one task introduced that the next worked around. Its `must_fix` findings go to the integration

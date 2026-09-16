@@ -183,6 +183,7 @@ def make_plan(
     claims: list[dict[str, Any]] | None = None,
     tasks: list[dict[str, Any]] | None = None,
     decisions: list[dict[str, Any]] | None = None,
+    lenses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """A plan document. The default is one claim covering R-1 and one task answering it."""
     plan: dict[str, Any] = {
@@ -192,6 +193,8 @@ def make_plan(
     }
     if decisions is not None:
         plan["decisions"] = decisions
+    if lenses is not None:
+        plan["lenses"] = lenses
     return plan
 
 

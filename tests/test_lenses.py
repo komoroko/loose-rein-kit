@@ -322,3 +322,278 @@ def _approve_mandate(repo: Any) -> None:
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=store_mod.read_digest(state))
         tx.append("gate_approved", cycle_id="demo-cycle", subject_ids=["mandate"])
+
+
+# --- one selection, two readers with different reach ------------------------------
+
+
+def capture_last_select(root: Path, task_id: str) -> str:
+    """`rein lens --select code --task <id>`'s output, as a reviewer would be handed it."""
+    import contextlib
+    import io
+
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        assert lens_cmd.main(["--select", "code", "--task", task_id, "--repo", str(root)]) == 0
+    return buffer.getvalue()
+
+
+def _task(task_id: str, scope_include: list[str]) -> Any:
+    from tests._support import make_task
+
+    return models.Task(make_task(task_id, claim_ids=["C-001"], scope_include=scope_include))
+
+
+def test_a_path_lens_is_dropped_for_a_task_whose_scope_it_misses() -> None:
+    """`Facts.changed` is the union of every task's scope, so one task touching a schema file put
+    the schema lens on every other task's review. That is the cost the class system exists to
+    avoid, reappearing one level down."""
+    schema = _lens(
+        "L-SCHEMA", stage="code", when=lenses.Condition(paths=("**/*.schema.json",)), lens_class=lenses.CLASS_STANDARD
+    )
+
+    assert lenses.for_task([schema], _task("T-001", ["src/x.schema.json"]), tracked=()) == [schema]
+    assert lenses.for_task([schema], _task("T-002", ["src/ui/colors.css"]), tracked=()) == []
+
+
+def test_a_lens_with_no_path_condition_reaches_every_task() -> None:
+    """Its condition is a fact about the plan — how many claims it states, how many tasks it has,
+    what relations hold between them — and that is equally true of any task in that plan."""
+    counted = _lens("L-COUNT", stage="code", when=lenses.Condition(min_claims=1), lens_class=lenses.CLASS_STANDARD)
+
+    assert lenses.for_task([counted], _task("T-001", ["src/x.schema.json"]), tracked=()) == [counted]
+    assert lenses.for_task([counted], _task("T-002", ["docs/notes.md"]), tracked=()) == [counted]
+
+
+def test_narrowing_can_only_ever_remove() -> None:
+    """The invariant the mandate rests on. A path matching one task's scope matches the union of
+    every task's scope too, so a lens that survives the narrowing was in the frozen selection
+    already — a reviewer cannot widen what was authorized, only spend it more precisely."""
+    library = [
+        _lens(
+            "L-SCHEMA",
+            stage="code",
+            when=lenses.Condition(paths=("**/*.schema.json",)),
+            lens_class=lenses.CLASS_STANDARD,
+        ),
+        _lens(
+            "L-CI",
+            stage="code",
+            when=lenses.Condition(paths=(".github/workflows/**",)),
+            lens_class=lenses.CLASS_STANDARD,
+        ),
+        _lens("L-COUNT", stage="code", when=lenses.Condition(min_claims=1), lens_class=lenses.CLASS_STANDARD),
+    ]
+    tasks = [
+        _task("T-001", ["src/x.schema.json"]),
+        _task("T-002", [".github/workflows/ci.yml"]),
+        _task("T-003", ["README.md"]),
+    ]
+    frozen = lenses.select(
+        library,
+        stage="code",
+        facts=lenses.Facts(claims=1, tasks=3, changed=tuple(p for t in tasks for p in t.scope_include)),
+    )[0]
+
+    for task in tasks:
+        assert set(lenses.for_task(frozen, task, tracked=())) <= set(frozen)
+
+
+def test_a_scope_that_names_a_directory_carries_the_lenses_for_what_is_under_it() -> None:
+    """The defect the narrowing shipped with. A scope entry is a subtree — `common.path_covered` is
+    this repository's one definition of that — and a lens pattern matches a file, so handing the
+    entry straight to fnmatch read the subtree as a filename and took the schema lens off the one
+    task that touches schemas. The union hid it: another task naming a file outright kept the lens
+    alive plan-wide."""
+    schema = _lens(
+        "L-SCHEMA", stage="code", when=lenses.Condition(paths=("**/*.schema.json",)), lens_class=lenses.CLASS_STANDARD
+    )
+    tracked = ("src/rein/data/schema/event.schema.json", "src/ui/colors.css")
+
+    assert lenses.for_task([schema], _task("T-001", ["src/rein/data/schema"]), tracked=tracked) == [schema]
+    assert lenses.for_task([schema], _task("T-002", ["src/rein/data/schema/"]), tracked=tracked) == [schema]
+    assert lenses.for_task([schema], _task("T-003", ["src/ui"]), tracked=tracked) == []
+
+
+def test_a_task_that_declares_no_scope_keeps_every_lens() -> None:
+    """An empty `include` is unbounded, says the schema. Deciding a path condition against an empty
+    list instead makes it hold nowhere, so the widest scope would get the narrowest review."""
+    schema = _lens(
+        "L-SCHEMA", stage="code", when=lenses.Condition(paths=("**/*.schema.json",)), lens_class=lenses.CLASS_STANDARD
+    )
+
+    assert lenses.for_task([schema], _task("T-001", []), tracked=("src/x.schema.json",)) == [schema]
+
+
+def test_a_scope_naming_what_does_not_exist_yet_is_still_a_name() -> None:
+    """A cycle writes files that are not there when it is planned, and the name the plan declares is
+    the only thing anybody knows about them."""
+    assert lenses.scope_paths(["src/new.schema.json"], ()) == ("src/new.schema.json",)
+    assert lenses.scope_paths([], ("src/x.py",)) == ()
+
+
+def test_the_union_is_unbounded_when_any_task_is() -> None:
+    """One task with no scope makes the plan's union unbounded, which is what the integration
+    reviewer reads against anyway."""
+    from tests._support import make_claim, make_plan, make_task
+
+    plan = models.Plan(
+        make_plan(
+            claims=[make_claim("C-001")],
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"]),
+                make_task("T-002", claim_ids=["C-001"], scope_include=["src"]),
+            ],
+        )
+    )
+
+    assert lenses.Facts.of(plan, tracked=("src/x.schema.json", "docs/notes.md")).changed == (
+        "docs/notes.md",
+        "src/x.schema.json",
+    )
+
+
+def test_the_integration_reader_takes_the_selection_unnarrowed() -> None:
+    """It reads the tree the merge produced, which is exactly the union the selection was resolved
+    against. The unit was never wrong; handing one list to two readers was."""
+    library = [
+        _lens(
+            "L-SCHEMA",
+            stage="code",
+            when=lenses.Condition(paths=("**/*.schema.json",)),
+            lens_class=lenses.CLASS_STANDARD,
+        ),
+        _lens(
+            "L-CI",
+            stage="code",
+            when=lenses.Condition(paths=(".github/workflows/**",)),
+            lens_class=lenses.CLASS_STANDARD,
+        ),
+    ]
+    union = lenses.Facts(claims=1, tasks=2, changed=("src/x.schema.json", ".github/workflows/ci.yml"))
+
+    assert {lens.id for lens in lenses.select(library, stage="code", facts=union)[0]} == {"L-SCHEMA", "L-CI"}
+
+
+def test_selecting_for_one_task_drops_what_that_task_cannot_carry(tmp_path: Path, config_home: Path) -> None:
+    from tests._support import make_task
+
+    repo = _repo(
+        tmp_path,
+        tasks=[
+            make_task("T-001", claim_ids=["C-001"], scope_include=["src/x.schema.json"]),
+            make_task("T-002", claim_ids=["C-001"], scope_include=["src/ui/colors.css"]),
+        ],
+    )
+    assert lens_cmd.main(["--select", "code", "--repo", str(tmp_path)]) == 0
+    from rein import store as store_mod
+
+    applied = {e.id for e in _plan(store_mod, repo).lenses if e.stage == "code" and e.status == "applied"}
+    assert "L-CODE-SCHEMA-DRIFT" in applied  # the union carries it
+
+    library = lenses.library()
+    plan = _plan(store_mod, repo)
+    unrelated = next(t for t in plan.tasks if t.id == "T-002")
+    frozen_ids, _ = lenses.frozen(plan, stage="code")
+    kept = {lens.id for lens in lenses.for_task(lenses.by_id(library, frozen_ids)[0], unrelated, tracked=())}
+    assert "L-CODE-SCHEMA-DRIFT" not in kept
+
+
+def test_a_directory_scoped_task_keeps_the_lens_for_what_is_under_it(tmp_path: Path, config_home: Path) -> None:
+    """End to end through the command, against a real file listing. The unit tests above pass the
+    listing in; this is the path that has to fetch it, and it is where a scope entry stopped being
+    a string and became a subtree."""
+    import subprocess
+
+    from tests._support import make_task
+
+    _repo(
+        tmp_path,
+        tasks=[
+            make_task("T-001", claim_ids=["C-001"], scope_include=["src/rein/data/schema"]),
+            make_task("T-002", claim_ids=["C-001"], scope_include=["src/ui"]),
+        ],
+    )
+    schema = tmp_path / "src" / "rein" / "data" / "schema" / "event.schema.json"
+    schema.parent.mkdir(parents=True)
+    schema.write_text("{}", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+
+    with_schema = capture_last_select(tmp_path, "T-001")
+    without = capture_last_select(tmp_path, "T-002")
+
+    assert "L-CODE-SCHEMA-DRIFT" in with_schema
+    assert "L-CODE-SCHEMA-DRIFT" not in without
+
+
+def test_narrowing_to_a_task_no_plan_holds_is_refused(tmp_path: Path, config_home: Path) -> None:
+    """Falling back to the whole list would review one task against a wider selection than the
+    reviewer thinks it asked for, with nothing on screen saying so."""
+    _repo(tmp_path)
+
+    assert lens_cmd.main(["--select", "code", "--task", "T-404", "--repo", str(tmp_path)]) == 2
+
+
+def test_task_without_select_is_refused(tmp_path: Path, config_home: Path) -> None:
+    _repo(tmp_path)
+
+    assert lens_cmd.main(["--task", "T-001", "--repo", str(tmp_path)]) == 2
+
+
+# --- the pre-freeze snapshot of what the loop decided and how far it reaches -------
+
+
+def _events(repo: Any) -> list[Any]:
+    from rein import event_chain
+
+    return event_chain.scan(repo.events)[0]
+
+
+def test_the_pre_freeze_pass_records_the_reaches_it_saw(tmp_path: Path, config_home: Path) -> None:
+    """The only "before" a freeze can be compared against. A human moving a decision from `mandate`
+    to `local` edits the file, and nothing else in the harness is watching when they do."""
+    from tests._support import make_decision
+
+    repo = _repo(tmp_path, decisions=[make_decision("D-001", reach="mandate", settled_by="human")])
+    assert lens_cmd.main(["--select", "code", "--repo", str(tmp_path)]) == 0
+
+    from rein import event_chain
+
+    assert event_chain.derived_reaches(_events(repo)) == {"D-001": "mandate"}
+
+
+def test_the_snapshot_is_not_retaken_when_nothing_moved(tmp_path: Path, config_home: Path) -> None:
+    """A record about the draft, not a change to it. Re-recording an unchanged reading would put a
+    row in the chain for every drafting command that happened to run."""
+    from tests._support import make_decision
+
+    repo = _repo(tmp_path, decisions=[make_decision("D-001")])
+    lens_cmd.main(["--select", "code", "--repo", str(tmp_path)])
+    before = sum(1 for e in _events(repo) if e.event == "decisions_derived")
+    lens_cmd.main(["--select", "code", "--repo", str(tmp_path)])
+
+    assert sum(1 for e in _events(repo) if e.event == "decisions_derived") == before == 1
+
+
+def test_a_moved_reach_is_snapshotted_without_rewriting_the_plan(tmp_path: Path, config_home: Path) -> None:
+    """The snapshot changes nothing in the document, so pairing it with a plan write would re-write
+    the plan every time a decision was added."""
+    from rein import store as store_mod
+    from tests._support import make_decision
+
+    repo = _repo(tmp_path, decisions=[make_decision("D-001", reach="mandate", settled_by="human")])
+    lens_cmd.main(["--select", "code", "--repo", str(tmp_path)])
+    digest_before = store_mod.read_digest(_plan(store_mod, repo))
+
+    plan = _plan(store_mod, repo)
+    raw = json.loads(json.dumps(dict(plan.raw)))
+    raw["decisions"] = [make_decision("D-001", reach="local")]
+    _write_plan(store_mod, repo, raw)
+    digest_after_edit = store_mod.read_digest(_plan(store_mod, repo))
+    lens_cmd.main(["--select", "code", "--repo", str(tmp_path)])
+
+    from rein import event_chain
+
+    assert event_chain.derived_reaches(_events(repo)) == {"D-001": "local"}
+    assert store_mod.read_digest(_plan(store_mod, repo)) == digest_after_edit != digest_before

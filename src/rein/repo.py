@@ -174,6 +174,18 @@ class Repo:
             return ""
         return proc.stdout.strip() if proc.returncode == 0 else ""
 
+    def tracked_paths(self) -> tuple[str, ...] | None:
+        """Every file git tracks under this root, repo-relative — or `None` when git cannot answer.
+
+        The two are not the same answer and the caller has to tell them apart: `()` is a repository
+        that tracks nothing yet, and `None` is no git, no repository, or a git that failed. A
+        caller that treats the second as the first silently decides against an empty world.
+        """
+        rc, out = self._git_rc("ls-files", "-z")
+        if rc != 0:
+            return None
+        return tuple(path for path in out.split("\0") if path)
+
     def _git_rc(self, *args: str) -> tuple[int, str]:
         """Like :meth:`_git` but returns `(returncode, stdout)` *unstripped*.
 

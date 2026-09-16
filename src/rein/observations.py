@@ -16,9 +16,12 @@ quantity that would move if that claim were false:
 =========================  ==========================================================
 claim                      what would move if it were wrong
 =========================  ==========================================================
-selection by reach         `reach_overruled` — a `local` decision a human overruled at
-                           the gate. The loop called it cheap to undo and the person
-                           who would pay disagreed.
+selection by reach         `reach_overruled`, in two arms — `too_local`, a `local`
+                           decision a human overruled at the gate, and `too_mandate`,
+                           a `mandate` decision that ended up `local` before the
+                           freeze. One criterion, two ways to be wrong. Measured on
+                           both sides because a one-sided figure only ever reads as
+                           "ask more", and the criterion exists to ask less.
 honesty buys interventions `unknown_at_mandate` beside `judgement_raised` — mandates
                            that admitted what they did not know, against findings that
                            came back needing a human to sort code from plan.
@@ -27,6 +30,11 @@ by-product of deciding     back. The heaviest row: somebody said yes to somethin
                            turned out not to have understood.
 the harness owns waiting   `waited_seconds` — from the decision being derived to it
                            being answered.
+selection by reach         the *count* of those same readings: one per wait, so it is
+settles how often work     how often work stopped. Read off `waited_seconds` rather
+stops                      than recorded again, and never split by arm — whether a
+                           channel was configured has nothing to do with whether the
+                           criterion settles the number of stops.
 =========================  ==========================================================
 
 **An observation is read-only and never an input.** Nothing here is read by a gate, a review or a
@@ -65,29 +73,99 @@ KINDS: tuple[str, ...] = (
 )
 KIND_VALUES = frozenset(KINDS)
 
+#: The conditions a reading can be taken under, per kind. A measurement with no control is a
+#: number, not evidence, and the two kinds below each carry a claim that only a comparison can
+#: falsify. Per kind rather than one shared set: `notified` against a `reach_overruled` reading
+#: would place it in a comparison nobody is making, and a store that accepts it is one nobody can
+#: aggregate.
+ARM_NOTIFIED = "notified"
+ARM_SILENT = "silent"
+#: The two ways selection by reach can be wrong. `too_local` is the loop calling a decision cheap
+#: to undo and the person who would pay disagreeing; `too_mandate` is the loop routing one to a
+#: human and that reach not surviving to the freeze. Both readings are about the criterion rather
+#: than about who moved it: what each one says is that a reach the loop derived did not hold. One
+#: claim, two directions — never pooled, because a pooled figure reads as "the criterion was wrong
+#: N times" and says nothing about which way to move it.
+ARM_TOO_LOCAL = "too_local"
+ARM_TOO_MANDATE = "too_mandate"
+
+
+@dataclass(frozen=True)
+class Arms:
+    """What one kind's readings can be grouped by, and what to say when only some groups are there.
+
+    One record per kind rather than three mappings keyed alike. The arms, the note for a one-sided
+    record and the arm that pre-arm readings belong to are three facts about the same comparison,
+    and holding them apart is holding a pair that can drift — the drift showing up as a `KeyError`
+    in front of somebody reading their own figures.
+    """
+
+    #: Closed. Every reading of this kind is in exactly one of them; there is no unarmed bucket,
+    #: because a figure pooled from readings that never shared a condition is what arms prevent.
+    values: frozenset[str]
+    #: Printed when the record has some arms and not others, saying what would fill the gap.
+    one_sided: str
+    #: Where readings written before this kind was armed belong. Provenance rather than a guess:
+    #: it is read off the one code path that wrote them. "" means the kind was armed from its
+    #: first reading, so an unarmed one on disk was never written by this harness.
+    legacy: str = ""
+
+
+ARMS: Mapping[str, Arms] = {
+    "waited_seconds": Arms(
+        values=frozenset({ARM_NOTIFIED, ARM_SILENT}),
+        one_sided=(
+            "The claim is that a channel shortens the wait, and one arm cannot say: run some "
+            "cycles with `command:` unset too."
+        ),
+    ),
+    "reach_overruled": Arms(
+        values=frozenset({ARM_TOO_LOCAL, ARM_TOO_MANDATE}),
+        one_sided=(
+            "The criterion can be wrong in either direction and only one is on record. The missing side is a "
+            "gesture, not a setting: `too_local` is a change request against a `local` decision, `too_mandate` "
+            "is a `mandate` decision that ended up `local` before the freeze."
+        ),
+        # 0.6.0 recorded this kind unarmed, and `change_request.add` was the only thing that wrote
+        # it — which is this arm exactly. The label is new; the readings are not, and re-filing
+        # them is what keeps an upgrade from turning an existing record into a third bucket
+        # printed under a claim about arms it does not have.
+        legacy=ARM_TOO_LOCAL,
+    ),
+}
 #: Kinds whose claim is a comparison, so their readings are grouped by `arm` and never pooled.
-ARMED_KINDS = frozenset({"waited_seconds"})
+ARMED_KINDS = frozenset(ARMS)
 
 #: Why each kind exists, printed beside the figure — a number whose claim is not on screen beside
 #: it is one somebody will read as a score.
 CLAIMS: Mapping[str, str] = {
-    "reach_overruled": "selection by reach: a `local` decision the human overruled was one the loop misjudged",
+    "reach_overruled": (
+        "selection by reach: each arm is the criterion misjudging one way — `too_local` too loose, "
+        "`too_mandate` too tight"
+    ),
     "unknown_at_mandate": "honesty at the mandate is what buys fewer interventions later",
     "judgement_raised": "...measured against this: findings that needed a human to sort code from plan",
     "acceptance_reopened": "comprehension is a by-product of deciding — a reopened acceptance says it was not",
     "waited_seconds": "the harness owns waiting: how long a decision sat, with a channel and without one",
 }
 
+#: Kinds whose value is seconds. Everything else is a count, and the two are not rendered alike: a
+#: mean of durations answers "how long", a total of counts answers "how often". This is not the
+#: armed/unarmed split — `reach_overruled` is armed and is still a count.
+DURATION_KINDS = frozenset({"waited_seconds"})
+
+#: Read off `waited_seconds` rather than recorded again: one reading per wait, so the count *is*
+#: how often work stopped. It falsifies a different claim than the durations do, so it is printed
+#: with its own claim beside it, and pooled across arms — whether a channel was configured has
+#: nothing to do with whether the criterion settles the number of stops.
+#:
+#: Counted, never capped, and the store is where that is guaranteed rather than promised: nothing
+#: reads this file to decide anything, so there is no path by which the figure could become a
+#: ceiling. A ceiling on how often a human may be asked gets answered by not asking, which is the
+#: failure selection by reach exists to prevent.
+STOP_COUNT_CLAIM = "selection by reach settles how often work stops — the count of blocking points, never a ceiling"
+
 STORE_NAME = "observations.ndjson"
-
-
-#: The two conditions a `waited_seconds` reading can be taken under. A measurement with no
-#: control is a number, not evidence: "the harness owns waiting" is a claim that waits are shorter
-#: *with* a channel than without one, and that comparison needs both arms recorded. Closed, and
-#: used by `waited_seconds` alone — every other kind is a count whose claim needs no comparison.
-ARM_NOTIFIED = "notified"
-ARM_SILENT = "silent"
-ARM_VALUES = frozenset({"", ARM_NOTIFIED, ARM_SILENT})
 
 
 @dataclass(frozen=True)
@@ -121,8 +199,15 @@ def record(kind: str, *, project: str, cycle_id: str, value: float = 1.0, subjec
     if kind not in KIND_VALUES:
         logger.warning(f"unknown observation kind {kind!r} — not recorded")
         return False
-    if arm not in ARM_VALUES:
-        logger.warning(f"unknown observation arm {arm!r} — not recorded")
+    # An armed kind with no arm is a reading that cannot be placed in the comparison it exists for,
+    # and an unarmed kind carrying one is a comparison nobody is making. Both are refused rather
+    # than filed under "": a figure pooled from readings that never shared a condition is the thing
+    # `ARMS` exists to prevent.
+    spec = ARMS.get(kind)
+    allowed = spec.values if spec is not None else frozenset({""})
+    if arm not in allowed:
+        wanted = f"one of {sorted(allowed)}" if spec is not None else "no arm — its claim needs no comparison"
+        logger.warning(f"observation {kind!r} carried arm {arm!r}; it takes {wanted}. Not recorded.")
         return False
     try:
         numeric = float(value)
@@ -149,6 +234,33 @@ def record(kind: str, *, project: str, cycle_id: str, value: float = 1.0, subjec
         logger.debug(f"could not record an observation: {exc}")
         return False
     return True
+
+
+def _placed_arm(kind: str, arm: str, path: Path) -> str | None:
+    """The arm this reading belongs in, or `None` when it belongs in none of them.
+
+    Every reading of an armed kind sits in exactly one arm, so the two ways a stored line can fail
+    to are handled here rather than by coercing it to `""` and letting `summarize` open a bucket
+    for it. That bucket was the bug: readings written before a kind was armed reappeared as a
+    third group, printed under a claim about arms they did not have, and the missing-arm warning —
+    which looks only at real arms — stayed silent about a record that had none.
+
+    Pre-arm readings are re-filed into `Arms.legacy`, which is provenance and not a guess. Anything
+    else is refused: a reading nobody can place is not a reading, and dropping it loudly beats
+    pooling it quietly into a figure that then means nothing.
+    """
+    spec = ARMS.get(kind)
+    if spec is None:
+        return ""  # unarmed kind: a stray label on disk names a comparison nobody is making
+    if not arm and spec.legacy:
+        return spec.legacy
+    if arm not in spec.values:
+        logger.warning(
+            f"{path}: a {kind!r} reading in arm {arm!r} belongs to no arm of that kind "
+            f"({', '.join(sorted(spec.values))}) — skipped rather than pooled."
+        )
+        return None
+    return arm
 
 
 def read(path: Path | None = None) -> list[Observation]:
@@ -182,16 +294,19 @@ def read(path: Path | None = None) -> list[Observation]:
             # Well-formed JSON carrying a value nothing can average. Skipped for the same reason a
             # torn line is: one unreadable row must not cost every reading taken before it.
             continue
-        arm = str(raw.get("arm", ""))
+        kind = str(raw["kind"])
+        arm = _placed_arm(kind, str(raw.get("arm", "")), target)
+        if arm is None:
+            continue
         out.append(
             Observation(
-                kind=str(raw["kind"]),
+                kind=kind,
                 project=str(raw.get("project", "")),
                 cycle_id=str(raw.get("cycle_id", "")),
                 value=value,
                 at=str(raw.get("at", "")),
                 subject=str(raw.get("subject", "")),
-                arm=arm if arm in ARM_VALUES else "",
+                arm=arm,
             )
         )
     return out
@@ -212,7 +327,7 @@ def summarize(entries: Sequence[Observation], *, project: str = "") -> dict[str,
             continue
         groups: dict[str, list[float]] = {}
         for entry in of_kind:
-            key = f"{kind}/{entry.arm}" if kind in ARMED_KINDS and entry.arm else kind
+            key = f"{kind}/{entry.arm}" if kind in ARMED_KINDS else kind
             groups.setdefault(key, []).append(entry.value)
         for key, values in sorted(groups.items()):
             out[key] = {"count": len(values), "total": sum(values), "mean": sum(values) / len(values)}
@@ -230,21 +345,27 @@ def render(summary: Mapping[str, Mapping[str, float]]) -> str:
     seen_claims: set[str] = set()
     for key, figures in summary.items():
         kind = key.split("/", 1)[0]
-        if kind in ARMED_KINDS:
-            lines.append(f"{key:<30} {figures['count']:>5} waits, mean {figures['mean'] / 60:.1f} min")
+        if kind in DURATION_KINDS:
+            lines.append(f"{key:<30} {int(figures['count']):>5} waits, mean {figures['mean'] / 60:.1f} min")
         else:
             lines.append(f"{key:<30} {int(figures['total']):>5}")
         if kind not in seen_claims:
             lines.append(f"  {CLAIMS[kind]}")
             seen_claims.add(kind)
-    if any(key.startswith("waited_seconds") for key in summary) and not all(
-        f"waited_seconds/{arm}" in summary for arm in (ARM_NOTIFIED, ARM_SILENT)
-    ):
-        lines.append("")
-        lines.append(
-            "  Only one arm of `waited_seconds` has readings. The claim is that a channel shortens "
-            "the wait, and one arm cannot say: run some cycles with `command:` unset too."
-        )
+
+    # The same readings, counted instead of averaged, and pooled across arms. A number printed with
+    # no claim beside it gets read as a score, so this one carries its own.
+    stops = sum(int(f["count"]) for k, f in summary.items() if k.split("/", 1)[0] == "waited_seconds")
+    if stops:
+        lines.append(f"{'stops (every arm)':<30} {stops:>5}")
+        lines.append(f"  {STOP_COUNT_CLAIM}")
+
+    for kind, spec in ARMS.items():
+        present = {key.split("/", 1)[1] for key in summary if key.startswith(f"{kind}/")}
+        if present and present != spec.values:
+            missing = ", ".join(sorted(spec.values - present))
+            lines.append("")
+            lines.append(f"  `{kind}` has no readings in: {missing}. {spec.one_sided}")
     lines.append("")
     lines.append(
         "No thresholds, and none are coming. These are the material for deciding whether a rule "

@@ -4,6 +4,145 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.6.1] - 2026-09-17
+
+Four corrections with one thing in common: **each was found by reading the shipped code against
+the reasoning that asked for it, and each time the reasoning was the thing that was wrong.** Two
+design claims did not survive being counted, and two figures were measuring one side of a question
+with two.
+
+### A review lens is narrowed where it is handed over, not where it is resolved
+
+The selection is resolved once against the whole plan and frozen with the mandate. `build.md` then
+claimed the lenses reaching a task's reviewer "are conditioned on the paths the plan declares, so a
+schema lens over a change that touches no schema is not asked for". `lenses.Facts.of` builds
+`changed` from the **union** of every task's `scope.include`, so that sentence was false: one task
+touching a schema file put the schema lens on every other task's review — the "attack a failure
+this change cannot carry" cost the class system exists to avoid, reappearing one level down.
+
+The fix is not a per-task resolution. Of the 25 packaged lenses, exactly four condition on `paths`;
+the other 21 condition on `min_claims`, `min_tasks` or `requires`, which count what the plan states
+and what holds between its tasks. None of those has a value for a single task, so resolving per
+task would copy 21 lenses onto every task or drop their conditions, and 19 of the 25 live at stages
+where a task is not a deliverable at all. The unit was right.
+
+What was wrong is that one list went to two readers with different reach. The integration reviewer
+reads the tree the merge produced — exactly that union — and the per-task reviewer reads one scope.
+So `lenses.for_task` narrows at the hand-off, on the one axis that decomposes: a lens with `paths`
+is kept when they match this task's scope, a lens without them is kept for every task because its
+condition is a fact about the plan. `rein lens --select <stage> --task <T-NNN>` is the narrowed
+form; without `--task` the integration reviewer gets the list unchanged. **The narrowing can only
+ever remove** — a path a task's scope covers is covered by the union too — so nothing outside the
+frozen selection can reach a reviewer through it, and a `--task` naming a task no plan holds is
+refused rather than quietly answered with the whole list.
+
+Narrowing it exposed an older defect in the same place. Two path languages meet in that condition
+and they are not the same one: a lens `paths` pattern is fnmatch over **one file's path**, while a
+scope entry is a **subtree** — `common.path_covered`, the rule `guard.paths` and a task's `scope`
+already share. `Facts.changed` handed the entries straight to fnmatch, which reads a subtree as a
+filename, so `fnmatch("src/rein/data/schema", "**/*.schema.json")` was `False` and a task scoped to
+a directory carried no path lens at all. The union hid it — some other task naming a file outright
+kept the lens alive plan-wide — and narrowing removed the place it was hiding. So `lenses.scope_paths`
+resolves a scope against the repository first (`repo.Repo.tracked_paths`, plus the entries
+themselves, because a scope may name a module this cycle is about to write), and a task that
+declares no scope keeps every lens: an empty `include` is unbounded, and the widest scope getting
+the narrowest review is the inversion the narrowing would otherwise have introduced. When git
+cannot list the files, `rein lens` says so rather than deciding against an empty world.
+
+### Whatever a gate requires on screen belongs on every route that can open it
+
+`rein approve mandate` prints the decisions the loop settled without asking, each with the
+reasoning behind its reach claim, and the line saying overruling one costs a task now and a
+`/revise` after the freeze. The dashboard's approval footer is the other route a human can open
+that gate from, and `ui._approve_gate` calls `readiness` and `record_approval` directly —
+`confirm_locally` is on neither side of it. So an approval made there ratified every one of those
+reach calls with none of them on screen.
+
+The material was never missing: `.rein/plan.yaml` is the first deliverable in that pane and holds
+both `decisions` and `lenses`. What only the terminal had is the **selection** — which of a few
+hundred lines deserve an eye at the moment of approving. Asking somebody to find three `unasked`
+decisions inside a plan document is the same failure as sending a reviewer through a lens that
+cannot fire here: what matters competes for attention with what does not, and loses.
+
+`approve.naming` returns that selection and both screens render it in their own idiom;
+`OVERRULE_COST` is one string rather than two paraphrases of one mechanism. The lens list it
+carries is the plan's whole selection, not one task's — at the moment of approving nothing has been
+narrowed yet, and what the approval can overrule is the selection itself. A frozen lens the library
+no longer holds is named there rather than dropped, which is the machine-local drift the freeze
+exists to expose, at the last point it can still be acted on.
+
+The ids, stages and statuses are plan content and the dashboard already serves `.rein/plan.yaml`
+whole to any reader, which is what a readable review means here. A lens's `attack` and
+`applies_when` are not: they are read from the **user-global** library, where other projects'
+failures are written down. So the readiness endpoint asks for them only for a reader holding the
+write session — the one who could do the approving — and nobody else gets a file from outside the
+repository because a page was left open.
+
+### Selection by reach can be wrong in two directions and only one was counted
+
+`reach_overruled` counted a `local` decision a human overruled at the gate: the loop called it
+cheap to undo and the person who would pay disagreed. Nothing counted the other direction, so the
+only reading that figure ever supported was "ask about more things" — from a criterion whose whole
+purpose is to ask about fewer. Left alone, the measurement would have walked back the judgement it
+was installed to test.
+
+The gesture that says "you did not need to ask me" already exists, and this harness already
+prescribes it: `rein approve mandate` refuses a `mandate` decision the loop settled itself with
+"answer each and set `settled_by: human`, or change the reach and say in `rationale` why undoing it
+stays local." Moving a decision from `mandate` to `local` before the freeze *is* that sentence, and
+the schema requires a `rationale` on every `local`, so it cannot be made silently. No judgement
+point is added — `reach_overruled` was never a question either, only a reading of a change request
+somebody was already filing.
+
+So `reach_overruled` joins `waited_seconds` in carrying an arm: `too_local` for the overrule,
+`too_mandate` for the walk-back. `ARM_VALUES` is replaced by `ARMS`, one record per kind holding
+the arms, what to print when only some of them have readings, and where pre-arm readings belong —
+three facts about one comparison, which drift when they are held apart. An armed kind refuses a
+reading with no arm, an unarmed kind refuses one that has it, and an arm belonging to another kind
+is refused on read rather than pooled into a bucket whose readings never shared a condition.
+
+`decisions_derived` records the reaches rein last saw in the draft, written by the pre-freeze pass
+every drafting command already makes; the freeze compares against it **and then advances it**,
+because `/revise` puts that gate back to `pending` and a baseline only drafting ever moved would
+have counted the same walk-back again at every re-approval — a figure growing with the number of
+revisions rather than with the number of misjudged reaches. A decision with no snapshot behind it
+is not guessed at.
+
+**Both arms are readings about the criterion, not about who moved the reach.** What each one says
+is that a reach the loop derived did not hold; the rationale the schema requires makes the move
+deliberate whoever made it, and an ordinary redraft is not counted because the baseline moves with
+it. **Neither arm is an unbiased estimate** — a human who answers rather than argue about the reach
+leaves nothing behind — and that is the point: the figure shows that pressure runs both ways, not
+how much.
+
+The best part is free. `rein observe` already says so when an armed figure has readings in only one
+arm, so the day this shipped it began naming its own blind side.
+
+### How often work stopped is counted, and the store is why it can never be a ceiling
+
+`waited_seconds` holds one reading per wait, so its count *is* how often work stopped — the
+quantity "minimise blocking points" stands or falls on. It was printed and attached to nothing:
+`CLAIMS` gave it the notification claim, which is what the durations answer, not the count. A
+number with no claim beside it gets read as a score, by this file's own rule.
+
+It now carries its own claim and is pooled across arms, because whether a channel was configured
+has nothing to do with whether selection by reach settles the number of stops. **Counted, never
+capped** — and unlike the acceptance budget this project removed, that is guaranteed by where it
+lives rather than promised in prose: nothing reads the observation store to decide anything, so
+there is no path by which the figure could become a limit. A ceiling on how often a human may be
+asked gets answered by not asking, which is the failure the criterion exists to prevent.
+
+### Format
+
+`lock.FORMAT` moves to `rein-grounded-v4`: `event.schema.json` gains `decisions_derived`. The
+observation store is unversioned and outside the audit chain, and a `reach_overruled` reading taken
+before the arms existed is re-filed as `too_local` — provenance rather than a guess, since
+`change_request.add` was the only thing that ever wrote one. Coercing them to "" instead opened a
+third bucket printed under a claim about arms it did not have, while the missing-arm warning, which
+looks only at real arms, stayed silent about a record that had none. There is no migration for the
+repository itself, as ever: install the recorded version to finish a cycle on it, or `rein init` a
+fresh one.
+
 ## [0.6.0] - 2026-09-16
 
 Six changes with one rule behind them: **what a human is asked is decided by the nature of the

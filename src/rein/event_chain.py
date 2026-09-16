@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -264,3 +264,22 @@ def summarize(events: Sequence[models.Event]) -> dict[str, int]:
         if event.event in counts:
             counts[event.event] += 1
     return {kind: n for kind, n in counts.items() if n}
+
+
+def derived_reaches(events: Sequence[models.Event]) -> dict[str, str]:
+    """`{decision id: reach}` as the last `decisions_derived` recorded it, or `{}` when none has.
+
+    The "before" a freeze is compared against. Only the last one: the drafting phase writes the
+    plan repeatedly and each pass supersedes the one before it, so what matters is the reading
+    nearest the freeze. An empty result is "rein never saw this draft's decisions", which is not
+    the same as "nothing moved" — the caller records nothing rather than guessing, because a
+    demotion inferred from a missing snapshot would be a reading with no measurement behind it.
+    """
+    for event in reversed(events):
+        if event.event != "decisions_derived":
+            continue
+        reaches = event.detail.get("reaches")
+        if isinstance(reaches, Mapping):
+            return {str(k): str(v) for k, v in reaches.items()}
+        return {}
+    return {}
