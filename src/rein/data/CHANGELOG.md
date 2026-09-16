@@ -4,6 +4,33 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.9.0] - 2026-09-16
+
+**The harness owns the channel that says "it's your turn".** Two gates say how *often* the work
+stops. Nothing said how long each stop lasts, and that is set by how soon the person finds out —
+which was somebody else's job: each agent CLI realized `notify-and-wait` its own way (Claude Code
+has a push notification, Codex and Gemini "say so and end the turn"), and the dashboard signalled
+through the browser tab, which has to be open to signal anything. The one number a Human-on-the-Loop
+harness exists to keep small was set outside it, by which CLI was in use and whether a window was up.
+
+`rein.notify.Watcher` runs inside `rein ui` for as long as the server does — no browser required —
+re-derives the same `status.decision` the page and `rein next` derive, and runs a configured command
+when the decision *changes*. One decision, one notification: the id is a function of the decision,
+so a busy minute underneath an unchanged one is silent, and a decision that goes away and comes back
+announces itself again, correctly, because it is waiting again. A channel that is down is logged and
+never raised: the watcher's job is the next notification too.
+
+**The channel is the person's, not the repository's.** It lives in `$XDG_CONFIG_HOME/rein/notify.yaml`
+beside the project registry, for the same reason principals and credentials do — `.rein/config.yaml`
+is frozen by the mandate, and where somebody's pings go is not a thing a mandate should freeze.
+
+**A notification is not an approval.** It carries what is waited on, which decision, and where to
+answer: never the evidence, never the launch secret, never a way to answer. Answering still goes
+through the dashboard's write authority or a terminal, so the signal may leave the machine without
+widening anything. `rein doctor` reports the channel — INFO when none is set (running without one is
+supported), WARN when the configured command is not runnable, which is worse than having none
+because you would be waiting for it.
+
 ## [0.8.0] - 2026-09-16
 
 **What reaches a human is decided by reach, not by whether the loop has a default.** `/req` and

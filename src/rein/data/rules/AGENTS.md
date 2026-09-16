@@ -23,6 +23,13 @@ or a way of running something — with these neutral capabilities, never an agen
 | `phase-invocation` | run a phase procedure (`/req` … `/status`) | read the command body, execute it |
 | `structured-question` | batched multiple-choice questions | numbered chat options, then wait |
 | `notify-and-wait` | flag a pending decision, then stop | state it, end the turn |
+
+`notify-and-wait` is how *you* hand a decision back. Reaching the person who is not looking is
+not yours and does not degrade with the host: `rein ui` watches the SSOT for as long as it runs
+and runs the channel configured in `$XDG_CONFIG_HOME/rein/notify.yaml` when the decision waiting
+on a human changes. The two gates say how often the work stops; this is what decides how long
+each stop lasts, so it is the harness's and not the CLI's. A notification carries what is waited
+on and where — never the evidence, and never a way to answer.
 | `approval-presentation` | present a deliverable for approval | ask for an explicit "approve" |
 | `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
 | `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |

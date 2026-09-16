@@ -45,6 +45,7 @@ from rein import (
     gitignore,
     install,
     models,
+    notify,
     policy_check,
     review_reading,
     strict_yaml,
@@ -830,7 +831,41 @@ def check_binaries() -> list[Finding]:
         else:
             findings.append(Finding(level, "env", f"{name} not found on PATH — {why}"))
     findings.extend(check_stack_extension())
+    findings.extend(check_notification_channel())
     return findings
+
+
+def check_notification_channel() -> list[Finding]:
+    """Is there a path by which "it is your turn" reaches somebody who is not looking?
+
+    Two gates say how often the work stops; they say nothing about how long each stop lasts, and
+    that is set by how soon the person finds out. Reported as INFO, not WARN: running without a
+    channel is supported — the dashboard still badges its tab and `rein next` still prints the
+    decision — and a harness that nagged about an unconfigured convenience would be one more thing
+    to stop reading. What it must not do is leave somebody assuming a ping is coming.
+    """
+    argv = notify.read_command()
+    if argv is None:
+        return [
+            Finding(
+                "INFO",
+                "env",
+                f"no notification channel — nothing tells you a decision is waiting unless the "
+                f"dashboard is open. Set `command:` in {notify.config_path()}.",
+            )
+        ]
+    program = argv[0]
+    if shutil.which(program) is None and not Path(program).exists():
+        return [
+            Finding(
+                "WARN",
+                "env",
+                f"the notification command `{program}` is not on PATH and is not a file — every "
+                "notification will fail silently, which is worse than having no channel because "
+                "you would be waiting for one.",
+            )
+        ]
+    return [Finding("PASS", "env", f"notification channel: `{' '.join(argv)}`")]
 
 
 def check_stack_extension() -> list[Finding]:

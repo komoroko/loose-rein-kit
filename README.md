@@ -519,6 +519,27 @@ steps keep their ceiling (`command_timeout_sec`) — their runtime is knowable.
 > detected commands in a brownfield repo; otherwise substitute yours, and point the profile at
 > your own image with `dockerfile:` when they need more than that.
 
+## Being told it is your turn
+
+Two gates say how often the work stops. How long each stop lasts is set by how soon you find out,
+so the channel is the harness's own rather than the agent CLI's: `rein ui` watches the SSOT for as
+long as it runs — no browser needed — and runs your command when the decision waiting on you
+changes.
+
+```yaml
+# $XDG_CONFIG_HOME/rein/notify.yaml   (~/.config/rein/notify.yaml)
+command: notify-send "rein"
+```
+
+The command is run with `REIN_PROJECT`, `REIN_DECISION_ID`, `REIN_HEADLINE`, `REIN_ACTION` and
+`REIN_URL` in its environment. It lives in your user config, not `.rein/config.yaml`, because that
+one is frozen by the mandate and where your pings go is not a thing a mandate should freeze.
+
+One decision, one notification: the id changes only when the decision does. A notification carries
+what is waited on and where to answer — never the evidence, and never the launch secret, so it may
+leave the machine without widening anything. `rein doctor` says whether a channel is configured and
+whether its command can actually run.
+
 ## Security review
 
 Three layers:

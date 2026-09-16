@@ -89,6 +89,7 @@ from rein import (
     event_chain,
     human_review,
     models,
+    notify,
     review_api,
     run_progress,
     security_review,
@@ -1094,6 +1095,21 @@ def main(argv: list[str] | None = None) -> int:
     if not args.read_only:
         print("  This link grants this browser write access (gate approval included) and works once.")
         print(f"  Anything opening {base} without it gets a read-only page.")
+    # Watching starts here, not inside a request handler: the point of it is the hours when no tab
+    # is open. It stops with the server (`closing`), and does nothing at all when no channel is
+    # configured, which is the default.
+    watcher = notify.Watcher(
+        status=lambda: _collect_status(server.root).get("decision"),
+        project=root.name,
+        url=base,
+        stop=server.closing,
+    )
+    watcher.start()
+    if notify.read_command() is None:
+        print(f"  No notification channel — set `command:` in {notify.config_path()} to be told when it is your turn.")
+    else:
+        print("  Notifications on: the channel is run when the decision waiting on you changes.")
+
     if open_mode(args.no_open, os.environ.get("TERM_PROGRAM")) == "vscode":
         print("  VS Code detected — open it inside the editor: Ctrl+Shift+P → 'Simple Browser: Show'")
         print("  and paste the URL above (or use the PORTS panel's 'Preview in Editor').")
