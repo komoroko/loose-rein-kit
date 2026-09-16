@@ -93,6 +93,17 @@ Four documents, distinct roles — do not conflate them:
   mandate screen shows the human what they were *not* asked, which is where that reasoning is
   overruled while overruling it is still cheap. The wider criterion asks about nearly every choice
   a design contains and spends the drafting phase before the irreversible ones come up.
+- **A review lens is a record with a condition, not a paragraph.** `rein lens --select <stage>`
+  gives the reviewer the lenses whose condition holds for *this* change; a `standard` one applies
+  without asking, a `conditional` one is proposed at the mandate gate, an `unclassified` one is off
+  until somebody writes down when it applies. Sending a reviewer at a failure that cannot occur
+  here costs a pass over the deliverable and returns nothing, while the findings that *are*
+  possible compete with it for attention. Over-reviewing is not thorough.
+- **A lens earns its place the second time, and loses it by never finding.** A one-off finding is
+  recorded `unclassified` — once is an incident, twice is what tells you the condition. The reverse
+  rule is `rein lens --stats`: applied and found counts per lens, across archived cycles, naming
+  the ones that keep applying and never find. Counted, never capped — a ceiling on how many lenses
+  may exist gets answered by deleting whichever is cheapest to delete.
 - **`status: unknown` is an answer.** Record it rather than filling it in with a default, and never
   write a claim for it: a claim nothing can make true cannot be judged. A `mandate` decision left
   `unknown` is refused by `rein approve mandate` — narrow the mandate so it does not reach it, or

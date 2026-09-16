@@ -4,6 +4,42 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.10.0] - 2026-09-16
+
+**A review lens is a record with a condition, not a paragraph in a prompt.**
+`adversarial-reviewer.md` carried three fixed lists and told the reviewer to work through every
+lens in the set, reporting each as a finding or as "attacked — no finding". A concurrency lens over
+a change with no concurrency, an injection lens over a change that touches no store: each costs a
+pass over the deliverable and returns nothing. And the cost is not only the time — findings compete
+with each other for a reader's attention, so a reviewer sent after failures that cannot occur here
+brings back the ones that can *plus* noise. Over-reviewing is not thorough.
+
+`rein.lenses` makes the condition the thing that decides. A `standard` lens is decidable from the
+mandate (the paths a task declares, the risk its claims carry) and applies without anybody being
+asked. A `conditional` one states its case at the mandate gate, where a human keeps or drops it in
+the pass they are already making. An `unclassified` one is **off** — that is what "nothing has been
+written down about when this applies" means. There is deliberately no always-on class: a lens with
+no condition cannot be told apart from one whose condition is "always", and the first is unfinished.
+
+**The library is the person's, the selection is the repository's.** `$XDG_CONFIG_HOME/rein/lenses.yaml`
+overlays the packaged set by id, so narrowing one lens does not mean adopting the whole file. The
+selection is what the reviewer is handed, and a review's inputs must not depend on machine-local
+state or the same repository reviewed elsewhere answers differently. Sharing lenses across
+repositories is safe for the same reason the classes exist: `standard` names what must be in the
+change, `conditional` states its case, `unclassified` is off. There is no path by which a lens fires
+where its failure cannot happen.
+
+**Earning a place, and losing one.** A lens earns its place the way a bug earns a regression test:
+not the first time, but when the same cause comes back — once is an incident, twice is what tells
+you the condition, which is why a one-off goes to `unclassified` with nothing yet to write in
+`applies_when`. The reverse rule is the new `lens_applied` event and `rein lens --stats`, which
+counts applications and finds per lens across archived cycles and names the ones that keep applying
+and never find: the condition is wider than the failure, or the cause is gone. Counted, never
+capped. A ceiling on how many lenses may exist gets answered by deleting whichever is cheapest to
+delete, not whichever has stopped earning its place.
+
+New verb `rein lens` (`--list`, `--select <stage>`, `--record <id> --found yes|no`, `--stats`).
+
 ## [0.9.0] - 2026-09-16
 
 **The harness owns the channel that says "it's your turn".** Two gates say how *often* the work

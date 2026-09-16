@@ -407,6 +407,12 @@ EVENT_ORDER: tuple[str, ...] = (
     # it was produced by a different agent than the one the mandate saw.
     "agents_switched",
     "decision_declared",
+    # One lens was pointed at one deliverable, and whether it found anything. Outside
+    # `ATTENTION_EVENTS`: it asks nobody to judge anything, it is what makes the library
+    # answerable later. A lens that keeps being applied and never finds has the wrong condition
+    # or has outlived its cause, and neither is visible from any one cycle — which is exactly
+    # why the count lives in the chain rather than in a process that ends with the run.
+    "lens_applied",
     # The work branch's quality gate, measured before any task ran. Its own name because it is a
     # fact about the *tree* rather than about a run: the mandate freezes it, `rein build` reads it, and
     # a task that fails a step the baseline already knew about is stopped rather than sent back to

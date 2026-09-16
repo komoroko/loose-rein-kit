@@ -92,6 +92,10 @@ VERBS: dict[str, Verb] = {
     "knowledge-gap": Verb("control_plane:knowledge_gap_main", "record what could not be found out", human=False),
     "evidence": Verb("evidence_cmd", "acceptance evidence this loop cannot obtain (record what you saw)", human=False),
     "dag": Verb("dag", "derive/inspect the task DAG (read-only; /tasks & /status use it)", human=False),
+    "lens": Verb(
+        "lens_cmd",
+        "the review lens library: --list what exists, --select what applies, --stats what it found",
+    ),
     "events": Verb("events", "read the hash-chained audit log (--cost sums what runs billed)", human=False),
     "task": Verb("task_cmd", "task reset <id> --reason … — put a blocked task back on the frontier", human=False),
     "guard": Verb("gate_guard", "the gate-guard hook / commit-stage check", human=False),
