@@ -37,7 +37,7 @@ import json
 import logging
 import re
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from rein import (
@@ -282,6 +282,34 @@ def _clarification_blockers(repo: repo_mod.Repo, gate: str) -> list[str]:
     return blockers
 
 
+def _decision_blockers(plan: models.Plan | None, gate: str) -> list[str]:
+    """A decision the scope rests on that nobody has an answer to yet.
+
+    `plan.decisions` records how each thing the drafting phase met was settled, and by whom. The
+    ones that reach the mandate are the ones whose reversal would collapse the scope; the rest the
+    loop settled itself, on the reading that undoing them later costs one task. A `mandate`
+    decision still `unknown` is the one state the gate cannot be opened over: the loop would be
+    told what it may change while what it may change is the undecided thing.
+
+    Deliberately not a count. Any number of `unknown` decisions the loop owns is fine and is
+    recorded rather than guessed at; one that the mandate rests on is not, however few there are.
+    The exits are both `/req`'s: narrow the mandate so it does not cover the undecided thing, or
+    make finding the answer this cycle's scope, with claims about what will be established rather
+    than what will be built.
+    """
+    if gate != "mandate" or plan is None:
+        return []
+    blocked = [d for d in plan.decisions if d.blocks_mandate]
+    if not blocked:
+        return []
+    listed = "; ".join(f"{d.id} ({d.subject})" for d in blocked)
+    return [
+        f"{len(blocked)} decision(s) the mandate rests on are still `unknown`: {listed}. "
+        "A scope cannot be delegated while what it covers is the undecided thing. Either narrow "
+        "the mandate so it does not reach them, or make answering them this cycle's scope."
+    ]
+
+
 def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool = True) -> list[str]:
     """Every mechanical reason `gate` cannot be approved. Empty means a request may be issued.
 
@@ -333,6 +361,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _audit_blockers(repo, state, config, gate)
     blockers += _change_request_blockers(state, gate)
     blockers += _clarification_blockers(repo, gate)
+    blockers += _decision_blockers(plan, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
     blockers += _review_blockers(repo, review, state, gate)
@@ -620,6 +649,14 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
             "Run this in your shell — there is deliberately no flag that skips it."
         )
     print(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
+    unasked = _unasked_decisions(repo, gate)
+    if unasked:
+        # The one thing on this screen that is not a digest. Everything else says what was decided
+        # with this human; this says what was decided without them, which is the part an approval
+        # silently ratifies unless it is put in front of somebody.
+        print(f"{len(unasked)} decision(s) the loop settled without asking you:")
+        print(render_unasked(unasked) + "")
+        print("  Overruling one now costs a task. After the mandate it costs `/revise`.\n")
     addressed = addressed_requests(repo, gate)
     if addressed:
         # Read before deciding, not after. These are the changes this human asked for last time;
@@ -633,6 +670,30 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
             f"survives this session and holds the gate shut until it is answered:\n"
             f"  rein changes add {gate} --target <docs/...#R-3 | T-004> --reason <what is wrong>"
         )
+
+
+def _unasked_decisions(repo: repo_mod.Repo, gate: str) -> list[models.Decision]:
+    """What the loop settled on its own reading that undoing it later stays local.
+
+    Only at the mandate: it is the gate that freezes the plan, so it is the last moment at which
+    disagreeing with that reading is a cheap edit rather than a `/revise`.
+    """
+    if gate != FREEZING_GATE:
+        return []
+    try:
+        plan = store_mod.Store(repo).read_plan()
+    except models.DocumentError:
+        return []  # a plan that does not parse is `_plan_blockers`' to report, not this screen's
+    return [d for d in plan.decisions if d.unasked] if plan is not None else []
+
+
+def render_unasked(decisions: Sequence[models.Decision]) -> str:
+    lines: list[str] = []
+    for d in decisions:
+        lines.append(f"  - {d.id} {d.subject}")
+        lines.append(f"      settled: {d.answer or '(unstated)'}")
+        lines.append(f"      local because: {d.rationale or '(unstated)'}")
+    return "\n".join(lines)
 
 
 def approve_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> int:

@@ -47,6 +47,14 @@
       "items": {
         "$ref": "#/$defs/task"
       }
+    },
+    "decisions": {
+      "description": "Every decision the drafting phase met, with who settled it. The list a human reads at the mandate gate is not what they were asked — it is what they were *not* asked: each `local` entry is a default the loop took on its own reading of the reach, and the gate is where that reading is overruled while overruling it is still cheap.",
+      "type": "array",
+      "maxItems": 512,
+      "items": {
+        "$ref": "#/$defs/decision"
+      }
     }
   },
   "$defs": {
@@ -370,6 +378,61 @@
                 "$ref": "#/$defs/repoPath"
               }
             }
+          }
+        }
+      }
+    },
+    "decision": {
+      "description": "One thing that had to be settled before the loop could build, and how it was settled. `reach` is the criterion that decides who settles it: a decision whose reversal would collapse the scope is `mandate` and a human settles it before the gate; one whose reversal stays local is `local` and the loop settles it and records it here. Asking about every default the loop would otherwise take is the wider net and it spends the drafting phase; asking about what cannot be undone locally is the one that pays. `status: unknown` is the honest answer when nobody has one — recorded rather than filled in with a default, and never turned into a claim, because a claim nothing can make true cannot be judged. A `mandate` decision left `unknown` is what `rein approve mandate` refuses: the scope is not yet defined enough to delegate.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "subject",
+        "reach",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^D-[0-9]+$"
+        },
+        "subject": {
+          "$ref": "#/$defs/text"
+        },
+        "reach": {
+          "enum": [
+            "mandate",
+            "local"
+          ]
+        },
+        "status": {
+          "enum": [
+            "settled",
+            "unknown"
+          ]
+        },
+        "rationale": {
+          "description": "Why this reach. Required for `local`: the claim being made is that reversing it later costs one task, and that claim is the thing a human overrules at the gate.",
+          "$ref": "#/$defs/text"
+        },
+        "settled_by": {
+          "enum": [
+            "human",
+            "loop"
+          ]
+        },
+        "answer": {
+          "$ref": "#/$defs/text"
+        },
+        "requirement_ids": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 32,
+            "pattern": "^(R|NFR)-[0-9]+$"
           }
         }
       }

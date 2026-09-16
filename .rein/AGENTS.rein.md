@@ -77,8 +77,20 @@ dependencies allow, re-running what went red.
 Four documents, distinct roles — do not conflate them:
 
 - **`.rein/plan.yaml`** — the frozen **Expected Model**: one claim per requirement
-  (`R-N`/`NFR-N`), and the task DAG. `claim_ids` threads each task back to the claim it
-  answers, cross-checked by `rein dag --trace`. Frozen when the mandate is approved.
+  (`R-N`/`NFR-N`), the task DAG, and the `decisions` record. `claim_ids` threads each task back to
+  the claim it answers, cross-checked by `rein dag --trace`. Frozen when the mandate is approved.
+- **What reaches a human is decided by reach, never by "would I otherwise use a default".** Each
+  decision drafting meets carries `reach: mandate | local`. `mandate` means undoing it later moves
+  a claim, a scope boundary or what counts as evidence — a human settles it. `local` means undoing
+  it costs one task and no claim — **the loop settles it and records the reasoning**, and the
+  mandate screen shows the human what they were *not* asked, which is where that reasoning is
+  overruled while overruling it is still cheap. The wider criterion asks about nearly every choice
+  a design contains and spends the drafting phase before the irreversible ones come up.
+- **`status: unknown` is an answer.** Record it rather than filling it in with a default, and never
+  write a claim for it: a claim nothing can make true cannot be judged. A `mandate` decision left
+  `unknown` is refused by `rein approve mandate` — narrow the mandate so it does not reach it, or
+  make answering it this cycle's scope. Relabelling it `local` to clear the check is falsifying the
+  record.
 - **`.rein/state.yaml`** — phase, gate approvals, task status. `gates.<name>` is
   `pending`|`approved` — **the only write path to `approved` is a human approval `rein`
   recorded**, and the receipt binds the digests that approval covered. The mandate approval also pins the

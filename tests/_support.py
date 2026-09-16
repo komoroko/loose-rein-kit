@@ -155,19 +155,44 @@ def make_task(
     return task
 
 
+def make_decision(
+    decision_id: str = "D-001",
+    *,
+    subject: str = "which serializer the export uses",
+    reach: str = "local",
+    status: str = "settled",
+    settled_by: str | None = "loop",
+    answer: str | None = "the stdlib json module",
+    rationale: str | None = "swapping it later rewrites one task's serializer and no claim",
+) -> dict[str, Any]:
+    """One decision record. The default is the common case: the loop settled it and said why."""
+    out: dict[str, Any] = {"id": decision_id, "subject": subject, "reach": reach, "status": status}
+    if settled_by is not None:
+        out["settled_by"] = settled_by
+    if answer is not None:
+        out["answer"] = answer
+    if rationale is not None:
+        out["rationale"] = rationale
+    return out
+
+
 def make_plan(
     *,
     cycle_id: str = DEMO_CYCLE,
     branch: str = DEMO_BRANCH,
     claims: list[dict[str, Any]] | None = None,
     tasks: list[dict[str, Any]] | None = None,
+    decisions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """A plan document. The default is one claim covering R-1 and one task answering it."""
-    return {
+    plan: dict[str, Any] = {
         "cycle": {"id": cycle_id, "base_commit": DEMO_COMMIT, "branch": branch},
         "claims": claims if claims is not None else [make_claim()],
         "tasks": tasks if tasks is not None else [make_task(claim_ids=["C-001"])],
     }
+    if decisions is not None:
+        plan["decisions"] = decisions
+    return plan
 
 
 # --- review.yaml --------------------------------------------------------------

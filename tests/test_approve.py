@@ -18,7 +18,17 @@ import pytest
 from rein import approve, digests, models, review_reading
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import chain, make_claim, make_config, make_plan, make_review, make_state, make_task, seed_repo
+from tests._support import (
+    chain,
+    make_claim,
+    make_config,
+    make_decision,
+    make_plan,
+    make_review,
+    make_state,
+    make_task,
+    seed_repo,
+)
 
 PENDING_ALL = dict.fromkeys(models.GATE_ORDER, "pending")
 
@@ -808,3 +818,72 @@ def test_a_freshness_nobody_could_measure_holds_the_gate_shut(tmp_path: Path) ->
 
     shutil.rmtree(tmp_path / ".git")
     assert any("could not be measured" in b for b in approve.readiness(repo, "acceptance"))
+
+
+# --- decisions the mandate rests on (plan §14, reach) --------------------------
+
+
+def test_an_unknown_decision_the_mandate_rests_on_holds_the_gate_shut(tmp_path: Path) -> None:
+    """The one state a mandate cannot be opened over: the loop would be told what it may change
+    while what it may change is the undecided thing."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            decisions=[
+                make_decision("D-001", reach="mandate", status="unknown", settled_by=None, answer=None, rationale=None)
+            ]
+        ),
+    )
+    blockers = [b for b in approve.readiness(repo, "mandate") if "still `unknown`" in b]
+
+    assert len(blockers) == 1
+    assert "D-001" in blockers[0]
+
+
+def test_an_unknown_decision_the_loop_owns_does_not_hold_the_gate_shut(tmp_path: Path) -> None:
+    """Not a count. Any number of open questions the loop can answer later is fine — recorded
+    rather than guessed at, which is the whole point of writing them down."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            decisions=[
+                make_decision(f"D-{n:03d}", reach="local", status="unknown", settled_by=None, answer=None)
+                for n in range(1, 8)
+            ]
+        ),
+    )
+    assert not [b for b in approve.readiness(repo, "mandate") if "still `unknown`" in b]
+
+
+def test_the_decision_check_is_the_mandates_alone(tmp_path: Path) -> None:
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            decisions=[
+                make_decision("D-001", reach="mandate", status="unknown", settled_by=None, answer=None, rationale=None)
+            ]
+        ),
+    )
+    assert not [b for b in approve.readiness(repo, "acceptance") if "still `unknown`" in b]
+
+
+def test_the_confirmation_lists_what_the_loop_settled_without_asking(tmp_path: Path) -> None:
+    """An approval silently ratifies every default the loop took unless they are put on screen.
+
+    The mandate is the last moment disagreeing costs an edit rather than a `/revise`, so it is the
+    only gate that shows them.
+    """
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(decisions=[make_decision("D-001"), make_decision("D-002", settled_by="human")]),
+    )
+    unasked = approve._unasked_decisions(repo, "mandate")
+
+    assert [d.id for d in unasked] == ["D-001"]  # D-002 is one the human already saw
+    rendered = approve.render_unasked(unasked)
+    assert "D-001" in rendered and "local because" in rendered
+    assert approve._unasked_decisions(repo, "acceptance") == []

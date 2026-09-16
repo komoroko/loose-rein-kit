@@ -120,6 +120,18 @@ STAGE_ORDER: tuple[str, ...] = ("drafting", "building", "done")
 
 PLAN_STATUS_VALUES = frozenset({"draft", "frozen", "invalidated"})
 
+# How far a decision reaches, which is what decides who settles it. `mandate` means reversing it
+# later moves a claim, a scope boundary or what counts as evidence — a human settles it before the
+# gate. `local` means reversing it costs one task and no claim, so the loop settles it and records
+# the reasoning for the gate screen to show. The criterion is irreversibility, never whether the
+# loop happens to have a default: it has one for nearly everything.
+DECISION_REACH_VALUES = frozenset({"mandate", "local"})
+#: Whether an answer exists yet. `unknown` is recorded rather than filled in with a default, and
+#: never turned into a claim — a claim nothing can make true cannot be judged.
+DECISION_STATUS_VALUES = frozenset({"settled", "unknown"})
+#: Who settled it. Empty while `status` is `unknown`, because nobody did.
+DECISION_SETTLED_BY_VALUES = frozenset({"human", "loop"})
+
 # Task vocabulary. `kind` is the DAG role that drives build orchestration (consumption order,
 # parallelism, merge) — deliberately not collapsed into a single "implementation", because
 # build_loop derives layers and the critical path from it.
@@ -751,7 +763,71 @@ class Task(Element):
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
 
-_PLAN_SECTIONS: Mapping[str, type[Element]] = {"claims": Claim, "tasks": Task}
+class Decision(Element):
+    """One thing the drafting phase had to settle, and who settled it.
+
+    `reach` is the criterion, and it is the whole point of the record. A decision whose reversal
+    would collapse the scope reaches the mandate and a human settles it; one whose reversal stays
+    inside a task is `local` and the loop settles it. The wider net — ask about every default the
+    loop would otherwise take — spends the drafting phase on questions whose answers could have
+    been changed later for the price of one task, and the human who runs out of patience stops
+    answering before the irreversible ones come up.
+
+    So the list a human reads at the gate is not what they were asked. It is what they were *not*
+    asked: every `local` entry with the loop's reasoning beside it, overruled at the one moment
+    overruling is still cheap.
+    """
+
+    @property
+    def subject(self) -> str:
+        return _str(self.raw, "subject")
+
+    @property
+    def reach(self) -> str:
+        return _str(self.raw, "reach")
+
+    @property
+    def status(self) -> str:
+        return _str(self.raw, "status")
+
+    @property
+    def rationale(self) -> str:
+        return _str(self.raw, "rationale")
+
+    @property
+    def answer(self) -> str:
+        return _str(self.raw, "answer")
+
+    @property
+    def settled_by(self) -> str:
+        """`human` or `loop` — empty while `status` is `unknown`, because nobody settled it.
+
+        What it separates is a default the loop took from a default a human looked at and kept.
+        Both read as settled afterwards, and only the first is a thing the gate has to show.
+        """
+        return _str(self.raw, "settled_by")
+
+    @property
+    def unasked(self) -> bool:
+        """Settled by the loop on its own reading of the reach — the list the gate screen shows."""
+        return self.status == "settled" and self.settled_by == "loop"
+
+    @property
+    def is_local(self) -> bool:
+        return self.reach == "local"
+
+    @property
+    def blocks_mandate(self) -> bool:
+        """A decision the scope rests on that nobody has an answer to.
+
+        Not a thing to fill in with a default, and not a thing to delegate around: the loop cannot
+        be told what it may change when what it may change is what is undecided. `/req` splits the
+        mandate to exclude it, or makes finding the answer the cycle's own scope.
+        """
+        return self.reach == "mandate" and self.status == "unknown"
+
+
+_PLAN_SECTIONS: Mapping[str, type[Element]] = {"claims": Claim, "tasks": Task, "decisions": Decision}
 
 
 # --- documents ----------------------------------------------------------------
@@ -844,6 +920,10 @@ class Plan:
     @property
     def tasks(self) -> tuple[Task, ...]:
         return self._section("tasks")
+
+    @property
+    def decisions(self) -> tuple[Decision, ...]:
+        return self._section("decisions")
 
     # -- lookup ---------------------------------------------------------------
 

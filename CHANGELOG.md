@@ -4,6 +4,34 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.8.0] - 2026-09-16
+
+**What reaches a human is decided by reach, not by whether the loop has a default.** `/req` and
+`/design` asked about every `[NEEDS CLARIFICATION]` marker the analyst and the architect left, and
+they were told to leave one wherever they would otherwise have settled on a plausible default. That
+is nearly every choice a document contains. The ordering was by impact × uncertainty and there was
+no cap, so the list was worked top to bottom — and a human who runs out of patience stops answering
+somewhere in the middle of it, which puts the irreversible questions behind the reversible ones.
+
+The criterion is now *irreversibility × blast radius*. `plan.yaml` gains a `decisions` record, and
+each entry carries `reach`: `mandate` when undoing it later moves a claim, a scope boundary or what
+counts as evidence, `local` when undoing it costs one task and no claim. A human is asked about the
+first. The loop settles the second itself and records a `rationale` for the reach.
+
+**And the gate shows what was not asked.** `rein approve mandate` now lists every decision the loop
+settled on its own reading, with its reasoning, before the confirmation. An approval ratifies those
+defaults either way; the difference is whether anybody saw them. The mandate is the last moment at
+which disagreeing is an edit rather than a `/revise`, so it is the only gate that shows them.
+
+**`status: unknown` is an answer.** A decision nobody has an answer to is recorded as one rather
+than filled in with a default, and never becomes a claim — a claim nothing can make true cannot be
+judged. A `mandate` decision left `unknown` is refused by the gate, naming them: a scope cannot be
+delegated while what it covers is the undecided thing. The exits are to narrow the mandate so it
+does not reach it, or to make answering it this cycle's scope. Deliberately not a count: any number
+of `unknown` decisions the loop owns is fine, and one the mandate rests on is not, however few.
+
+`lock.FORMAT` moves to `rein-grounded-v4` for the new `plan.yaml` section. No migration, as ever.
+
 ## [0.7.0] - 2026-09-16
 
 **Merging into the base is outside this harness.** `rein pr-stack --merge` ran `gh stack merge`
