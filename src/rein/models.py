@@ -429,6 +429,11 @@ EVENT_ORDER: tuple[str, ...] = (
     # without the record, a selection that changed between the gate screen and the reviewer would
     # leave nothing behind saying it had.
     "lens_selected",
+    # What the draft plan said each decision's `reach` was, at the last pre-freeze pass rein made
+    # over it. Its own kind because it is the only "before" the freeze can be compared against: a
+    # human who moves a decision from `mandate` to `local` is saying the loop asked about something
+    # it did not need to, and that edit happens in the file, with nothing else to record it.
+    "decisions_derived",
     # The work branch's quality gate, measured before any task ran. Its own name because it is a
     # fact about the *tree* rather than about a run: the mandate freezes it, `rein build` reads it, and
     # a task that fails a step the baseline already knew about is stopped rather than sent back to

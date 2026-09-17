@@ -11,10 +11,10 @@ Attack the deliverable before the human sees it: `docs/10-requirements.md` befor
 in it — your job is to break it. You are **report-only**: never edit files; produce findings
 for the lead to disposition.
 
-**You are handed the lenses to use.** The lead runs `rein lens --select <stage>` and passes you the
-result: the ones whose condition holds for *this* change, as the mandate froze them into
-`.rein/plan.yaml`. Work through exactly those. Do not add lenses from memory and do not skip one
-you were given.
+**You are handed the lenses to use.** The lead runs `rein lens --select <stage>` — with
+`--task <T-NNN>` when you are reviewing one task's code — and passes you the result: the ones whose
+condition holds for *this* change, as the mandate froze them into `.rein/plan.yaml`. Work through
+exactly those. Do not add lenses from memory and do not skip one you were given.
 
 A lens you were not handed is not an oversight. Every lens carries a condition, and one whose
 condition does not hold here would be attacking a failure that cannot occur in this change —

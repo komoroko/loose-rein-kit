@@ -955,3 +955,192 @@ def test_the_confirmation_lists_what_the_loop_settled_without_asking(tmp_path: P
     rendered = approve.render_unasked(unasked)
     assert "D-001" in rendered and "local because" in rendered
     assert approve._unasked_decisions(repo, "acceptance") == []
+
+
+# --- the naming layer reaches every route that can open the gate ------------------
+
+
+def test_the_naming_layer_carries_the_same_selection_the_terminal_prints(tmp_path: Path) -> None:
+    """Whatever a gate requires on screen belongs on every route that can open that gate. The
+    dashboard grew a second approval route and this did not follow it — the material was always in
+    `plan.yaml`, which its mandate pane serves whole; what only the terminal had was the selection.
+    """
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(decisions=[make_decision("D-001"), make_decision("D-002", settled_by="human")]),
+    )
+
+    naming = approve.naming(repo, "mandate")
+
+    assert [d["id"] for d in naming["unasked"]] == [d.id for d in approve._unasked_decisions(repo, "mandate")]
+    assert naming["unasked"][0]["rationale"]
+    assert naming["overrule_cost"] == approve.OVERRULE_COST
+
+
+def test_the_cost_of_overruling_is_one_string_both_screens_say(tmp_path: Path) -> None:
+    """Two screens saying it in their own words would be two claims about the same mechanism."""
+    assert "`/revise`" in approve.OVERRULE_COST
+    assert "costs a task" in approve.OVERRULE_COST
+
+
+def test_the_naming_layer_is_the_mandate_s_alone(tmp_path: Path) -> None:
+    """The mandate is the last moment disagreeing with a reach call costs an edit rather than a
+    `/revise`, so it is the only gate with anything to name."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(decisions=[make_decision("D-001")]),
+    )
+
+    empty: approve.Naming = {"unasked": [], "overrule_cost": approve.OVERRULE_COST, "lenses": []}
+    assert approve.naming(repo, "acceptance") == empty
+
+
+def test_the_naming_layer_carries_the_whole_lens_selection_not_one_task_s(tmp_path: Path) -> None:
+    """At the moment of approving nothing has been narrowed yet — `lenses.for_task` runs at the
+    hand-off to a reviewer — and what the approval can overrule is the selection itself."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            decisions=[make_decision("D-001")],
+            lenses=[{"id": "L-CODE-SCHEMA-DRIFT", "stage": "code", "status": "applied"}],
+        ),
+    )
+
+    listed = approve.naming(repo, "mandate")["lenses"]
+
+    assert [entry["id"] for entry in listed] == ["L-CODE-SCHEMA-DRIFT"]
+    assert listed[0]["applies_when"]
+
+
+def test_a_frozen_lens_the_library_no_longer_holds_is_named_rather_than_dropped(tmp_path: Path) -> None:
+    """Exactly the machine-local drift the freeze exists to expose, and the gate is where it can
+    still be acted on."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            decisions=[make_decision("D-001")],
+            lenses=[{"id": "L-GONE", "stage": "code", "status": "applied"}],
+        ),
+    )
+
+    listed = approve.naming(repo, "mandate")["lenses"]
+
+    assert listed[0]["applies_when"] == "(no longer in the library)"
+
+
+def test_the_library_text_is_not_handed_to_a_reader_without_a_session(tmp_path: Path) -> None:
+    """`attack` and `applies_when` are read out of the user-global library, which belongs to the
+    person and not to this repository — other projects' failures are written in it. The dashboard
+    serves a gate's readiness to any reader by design, so that text goes only to the reader who
+    could do the approving. The ids are plan content and stay."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            decisions=[make_decision("D-001")],
+            lenses=[{"id": "L-CODE-SCHEMA-DRIFT", "stage": "code", "status": "applied"}],
+        ),
+    )
+
+    withheld = approve.naming(repo, "mandate", include_library=False)["lenses"][0]
+    given = approve.naming(repo, "mandate", include_library=True)["lenses"][0]
+
+    assert withheld["id"] == given["id"] == "L-CODE-SCHEMA-DRIFT"
+    assert withheld["attack"] == "" and withheld["applies_when"] == ""
+    assert given["attack"] and given["applies_when"]
+
+
+# --- the other side of a misjudged reach ------------------------------------------
+
+
+def _derived(repo: repo_mod.Repo, reaches: dict[str, str]) -> None:
+    """Stand in for the pre-freeze pass `rein lens --select` makes over every draft."""
+    from rein import store as store_mod
+
+    with store_mod.Store(repo).transaction() as tx:
+        tx.append("decisions_derived", cycle_id="demo-cycle", subject_ids=sorted(reaches), detail={"reaches": reaches})
+
+
+def test_a_reach_the_human_walked_back_is_recorded_against_the_criterion(tmp_path: Path) -> None:
+    """The mirror of the change request `change_request` files. `rein approve mandate` names this
+    move itself — answer it, or change the reach and say why undoing it stays local — and the
+    schema requires that rationale, so it cannot be made silently."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(decisions=[make_decision("D-001", reach="local")]),
+    )
+    _derived(repo, {"D-001": "mandate"})
+
+    assert approve._reach_movement(repo)[0] == ["D-001"]
+
+
+def test_a_reach_that_never_moved_is_not_a_reading(tmp_path: Path) -> None:
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(decisions=[make_decision("D-001", reach="local")]),
+    )
+    _derived(repo, {"D-001": "local"})
+
+    assert approve._reach_movement(repo)[0] == []
+
+
+def test_a_promotion_is_not_counted_against_the_criterion(tmp_path: Path) -> None:
+    """`local` → `mandate` is a human saying the loop was too loose, and `change_request` already
+    files that from the gesture it is actually made with. Counting it here too would double it."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(decisions=[make_decision("D-001", reach="mandate", settled_by="human")]),
+    )
+    _derived(repo, {"D-001": "local"})
+
+    assert approve._reach_movement(repo)[0] == []
+
+
+def test_the_freeze_advances_the_baseline_it_just_read(tmp_path: Path) -> None:
+    """A comparison whose baseline is only ever written by *drafting* counts the same demotion again
+    at every re-approval — `/revise` puts this gate back to `pending` — so the figure would grow
+    with the number of revisions rather than with the number of misjudged reaches. The gate that
+    consumes the baseline advances it."""
+    from rein import event_chain, observations, revise
+
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates={"mandate": "pending", "acceptance": "pending"}, plan_status="draft"),
+        plan=make_plan(
+            claims=[make_claim("C-001")],
+            tasks=[make_task("T-001", claim_ids=["C-001"])],
+            decisions=[make_decision("D-001", reach="local")],
+        ),
+    )
+    _derived(repo, {"D-001": "mandate"})
+
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    first = [e for e in observations.read() if e.kind == "reach_overruled"]
+
+    events, _ = event_chain.scan(repo.events)
+    assert event_chain.derived_reaches(events) == {"D-001": "local"}
+    assert [e.arm for e in first] == [observations.ARM_TOO_MANDATE]
+
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "the task breakdown was wrong")
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+
+    assert len([e for e in observations.read() if e.kind == "reach_overruled"]) == 1
+
+
+def test_a_decision_with_no_snapshot_behind_it_is_not_guessed_at(tmp_path: Path) -> None:
+    """One that first appeared after the last pre-freeze pass has no "before" to have moved from,
+    and a demotion inferred from a missing snapshot is a reading with no measurement behind it."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(decisions=[make_decision("D-001", reach="local")]),
+    )
+
+    assert approve._reach_movement(repo)[0] == []  # nothing derived at all

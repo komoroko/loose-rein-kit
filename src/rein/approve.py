@@ -39,6 +39,7 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from typing import TypedDict
 
 from rein import (
     audit,
@@ -54,6 +55,7 @@ from rein import (
     review_policy,
     review_reading,
 )
+from rein import lenses as lens_lib
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -565,6 +567,7 @@ def record_approval(
     # Read before the transaction, recorded after it: an observation must never be able to fail an
     # approval, and the plan it counts is the one this approval is about to freeze.
     admitted = _unknowns_admitted(repo) if gate == FREEZING_GATE else 0
+    demoted, reaches = _reach_movement(repo) if gate == FREEZING_GATE else ([], None)
 
     # Everything below runs under the store lock. The chain-root binding is only meaningful if
     # nothing can append between the check and the receipt that pins it, and a gate approval
@@ -626,13 +629,79 @@ def record_approval(
                 subject_ids=[approval_id],
                 detail={key: raw["plan"][key] for key in FROZEN_PLAN_KEYS},
             )
+            # The baseline the next comparison runs against, advanced by the thing that consumes
+            # it. `/revise` puts this gate back to `pending`, so without this the same demotion is
+            # re-read and re-recorded at every re-approval and the figure counts revisions rather
+            # than misjudged reaches. `events` is the listing this transaction already read under
+            # the lock, so the comparison and the append cannot disagree.
+            if reaches is not None and reaches != event_chain.derived_reaches(events):
+                tx.append(
+                    "decisions_derived",
+                    cycle_id=state.cycle_id,
+                    actor="local-confirmation",
+                    subject_ids=sorted(reaches),
+                    detail={"reaches": reaches},
+                )
 
         tx.write("state", raw, expect_digest=seen)
     if gate == FREEZING_GATE:
         observations.record(
             "unknown_at_mandate", project=repo.root.name, cycle_id=state.cycle_id, value=admitted, subject=approval_id
         )
+        for decision_id in demoted:
+            observations.record(
+                "reach_overruled",
+                project=repo.root.name,
+                cycle_id=state.cycle_id,
+                subject=decision_id,
+                arm=observations.ARM_TOO_MANDATE,
+            )
     return approval_id
+
+
+def _reach_movement(repo: repo_mod.Repo) -> tuple[list[str], dict[str, str] | None]:
+    """`(demoted ids, every id's reach)` — what moved down since rein last read this draft, and now.
+
+    `None` for the second is a plan nobody could read, which is not the same answer as a plan with
+    no decisions in it: one says nothing about the reaches, and the other says there are none. A
+    caller that flattened them would erase the baseline on the way past a plan it could not parse.
+
+    The other half of selection-by-reach's falsifier, and the mirror of the one `change_request`
+    files. `too_local` is a decision the loop settled on its own reading that somebody then paid
+    for; this is one the loop routed *to* a human that ended up settled as `local` — the loop asked
+    about something whose reversal stays inside a task. `rein approve mandate` names the move
+    itself when it refuses a `mandate` decision the loop settled: answer it, or change the reach
+    and say in `rationale` why undoing it stays local. The schema requires that rationale on every
+    `local`, so the move cannot be made silently.
+
+    **The reading is about the criterion, not about who moved it.** What is measured is that a
+    reach the loop derived did not survive to the freeze, and the rationale requirement makes the
+    change deliberate whoever made it. An agent revising its own draft is not counted anyway, but
+    not because this can tell: the baseline is re-read by every drafting command (`rein lens
+    --select`), so an ordinary redraft moves the baseline with it, and what is left to compare
+    against is the pass that ran up to the gate. Attributing it further than that would be a claim
+    with no measurement behind it.
+
+    Neither arm is an unbiased estimate and this one is not either: somebody who answers the
+    question because answering is faster than arguing about the reach leaves nothing behind. Both
+    sides are lower bounds, which is the point — the figure exists to show that pressure runs in
+    both directions, not to measure how much.
+
+    Only decisions present in both readings count. One that first appeared after the last pre-freeze
+    pass has no "before" to have moved from, and a demotion inferred from a missing snapshot would
+    be a reading with no measurement behind it.
+    """
+    try:
+        plan = store_mod.Store(repo).read_plan()
+    except models.DocumentError:
+        return [], None  # a plan that does not parse is `_plan_blockers`' to report, not this figure's
+    if plan is None:
+        return [], None
+    events, _ = event_chain.scan(repo.events)
+    before = event_chain.derived_reaches(events)
+    reaches = {d.id: d.reach for d in plan.decisions}
+    demoted = [d.id for d in plan.decisions if before.get(d.id) == "mandate" and d.reach == "local"]
+    return demoted, reaches
 
 
 # --- the human confirmation -------------------------------------------------------
@@ -691,7 +760,7 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # silently ratifies unless it is put in front of somebody.
         print(f"{len(unasked)} decision(s) the loop settled without asking you:")
         print(render_unasked(unasked) + "")
-        print("  Overruling one now costs a task. After the mandate it costs `/revise`.\n")
+        print(f"  {OVERRULE_COST}\n")
     addressed = addressed_requests(repo, gate)
     if addressed:
         # Read before deciding, not after. These are the changes this human asked for last time;
@@ -705,6 +774,88 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
             f"survives this session and holds the gate shut until it is answered:\n"
             f"  rein changes add {gate} --target <docs/...#R-3 | T-004> --reason <what is wrong>"
         )
+
+
+#: What overruling one costs, and where that cost changes. Kept as one string because two screens
+#: say it, and a paraphrase on one of them would be a second claim about the same mechanism.
+OVERRULE_COST = "Overruling one now costs a task. After the mandate it costs `/revise`."
+
+
+class Naming(TypedDict):
+    """What the approval panel owes a human besides the digests, in the shape both screens read."""
+
+    unasked: list[dict[str, str]]
+    overrule_cost: str
+    lenses: list[dict[str, str]]
+
+
+def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> Naming:
+    """What an approval would ratify without being asked, in a shape either screen can render.
+
+    The *material* was never missing from the dashboard: `.rein/plan.yaml` is the first deliverable
+    in its mandate pane, and `decisions` and `lenses` are both in it. What only the terminal had is
+    the **selection** — which of a few hundred lines deserve a human's eye at the moment of
+    approving. Asking somebody to find three `unasked` decisions inside a plan document is the same
+    failure as sending a reviewer through a lens that cannot fire here: what matters competes for
+    attention with what does not, and loses.
+
+    The rule this restores: **whatever a gate requires on screen belongs on every route that can
+    open that gate.** The dashboard grew a second approval route and this did not follow it.
+
+    The lens list is the plan's whole selection, not one task's. At the moment of approving nothing
+    has been narrowed yet (`lenses.for_task` runs at the hand-off to a reviewer), and what the
+    approval can overrule is the selection itself.
+
+    `include_library` is about where the text comes from, not about how sensitive it is. The ids,
+    stages and statuses are in `.rein/plan.yaml`, which this cycle's own record already carries;
+    `attack` and `applies_when` are read out of the **user-global** library, which belongs to the
+    person and not to this repository — other projects' failures are written in it. The dashboard
+    serves a gate's readiness to any reader, by design, so it asks for the library only for a
+    reader holding the write session: the one who would be doing the approving has it, and nobody
+    else gets a file from outside the repository because a page was left open.
+    """
+    out: Naming = {"unasked": [], "overrule_cost": OVERRULE_COST, "lenses": []}
+    unasked = _unasked_decisions(repo, gate)
+    out["unasked"] = [
+        {
+            "id": d.id,
+            "subject": d.subject,
+            "answer": d.answer,
+            # Required for `local` by the schema, so "" can only appear under a plan nothing
+            # validated. Carried rather than dropped: the reach claim with no reasoning behind it
+            # is the one most worth looking at.
+            "rationale": d.rationale,
+        }
+        for d in unasked
+    ]
+    if gate != FREEZING_GATE:
+        return out
+    try:
+        plan = store_mod.Store(repo).read_plan()
+    except models.DocumentError:
+        return out  # a plan that does not parse is `_plan_blockers`' to report, not this screen's
+    if plan is None:
+        return out
+    known = {lens.id: lens for lens in lens_lib.library()} if include_library else {}
+    out["lenses"] = [
+        {
+            "id": entry.id,
+            "stage": entry.stage,
+            "status": entry.status,
+            "attack": known[entry.id].attack if entry.id in known else "",
+            # Named rather than skipped: an id the library no longer holds is exactly the drift the
+            # freeze exists to expose, and it should be visible while it can still be acted on. A
+            # reader who was not given the library is told that, rather than being shown the same
+            # blank and left to read it as drift.
+            "applies_when": (
+                known[entry.id].applies_when
+                if entry.id in known
+                else ("(no longer in the library)" if include_library else "")
+            ),
+        }
+        for entry in plan.lenses
+    ]
+    return out
 
 
 def _unasked_decisions(repo: repo_mod.Repo, gate: str) -> list[models.Decision]:

@@ -9,7 +9,10 @@ repository answers differently on another machine.
 from __future__ import annotations
 
 import json
+import logging
+import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -49,14 +52,14 @@ def test_recording_never_raises_even_when_the_store_cannot_be_written(
     """Every caller is doing something else — opening a gate, finishing a review. A store that can
     fail a gate would be an input to the thing it is measuring."""
     monkeypatch.setattr("rein.observations.Path.mkdir", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
-    assert observations.record("reach_overruled", project="p", cycle_id="c") is False
+    assert observations.record("reach_overruled", arm=observations.ARM_TOO_LOCAL, project="p", cycle_id="c") is False
 
 
 def test_a_torn_line_is_skipped_rather_than_refusing_the_file(store: Path) -> None:
     """An append-only file written by long-lived processes eventually holds one. Refusing the whole
     file over it would lose every reading before it, and this is material for a judgement — not
     evidence anybody signs."""
-    observations.record("reach_overruled", project="p", cycle_id="c-1")
+    observations.record("reach_overruled", arm=observations.ARM_TOO_LOCAL, project="p", cycle_id="c-1")
     with store.open("a", encoding="utf-8") as handle:
         handle.write('{"kind": "reach_ov\n')
     observations.record("judgement_raised", project="p", cycle_id="c-1", value=3)
@@ -69,7 +72,7 @@ def test_a_well_formed_line_carrying_an_unaveragable_value_is_skipped_too(store:
     """JSON that parses is not a reading that counts. `float(None)` raises, and it was raising
     outside the try — one such line and both `rein observe` and `--prune` fell over, against a
     docstring promising the opposite."""
-    observations.record("reach_overruled", project="p", cycle_id="c-1")
+    observations.record("reach_overruled", arm=observations.ARM_TOO_LOCAL, project="p", cycle_id="c-1")
     with store.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"kind": "waited_seconds", "project": "p", "cycle_id": "c", "value": None}) + "\n")
 
@@ -80,7 +83,14 @@ def test_a_well_formed_line_carrying_an_unaveragable_value_is_skipped_too(store:
 def test_recording_a_value_that_is_not_a_number_is_refused_rather_than_raised(store: Path) -> None:
     """ "Never raises" has to survive the caller that hands this a None it computed from a clock
     that was not running. The reading is lost; the gate the caller was opening is not."""
-    assert observations.record("waited_seconds", project="p", cycle_id="c", value=None) is False  # type: ignore[arg-type]
+    refused = observations.record(
+        "waited_seconds",
+        project="p",
+        cycle_id="c",
+        value=None,  # type: ignore[arg-type]
+        arm=observations.ARM_SILENT,
+    )
+    assert refused is False
     assert observations.read() == []
 
 
@@ -121,7 +131,7 @@ def test_the_report_carries_no_threshold(store: Path) -> None:
 
 def test_pruning_keeps_the_most_recent(store: Path) -> None:
     for n in range(10):
-        observations.record("reach_overruled", project="a", cycle_id=f"c-{n}")
+        observations.record("reach_overruled", arm=observations.ARM_TOO_LOCAL, project="a", cycle_id=f"c-{n}")
 
     assert observations.prune(4) == 6
     kept = observations.read()
@@ -129,6 +139,136 @@ def test_pruning_keeps_the_most_recent(store: Path) -> None:
 
 
 def test_pruning_below_the_count_drops_nothing(store: Path) -> None:
-    observations.record("reach_overruled", project="a", cycle_id="c-1")
+    observations.record("reach_overruled", arm=observations.ARM_TOO_LOCAL, project="a", cycle_id="c-1")
     assert observations.prune(100) == 0
     assert len(observations.read()) == 1
+
+
+# --- selection by reach, measured on both sides -----------------------------------
+
+
+def test_an_armed_kind_refuses_a_reading_with_no_arm(store: Path) -> None:
+    """A reading that cannot be placed in the comparison it exists for is not a reading. Filing it
+    under "" would pool it with readings that never shared a condition."""
+    assert observations.record("reach_overruled", project="p", cycle_id="c") is False
+    assert observations.record("waited_seconds", project="p", cycle_id="c", value=1) is False
+    assert observations.read() == []
+
+
+def test_an_unarmed_kind_refuses_an_arm(store: Path) -> None:
+    """`notified` against a count of reopened acceptances is a comparison nobody is making."""
+    assert observations.record("acceptance_reopened", project="p", cycle_id="c", arm="notified") is False
+    assert observations.read() == []
+
+
+def test_an_arm_belonging_to_another_kind_is_refused(store: Path) -> None:
+    """The vocabulary is per kind, not one shared set: a `waited_seconds` arm on a reach reading
+    would put it in the notification comparison."""
+    assert observations.record("reach_overruled", project="p", cycle_id="c", arm="notified") is False
+    assert observations.record("waited_seconds", project="p", cycle_id="c", value=1, arm="too_local") is False
+    assert observations.read() == []
+
+
+def test_the_two_directions_of_a_misjudged_reach_are_never_pooled(store: Path) -> None:
+    """One criterion, two ways to be wrong. A pooled figure reads as "the criterion was wrong N
+    times" and says nothing about which way to move it."""
+    observations.record("reach_overruled", project="a", cycle_id="c-1", arm=observations.ARM_TOO_LOCAL)
+    observations.record("reach_overruled", project="a", cycle_id="c-1", arm=observations.ARM_TOO_LOCAL)
+    observations.record("reach_overruled", project="a", cycle_id="c-2", arm=observations.ARM_TOO_MANDATE)
+
+    summary = observations.summarize(observations.read())
+
+    assert summary["reach_overruled/too_local"]["total"] == 2
+    assert summary["reach_overruled/too_mandate"]["total"] == 1
+    assert "reach_overruled" not in summary
+
+
+def test_a_reading_written_before_the_kind_was_armed_keeps_its_arm(store: Path) -> None:
+    """0.6.0 wrote `reach_overruled` unarmed and `change_request.add` was the only thing that wrote
+    it, so those readings are `too_local` — provenance, not a guess. Coercing them to "" instead
+    opened a third bucket printed under a claim about arms it did not have, and the missing-arm
+    warning, which looks only at real arms, stayed silent about a record that had none."""
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(
+        json.dumps({"kind": "reach_overruled", "project": "a", "cycle_id": "c-0", "value": 1.0, "subject": "D-001"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    entries = observations.read()
+
+    assert [e.arm for e in entries] == [observations.ARM_TOO_LOCAL]
+    assert set(observations.summarize(entries)) == {"reach_overruled/too_local"}
+
+
+def test_a_reading_in_no_arm_of_its_kind_is_dropped_not_pooled(store: Path, caplog: Any) -> None:
+    """A reading nobody can place is not a reading. Filing it under "" would pool it into a figure
+    whose whole point is that its readings shared a condition."""
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(
+        json.dumps({"kind": "waited_seconds", "project": "a", "cycle_id": "c-0", "value": 5.0, "arm": "whenever"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        entries = observations.read()
+
+    assert entries == []
+    assert "belongs to no arm" in caplog.text
+
+
+def test_one_sided_selection_by_reach_says_so(store: Path) -> None:
+    """The whole reason for the arms: a figure with only the "too loose" side on record only ever
+    reads as "ask more", and the criterion exists to ask less. The report names the gap itself
+    rather than leaving somebody to remember it."""
+    observations.record("reach_overruled", project="a", cycle_id="c-1", arm=observations.ARM_TOO_LOCAL)
+
+    out = observations.render(observations.summarize(observations.read()))
+
+    assert "no readings in: too_mandate" in out
+    assert "ended up `local` before the freeze" in out
+
+
+def test_both_sides_on_record_raises_no_warning(store: Path) -> None:
+    observations.record("reach_overruled", project="a", cycle_id="c-1", arm=observations.ARM_TOO_LOCAL)
+    observations.record("reach_overruled", project="a", cycle_id="c-1", arm=observations.ARM_TOO_MANDATE)
+
+    assert "no readings in" not in observations.render(observations.summarize(observations.read()))
+
+
+# --- how often work stopped -------------------------------------------------------
+
+
+def test_the_stop_count_is_pooled_across_arms_and_carries_its_own_claim(store: Path) -> None:
+    """One `waited_seconds` reading per wait, so its count is how often work stopped — which
+    falsifies a different claim than the durations do. Whether a channel was configured has nothing
+    to do with whether selection by reach settles the number of stops, so the count is not split."""
+    observations.record("waited_seconds", project="a", cycle_id="c-1", value=60, arm=observations.ARM_NOTIFIED)
+    observations.record("waited_seconds", project="a", cycle_id="c-1", value=120, arm=observations.ARM_NOTIFIED)
+    observations.record("waited_seconds", project="a", cycle_id="c-1", value=30, arm=observations.ARM_SILENT)
+
+    out = observations.render(observations.summarize(observations.read()))
+
+    assert "stops (every arm)" in out
+    assert observations.STOP_COUNT_CLAIM in out
+    # Three waits, pooled — not two and one.
+    assert re.search(r"stops \(every arm\)\s+3", out)
+
+
+def test_no_stop_count_line_without_waits(store: Path) -> None:
+    observations.record("acceptance_reopened", project="a", cycle_id="c-1")
+
+    assert "stops (every arm)" not in observations.render(observations.summarize(observations.read()))
+
+
+def test_the_stop_count_has_no_ceiling_anywhere(store: Path) -> None:
+    """Counted, never capped, and the store is where that is guaranteed rather than promised:
+    nothing reads this file to decide anything, so there is no path by which the figure could
+    become one."""
+    observations.record("waited_seconds", project="a", cycle_id="c-1", value=1, arm=observations.ARM_SILENT)
+
+    out = observations.render(observations.summarize(observations.read()))
+
+    assert "never a ceiling" in out
+    assert "No thresholds, and none are coming" in out

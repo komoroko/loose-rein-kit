@@ -60,7 +60,7 @@ from typing import Any
 
 import yaml
 
-from rein import models
+from rein import common, models
 from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,34 @@ FACT_VALUES = frozenset({FACT_NFR_CLAIMS, FACT_PARALLEL_TASKS, FACT_TASK_DEPENDE
 LIBRARY_NAME = "lenses.yaml"
 
 
+def scope_paths(entries: Iterable[str], tracked: Sequence[str]) -> tuple[str, ...]:
+    """The repo-relative paths a scope covers, in the vocabulary a lens condition reads.
+
+    Two path languages meet here and they are not the same one. A lens `paths` pattern is fnmatch
+    over **one file's path**; a scope entry is a **subtree** — `src/rein/data/schema` covers
+    everything beneath it, which is what `common.path_covered` means and what `guard.paths` and a
+    task's `scope` both use. Handing an entry straight to fnmatch reads the subtree as a filename,
+    so `fnmatch("src/rein/data/schema", "**/*.schema.json")` is `False` and the schema lens came
+    off the one task that touches schemas. The union hid it: some *other* task naming a file
+    outright kept the lens alive plan-wide, so the mismatch only surfaced once the selection was
+    narrowed per task and there was no other task to hide behind.
+
+    So the entries are resolved against the repository before any pattern sees them: every tracked
+    file the scope covers, plus the entries themselves. The entries stay because a scope may name
+    something that does not exist yet — a module this cycle will write — and its declared name is
+    then the only thing anybody knows about it.
+
+    An empty `entries` is *not* "unbounded" here: it is "nothing declared". Unboundedness is a
+    statement a caller makes about a scope it holds, and both callers make it explicitly, because
+    the two readings differ by every lens in the library.
+    """
+    wanted = sorted({entry for entry in entries if entry})
+    if not wanted:
+        return ()
+    covered = {path for path in tracked if any(common.path_covered(path, entry) for entry in wanted)}
+    return tuple(sorted(covered | set(wanted)))
+
+
 @dataclass(frozen=True)
 class Facts:
     """What a condition is decided against: this cycle's plan, reduced to what a lens can ask.
@@ -116,8 +144,15 @@ class Facts:
     present: frozenset[str] = frozenset()
 
     @classmethod
-    def of(cls, plan: Any) -> Facts:
-        """Read off a `models.Plan`. An absent plan yields facts nothing conditional holds against."""
+    def of(cls, plan: Any, *, tracked: Sequence[str]) -> Facts:
+        """Read off a `models.Plan`. An absent plan yields facts nothing conditional holds against.
+
+        `tracked` is the repository's file listing (`repo.Repo.tracked_paths`), which `changed`
+        needs because a scope entry is a subtree and a lens pattern matches a file — see
+        :func:`scope_paths`. It is a required argument rather than one with a default: the failure
+        of passing nothing is that path conditions quietly stop holding, which is silent, total,
+        and exactly what this argument exists to prevent.
+        """
         if plan is None:
             return cls()
         claims = list(plan.claims)
@@ -133,8 +168,15 @@ class Facts:
             present.add(FACT_PARALLEL_TASKS)
         if any(task.blocked_by for task in tasks):
             present.add(FACT_TASK_DEPENDENCIES)
+        # An empty `include` is unbounded — the schema says so — and a task that declares no scope
+        # at all is the same statement. One such task makes the union unbounded, which is what the
+        # integration reviewer reads against anyway.
+        if tasks and any(not task.scope_include for task in tasks):
+            changed = tuple(sorted(tracked))
+        else:
+            changed = scope_paths({path for task in tasks for path in task.scope_include}, tracked)
         return cls(
-            changed=tuple(sorted({path for task in tasks for path in task.scope_include})),
+            changed=changed,
             risks=tuple(claim.risk for claim in claims if claim.risk),
             claims=len(claims),
             tasks=len(tasks),
@@ -167,11 +209,11 @@ class Condition:
             return False
         if self.requires and not set(self.requires) <= facts.present:
             return False
-        if not self._paths_hold(facts.changed):
+        if not self.paths_hold(facts.changed):
             return False
         return self._risk_holds(facts.risks)
 
-    def _paths_hold(self, changed: Sequence[str]) -> bool:
+    def paths_hold(self, changed: Sequence[str]) -> bool:
         if not self.paths:
             return True
         return any(fnmatch.fnmatch(path, pattern) for path in changed for pattern in self.paths)
@@ -360,6 +402,40 @@ def frozen(plan: Any, *, stage: str) -> tuple[list[str], list[str]]:
         [e.id for e in entries if e.status == SELECTION_APPLIED],
         [e.id for e in entries if e.status == SELECTION_PROPOSED],
     )
+
+
+def for_task(lenses: Sequence[Lens], task: Any, *, tracked: Sequence[str]) -> list[Lens]:
+    """The subset of a frozen selection that one task's reviewer is actually sent to look for.
+
+    The selection is resolved once against the whole plan, and it has to be: `min_claims` counts
+    what the plan states, `min_tasks` counts its tasks, and `parallel_tasks` and
+    `task_dependencies` are relations *between* tasks. None of those has a value for a single task,
+    so a per-task resolution would drop them or copy them onto every task. The unit is right.
+
+    What is wrong is handing that one list to two readers with different reach. `Facts.changed` is
+    every path the plan's tasks together may touch, so it answers for the integration reviewer,
+    which reads the tree the merge produced — and over-answers for a per-task reviewer, which reads
+    only its own scope. One task touching a schema file put the schema lens on the review of every
+    other task, which is the "attack a failure this change cannot carry" cost the class system
+    exists to avoid.
+
+    So the narrowing happens here, at the hand-off, on the one axis that decomposes: a lens with
+    `paths` is kept only when they match a path *this* task's scope covers. A lens without them is
+    kept for every task, because its condition is a fact about the plan and is equally true of any
+    task in it.
+
+    **A task that declares no scope keeps everything.** An empty `include` is unbounded, says the
+    schema, and the widest scope getting the narrowest review is the inversion this narrowing would
+    otherwise introduce.
+
+    **This can only ever remove.** A task's covered paths are a subset of the plan's, so every lens
+    that survives was in the frozen list already — the mandate cannot be widened by a reviewer,
+    only spent more precisely.
+    """
+    if not task.scope_include:
+        return list(lenses)
+    changed = scope_paths(task.scope_include, tracked)
+    return [lens for lens in lenses if lens.when.paths_hold(changed)]
 
 
 def by_id(lenses: Sequence[Lens], ids: Sequence[str]) -> tuple[list[Lens], list[str]]:

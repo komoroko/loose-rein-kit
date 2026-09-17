@@ -67,6 +67,72 @@ function GateHead({ status, gate, review }) {
 // It is drawn in this pane rather than in an OS confirm() so the digests stay on screen while they
 // are being read, and so the refusal — a gate that is not ready — lands where the person asking is
 // looking instead of in the Console's output pane on another screen.
+// The part of the approval panel that is not a digest. Everything beside it says what was decided
+// *with* this human; these say what was decided without them, and an approval ratifies them
+// silently unless they are put in front of somebody.
+//
+// The material was never missing here — `.rein/plan.yaml` is the first deliverable in the left
+// rail, and both lists are in it. What was missing is the selection: which of a few hundred lines
+// deserve an eye at the moment of approving. `rein approve` prints it before its [y/N]; this route
+// did not, and whatever a gate requires on screen belongs on every route that can open it.
+function Naming({ naming }) {
+  const unasked = (naming || {}).unasked || [];
+  const lenses = (naming || {}).lenses || [];
+  if (!unasked.length && !lenses.length) return null;
+  return (
+    <>
+      {unasked.length ? (
+        <>
+          <div className="subhead" style={{ marginTop: ".8rem" }}>
+            {unasked.length} decision(s) the loop settled without asking you
+          </div>
+          <div className="scroll">
+            <table>
+              <tbody>
+                {unasked.map((d) => (
+                  <tr key={d.id}>
+                    <td><span className="mono">{d.id}</span> {d.subject}</td>
+                    <td>
+                      <div>settled: {d.answer || "(no answer recorded)"}</div>
+                      {/* Required for `local` by the schema, so the fallback can only appear under a
+                          plan nothing validated — and that is the reach claim most worth reading. */}
+                      <div className="note">
+                        local because: {d.rationale || "(none recorded — the reach claim is unsupported)"}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="note">{naming.overrule_cost}</p>
+        </>
+      ) : null}
+      {lenses.length ? (
+        <details style={{ marginTop: ".8rem" }}>
+          <summary>{lenses.length} review lens(es) this mandate would freeze</summary>
+          <table>
+            <tbody>
+              {lenses.map((l) => (
+                <tr key={l.stage + ":" + l.id}>
+                  <td><span className="mono">{l.id}</span> [{l.stage}]</td>
+                  <td>
+                    <div>{l.attack}</div>
+                    <div className="note">
+                      {l.status === "proposed" ? "proposed — yours to keep or drop: " : "applies when: "}
+                      {l.applies_when}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
 function Panel({ panel, review, unopened, onClose, onApprove, onChanges, onFreeze }) {
   const [target, setTarget] = useState(panel.kind === "changes" ? panel.suggested : "");
   const [reason, setReason] = useState("");
@@ -103,6 +169,7 @@ function Panel({ panel, review, unopened, onClose, onApprove, onChanges, onFreez
             </tbody>
           </table>
         </div>
+        <Naming naming={panel.naming} />
         {unopened.length ? <p className="note">Not opened in this pane yet: {unopened.join(", ")}</p> : null}
         <div className="row" style={{ marginTop: ".8rem" }}>
           <button className="primary" onClick={onApprove}>
@@ -268,7 +335,9 @@ export default function Gate({ status, gate }) {
   async function openApproval() {
     const ready = await getJson(`/api/gate/${encodeURIComponent(gate)}/readiness`);
     if (ready.error) return toast(ready.error, "err");
-    setPanel(ready.ok ? { kind: "approve", covers: ready.covers || {} } : { kind: "blocked", blockers: ready.blockers || [] });
+    setPanel(ready.ok
+      ? { kind: "approve", covers: ready.covers || {}, naming: ready.naming || {} }
+      : { kind: "blocked", blockers: ready.blockers || [] });
   }
 
   async function confirmApproval() {

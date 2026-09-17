@@ -1279,3 +1279,19 @@ def test_an_unanchored_change_request_is_refused(server: ui.DashboardServer) -> 
     status, body = write(server, "/api/changes", {"gate": "mandate", "target": "", "reason": "vague"})
     assert status == 400
     assert "needs a --target" in json.loads(body)["error"]
+
+
+def test_the_readiness_payload_carries_what_the_terminal_names_before_its_prompt(
+    server: ui.DashboardServer, repo: Path
+) -> None:
+    """The dashboard is the second route that can open a gate, and `confirm_locally` — which prints
+    the decisions the loop settled without asking — is on neither side of it. Whatever a gate
+    requires on screen belongs on every route that can open it.
+    """
+    from rein import approve
+    from rein import repo as repo_mod
+
+    ready = _readiness(server, "mandate")
+
+    assert ready["naming"]["overrule_cost"] == approve.OVERRULE_COST
+    assert ready["naming"]["unasked"] == approve.naming(repo_mod.Repo(repo), "mandate")["unasked"]

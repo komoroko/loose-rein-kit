@@ -106,12 +106,19 @@ Four documents, distinct roles — do not conflate them:
 - **What the harness measures about itself is what would falsify a rule it follows.** Not what is
   easy to collect: a pile of metrics nobody reads loses the figures that matter among the ones that
   were merely available. `rein observe` prints each figure beside the claim it tests —
-  `reach_overruled` against selection by reach, `unknown_at_mandate` beside `judgement_raised`,
-  `acceptance_reopened`, `waited_seconds` in both arms — the wait is timed whether or not a
-  notification channel is configured, because "the channel shortens it" is a comparison and one
-  arm cannot make it. No thresholds, and none are coming: a number with a
-  ceiling gets managed instead of read. **Nothing reads the store back.** A cycle's outcome must
-  not depend on what earlier cycles recorded, or the same repository answers differently elsewhere.
+  `unknown_at_mandate` beside `judgement_raised`, `acceptance_reopened`, and two figures that are
+  comparisons and so are recorded in arms and never pooled. `waited_seconds` is timed whether or
+  not a notification channel is configured, because "the channel shortens it" is a comparison and
+  one arm cannot make it. `reach_overruled` splits the same way: `too_local` is a `local` decision
+  a human overruled, `too_mandate` a `mandate` decision that ended up `local` before the freeze.
+  Both are readings about the criterion, not about who moved the reach. One criterion, two ways to be wrong — measured on both sides because a one-sided figure
+  only ever reads as "ask more", and the criterion exists to ask less. Its *count* of
+  `waited_seconds` readings is how often work stopped, printed pooled and with its own claim: how
+  often a human is asked is counted, never capped. No thresholds, and none are coming: a number
+  with a ceiling gets managed instead of read. **Nothing reads the store back**, which is also what
+  keeps the count from becoming a ceiling — there is no path by which it could. A cycle's outcome
+  must not depend on what earlier cycles recorded, or the same repository answers differently
+  elsewhere.
 - **A lens earns its place the second time, and loses it by never finding.** A one-off finding is
   recorded `unclassified` — once is an incident, twice is what tells you the condition. The reverse
   rule is `rein lens --stats`: applied and found counts per lens, across archived cycles, naming
