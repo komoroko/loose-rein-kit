@@ -24,6 +24,18 @@ the mandate is what adds them, out of the plan it is freezing — the act that f
 built is the act that fixes how many more times this cycle stops, and the approver sees the count
 while approving the thing that creates it. There is no cap on how many.
 
+**Every route that can open a gate opens all of them.** The dashboard is not a second-class route
+for two of the gate kinds: a crossing gate has a reading room derived from the plan that created it
+(the task's ticket and the decision records its declarations point at — which is what
+`operator_surface.adr` has always been for), it is approved through the same session-bound endpoint,
+and the board lists it. `is_awaiting` now means *decidable now* rather than *first in the list*,
+because two crossings carry no order against each other and a pane reading position would have told
+a human the second was not theirs to decide.
+
+**Gates are named, never numbered.** The ①..⑤ notation, then ①②, was a position in a fixed ladder.
+It is gone from the dashboard, the browser-tab flag, the board's text rendering and both payloads —
+an ordinal cannot survive a count that follows the change.
+
 `State.gate_ids` replaces the constant everywhere it was read, `State.upstream_of` replaces the
 index arithmetic, and the gates of a cycle are a fan rather than a line: each crossing is downstream
 of the mandate and upstream of acceptance, and they carry no order among themselves. Ordering two of

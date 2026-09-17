@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { READ_ONLY, circled, getJson, postJson, record, toast } from "../api.js";
+import { READ_ONLY, getJson, postJson, record, toast } from "../api.js";
 import { Empty, ReviewRun, Warn } from "../parts.jsx";
 import { DeliverableBody, DeliverableList, mainEntries } from "./Deliverables.jsx";
 import { StageBody, StageList } from "./stages.jsx";
@@ -50,7 +50,7 @@ function GateHead({ status, gate, review }) {
   return (
     <div className="gatehead">
       <span className="gtitle">
-        Gate {circled(g.index || (review || {}).index || 0)} · {gate || ""}
+        Gate · {gate || ""}
       </span>
       <span className="gstate">{where}</span>
     </div>
@@ -165,13 +165,13 @@ function Naming({ naming, gate }) {
 function Panel({ panel, review, unopened, onClose, onApprove, onChanges, onFreeze }) {
   const [target, setTarget] = useState(panel.kind === "changes" ? panel.suggested : "");
   const [reason, setReason] = useState("");
-  const index = circled((review || {}).index || 0);
+  const name = (review || {}).gate || "";
   const cancel = <button onClick={onClose}>Cancel</button>;
 
   if (panel.kind === "blocked") {
     return (
       <div className="confirm">
-        <p className="lede">Gate {index} will not open yet.</p>
+        <p className="lede">Gate {name} will not open yet.</p>
         <ul className="note">
           {panel.blockers.map((b) => <li key={b}>{b}</li>)}
         </ul>
@@ -185,7 +185,7 @@ function Panel({ panel, review, unopened, onClose, onApprove, onChanges, onFreez
   if (panel.kind === "approve") {
     return (
       <div className="confirm">
-        <p className="lede">Approving gate {index} binds these digests. The gate opens when you confirm.</p>
+        <p className="lede">Approving gate {name} binds these digests. The gate opens when you confirm.</p>
         <div className="scroll">
           <table>
             <tbody>
@@ -202,7 +202,7 @@ function Panel({ panel, review, unopened, onClose, onApprove, onChanges, onFreez
         {unopened.length ? <p className="note">Not opened in this pane yet: {unopened.join(", ")}</p> : null}
         <div className="row" style={{ marginTop: ".8rem" }}>
           <button className="primary" onClick={onApprove}>
-            Approve gate {index}
+            Approve gate {name}
           </button>
           {cancel}
         </div>
@@ -481,7 +481,7 @@ function Footer({ review, session, isBuild, gate, onApprove, onChanges }) {
     );
   }
   if (review.status === "approved") {
-    return <span className="okline">✓ gate {circled(review.index)} already open</span>;
+    return <span className="okline">✓ gate {review.gate} already open</span>;
   }
   if (!review.is_awaiting) return <span className="note">Not the gate under decision.</span>;
 
@@ -497,7 +497,7 @@ function Footer({ review, session, isBuild, gate, onApprove, onChanges }) {
           The human review is not frozen — {(session.completion_blockers || []).length} blocker(s).
         </span>
         <button className="primary" disabled>
-          Approve gate {circled(review.index)}
+          Approve gate {review.gate}
         </button>
       </>
     );
@@ -507,7 +507,7 @@ function Footer({ review, session, isBuild, gate, onApprove, onChanges }) {
     <>
       {warn}
       <button className="primary" onClick={onApprove}>
-        Approve gate {circled(review.index)}
+        Approve gate {review.gate}
       </button>{" "}
       <button onClick={onChanges}>Request changes</button>
     </>

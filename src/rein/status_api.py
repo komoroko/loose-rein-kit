@@ -1025,10 +1025,9 @@ def collect_status(
             {
                 "name": g,
                 "status": gates[g],
-                "index": i + 1,
                 "approval_id": (state.gate_receipt(g) or {}).get("approval_id") if state else None,
             }
-            for i, g in enumerate(gates)
+            for g in gates
         ],
         "plan": plan_block,
         "plan_status": state.plan_status if state else "draft",
@@ -1110,7 +1109,7 @@ def render(status: dict[str, object]) -> str:
     if isinstance(gates, list):
         for gate in gates:
             approval = gate.get("approval_id") or "-"
-            lines.append(f"- {gate['index']}. {gate['name']}: {gate['status']}  (approval: {approval})")
+            lines.append(f"- {gate['name']}: {gate['status']}  (approval: {approval})")
 
     plan = status.get("plan")
     if isinstance(plan, dict):

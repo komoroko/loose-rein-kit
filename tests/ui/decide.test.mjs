@@ -12,7 +12,6 @@ const AWAITING = {
 
 const REVIEW = {
   gate: "mandate",
-  index: 1,
   status: "pending",
   is_awaiting: true,
   awaiting: "mandate",
@@ -41,11 +40,11 @@ async function readingRoom({ readiness = { ok: true, covers: { plan: "sha256:aa"
   return { app, posts };
 }
 
-const APPROVE = { text: "Approve gate ①" };
+const APPROVE = { text: "Approve gate mandate" };
 
 test("the footer offers the decision, and the panel says what it would bind", async () => {
   const { app } = await readingRoom();
-  assert.match(app.text("rvFoot"), /Approve gate ①/);
+  assert.match(app.text("rvFoot"), /Approve gate mandate/);
 
   await app.click(APPROVE);
   const panel = app.text("rvFoot");
@@ -182,4 +181,58 @@ test("the console names the agent behind each role and switches one without a co
   assert.deepEqual(posts, [
     { action: "agent", params: { role: "implementer", adapter: "copilot", model: "gpt-5.2" } },
   ]);
+});
+
+
+// An irreversible point is a gate this cycle grew, so the dashboard has to be able to open it: a
+// route that cannot is the same gap as a panel that omits what the gate requires, one step out.
+const CROSSING = {
+  ...REVIEW,
+  gate: "T-001",
+  awaiting: "T-001",
+};
+
+const CROSSING_READINESS = {
+  ok: true,
+  covers: { plan: "sha256:aa" },
+  naming: {
+    unasked: [],
+    lenses: [],
+    overrule_cost: "",
+    crossing: [
+      { task_id: "T-001", title: "migrate users", kind: "persistence", name: "the users table", adr: "ADR-007" },
+    ],
+  },
+};
+
+test("a gate named after a task opens in the same pane, and says what it cannot take back", async () => {
+  const posts = [];
+  const app = await boot({
+    hash: "#gate/T-001",
+    routes: baseRoutes((url, options) => {
+      if (options?.method === "POST") {
+        posts.push({ url, body: JSON.parse(options.body) });
+        return { ok: true, gate: "T-001", approval_id: "GA-2" };
+      }
+      if (url.endsWith("/readiness")) return CROSSING_READINESS;
+      if (url.startsWith("/api/review/")) return CROSSING;
+      return undefined;
+    }),
+  });
+  await app.open();
+  await app.push("status", {
+    ...AWAITING,
+    gates: [
+      { name: "mandate", status: "approved", approval_id: "GA-0" },
+      { name: "T-001", status: "pending", approval_id: null },
+      { name: "acceptance", status: "pending", approval_id: null },
+    ],
+  });
+
+  assert.match(app.text("rvFoot"), /Approve gate T-001/);
+  await app.click({ text: "Approve gate T-001" });
+  const panel = app.text("rvFoot");
+  assert.match(panel, /cannot undo/);
+  assert.match(panel, /the users table/);
+  assert.match(panel, /ADR-007/);
 });

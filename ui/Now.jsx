@@ -1,7 +1,7 @@
 // The Now view: the next recommended command, and what stands between this repository and its
 // next gate.
 
-import { awaitingGate, circled, copyCmd } from "./api.js";
+import { awaitingGate, copyCmd } from "./api.js";
 import { Chip, Empty, ReviewRun, Scroll, Warn } from "./parts.jsx";
 
 function NextCommand({ status }) {
@@ -28,7 +28,7 @@ function NextCommand({ status }) {
           ))}
           {showRead ? (
             <a className="chip clk" href={"#gate/" + awaiting.name}>
-              read gate {circled(awaiting.index)} →
+              read gate {awaiting.name} →
             </a>
           ) : null}
         </div>
@@ -88,7 +88,7 @@ function InTheWay({ status }) {
         </>
       ) : awaiting ? (
         <p className="note">
-          Nothing is in the way of gate {circled(awaiting.index)} {awaiting.name}.{" "}
+          Nothing is in the way of gate {awaiting.name}.{" "}
           <a href={"#gate/" + awaiting.name}>Read it</a>, then decide.
         </p>
       ) : (
@@ -109,7 +109,7 @@ export default function Now({ status }) {
     );
   }
   const awaiting = awaitingGate(status);
-  const named = awaiting ? `gate ${circled(awaiting.index)} ${awaiting.name}` : "the next gate";
+  const named = awaiting ? `gate ${awaiting.name}` : "the next gate";
   return (
     <div className="view" id="view-now">
       <div className="block">

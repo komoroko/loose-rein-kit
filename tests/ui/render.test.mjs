@@ -39,7 +39,7 @@ test("the spine marks exactly one gate as the one waiting on you", async () => {
 
 test("Now names the gate it is clearing the way for", async () => {
   const app = await dashboard();
-  assert.match(app.text("attentionHead"), /In the way of gate ② acceptance/);
+  assert.match(app.text("attentionHead"), /In the way of gate acceptance/);
   assert.match(app.html("next"), /class="cmd"/);
   assert.match(app.html("attention"), /waiting on you/);
 });

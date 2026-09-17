@@ -9,12 +9,8 @@
 export const TOKEN = window.TOKEN;
 export const READ_ONLY = window.READ_ONLY;
 
-// Gate indices in the notation the documents use (AGENTS.md, the phase commands, the review pane's
-// own prose) — so the dashboard and the docs name the same gate the same way.
-const CIRCLED = ["", "①", "②", "③", "④", "⑤"];
-export function circled(i) {
-  return CIRCLED[i] || "g" + i;
-}
+// Gates are named, never numbered. They were ①..⑤, then ①② — a position in a fixed ladder, which
+// stops being true the moment a cycle declares an irreversible point and grows a gate of its own.
 
 // ---- toasts ----
 // A store rather than a hook, because the callers are event handlers and async writes, not

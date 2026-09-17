@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from "react";
 
-import { READ_ONLY, awaitingGate, circled, getJson, postJson, toast } from "./api.js";
+import { READ_ONLY, awaitingGate, getJson, postJson, toast } from "./api.js";
 import { useRoute, useStream, useTheme, useToasts } from "./hooks.js";
 import { useNotifier } from "./notify.js";
 import Now from "./Now.jsx";
@@ -61,7 +61,7 @@ function Spine({ status, route }) {
             >
               <span className="mark">{g.status === "approved" ? "✓" : g.name === awaiting ? "◆" : "·"}</span>
               <span className="gname">
-                {g.name} <span className="gidx">{circled(g.index)}</span>
+                {g.name}
               </span>
             </a>
           );

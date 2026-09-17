@@ -23,6 +23,7 @@ from __future__ import annotations
 import html
 import re
 import subprocess
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -78,6 +79,40 @@ _GATE_SPEC: dict[str, dict[str, list[_SpecItem]]] = {
 
 class ReviewError(Exception):
     """An unknown gate name — the only input error this module can be handed."""
+
+
+def _raw_plan(root: Path) -> models.Plan | None:
+    """plan.yaml wrapped without schema validation, or None when it cannot be read at all.
+
+    Same posture as :func:`_raw_state`: a document that would fail its schema must not take the
+    pane down, because the pane is where a person goes to find out what is wrong.
+    """
+    try:
+        return models.Plan(strict_yaml.load_mapping((root / ".rein" / "plan.yaml").read_text(encoding="utf-8")))
+    except (OSError, strict_yaml.StrictParseError):
+        return None
+
+
+def _crossing_spec(root: Path, gate: str) -> dict[str, list[_SpecItem]] | None:
+    """What a human reads to open a gate named after a task, or None when this cycle has no such gate.
+
+    Derived rather than declared, because the gate itself is: it exists because *this* plan froze
+    *this* task as work it cannot take back. The reading is that task's ticket and the decision
+    records its declarations point at — which is exactly where the reversibility was argued, and
+    what `operator_surface.adr` has always been for. The design travels as context, the same way
+    the brief travels with the mandate.
+
+    Validated against the state, not only the plan: a task id that is well-formed but never became
+    a gate is an unknown gate, not an empty reading room.
+    """
+    state = _raw_state(root)
+    if state is None or gate not in state.crossing_gates:
+        return None
+    plan = _raw_plan(root)
+    task = next((t for t in plan.tasks if t.id == gate), None) if plan is not None else None
+    adrs = sorted({str(entry["adr"]) for entry in task.irreversible_surfaces if entry.get("adr")}) if task else []
+    main: list[_SpecItem] = [f"docs/tasks/{gate}.md", *(f"docs/decisions/{adr}.md" for adr in adrs)]
+    return {"main": main, "context": ["docs/20-design.md"]}
 
 
 def _confidence(section_md: str) -> str | None:
@@ -268,28 +303,39 @@ def _gate_statuses(root: Path) -> dict[str, str]:
     state = _raw_state(root)
     if state is None:
         return {}
-    # The two document gates only. A crossing gate authorizes an operation, not a deliverable, so
-    # it has no row in `_GATE_SPEC` and nothing for this pane to show.
-    return {gate: state.gate_status(gate) for gate in models.GATE_ENDS}
+    # Every gate of this cycle, in this cycle's shape — `awaiting` is read off this, and a pane
+    # that listed only the two ends would say acceptance is next while a crossing stands unopened.
+    return {gate: state.gate_status(gate) for gate in state.gate_ids}
+
+
+def _decidable(root: Path, gate: str, gates: Mapping[str, str]) -> bool:
+    """Is `gate` open for a decision right now — not approved, and nothing it rests on pending?"""
+    if gates.get(gate, "pending") == "approved":
+        return False
+    state = _raw_state(root)
+    return state is not None and state.pending_upstream(gate) is None
 
 
 def collect_review(root: str | Path, gate: str) -> dict[str, object]:
     """Everything the review pane shows for `gate`. Raises ReviewError only for an unknown gate."""
-    if gate not in _GATE_SPEC:
-        raise ReviewError(f"unknown gate '{gate}' (expected one of {', '.join(models.GATE_ENDS)})")
     root = Path(root)
+    spec = _GATE_SPEC.get(gate) or _crossing_spec(root, gate)
+    if spec is None:
+        raise ReviewError(f"unknown gate '{gate}' ({models.gate_names()})")
 
     gates = _gate_statuses(root)
-    awaiting = next((g for g in models.GATE_ENDS if gates.get(g) != "approved"), None)
+    awaiting = next((g for g in gates if gates.get(g) != "approved"), None)
 
     result: dict[str, object] = {
         "gate": gate,
-        "index": models.GATE_ENDS.index(gate) + 1,
         "status": gates.get(gate, "pending"),
         "awaiting": awaiting,
-        "is_awaiting": gate == awaiting,
-        "deliverables": _expand(root, _GATE_SPEC[gate]["main"]),
-        "context": _expand(root, _GATE_SPEC[gate]["context"]),
+        # Decidable now, which is not the same as "first in the list". Two crossings carry no order
+        # against each other, so a pane that read `gate == awaiting` would tell a human the second
+        # one is not theirs to decide — when the only thing it rests on, the mandate, is open.
+        "is_awaiting": _decidable(root, gate, gates),
+        "deliverables": _expand(root, spec["main"]),
+        "context": _expand(root, spec["context"]),
         "diff": None,
         "review_meta": None,
         "open_escalations": None,
