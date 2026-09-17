@@ -19,7 +19,7 @@ evidence — so the conclusion lives here, one line each.
 -
 
 ## 3. Adoption of speculative work
-For each item in the phase deliverables' "speculative work log", finalize adopt / discard (fill the "Adopt? (human)" column).
+For each row in `docs/speculative-work.md`, finalize adopt / discard (fill the "Adopt? (human)" column).
 
 -
 

@@ -4,6 +4,92 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.6.3] - 2026-09-18
+
+Four readings that were asking the wrong store, or naming a place that did not exist. **Each one
+was settled by finding the mechanism already built and wired to something else** — a watermark, a
+return value, a chain — rather than by adding one.
+
+### The speculative work log did not exist anywhere
+
+"While a gate is pending" is the rule that lets work continue without compromising a gate: only
+outcome-independent work, outside `guard.paths`, throwaway-by-default, **recorded**. Four procedure
+files named where to record it and named three different places. `req.md`, `tasks.md` and
+`build.md` said "speculative-work events" — a record the closed event vocabulary has no name for,
+which `models.EVENT_KINDS`'s own comment calls out as a claim about the log that is not true.
+`design.md` said a "speculative work log" in `docs/20-design.md`. `gate-workflow.md` said the phase
+deliverable's log. `/status` step 4 reads one, and `docs/retrospective.md` §3 finalizes its "Adopt?
+(human)" column at the end of every cycle.
+
+No scaffold document has ever contained that section. The record every one of those texts depends
+on was in none of them.
+
+There is one log now, `docs/speculative-work.md`, scaffolded with the columns the retrospective
+already asks for, and every text points at it. One file rather than one per phase because the
+question asked of it later — did waiting cost anything? — is one question. No event kind was added:
+this is work whose adoption a human decides after the gate, which is a document's judgement and not
+a state transition the chain has to defend.
+
+### A notification that did not arrive was filed as one that did
+
+`waited_seconds` is an armed reading: how long a decision sat with a notification and without one.
+`Watcher.tick` set the arm from `read_channel() is not None` and *then* called `send`. `send`
+returns False when the channel fails — a command that is not installed, a non-zero exit, a timeout
+— and nothing read that. So a repository with a configured, broken channel filed every one of its
+waits as `notified`, and the treatment arm held waits where nobody had been told anything, which is
+the one distinction the comparison exists to make.
+
+The arm follows the delivery now. Exactly one send happens per wait, so that one result is the
+wait's condition, fixed at its start exactly as before.
+
+This also answers something the control arm needed. The `silent` series was thought to require a
+cycle with notification deliberately switched off — measuring by degrading the thing measured, on
+a hypothesis whose size is what the measurement was for. A failed delivery is that same condition,
+occurring without anyone choosing it, and the harness already knew: `send` had told it and the arm
+had thrown it away. It is a control condition that can be picked up, not a control group that was
+designed — failures cluster in time — and that is worth saying beside the figure.
+
+### `rein start` says what is new in the observation store
+
+`rein observe` is pull-only, on purpose: a trigger needs a level to fire at, and a level is exactly
+what a store that nothing reads back must not have. The consequence was a store nobody has to open
+— the same rot the lens library's retirement rule exists against.
+
+The occasion that needs no level was already built for the other store. `rein start` reports what
+moved since this reader last looked, against a per-person watermark that is not in `.rein/` because
+"this person has read up to here" is not a change to the project's state. The observation store
+gets the same treatment: a count, in the reader's own state beside their place in the chain, and
+one line in a reading somebody is already doing. It asks for no answer and is not on the
+notification channel — that channel carries decisions waiting on a person, and these wait on
+nobody. Reading the figures does not write to the store they came from.
+
+The mark is a count rather than a sequence because the store has none, and `--prune` can shrink it;
+a mark above the total means the store was trimmed, and the delta is reported as zero rather than
+as a negative.
+
+### How often the work stopped, asked of the chain instead of the dashboard
+
+The stop count came from counting `waited_seconds` readings. Those are written by `notify.Watcher`,
+which only `rein ui` starts — so a cycle driven from the terminal recorded no stops, and a count of
+zero meant either "nothing stopped" or "nobody opened the dashboard". The count and the duration of
+a stop were sharing a store, which made them look like one question with one answer.
+
+They are not. A duration needs the moment a wait began, and for a gate that moment is not an event.
+A count does not: every stop that *ended* is in the chain already — `gate_approved` is a person
+opening a gate, `changes_requested` is one refusing to, and an escalation is one being asked. All
+written inside a `store.Transaction`, on every host, with or without a dashboard.
+
+`events.stops` counts them, over the live chain and every archive (the figure would otherwise go
+blank at the second cycle, which is when it starts being worth reading). Escalations are distinct
+by `(kind, subjects)` — the identity `open_conditions` already groups by, because a repeated
+escalation is one thing to decide. `gate_revised` is excluded: `/revise` reopens a gate somebody
+has just refused, and that refusal is already counted. So is `decision_declared`, which five call
+sites use for three unrelated things.
+
+`rein observe` prints both counts, labelled by what they count, and never one instead of the other:
+they cover different scopes and are not corrections of each other. Neither has a ceiling, and the
+reason is still structural — nothing reads this store back to decide anything.
+
 ## [0.6.2] - 2026-09-18
 
 Claims the code makes about itself, and two tallies reading one event where the question needs

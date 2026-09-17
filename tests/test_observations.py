@@ -250,16 +250,44 @@ def test_the_stop_count_is_pooled_across_arms_and_carries_its_own_claim(store: P
 
     out = observations.render(observations.summarize(observations.read()))
 
-    assert "stops (every arm)" in out
     assert observations.STOP_COUNT_CLAIM in out
     # Three waits, pooled — not two and one.
-    assert re.search(r"stops \(every arm\)\s+3", out)
+    assert re.search(r"stops \(timed, every arm\)\s+3", out)
 
 
 def test_no_stop_count_line_without_waits(store: Path) -> None:
     observations.record("acceptance_reopened", project="a", cycle_id="c-1")
 
-    assert "stops (every arm)" not in observations.render(observations.summarize(observations.read()))
+    assert "stops (" not in observations.render(observations.summarize(observations.read()))
+
+
+def test_the_chained_stop_count_is_printed_beside_the_timed_one_never_instead(store: Path) -> None:
+    """They are not the same quantity. The timed count is waits `rein ui` saw, across every project
+    in this user-global store; the chained count is human interventions in one repository's audit
+    chain, needing no dashboard. A reader who takes them for one number reads the gap as drift."""
+    observations.record("waited_seconds", project="a", cycle_id="c-1", value=60, arm=observations.ARM_NOTIFIED)
+
+    out = observations.render(observations.summarize(observations.read()), chain_stops=4)
+
+    assert re.search(r"stops \(timed, every arm\)\s+1", out)
+    assert re.search(r"stops \(this repo, chained\)\s+4", out)
+    assert "the two count different things" in out
+
+
+def test_an_empty_store_still_reports_what_the_chain_counted(store: Path) -> None:
+    """The case this figure exists for. A cycle driven from the terminal writes no observation and
+    still stopped for a human every time it did — so returning "nothing recorded yet" here would
+    withhold the count at the one moment it is the only count there is."""
+    out = observations.render({}, chain_stops=5)
+
+    assert re.search(r"stops \(this repo, chained\)\s+5", out)
+    assert observations.STOP_COUNT_CLAIM in out
+    assert "nothing recorded yet" not in out
+
+    # …and with nothing anywhere, it says so about both rather than only the store.
+    both_empty = observations.render({}, chain_stops=0)
+    assert "nothing recorded yet" in both_empty
+    assert "no stop yet either" in both_empty
 
 
 def test_the_stop_count_has_no_ceiling_anywhere(store: Path) -> None:

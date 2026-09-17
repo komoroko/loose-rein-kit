@@ -78,6 +78,12 @@ KIND_VALUES = frozenset(KINDS)
 #: falsify. Per kind rather than one shared set: `notified` against a `reach_overruled` reading
 #: would place it in a comparison nobody is making, and a store that accepts it is one nobody can
 #: aggregate.
+#:
+#: `notified` means a notification **was delivered** for that wait, not that a channel was
+#: configured for it. The two came apart wherever a channel was configured and broken, and the arm
+#: read the config: every such wait landed in the treatment group having told nobody. A control
+#: condition is also what a failed delivery *is* — obtained without anyone turning a channel off
+#: to get it.
 ARM_NOTIFIED = "notified"
 ARM_SILENT = "silent"
 #: The two ways selection by reach can be wrong. `too_local` is the loop calling a decision cheap
@@ -146,7 +152,10 @@ CLAIMS: Mapping[str, str] = {
     "unknown_at_mandate": "honesty at the mandate is what buys fewer interventions later",
     "judgement_raised": "...measured against this: findings that needed a human to sort code from plan",
     "acceptance_reopened": "comprehension is a by-product of deciding — a reopened acceptance says it was not",
-    "waited_seconds": "the harness owns waiting: how long a decision sat, with a channel and without one",
+    "waited_seconds": (
+        "the harness owns waiting: how long a decision sat, with a notification delivered and without "
+        "one — a configured channel that did not deliver is a wait nobody was told about"
+    ),
 }
 
 #: Kinds whose value is seconds. Everything else is a count, and the two are not rendered alike: a
@@ -164,6 +173,16 @@ DURATION_KINDS = frozenset({"waited_seconds"})
 #: ceiling. A ceiling on how often a human may be asked gets answered by not asking, which is the
 #: failure selection by reach exists to prevent.
 STOP_COUNT_CLAIM = "selection by reach settles how often work stops — the count of blocking points, never a ceiling"
+
+#: Said whenever both stop counts are printed, because they are not the same quantity and a reader
+#: who takes them for one will read the gap as drift. The timed count is waits the dashboard saw
+#: the SSOT surface, so it is blind to any cycle run without `rein ui` and spans every project in
+#: this store. The chained count is human interventions one repository's audit chain recorded, so
+#: it misses nothing and covers only that repository. Neither is a correction of the other.
+_STOP_SOURCES = (
+    "the two count different things: timed = waits `rein ui` saw, across every project here; "
+    "chained = human interventions in this repository's chain, with no dashboard needed"
+)
 
 STORE_NAME = "observations.ndjson"
 
@@ -334,13 +353,27 @@ def summarize(entries: Sequence[Observation], *, project: str = "") -> dict[str,
     return out
 
 
-def render(summary: Mapping[str, Mapping[str, float]]) -> str:
-    if not summary:
-        return (
+def render(summary: Mapping[str, Mapping[str, float]], chain_stops: int | None = None) -> str:
+    """The figures, each beside the claim it tests.
+
+    `chain_stops` is the same question as the `stops` line below, asked of a source that does not
+    need `rein ui` (`events.stops`). It is passed in rather than read here because it is a fact
+    about one repository and this store is user-global — and it is printed *beside* the timed
+    count, never instead of it, because the two are not the same quantity. See `_STOP_SOURCES`.
+    """
+    # An empty store with a chain behind it is the case this figure was added for: a cycle run from
+    # the terminal alone records no observation and still stopped for a human every time it did.
+    # Returning the "nothing recorded yet" line here would have withheld the count at exactly the
+    # moment it is the only one there is.
+    if not summary and not chain_stops:
+        nothing = (
             f"nothing recorded yet ({store_path()}).\n"
             "Observations accumulate as cycles run; one cycle answers none of the questions they "
             "are for, which are all about whether a rule in this harness was a good one."
         )
+        if chain_stops is None:
+            return nothing
+        return f"{nothing}\nThis repository's chain records no stop yet either."
     lines: list[str] = []
     seen_claims: set[str] = set()
     for key, figures in summary.items():
@@ -356,9 +389,14 @@ def render(summary: Mapping[str, Mapping[str, float]]) -> str:
     # The same readings, counted instead of averaged, and pooled across arms. A number printed with
     # no claim beside it gets read as a score, so this one carries its own.
     stops = sum(int(f["count"]) for k, f in summary.items() if k.split("/", 1)[0] == "waited_seconds")
-    if stops:
-        lines.append(f"{'stops (every arm)':<30} {stops:>5}")
+    if stops or chain_stops is not None:
+        if stops:
+            lines.append(f"{'stops (timed, every arm)':<30} {stops:>5}")
+        if chain_stops is not None:
+            lines.append(f"{'stops (this repo, chained)':<30} {chain_stops:>5}")
         lines.append(f"  {STOP_COUNT_CLAIM}")
+        if stops and chain_stops is not None:
+            lines.append(f"  {_STOP_SOURCES}")
 
     for kind, spec in ARMS.items():
         present = {key.split("/", 1)[1] for key in summary if key.startswith(f"{kind}/")}

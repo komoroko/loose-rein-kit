@@ -25,9 +25,9 @@ Show the Human-on-the-Loop monitoring view. **Do not change state (read-only).**
      Distinguish the cause by exit code: **1 = missing (belongs under "Waiting on you") /
      2 = cannot check** (requirements document absent, 0 requirement IDs, or no tasks in the plan
      → guide as a path/notation setup problem).
-4. **Speculative work**: from the phase deliverable's speculative-work log, list the items whose
-   adoption is still undecided. If `done` is reached but `docs/retrospective.md` is unfilled, or a
-   log still has open items, prompt about them.
+4. **Speculative work**: from `docs/speculative-work.md`, list the rows whose "Adopt? (human)" column is
+   still blank. If `done` is reached but `docs/retrospective.md` is unfilled, or the log still has
+   blank rows, prompt about them.
 5. **(Only with GitHub integration)** If `github.enabled: true` in `.rein/config.yaml`, give a
    one-line note that `rein issue-sync` can bring Issues into line with this board (the plan's
    tasks). Issues are a one-way mirror, not the SSOT.

@@ -359,8 +359,8 @@ is the point; never fold them into the implementer's session.
    - **Always present a self-assessment as well** (`.rein/prompts/rules/gate-workflow.md` "Gate self-assessment"),
      including the outcomes of spots that produced blocked/needs-revision.
 5. **While waiting for approval**, only outcome-independent speculative work
-   (`.rein/prompts/rules/gate-workflow.md` "While a gate is pending"; record it as
-   speculative-work events):
+   (`.rein/prompts/rules/gate-workflow.md` "While a gate is pending"; record it in
+   `docs/speculative-work.md`):
    concretizing functional test cases in `docs/test/test-plan.md`, a trial run of
    `make audit`, and other `/verify` prep pulled forward. Do not make changes that could
    require redoing the implementation.

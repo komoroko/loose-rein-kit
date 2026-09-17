@@ -36,8 +36,9 @@ drip-feeding one question at a time, never a budget for the phase. Pull forward 
 outcome-independent work** (scaffolding, dev-env/CI setup, read-only investigation, fixtures)
 — never deliverables premised on the pending decision. Speculative work stays **outside
 `guard.paths`** (`tests/` is deliberately unguarded for this); a gate_guard denial marks
-the boundary. It is throwaway-by-default, recorded in the phase deliverable's "speculative work
-log" (per-phase specifics: each procedure file's "While waiting for approval" section).
+the boundary. It is throwaway-by-default, recorded in `docs/speculative-work.md` — **one log for every
+phase**, because the question asked of it later ("did waiting cost anything?") is one question
+(per-phase specifics: each procedure file's "While waiting for approval" section).
 
 ## The human review before acceptance
 

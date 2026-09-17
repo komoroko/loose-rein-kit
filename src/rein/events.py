@@ -35,6 +35,39 @@ ATTENTION_EVENTS = frozenset(
 )
 
 
+#: Chain events that each mark one stop at a gate: the work halted and a human acted. Both need a
+#: person — `gate_approved` is one opening a gate and `changes_requested` is one refusing to.
+#:
+#: This exists because the stop *count* and the stop *duration* have different availability, and
+#: living in one store made them look like one question. Duration comes from `notify.Watcher`,
+#: which only `rein ui` starts, so a cycle run from the terminal alone records none. The count does
+#: not need the watcher: every stop that ended is already in the chain, written inside a
+#: `store.Transaction` on every host and every path.
+#:
+#: `gate_revised` is deliberately out. `/revise` reopens a gate a person has usually just refused,
+#: and that refusal is `changes_requested` — counting both would count one stop twice. So is
+#: `decision_declared`, which five call sites use for salvage branches, the PR-stack ledger and
+#: task declarations; a name that means several things cannot be one of them here.
+GATE_STOP_EVENTS = frozenset({"gate_approved", "changes_requested"})
+
+
+def stops(events: Sequence[models.Event]) -> int:
+    """How many times this chain says the work stopped and a human had to act.
+
+    The gate stops above, plus the distinct conditions that were escalated to a person. Distinct by
+    `(kind, subjects)` — the same identity :func:`open_conditions` groups by, because a repeated
+    escalation is one thing to decide however many attempts recorded it, and two surfaces answering
+    one question differently is the failure that grouping was written against.
+
+    Counted over whatever chain it is handed, so an archived cycle counts the same as the live one.
+    Never a ceiling: nothing reads this back to decide anything, which is the invariant that keeps
+    a figure from becoming a budget (`observations.STOP_COUNT_CLAIM`).
+    """
+    gates = sum(1 for e in events if e.event in GATE_STOP_EVENTS)
+    escalated = {(e.event, tuple(e.subject_ids)) for e in events if e.event in ATTENTION_EVENTS}
+    return gates + len(escalated)
+
+
 #: `ATTENTION_EVENTS` a task's own later success can retire. Both are the build loop's per-attempt
 #: verdicts about a task, so the task's status is authoritative over what they reported.
 _TASK_SCOPED = frozenset({"task_failed", "knowledge_gap"})

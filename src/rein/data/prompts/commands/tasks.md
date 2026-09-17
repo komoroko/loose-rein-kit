@@ -62,7 +62,7 @@ On the first run (no tasks generated yet), create them with the steps below.
 Write the deliverables (`docs/tasks/T-NNN.md`) in the user's language.
 
 ## While waiting for approval
-`notify-and-wait` first; then only **outcome-independent, throwaway-by-default** work (rules: `.rein/prompts/rules/gate-workflow.md` "While a gate is pending"), recorded as speculative-work events:
+`notify-and-wait` first; then only **outcome-independent, throwaway-by-default** work (rules: `.rein/prompts/rules/gate-workflow.md` "While a gate is pending"), recorded in `docs/speculative-work.md`:
 - Preparing test fixtures/harness/scaffolding that are clearly needed from the agreed design
   (`tests/` is deliberately unguarded for exactly this; the paths in `guard.paths` wait for the mandate).
 - **Forbidden**: real implementation of each feature.

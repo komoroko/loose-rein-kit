@@ -29,7 +29,7 @@ and changing the approach it cites needs `/revise` and a re-approval, so say so 
 Write the deliverables (`docs/20-design.md`, `docs/decisions/ADR-*.md`) in the user's language.
 
 ## While the mandate is unapproved
-No product code (`rein guard` denies it), and only **throwaway-by-default** work recorded in the "speculative work log" of `docs/20-design.md` (rules: `.rein/prompts/rules/gate-workflow.md` "While a gate is pending"):
+No product code (`rein guard` denies it), and only **throwaway-by-default** work recorded in `docs/speculative-work.md` (rules: `.rein/prompts/rules/gate-workflow.md` "While a gate is pending"):
 - Setting up the skeleton of the dev environment / test harness / CI, lint/static-analysis config —
   **outside `guard.paths`** (e.g. CI config, `tests/`, tooling); a guarded path waits for the
   mandate instead.

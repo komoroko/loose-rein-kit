@@ -244,6 +244,40 @@ def test_a_wait_with_no_channel_configured_is_still_measured(config_home: Path) 
     assert [o.arm for o in waits] == [observations.ARM_SILENT]
 
 
+def test_a_configured_channel_that_did_not_deliver_is_a_silent_wait(
+    config_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The arm is what the wait was spent under, and a channel that failed told nobody. It used to
+    be set from `read_channel() is not None` before `send` ran, so a command that is not installed,
+    or exits non-zero, or times out, filed every one of its waits as `notified` — a treatment group
+    holding waits where nobody was notified, which is the one thing the comparison exists to tell
+    apart. `send` already returned False; the arm was reading the config instead of the outcome."""
+    monkeypatch.setattr(notify, "read_channel", lambda: notify.Channel(argv=("definitely-not-a-command",)))
+    monkeypatch.setattr(notify, "send", lambda *_a, **_k: False)
+    queue: list[Any] = [_decision("a"), {"id": "", "waiting_on_human": False}]
+    watcher = notify.Watcher(status=lambda: queue.pop(0), project="demo", url="http://x/", stop=threading.Event())
+
+    assert watcher.tick() is False  # the channel was configured; the send failed
+    watcher.tick()
+
+    waits = [o for o in observations.read() if o.kind == "waited_seconds"]
+    assert [o.arm for o in waits] == [observations.ARM_SILENT]
+
+
+def test_a_delivered_notification_is_the_treatment_arm(config_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """…and the other side of it, so the change above cannot be satisfied by filing everything
+    `silent`."""
+    _capture(monkeypatch)
+    queue: list[Any] = [_decision("a"), {"id": "", "waiting_on_human": False}]
+    watcher = notify.Watcher(status=lambda: queue.pop(0), project="demo", url="http://x/", stop=threading.Event())
+
+    assert watcher.tick() is True
+    watcher.tick()
+
+    waits = [o for o in observations.read() if o.kind == "waited_seconds"]
+    assert [o.arm for o in waits] == [observations.ARM_NOTIFIED]
+
+
 def test_the_two_arms_are_summarized_apart(config_home: Path) -> None:
     """Pooled, the mean moves with whichever arm was recorded more and answers a question nobody
     asked. The claim is the difference between them."""

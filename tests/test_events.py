@@ -299,3 +299,42 @@ def test_cost_on_a_repository_that_has_launched_nothing(tmp_path: Path, capsys: 
     _seed(tmp_path, "cycle_initialized")
     assert events.main(["--cost", "--repo", str(tmp_path)]) == 0
     assert "no run has recorded what it cost yet" in capsys.readouterr().out
+
+
+# --- how often the work stopped, asked of the chain ----------------------------
+
+
+def test_stops_counts_gate_stops_and_distinct_escalations() -> None:
+    """The count and the duration of a stop have different availability, and living in one store
+    made them look like one question. `notify.Watcher` only runs under `rein ui`, so a cycle driven
+    from the terminal records no duration — but every stop that ended is in the chain already."""
+    built = _chain(
+        ("gate_approved", ("mandate",)),
+        ("changes_requested", ("acceptance",)),
+        ("gate_approved", ("acceptance",)),
+        ("task_started", ("T-1",)),  # nobody stopped for this
+    )
+    assert events.stops(built) == 3
+
+
+def test_a_repeated_escalation_is_one_stop() -> None:
+    """Eight supervised attempts against one session limit file eight rows and are one thing to
+    decide. `open_conditions` groups by `(kind, subjects)` for that reason; counting stops by any
+    other rule would make two surfaces answer one question differently."""
+    built = _chain(*[("task_failed", ("T-1",))] * 8)
+    assert events.stops(built) == 1
+
+    both = _chain(("task_failed", ("T-1",)), ("task_failed", ("T-2",)))
+    assert events.stops(both) == 2
+
+
+def test_a_revision_is_not_counted_on_top_of_the_refusal_that_caused_it() -> None:
+    """`/revise` reopens a gate a person has usually just refused, and that refusal is already
+    `changes_requested`. `decision_declared` is out for a different reason: five call sites use it
+    for salvage branches, the PR-stack ledger and task declarations, so it does not mean one thing."""
+    built = _chain(
+        ("changes_requested", ("mandate",)),
+        ("gate_revised", ("mandate",)),
+        ("decision_declared", ("T-1",)),
+    )
+    assert events.stops(built) == 1

@@ -292,11 +292,22 @@ class Watcher:
         if not current:
             return False
         channel = read_channel()
-        self._arm = observations.ARM_NOTIFIED if channel is not None else observations.ARM_SILENT
         if channel is None:
+            self._arm = observations.ARM_SILENT
             return False
         assert isinstance(decision, Mapping)
-        return send(render(decision, project=self._project, url=self._url), command=list(channel.argv))
+        sent = send(render(decision, project=self._project, url=self._url), command=list(channel.argv))
+        # The arm is what the wait was *spent under*, and a channel that did not deliver is a wait
+        # the person was not told about. It used to be set from `channel is not None` before this
+        # call, so a configured-but-broken channel — a command that is not installed, a non-zero
+        # exit, a timeout — filed every one of its waits as `notified`. The comparison then had a
+        # treatment arm holding waits where nobody was notified, which is the one thing it exists
+        # to distinguish. `send` already knew; the arm was reading the config instead of the outcome.
+        #
+        # Exactly one send happens per wait (the id has to change for `tick` to get this far), so
+        # this one result is that wait's condition, fixed at its start like the other arm is.
+        self._arm = observations.ARM_NOTIFIED if sent else observations.ARM_SILENT
+        return sent
 
     def _close_wait(self) -> None:
         """File the wait that just ended, in the arm it was spent in.
