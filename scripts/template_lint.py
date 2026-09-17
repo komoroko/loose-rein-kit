@@ -124,8 +124,12 @@ def _require(text: str, path: str, terms: list[str], what: str) -> list[str]:
 
 
 def gate_names() -> list[str]:
-    """The canonical gate list (models.GATE_ORDER) the prose must echo verbatim."""
-    return sorted(models.GATE_ORDER)
+    """The two gate names (models.GATE_ENDS) the prose must echo verbatim.
+
+    Only these two. A cycle's other gates are named for the tasks that declared themselves
+    irreversible, so they exist per cycle and there is nothing for a template to echo.
+    """
+    return sorted(models.GATE_ENDS)
 
 
 def quality_gate_steps(config_text: str) -> list[str]:
@@ -146,7 +150,7 @@ def check_vocabulary(files: dict[str, str]) -> list[str]:
     failures += _require(files[AGENTS_MD], AGENTS_MD, kinds, "task kind (dag.KIND_VALUES)")
     failures += _require(files[TASKS_CMD], TASKS_CMD, kinds, "task kind (dag.KIND_VALUES)")
     failures += _require(files[TASKS_CMD], TASKS_CMD, sorted(dag.STATUS_VALUES), "task status (dag.STATUS_VALUES)")
-    failures += _require(files[AGENTS_MD], AGENTS_MD, gate_names(), "gate (models.GATE_ORDER)")
+    failures += _require(files[AGENTS_MD], AGENTS_MD, gate_names(), "gate (models.GATE_ENDS)")
     # The DoD step names are defined once (config.yaml) but narrated in several prose homes —
     # every copy must keep echoing them, or a renamed step teaches stale vocabulary somewhere.
     steps = quality_gate_steps(files[CONFIG_PATH])

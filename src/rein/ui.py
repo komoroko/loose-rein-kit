@@ -304,8 +304,8 @@ def action_argv(action: str, params: dict[str, object]) -> list[str]:
     # not evidence of anything, and dispositions live in `review.yaml`, where they are signed.
     if action == "revise":
         gate = str(params.get("gate") or "")
-        if gate not in models.GATE_VALUES:
-            raise UiActionError(HTTPStatus.BAD_REQUEST, f"revise 'gate' must be one of {', '.join(models.GATE_ORDER)}")
+        if not models.gate_name_ok(gate):
+            raise UiActionError(HTTPStatus.BAD_REQUEST, f"revise 'gate' must be {models.gate_names()}")
         reason = str(params.get("reason") or "").strip()
         if not reason:
             raise UiActionError(HTTPStatus.BAD_REQUEST, "revise needs a non-empty 'reason'")

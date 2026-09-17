@@ -19,7 +19,7 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import chain, make_state, seed_repo
 
-ALL_APPROVED = dict.fromkeys(models.GATE_ORDER, "approved")
+ALL_APPROVED = dict.fromkeys(models.GATE_ENDS, "approved")
 
 
 def finished_repo(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:

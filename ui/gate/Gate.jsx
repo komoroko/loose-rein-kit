@@ -75,12 +75,41 @@ function GateHead({ status, gate, review }) {
 // rail, and both lists are in it. What was missing is the selection: which of a few hundred lines
 // deserve an eye at the moment of approving. `rein approve` prints it before its [y/N]; this route
 // did not, and whatever a gate requires on screen belongs on every route that can open it.
-function Naming({ naming }) {
+function Naming({ naming, gate }) {
   const unasked = (naming || {}).unasked || [];
   const lenses = (naming || {}).lenses || [];
-  if (!unasked.length && !lenses.length) return null;
+  const crossing = (naming || {}).crossing || [];
+  if (!unasked.length && !lenses.length && !crossing.length) return null;
+  const crossingTasks = [...new Set(crossing.map((c) => c.task_id))];
   return (
     <>
+      {crossing.length ? (
+        <>
+          {/* First, and not in a <details>. At the mandate this is how many more times the cycle
+              will stop; at a crossing gate it is the thing about to become permanent. It is the one
+              item on this screen that no later gate can reconsider. */}
+          <div className="subhead" style={{ marginTop: ".8rem" }}>
+            {gate === "mandate"
+              ? `${crossingTasks.length} further stop(s) this mandate creates — one before each task that declares work it cannot take back`
+              : "This approval lets the loop do something it cannot undo"}
+          </div>
+          <table>
+            <tbody>
+              {crossing.map((c) => (
+                <tr key={c.task_id + ":" + c.name}>
+                  <td><span className="mono">{c.task_id}</span> {c.title}</td>
+                  <td>
+                    <div>cannot be undone: {c.name} ({c.kind})</div>
+                    <div className="note">
+                      decided in: {c.adr || "(no ADR recorded — the reversibility claim is unsupported)"}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : null}
       {unasked.length ? (
         <>
           <div className="subhead" style={{ marginTop: ".8rem" }}>
@@ -169,7 +198,7 @@ function Panel({ panel, review, unopened, onClose, onApprove, onChanges, onFreez
             </tbody>
           </table>
         </div>
-        <Naming naming={panel.naming} />
+        <Naming naming={panel.naming} gate={(review || {}).gate} />
         {unopened.length ? <p className="note">Not opened in this pane yet: {unopened.join(", ")}</p> : null}
         <div className="row" style={{ marginTop: ".8rem" }}>
           <button className="primary" onClick={onApprove}>

@@ -259,7 +259,8 @@ human decides *whether*; the loop does the work.
 - **Context isolation and hygiene.** Delegate phase work to role agents; keep deliverables and
   logs lean (tiers, GC, compaction: the rules module).
 - **Promote durable lessons** from `docs/retrospective.md` into the always-loaded files at
-  acceptance, not archived away.
+  acceptance, not archived away. The lens library is one of those destinations: it is the only
+  way a review lens is ever added, and `rein lens --stats` argues only for removal.
 - If anything behaves oddly, run `rein doctor` first.
 - **The verb list is in the CLI, not in this file.** `rein help --all` names every verb (the
   default listing carries only the ones a human types) and `rein <verb> --help` gives its

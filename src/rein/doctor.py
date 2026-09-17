@@ -317,12 +317,6 @@ def check_integrations(repo: repo_mod.Repo, config: models.Config | None) -> lis
 #: Gates whose approval is taken at or after the freeze. Their receipts bind the *frozen* plan and
 #: config, so a receipt of theirs naming a different digest is a real inconsistency.
 #:
-#: Both of them, now that there are two. It used to exclude the requirements and design gates,
-#: which were approved while the plan was still a draft that `/design` and `/tasks` then moved —
-#: comparing their receipts against the live document turned every healthy repository permanently
-#: red. There is no such gate any more: the mandate approval *is* the freeze, so every receipt in
-#: the document was taken against frozen bytes.
-_POST_FREEZE_GATES = models.GATE_ORDER
 
 
 def _source_drift(state: models.State, repo: repo_mod.Repo | None) -> list[Finding]:
@@ -447,7 +441,12 @@ def check_freeze_drift(
     findings.append(_environment_drift(state, config))
     findings += _source_drift(state, repo)
 
-    for gate in _POST_FREEZE_GATES:
+    # Every gate of this cycle. It used to exclude the requirements and design gates, which were
+    # approved while the plan was still a draft that `/design` and `/tasks` then moved — comparing
+    # their receipts against the live document turned every healthy repository permanently red.
+    # There is no such gate any more: the mandate approval *is* the freeze, so every receipt taken
+    # afterwards, crossing gates included, was taken against frozen bytes.
+    for gate in state.gate_ids:
         if state.gate_status(gate) != "approved":
             continue
         receipt = state.gate_receipt(gate) or {}
@@ -478,7 +477,7 @@ def check_receipts(state: models.State | None) -> list[Finding]:
     if state is None:
         return []
     findings: list[Finding] = []
-    for gate in models.GATE_ORDER:
+    for gate in state.gate_ids:
         if state.gate_status(gate) != "approved":
             continue
         receipt = state.gate_receipt(gate) or {}

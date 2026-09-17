@@ -63,7 +63,7 @@ def _files(**overrides: str) -> dict[str, str]:
 def test_gate_names_come_from_the_vocabulary_not_a_scraped_file() -> None:
     """Read from a document's front matter these would drift. A constant cannot drift from the
     code that acts on it, which is the whole point of a canary."""
-    assert template_lint.gate_names() == sorted(models.GATE_ORDER)
+    assert template_lint.gate_names() == sorted(models.GATE_ENDS)
 
 
 def test_quality_gate_steps_reads_the_dod_names() -> None:

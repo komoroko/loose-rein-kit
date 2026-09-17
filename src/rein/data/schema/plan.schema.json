@@ -298,7 +298,8 @@
       "required": [
         "kind",
         "name",
-        "paths"
+        "paths",
+        "reversible"
       ],
       "properties": {
         "kind": {
@@ -324,6 +325,10 @@
           "items": {
             "$ref": "#/$defs/repoPath"
           }
+        },
+        "reversible": {
+          "description": "Whether this surface can be taken back once the task that creates it has run. Not a new question: the architect answers it for every requirement and the design carries it into the task, which is where `/tasks` reads it from — it was simply dropped on the way into this record, leaving the answer in prose that only the acceptance brief opens, after the thing has happened. Required and boolean, with no default, because an omitted answer used to read as `true` by silence. `false` makes the task an irreversible point: the cycle gains a gate named for it and the loop stops there before running it, which is the only place the answer can still change anything.",
+          "type": "boolean"
         },
         "adr": {
           "description": "The decision record that settled what this requires of a person and whether it can be undone. Shown beside the declaration at acceptance so the trade-off a human approved with the mandate is reachable from what was built — the review never restates it, because a restatement is a sentence nobody observed.",

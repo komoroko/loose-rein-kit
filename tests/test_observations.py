@@ -291,12 +291,60 @@ def test_an_empty_store_still_reports_what_the_chain_counted(store: Path) -> Non
 
 
 def test_the_stop_count_has_no_ceiling_anywhere(store: Path) -> None:
-    """Counted, never capped, and the store is where that is guaranteed rather than promised:
-    nothing reads this file to decide anything, so there is no path by which the figure could
-    become one."""
+    """The report says so. `test_only_these_modules_read_the_store` is what makes it true."""
     observations.record("waited_seconds", project="a", cycle_id="c-1", value=1, arm=observations.ARM_SILENT)
 
     out = observations.render(observations.summarize(observations.read()))
 
     assert "never a ceiling" in out
     assert "No thresholds, and none are coming" in out
+
+
+#: The two places allowed to read observations back, and what each reads them for. Both print to a
+#: person and neither returns a value to a caller that decides anything: `observe_cmd` is the report
+#: itself, `resume` says how many readings arrived since this person last looked.
+READERS = {"observe_cmd", "resume"}
+
+#: Reading the store. Recording into it is `record`, which every phase may call.
+_READS = frozenset({"read", "summarize", "render"})
+
+
+def _modules_reading_the_store() -> set[str]:
+    """Every module under `src/rein` that calls one of `_READS` on `observations`."""
+    import ast
+
+    source_root = Path(__file__).resolve().parent.parent / "src" / "rein"
+    found: set[str] = set()
+    for path in sorted(source_root.rglob("*.py")):
+        if path.name == "observations.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute) or node.attr not in _READS:
+                continue
+            if isinstance(node.value, ast.Name) and node.value.id == "observations":
+                found.add(path.stem)
+    return found
+
+
+def test_only_these_modules_read_the_store() -> None:
+    """The invariant the whole design of `observations` rests on, fixed against the source.
+
+    A figure becomes a ceiling when something consults it to decide. `00-concept.md` argues the
+    count cannot become one *because there is no path by which it could* — a property about every
+    future edit, which a test asserting two strings in a report does not hold. So read the source:
+    a `read()` that appears in `approve`, `build_loop`, `revise` or `review` fails here, and the
+    person who added it decides whether the guarantee or the caller goes.
+    """
+    assert _modules_reading_the_store() == READERS
+
+
+def test_the_judging_paths_only_ever_record() -> None:
+    """Named separately because these four are the ones the guarantee is about.
+
+    `_modules_reading_the_store` would catch them, but only as a set that stopped matching. This
+    says which callers were meant: the gate, the build, the roll back, and the change request.
+    """
+    judging = {"approve", "build_loop", "revise", "change_request"}
+
+    assert judging & _modules_reading_the_store() == set()

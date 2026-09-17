@@ -26,7 +26,7 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     seed_repo(
         root,
-        state=make_state(project="rt", gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+        state=make_state(project="rt", gates=dict.fromkeys(models.GATE_ENDS, "pending")),
         config=make_config(profiles=SANDBOXED_PROFILES),
     )
     return root

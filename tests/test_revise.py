@@ -18,7 +18,7 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import make_plan, make_review, make_state, make_task, seed_repo
 
-ALL_APPROVED = dict.fromkeys(models.GATE_ORDER, "approved")
+ALL_APPROVED = dict.fromkeys(models.GATE_ENDS, "approved")
 
 
 def repo_at(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:
@@ -42,7 +42,7 @@ def test_the_reset_runs_forward_from_the_target(tmp_path: Path) -> None:
 
 
 def test_an_already_pending_chain_resets_nothing(tmp_path: Path) -> None:
-    repo = repo_at(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending"), plan_status="draft"))
+    repo = repo_at(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending"), plan_status="draft"))
     assert revise.gates_to_reset("mandate", state_of(repo)) == []
 
 
@@ -52,7 +52,7 @@ def test_applying_a_rollback_leaves_no_downstream_approval(tmp_path: Path) -> No
     revise.apply(repo, revision, "the auth method was wrong")
 
     state = state_of(repo)
-    assert [state.gate_status(g) for g in models.GATE_ORDER] == ["pending", "pending"]
+    assert [state.gate_status(g) for g in models.GATE_ENDS] == ["pending", "pending"]
     assert state.stage == "drafting"
     assert state.gate_chain_violations() == []
 
@@ -66,7 +66,7 @@ def test_an_unknown_target_gate_is_refused(tmp_path: Path) -> None:
 def test_a_phase_name_is_not_a_rollback_target() -> None:
     """The target is a gate — an authorization — never a phase. The mapping between the two was a
     table here, and it only existed because approving a gate also advanced a phase."""
-    assert not {"requirements", "design", "tasks", "build", "verify"} & models.GATE_VALUES
+    assert not {"requirements", "design", "tasks", "build", "verify"} & set(models.GATE_ENDS)
 
 
 # --- consequences of a rollback -----------------------------------------------
@@ -270,3 +270,53 @@ def _scoped_plan() -> dict[str, Any]:
     task = make_task("T-001", claim_ids=["C-001"])
     task["scope"] = {"include": ["src/api/"]}
     return make_plan(tasks=[task])
+
+
+# --- what a roll back cannot take back ----------------------------------------
+
+
+def _crossed(tmp_path: Path) -> repo_mod.Repo:
+    """A cycle that has already crossed one irreversible point and has another still pending."""
+    return repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"mandate": "approved", "T-001": "approved", "T-003": "pending", "acceptance": "pending"}
+        ),
+        plan=make_plan(tasks=[make_task("T-001"), make_task("T-003")]),
+    )
+
+
+def test_rewinding_to_the_mandate_withdraws_every_crossing(tmp_path: Path) -> None:
+    repo = _crossed(tmp_path)
+    assert revise.gates_to_reset("mandate", state_of(repo)) == ["mandate", "T-001"]
+
+
+def test_rewinding_to_one_crossing_leaves_the_others_standing(tmp_path: Path) -> None:
+    """They were never authorized by it. Ordering them against each other would be authorizing
+    execution order, which is inside the delegation."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"mandate": "approved", "T-001": "approved", "T-003": "approved", "acceptance": "pending"}
+        ),
+        plan=make_plan(tasks=[make_task("T-001"), make_task("T-003")]),
+    )
+
+    assert revise.gates_to_reset("T-003", state_of(repo)) == ["T-003"]
+
+
+def test_the_roll_back_says_which_of_it_the_world_will_not_undo(tmp_path: Path) -> None:
+    """Every other line of the plan describes something the roll back undoes. This one is the
+    authorization coming back without the thing it authorized."""
+    repo = _crossed(tmp_path)
+
+    rendered = revise.render(revise.plan_revision(repo, "mandate", []))
+
+    assert "T-001 authorized work that cannot be taken back" in rendered
+    assert "still done" in rendered
+
+
+def test_a_roll_back_that_crossed_nothing_says_nothing_about_it(tmp_path: Path) -> None:
+    repo = repo_at(tmp_path, state=make_state(gates=ALL_APPROVED))
+
+    assert "cannot be taken back" not in revise.render(revise.plan_revision(repo, "mandate", []))

@@ -3210,6 +3210,20 @@ class Orchestrator:
                 return common.EXIT_HUMAN_NEEDED
 
             mode, tasks = batch
+            waiting = [t for t in tasks if self._awaits_crossing(t.id)]
+            if waiting:
+                for task in waiting:
+                    self._escalate(
+                        "irreversible_point",
+                        f"{task.id}: the plan froze this task as work that cannot be taken back, so it is "
+                        f"its own contact point and the loop stops in front of it. A human approves it with "
+                        f"`rein approve {task.id}` — nothing here can, and running the task first would make "
+                        f"the decision by doing it.",
+                        task=task.id,
+                    )
+                tasks = [t for t in tasks if t.id not in {w.id for w in waiting}]
+                if not tasks:
+                    return common.EXIT_HUMAN_NEEDED
             # Here rather than at the top of the run: a `rein build` that finds every task done goes
             # straight to acceptance, and a full gate run at the root to answer a question no task is
             # going to ask is exactly the waste this exists to end.
@@ -3220,6 +3234,20 @@ class Orchestrator:
             else:
                 self._consume_parallel(tasks)
             # Recompute at the top of the loop after each batch (reassemble the chain).
+
+    def _awaits_crossing(self, task_id: str) -> bool:
+        """Is this task an irreversible point whose gate nobody has approved yet?
+
+        Read fresh rather than off `self.state`: the whole point of stopping is that a human then
+        approves, and the next `rein build` must see that. A task with no gate of its own is every
+        task in a cycle that declared nothing irreversible, and `gate_status` answers `pending` for
+        a name it does not hold — so the membership test comes first and the absence of a gate is
+        never read as an unapproved one.
+        """
+        state = self.store.read_state()
+        if state is None:
+            return False
+        return task_id in state.crossing_gates and state.gate_status(task_id) != "approved"
 
     def _consume_serial(self, tasks: list[dag.Task]) -> None:
         """Finalize foundation tasks etc. serially on the work branch."""

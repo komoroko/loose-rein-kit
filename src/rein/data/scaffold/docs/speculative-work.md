@@ -11,7 +11,7 @@ denial is where the boundary is, not an obstacle to route around.
 
 Everything here is **throwaway-by-default**. The gate's answer decides whether it survives, and
 that decision is a human's: `rein next` / `/status` names the rows still blank, and
-`docs/retrospective.md` §3 is where they are finalized at the end of the cycle.
+`docs/retrospective.md` §4 is where they are finalized at the end of the cycle.
 
 | Phase | What was done | Premised on | Adopt? (human) |
 |---|---|---|---|

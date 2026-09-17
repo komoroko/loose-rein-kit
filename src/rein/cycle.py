@@ -96,7 +96,7 @@ def readiness(repo: repo_mod.Repo) -> list[str]:
     if defects:
         blockers.append(f"the audit chain has {len(defects)} defect(s); the archive would record an unreadable log")
 
-    for gate in models.GATE_ORDER:
+    for gate in state.gate_ids:
         receipt = state.gate_receipt(gate)
         if state.gate_status(gate) != "approved" or receipt is None:
             continue
@@ -168,7 +168,9 @@ def next_state(previous: models.State, slug: str) -> dict[str, object]:
         "project": previous.project,
         "cycle_id": slug,
         "updated_at": event_chain.now_iso(),
-        "gates": {gate: {"status": "pending", "receipt": None} for gate in models.GATE_ORDER},
+        # The two ends only. What this cycle will build is not known yet, so neither is how many
+        # irreversible points it has — `approve mandate` adds those when it freezes the plan.
+        "gates": {gate: {"status": "pending", "receipt": None} for gate in models.GATE_ENDS},
         "plan": {"status": "draft"},
         "execution": {"status": "idle"},
         "tasks": {},

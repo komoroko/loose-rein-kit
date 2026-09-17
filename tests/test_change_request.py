@@ -25,7 +25,7 @@ from tests._support import (
     seed_repo,
 )
 
-PENDING_ALL = dict.fromkeys(models.GATE_ORDER, "pending")
+PENDING_ALL = dict.fromkeys(models.GATE_ENDS, "pending")
 
 
 def repo_at(tmp_path: Path) -> repo_mod.Repo:

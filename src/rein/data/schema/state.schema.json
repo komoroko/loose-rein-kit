@@ -28,9 +28,14 @@
       "maxLength": 64
     },
     "gates": {
-      "description": "The two things a human approves. `mandate` authorizes what the loop may change and what it must prove; `acceptance` takes the change on the evidence now recorded. There were five, one per phase, and the same transaction that flipped one also advanced a `current_phase` field beside it — so authority and progress were one write and could disagree. Where the cycle stands is now derived from these two (`models.State.stage`) and stored nowhere.",
+      "description": "Where a human has to decide. `mandate` authorizes what the loop may change and what it must prove; `acceptance` takes the change on the evidence now recorded. Both are always here, and they are not a total: this object refused every other key, which made the number of times a human is asked a constant of the tool rather than a property of the change — the same ceiling the approval-screen budget already got wrong once. A task that freezes an `operator_surface` it cannot undo adds a gate named for that task, inserted when the mandate is approved and the plan is frozen, and the loop stops there before running it. Where the cycle stands is still derived from `mandate` and `acceptance` alone (`models.State.stage`) and stored nowhere.",
       "type": "object",
-      "additionalProperties": false,
+      "propertyNames": {
+        "pattern": "^(mandate|acceptance|T-[0-9]+)$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/gate"
+      },
       "required": [
         "mandate",
         "acceptance"
@@ -508,11 +513,9 @@
             "pattern": "^CR-[A-Z]+-[0-9A-F]+$"
           },
           "gate": {
-            "description": "Which gate this request stands against.",
-            "enum": [
-              "mandate",
-              "acceptance"
-            ]
+            "description": "Which gate this request stands against. A pattern rather than an enum of two, for the same reason `gates` is: a cycle can have a gate named for a task it froze as irreversible, and standing a request against one is the narrowing move — it holds that point shut until the request is answered.",
+            "type": "string",
+            "pattern": "^(mandate|acceptance|T-[0-9]+)$"
           },
           "target": {
             "description": "What in the deliverable this is about: a document anchor (docs/10-requirements.md#R-3) or an id (R-3, C-001, T-004). The anchor is the point — it is what lets the fix read one slice instead of re-running the phase.",

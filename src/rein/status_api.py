@@ -54,7 +54,6 @@ from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
 
-GATE_ORDER = models.GATE_ORDER
 STAGE_ORDER = models.STAGE_ORDER
 
 #: Stage → the gate whose approval ends it, and the command that presents that gate.
@@ -268,7 +267,6 @@ def next_action(
             kind="fix",
             reason=f"stage '{stage}' is not in the lifecycle vocabulary; diagnose the SSOT.",
         )
-    index = GATE_ORDER.index(gate) + 1
     # A human already read this and said "not yet". The reason has to name what they asked for —
     # otherwise the next session re-derives the deliverable from scratch and answers nothing.
     if open_change_requests:
@@ -287,7 +285,7 @@ def next_action(
         return Recommendation(
             command=f"rein approve {gate}",
             kind="approve_gate",
-            reason=f"Gate {index} ({gate}) has no mechanical blocker left — it is waiting on your decision. "
+            reason=f"The {gate} gate has no mechanical blocker left — it is waiting on your decision. "
             "Read it in `rein ui` and approve there, or run this yourself at a terminal; an agent never runs "
             "it for you.",
             also=("rein ui", f"rein approve {gate} --check"),
@@ -324,7 +322,7 @@ def next_action(
     return Recommendation(
         command=_stage_command(stage, plan_missing),
         kind="run_phase",
-        reason=_stage_reason(stage, plan_missing, gate, index),
+        reason=_stage_reason(stage, plan_missing, gate),
         also=also,
     )
 
@@ -340,11 +338,13 @@ def _stage_command(stage: str, plan_missing: bool) -> str:
     return "/req" if plan_missing else "/tasks"
 
 
-def _stage_reason(stage: str, plan_missing: bool, gate: str, index: int) -> str:
+# Gates are named, never numbered. They were numbered, out of a fixed `GATE_ORDER` of two — an
+# ordinal that stops being true the moment a cycle declares an irreversible point and grows a third.
+def _stage_reason(stage: str, plan_missing: bool, gate: str) -> str:
     if stage == "building":
         return (
-            f"The mandate is approved and the work is inside it; it ends by presenting gate {index} "
-            f"({gate}) for your acceptance decision."
+            "The mandate is approved and the work is inside it; it ends by presenting the "
+            f"{gate} gate for your acceptance decision."
         )
     if plan_missing:
         return (
@@ -353,7 +353,7 @@ def _stage_reason(stage: str, plan_missing: bool, gate: str, index: int) -> str:
             "change — one approval covers all three."
         )
     return (
-        f"A mandate is being written; it ends by presenting gate {index} ({gate}) for your approval. "
+        f"A mandate is being written; it ends by presenting the {gate} gate for your approval. "
         "What it still needs is a task DAG answering every claim, a measured baseline, and no open "
         "`[NEEDS CLARIFICATION]`."
     )
@@ -682,13 +682,12 @@ def pending_queue(
         check = f"rein approve {probe_gate} --check"
         items += [_pending_item("blocking", "gate_blocker", probe_gate, b, check) for b in gate_blockers]
         if not gate_blockers:
-            index = GATE_ORDER.index(probe_gate) + 1
             items.append(
                 _pending_item(
                     "attention",
                     "gate_ready",
                     probe_gate,
-                    f"gate {index} ({probe_gate}) has no mechanical blocker left — it is waiting on your decision",
+                    f"the {probe_gate} gate has no mechanical blocker left — it is waiting on your decision",
                     f"rein approve {probe_gate}",
                 )
             )
@@ -897,7 +896,9 @@ def collect_status(
     except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
         warnings.append(f"cannot read config.yaml: {exc}")
 
-    gates = {g: state.gate_status(g) for g in GATE_ORDER} if state else dict.fromkeys(GATE_ORDER, "pending")
+    # This cycle's gates, in this cycle's shape: two, plus one for every irreversible point the
+    # frozen plan declared. With no state there is nothing frozen, so there are the two ends.
+    gates = {g: state.gate_status(g) for g in state.gate_ids} if state else dict.fromkeys(models.GATE_ENDS, "pending")
     stage = state.stage if state else "drafting"
 
     tasks_block: dict[str, object] | None = None
@@ -1027,7 +1028,7 @@ def collect_status(
                 "index": i + 1,
                 "approval_id": (state.gate_receipt(g) or {}).get("approval_id") if state else None,
             }
-            for i, g in enumerate(GATE_ORDER)
+            for i, g in enumerate(gates)
         ],
         "plan": plan_block,
         "plan_status": state.plan_status if state else "draft",
@@ -1054,7 +1055,7 @@ def collect_status(
         "next": asdict(recommendation),
         "decision": pending_decision(
             recommendation,
-            next((g for g in GATE_ORDER if gates[g] != "approved"), None),
+            next((g for g in gates if gates[g] != "approved"), None),
             pending=pending,
         ),
         "pending": pending,

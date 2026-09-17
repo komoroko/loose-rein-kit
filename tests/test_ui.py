@@ -138,7 +138,7 @@ def _seed_repo(base: Path, project: str) -> Path:
     base.mkdir(parents=True, exist_ok=True)
     seed_repo(
         base,
-        state=make_state(project=project, gates=dict.fromkeys(models.GATE_ORDER, "pending"), plan_status="draft"),
+        state=make_state(project=project, gates=dict.fromkeys(models.GATE_ENDS, "pending"), plan_status="draft"),
         config=make_config(profiles=SANDBOXED_PROFILES),
     )
     return base
@@ -383,7 +383,7 @@ def _repo_with_tasks(tmp_path: Path) -> Path:
         base,
         state=make_state(
             project="demo",
-            gates=dict.fromkeys(models.GATE_ORDER, "pending"),
+            gates=dict.fromkeys(models.GATE_ENDS, "pending"),
             plan_status="frozen",
             tasks={"T-001": "done", "T-002": "in-progress"},
         ),
@@ -1002,7 +1002,7 @@ def review_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
     root.mkdir()
     seed_repo(
         root,
-        state=make_state(project="rv", gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+        state=make_state(project="rv", gates=dict.fromkeys(models.GATE_ENDS, "pending")),
         config=make_config(profiles=SANDBOXED_PROFILES),
         review=_generated_review_with_card(),
     )

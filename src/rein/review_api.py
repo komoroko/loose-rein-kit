@@ -268,21 +268,23 @@ def _gate_statuses(root: Path) -> dict[str, str]:
     state = _raw_state(root)
     if state is None:
         return {}
-    return {gate: state.gate_status(gate) for gate in models.GATE_ORDER}
+    # The two document gates only. A crossing gate authorizes an operation, not a deliverable, so
+    # it has no row in `_GATE_SPEC` and nothing for this pane to show.
+    return {gate: state.gate_status(gate) for gate in models.GATE_ENDS}
 
 
 def collect_review(root: str | Path, gate: str) -> dict[str, object]:
     """Everything the review pane shows for `gate`. Raises ReviewError only for an unknown gate."""
     if gate not in _GATE_SPEC:
-        raise ReviewError(f"unknown gate '{gate}' (expected one of {', '.join(models.GATE_ORDER)})")
+        raise ReviewError(f"unknown gate '{gate}' (expected one of {', '.join(models.GATE_ENDS)})")
     root = Path(root)
 
     gates = _gate_statuses(root)
-    awaiting = next((g for g in models.GATE_ORDER if gates.get(g) != "approved"), None)
+    awaiting = next((g for g in models.GATE_ENDS if gates.get(g) != "approved"), None)
 
     result: dict[str, object] = {
         "gate": gate,
-        "index": models.GATE_ORDER.index(gate) + 1,
+        "index": models.GATE_ENDS.index(gate) + 1,
         "status": gates.get(gate, "pending"),
         "awaiting": awaiting,
         "is_awaiting": gate == awaiting,

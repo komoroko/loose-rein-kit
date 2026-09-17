@@ -747,7 +747,7 @@ def test_a_leaf_gate_violation_blocks_without_merging(tmp_path: Path, monkeypatc
     escalated: list[tuple[object, ...]] = []
     monkeypatch.setattr(loop, "_escalate_gate_violation", lambda *a: escalated.append(a))
 
-    with pytest.raises(build_loop.StopLoop):
+    with pytest.raises(common.StopLoop):
         loop._consume_parallel([task])
 
     raw = store_mod.Store(loop.repo).read_raw("state")
@@ -1646,7 +1646,7 @@ def test_a_serial_gate_violation_blocks_before_finalize(tmp_path: Path, monkeypa
     escalated: list[tuple[object, ...]] = []
     monkeypatch.setattr(loop, "_escalate_gate_violation", lambda *a: escalated.append(a))
 
-    with pytest.raises(build_loop.StopLoop):
+    with pytest.raises(common.StopLoop):
         loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
 
     raw = store_mod.Store(loop.repo).read_raw("state")
@@ -3540,3 +3540,79 @@ def test_a_launch_goes_through_the_executor_when_a_box_is_configured(
 
 def _never_called(*args: object, **kwargs: object) -> tuple[int, str]:
     raise AssertionError("an agent launch reached the host while a sandbox was configured")
+
+
+# --- the point the loop may not cross on its own ------------------------------
+
+
+def _irreversible_repo(tmp_path: Path, *, approved: bool) -> build_loop.Orchestrator:
+    """A frozen cycle whose first task declares work that leaves the repository."""
+    task = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        operator_surface=[
+            {
+                "kind": "persistence",
+                "name": "the users table, migrated",
+                "paths": ["db/schema.sql"],
+                "reversible": False,
+                "adr": "ADR-001",
+            }
+        ],
+    )
+    return orchestrator(
+        tmp_path,
+        plan=make_plan(tasks=[task]),
+        state=make_state(
+            plan_status="frozen",
+            gates={"mandate": "approved", "T-001": "approved" if approved else "pending", "acceptance": "pending"},
+        ),
+    )
+
+
+def test_the_build_stops_in_front_of_an_unapproved_irreversible_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Running it first would make the decision by doing it, which is the one thing a contact point
+    exists to prevent. The loop hands back to the human with the command that moves it."""
+    loop = _irreversible_repo(tmp_path, approved=False)
+    ran: list[str] = []
+    monkeypatch.setattr(loop, "_consume_serial", lambda tasks: ran.extend(t.id for t in tasks))
+    monkeypatch.setattr(loop, "_consume_parallel", lambda tasks: ran.extend(t.id for t in tasks))
+
+    assert loop._consume() == common.EXIT_HUMAN_NEEDED
+    assert ran == []
+    escalations = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "knowledge_gap"]
+    assert [e.detail["kind"] for e in escalations] == ["irreversible_point"]
+    assert "rein approve T-001" in escalations[-1].detail["message"]
+
+
+def test_an_approved_irreversible_task_runs_like_any_other(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is a stop, not a mode: once a human has crossed it nothing about the task changes.
+
+    The batch handler raises to end the run rather than returning — a stub that recorded and
+    returned would leave the task `todo` and `_consume` would hand it back forever, which is the
+    loop's correct behaviour and a hanging test.
+    """
+    loop = _irreversible_repo(tmp_path, approved=True)
+    ran: list[str] = []
+
+    def dispatched(tasks: list[dag.Task]) -> None:
+        ran.extend(t.id for t in tasks)
+        raise common.StopLoop("enough", common.EXIT_DONE)
+
+    monkeypatch.setattr(loop, "_consume_serial", dispatched)
+    monkeypatch.setattr(loop, "_load_baseline", lambda: None)
+
+    with pytest.raises(common.StopLoop):
+        loop._consume()
+
+    assert ran == ["T-001"]
+
+
+def test_a_task_with_no_gate_of_its_own_is_never_read_as_an_unapproved_one(tmp_path: Path) -> None:
+    """`gate_status` answers `pending` for a name it does not hold, so the membership test has to
+    come first — otherwise every task in a cycle that declared nothing irreversible would stop."""
+    loop = orchestrator(tmp_path)
+
+    assert loop._awaits_crossing("T-001") is False

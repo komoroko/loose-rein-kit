@@ -29,8 +29,8 @@ from tests._support import (
     seed_repo,
 )
 
-PENDING_ALL = dict.fromkeys(models.GATE_ORDER, "pending")
-APPROVED_ALL = dict.fromkeys(models.GATE_ORDER, "approved")
+PENDING_ALL = dict.fromkeys(models.GATE_ENDS, "pending")
+APPROVED_ALL = dict.fromkeys(models.GATE_ENDS, "approved")
 
 BASE: dict[str, Any] = dict(
     stage="building",
@@ -633,7 +633,7 @@ def test_surfaces_on_disk_count_even_when_the_lock_records_no_install(tmp_path: 
 def test_the_stage_map_agrees_with_the_vocabulary() -> None:
     """One row per stage that ends in an approval — `done` ends in nothing, which is why it is
     absent rather than mapped to a gate nobody opens."""
-    assert set(status_api.STAGE_GATE.values()) == set(models.GATE_ORDER)
+    assert set(status_api.STAGE_GATE.values()) == set(models.GATE_ENDS)
     assert set(status_api.STAGE_GATE) == set(models.STAGE_ORDER) - {"done"}
 
 

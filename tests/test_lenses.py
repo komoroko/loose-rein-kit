@@ -267,7 +267,7 @@ def _repo(tmp_path: Path, **plan_kwargs: Any) -> Any:
     plan_kwargs.setdefault("tasks", [make_task("T-001", claim_ids=["C-001"], scope_include=["src/**"])])
     seed_repo(
         tmp_path,
-        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending"), plan_status="draft"),
+        state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending"), plan_status="draft"),
         plan=make_plan(**plan_kwargs),
         config=make_config(profiles=SANDBOXED_PROFILES),
     )
@@ -634,3 +634,17 @@ def test_a_moved_reach_is_snapshotted_without_rewriting_the_plan(tmp_path: Path,
 
     assert event_chain.derived_reaches(_events(repo)) == {"D-001": "local"}
     assert store_mod.read_digest(_plan(store_mod, repo)) == digest_after_edit != digest_before
+
+
+def test_the_stats_point_at_where_a_lens_gets_in_not_only_at_what_to_remove() -> None:
+    """Every other line of this report argues for removal, and it counts only lenses that exist —
+    so a library read through it alone shrinks and never grows, with no threshold anywhere to make
+    that visible. Entry is a human's judgement at the retrospective, and the output has to say so
+    where the removal advice is read."""
+    library = [_lens("L-1", lens_class=lenses.CLASS_STANDARD, applies_when="the cycle states a claim")]
+    out = lens_cmd.render_stats(lens_cmd.stats([_applied("L-1", False), _applied("L-1", False)]), library)
+
+    assert "can only ever argue for removal" in out
+    assert "docs/retrospective.md" in out
+    # After the advice it qualifies, like the scope note: a reader holds both by the time they act.
+    assert out.index("docs/retrospective.md") > out.index("never found anything")

@@ -4,6 +4,64 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.8.0] - 2026-09-18
+
+**Three things the concept asked for that the code had not built.** The previous release found ten
+defects by reading the code's claims about itself against the code. That method can only ever reach
+what exists; two of these three were invisible to it, because nothing was there to make a false
+claim. They came from reading the *principles* against the code instead.
+
+### The number of times a human is asked is no longer a constant of this tool
+
+`GATE_ORDER` was a two-element tuple and `state.gates` refused every other key, so a cycle had two
+contact points whatever it contained. That is a ceiling on how often a human is asked — the mistake
+the approval-screen budget already made once, except that this one could not even be raised.
+
+A human is asked wherever undoing gets expensive, so the count now follows the change. A task that
+freezes an `operator_surface` it cannot undo is an irreversible point of its own: it gets a gate
+named for it, `rein build` stops in front of it, and a human runs `rein approve T-NNN`. Approving
+the mandate is what adds them, out of the plan it is freezing — the act that fixes what will be
+built is the act that fixes how many more times this cycle stops, and the approver sees the count
+while approving the thing that creates it. There is no cap on how many.
+
+`State.gate_ids` replaces the constant everywhere it was read, `State.upstream_of` replaces the
+index arithmetic, and the gates of a cycle are a fan rather than a line: each crossing is downstream
+of the mandate and upstream of acceptance, and they carry no order among themselves. Ordering two of
+them against each other would be authorizing execution order, which the concept puts inside the
+delegation. `rein revise` withdraws a crossing like any other approval and now says the one thing it
+cannot do — the operation stays done.
+
+### `operator_surface` keeps the answer the design already gave
+
+`architect.md` requires every requirement to state what it needs of a person **and whether it can be
+undone**; `design.md` carries that into the tasks. The frozen record kept `{kind, name, paths, adr}`
+and dropped the reversibility, leaving it in prose that only the acceptance brief opens — by which
+time the thing has happened. `reversible` is now a required boolean on every declaration, with no
+default, because an omitted answer read as "yes" by silence.
+
+### Review lenses can get in, not only out
+
+`rein lens --stats` counted the lenses you have and argued, with no threshold anywhere, for removing
+the ones that had stopped earning their place. Nothing anywhere added one: `lenses.py` only reads the
+library, and `lenses.yaml` appeared in no prompt, no scaffold and no retrospective. A library read
+through that output alone can only shrink.
+
+The mechanism for entry already existed — the retrospective promotes durable lessons into the
+always-loaded files and records where each landed — and the library was missing from the list of
+destinations. `docs/retrospective.md` gains section 2, which holds this cycle's root causes against
+the lenses that were watching for them; `/verify` asks the question; the promotion targets name the
+library; and `--stats` says, where its removal advice is read, that it can only ever argue one way.
+No machine matching: no identifier ties a cause in one cycle to a cause in the last, so recurrence
+is the human's judgement, made with both lists in front of them.
+
+### The observation store's invariant is fixed against the source
+
+`00-concept.md` argues the stop count cannot become a ceiling *because there is no path by which it
+could* — a claim about every future edit. The test asserting it checked two strings in a rendered
+report and stated the invariant in its docstring, so a `read()` added to `approve.py` tomorrow would
+have passed. It now parses `src/rein` and pins the set of modules that read the store, with the gate,
+the build, the roll back and the change request named separately as the four the guarantee is about.
+
 ## [0.7.0] - 2026-09-18
 
 **Ten corrections, every one found by reading a claim the code makes about itself against the code

@@ -72,8 +72,8 @@ def add(repo: repo_mod.Repo, gate: str, target: str, reason: str) -> str:
     case it exists for. It needs no authority of any kind, because it can only ever *narrow* what
     happens next.
     """
-    if gate not in models.GATE_VALUES:
-        raise ChangeRequestError(f"unknown gate {gate!r} (one of {', '.join(models.GATE_ORDER)})")
+    if not models.gate_name_ok(gate):
+        raise ChangeRequestError(f"unknown gate {gate!r} ({models.gate_names()})")
     if not target.strip():
         raise ChangeRequestError(
             "a change request needs a --target: the file#anchor or id it is about "
@@ -220,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     add_p = sub.add_parser("add", help="record a change request against a gate (holds it shut)")
-    add_p.add_argument("gate", help=f"one of: {', '.join(models.GATE_ORDER)}")
+    add_p.add_argument("gate", help=models.gate_names())
     add_p.add_argument("--target", required=True, help="what it is about: docs/10-requirements.md#R-3, T-004, C-001")
     add_p.add_argument("--reason", required=True, help="what is wrong")
 

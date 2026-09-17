@@ -62,7 +62,19 @@ def stats(events: Sequence[models.Event]) -> dict[str, dict[str, int]]:
 #: cover is a separate question (`20-open.md` item 9); saying which one they *do* cover is not.
 _SCOPE_NOTE = (
     "These counts are this repository's chain and archives only. The library is shared across "
-    "every repository you use, so check the others before narrowing or dropping anything in it."
+    "every repository you use, so check the others before narrowing, dropping or adding anything "
+    "in it."
+)
+
+#: The other half. Everything above is a reason to remove a lens: a tally over lenses that exist
+#: cannot see the one nobody wrote, so a library read through this output alone only ever shrinks —
+#: with no threshold anywhere, which is what makes the drift quiet. Entry is a human's judgement at
+#: a named occasion rather than a verb here, because the material for it (what went wrong this
+#: cycle, against what was being watched for) is what the retrospective already puts side by side.
+_ENTRY_NOTE = (
+    "This tally can only ever argue for removal — it counts the lenses you have, never the one "
+    "that was missing. Entry is section 1 of docs/retrospective.md: rework whose cause no applied "
+    "lens was watching for is a lens to write, by hand, into {path}."
 )
 
 
@@ -97,6 +109,8 @@ def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lens
             f"{', '.join(unapplied)}. Dropped at the gate, not recorded by the reviewer, or still "
             "in an open cycle — this tally cannot tell which, only that it was not simply absent."
         )
+    lines.append("")
+    lines.append(_ENTRY_NOTE.format(path=lenses.library_path()))
     lines.append("")
     lines.append(_SCOPE_NOTE)
     return "\n".join(lines)

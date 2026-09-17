@@ -71,9 +71,15 @@ class ReviseError(RuntimeError):
 
 
 def gates_to_reset(target_gate: str, state: models.State) -> list[str]:
-    """Every currently-approved gate from `target_gate` onward. Empty = nothing to do."""
-    start = models.GATE_ORDER.index(target_gate)
-    return [g for g in models.GATE_ORDER[start:] if state.gate_status(g) == "approved"]
+    """Every currently-approved gate at or downstream of `target_gate`. Empty = nothing to do.
+
+    Downstream is read off `State.upstream_of` rather than a position in a list, because the gates
+    of a cycle are a fan and not a line: rewinding to the mandate withdraws every crossing and the
+    acceptance, while rewinding to one crossing leaves the others standing — they were never
+    authorized by it.
+    """
+    downstream = {target_gate} | {g for g in state.gate_ids if target_gate in state.upstream_of(g)}
+    return [g for g in state.gate_ids if g in downstream and state.gate_status(g) == "approved"]
 
 
 def impacted_closure(plan: models.Plan, state: models.State | None, seeds: list[str]) -> tuple[list[str], list[str]]:
@@ -90,8 +96,8 @@ def plan_revision(repo: repo_mod.Repo, target_gate: str, seeds: list[str]) -> di
     Computing the plan once and rendering it twice is what keeps a dry run honest; two code
     paths that "do the same thing" are two code paths that eventually do not.
     """
-    if target_gate not in models.GATE_VALUES:
-        raise ReviseError(f"unknown target gate {target_gate!r} (one of {', '.join(models.GATE_ORDER)})")
+    if not models.gate_name_ok(target_gate):
+        raise ReviseError(f"unknown target gate {target_gate!r} ({models.gate_names()})")
 
     store = store_mod.Store(repo)
     state = store.read_state()
@@ -113,6 +119,9 @@ def plan_revision(repo: repo_mod.Repo, target_gate: str, seeds: list[str]) -> di
     return {
         "target_gate": target_gate,
         "gates_reset": resets,
+        # Withdrawn authorizations that the world will not withdraw with them. Every other line of
+        # this plan describes something a roll back undoes; these describe what it cannot.
+        "crossed": [g for g in resets if g in state.crossing_gates],
         "unfreezes_plan": target_gate in UNFREEZES_PLAN and state.plan_status == "frozen",
         "invalidates_review": bool(resets),
         "cleared_receipts": [g for g in resets if state.gate_receipt(g) is not None],
@@ -134,6 +143,14 @@ def render(revision: dict[str, object]) -> str:
         lines.append(
             f"- receipts cleared for: {', '.join(cleared)} "
             "(their gate_approved events stay in the audit chain as history)"
+        )
+    crossed = revision["crossed"]
+    assert isinstance(crossed, list)
+    if crossed:
+        lines.append(
+            f"- WARNING: {', '.join(crossed)} authorized work that cannot be taken back. The approval "
+            "is withdrawn and the task returns to the plan; whatever it already did is still done, "
+            "and undoing that is yours to do outside this tool."
         )
     if revision["unfreezes_plan"]:
         lines.append("- plan.status: frozen → draft (plan.yaml and config.yaml become editable)")
@@ -247,7 +264,7 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="roll back: reset gates from a target gate onward, in a chain")
-    parser.add_argument("--to", required=True, metavar="GATE", help=f"one of: {', '.join(models.GATE_ORDER)}")
+    parser.add_argument("--to", required=True, metavar="GATE", help=models.gate_names())
     parser.add_argument("--reason", default="", help="why (recorded in the audit chain)")
     parser.add_argument("--impacted", default="", help="comma-separated task ids directly affected")
     parser.add_argument("--dry-run", action="store_true", help="print what would change; write nothing")

@@ -69,7 +69,7 @@ def test_rule_one_is_not_relaxed_by_template_mode(tmp_path: Path) -> None:
 
 
 def test_rule_one_holds_even_with_every_gate_approved(tmp_path: Path) -> None:
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "approved")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "approved")))
     allowed, _ = decide(tmp_path, ".rein/events.ndjson")
     assert not allowed
 
@@ -89,7 +89,7 @@ def test_the_guards_own_registration_cannot_be_edited_by_an_agent(tmp_path: Path
     rule mentioned: not rule 1, not rule 2, and not `guard.paths`, which covers deliverable
     directories. Every gate approved makes no difference — there is no phase at which rewriting the
     guard's own registration is the expected next step."""
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "approved")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "approved")))
     allowed, reason = decide(tmp_path, rel)
     assert not allowed
     assert "switch off edit-stage enforcement" in reason
@@ -178,7 +178,7 @@ def test_a_guarded_path_waits_for_a_mandate(tmp_path: Path, rel: str) -> None:
     What it enforces now is the delegation: nothing touches the product until a human has said what
     the loop may change.
     """
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     allowed, reason = decide(tmp_path, rel)
     assert not allowed
     assert "no mandate is approved" in reason
@@ -191,7 +191,7 @@ def test_the_mandates_own_material_is_never_guarded(tmp_path: Path, rel: str) ->
     They were guarded, each on the phase gate before it, which is what made writing a design before
     the requirements were signed a rule violation rather than a way of working.
     """
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     assert decide(tmp_path, rel)[0]
 
 
@@ -269,7 +269,7 @@ def test_an_unreadable_plan_fails_closed_on_the_scope(tmp_path: Path) -> None:
 def test_unguarded_paths_stay_open(tmp_path: Path, rel: str) -> None:
     """tests/ is deliberately unguarded: preparing fixtures while the mandate is pending is
     sanctioned speculative work, and freezing it would just push the work off the record."""
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     assert decide(tmp_path, rel)[0]
 
 
@@ -277,7 +277,7 @@ def test_template_mode_relaxes_only_rule_three(tmp_path: Path) -> None:
     seed_repo(
         tmp_path,
         config=make_config(template_mode=True),
-        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending"), plan_status="draft"),
+        state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending"), plan_status="draft"),
     )
     assert decide(tmp_path, "src/app.py")[0]  # rule 3 relaxed
     assert not decide(tmp_path, ".rein/state.yaml")[0]  # rule 1 is not
@@ -317,7 +317,7 @@ def test_config_paths_replace_the_built_in_defaults(tmp_path: Path) -> None:
     seed_repo(
         tmp_path,
         config=make_config(guard_paths=["core/"]),
-        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+        state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")),
     )
     assert not decide(tmp_path, "core/thing.py")[0]
     assert decide(tmp_path, "src/app.py")[0]  # not in this repo's map
@@ -326,7 +326,7 @@ def test_config_paths_replace_the_built_in_defaults(tmp_path: Path) -> None:
 def test_defaults_apply_when_config_declares_no_paths(tmp_path: Path) -> None:
     config = make_config()
     config["guard"].pop("paths")  # type: ignore[union-attr]
-    seed_repo(tmp_path, config=config, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, config=config, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     assert not decide(tmp_path, "src/app.py")[0]
 
 
@@ -353,7 +353,7 @@ def test_a_key_this_release_has_never_heard_of_does_not_disarm_the_guard(tmp_pat
     seed_repo(
         tmp_path,
         config=make_config(guard_paths=["core/"]),
-        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+        state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")),
     )
     written = _rewrite_config(tmp_path, lambda d: d.setdefault("review_policy", {}).update(a_key_from_the_future=True))
     assert models.schema_errors(written, "config"), "the point of this test is a document the schema rejects"
@@ -367,7 +367,7 @@ def test_a_key_this_release_has_never_heard_of_does_not_disarm_the_guard(tmp_pat
 
 def test_a_config_that_does_not_parse_denies_and_names_the_config(tmp_path: Path) -> None:
     """Fail closed, and on the guard's own input: the previous behaviour blamed the gate."""
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     (tmp_path / ".rein" / "config.yaml").write_text("guard: [this is not a mapping\n", encoding="utf-8")
 
     allowed, reason = decide(tmp_path, "src/app.py")
@@ -384,7 +384,7 @@ def test_the_config_the_guard_could_not_read_is_the_one_path_it_still_lets_throu
     `git commit` of the fix would be denied too."""
     seed_repo(
         tmp_path,
-        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending"), plan_status="draft"),
+        state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending"), plan_status="draft"),
     )
     (tmp_path / ".rein" / "config.yaml").write_text("guard: [not a mapping\n", encoding="utf-8")
 
@@ -404,7 +404,7 @@ def test_a_rule_map_that_cannot_be_read_is_never_replaced_by_the_defaults(tmp_pa
     seed_repo(
         tmp_path,
         config=make_config(guard_paths=["infra/"]),
-        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+        state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")),
     )
     _rewrite_config(tmp_path, lambda d: d["guard"].update(paths="infra/"))
 
@@ -421,7 +421,7 @@ def test_an_entry_that_is_not_a_path_is_unreadable_rather_than_dropped(tmp_path:
     seed_repo(
         tmp_path,
         config=make_config(guard_paths=["infra/"]),
-        state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+        state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")),
     )
     _rewrite_config(tmp_path, lambda d: d["guard"].update(paths=[{"path": "infra/"}]))
 
@@ -474,7 +474,7 @@ def test_the_camelcase_spelling_is_accepted(tmp_path: Path, monkeypatch: pytest.
     import io
     import sys
 
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     payload = {"cwd": str(tmp_path), "tool_input": {"filePath": str(tmp_path / "src/app.py")}}
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     out = io.StringIO()
@@ -530,7 +530,7 @@ def _git(root: Path, *args: str) -> None:
 
 @pytest.mark.integration
 def test_check_diff_fails_on_a_guarded_path(tmp_path: Path) -> None:
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")), git=True)
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")), git=True)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
     assert gate_guard.check_diff(repo_mod.Repo(tmp_path)) == 1
@@ -747,7 +747,7 @@ def test_a_notebook_edit_under_a_guarded_prefix_is_denied(tmp_path: Path) -> Non
     import io
     import sys
 
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     payload = {"cwd": str(tmp_path), "tool_input": {"notebook_path": str(tmp_path / "src/train.ipynb")}}
     stdin, stdout = sys.stdin, sys.stdout
     sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
@@ -771,7 +771,7 @@ def test_a_denial_is_written_in_every_hosts_dialect_at_once(tmp_path: Path) -> N
     import io
     import sys
 
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     payload = {"cwd": str(tmp_path), "tool_input": {"file_path": str(tmp_path / "src/app.py")}}
     stdin, stdout = sys.stdin, sys.stdout
     sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
@@ -789,20 +789,20 @@ def test_a_denial_is_written_in_every_hosts_dialect_at_once(tmp_path: Path) -> N
 
 
 def test_a_patch_touching_a_guarded_path_is_denied(tmp_path: Path) -> None:
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     reason = codex_hook(tmp_path, _patch("*** Update File: src/app.py\n@@\n-a\n+b\n"))
     assert "no mandate is approved" in reason
 
 
 def test_a_patch_touching_nothing_guarded_passes(tmp_path: Path) -> None:
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     assert codex_hook(tmp_path, _patch("*** Update File: README.md\n@@\n-a\n+b\n")) == ""
 
 
 def test_one_guarded_file_denies_the_whole_patch_and_says_which(tmp_path: Path) -> None:
     """A hook cannot apply "the rest of it", so the whole call is denied — and rule 3's message
     names the gate, not the file, so a multi-file patch has to be told which path it was."""
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     reason = codex_hook(
         tmp_path,
         _patch("*** Update File: README.md\n@@\n+x\n", "*** Update File: src/app.py\n@@\n+y\n"),
@@ -822,7 +822,7 @@ def test_a_patch_may_not_hand_edit_a_machine_written_artifact(tmp_path: Path) ->
 def test_patch_paths_resolve_against_the_session_cwd(tmp_path: Path) -> None:
     """A patch names paths relative to the session's cwd, not to the repository root — a hook
     fired from a subdirectory would otherwise guard the wrong file."""
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     (tmp_path / "src").mkdir(exist_ok=True)
     import io
     import sys
@@ -855,7 +855,7 @@ def test_a_hosts_own_spelling_of_the_call_is_read_as_well_as_answered(tmp_path: 
     import io
     import sys
 
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     payload = {"cwd": str(tmp_path), "tool_args": {"file_path": str(tmp_path / "src/app.py")}}
     stdin, stdout = sys.stdin, sys.stdout
     sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
@@ -892,7 +892,7 @@ def test_a_payload_the_guard_cannot_read_says_so_before_allowing(
     import io
     import sys
 
-    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    seed_repo(tmp_path, state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     payload = {"cwd": str(tmp_path), "arguments": {"file_path": str(tmp_path / "src/app.py")}}
     stdin = sys.stdin
     sys.stdin = io.StringIO(json.dumps(payload))

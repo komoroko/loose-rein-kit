@@ -25,7 +25,7 @@ from typing import Any
 
 from rein import adapters, digests, event_chain, gate_guard, models, store
 
-GATE_ORDER = models.GATE_ORDER
+GATE_ORDER = models.GATE_ENDS
 
 DEMO_PROJECT = "demo"
 DEMO_CYCLE = "demo-cycle"
@@ -68,7 +68,9 @@ def make_state(
     resolved.update(gates or {})
 
     gate_block: dict[str, Any] = {}
-    for name in GATE_ORDER:
+    # The two ends first, then whatever else the caller named — a cycle that froze an irreversible
+    # task carries a gate for it, and a fixture that dropped the extra keys could not express one.
+    for name in (*GATE_ORDER, *(g for g in resolved if g not in GATE_ORDER)):
         status = resolved[name]
         gate_block[name] = {
             "status": status,

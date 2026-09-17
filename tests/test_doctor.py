@@ -281,7 +281,7 @@ def test_unparseable_settings_warn_rather_than_pass(tmp_path: Path) -> None:
 
 
 def test_no_gate_approved_yet_is_info(tmp_path: Path) -> None:
-    state = models.State(make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    state = models.State(make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     results = doctor.check_receipts(state)
     assert [f.level for f in results] == ["INFO"]
 
