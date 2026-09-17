@@ -4,11 +4,111 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
-## [0.6.3] - 2026-09-18
+## [0.7.0] - 2026-09-18
 
-Four readings that were asking the wrong store, or naming a place that did not exist. **Each one
-was settled by finding the mechanism already built and wired to something else** — a watermark, a
-return value, a chain — rather than by adding one.
+**Ten corrections, every one found by reading a claim the code makes about itself against the code
+that makes it.** Three named a guarantee at a point nothing verified it. Three read one store, or
+one event, where the question needed two. Three described a record that no file contained. One was
+a table that had stopped being a table. Nothing here changes what a gate denies or what a lens
+does; what changes is what a reader is told — and, in four places, the check that would have caught
+the drift.
+
+They arrived in two passes, and the second pass began by reviewing the first: two of these are
+defects in the fixes above them.
+
+### The gate guard has three checkpoints, and only one of them is unconditional
+
+Asked what holds on a host with no editor hook, this release used to answer: "the commit-stage
+check (`rein guard --check-diff`) still applies if the pre-commit hook is installed." `rein install`
+does not write `.pre-commit-config.yaml`, `src/rein/data/` does not ship one, and `rein doctor`
+never looked for one — so that sentence offered reassurance on a condition nothing had checked, at
+exactly the point where an operator is deciding whether the boundary is real. `rein guard`'s own
+usage made it worse with a definite article: "this is what .pre-commit-config.yaml registers",
+describing *this* repository's config as though it were the reader's.
+
+What actually holds is the third checkpoint, which none of these texts mentioned.
+`build_loop._gate_violations` re-checks every path a task changed before the leaf branch merges —
+in code, inside `rein build`, on every host, with no registration to be missing. It has been there
+since 0.1.0 and its own docstring gives the reason: "an implementer may commit with hooks absent or
+bypassed". So a host without an edit-time hook does not drop the boundary to the convention layer.
+It changes **when** a violation is caught: edit-time denies the write and the agent reroutes before
+doing the work; merge-stage denies a whole task later and escalates it as `gate_violation` for a
+human. Same boundary, different price.
+
+`doctor` now reads the commit-stage registration instead of hedging about it — a diagnostic that
+can open a file and speculates instead is worse than one that stays quiet — and says which of the
+three this repository has. The absent-hook warning names merge-stage as what still holds; the
+matcher warning ("an edit made with `MultiEdit` never reaches the guard") no longer claims the
+commit-stage check "becomes the only layer"; and the Codex note no longer says an untrusted project
+"falls back to the commit-stage check". `gate_guard`'s module docstring and usage, and the
+"Enforcement detail" paragraph in `gate-workflow.md`, now describe all three and mark which are
+conditional.
+
+The gap this leaves is stated rather than papered over: a change that never goes through
+`rein build` passes no checkpoint `rein` installs. Nothing here closes it — that is a separate
+decision — but `doctor` now says so out loud.
+
+### A commit-stage registration is `rein guard --check-diff`, and the bare name is worse than nothing
+
+That commit-stage reading shipped checking for `rein guard` in `.pre-commit-config.yaml`, which
+would have called a broken registration a PASS. `rein guard` **alone** is the hook invocation: it reads a
+host's JSON payload on stdin. Run from pre-commit it is handed no payload, logs "unparseable hook
+payload — allowing without a gate check", and returns the allow code. That is a hook firing on
+every commit and checking nothing — the precise thing a green `doctor` must never cover for. The
+reading requires `--check-diff`, and names the bare-entry case separately from the absent one.
+
+### The same claim, in five more places
+
+`doctor` was the diagnostic; the claim was in the guard itself. `gate_guard.main`'s two fail-open
+paths — an unparseable payload, and a host that names its tool arguments something this release has
+not seen — both told the reader "the commit-stage check still runs". Those are the two places where
+the edit-time guard has just stopped guarding, so they are exactly where the reassurance had to be
+true. `PATH_KEYS` and `CLAUDE_WRITE_TOOLS` carried it as commentary, and the Codex integration file
+shipped it to users: "until then the guard is not registered and only the commit-stage check runs."
+All five now name what actually catches the write, which is where `rein build` lands it.
+
+### A capability that fell out of the vocabulary table kept its name and lost its degradation
+
+Portable verbs work because every one of them declares what to do on a host that lacks it. That
+declaration is the table's third column in `AGENTS.md`. A prose paragraph about `notify-and-wait`
+had been placed directly beneath its row, which ends the table there — the five rows after it
+(`approval-presentation`, `session-compaction`, `role-delegation`, `command-preauthorization`,
+`background-wait`) continued as paragraph text. Five of the eight capabilities had no degradation
+column at all, in the file that exists to give them one.
+
+`check_capability_mapping` did not catch it because of how it asked. Its test for "AGENTS.md
+defines this capability" was whether `` `token` `` appeared *somewhere in the file*, and every
+token still did. It now reads the section as a table — contiguous rows after the separator, ending
+at the first line that is not a row, which is what a Markdown renderer does — and requires each
+mapped capability to be a row with a non-empty `Lacking it` cell. Run against the broken file, the
+new check reports all five.
+
+The paragraph moved below the table, where it was always meant to be read.
+
+### `rein lens --stats` was reading one of the two events it needs
+
+A `proposed` lens is dropped by deleting it from the plan before the freeze. It then leaves no
+`lens_applied` behind and reads exactly like a lens whose condition never held — both are simply
+absent from the tally. So a lens whose condition is wide enough to be proposed every cycle and
+dropped every cycle costs a judgement every cycle, and the retirement rule could not see it.
+
+Nothing needed recording that was not already recorded. `lens_selected` names every lens the
+resolution wrote into the plan, `proposed` ones included, and `--stats` was reading `lens_applied`
+alone. It now counts both and names the lenses selected into a plan and never recorded as applied
+— without claiming a cause, because three produce it (dropped at the gate, not recorded by the
+reviewer, or an open cycle) and the tally cannot tell them apart. What it can say is that such a
+lens was not simply absent.
+
+No `dropped` status was added. The plan schema is `additionalProperties: false` and, more to the
+point, a record of a human's edit does not belong inside the digest that edit changes.
+
+### …and the counts say whose they are before inviting an edit to a shared library
+
+`--stats` reads this repository's chain and its archives. The library it then tells you to narrow
+or drop from lives in `$XDG_CONFIG_HOME` and is shared by every repository you use. The output
+ended "Narrow it in <that path>, or drop it" with nothing saying the reading behind the instruction
+was narrower than the thing it would change. It now says so. Which range the statistics *should*
+cover is a separate question; saying which one they do cover is not.
 
 ### The speculative work log did not exist anywhere
 
@@ -89,108 +189,6 @@ sites use for three unrelated things.
 `rein observe` prints both counts, labelled by what they count, and never one instead of the other:
 they cover different scopes and are not corrections of each other. Neither has a ceiling, and the
 reason is still structural — nothing reads this store back to decide anything.
-
-## [0.6.2] - 2026-09-18
-
-Claims the code makes about itself, and two tallies reading one event where the question needs
-two. **A guarantee stated where it is not verified, a vocabulary declared in a table that had
-stopped being one, and a retirement rule that could not see the lenses it was written for.**
-Nothing here changes what the guard denies or what a lens does; what changes is what a reader is
-told, and in three places the check that would have caught the drift.
-
-### The gate guard has three checkpoints, and only one of them is unconditional
-
-Asked what holds on a host with no editor hook, this release used to answer: "the commit-stage
-check (`rein guard --check-diff`) still applies if the pre-commit hook is installed." `rein install`
-does not write `.pre-commit-config.yaml`, `src/rein/data/` does not ship one, and `rein doctor`
-never looked for one — so that sentence offered reassurance on a condition nothing had checked, at
-exactly the point where an operator is deciding whether the boundary is real. `rein guard`'s own
-usage made it worse with a definite article: "this is what .pre-commit-config.yaml registers",
-describing *this* repository's config as though it were the reader's.
-
-What actually holds is the third checkpoint, which none of these texts mentioned.
-`build_loop._gate_violations` re-checks every path a task changed before the leaf branch merges —
-in code, inside `rein build`, on every host, with no registration to be missing. It has been there
-since 0.1.0 and its own docstring gives the reason: "an implementer may commit with hooks absent or
-bypassed". So a host without an edit-time hook does not drop the boundary to the convention layer.
-It changes **when** a violation is caught: edit-time denies the write and the agent reroutes before
-doing the work; merge-stage denies a whole task later and escalates it as `gate_violation` for a
-human. Same boundary, different price.
-
-`doctor` now reads the commit-stage registration instead of hedging about it — a diagnostic that
-can open a file and speculates instead is worse than one that stays quiet — and says which of the
-three this repository has. The absent-hook warning names merge-stage as what still holds; the
-matcher warning ("an edit made with `MultiEdit` never reaches the guard") no longer claims the
-commit-stage check "becomes the only layer"; and the Codex note no longer says an untrusted project
-"falls back to the commit-stage check". `gate_guard`'s module docstring and usage, and the
-"Enforcement detail" paragraph in `gate-workflow.md`, now describe all three and mark which are
-conditional.
-
-The gap this leaves is stated rather than papered over: a change that never goes through
-`rein build` passes no checkpoint `rein` installs. Nothing here closes it — that is a separate
-decision — but `doctor` now says so out loud.
-
-### A capability that fell out of the vocabulary table kept its name and lost its degradation
-
-Portable verbs work because every one of them declares what to do on a host that lacks it. That
-declaration is the table's third column in `AGENTS.md`. A prose paragraph about `notify-and-wait`
-had been placed directly beneath its row, which ends the table there — the five rows after it
-(`approval-presentation`, `session-compaction`, `role-delegation`, `command-preauthorization`,
-`background-wait`) continued as paragraph text. Five of the eight capabilities had no degradation
-column at all, in the file that exists to give them one.
-
-`check_capability_mapping` did not catch it because of how it asked. Its test for "AGENTS.md
-defines this capability" was whether `` `token` `` appeared *somewhere in the file*, and every
-token still did. It now reads the section as a table — contiguous rows after the separator, ending
-at the first line that is not a row, which is what a Markdown renderer does — and requires each
-mapped capability to be a row with a non-empty `Lacking it` cell. Run against the broken file, the
-new check reports all five.
-
-The paragraph moved below the table, where it was always meant to be read.
-
-### A commit-stage registration is `rein guard --check-diff`, and the bare name is worse than nothing
-
-The reading above went in checking for `rein guard` in `.pre-commit-config.yaml`, which would have
-called a broken registration a PASS. `rein guard` **alone** is the hook invocation: it reads a
-host's JSON payload on stdin. Run from pre-commit it is handed no payload, logs "unparseable hook
-payload — allowing without a gate check", and returns the allow code. That is a hook firing on
-every commit and checking nothing — the precise thing a green `doctor` must never cover for. The
-reading requires `--check-diff`, and names the bare-entry case separately from the absent one.
-
-### The same claim, in five more places
-
-`doctor` was the diagnostic; the claim was in the guard itself. `gate_guard.main`'s two fail-open
-paths — an unparseable payload, and a host that names its tool arguments something this release has
-not seen — both told the reader "the commit-stage check still runs". Those are the two places where
-the edit-time guard has just stopped guarding, so they are exactly where the reassurance had to be
-true. `PATH_KEYS` and `CLAUDE_WRITE_TOOLS` carried it as commentary, and the Codex integration file
-shipped it to users: "until then the guard is not registered and only the commit-stage check runs."
-All five now name what actually catches the write, which is where `rein build` lands it.
-
-### `rein lens --stats` was reading one of the two events it needs
-
-A `proposed` lens is dropped by deleting it from the plan before the freeze. It then leaves no
-`lens_applied` behind and reads exactly like a lens whose condition never held — both are simply
-absent from the tally. So a lens whose condition is wide enough to be proposed every cycle and
-dropped every cycle costs a judgement every cycle, and the retirement rule could not see it.
-
-Nothing needed recording that was not already recorded. `lens_selected` names every lens the
-resolution wrote into the plan, `proposed` ones included, and `--stats` was reading `lens_applied`
-alone. It now counts both and names the lenses selected into a plan and never recorded as applied
-— without claiming a cause, because three produce it (dropped at the gate, not recorded by the
-reviewer, or an open cycle) and the tally cannot tell them apart. What it can say is that such a
-lens was not simply absent.
-
-No `dropped` status was added. The plan schema is `additionalProperties: false` and, more to the
-point, a record of a human's edit does not belong inside the digest that edit changes.
-
-### …and the counts say whose they are before inviting an edit to a shared library
-
-`--stats` reads this repository's chain and its archives. The library it then tells you to narrow
-or drop from lives in `$XDG_CONFIG_HOME` and is shared by every repository you use. The output
-ended "Narrow it in <that path>, or drop it" with nothing saying the reading behind the instruction
-was narrower than the thing it would change. It now says so. Which range the statistics *should*
-cover is a separate question; saying which one they do cover is not.
 
 ## [0.6.1] - 2026-09-17
 
