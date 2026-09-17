@@ -207,7 +207,16 @@ def test_check_wrapper_parity_trips_on_description_drift(tmp_path: Path) -> None
 _CLAUDE_MAP = "| `structured-question` | AskUserQuestion |\n| `notify-and-wait` | PushNotification |\n"
 _COPILOT_MAP = "| `structured-question` | numbered options in chat |\n| `notify-and-wait` | end the turn |\n"
 _CODEX_MAP = "| `structured-question` | numbered options in chat |\n| `notify-and-wait` | end the turn |\n"
-_AGENTS_VOCAB = "vocabulary: `structured-question`, `notify-and-wait`.\n"
+# AGENTS.md's capability section. It is a **table** here because that is the only form that
+# declares a degradation: `capability_degradations` reads the third column, and a row that has
+# fallen out of the table has no column at all.
+_AGENTS_VOCAB = (
+    "## Capability vocabulary (portable verbs)\n\n"
+    "| Capability | Meaning | Lacking it |\n"
+    "|---|---|---|\n"
+    "| `structured-question` | batched questions | numbered chat options, then wait |\n"
+    "| `notify-and-wait` | flag a pending decision | state it, end the turn |\n"
+)
 
 
 def _maps(claude: str = _CLAUDE_MAP, copilot: str = _COPILOT_MAP, codex: str = _CODEX_MAP) -> dict[str, str]:
@@ -237,14 +246,54 @@ def test_check_capability_mapping_covers_the_codex_mapping() -> None:
             claude=_CLAUDE_MAP + "| `session-compaction` | /compact |\n",
             copilot=_COPILOT_MAP + "| `session-compaction` | /compact |\n",
         ),
-        _AGENTS_VOCAB + " `session-compaction`\n",
+        _AGENTS_VOCAB + "| `session-compaction` | reset at a checkpoint | a fresh session |\n",
     )
     assert [f for f in failures if template_lint.CODEX_MAPPING in f and "session-compaction" in f]
 
 
 def test_check_capability_mapping_trips_on_undefined_token() -> None:
-    failures = template_lint.check_capability_mapping(_maps(), "vocabulary: `notify-and-wait`.\n")
-    assert any("`structured-question` is mapped but never defined" in f for f in failures)
+    vocab = _AGENTS_VOCAB.replace(
+        "| `structured-question` | batched questions | numbered chat options, then wait |\n", ""
+    )
+    failures = template_lint.check_capability_mapping(_maps(), vocab)
+    assert any("`structured-question` is mapped but has no row" in f for f in failures)
+
+
+def test_a_row_that_follows_a_paragraph_is_not_a_row() -> None:
+    """The defect this check was rewritten for. A prose paragraph had been inserted between two
+    rows of the live table, which ends the table above it and leaves everything below as paragraph
+    text — five capabilities with no degradation column at all. The old check asked whether
+    `` `token` `` appeared *somewhere in the file*, so every token was still there and nothing
+    failed for as long as it took to read the rendered page.
+    """
+    split = _AGENTS_VOCAB.replace(
+        "| `notify-and-wait` | flag a pending decision | state it, end the turn |\n",
+        "\nsome prose about `notify-and-wait` that belongs below the table\n"
+        "| `notify-and-wait` | flag a pending decision | state it, end the turn |\n",
+    )
+    assert "`notify-and-wait`" in split  # the substring test the old check used still passes
+    assert sorted(template_lint.capability_degradations(split)) == ["structured-question"]
+    failures = template_lint.check_capability_mapping(_maps(), split)
+    assert any("`notify-and-wait` is mapped but has no row" in f for f in failures)
+
+
+def test_a_row_with_an_empty_degradation_cell_trips() -> None:
+    """A capability is portable because it says what to do without it. A blank cell is a row the
+    table has and the vocabulary does not."""
+    blank = _AGENTS_VOCAB.replace(
+        "| `notify-and-wait` | flag a pending decision | state it, end the turn |",
+        "| `notify-and-wait` | flag a pending decision |  |",
+    )
+    failures = template_lint.check_capability_mapping(_maps(), blank)
+    assert any("`notify-and-wait` declares no degradation" in f for f in failures)
+
+
+def test_the_live_vocabulary_table_declares_every_degradation() -> None:
+    """Run against the shipped AGENTS.md rather than a fixture: the column that makes the verbs
+    portable is the one nothing used to read."""
+    table = template_lint.capability_degradations((_REPO_ROOT / template_lint.AGENTS_MD).read_text(encoding="utf-8"))
+    assert len(table) == 8
+    assert all(table.values()), [name for name, lacking in table.items() if not lacking]
 
 
 def test_check_neutral_vocabulary_trips_on_dialect_leak() -> None:

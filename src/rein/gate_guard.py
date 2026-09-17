@@ -1,10 +1,20 @@
 """The mechanism layer: deny in code what the convention layer merely asks agents not to do.
 
 Registered as a PreToolUse hook by `rein install <agent>`, this fires on every
-editor write and answers one question — may this path be written right now? It also runs at
-commit stage (`--check-diff`) over every changed path, so an agent whose environment cannot
-intercept edits, or a write that bypassed the hook (a shell redirect, `sed -i`), is still
-checked before the change lands.
+editor write and answers one question — may this path be written right now? That is one of three
+checkpoints, and the only one a host's capabilities decide:
+
+* **edit-time** — this hook. `rein install` registers it on the four hosts that have one.
+* **commit-stage** — `--check-diff`, over every path in the diff. Registered by a repository's own
+  `.pre-commit-config.yaml`; `rein` neither installs one nor ships one, so this checkpoint is a
+  fact about the repository and `rein doctor` reports whether it holds.
+* **merge-stage** — `build_loop._gate_violations`, in code inside `rein build`, over every path a
+  task changed before it lands. No host, hook or config can be missing it.
+
+So an agent whose environment cannot intercept edits, or a write that bypassed the hook (a shell
+redirect, `sed -i`), is still checked — by the third one, which is also the reason the first two
+being absent degrades *when a violation is caught*, not *whether the boundary holds*. What has no
+checkpoint rein installs is a change that never goes through `rein build` at all.
 
 Four rules, in order of severity:
 
@@ -753,8 +763,9 @@ USAGE = """usage: rein guard [--check-diff]
   (no arguments)  pre-tool hook mode (Claude Code `PreToolUse`, Gemini CLI `BeforeTool`, and the
                   hosts that copied either): reads the host's JSON payload on stdin and answers
                   whether the paths it is about to write may be written right now.
-  --check-diff    commit-stage mode: checks every path in the diff against HEAD. This is what
-                  .pre-commit-config.yaml registers, and what `make check` runs.
+  --check-diff    commit-stage mode: checks every path in the diff against HEAD. This is what a
+                  repository's own .pre-commit-config.yaml registers — `rein` neither installs one
+                  nor ships one, so `rein doctor` reports whether this repository has it.
 """
 
 

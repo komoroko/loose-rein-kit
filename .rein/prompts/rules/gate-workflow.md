@@ -158,9 +158,12 @@ at the next `/verify`. Abandonment is `rein cycle-close --name abandoned-<slug>`
 ## Enforcement detail (the gate rules' mechanism layer)
 
 The installed `rein guard` denies in code at three checkpoints — **edit-time** (editor
-hook on deliverable writes), **commit-stage** (`rein guard --check-diff` in pre-commit /
-the quality gate), and **merge-stage** (`rein build` re-checks every path a task changed
-before it lands; violations escalate as `gate_violation`). Guarded paths: `guard.paths`.
+hook on deliverable writes; registered on the hosts that have one), **commit-stage**
+(`rein guard --check-diff`, when this repository's own pre-commit config registers it — `rein`
+does not install one), and **merge-stage** (`rein build` re-checks every path a task changed
+before it lands; violations escalate as `gate_violation`). Only the third is unconditional, so a
+host without an edit-time hook changes *when* a violation is caught, not whether the boundary
+holds; `rein doctor` reports which of the three this repository has. Guarded paths: `guard.paths`.
 A `state.yaml` gate flip to `approved` written by hand is denied: the only write path is
 `approve.record_approval`, reached by a human confirming at their own terminal or in the dashboard
 (AGENTS.md "Gate rules" 2). Both check readiness first, print the digests the approval would cover,

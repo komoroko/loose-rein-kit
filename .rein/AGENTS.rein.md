@@ -23,6 +23,11 @@ or a way of running something — with these neutral capabilities, never an agen
 | `phase-invocation` | run a phase procedure (`/req` … `/status`) | read the command body, execute it |
 | `structured-question` | batched multiple-choice questions | numbered chat options, then wait |
 | `notify-and-wait` | flag a pending decision, then stop | state it, end the turn |
+| `approval-presentation` | present a deliverable for approval | ask for an explicit "approve" |
+| `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
+| `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |
+| `command-preauthorization` | pre-authorize known-safe commands | approve each interactively |
+| `background-wait` | wait out a command that runs longer than one turn's worth of patience, without asking it anything: either the host re-enters you when it exits, or the tool call itself waits | run it in the foreground with the longest wait the host allows; only when even that cannot hold it, detach with the output in a file, end the turn, and read the log when a human brings you back |
 
 `notify-and-wait` is how *you* hand a decision back. Reaching the person who is not looking is
 not yours and does not degrade with the host: `rein ui` watches the SSOT for as long as it runs
@@ -31,11 +36,6 @@ on a human changes. The two gates say how often the work stops; this is what dec
 each stop lasts, so it is the harness's and not the CLI's. A notification carries what is waited
 on and where — never the evidence, and never a way to answer: the page it names is read-only
 unless that browser already holds a session.
-| `approval-presentation` | present a deliverable for approval | ask for an explicit "approve" |
-| `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
-| `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |
-| `command-preauthorization` | pre-authorize known-safe commands | approve each interactively |
-| `background-wait` | wait out a command that runs longer than one turn's worth of patience, without asking it anything: either the host re-enters you when it exits, or the tool call itself waits | run it in the foreground with the longest wait the host allows; only when even that cannot hold it, detach with the output in a file, end the turn, and read the log when a human brings you back |
 
 ## Language
 

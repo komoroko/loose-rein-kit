@@ -63,6 +63,9 @@ COPILOT_HOOKS_DIR = ".github/hooks"
 #: Codex reads hooks from either form, so both are checked; a repository that ships neither has
 #: no edit-time guard under Codex.
 CODEX_HOOK_FILES = (".codex/hooks.json", ".codex/config.toml")
+#: Where a repository registers the commit-stage check, when it registers one. `rein` neither
+#: installs this file nor ships one, which is why whether it holds is looked at and never assumed.
+PRE_COMMIT_PATH = ".pre-commit-config.yaml"
 
 
 @dataclass(frozen=True)
@@ -964,11 +967,35 @@ def check_upstream(repo: repo_mod.Repo) -> list[Finding]:
     ]
 
 
+def _commit_stage(repo: repo_mod.Repo) -> Finding:
+    """Whether this repository registers the commit-stage check — looked at, never assumed.
+
+    `rein install` does not write `.pre-commit-config.yaml` and `src/rein/data/` does not ship
+    one, so whether `rein guard --check-diff` runs at commit is a fact about the repository, not
+    about the tool. This used to be reported as "the commit-stage check still applies **if** the
+    pre-commit hook is installed" — a condition nothing had checked, offered as reassurance.
+    Looking is cheaper than hedging, and a diagnostic that hedges about what it could read is
+    worse than one that stays silent.
+    """
+    if _reads_guard(repo.path(PRE_COMMIT_PATH)):
+        return Finding("PASS", "hook", f"commit-stage: {PRE_COMMIT_PATH} registers `rein guard`")
+    return Finding(
+        "INFO",
+        "hook",
+        f"commit-stage: {PRE_COMMIT_PATH} does not register `rein guard` — rein neither installs nor "
+        "ships it. What a task changes is still re-checked in code before it lands (merge-stage, "
+        "`rein build`, every host); a change made outside `rein build` passes no checkpoint rein installs.",
+    )
+
+
 def check_hook(repo: repo_mod.Repo) -> list[Finding]:
-    """The gate guard is only real if a PreToolUse hook actually invokes it.
+    """Which of the guard's three checkpoints this repository actually has.
 
     There is no `enforce_hook` knob to check any more: a guard with an off switch an agent can
-    reach is a convention, so the only question left is whether a host carries it.
+    reach is a convention, so what is left is *where* the guard runs. Only two of the three are
+    a question. **Edit-time** is a host registration, **commit-stage** is a repository's own
+    pre-commit config, and **merge-stage** is inside `rein build` — unconditional, on every host,
+    and so never reported as absent.
     """
     registered = {
         "claude": [repo.path(SETTINGS_PATH)],
@@ -984,11 +1011,12 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
                 "hook",
                 f"the gate guard is registered in none of {SETTINGS_PATH}, {COPILOT_HOOKS_DIR}/*.json, "
                 f"{', '.join(CODEX_HOOK_FILES)}, {GEMINI_SETTINGS_PATH} — edit-time enforcement is absent. "
-                "The commit-stage check "
-                "(`rein guard --check-diff`) still applies if the pre-commit hook is installed.",
-            )
+                "Merge-stage still holds: `rein build` re-checks every path a task changed before it "
+                "lands, in code and on every host.",
+            ),
+            _commit_stage(repo),
         ]
-    findings = [Finding("PASS", "hook", f"gate guard registered ({', '.join(surfaces)})")]
+    findings = [Finding("PASS", "hook", f"gate guard registered ({', '.join(surfaces)})"), _commit_stage(repo)]
     missing = [_HOST_LABEL[host] for host in registered if host not in surfaces]
     if missing:
         findings.append(
@@ -1004,7 +1032,8 @@ def check_hook(repo: repo_mod.Repo) -> list[Finding]:
                 "INFO",
                 "hook",
                 "the Codex registration is project-scoped config, which Codex reads only once the project "
-                "is trusted — until then that session falls back to the commit-stage check",
+                "is trusted — until then that session has no edit-time check, and what it changes is "
+                "caught where `rein build` lands it",
             )
         )
     return findings
@@ -1016,8 +1045,9 @@ def _check_matcher(repo: repo_mod.Repo, rel: str, event: str, write_tools: Seque
     "Is the guard registered?" and "does the registration cover the tools that write?" are two
     questions and only the first was asked. Claude's matcher read `Write|Edit|MultiEdit` —
     `MultiEdit` retired upstream, `NotebookEdit` never added — so a `.ipynb` under a guarded prefix
-    passed the edit-stage check untouched and only the commit-stage one ever looked at it. A hook
-    that fires on a subset of the writes is the failure mode this whole file exists to make visible.
+    passed the edit-stage check untouched and was not looked at again until `rein build` landed it.
+    A hook that fires on a subset of the writes is the failure mode this whole file exists to make
+    visible.
 
     Taken per host rather than for claude alone, which is how it was written: a second host with a
     settings file and a matcher of its own (Gemini CLI's `BeforeTool`) was checked for the guard's
@@ -1043,8 +1073,9 @@ def _check_matcher(repo: repo_mod.Repo, rel: str, event: str, write_tools: Seque
             "WARN",
             "hook",
             f"{rel}'s {event} matcher does not name {', '.join(uncovered)}, so an edit made "
-            "with it never reaches the guard — the commit-stage check becomes the only layer. Add them to "
-            "the matcher (`rein install <host> --force` restores the shipped one).",
+            "with it never reaches the guard — what it changes is caught a whole task later, where "
+            "`rein build` lands it. Add them to the matcher (`rein install <host> --force` restores "
+            "the shipped one).",
         )
     ]
 

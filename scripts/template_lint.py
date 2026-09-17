@@ -87,6 +87,9 @@ _REIN_INVOCATION_RE = re.compile(r"`rein ([^`\n]+)`")
 _FLAG_RE = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]*)")
 # A capability token is the backticked kebab word opening a mapping-table row.
 _CAPABILITY_ROW_RE = re.compile(r"^\|\s*`([a-z][a-z-]+)`\s*\|", re.MULTILINE)
+# The section AGENTS.md declares the vocabulary in — where the degradation column lives.
+_CAPABILITY_HEADING = "## Capability vocabulary"
+_TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 # `description:` in YAML frontmatter, `description = "…"` in a Codex subagent's TOML.
 _DESCRIPTION_RE = re.compile(r"^description\s*[:=]\s*(.+?)\s*$", re.MULTILINE)
 _TOML_ESCAPE_RE = re.compile(r"\\(.)")
@@ -253,12 +256,53 @@ def check_adapter_lists(root: Path) -> list[str]:
     return failures
 
 
+def capability_degradations(agents_text: str) -> dict[str, str]:
+    """`{capability: what to do lacking it}`, read out of AGENTS.md's own table **as a table**.
+
+    The vocabulary is portable because every capability declares what to do without it. That
+    declaration is a column, and a column only exists while the rows are one table.
+
+    This replaced a substring test — does `` `token` `` appear anywhere in AGENTS.md — and the
+    substring test is what let the table sit broken: a prose paragraph had been inserted between
+    two rows, which ends the table above it and leaves the five rows below as paragraph text. The
+    tokens were all still *in the file*, so nothing failed, and five capabilities silently had no
+    degradation column at all.
+    """
+    lines = agents_text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith(_CAPABILITY_HEADING))
+    except StopIteration:
+        return {}
+    body = lines[start + 1 :]
+    end = next((i for i, line in enumerate(body) if line.startswith("## ")), len(body))
+    body = body[:end]  # this section only — a section with no table must not borrow the next one's
+    try:  # the separator row is what makes the lines above and below it one table
+        sep = next(i for i, line in enumerate(body) if _TABLE_SEPARATOR_RE.match(line))
+    except StopIteration:
+        return {}
+    table: dict[str, str] = {}
+    # Contiguous rows only. A table ends at the first line that is not one, which is the whole
+    # point: rows that continue after a paragraph are not rows, and reading them as if they were
+    # is how this went unnoticed for as long as it did.
+    for line in body[sep + 1 :]:
+        if not line.startswith("|"):
+            break
+        match = _CAPABILITY_ROW_RE.match(line)
+        if match is None:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        table[match.group(1)] = cells[2] if len(cells) > 2 else ""
+    return table
+
+
 def check_capability_mapping(mappings: dict[str, str], agents_text: str) -> list[str]:
     """Every capability mapping covers the same token set, and AGENTS.md defines every token.
 
     The mapping tables (CLAUDE.md, the Copilot instructions file, the Codex one) are
     hand-maintained mirrors; the vocabulary itself lives in AGENTS.md. A capability added to one
-    mapping only — or one that AGENTS.md never defines — is the drift.
+    mapping only — or one that AGENTS.md's table has no row for — is the drift. `never defines` used
+    to mean `the token appears somewhere in the file`; it means a row with a degradation now
+    (:func:`capability_degradations`).
 
     Keyed by path rather than fixed to two arguments so that adding a host adds a mapping here
     and nothing else: a mapping this function does not receive is a mapping no canary holds,
@@ -273,9 +317,17 @@ def check_capability_mapping(mappings: dict[str, str], agents_text: str) -> list
         for token in elsewhere:
             others = ", ".join(sorted(p for p, ts in per_path.items() if token in ts))
             failures.append(f"{path}: missing capability `{token}` (mapped in {others})")
+    defined = capability_degradations(agents_text)
     for token in sorted(union):
-        if f"`{token}`" not in agents_text:
-            failures.append(f"{AGENTS_MD}: capability `{token}` is mapped but never defined here")
+        if token not in defined:
+            failures.append(
+                f"{AGENTS_MD}: capability `{token}` is mapped but has no row in the vocabulary table "
+                f"(a row outside the table is prose, not a declaration)"
+            )
+        elif not defined[token]:
+            failures.append(
+                f"{AGENTS_MD}: capability `{token}` declares no degradation — its `Lacking it` cell is empty"
+            )
     return failures
 
 

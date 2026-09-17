@@ -4,6 +4,63 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.6.2] - 2026-09-18
+
+Two claims the code makes about itself, both about the layer that is supposed to hold when a host
+cannot help. **A guarantee stated where it is not verified, and a vocabulary declared in a table
+that had stopped being one.** Neither changes what the guard does; both change what a reader is
+told it does, and one of them adds the check that would have caught it.
+
+### The gate guard has three checkpoints, and only one of them is unconditional
+
+Asked what holds on a host with no editor hook, this release used to answer: "the commit-stage
+check (`rein guard --check-diff`) still applies if the pre-commit hook is installed." `rein install`
+does not write `.pre-commit-config.yaml`, `src/rein/data/` does not ship one, and `rein doctor`
+never looked for one — so that sentence offered reassurance on a condition nothing had checked, at
+exactly the point where an operator is deciding whether the boundary is real. `rein guard`'s own
+usage made it worse with a definite article: "this is what .pre-commit-config.yaml registers",
+describing *this* repository's config as though it were the reader's.
+
+What actually holds is the third checkpoint, which none of these texts mentioned.
+`build_loop._gate_violations` re-checks every path a task changed before the leaf branch merges —
+in code, inside `rein build`, on every host, with no registration to be missing. It has been there
+since 0.1.0 and its own docstring gives the reason: "an implementer may commit with hooks absent or
+bypassed". So a host without an edit-time hook does not drop the boundary to the convention layer.
+It changes **when** a violation is caught: edit-time denies the write and the agent reroutes before
+doing the work; merge-stage denies a whole task later and escalates it as `gate_violation` for a
+human. Same boundary, different price.
+
+`doctor` now reads the commit-stage registration instead of hedging about it — a diagnostic that
+can open a file and speculates instead is worse than one that stays quiet — and says which of the
+three this repository has. The absent-hook warning names merge-stage as what still holds; the
+matcher warning ("an edit made with `MultiEdit` never reaches the guard") no longer claims the
+commit-stage check "becomes the only layer"; and the Codex note no longer says an untrusted project
+"falls back to the commit-stage check". `gate_guard`'s module docstring and usage, and the
+"Enforcement detail" paragraph in `gate-workflow.md`, now describe all three and mark which are
+conditional.
+
+The gap this leaves is stated rather than papered over: a change that never goes through
+`rein build` passes no checkpoint `rein` installs. Nothing here closes it — that is a separate
+decision — but `doctor` now says so out loud.
+
+### A capability that fell out of the vocabulary table kept its name and lost its degradation
+
+Portable verbs work because every one of them declares what to do on a host that lacks it. That
+declaration is the table's third column in `AGENTS.md`. A prose paragraph about `notify-and-wait`
+had been placed directly beneath its row, which ends the table there — the five rows after it
+(`approval-presentation`, `session-compaction`, `role-delegation`, `command-preauthorization`,
+`background-wait`) continued as paragraph text. Five of the eight capabilities had no degradation
+column at all, in the file that exists to give them one.
+
+`check_capability_mapping` did not catch it because of how it asked. Its test for "AGENTS.md
+defines this capability" was whether `` `token` `` appeared *somewhere in the file*, and every
+token still did. It now reads the section as a table — contiguous rows after the separator, ending
+at the first line that is not a row, which is what a Markdown renderer does — and requires each
+mapped capability to be a row with a non-empty `Lacking it` cell. Run against the broken file, the
+new check reports all five.
+
+The paragraph moved below the table, where it was always meant to be read.
+
 ## [0.6.1] - 2026-09-17
 
 Four corrections with one thing in common: **each was found by reading the shipped code against
