@@ -198,9 +198,46 @@ def _applied(lens_id: str, found: bool) -> models.Event:
     return event_chain.make("lens_applied", "demo-cycle", detail={"lens": lens_id, "found": found})
 
 
+def _selected(*lens_ids: str) -> models.Event:
+    from rein import event_chain
+
+    return event_chain.make("lens_selected", "demo-cycle", subject_ids=sorted(lens_ids))
+
+
 def test_stats_count_applications_and_finds_separately() -> None:
     counts = lens_cmd.stats([_applied("L-1", False), _applied("L-1", True), _applied("L-2", False)])
-    assert counts == {"L-1": {"applied": 2, "found": 1}, "L-2": {"applied": 1, "found": 0}}
+    assert counts == {
+        "L-1": {"selected": 0, "applied": 2, "found": 1},
+        "L-2": {"selected": 0, "applied": 1, "found": 0},
+    }
+
+
+def test_a_lens_dropped_at_the_gate_is_not_the_same_as_one_that_never_came_up() -> None:
+    """Dropping a `proposed` lens deletes it from the plan before the freeze, so it leaves no
+    `lens_applied` and reads like a lens whose condition never held. The difference was on record
+    the whole time — `lens_selected` names every lens the resolution wrote into the plan — and the
+    tally was reading the other event. A lens wide enough to be proposed every cycle and dropped
+    every cycle costs a judgement each time and used to be invisible to the retirement rule."""
+    counts = lens_cmd.stats([_selected("L-1", "L-2"), _applied("L-2", True)])
+    assert counts["L-1"] == {"selected": 1, "applied": 0, "found": 0}
+    assert counts["L-2"] == {"selected": 1, "applied": 1, "found": 1}
+
+    library = [_lens("L-1", lens_class=lenses.CLASS_CONDITIONAL, applies_when="the cycle touches a schema")]
+    out = lens_cmd.render_stats(counts, library)
+    assert "L-1" in out.split("never recorded as applied")[1]
+    assert "L-2" not in out.split("never recorded as applied")[1]
+    # …and it names the count without claiming a cause it cannot see.
+    assert "cannot tell which" in out
+
+
+def test_the_stats_say_whose_numbers_they_are_before_pointing_at_a_shared_library() -> None:
+    """The counts are one repository's chain and archives; the library they invite an edit to is
+    user-global. The output used to end "Narrow it in <user-global path>, or drop it" with nothing
+    saying the reading behind that instruction was narrower than the thing it would change."""
+    library = [_lens("L-1", lens_class=lenses.CLASS_STANDARD, applies_when="the cycle states a claim")]
+    out = lens_cmd.render_stats(lens_cmd.stats([_applied("L-1", False), _applied("L-1", False)]), library)
+    assert "this repository's chain and archives only" in out
+    assert out.index("this repository's chain and archives only") > out.index("never found anything")
 
 
 def test_a_lens_that_keeps_applying_and_never_finds_is_named() -> None:

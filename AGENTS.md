@@ -121,9 +121,12 @@ Four documents, distinct roles — do not conflate them:
   elsewhere.
 - **A lens earns its place the second time, and loses it by never finding.** A one-off finding is
   recorded `unclassified` — once is an incident, twice is what tells you the condition. The reverse
-  rule is `rein lens --stats`: applied and found counts per lens, across archived cycles, naming
-  the ones that keep applying and never find. Counted, never capped — a ceiling on how many lenses
-  may exist gets answered by deleting whichever is cheapest to delete.
+  rule is `rein lens --stats`: selected, applied and found counts per lens, across archived cycles,
+  naming the ones that keep applying and never find — and the ones selected into a plan and never
+  recorded as applied, which is where a lens dropped at the gate every cycle shows up instead of
+  reading as one that never came up. Counted, never capped — a ceiling on how many lenses may exist
+  gets answered by deleting whichever is cheapest to delete. The counts are **this repository's**;
+  the library is user-global, so the output says so before inviting an edit to it.
 - **`status: unknown` is an answer.** Record it rather than filling it in with a default, and never
   write a claim for it: a claim nothing can make true cannot be judged. A `mandate` decision left
   `unknown` is refused by `rein approve mandate` — narrow the mandate so it does not reach it, or

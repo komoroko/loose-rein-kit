@@ -863,6 +863,22 @@ def test_the_commit_stage_checkpoint_is_looked_at_not_assumed(tmp_path: Path) ->
     assert _levels(doctor.check_hook(repo_mod.Repo(tmp_path)), "commit-stage") == ["PASS"]
 
 
+def test_a_commit_stage_entry_without_check_diff_is_not_a_registration(tmp_path: Path) -> None:
+    """`rein guard` alone is the *hook* invocation — it reads a host's JSON payload on stdin. Run
+    from pre-commit it is handed no payload, warns, and returns the allow code, so the hook fires
+    on every commit and checks nothing. Reporting that as PASS would be the same class of claim
+    this reading was written to stop making, one file further in."""
+    seed_repo(tmp_path)
+    (tmp_path / doctor.PRE_COMMIT_PATH).write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: rein-guard\n        entry: rein guard\n",
+        encoding="utf-8",
+    )
+    findings = [f for f in doctor.check_hook(repo_mod.Repo(tmp_path)) if "commit-stage" in f.message]
+    assert [f.level for f in findings] == ["INFO"]
+    assert "without `--check-diff`" in findings[0].message
+    assert "reads no payload, warns and allows" in findings[0].message
+
+
 def test_the_commit_stage_finding_is_reported_with_a_hook_host_too(tmp_path: Path) -> None:
     """The three checkpoints are independent. Having an edit-time hook says nothing about
     whether the commit-stage one is registered, so the reading is not conditioned on it."""

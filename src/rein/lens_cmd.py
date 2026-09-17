@@ -28,9 +28,21 @@ logger = logging.getLogger(__name__)
 
 
 def stats(events: Sequence[models.Event]) -> dict[str, dict[str, int]]:
-    """Per lens: how many times it was applied, and how many of those found something."""
-    counts: dict[str, dict[str, int]] = defaultdict(lambda: {"applied": 0, "found": 0})
+    """Per lens: how often it was selected into a plan, applied, and found something.
+
+    `selected` counts `lens_selected`, which names every lens the resolution wrote into the plan —
+    the `proposed` ones as much as the `applied` ones. It is here because the retirement rule could
+    not see a whole class of lens without it. A lens a human drops at the gate is deleted from the
+    plan before the freeze, so it leaves no `lens_applied` behind and reads exactly like a lens
+    whose condition never held: both are simply absent. The difference was always on record — the
+    `lens_selected` event still names it — and this tally was reading the other event.
+    """
+    counts: dict[str, dict[str, int]] = defaultdict(lambda: {"selected": 0, "applied": 0, "found": 0})
     for event in events:
+        if event.event == "lens_selected":
+            for lens_id in event.subject_ids:
+                counts[str(lens_id)]["selected"] += 1
+            continue
         if event.event != "lens_applied":
             continue
         detail = event.detail if isinstance(event.detail, Mapping) else {}
@@ -43,16 +55,27 @@ def stats(events: Sequence[models.Event]) -> dict[str, dict[str, int]]:
     return dict(counts)
 
 
+#: Said wherever the output invites an edit to the library. The counts come from this repository's
+#: audit chain and its archives; the library they point at is user-global. `--stats` used to end
+#: "Narrow it in <user-global path>, or drop it" on the strength of one repository's numbers, so
+#: the reading it directed was wider than the reading it had. Which range the statistics should
+#: cover is a separate question (`20-open.md` item 9); saying which one they *do* cover is not.
+_SCOPE_NOTE = (
+    "These counts are this repository's chain and archives only. The library is shared across "
+    "every repository you use, so check the others before narrowing or dropping anything in it."
+)
+
+
 def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lenses.Lens]) -> str:
     known = {lens.id: lens for lens in library}
     rows = sorted(counts.items(), key=lambda kv: (-kv[1]["applied"], kv[0]))
     if not rows:
-        return "no lens has been applied yet — nothing to say about which ones earn their place"
-    lines = [f"{'lens':<32} {'applied':>8} {'found':>6}  condition"]
+        return "no lens has been selected or applied yet — nothing to say about which ones earn their place"
+    lines = [f"{'lens':<32} {'selected':>8} {'applied':>8} {'found':>6}  condition"]
     for lens_id, count in rows:
         lens = known.get(lens_id)
         where = lens.applies_when if lens is not None else "(no longer in the library)"
-        lines.append(f"{lens_id:<32} {count['applied']:>8} {count['found']:>6}  {where}")
+        lines.append(f"{lens_id:<32} {count['selected']:>8} {count['applied']:>8} {count['found']:>6}  {where}")
     silent = [lens_id for lens_id, c in rows if c["applied"] >= 2 and c["found"] == 0]
     if silent:
         lines.append("")
@@ -61,6 +84,21 @@ def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lens
             "Either the condition is wider than the failure, or the cause is gone. Narrow it in "
             f"{lenses.library_path()}, or drop it."
         )
+    # Selected and never recorded as applied. Three things produce it and the tally cannot tell
+    # them apart, so it names the count and not a cause: a human dropped it at the gate, the
+    # reviewer never ran `--record`, or the cycle is still open. Naming it is what makes the first
+    # one visible at all — a lens whose condition is wide enough to keep being proposed and keep
+    # being dropped costs a judgement every cycle and reads, today, as a lens that never came up.
+    unapplied = [lens_id for lens_id, c in rows if c["selected"] > 0 and c["applied"] == 0]
+    if unapplied:
+        lines.append("")
+        lines.append(
+            f"{len(unapplied)} lens(es) selected into a plan and never recorded as applied: "
+            f"{', '.join(unapplied)}. Dropped at the gate, not recorded by the reviewer, or still "
+            "in an open cycle — this tally cannot tell which, only that it was not simply absent."
+        )
+    lines.append("")
+    lines.append(_SCOPE_NOTE)
     return "\n".join(lines)
 
 

@@ -7,7 +7,7 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.6.2
   files:
-    AGENTS.rein.md: sha256:913cf506a011617614fd83f634e7f18125819b513ebe31f5852b7c08d3ae35cf
+    AGENTS.rein.md: sha256:46a44dcb9ac5baacfc0ed2dfbf3a556669955cf7b716524b5ec2b5a1a42fe2f4
     oci/python/Containerfile: sha256:9e311e179f5794659968fe7bb0d14ef9831c28c818afd3d10f3abe3b87b7afd7
     prompts/agents/adversarial-reviewer.md: sha256:f9efecb651e7d72d7ee991457c1f3644f618487df15d9ddd9f6dd5a4c2d3f349
     prompts/agents/architect.md: sha256:719aaa7bd29675164d3732995195bb7fa529a04e48c73f0c0c15375479f15353
@@ -66,7 +66,7 @@ integrations:
       .codex/agents/implementer.toml: sha256:1c93b60464227ec637eed7290f3bb6d2a6f8c5d39bb904f131557a2ebf780b6b
       .codex/agents/requirements-analyst.toml: sha256:9249d1d6d8632d2fec155ec3577b802e723ea3b2235c8ae87389d08cde865038
       .codex/hooks.json: sha256:7b64f50c947287ac882d04f0816a79df4d8c7c6b3060137cfb9014d274af0909
-      .codex/rein.md: sha256:470c417f84ca4659e0bc93ab44f07470e6e68bf07dc385bf5a7257128e3ccc26
+      .codex/rein.md: sha256:1d75d677e7b6039c1d9852e45c4d56b06f9011df5be4063e782d320c34e54f96
   copilot:
     version: 0.6.2
     installed_at: '2026-08-04'

@@ -6,10 +6,11 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.6.2] - 2026-09-18
 
-Two claims the code makes about itself, both about the layer that is supposed to hold when a host
-cannot help. **A guarantee stated where it is not verified, and a vocabulary declared in a table
-that had stopped being one.** Neither changes what the guard does; both change what a reader is
-told it does, and one of them adds the check that would have caught it.
+Claims the code makes about itself, and two tallies reading one event where the question needs
+two. **A guarantee stated where it is not verified, a vocabulary declared in a table that had
+stopped being one, and a retirement rule that could not see the lenses it was written for.**
+Nothing here changes what the guard denies or what a lens does; what changes is what a reader is
+told, and in three places the check that would have caught the drift.
 
 ### The gate guard has three checkpoints, and only one of them is unconditional
 
@@ -60,6 +61,50 @@ mapped capability to be a row with a non-empty `Lacking it` cell. Run against th
 new check reports all five.
 
 The paragraph moved below the table, where it was always meant to be read.
+
+### A commit-stage registration is `rein guard --check-diff`, and the bare name is worse than nothing
+
+The reading above went in checking for `rein guard` in `.pre-commit-config.yaml`, which would have
+called a broken registration a PASS. `rein guard` **alone** is the hook invocation: it reads a
+host's JSON payload on stdin. Run from pre-commit it is handed no payload, logs "unparseable hook
+payload — allowing without a gate check", and returns the allow code. That is a hook firing on
+every commit and checking nothing — the precise thing a green `doctor` must never cover for. The
+reading requires `--check-diff`, and names the bare-entry case separately from the absent one.
+
+### The same claim, in five more places
+
+`doctor` was the diagnostic; the claim was in the guard itself. `gate_guard.main`'s two fail-open
+paths — an unparseable payload, and a host that names its tool arguments something this release has
+not seen — both told the reader "the commit-stage check still runs". Those are the two places where
+the edit-time guard has just stopped guarding, so they are exactly where the reassurance had to be
+true. `PATH_KEYS` and `CLAUDE_WRITE_TOOLS` carried it as commentary, and the Codex integration file
+shipped it to users: "until then the guard is not registered and only the commit-stage check runs."
+All five now name what actually catches the write, which is where `rein build` lands it.
+
+### `rein lens --stats` was reading one of the two events it needs
+
+A `proposed` lens is dropped by deleting it from the plan before the freeze. It then leaves no
+`lens_applied` behind and reads exactly like a lens whose condition never held — both are simply
+absent from the tally. So a lens whose condition is wide enough to be proposed every cycle and
+dropped every cycle costs a judgement every cycle, and the retirement rule could not see it.
+
+Nothing needed recording that was not already recorded. `lens_selected` names every lens the
+resolution wrote into the plan, `proposed` ones included, and `--stats` was reading `lens_applied`
+alone. It now counts both and names the lenses selected into a plan and never recorded as applied
+— without claiming a cause, because three produce it (dropped at the gate, not recorded by the
+reviewer, or an open cycle) and the tally cannot tell them apart. What it can say is that such a
+lens was not simply absent.
+
+No `dropped` status was added. The plan schema is `additionalProperties: false` and, more to the
+point, a record of a human's edit does not belong inside the digest that edit changes.
+
+### …and the counts say whose they are before inviting an edit to a shared library
+
+`--stats` reads this repository's chain and its archives. The library it then tells you to narrow
+or drop from lives in `$XDG_CONFIG_HOME` and is shared by every repository you use. The output
+ended "Narrow it in <that path>, or drop it" with nothing saying the reading behind the instruction
+was narrower than the thing it would change. It now says so. Which range the statistics *should*
+cover is a separate question; saying which one they do cover is not.
 
 ## [0.6.1] - 2026-09-17
 

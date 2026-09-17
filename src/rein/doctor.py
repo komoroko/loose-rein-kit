@@ -66,6 +66,11 @@ CODEX_HOOK_FILES = (".codex/hooks.json", ".codex/config.toml")
 #: Where a repository registers the commit-stage check, when it registers one. `rein` neither
 #: installs this file nor ships one, which is why whether it holds is looked at and never assumed.
 PRE_COMMIT_PATH = ".pre-commit-config.yaml"
+#: …and what the registration has to say. `rein guard` **alone** is the *hook* invocation: it reads
+#: a host's JSON payload on stdin, so under pre-commit it is handed no payload, warns, and allows —
+#: a hook that runs on every commit and checks nothing. Accepting the bare name here would have
+#: turned that into a PASS, which is the shape of claim this whole reading exists to stop making.
+_CHECK_DIFF_RE = re.compile(r"rein guard\b[^\n]*--check-diff")
 
 
 @dataclass(frozen=True)
@@ -977,14 +982,24 @@ def _commit_stage(repo: repo_mod.Repo) -> Finding:
     Looking is cheaper than hedging, and a diagnostic that hedges about what it could read is
     worse than one that stays silent.
     """
-    if _reads_guard(repo.path(PRE_COMMIT_PATH)):
-        return Finding("PASS", "hook", f"commit-stage: {PRE_COMMIT_PATH} registers `rein guard`")
+    try:
+        text = repo.path(PRE_COMMIT_PATH).read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    if _CHECK_DIFF_RE.search(text):
+        return Finding("PASS", "hook", f"commit-stage: {PRE_COMMIT_PATH} registers `rein guard --check-diff`")
+    detail = (
+        "registers `rein guard` without `--check-diff`, which is the hook invocation — under "
+        "pre-commit it reads no payload, warns and allows"
+        if _mentions_guard(text)
+        else "does not register `rein guard --check-diff` — rein neither installs nor ships it"
+    )
     return Finding(
         "INFO",
         "hook",
-        f"commit-stage: {PRE_COMMIT_PATH} does not register `rein guard` — rein neither installs nor "
-        "ships it. What a task changes is still re-checked in code before it lands (merge-stage, "
-        "`rein build`, every host); a change made outside `rein build` passes no checkpoint rein installs.",
+        f"commit-stage: {PRE_COMMIT_PATH} {detail}. What a task changes is still re-checked in code "
+        "before it lands (merge-stage, `rein build`, every host); a change made outside `rein build` "
+        "passes no checkpoint rein installs.",
     )
 
 

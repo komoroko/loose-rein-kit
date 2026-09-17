@@ -691,13 +691,14 @@ def patch_targets(command: str) -> list[str]:
 #: question. Claude Code sends `file_path` for Write/Edit and `notebook_path` for NotebookEdit;
 #: VS Code Copilot camelCases both. A notebook is source like any other file — a `.ipynb` under a
 #: guarded prefix was reaching the guard with no path it could read, so the edit-stage check passed
-#: it and only the commit-stage one (extension-blind, walking `git status`) ever saw it.
+#: it and nothing looked at it again until `rein build` landed it.
 PATH_KEYS: tuple[str, ...] = ("file_path", "filePath", "notebook_path", "notebookPath")
 
 #: The Claude Code tools that write a file, and therefore all have to reach the guard. This tuple is
 #: the claim; `doctor.check_hook` holds the installed PreToolUse matcher against it, and `PATH_KEYS`
 #: is what makes the coverage real once a call actually arrives. A tool absent from both is a hole
-#: nothing reports: the matcher never fires and the commit-stage check becomes the only layer left.
+#: nothing reports: the matcher never fires, and what the tool writes is not looked at again until
+#: `rein build` lands it — a whole task later, as an escalation rather than a denied write.
 #:
 #: `MultiEdit` is retired upstream and stays. This is a foreign host's tool namespace, not a format
 #: of ours to keep tidy — a dead alternative in a regex costs nothing and keeps an older host covered.
@@ -790,7 +791,8 @@ def main(argv: list[str] | None = None) -> int:
     except (json.JSONDecodeError, ValueError):
         # Fail-open by design: some hosts fire hooks for every tool and a malformed payload must
         # not block path-less tools — but leave a trace, so a guard that stopped guarding is
-        # visible in the hook log rather than silently absent. The commit-stage check still runs.
+        # visible in the hook log rather than silently absent. What the write changes is still
+        # re-checked where `rein build` lands it.
         logger.warning("gate_guard: unparseable hook payload on stdin — allowing without a gate check")
         return 0
     tool_input = tool_arguments(payload)
@@ -802,7 +804,7 @@ def main(argv: list[str] | None = None) -> int:
         # allows every edit.
         logger.warning(
             f"gate_guard: this host names the tool call's arguments none of {', '.join(TOOL_ARGS_KEYS)} "
-            "— allowing without a gate check. The commit-stage `rein guard --check-diff` still runs."
+            "— allowing without a gate check. What this writes is re-checked where `rein build` lands it."
         )
         return 0
     paths = hook_paths(tool_input)
