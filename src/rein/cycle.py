@@ -8,7 +8,8 @@ design, tasks, and tests describe one change, not the whole product. Closing a c
      §27). The four SSOT documents go with the docs because they *are* the record of what was
      decided and on what evidence — archiving the prose and dropping the evidence would leave a
      history of conclusions with no grounds.
-  2. Restores fresh scaffolds from the snapshot taken at `init`, while the docs were pristine.
+  2. Restores fresh scaffolds: the per-cycle documents from the payload this release ships, the
+     SSOT documents from the snapshot `init` took while they were pristine.
   3. Resets state to a new cycle: every gate pending, phase back to `brief`, a fresh chain.
 
 `00-product-brief.md` and `05-current-state.md` persist — they are the product, not the cycle.
@@ -26,26 +27,28 @@ import logging
 import shutil
 from datetime import date
 
-from rein import common, event_chain, models
+from rein import common, data, event_chain, models
 from rein import repo as repo_mod
 from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
 
 DOCS_DIR = "docs"
-SCAFFOLD_DOCS = ".rein/scaffold/docs"
+#: Where the packaged per-cycle documents live inside the payload. `init` seeds `docs/` from here
+#: and `cycle-close` restores from here, so "what a fresh cycle's documents are" has one answer and
+#: it is the running release's.
+SCAFFOLD_DOCS_PAYLOAD = "scaffold/docs"
 SCAFFOLD_REIN = ".rein/scaffold/rein"
 ARCHIVE_DIR = "docs/archive"
 
-#: Per-cycle deliverables under docs/: archived with the cycle, then restored from the pristine
-#: snapshot for the next one. Everything in :data:`PERSISTENT_DOCS` is the other answer.
+#: Per-cycle deliverables under docs/: archived with the cycle, then restored from the payload for
+#: the next one. Everything in :data:`PERSISTENT_DOCS` is the other answer.
 #:
 #: Every scaffold document is one or the other, and `scripts/template_lint.py` holds the two lists
-#: against `src/rein/data/scaffold/docs/` so that adding a scaffold file without classifying it
-#: fails there. `speculative-work.md` was added unclassified: it is filled in per cycle and its
-#: rows are finalized in that cycle's retrospective, and because it was in neither list it was
-#: neither archived nor reset — the next cycle opened holding the last one's rows, and `/status`
-#: went on naming them as still undecided.
+#: against `src/rein/data/scaffold/docs/` so that shipping a scaffold file without classifying it
+#: fails there. Unclassified is not a third policy: a per-cycle log left out of this list is never
+#: archived and never reset, so the next cycle opens holding the last one's rows while `/status`
+#: goes on naming them as still undecided. `speculative-work.md` is a per-cycle log, so it is here.
 CYCLE_DOCS: tuple[str, ...] = (
     "10-requirements.md",
     "20-design.md",
@@ -67,23 +70,25 @@ PERSISTENT_DOCS: tuple[str, ...] = (
 CYCLE_STATE: tuple[str, ...] = ("plan.yaml", "state.yaml", "review.yaml", "events.ndjson")
 
 
-def snapshot_scaffold(repo: repo_mod.Repo) -> bool:
-    """Copy the pristine docs and SSOT documents aside, once. True if anything was taken.
+def snapshot_ssot(repo: repo_mod.Repo) -> bool:
+    """Copy the pristine SSOT documents aside, once. True if anything was taken.
 
-    Called by `init` while everything is still pristine. A no-op per target once its snapshot
-    exists — re-running init after the docs are filled must never overwrite the pristine copy.
+    **Only the SSOT.** `docs/` used to be snapshotted here too, and that copy was the bug: it was
+    taken once, at `init`, and nothing ever added to it — so a per-cycle document a later release
+    began shipping was archived by `cycle-close` and then not restored, because the snapshot taken
+    by an older release had no copy of it to restore from. Silently, since :func:`_restore` skips
+    what is absent. The per-cycle documents are packaged data, byte-identical to what `init` seeds,
+    so a per-repository copy of them was a duplicate that could only ever go stale; they are
+    restored from the payload now (:data:`SCAFFOLD_DOCS_PAYLOAD`), which is the same thing
+    `rein sync` does for the prompts, the schemas and the rules.
+
+    `plan.yaml` and `review.yaml` stay here because they are *not* the payload: `init` fills the
+    plan's cycle id and work branch, so this repository's pristine copy is the only one there is.
+
+    A no-op per target once its snapshot exists — re-running init after the documents are filled
+    must never overwrite the pristine copy.
     """
     took = False
-    docs_dst = repo.path(SCAFFOLD_DOCS)
-    docs_src = repo.path(DOCS_DIR)
-    if not docs_dst.exists() and docs_src.is_dir():
-        docs_dst.mkdir(parents=True)
-        for item in sorted(docs_src.iterdir()):
-            if item.name == "archive":
-                continue
-            (shutil.copytree if item.is_dir() else shutil.copy2)(item, docs_dst / item.name)
-        took = True
-
     state_dst = repo.path(SCAFFOLD_REIN)
     state_dst.mkdir(parents=True, exist_ok=True)
     for name in ("plan.yaml", "state.yaml", "review.yaml"):
@@ -156,14 +161,29 @@ def _archive(repo: repo_mod.Repo, rows: list[tuple[str, str, str]]) -> list[str]
 
 
 def _restore(repo: repo_mod.Repo) -> list[str]:
-    """Recreate fresh scaffolds from the snapshot, never overwriting an existing file."""
+    """Recreate fresh scaffolds for the next cycle, never overwriting an existing file.
+
+    The per-cycle documents come from the payload, file by file, so every one this release ships
+    is restored whether or not the repository existed when it was added — the drift that made a
+    document vanish at the first close after an upgrade. `CYCLE_DOCS` names directories as well as
+    files (`tasks`, `test`, `decisions`), so membership is tested on the first path segment and the
+    tree below it is written out entry by entry.
+
+    A file already on disk is left alone: the archive is a `git mv`, so anything still there is
+    something the move could not take, and overwriting it would destroy work.
+    """
     restored: list[str] = []
-    for name in CYCLE_DOCS:
-        src = repo.path(SCAFFOLD_DOCS) / name
-        dst = repo.path(DOCS_DIR) / name
-        if not src.exists() or dst.exists():
+    cycle_docs = set(CYCLE_DOCS)
+    prefix = len(SCAFFOLD_DOCS_PAYLOAD) + 1
+    for rel, blob in data.iter_files(SCAFFOLD_DOCS_PAYLOAD):
+        doc_rel = rel[prefix:]
+        if doc_rel.split("/")[0] not in cycle_docs:
             continue
-        (shutil.copytree if src.is_dir() else shutil.copy2)(src, dst)
+        dst = repo.path(DOCS_DIR) / doc_rel
+        if dst.exists():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(blob)
         restored.append(str(dst.relative_to(repo.root)))
     for name in ("plan.yaml", "review.yaml"):
         src = repo.path(SCAFFOLD_REIN) / name

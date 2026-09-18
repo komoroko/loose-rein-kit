@@ -215,6 +215,49 @@ def written_by_newer(repo: repo_mod.Repo, running_version: str) -> tuple[str, st
     return recorded, _upgrade_hint(source_of(data))
 
 
+def written_by_older(repo: repo_mod.Repo, running_version: str) -> str | None:
+    """The version that wrote the lock, when it is older than the running tool — otherwise None.
+
+    The other half of :func:`written_by_newer`, and it explains the mirror-image failure. A release
+    that *narrows* a schema — a field that used to be optional becoming required, a value that used
+    to be accepted no longer being — leaves the documents of every repository written before it
+    failing validation. The document is not damaged and no rollback repairs it: what changed is the
+    reader, and `rein revise --to mandate` sends a human to rewind an approved gate to fix nothing.
+
+    No upgrade hint, because upgrading is what happened. What the caller needs to say is *which*
+    two releases the repository is between, so the changelog entries between them are reachable.
+    """
+    data = read(repo.lock)
+    if data is None:
+        return None
+    recorded = tool_version_of(data)
+    if not recorded:
+        return None
+    try:
+        recorded_v, running_v = Version(recorded), Version(running_version)
+    except InvalidVersion:
+        return None
+    return recorded if recorded_v < running_v else None
+
+
+def ahead_summary(repo: repo_mod.Repo, running_version: str) -> str | None:
+    """`this repository was last written by rein X and you are running Y — <where to look>`, or None.
+
+    Deliberately not phrased as a diagnosis. Being ahead of a repository does not prove that *this*
+    document failed for that reason — a genuinely damaged file in an un-upgraded repository reaches
+    the same place — so the sentence states the skew and what it can cost, and leaves the errors on
+    the exception for whoever reads further.
+    """
+    recorded = written_by_older(repo, running_version)
+    if recorded is None:
+        return None
+    return (
+        f"this repository was last written by rein {recorded} and you are running {running_version}, "
+        f"so a document {recorded} was entitled to write may be one this release no longer accepts — "
+        f"`rein upgrade` prints every changelog section between {recorded} and {running_version}"
+    )
+
+
 def behind_summary(repo: repo_mod.Repo, running_version: str) -> str | None:
     """`this repository was written by rein X and you are running Y — <how to upgrade>`, or None.
 

@@ -393,6 +393,53 @@ def test_a_terminal_only_cycle_reports_both_chained_figures(
     assert re.search(r"stopped \(this repo, chained\)\s+2 stops, mean 80.0 min", out)
 
 
+def test_another_projects_readings_do_not_borrow_this_repositorys_chain(
+    store: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--project` names a project in a user-global store; the chained figures are one
+    repository's audit chain. Printing them together under a heading that says "this repo" puts
+    two scopes in one table and reads as one."""
+    built = [
+        event_chain.link(
+            None,
+            replace(
+                event_chain.make("gate_approved", "demo-cycle", subject_ids=("mandate",)),
+                ts="2026-01-05T09:00:00+09:00",
+            ),
+        )
+    ]
+    repo_root = tmp_path / "work"
+    seed_repo(repo_root, events=built)
+    observations.record("waited_seconds", project="elsewhere", cycle_id="c", value=60.0, arm=observations.ARM_SILENT)
+
+    assert observe_mod.main(["--repo", str(repo_root), "--project", "elsewhere"]) == 0
+
+    out = capsys.readouterr().out
+    assert "project elsewhere" in out
+    assert "chained" not in out
+
+
+def test_the_chain_is_read_when_the_project_named_is_this_repositorys(
+    store: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Naming the project explicitly must not cost the figures when it is the same scope."""
+    built = [
+        event_chain.link(
+            None,
+            replace(
+                event_chain.make("gate_approved", "demo-cycle", subject_ids=("mandate",)),
+                ts="2026-01-05T09:00:00+09:00",
+            ),
+        )
+    ]
+    repo_root = tmp_path / "work"
+    seed_repo(repo_root, events=built)
+
+    assert observe_mod.main(["--repo", str(repo_root), "--project", repo_root.name]) == 0
+
+    assert re.search(r"stops \(this repo, chained\)\s+1", capsys.readouterr().out)
+
+
 def test_a_tampered_chain_yields_no_figures_rather_than_wrong_ones(
     store: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

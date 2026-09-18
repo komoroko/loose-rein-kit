@@ -240,17 +240,50 @@ def _baseline_blockers(state: models.State, gate: str) -> list[str]:
     return []
 
 
-def _change_request_blockers(state: models.State, gate: str) -> list[str]:
+def _change_request_blockers(plan: models.Plan | None, state: models.State, gate: str) -> list[str]:
     """Open change requests hold the gate shut. This is what makes declining mean something.
 
     Without it "not yet, change R-3" was a sentence in a chat window: the gate stayed ready, the
     board kept recommending an approval, and a new session had no idea a human had already said
     no. An `addressed` request does not block — it is listed on the approval screen instead.
+
+    The mandate answers for **two** sets of requests, because it is the one approval that can end
+    another gate's existence: freezing the plan re-derives the crossing gates from it, so a
+    crossing the new cut does not declare irreversible is gone in that same write. An open request
+    standing against such a gate would survive the write pointing at a gate the cycle no longer
+    has — recorded, holding nothing shut, invisible to every `--gate` this cycle can name. So it
+    blocks here instead: either the request is addressed (and the approval closes it, the way every
+    other addressed request is closed), or the plan keeps the task irreversible and the gate with
+    it. Nothing is dropped, and nothing is dropped silently.
     """
-    return [
+    blockers = [
         f"{cr.get('id')} is an open change request against {cr.get('target')}: {cr.get('reason')}"
         for cr in state.change_requests_for(gate, "open")
     ]
+    if gate != FREEZING_GATE or plan is None:
+        return blockers
+    for cr in change_request.open_against(state, gates_dropped_by(plan, state)):
+        blockers.append(
+            f"{cr.get('id')} is an open change request against gate {cr.get('gate')}, which this "
+            f"plan no longer declares irreversible — approving would delete the gate it is holding "
+            f"shut. Answer it (`rein changes address {cr.get('id')} --note …`), or keep the task's "
+            "`operator_surface` declaration at `reversible: false`."
+        )
+    return blockers
+
+
+def gates_dropped_by(plan: models.Plan, state: models.State) -> tuple[str, ...]:
+    """The crossing gates this cycle has that freezing `plan` would remove.
+
+    Takes the plan rather than the repository, because "the plan that is about to be frozen" is
+    something both callers already hold and re-reading it would let them disagree about it. The
+    difference matters: `plan.crossing_task_ids` is `()` both for a plan that declares nothing
+    irreversible and for one nobody could read, and subtracting the second from this cycle's gates
+    says every crossing is about to be deleted. There is no plan to pass in that case, so the
+    question is not asked.
+    """
+    keeping = set(plan.crossing_task_ids)
+    return tuple(g for g in state.crossing_gates if g not in keeping)
 
 
 def _clarification_blockers(repo: repo_mod.Repo, gate: str) -> list[str]:
@@ -398,7 +431,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
     blockers += _baseline_blockers(state, gate)
     blockers += _audit_blockers(repo, state, config, gate)
-    blockers += _change_request_blockers(state, gate)
+    blockers += _change_request_blockers(plan, state, gate)
     blockers += _clarification_blockers(repo, gate)
     blockers += _decision_blockers(plan, gate)
     blockers += _plan_blockers(repo, plan, gate)
@@ -636,8 +669,21 @@ def record_approval(
         raw["updated_at"] = event_chain.now_iso()
         # The approval is what closes the change requests it covered: the human read each note
         # beside these digests and decided they were answered. Open ones cannot be here —
-        # readiness refuses while any stands.
-        change_request.resolve_addressed(raw, gate)
+        # readiness refuses while any stands, for this gate and for the gates the line below is
+        # about to delete.
+        #
+        # `dropped` is the second set. Freezing the plan re-derives the crossing gates from it, so
+        # a crossing this cut does not declare irreversible ceases to exist in this write; an
+        # addressed request standing against it would otherwise be left pointing at a gate the
+        # cycle no longer has, blocking nothing and listed under no gate name anybody can type.
+        # The approval that removes the gate is what closes it, and this receipt is what the
+        # closure points back to.
+        # Read off `crossings`, which is the gate set this transaction is about to write, so the
+        # gates being deleted and the gates being kept cannot come from two readings of one plan.
+        # Only the mandate deletes any: `crossings` is empty at every other gate because none is
+        # being derived there, and subtracting that from this cycle's would name all of them.
+        dropped = tuple(g for g in state.crossing_gates if g not in set(crossings)) if gate == FREEZING_GATE else ()
+        change_request.resolve_addressed(raw, (gate, *dropped))
 
         # Approving the mandate is what freezes the plan — the write `gate_guard` rule 2 and
         # `rein build` both key off, and the only one in the codebase that sets

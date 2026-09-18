@@ -478,9 +478,11 @@ def run_init(
     rc = install_mod.sync(repo)
     if rc != 0:
         return rc
-    # 4) the pristine scaffold snapshot cycle-close restores from.
-    if cycle.snapshot_scaffold(repo):
-        print(f"  snapshot      pristine docs + SSOT → {cycle.SCAFFOLD_DOCS}")
+    # 4) the pristine SSOT snapshot cycle-close restores from. The per-cycle documents are not
+    #    copied aside: `cycle-close` restores those straight from the payload, so they follow the
+    #    release instead of freezing at whatever this repository was initialized with.
+    if cycle.snapshot_ssot(repo):
+        print(f"  snapshot      pristine SSOT → {cycle.SCAFFOLD_REIN}")
     # 5) the agent-neutral rules pointer (AGENTS.md), appended at most once — and never in the
     #    template repo, whose own AGENTS.md *is* the rules body (a pointer to itself would be a
     #    second, contradictory load, the way `rein install claude` skips the CLAUDE.md block).

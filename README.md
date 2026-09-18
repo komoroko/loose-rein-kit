@@ -654,7 +654,7 @@ SSOT). Writing issues is outward-facing, so the opt-in is the consent.
 ## Repository layout
 
 `rein init` writes **only state**: the four SSOT documents (placeholder-filled) and the docs
-scaffolds, the materialized prompts/schema plus a pristine scaffold snapshot and `.rein/rein.lock`,
+scaffolds, the materialized prompts/schema plus a pristine snapshot of the SSOT and `.rein/rein.lock`,
 a marker-guarded pointer block appended to `AGENTS.md`, and the work branch, created and switched
 to with the gate guard flipped live. No build files, no makefile, and no agent surfaces unless you
 `rein install` them; existing files are never overwritten.
