@@ -32,7 +32,7 @@ or a way of running something — with these neutral capabilities, never an agen
 `notify-and-wait` is how *you* hand a decision back. Reaching the person who is not looking is
 not yours and does not degrade with the host: `rein ui` watches the SSOT for as long as it runs
 and runs the channel configured in `$XDG_CONFIG_HOME/rein/notify.yaml` when the decision waiting
-on a human changes. The two gates say how often the work stops; this is what decides how long
+on a human changes. The gates say how often the work stops; this is what decides how long
 each stop lasts, so it is the harness's and not the CLI's. A notification carries what is waited
 on and where — never the evidence, and never a way to answer: the page it names is read-only
 unless that browser already holds a session.
@@ -45,15 +45,17 @@ values, `epistemic_status`) stays as-is in every language.
 
 ## Development lifecycle
 
-**A human approves twice, and neither approval is about the order of the work.**
+**A human approves at both ends, plus once at every irreversible point between them, and no
+approval is about the order of the work.**
 
 ```
                     ┌─ mandate ─────────────────┐   ┌─ acceptance ───────────┐
 drafting ───────────┤ what the loop may change, ├───┤ the evidence is there, ├─── done
   /req /design      │ what it must make true,   │   │ take the change        │
   /tasks (any       │ what evidence counts      │   └────────────────────────┘
-  order, repeated)  └───────────────────────────┘        ▲gate②
-                             ▲gate①                      /verify presents it
+  order, repeated)  └───────────────────────────┘      ▲acceptance
+                          ▲mandate    ▲T-NNN, one per   /verify presents it
+                                       irreversible point, if the plan froze any
 ```
 
 `/req`→`docs/10-requirements.md`+the claims · `/design`→`docs/20-design.md`+ADRs ·
@@ -169,12 +171,29 @@ Enforcement is layered: `rein guard` denies violations in code at edit/commit/me
 stage; unreadable gates and an unreadable scope **fail closed**. **A guard denial marks a boundary
 of what was delegated — never disable, relax, or bypass it** (detail: the rules module).
 
+## How many gates a cycle has
+
+**Two ends, plus one for every point the plan froze as irreversible.** `mandate` says what the loop
+may change and what it must prove; `acceptance` takes the change on the evidence recorded. Between
+them a cycle has one gate, named `T-NNN` after the task, for each task whose `operator_surface`
+declares `reversible: false` — data that moves, a version published, a charge made. Those gates
+appear when the mandate is approved, out of the plan that approval freezes, and `rein build` stops
+in front of each such task and hands back with `rein approve T-NNN`: afterwards there is nothing
+left to approve. **How many times a human is asked is a property of the change, never a constant of
+this tool** — a ceiling on it is the same mistake as a budget for questions.
+
+They are a fan, not a line: each crossing stands on the mandate alone and acceptance stands on all
+of them, and two crossings carry no order against each other, because ordering them would be
+authorizing the execution order the loop owns. `rein next` names whichever gate you can open now.
+
 ## Roll back (returning upstream)
 
 On a confirmed defect in what was authorized, roll back at the human's discretion with `/revise
---to mandate` (or `--to acceptance`): **gates reset in a chain** — an upstream `pending` never
-leaves a downstream gate `approved`, and it invalidates the receipts and the review built on top of
-it. **Rewinding approval is a human privilege**, never automatic. Reclassify each task the impact analysis (`rein dag
+--to mandate` (or `--to acceptance`, or `--to T-NNN`): **gates reset in a chain** — an upstream
+`pending` never leaves a downstream gate `approved`, and it invalidates the receipts and the review
+built on top of it. Rewinding a crossing withdraws the approval; what the task already did stays
+done, and the roll back says so. **Rewinding approval is a human privilege**, never automatic.
+Reclassify each task the impact analysis (`rein dag
 --impacted`) flags, never discard (procedure: revise.md, tasks.md).
 
 ## Task dependency graph

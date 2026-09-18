@@ -94,8 +94,11 @@ export async function getJson(path) {
 
 // The gate the human is standing at: the first one not yet approved. Derived once — the spine, the
 // tab badge, the review pane and the notifier all have to agree on it.
+// The gate to read next, and the ◆ on the spine. `decidable` is the server's answer
+// (`models.State.decidable_gates`), not "the first unapproved one" — that reading is a position in
+// a ladder, and with a crossing pending it points at a gate whose upstream is still shut.
 export function awaitingGate(status) {
-  return ((status || {}).gates || []).find((g) => g.status !== "approved") || null;
+  return ((status || {}).gates || []).find((g) => g.decidable) || null;
 }
 
 export function copyCmd(cmd, el) {

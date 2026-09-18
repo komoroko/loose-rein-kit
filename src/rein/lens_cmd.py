@@ -73,8 +73,9 @@ _SCOPE_NOTE = (
 #: cycle, against what was being watched for) is what the retrospective already puts side by side.
 _ENTRY_NOTE = (
     "This tally can only ever argue for removal — it counts the lenses you have, never the one "
-    "that was missing. Entry is section 1 of docs/retrospective.md: rework whose cause no applied "
-    "lens was watching for is a lens to write, by hand, into {path}."
+    "that was missing. Entry is section 2 of docs/retrospective.md, held against the root causes "
+    "in section 1: rework whose cause no applied lens was watching for is a lens to write, by "
+    "hand, into {path}."
 )
 
 

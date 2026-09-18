@@ -903,3 +903,37 @@ def test_a_payload_the_guard_cannot_read_says_so_before_allowing(
         sys.stdin = stdin
     assert "names the tool call's arguments none of" in caplog.text
     assert "tool_input" in caplog.text  # the spellings it does know, so the reader can add theirs
+
+
+# --- what counts as a commit-stage registration ------------------------------------
+
+
+def test_a_registration_split_across_entry_and_args_is_a_registration() -> None:
+    """pre-commit's own idiom, and the shape a line-wise regex called neutered."""
+    text = (
+        "repos:\n  - repo: local\n    hooks:\n      - id: g\n        entry: rein guard\n        args: [--check-diff]\n"
+    )
+
+    assert gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_REGISTERED
+
+
+def test_the_bare_hook_invocation_is_neutered_and_not_absent() -> None:
+    """`rein guard` alone reads a host's JSON payload on stdin. Under pre-commit it is handed
+    none, warns and allows — a hook that runs on every commit and checks nothing. Both `doctor`
+    and the base-side verifier need to tell that apart from a repository that wired nothing."""
+    text = "repos:\n  - repo: local\n    hooks:\n      - id: g\n        entry: rein guard\n"
+
+    assert gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_NEUTERED
+
+
+def test_a_config_that_does_not_parse_is_neither_registered_nor_absent() -> None:
+    assert gate_guard.commit_stage_registration("repos: [oops\n") == gate_guard.COMMIT_STAGE_UNREADABLE
+    assert gate_guard.commit_stage_registration("") == gate_guard.COMMIT_STAGE_ABSENT
+
+
+def test_a_commented_out_registration_is_not_one() -> None:
+    """The substring reading called this registered, which is the same error in the other
+    direction: a PASS over a checkpoint that does not run."""
+    text = "repos: []\n# - repo: local\n#   hooks:\n#     - id: g\n#       entry: rein guard --check-diff\n"
+
+    assert gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_ABSENT

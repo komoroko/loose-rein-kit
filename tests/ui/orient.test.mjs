@@ -11,7 +11,6 @@ import { STATUS, baseRoutes, boot } from "./_harness.mjs";
 
 const REVIEW = {
   gate: "acceptance",
-  index: 4,
   status: "pending",
   is_awaiting: true,
   awaiting: "acceptance",

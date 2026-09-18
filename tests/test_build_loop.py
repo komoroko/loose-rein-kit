@@ -3571,7 +3571,7 @@ def _irreversible_repo(tmp_path: Path, *, approved: bool) -> build_loop.Orchestr
 
 
 def test_the_build_stops_in_front_of_an_unapproved_irreversible_task(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Running it first would make the decision by doing it, which is the one thing a contact point
     exists to prevent. The loop hands back to the human with the command that moves it."""
@@ -3582,9 +3582,71 @@ def test_the_build_stops_in_front_of_an_unapproved_irreversible_task(
 
     assert loop._consume() == common.EXIT_HUMAN_NEEDED
     assert ran == []
-    escalations = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "knowledge_gap"]
-    assert [e.detail["kind"] for e in escalations] == ["irreversible_point"]
-    assert "rein approve T-001" in escalations[-1].detail["message"]
+    assert "rein approve T-001" in capsys.readouterr().out
+
+
+def test_the_stop_at_a_contact_point_is_presented_and_not_escalated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pending gate is already the record that the work stopped and a human has to act.
+
+    Reaching acceptance files no escalation either (`_present_gate4`) and for this reason. A
+    `knowledge_gap` beside the gate is a second record of one fact, and one that nothing closes:
+    `rein next` then recommends `rein events --summary` instead of the approval that moves it, and
+    `events.stops` counts the stop twice — once here and once when `gate_approved` lands.
+    """
+    loop = _irreversible_repo(tmp_path, approved=False)
+    monkeypatch.setattr(loop, "_consume_serial", lambda tasks: None)
+
+    assert loop._consume() == common.EXIT_HUMAN_NEEDED
+    assert [e.event for e in store_mod.Store(loop.repo).read_events() if e.event == "knowledge_gap"] == []
+
+
+def test_a_contact_point_stops_its_own_task_and_not_the_work_beside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The rest of the batch runs, and the handover is presented once when nothing runnable is left.
+
+    Presenting inside the batch loop announced it again on every pass — two records of one stop for
+    a frontier with one other task in it, and one more for every batch after that.
+    """
+    crossing = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        kind="parallel",
+        operator_surface=[
+            {
+                "kind": "persistence",
+                "name": "the users table, migrated",
+                "paths": ["db/schema.sql"],
+                "reversible": False,
+                "adr": "ADR-001",
+            }
+        ],
+    )
+    beside = make_task("T-002", claim_ids=["C-001"], kind="parallel")
+    loop = orchestrator(
+        tmp_path,
+        plan=make_plan(tasks=[crossing, beside]),
+        state=make_state(
+            plan_status="frozen",
+            gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"},
+        ),
+    )
+    ran: list[str] = []
+
+    def finish(tasks: list[dag.Task]) -> None:
+        for task in tasks:
+            ran.append(task.id)
+            loop._set_status(task.id, "done")
+
+    monkeypatch.setattr(loop, "_consume_serial", finish)
+    monkeypatch.setattr(loop, "_consume_parallel", finish)
+    monkeypatch.setattr(loop, "_load_baseline", lambda: None)
+
+    assert loop._consume() == common.EXIT_HUMAN_NEEDED
+    assert ran == ["T-002"]
+    assert capsys.readouterr().out.count("an irreversible point") == 1
 
 
 def test_an_approved_irreversible_task_runs_like_any_other(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

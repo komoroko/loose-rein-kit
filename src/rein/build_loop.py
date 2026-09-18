@@ -3212,18 +3212,12 @@ class Orchestrator:
             mode, tasks = batch
             waiting = [t for t in tasks if self._awaits_crossing(t.id)]
             if waiting:
-                for task in waiting:
-                    self._escalate(
-                        "irreversible_point",
-                        f"{task.id}: the plan froze this task as work that cannot be taken back, so it is "
-                        f"its own contact point and the loop stops in front of it. A human approves it with "
-                        f"`rein approve {task.id}` — nothing here can, and running the task first would make "
-                        f"the decision by doing it.",
-                        task=task.id,
-                    )
+                # Everything else in the batch first: a contact point stops the work that has to
+                # cross it, not the work beside it. The presentation happens when nothing runnable
+                # is left, which is also what makes it happen once per run.
                 tasks = [t for t in tasks if t.id not in {w.id for w in waiting}]
                 if not tasks:
-                    return common.EXIT_HUMAN_NEEDED
+                    return self._present_crossings(waiting)
             # Here rather than at the top of the run: a `rein build` that finds every task done goes
             # straight to acceptance, and a full gate run at the root to answer a question no task is
             # going to ask is exactly the waste this exists to end.
@@ -3234,6 +3228,37 @@ class Orchestrator:
             else:
                 self._consume_parallel(tasks)
             # Recompute at the top of the loop after each batch (reassemble the chain).
+
+    def _present_crossings(self, waiting: Sequence[dag.Task]) -> int:
+        """Hand back at an irreversible point: say what it is, and the one command that moves it.
+
+        **Printed, not escalated.** Reaching the acceptance gate does the same thing
+        (`_present_gate4`) and for the same reason: the pending gate in `state.yaml` *is* the
+        record that the work stopped and a human has to act, and the chain records how it ends
+        (`gate_approved`, `changes_requested`). Filing a `knowledge_gap` beside it wrote a second
+        record of one fact — one that no approval ever closes, that `rein next` then recommended
+        `rein events --summary` for instead of the approval, and that `events.stops` counted a
+        second time. `run_aborted` is out of `ATTENTION_EVENTS` on exactly this reasoning.
+
+        Once per run, because the batch that contains nothing else is where this lands.
+        """
+        print("\n========== an irreversible point ==========")
+        for task in waiting:
+            print(f"  {task.id}  {task.title}")
+        print(
+            "\nThe plan froze this work as something that cannot be taken back, so it is its own\n"
+            "contact point and the loop stops in front of it. Running it first would make the\n"
+            "decision by doing it.\n"
+            "\nNext:\n"
+            "  1. rein ui — read the ticket and the ADR the declaration points at"
+        )
+        for number, task in enumerate(waiting, start=2):
+            print(f"  {number}. rein approve {task.id} — readiness check, then your confirmation at the terminal")
+        print(
+            "\nNothing here can open it, and neither can anything but a human: a gate opens only on\n"
+            "the gate name typed at an interactive terminal, recorded by `rein approve` itself."
+        )
+        return common.EXIT_HUMAN_NEEDED
 
     def _awaits_crossing(self, task_id: str) -> bool:
         """Is this task an irreversible point whose gate nobody has approved yet?
@@ -3666,8 +3691,8 @@ class Orchestrator:
         root, over the merged result — because what the quality gate is asked about is the tree the
         acceptance reading will read, never the slice in isolation.
 
-        It takes the `dag.Task` rather than the graph because both callers already hold one: gate
-        ④ resolves the id against the graph before it calls this, and the task boundary
+        It takes the `dag.Task` rather than the graph because both callers already hold one: the
+        acceptance path resolves the id against the graph before it calls this, and the task boundary
         (`_repair_warm_findings`) has the task in hand. The graph was an argument for one lookup.
 
         `where` is which of those two called, and it is only ever a label: every line this path
@@ -3883,7 +3908,9 @@ class Orchestrator:
             "Next:\n"
             "  1. rein ui                — read the scope and the orient brief, then answer the\n"
             "                                   Decision Cards and freeze the review\n"
-            "  2. rein approve build     — readiness check, then your confirmation at the terminal\n"
+            # Spelled from the constant, not typed: this line said `rein approve build` for two
+            # releases after that gate stopped existing — a handover whose one command exits 2.
+            f"  2. rein approve {models.GATE_LAST} — readiness check, then your confirmation at the terminal\n"
             "\nAn answer of `revise_implementation` on a card hands that subject back to this loop: it\n"
             "says the code is what is wrong, which is the one thing the review cannot decide for itself.\n"
             "Re-run `rein build` afterwards and it will be repaired like any other finding.\n"

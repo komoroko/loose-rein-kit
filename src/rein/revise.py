@@ -103,6 +103,11 @@ def plan_revision(repo: repo_mod.Repo, target_gate: str, seeds: list[str]) -> di
     state = store.read_state()
     if state is None:
         raise ReviseError("no .rein/state.yaml — nothing to roll back")
+    # The membership question, asked because the spelling check above is not it. A target this
+    # cycle does not have resets nothing, and rendering that as an empty plan reads as "already
+    # rolled back" — then writes a `gate_revised` event naming a gate that never existed.
+    if absent := state.gate_absence_reason(target_gate):
+        raise ReviseError(absent)
     plan = store.read_plan()
 
     resets = gates_to_reset(target_gate, state)

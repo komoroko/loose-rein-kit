@@ -645,6 +645,9 @@ def test_the_stats_point_at_where_a_lens_gets_in_not_only_at_what_to_remove() ->
     out = lens_cmd.render_stats(lens_cmd.stats([_applied("L-1", False), _applied("L-1", False)]), library)
 
     assert "can only ever argue for removal" in out
-    assert "docs/retrospective.md" in out
+    # The section that holds the table a lens is written into, not the one holding the root causes
+    # it is held against — a pointer at the wrong section is the same defect as a pointer at a
+    # document that does not exist, one heading further in.
+    assert "section 2 of docs/retrospective.md" in out
     # After the advice it qualifies, like the scope note: a reader holds both by the time they act.
     assert out.index("docs/retrospective.md") > out.index("never found anything")

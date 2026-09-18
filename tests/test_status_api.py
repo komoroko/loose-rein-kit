@@ -43,6 +43,9 @@ BASE: dict[str, Any] = dict(
     plan_missing=False,
     unsandboxed_profiles=[],
     unsandboxed_build_targets=[],
+    # The gate a person could open in this state. It is the stage's gate here because this cycle
+    # froze nothing irreversible; where one is frozen the two differ, which is the whole point.
+    decidable_gate="acceptance",
 )
 
 
@@ -877,3 +880,64 @@ def test_a_finding_the_loop_owns_is_still_the_build_s() -> None:
     rec = _build_phase(repairable_findings=1, decidable_findings=3)
 
     assert rec.command == "rein build", "a repairable finding outranks a decidable one: it costs nobody anything"
+
+
+# --- a gate named after a task, on the surfaces that point a person at one ----------
+
+
+def _crossing_repo(tmp_path: Path, *, crossing: str = "pending") -> repo_mod.Repo:
+    task = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        operator_surface=[
+            {
+                "kind": "persistence",
+                "name": "the users table, migrated",
+                "paths": ["db/schema.sql"],
+                "reversible": False,
+                "adr": "ADR-007",
+            }
+        ],
+    )
+    seed_repo(
+        tmp_path,
+        plan=make_plan(tasks=[task]),
+        state=make_state(gates={"mandate": "approved", "T-001": crossing, "acceptance": "pending"}),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+    )
+    return repo_mod.Repo(tmp_path)
+
+
+def test_the_board_points_at_the_gate_that_can_be_opened_now(tmp_path: Path) -> None:
+    """The stage's gate is acceptance and the gate waiting on a person is the crossing.
+
+    Probing by stage, the board recommended `/build`, reported `waiting_on_human: false`, and
+    offered `rein approve acceptance --check` as the action for a row whose blocker was the
+    crossing — the one gate that could actually be opened appeared on no surface that points a
+    person anywhere.
+    """
+    status: dict[str, Any] = status_api.collect_status(_crossing_repo(tmp_path))
+    pending: list[dict[str, str]] = status["pending"]
+
+    assert status["next"]["command"] == "rein approve T-001"
+    assert status["decision"]["waiting_on_human"] is True
+    assert str(status["decision"]["id"]).endswith("rein approve T-001")
+    assert [row["subject"] for row in pending if row["kind"] == "gate_ready"] == ["T-001"]
+
+
+def _decidable(repo: repo_mod.Repo) -> dict[str, bool]:
+    status: dict[str, Any] = status_api.collect_status(repo)
+    rows: list[dict[str, Any]] = status["gates"]
+    return {row["name"]: row["decidable"] for row in rows}
+
+
+def test_the_payload_says_which_gates_are_open_for_a_decision(tmp_path: Path) -> None:
+    """Decidability is the server's answer, so the spine and the review pane cannot disagree
+    about it. "The first unapproved one" is a position in a ladder, and crossings have no order."""
+    assert _decidable(_crossing_repo(tmp_path)) == {"mandate": False, "T-001": True, "acceptance": False}
+
+
+def test_acceptance_becomes_decidable_once_the_point_is_crossed(tmp_path: Path) -> None:
+    decidable = _decidable(_crossing_repo(tmp_path, crossing="approved"))
+
+    assert decidable == {"mandate": False, "T-001": False, "acceptance": True}

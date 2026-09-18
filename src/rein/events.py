@@ -51,21 +51,39 @@ ATTENTION_EVENTS = frozenset(
 GATE_STOP_EVENTS = frozenset({"gate_approved", "changes_requested"})
 
 
+def task_outcomes(events: Sequence[models.Event]) -> dict[str, str]:
+    """The last task status **the chain itself** recorded, per subject.
+
+    `state.yaml` is the authority while a cycle is live, and it is exactly what an archived chain
+    does not come with. Every status the loop writes goes out with its event
+    (`build_loop.set_task_status` puts it in `detail.status`), so the chain can answer the same
+    question about its own past — which is what lets one retirement rule serve both.
+    """
+    outcomes: dict[str, str] = {}
+    for event in events:
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        status = detail.get("status")
+        if isinstance(status, str):
+            outcomes.update(dict.fromkeys(event.subject_ids, status))
+    return outcomes
+
+
 def stops(events: Sequence[models.Event]) -> int:
     """How many times this chain says the work stopped and a human had to act.
 
-    The gate stops above, plus the distinct conditions that were escalated to a person. Distinct by
-    `(kind, subjects)` — the same identity :func:`open_conditions` groups by, because a repeated
-    escalation is one thing to decide however many attempts recorded it, and two surfaces answering
-    one question differently is the failure that grouping was written against.
+    The gate stops above, plus the conditions that actually reached a person —
+    :func:`open_conditions` over this chain's own outcomes, so the *same* rule that decides what a
+    board calls pending decides what this counts. It read raw `ATTENTION_EVENTS` before, with no
+    retirement at all: a task that failed twice and passed on the third attempt was counted as a
+    stop a human had to act on, while every surface that asks "what awaits you" correctly said
+    nothing did. A figure about human contact points may not count the loop recovering by itself.
 
     Counted over whatever chain it is handed, so an archived cycle counts the same as the live one.
     Never a ceiling: nothing reads this back to decide anything, which is the invariant that keeps
     a figure from becoming a budget (`observations.STOP_COUNT_CLAIM`).
     """
     gates = sum(1 for e in events if e.event in GATE_STOP_EVENTS)
-    escalated = {(e.event, tuple(e.subject_ids)) for e in events if e.event in ATTENTION_EVENTS}
-    return gates + len(escalated)
+    return gates + len(open_conditions(events, task_outcomes(events)))
 
 
 #: `ATTENTION_EVENTS` a task's own later success can retire. Both are the build loop's per-attempt

@@ -7,7 +7,7 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.8.0
   files:
-    AGENTS.rein.md: sha256:7beac3cb0b488bb201f296b0c6d17e2fd245e9570655b48d6bcc3578c5d01229
+    AGENTS.rein.md: sha256:fdb0a2e58c7d7b50853058b67380e679bab264875f3d49b0110abb57e39bcd71
     oci/python/Containerfile: sha256:9e311e179f5794659968fe7bb0d14ef9831c28c818afd3d10f3abe3b87b7afd7
     prompts/agents/adversarial-reviewer.md: sha256:f9efecb651e7d72d7ee991457c1f3644f618487df15d9ddd9f6dd5a4c2d3f349
     prompts/agents/architect.md: sha256:2f5d25fbbb939eab00a26db15241c1418283f7c627fb3c639ede199f4a4bdf8f
@@ -21,12 +21,12 @@ prompts:
     prompts/commands/status.md: sha256:6f31d2c1b46f62b0e511300838251dc6a35fb33c3d1b03dfbed1543e76f4de2d
     prompts/commands/tasks.md: sha256:4703e0af45ea6d8d5f22d276f377371d04a8f3b5052159f45b5e40378d366032
     prompts/commands/verify.md: sha256:c64d82b267e0e988ee98dfd6cc5a3063f7195ff7a08a55e2b4c43ac2d26d258d
-    prompts/rules/gate-workflow.md: sha256:fac89746730062f68cbb0ca02d9485eb9710a1dcce65f5b1ad72276b3b17e8cf
+    prompts/rules/gate-workflow.md: sha256:23dd5793f0a3039cbd4b9f68d2b8215574b995e15eb1c97341802884af6f4465
     schema/config.schema.json: sha256:baae846af091c01b0789813422ae6dd2c66e1a9604bcb71e97c4d94caea04102
     schema/event.schema.json: sha256:c61ae420544b173bbfc6f12a40d78be01bbfd2dcc314c7599b021ac6fc8ac114
     schema/plan.schema.json: sha256:fbb4eb02c4f2adf2af1cd5d0a9c16424e99aff44d4b87da6e1bb9639dd192c62
     schema/review.schema.json: sha256:4c85846abac24fa88c5108a33d839c1bda6ee741c8b2a8e83e0d79bd50840540
-    schema/state.schema.json: sha256:ffd1571f2d22f831de7280898371ff23d267c543eb610b847408529db1393f24
+    schema/state.schema.json: sha256:31a619efcdaf5eed05d7e2047083a81fab8b9db7af862e76b5969cb1332343d3
     oci/agent/Containerfile: sha256:724870d2f55ce6903144039a6f9f9ad2587e7837e76705ef4049fa62a26599ee
 integrations:
   claude:

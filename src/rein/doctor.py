@@ -63,14 +63,11 @@ COPILOT_HOOKS_DIR = ".github/hooks"
 #: Codex reads hooks from either form, so both are checked; a repository that ships neither has
 #: no edit-time guard under Codex.
 CODEX_HOOK_FILES = (".codex/hooks.json", ".codex/config.toml")
-#: Where a repository registers the commit-stage check, when it registers one. `rein` neither
-#: installs this file nor ships one, which is why whether it holds is looked at and never assumed.
-PRE_COMMIT_PATH = ".pre-commit-config.yaml"
-#: …and what the registration has to say. `rein guard` **alone** is the *hook* invocation: it reads
-#: a host's JSON payload on stdin, so under pre-commit it is handed no payload, warns, and allows —
-#: a hook that runs on every commit and checks nothing. Accepting the bare name here would have
-#: turned that into a PASS, which is the shape of claim this whole reading exists to stop making.
-_CHECK_DIFF_RE = re.compile(r"rein guard\b[^\n]*--check-diff")
+#: Where a repository registers the commit-stage check, and what counts as registering it. Both
+#: live in `gate_guard`, the module that owns the checkpoint: `policy_check` refuses a head that
+#: takes this registration away, and a second reader here would be the thing that lets the two
+#: disagree about what "registered" means.
+PRE_COMMIT_PATH = gate_guard.PRE_COMMIT_PATH
 
 
 @dataclass(frozen=True)
@@ -985,14 +982,23 @@ def _commit_stage(repo: repo_mod.Repo) -> Finding:
         text = repo.path(PRE_COMMIT_PATH).read_text(encoding="utf-8")
     except OSError:
         text = ""
-    if _CHECK_DIFF_RE.search(text):
+    verdict = gate_guard.commit_stage_registration(text)
+    if verdict == gate_guard.COMMIT_STAGE_REGISTERED:
         return Finding("PASS", "hook", f"commit-stage: {PRE_COMMIT_PATH} registers `rein guard --check-diff`")
-    detail = (
-        "registers `rein guard` without `--check-diff`, which is the hook invocation — under "
-        "pre-commit it reads no payload, warns and allows"
-        if _mentions_guard(text)
-        else "does not register `rein guard --check-diff` — rein neither installs nor ships it"
-    )
+    detail = {
+        gate_guard.COMMIT_STAGE_NEUTERED: (
+            "registers `rein guard` without `--check-diff`, which is the hook invocation — under "
+            "pre-commit it reads no payload, warns and allows"
+        ),
+        gate_guard.COMMIT_STAGE_UNREADABLE: (
+            "could not be read as an unambiguous YAML document (duplicate keys, anchors and "
+            "aliases are refused), so whether it registers `rein guard --check-diff` is a question "
+            "this cannot answer — which is not the same as an absence"
+        ),
+        gate_guard.COMMIT_STAGE_ABSENT: (
+            "does not register `rein guard --check-diff` — rein neither installs nor ships it"
+        ),
+    }[verdict]
     return Finding(
         "INFO",
         "hook",
@@ -1112,7 +1118,7 @@ def preauthorized_verbs(entry: str) -> list[str]:
     """The gate-opening verbs a `permissions.allow` entry would let through unprompted.
 
     Matching is prefix-based in both directions, because the host's own matching is: a rule for
-    `rein approve build` reaches one of the verbs, and so does the broader `rein`,
+    `rein approve acceptance` reaches one of the verbs, and so does the broader `rein`,
     which pre-authorizes every verb including this one. What it cannot see is a wrapper —
     `Bash(uv run *)` reaches `uv run rein approve` — and enumerating every shell that could
     carry a command is not something a check can honestly claim to do, so the PASS below says

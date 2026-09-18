@@ -22,6 +22,7 @@ from tests._support import (
     make_decision,
     make_plan,
     make_state,
+    make_task,
     seed_repo,
 )
 
@@ -187,6 +188,7 @@ def test_the_board_names_the_requests_rather_than_the_gate(tmp_path: Path) -> No
         unsandboxed_profiles=[],
         unsandboxed_build_targets=[],
         gate_ready=False,
+        decidable_gate="mandate",
         open_change_requests=2,
     )
     assert rec.kind == "reconcile"
@@ -293,3 +295,57 @@ def test_a_target_that_merely_starts_with_d_is_not_a_decision(tmp_path: Path, ob
     change_request.add(repo, "mandate", "docs/D-spec.md", "the spec contradicts R-1")
 
     assert [o for o in observations.read() if o.kind == "reach_overruled"] == []
+
+
+# --- a gate named after a task ------------------------------------------------------
+
+
+def _crossing_repo(tmp_path: Path) -> repo_mod.Repo:
+    """A frozen cycle stopped in front of a task it cannot take back."""
+    task = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        operator_surface=[
+            {
+                "kind": "persistence",
+                "name": "the users table, migrated",
+                "paths": ["db/schema.sql"],
+                "reversible": False,
+                "adr": "ADR-007",
+            }
+        ],
+    )
+    seed_repo(
+        tmp_path,
+        state=make_state(gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"}),
+        plan=make_plan(claims=[make_claim("C-001", requirement_ids=["R-1"])], tasks=[task]),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+    )
+    return repo_mod.Repo(tmp_path)
+
+
+def test_a_crossing_can_be_refused_and_not_only_approved(tmp_path: Path) -> None:
+    """A gate a human may open and may not decline is not a decision.
+
+    The id used to carry the gate name, so every request against `T-001` produced
+    `CR-T-001-…` and died on the id's own pattern — leaving the irreversible point as the one
+    gate where "not yet, change this" had no route at all, on any surface.
+    """
+    repo = _crossing_repo(tmp_path)
+    assert approve.readiness(repo, "T-001") == []
+
+    request_id = change_request.add(repo, "T-001", "T-001", "migrate in two steps, not one")
+
+    assert request_id.startswith("CR-")
+    blockers = approve.readiness(repo, "T-001")
+    assert len(blockers) == 1 and "two steps" in blockers[0]
+    assert [cr["id"] for cr in state_of(repo).change_requests_for("T-001", "open")] == [request_id]
+
+
+def test_a_request_against_a_gate_this_cycle_does_not_have_is_refused(tmp_path: Path) -> None:
+    """`T-404` is well-formed and absent. Recorded, it holds nothing shut and appears in no
+    listing anyone reads — which is indistinguishable, from the outside, from having been filed."""
+    repo = _crossing_repo(tmp_path)
+
+    with pytest.raises(change_request.ChangeRequestError, match="this cycle has no gate 'T-404'"):
+        change_request.add(repo, "T-404", "T-001", "typo in the task id")

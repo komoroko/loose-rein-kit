@@ -83,9 +83,11 @@ GATE_STATUS_VALUES = frozenset({"pending", "approved"})
 def gate_name_ok(gate: str) -> bool:
     """Whether `gate` could name a gate at all — a spelling check, nothing more.
 
-    Whether *this* cycle has it is `State.gate_ids`, and that is the question every caller that
-    holds a state should be asking: a crossing gate exists only for a task the frozen plan said
-    was irreversible, so `T-009` is well-formed and usually absent.
+    Whether *this* cycle has it is `State.gate_absence_reason`, and that is the question every
+    caller holding a state has to ask instead of this one: a crossing gate exists only for a task
+    the frozen plan said was irreversible, so `T-009` is well-formed and usually absent. This is
+    for the one caller with no state yet — an argument parser, or a readiness check before the
+    documents are read.
     """
     return gate in GATE_ENDS or CROSSING_GATE_RE.match(gate) is not None
 
@@ -303,7 +305,7 @@ DISPOSITION_VALUES = frozenset(
 )
 
 #: How far the human half of the acceptance review has got. `frozen` is the end state: the answers
-#: are sealed and digested, and `rein approve build` is what a human runs next.
+#: are sealed and digested, and `rein approve acceptance` is what a human runs next.
 HUMAN_REVIEW_STATUS_ORDER: tuple[str, ...] = ("not_started", "in_progress", "frozen")
 HUMAN_REVIEW_STATUS_VALUES = frozenset(HUMAN_REVIEW_STATUS_ORDER)
 #: Whether a machine review exists at all. An explicit status rather than an inference from
@@ -1172,6 +1174,35 @@ class State:
     @property
     def approved_gates(self) -> tuple[str, ...]:
         return tuple(g for g in self.gate_ids if self.gate_status(g) == "approved")
+
+    @property
+    def decidable_gates(self) -> tuple[str, ...]:
+        """The gates a human could open *right now*: not approved, with nothing they rest on pending.
+
+        **Not "the first unapproved one".** That reading is a position in a ladder, and crossings
+        carry no order against each other, so it tells the person holding the second one that it is
+        not theirs to decide. One rule, here, because the surfaces that ask it had begun to answer
+        differently: the board's recommendation said a crossing was nobody's to decide while the
+        review pane said it was open.
+        """
+        return tuple(g for g in self.gate_ids if self.gate_status(g) != "approved" and self.pending_upstream(g) is None)
+
+    def gate_absence_reason(self, gate: str) -> str | None:
+        """Why `gate` is not one of this cycle's gates, or None when it is one.
+
+        The wording lives here because every caller holding a state owes the same answer, and the
+        two that skipped the question did not skip it deliberately: `gate_name_ok` reads like a
+        validation and is only a spelling check.
+        """
+        if gate in self.gate_ids:
+            return None
+        if not gate_name_ok(gate):
+            return f"unknown gate {gate!r} ({gate_names()})"
+        return (
+            f"this cycle has no gate {gate!r} — it has {', '.join(self.gate_ids)}. A crossing gate "
+            "exists only for a task the frozen plan declared irreversible, and it appears when the "
+            "mandate is approved."
+        )
 
     @property
     def plan_status(self) -> str:

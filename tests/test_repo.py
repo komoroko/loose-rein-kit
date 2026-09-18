@@ -12,7 +12,7 @@ import pytest
 
 from rein import gate_guard
 from rein import repo as repo_mod
-from tests._support import GATE_ORDER, make_state, seed_repo
+from tests._support import GATE_ENDS, make_state, seed_repo
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def repo_root(tmp_path: Path) -> Path:
     return tmp_path
 
 
-_ALL_PENDING = {name: "pending" for name in GATE_ORDER}
+_ALL_PENDING = {name: "pending" for name in GATE_ENDS}
 
 
 def test_find_root_walks_up_from_a_subdirectory(repo_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,7 +83,7 @@ def test_gate_guard_resolves_repo_from_the_payload_cwd(repo_root: Path, monkeypa
     monkeypatch.delenv("REIN_ROOT", raising=False)
     seed_repo(
         repo_root,
-        state=make_state(gates=dict.fromkeys(GATE_ORDER, "pending")),
+        state=make_state(gates=dict.fromkeys(GATE_ENDS, "pending")),
     )
     payload = json.dumps(
         {

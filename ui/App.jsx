@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from "react";
 
-import { READ_ONLY, awaitingGate, getJson, postJson, toast } from "./api.js";
+import { READ_ONLY, getJson, postJson, toast } from "./api.js";
 import { useRoute, useStream, useTheme, useToasts } from "./hooks.js";
 import { useNotifier } from "./notify.js";
 import Now from "./Now.jsx";
@@ -17,16 +17,17 @@ import ConsoleView from "./ConsoleView.jsx";
 import Gate from "./gate/Gate.jsx";
 
 // The lifecycle rail, and the page's only rendering of "which gate waits on you". Three states and
-// no fourth: opened by a recorded human approval, waiting on you, not yet reached. The waiting one
-// is the single inverted block on the page — nothing else on any screen is painted that way.
+// no fourth: opened by a recorded human approval, waiting on you, not yet reached. Waiting is the
+// only inverted block on the page — nothing else on any screen is painted that way — and there is
+// one per gate that is open for a decision, which is more than one when a cycle froze two
+// irreversible points: they carry no order against each other, so neither is "next".
 //
-// Two stations, because a human approves twice: the mandate (what the loop may change and must
-// prove) and acceptance (the change is taken). There were five, one per phase, plus a `live` class
-// that lit the station matching `current_phase` — a second source of "where are we" that could
-// disagree with the gates it sat on top of. The stage is derived from these two now, and the rail
-// draws only them.
+// Two stations at least — the mandate (what the loop may change and must prove) and acceptance
+// (the change is taken) — plus one for every point this cycle's plan froze as irreversible. There
+// were five, one per phase, plus a `live` class that lit the station matching `current_phase` — a
+// second source of "where are we" that could disagree with the gates it sat on top of. The stage
+// is derived from the two ends now, and the rail draws whatever gates the payload carries.
 function Spine({ status, route }) {
-  const awaiting = (awaitingGate(status) || {}).name;
   const item = (view, label) => (
     <a className={"nav-item" + (route.view === view ? " active" : "")} href={"#" + view} data-view={view}>
       {label}
@@ -39,16 +40,18 @@ function Spine({ status, route }) {
       <div className="stations" id="stepper">
         {((status || {}).gates || []).map((g) => {
           const here = g.name === route.gate;
+          // Marked per gate, not against one "awaiting" name: two crossings can both be open at
+          // once, and nothing orders them against each other.
           const cls = [
             "station",
-            g.status === "approved" ? "approved" : g.name === awaiting ? "awaiting" : "future",
+            g.status === "approved" ? "approved" : g.decidable ? "awaiting" : "future",
             here ? "active" : "",
           ].filter(Boolean).join(" ");
           // Every approval is a human's typed confirmation and the receipt id is the proof of it,
           // so an opened gate says which approval opened it rather than only that it is open.
           const title = g.status === "approved"
             ? `approved (${g.approval_id || "receipt unreadable"})`
-            : g.name === awaiting
+            : g.decidable
               ? "waiting on you — read it, then decide"
               : "not reached yet";
           return (
@@ -59,7 +62,7 @@ function Spine({ status, route }) {
               title={title}
               aria-current={here ? "page" : undefined}
             >
-              <span className="mark">{g.status === "approved" ? "✓" : g.name === awaiting ? "◆" : "·"}</span>
+              <span className="mark">{g.status === "approved" ? "✓" : g.decidable ? "◆" : "·"}</span>
               <span className="gname">
                 {g.name}
               </span>

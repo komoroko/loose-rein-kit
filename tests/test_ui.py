@@ -899,8 +899,12 @@ def test_the_frontend_fixture_still_looks_like_a_real_status_payload(repo: Path)
     # The `repo` fixture has no plan, so its `tasks` is None; the frontend fixture's has one, and
     # the block's own shape is pinned by test_status_payload_carries_every_field_the_modules_read.
     assert set(fixture["tasks"]["counts"]) == set(models.TASK_STATUS_ORDER)
+    # Against the live row rather than a list written out here: a second hand-maintained copy of
+    # the payload's shape is the drift this test exists to catch, one level down.
+    live_gate_keys = {frozenset(gate) for gate in live["gates"]}
+    assert len(live_gate_keys) == 1
     for gate in fixture["gates"]:
-        assert set(gate) == {"name", "status", "approval_id"}
+        assert frozenset(gate) in live_gate_keys, "the fixture's gate rows are not the payload's any more"
 
 
 def test_status_reads_the_event_log_through_the_cache(repo: Path) -> None:
@@ -1264,7 +1268,7 @@ def test_the_pane_can_record_a_change_request(server: ui.DashboardServer, repo: 
         {"gate": "mandate", "target": "docs/10-requirements.md#R-3", "reason": "unmeasurable"},
     )
     assert status == 200
-    assert json.loads(body)["id"].startswith("CR-MANDATE-")
+    assert json.loads(body)["id"].startswith("CR-")
 
     blockers = approve.readiness(repo_mod.Repo(repo), "mandate")
     assert any("open change request" in b for b in blockers)
@@ -1363,3 +1367,19 @@ def test_acceptance_is_refused_while_the_point_is_uncrossed(crossing_server: ui.
 
     assert not ready["ok"]
     assert any("T-001" in b for b in ready["blockers"])
+
+
+def test_an_irreversible_point_can_be_refused_from_the_dashboard(crossing_server: ui.DashboardServer) -> None:
+    """The footer offers "request changes" at every gate; at a crossing it returned 400 with a
+    raw schema error, because the request id was built out of the gate's name. A gate a human may
+    approve and may not decline is not a decision, whichever route they are on."""
+    status, body = write(
+        crossing_server, "/api/changes", {"gate": "T-001", "target": "T-001", "reason": "migrate in two steps"}
+    )
+    assert status == 200, body
+
+    from rein import approve as approve_mod
+    from rein import repo as repo_mod
+
+    blockers = approve_mod.readiness(repo_mod.Repo(crossing_server.active_root()), "T-001")
+    assert any("two steps" in b for b in blockers)

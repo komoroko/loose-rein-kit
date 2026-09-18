@@ -879,6 +879,33 @@ def test_a_commit_stage_entry_without_check_diff_is_not_a_registration(tmp_path:
     assert "reads no payload, warns and allows" in findings[0].message
 
 
+def test_the_registration_is_read_as_a_config_and_not_as_text(tmp_path: Path) -> None:
+    """pre-commit splits an invocation across `entry` and `args`, and its own documentation does.
+
+    A line-wise regex called that working registration a neutered one — an INFO asserting the hook
+    "reads no payload, warns and allows" about a repository where the checkpoint holds. Wrong in
+    the safe direction is still wrong: this reading exists to say only what it verified.
+    """
+    seed_repo(tmp_path)
+    (tmp_path / doctor.PRE_COMMIT_PATH).write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: rein-guard\n        entry: rein guard\n"
+        "        args: [--check-diff]\n",
+        encoding="utf-8",
+    )
+    assert _levels(doctor.check_hook(repo_mod.Repo(tmp_path)), "commit-stage") == ["PASS"]
+
+
+def test_a_config_that_cannot_be_parsed_is_said_to_be_unreadable(tmp_path: Path) -> None:
+    """Not "absent". A file nobody can read is a question this check could not answer, and the
+    tri-state is the whole reason it is worth reading at all."""
+    seed_repo(tmp_path)
+    (tmp_path / doctor.PRE_COMMIT_PATH).write_text("repos: [oops\n", encoding="utf-8")
+
+    findings = [f for f in doctor.check_hook(repo_mod.Repo(tmp_path)) if "commit-stage" in f.message]
+    assert [f.level for f in findings] == ["INFO"]
+    assert "could not be read as an unambiguous YAML document" in findings[0].message
+
+
 def test_the_commit_stage_finding_is_reported_with_a_hook_host_too(tmp_path: Path) -> None:
     """The three checkpoints are independent. Having an edit-time hook says nothing about
     whether the commit-stage one is registered, so the reading is not conditioned on it."""

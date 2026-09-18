@@ -36,7 +36,10 @@ _CONFIG = store.dump_yaml(
     )
 ).decode()
 
-_AGENTS = "kinds: foundation / parallel / integration. gates: mandate, acceptance. steps: test, review.\n"
+_AGENTS = (
+    "kinds: foundation / parallel / integration. gates: mandate, acceptance, and T-NNN for an "
+    "irreversible point. steps: test, review.\n"
+)
 _TASKS_CMD = (
     "kind: foundation | parallel | integration. "
     "status: todo in-progress blocked needs-revision awaiting-evidence done.\n"
@@ -63,7 +66,17 @@ def _files(**overrides: str) -> dict[str, str]:
 def test_gate_names_come_from_the_vocabulary_not_a_scraped_file() -> None:
     """Read from a document's front matter these would drift. A constant cannot drift from the
     code that acts on it, which is the whole point of a canary."""
-    assert template_lint.gate_names() == sorted(models.GATE_ENDS)
+    assert template_lint.gate_names() == sorted([*models.GATE_ENDS, "T-NNN"])
+
+
+def test_the_always_loaded_rules_have_to_name_the_third_kind_of_gate() -> None:
+    """A cycle grows a gate per irreversible point, and the file an agent always has loaded said
+    the lifecycle had two. There is no *name* to echo — those are per cycle — but there is a
+    spelling, and leaving it unrequired is how the rules came to describe a lifecycle the loop had
+    stopped having."""
+    files = _files(**{template_lint.AGENTS_MD: _AGENTS.replace(", and T-NNN for an irreversible point", "")})
+
+    assert any("AGENTS.md" in f and "`T-NNN`" in f for f in template_lint.check_vocabulary(files))
 
 
 def test_quality_gate_steps_reads_the_dod_names() -> None:
@@ -726,3 +739,42 @@ def test_the_upgrade_canary_refuses_to_pass_when_it_could_not_look(tmp_path: Pat
     template_lint._tracked_texts.cache_clear()
     with pytest.raises(OSError, match="could not list git-tracked files"):
         template_lint._tracked_texts(tmp_path)  # not a git checkout
+
+
+def test_a_documented_gate_that_the_vocabulary_does_not_have_is_drift() -> None:
+    """`rein approve build`, `rein approve requirements` and `rein approve design` outlived the
+    five-gate lifecycle by two releases — in printed handovers and in the scaffold a new
+    repository is seeded from, where they read as instructions and exit 2. A gate name is
+    checkable against the vocabulary, and nothing was checking it."""
+    failures = template_lint.check_documented_invocations(
+        _REPO_ROOT, {"docs/x.md": "then run `rein approve design` and `rein revise --to build`"}
+    )
+
+    assert [f for f in failures if "design" in f] and [f for f in failures if "build" in f]
+
+
+def test_a_documented_gate_the_vocabulary_does_have_is_not_drift() -> None:
+    """Including the crossing spelling and the shapes a document legitimately writes."""
+    text = (
+        "`rein approve mandate`, `rein approve acceptance`, `rein approve T-004`, "
+        "`rein approve T-NNN`, `rein approve <gate>`, `rein revise --to T-004`, "
+        "`rein changes add acceptance --target T-1 --reason x`, `rein changes list --gate mandate`"
+    )
+
+    assert template_lint.check_documented_invocations(_REPO_ROOT, {"docs/x.md": text}) == []
+
+
+def test_every_shipped_scaffold_document_is_classified() -> None:
+    assert template_lint.check_scaffold_docs_classified(_REPO_ROOT) == []
+
+
+def test_a_reference_to_a_retrospective_section_that_does_not_exist_is_drift() -> None:
+    """Four documents send someone to a numbered section to finalize something there. Inserting a
+    section renumbers everything below it and the references do not move with it."""
+    failures = template_lint.check_retrospective_sections(_REPO_ROOT, {"x.md": "finalize it in retrospective §9"})
+
+    assert len(failures) == 1 and "§9" in failures[0]
+
+
+def test_the_shipped_references_to_retrospective_sections_all_resolve() -> None:
+    assert template_lint.check_retrospective_sections(_REPO_ROOT, template_lint.neutral_texts(_REPO_ROOT)) == []

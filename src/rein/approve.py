@@ -385,12 +385,8 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
 
     if state is None:
         return ["no .rein/state.yaml — run `rein init` first"]
-    if gate not in state.gate_ids:
-        raise ApprovalError(
-            f"this cycle has no gate {gate!r} — it has {', '.join(state.gate_ids)}. A crossing gate "
-            "exists only for a task the frozen plan declared irreversible, and it appears when the "
-            "mandate is approved."
-        )
+    if absent := state.gate_absence_reason(gate):
+        raise ApprovalError(absent)
 
     blockers: list[str] = []
     _, defects = event_chain.scan(repo.events)

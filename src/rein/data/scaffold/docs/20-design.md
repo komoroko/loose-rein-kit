@@ -7,7 +7,7 @@
      exact spot it affects (the design section, or the option list it belongs to), instead of settling
      on a plausible default. There is no cap on how many: every marker is decided by the human — as a
      technical choice recorded in an ADR — or demoted to Open questions with its assumption written
-     out, and `rein approve design` refuses while any is left standing in the prose. -->
+     out, and `rein approve mandate` refuses while any is left standing in the prose. -->
 
 ## Architecture overview
 <!-- Overall structure. Component diagram or data flow in prose / a simple diagram -->

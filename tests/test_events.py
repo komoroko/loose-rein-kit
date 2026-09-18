@@ -135,7 +135,8 @@ def _chain(*specs: tuple[str, tuple[str, ...]]) -> list[models.Event]:
     built: list[models.Event] = []
     previous: models.Event | None = None
     for name, subjects in specs:
-        linked = event_chain.link(previous, event_chain.make(name, "demo-cycle", subject_ids=subjects))
+        detail: dict[str, object] | None = {"status": "done"} if name == "task_completed" else None
+        linked = event_chain.link(previous, event_chain.make(name, "demo-cycle", subject_ids=subjects, detail=detail))
         built.append(linked)
         previous = linked
     return built
@@ -338,3 +339,27 @@ def test_a_revision_is_not_counted_on_top_of_the_refusal_that_caused_it() -> Non
         ("decision_declared", ("T-1",)),
     )
     assert events.stops(built) == 1
+
+
+def test_a_failure_the_loop_recovered_from_by_itself_is_not_a_stop() -> None:
+    """A stop is a human contact point. The loop failing a task twice and passing on the third
+    attempt never reached anybody, and every surface that asks "what awaits you" says so —
+    `stops` read raw `ATTENTION_EVENTS` with no retirement and counted it anyway.
+    """
+    recovered = _chain(("task_failed", ("T-1",)), ("task_failed", ("T-1",)), ("task_completed", ("T-1",)))
+
+    assert events.open_conditions(recovered, events.task_outcomes(recovered)) == []
+    assert events.stops(recovered) == 0
+
+
+def test_a_task_that_never_came_back_is_still_a_stop() -> None:
+    """The other half: retirement is the task's own later success, not the passage of time."""
+    assert events.stops(_chain(("task_failed", ("T-1",)))) == 1
+
+
+def test_the_chain_answers_for_its_own_task_outcomes() -> None:
+    """`state.yaml` is the authority while a cycle is live and exactly what an archive lacks. The
+    status travels on the event, so one retirement rule can serve the live chain and the archives."""
+    chain = _chain(("task_started", ("T-1",)), ("task_completed", ("T-1",)))
+
+    assert events.task_outcomes(chain)["T-1"] == "done"

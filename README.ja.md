@@ -25,10 +25,10 @@ flowchart LR
         tasks["/tasks<br/>scope とタスク DAG"]:::agent
     end
 
-    g1{"① mandate<br/>変更してよい範囲・<br/>満たすべき claim・<br/>必要な証拠"}:::human
+    g1{"mandate<br/>変更してよい範囲・<br/>満たすべき claim・<br/>必要な証拠"}:::human
     build["/build<br/>実装ループ"]:::agent
     verify["/verify<br/>検証"]:::agent
-    g2{"② acceptance<br/>変更を受け入れる"}:::human
+    g2{"acceptance<br/>変更を受け入れる"}:::human
     done(["done"])
 
     subgraph TASKS["タスク群(依存グラフ DAG) — ループが自由に切り直す"]
@@ -62,7 +62,7 @@ flowchart LR
     style done fill:#ffffff,stroke:#9aa0a6,color:#26282b;
 ```
 
-- **緑** — 人間が判断する箇所。brief、2つのゲート、`/revise` が該当する。
+- **緑** — 人間が判断する箇所。brief、各ゲート、`/revise` が該当する。
 - **青** — エージェントが実行する箇所。各コマンドと、そこで処理されるタスク群を指す。
 - **赤い点線の矢印** — 差し戻しを表し、人間が決めたときにのみ実行される。
 
@@ -78,9 +78,19 @@ flowchart LR
 
 | 手順 | コマンド | 何が起きるか | 人間の役割 |
 |------|----------|--------------|------------|
-| 起草 | `/req` `/design` `/tasks` | claim・方針・scope・タスク DAG を書く(順不同) | ① **mandate** を承認する。scope・claim・受入基準を決める |
+| 起草 | `/req` `/design` `/tasks` | claim・方針・scope・タスク DAG を書く(順不同) | **mandate** を承認する。scope・claim・受入基準を決める |
 | 実装 | `/build`  | mandate の内側で自律実装する(テスト green が完了条件) | — 何もしない。レビュー指摘は自分で直す |
-| 検証 | `/verify` | 機能・非機能テスト、依存監査、grounded review | ② **acceptance** を承認する。変更を受け入れる |
+| 検証 | `/verify` | 機能・非機能テスト、依存監査、grounded review | **acceptance** を承認する。変更を受け入れる |
+
+**変更がそれを含むときだけ現れる3種類目のゲートがある。** `operator_surface` に
+`reversible: false` を宣言したタスク(データが動く、バージョンが公開される、課金が発生する)は、
+それ自体が接点になる。そのタスク名を冠した `T-NNN` というゲートがサイクルに加わり、`rein build`
+はその手前で止まる。acceptance で「もう起きてしまった」と読むのではなく、走る前に
+`rein approve T-NNN` を実行する。これらのゲートは mandate の承認時に、その承認が凍結する plan から
+導かれて現れる。何を作るかを確定させる行為が、このサイクルであと何回止まるかを同時に確定させ、
+承認者はその回数を承認する当のものの一部として見る。**上限は無い。** 何回聞かれるかは変更の性質で
+決まり、ツールの定数ではない。不可逆点どうしに順序は無く、各点は mandate の下流、acceptance は
+すべての不可逆点の下流にある。
 
 ## セットアップ
 
@@ -279,8 +289,8 @@ CLI の一覧は `rein agent --show`)、`rein project add` はダッシュボー
      開かないゲートについてボードが「対応不要」と表示することはない。`--full` で全景を、
      `--no-mark` で既読位置を進めずに閲覧できる
    - `/status` — 同じ内容をチャットに表示する(タスク DAG も併せて)
-   - `rein ui` — ダッシュボードを開く。ライフサイクルがそのままナビゲーションで、5つのゲートが
-     左端の spine に並ぶ。判断を待っているゲートは、画面内で唯一の反転ブロックとして示す。
+   - `rein ui` — ダッシュボードを開く。ライフサイクルがそのままナビゲーションで、このサイクルの
+     ゲートが左端の spine に並ぶ。いま判断できるゲートだけを反転ブロックとして示す。
      **Now** はこのキューと次のコマンドを表示する。ゲートを開くとその読み室(`#gate/<name>`)に
      入る。acceptance では scope → 何が変わりどうレビューされたか → この変更が人に何を要求するか →
      未決着の claim・gap・finding を1件1枚で示す Decision Card(high/critical のカードが未回答の

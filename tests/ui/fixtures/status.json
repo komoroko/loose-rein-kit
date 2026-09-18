@@ -13,11 +13,13 @@
     {
       "name": "mandate",
       "status": "approved",
+      "decidable": false,
       "approval_id": "GA-MANDATE-0001"
     },
     {
       "name": "acceptance",
       "status": "pending",
+      "decidable": true,
       "approval_id": null
     }
   ],

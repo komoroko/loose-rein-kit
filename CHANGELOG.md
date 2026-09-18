@@ -182,11 +182,12 @@ opening a gate, `changes_requested` is one refusing to, and an escalation is one
 written inside a `store.Transaction`, on every host, with or without a dashboard.
 
 `events.stops` counts them, over the live chain and every archive (the figure would otherwise go
-blank at the second cycle, which is when it starts being worth reading). Escalations are distinct
-by `(kind, subjects)` — the identity `open_conditions` already groups by, because a repeated
-escalation is one thing to decide. `gate_revised` is excluded: `/revise` reopens a gate somebody
-has just refused, and that refusal is already counted. So is `decision_declared`, which five call
-sites use for three unrelated things.
+blank at the second cycle, which is when it starts being worth reading). Escalations are counted
+by `open_conditions` over the chain's own task outcomes — the *same* rule every board narrows by,
+so a condition the loop recovered from by itself is not counted as one a human had to act on, and
+a repeated escalation is one thing to decide however often it was recorded. `gate_revised` is
+excluded: `/revise` reopens a gate somebody has just refused, and that refusal is already counted.
+So is `decision_declared`, which five call sites use for three unrelated things.
 
 `rein observe` prints both counts, labelled by what they count, and never one instead of the other:
 they cover different scopes and are not corrections of each other. Neither has a ceiling, and the
@@ -257,6 +258,87 @@ could* — a claim about every future edit. The test asserting it checked two st
 report and stated the invariant in its docstring, so a `read()` added to `approve.py` tomorrow would
 have passed. It now parses `src/rein` and pins the set of modules that read the store, with the gate,
 the build, the roll back and the change request named separately as the four the guarantee is about.
+
+### Nine more, from reading the fourteen above adversarially
+
+A third pass, run the way `adversarial-reviewer.md` says to run one: try to break it, look hardest
+at what did **not** change, and keep only what survives an attempt to refute it. Nine did. Most are
+defects in the fourteen above; the rest is older drift they walked past — a base-side check that
+never learned what `doctor` learned, and printed commands naming gates deleted two releases ago.
+
+**A gate a human may approve and may not refuse is not a decision.** A change request's id was
+built out of the gate's name — `CR-{gate.upper()}-{hex}` — so the id's own schema pattern,
+`^CR-[A-Z]+-[0-9A-F]+$`, was a second and weaker copy of the gate vocabulary. It did not follow
+when a cycle could grow a gate named `T-001`: every request against a crossing died on that
+pattern, at the CLI and as a 400 in the pane, which left the irreversible point as the one gate a
+human could open and could not decline. The id is an identity now (`CR-1A2B3C4D`) and says nothing
+about the gate; which gate a request stands against is the record's `gate` field, one line down.
+
+**The surfaces that point a person at a decision were still counting two gates.** `is_awaiting` was
+fixed in the review pane and nowhere else. `status_api` probed "the gate this stage ends with", and
+a stage is derived from the two ends — so with a crossing pending, the board recommended `/build`,
+reported `waiting_on_human: false`, and offered `rein approve acceptance --check` as the action for
+a row whose blocker was the crossing. The gate a person could actually open appeared on no surface
+that points anywhere, and the notification channel never fired for it. Decidability is one property
+now, `models.State.decidable_gates`, read by the board, the pane and the spine; the payload carries
+`decidable` per gate, so the page no longer re-derives it as "the first unapproved one" — a position
+in a ladder, which marks the second of two crossings as nobody's to decide.
+
+**The base-side verifier still read the commit-stage guard as a substring.** `doctor` learned that
+bare `rein guard` is a hook invocation that checks nothing; `policy_check` did not. Its enforcement
+marker was the string `"rein guard"`, so a head rewriting `entry: rein guard --check-diff` into
+`entry: rein guard` kept the marker and passed the check whose whole job is refusing that move. The
+markers are predicates now, and the commit-stage one is `gate_guard`'s own reader — the same
+function `rein doctor` reports from, because two readers of one registration is how the refusal
+becomes worthless.
+
+**A registration is a config, not a line of text.** That reader was a regex over one line, and
+pre-commit splits an invocation across `entry` and `args` exactly as its own documentation does. A
+repository with `entry: rein guard` + `args: [--check-diff]` — a working checkpoint — was told it
+"reads no payload, warns and allows". It is parsed as YAML now, and answers four ways: registered,
+neutered, absent, or unreadable, which is not the same as absent.
+
+**`docs/speculative-work.md` was archived by nothing.** The new log is per-cycle — its rows are
+finalized in that cycle's retrospective — and it was in neither `CYCLE_DOCS` nor anything else, so
+`cycle-close` neither archived nor reset it and the next cycle opened holding the last one's rows.
+It is a cycle doc now, and `PERSISTENT_DOCS` names the other answer, so a scaffold document in
+neither list fails template-lint rather than quietly persisting.
+
+**A stop the loop recovered from by itself was counted as a human stop.** `events.stops` read raw
+`ATTENTION_EVENTS` with no retirement rule, so a task that failed twice and passed on the third
+attempt added one to a figure whose label is "the work stopped and a human had to act" — while
+every surface that asks what awaits a person correctly said nothing did. It counts
+`open_conditions` now, over outcomes read from the chain itself (`events.task_outcomes`), so the
+live board and an archived cycle narrow by the same rule.
+
+**The spelling check was standing in for the membership check.** `models.gate_name_ok` answers
+whether a string could name a gate; whether *this* cycle has it is a different question, and
+`approve` was the only caller asking it. `rein revise --to T-404` planned an empty roll back — which
+reads as "already rolled back" — and then wrote a `gate_revised` event naming a gate that never
+existed; `rein changes add` had the same hole. Both were impossible before the vocabulary opened up.
+`State.gate_absence_reason` is that question, with one wording, and every caller holding a state
+now asks it.
+
+**The stop at an irreversible point was recorded twice.** The loop escalated a `knowledge_gap`
+beside the pending gate. The gate is already the record that the work stopped and a human must act,
+and the chain records how it ends — so the escalation was a second record of one fact, one that no
+approval closes, that made `rein next` recommend `rein events --summary` instead of the approval,
+and that `events.stops` counted again when `gate_approved` landed. It was also re-filed on every
+batch that went past it. Reaching acceptance prints its handover and files nothing
+(`_present_gate4`); reaching a crossing now does the same, once, after the rest of the batch has
+run.
+
+**And the documents still described a two-gate lifecycle.** `AGENTS.md` — the always-loaded one —
+said "the two gates say how often the work stops", listed `--to mandate` and `--to acceptance` as
+the roll-back targets, and never mentioned a crossing at all; both READMEs said the same; the new
+speculative-work log told a reader the pending gate was `mandate` or `acceptance`. Worse, three
+printed lines still named gates deleted two releases ago: `rein approve build` in the acceptance
+handover and after freezing a review, and `rein approve requirements` / `rein approve design` in
+the scaffold a new repository is seeded from — instructions that exit 2. The prose is corrected,
+the printed ones are spelled from `models.GATE_LAST` rather than typed, and four canaries close the
+classes: a documented `rein approve|revise|changes` gate argument must be one the vocabulary has,
+`AGENTS.md` must spell the `T-NNN` form, every scaffold document must be classified, and every
+`retrospective §N` reference must resolve to a section that exists.
 
 ## [0.6.1] - 2026-09-17
 

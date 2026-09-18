@@ -128,6 +128,13 @@ def next_action(
     plan_missing: bool,
     unsandboxed_profiles: list[str],
     unsandboxed_build_targets: list[str] | None = None,
+    #: The gate a human can open right now (`models.State.decidable_gates`), or None when none is.
+    #: **Not the gate the stage ends with.** Those are the same thing only in a cycle that froze
+    #: nothing irreversible; where one was frozen, the stage's gate is acceptance and the gate
+    #: actually waiting on a person is the crossing — so a table reading the stage recommended the
+    #: build, said nothing was waiting on anybody, and offered `rein approve acceptance` as the
+    #: action for a row whose blocker was the crossing.
+    decidable_gate: str | None = None,
     gate_ready: bool | None = None,
     open_change_requests: int = 0,
     repairable_findings: int = 0,
@@ -269,13 +276,16 @@ def next_action(
         )
     # A human already read this and said "not yet". The reason has to name what they asked for —
     # otherwise the next session re-derives the deliverable from scratch and answers nothing.
+    # Both rows below are about the gate a person can open, never the one the stage ends with, and
+    # both are only reachable when such a gate exists: `gate_ready` was probed for it, and open
+    # change requests are counted against it.
     if open_change_requests:
         return Recommendation(
             command=_stage_command(stage, plan_missing),
             kind="reconcile",
-            reason=f"{open_change_requests} change request(s) you raised are still open, and the {gate} gate "
+            reason=f"{open_change_requests} change request(s) you raised are still open, and the {decidable_gate} gate "
             "stays shut until they are. Read them, fix only what each one anchors, and mark each addressed.",
-            also=(f"rein changes list --gate {gate}",),
+            also=(f"rein changes list --gate {decidable_gate}",),
         )
     # Nothing mechanical is left: what remains is a person deciding. This is the only row producing
     # `approve_gate`, and so the only thing that ever turns `waiting_on_human` on — the state the
@@ -283,12 +293,12 @@ def next_action(
     # queue's `gate_ready` row does, so the board and the recommendation cannot disagree.
     if gate_ready:
         return Recommendation(
-            command=f"rein approve {gate}",
+            command=f"rein approve {decidable_gate}",
             kind="approve_gate",
-            reason=f"The {gate} gate has no mechanical blocker left — it is waiting on your decision. "
+            reason=f"The {decidable_gate} gate has no mechanical blocker left — it is waiting on your decision. "
             "Read it in `rein ui` and approve there, or run this yourself at a terminal; an agent never runs "
             "it for you.",
-            also=("rein ui", f"rein approve {gate} --check"),
+            also=("rein ui", f"rein approve {decidable_gate} --check"),
         )
     # The machine review found blocking things the loop can repair on its own — a task's declared
     # scope owns the code they anchored to, and the repair changes no claim and no plan. `rein
@@ -560,7 +570,7 @@ _AGENT_KINDS = frozenset({"run_phase"})
 
 def pending_decision(
     recommendation: Recommendation,
-    awaiting_gate: str | None,
+    decidable_gate: str | None,
     *,
     pending: Sequence[Mapping[str, str]] = (),
 ) -> dict[str, object]:
@@ -580,7 +590,7 @@ def pending_decision(
     single stuck task from a repository that needs an afternoon.
     """
     waiting = recommendation.kind not in _AGENT_KINDS
-    subject = awaiting_gate if recommendation.kind == "approve_gate" else recommendation.kind
+    subject = decidable_gate if recommendation.kind == "approve_gate" else recommendation.kind
     return {
         "id": f"{recommendation.kind}:{subject}:{recommendation.command}" if waiting else "",
         "waiting_on_human": waiting,
@@ -930,10 +940,14 @@ def collect_status(
     unsandboxed_profiles = config.unsandboxed_code_profiles() if config else []
     unsandboxed_build_targets = config.unsandboxed_build_targets() if config else []
 
-    # Probe readiness for the gate this stage ends with — not merely the first unapproved one. At
-    # `done` no gate is in play, and in an uninitialized template every gate is blocked by the
-    # initialization itself, which the recommendation already says.
-    probe_gate = STAGE_GATE.get(stage)
+    # Probe the gate a human can open right now (`models.State.decidable_gates`), not the one the
+    # stage ends with: those differ exactly when the cycle froze an irreversible point, and the
+    # crossing is then the gate waiting on a person while the stage's gate is acceptance. Neither
+    # is "the first unapproved one" — crossings carry no order, so a position in the list is not an
+    # answer. At `done` nothing is decidable, and in an uninitialized template every gate is
+    # blocked by the initialization itself, which the recommendation already says.
+    decidable = state.decidable_gates if state else ()
+    probe_gate = decidable[0] if decidable else None
     gate_blockers: list[str] | None = None
     if probe_gate is not None and state is not None and not uninitialized:
         try:
@@ -952,6 +966,7 @@ def collect_status(
         plan_missing=plan is None,
         unsandboxed_profiles=unsandboxed_profiles,
         unsandboxed_build_targets=unsandboxed_build_targets,
+        decidable_gate=probe_gate,
         # None when readiness was not probed — the table must not read that as "blocked".
         gate_ready=None if gate_blockers is None else not gate_blockers,
         open_change_requests=len(state.change_requests_for(probe_gate, "open")) if state and probe_gate else 0,
@@ -1025,6 +1040,11 @@ def collect_status(
             {
                 "name": g,
                 "status": gates[g],
+                # Whether this one is open for a decision now, decided here and not in the client.
+                # The page used to take "the first not-approved gate" for it, which is a position
+                # in a ladder — with two crossings pending it told the person holding the second
+                # that it was not theirs.
+                "decidable": g in decidable,
                 "approval_id": (state.gate_receipt(g) or {}).get("approval_id") if state else None,
             }
             for g in gates
@@ -1052,11 +1072,7 @@ def collect_status(
             for e, seen in attention
         ],
         "next": asdict(recommendation),
-        "decision": pending_decision(
-            recommendation,
-            next((g for g in gates if gates[g] != "approved"), None),
-            pending=pending,
-        ),
+        "decision": pending_decision(recommendation, probe_gate, pending=pending),
         "pending": pending,
         # False means gate readiness was not probed — see pending_queue's tri-state note.
         "pending_deep": gate_blockers is not None,

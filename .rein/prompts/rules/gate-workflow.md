@@ -177,7 +177,21 @@ while the repo IS the template. Detail: the `guard` block's comments in `config.
 
 Declining is a first-class answer, not a dead end: answering `n`, or using the dashboard's
 "request changes", records a change request against the gate (`rein changes`) that **holds the
-gate shut until it is answered** and survives the session.
+gate shut until it is answered** and survives the session. It is available at every gate a human
+can open, the irreversible points included — a gate you may approve and may not refuse is not a
+decision.
+
+## The gates a cycle has
+
+`mandate` and `acceptance` are the two ends, and a cycle has one more gate — named `T-NNN` after
+the task — for every task whose `operator_surface` declares `reversible: false`. They are added
+when the mandate is approved, out of the plan that approval freezes, and `rein build` stops in
+front of each such task rather than running it and finding out at acceptance that it has already
+happened. The count therefore comes from the change, not from this tool; there is no ceiling on
+it. Each crossing stands on the mandate alone and acceptance stands on all of them, and crossings
+carry **no order against each other** — ordering them would be authorizing the execution order the
+loop owns. `rein approve T-NNN`, `rein revise --to T-NNN` and `rein changes add T-NNN` all work
+exactly as they do for the two ends.
 
 ## Repo map
 

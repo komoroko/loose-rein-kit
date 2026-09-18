@@ -17,7 +17,8 @@ that decision is a human's: `rein next` / `/status` names the rows still blank, 
 |---|---|---|---|
 | | | | |
 
-- **Phase** — the gate that was pending: `mandate` or `acceptance`.
+- **Phase** — the gate that was pending: `mandate`, `acceptance`, or the `T-NNN` of an
+  irreversible point this cycle is stopped in front of.
 - **Premised on** — what the work would be wasted by. If nothing, say "nothing"; that is what
   makes it outcome-independent, and a row that cannot fill this in was not speculative work, it
   was the deliverable.

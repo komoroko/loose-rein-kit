@@ -6,7 +6,6 @@ import { STATUS, baseRoutes, boot } from "./_harness.mjs";
 
 const REVIEW = {
   gate: "acceptance",
-  index: 4,
   status: "pending",
   is_awaiting: true,
   awaiting: "acceptance",
@@ -35,6 +34,27 @@ test("the spine marks exactly one gate as the one waiting on you", async () => {
   assert.match(spine, /href="#gate\/acceptance"/);
   assert.match(spine, /station approved[^>]*href="#gate\/mandate"/);
   assert.equal((spine.match(/class="station /g) || []).length, STATUS.gates.length);
+});
+
+test("two irreversible points are both open, and the spine says so", async () => {
+  // Marked from the server's `decidable`, per gate. Reading "the first not-approved one" off the
+  // list is a position in a ladder, and crossings carry no order — so the second one rendered as
+  // "not reached yet" while it was every bit as open as the first.
+  const app = await boot({ hash: "#now", routes: baseRoutes() });
+  await app.open();
+  await app.push("status", {
+    ...STATUS,
+    gates: [
+      { name: "mandate", status: "approved", decidable: false, approval_id: "GA-MANDATE-0001" },
+      { name: "T-001", status: "pending", decidable: true, approval_id: null },
+      { name: "T-004", status: "pending", decidable: true, approval_id: null },
+      { name: "acceptance", status: "pending", decidable: false, approval_id: null },
+    ],
+  });
+  const spine = app.html("stepper");
+
+  assert.equal((spine.match(/station awaiting/g) || []).length, 2);
+  assert.match(spine, /href="#gate\/T-004"/);
 });
 
 test("Now names the gate it is clearing the way for", async () => {

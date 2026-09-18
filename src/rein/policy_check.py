@@ -27,11 +27,11 @@ from __future__ import annotations
 import argparse
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from rein import event_chain, models, strict_yaml
+from rein import event_chain, gate_guard, models, strict_yaml
 from rein import repo as repo_mod
 
 logger = logging.getLogger(__name__)
@@ -59,9 +59,19 @@ _BANNED_KEYS: frozenset[str] = frozenset(
 
 #: Files that carry an enforcement boundary rather than product code. A head that removes what a
 #: base tree had is removing a check on itself, which is the one move this file exists to refuse.
-_ENFORCEMENT_MARKERS: tuple[tuple[str, str, str], ...] = (
-    (".pre-commit-config.yaml", "rein guard", "the commit-stage gate guard"),
-    (".claude/settings.json", "rein guard", "the edit-stage gate guard hook"),
+#:
+#: Each entry says *what the file has to still do*, not what string it has to still contain. The
+#: commit-stage row was `"rein guard"`, a substring — so a head that rewrote
+#: `entry: rein guard --check-diff` into `entry: rein guard` kept the marker and passed, while
+#: what it left behind is a hook that runs on every commit, reads no payload and allows. The
+#: predicate is `gate_guard`'s own, the same one `rein doctor` reports from.
+_ENFORCEMENT_MARKERS: tuple[tuple[str, Callable[[str], bool], str], ...] = (
+    (
+        gate_guard.PRE_COMMIT_PATH,
+        lambda text: gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_REGISTERED,
+        "the commit-stage gate guard (`rein guard --check-diff`)",
+    ),
+    (".claude/settings.json", lambda text: "rein guard" in text, "the edit-stage gate guard hook"),
 )
 
 #: What a workflow invoking the base-side check has to keep. `pull_request` because that is the
@@ -122,14 +132,14 @@ def _enforcement_removals(repo: repo_mod.Repo, base_sha: str, head_sha: str) -> 
     the move a base-side check exists to catch.
     """
     violations: list[str] = []
-    for path, marker, what in _ENFORCEMENT_MARKERS:
+    for path, holds, what in _ENFORCEMENT_MARKERS:
         base_text = _show(repo, base_sha, path)
-        if base_text is None or marker not in base_text:
+        if base_text is None or not holds(base_text):
             continue
         head_text = _show(repo, head_sha, path)
         if head_text is None:
             violations.append(f"the head tree deletes {path}, which carried {what}")
-        elif marker not in head_text:
+        elif not holds(head_text):
             violations.append(f"the head tree removes {what} from {path}")
     return violations
 

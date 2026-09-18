@@ -1,7 +1,7 @@
 # Requirements
 
 > `/req` generates/updates this, sounding out from `docs/00-product-brief.md`.
-> Finalized once a human approves at **gate ①**. Changes after approval need re-approval.
+> Finalized once a human approves at **the mandate gate**. Changes after approval need re-approval.
 
 ## Summary
 <!-- The value this product provides, in 3 lines or fewer -->
@@ -14,7 +14,7 @@ Write acceptance criteria as **measurable, technology-agnostic** checks (a numbe
 <!-- While drafting, mark anything undecided inline as a `[NEEDS CLARIFICATION: <what>]` marker at the
      exact spot it affects, instead of picking a plausible default. There is no cap on how many:
      every marker is asked of the human or demoted to Open questions with its assumption written
-     out, and `rein approve requirements` refuses while any is left standing in the prose. -->
+     out, and `rein approve mandate` refuses while any is left standing in the prose. -->
 
 ### R-1: <title>
 - **Overview**:
@@ -58,13 +58,13 @@ dedicated design section or task is fine (the trace only WARNs) — but every NF
 - Q: <question> → A: <the human's answer> (YYYY-MM-DD)
 
 ## Open questions
-<!-- Points to confirm with the human. Resolve before gate ①. -->
+<!-- Points to confirm with the human. Resolve before the mandate gate. -->
 -
 
 ## Adversarial review
-> Findings from the independent `adversarial-reviewer` round before gate ① (procedure: req.md step 6),
+> Findings from the independent `adversarial-reviewer` round before the mandate gate (procedure: req.md step 6),
 > with the lead's disposition per finding. Blockers must be `fixed` or `disputed` (with the reason)
-> before the gate; the human sees this table — and settles any unresolved dispute — at gate ①.
+> before the gate; the human sees this table — and settles any unresolved dispute — at the mandate gate.
 
 | ID | Severity (blocker/major/minor) | Finding (with counterexample) | Disposition (revise_* / request_expert / run_experiment / reduce_scope / dispute_finding: why) |
 |----|--------------------------------|-------------------------------|-----------------------------------------------------|
@@ -72,7 +72,7 @@ dedicated design section or task is fine (the trace only WARNs) — but every NF
 
 
 ## Self-assessment (assumptions, confidence)
-> Communicated to the human at gate ① as `.rein/prompts/rules/gate-workflow.md` "Gate self-assessment". Leave it here, not just spoken.
+> Communicated to the human at the mandate gate as `.rein/prompts/rules/gate-workflow.md` "Gate self-assessment". Leave it here, not just spoken.
 - **Assumptions made**: <assumptions taken as given without confirming; points where, if wrong, the requirements break>
 - **Confidence**: high / medium / low (may be split per requirement/area; **attach a reason for low spots**)
 - **Open questions / points for the human to decide**:

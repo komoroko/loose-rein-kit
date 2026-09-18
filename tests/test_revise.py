@@ -320,3 +320,16 @@ def test_a_roll_back_that_crossed_nothing_says_nothing_about_it(tmp_path: Path) 
     repo = repo_at(tmp_path, state=make_state(gates=ALL_APPROVED))
 
     assert "cannot be taken back" not in revise.render(revise.plan_revision(repo, "mandate", []))
+
+
+def test_a_target_gate_this_cycle_does_not_have_is_refused(tmp_path: Path) -> None:
+    """`T-404` spells a gate correctly and this cycle has no such gate.
+
+    Accepted, it reset nothing, rendered as an empty plan — which reads as "already rolled
+    back" — and then wrote a `gate_revised` event naming a gate that never existed. `rein
+    approve` refused the same input all along; the spelling check is not the membership check.
+    """
+    repo = _crossed(tmp_path)
+
+    with pytest.raises(revise.ReviseError, match="this cycle has no gate 'T-404'"):
+        revise.plan_revision(repo, "T-404", [])

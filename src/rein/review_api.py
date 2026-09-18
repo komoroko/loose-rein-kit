@@ -3,8 +3,8 @@
 status_api.py answers "where does the lifecycle stand"; this module answers the companion question
 "what do I read to approve the gate in front of me". `collect_review(root, gate)` returns one JSON
 object per gate: the phase deliverables rendered through mdlite (escape-first — see its threat
-model), each deliverable's Self-assessment section split out so the pane can pin it, and for gate
-④ the work-branch diff plus the generated review's freshness.
+model), each deliverable's Self-assessment section split out so the pane can pin it, and for
+acceptance the work-branch diff plus the generated review's freshness.
 
 Reach is fixed server-side, the same way ui.action_argv fixes command lines: the client sends only
 a gate name; which files are read comes from the `_GATE_SPEC` constant plus a template-excluding
@@ -23,7 +23,6 @@ from __future__ import annotations
 import html
 import re
 import subprocess
-from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -308,14 +307,6 @@ def _gate_statuses(root: Path) -> dict[str, str]:
     return {gate: state.gate_status(gate) for gate in state.gate_ids}
 
 
-def _decidable(root: Path, gate: str, gates: Mapping[str, str]) -> bool:
-    """Is `gate` open for a decision right now — not approved, and nothing it rests on pending?"""
-    if gates.get(gate, "pending") == "approved":
-        return False
-    state = _raw_state(root)
-    return state is not None and state.pending_upstream(gate) is None
-
-
 def collect_review(root: str | Path, gate: str) -> dict[str, object]:
     """Everything the review pane shows for `gate`. Raises ReviewError only for an unknown gate."""
     root = Path(root)
@@ -324,7 +315,12 @@ def collect_review(root: str | Path, gate: str) -> dict[str, object]:
         raise ReviewError(f"unknown gate '{gate}' ({models.gate_names()})")
 
     gates = _gate_statuses(root)
-    awaiting = next((g for g in gates if gates.get(g) != "approved"), None)
+    state = _raw_state(root)
+    decidable = state.decidable_gates if state is not None else ()
+    # What to read next when this pane is not it. The first *decidable* gate, not the first
+    # unapproved one: with a crossing pending, the unapproved list starts at a gate the mandate
+    # may not even have reached.
+    awaiting = decidable[0] if decidable else None
 
     result: dict[str, object] = {
         "gate": gate,
@@ -333,7 +329,7 @@ def collect_review(root: str | Path, gate: str) -> dict[str, object]:
         # Decidable now, which is not the same as "first in the list". Two crossings carry no order
         # against each other, so a pane that read `gate == awaiting` would tell a human the second
         # one is not theirs to decide — when the only thing it rests on, the mandate, is open.
-        "is_awaiting": _decidable(root, gate, gates),
+        "is_awaiting": gate in decidable,
         "deliverables": _expand(root, spec["main"]),
         "context": _expand(root, spec["context"]),
         "diff": None,

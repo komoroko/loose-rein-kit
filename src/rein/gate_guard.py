@@ -758,6 +758,57 @@ def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
     return patch_targets(command) if isinstance(command, str) else []
 
 
+#: Where a repository registers the commit-stage check, when it registers one. `rein install` does
+#: not write this file and `src/rein/data/` does not ship one, so whether the checkpoint holds is a
+#: fact about the repository — looked at, never assumed.
+PRE_COMMIT_PATH = ".pre-commit-config.yaml"
+
+#: What :func:`commit_stage_registration` can answer. `NEUTERED` is the one worth naming: `rein
+#: guard` **alone** is the *hook* invocation — it reads a host's JSON payload on stdin, so under
+#: pre-commit it is handed none, warns, and allows. A hook that runs on every commit and checks
+#: nothing is not the commit-stage check, and reading the bare name as one is what let the claim
+#: "the commit-stage check still applies" be printed over it.
+COMMIT_STAGE_REGISTERED = "registered"
+COMMIT_STAGE_NEUTERED = "neutered"
+COMMIT_STAGE_ABSENT = "absent"
+COMMIT_STAGE_UNREADABLE = "unreadable"
+
+
+def commit_stage_registration(text: str) -> str:
+    """Which of the four a `.pre-commit-config.yaml` text is, read **as a config and not as text**.
+
+    A substring search cannot answer this. pre-commit splits an invocation across two keys —
+    `entry: rein guard` with `args: [--check-diff]` is the idiom the tool's own documentation
+    uses — so a regex over one line reports a working registration as a neutered one, and a
+    commented-out block as a working one. One reader, because `doctor.check_hook` tells the
+    repository's owner what it has and `policy_check` refuses a head that takes it away, and those
+    two disagreeing is the drift that makes the refusal worthless.
+    """
+    from rein import strict_yaml  # lazy: keep `import gate_guard` cheap on the hook path
+
+    if not text.strip():
+        return COMMIT_STAGE_ABSENT
+    try:
+        document = strict_yaml.load_mapping(text, what=PRE_COMMIT_PATH)
+    except strict_yaml.StrictParseError:
+        return COMMIT_STAGE_UNREADABLE
+    verdict = COMMIT_STAGE_ABSENT
+    repos = document.get("repos")
+    for repo_entry in repos if isinstance(repos, list) else []:
+        hooks = repo_entry.get("hooks") if isinstance(repo_entry, dict) else ()
+        for hook in hooks if isinstance(hooks, list) else ():
+            if not isinstance(hook, dict) or "rein guard" not in str(hook.get("entry", "")):
+                continue
+            args = hook.get("args")
+            words = str(hook["entry"]).split()
+            if isinstance(args, list):
+                words += [str(arg) for arg in args]
+            if "--check-diff" in words:
+                return COMMIT_STAGE_REGISTERED
+            verdict = COMMIT_STAGE_NEUTERED
+    return verdict
+
+
 #: The guard has exactly two invocations, and a human asking about them is a third thing entirely.
 USAGE = """usage: rein guard [--check-diff]
 
