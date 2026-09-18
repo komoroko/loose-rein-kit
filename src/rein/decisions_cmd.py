@@ -32,10 +32,9 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 
-from rein import common, data, event_chain, mdlite, strict_yaml
+from rein import common, event_chain, mdlite, strict_yaml
 from rein import events as events_mod
 from rein import repo as repo_mod
 
@@ -46,10 +45,26 @@ logger = logging.getLogger(__name__)
 #: is kept whole rather than dropped for not matching a shape nobody validates.
 _BULLET_RE = re.compile(r"^\s*[-*]\s+(?P<text>.+?)\s*$")
 
-#: The scaffold document these bullets are read out of. Held by name because the placeholders are
-#: read from it rather than guessed at — see :func:`_template_bullets`.
+#: The scaffold document these bullets are read out of.
 _REQUIREMENTS_DOC = "10-requirements.md"
-_SCAFFOLD_REQUIREMENTS = f"scaffold/docs/{_REQUIREMENTS_DOC}"
+
+#: An unfilled slot in the scaffold's own notation: `<question>`, `<title>`, `<the human's answer>`.
+#: A bullet still carrying one was never filled in, so it is the template speaking and not a record.
+#:
+#: **Intrinsic, because the reading is not.** This was a set difference against the bullets the
+#: *running release* ships, which is the one thing a cross-cycle reader must not do: an archived
+#: `10-requirements.md` was written by whatever release closed that cycle, so a scaffold whose
+#: wording has since moved leaves that cycle's placeholders unrecognised and prints them back as
+#: somebody's judgement — the same failure as validating an archive against today's schema, which
+#: the module docstring refuses two paragraphs up. What a slot looks like travels *in the document*,
+#: so it still answers for an archive no payload describes any more.
+#:
+#: Tight on purpose. The opening `<` must be followed by a letter and closed on the same bullet, so
+#: `- must handle <= 3 retries` and `- a < b and c > d` are not slots; a filled-in clarification
+#: carries no angle brackets at all. The scaffold no longer ships an example bullet in either
+#: section either (the shape lives in the section's HTML comment), so for anything written from
+#: this release on there is nothing here to filter.
+_SLOT_RE = re.compile(r"<[A-Za-z][^<>]*>")
 
 _ADR_FIELD_RE = re.compile(r"^\s*[-*]\s+\*\*(?P<field>Status|Date)\*\*\s*:\s*(?P<value>.+?)\s*$", re.MULTILINE)
 _ADR_TITLE_RE = re.compile(r"^#\s+(?P<title>.+?)\s*$", re.MULTILINE)
@@ -86,42 +101,22 @@ def _text(path: Path) -> str | None:
         return None
 
 
-@lru_cache(maxsize=1)
-def _template_bullets() -> frozenset[str]:
-    """Every bullet the shipped `10-requirements.md` already contains.
+def _bullets(body: str) -> list[str]:
+    """The bullets of one section that are records — comments stripped, unfilled slots dropped.
 
-    **The template's own text is not a record of anything.** A repository that has clarified
-    nothing still carries `- Q: <question> → A: <the human's answer> (YYYY-MM-DD)`, and printing
-    that back as somebody's judgement is worse than printing nothing. Which lines are placeholders
-    is read from the scaffold rather than matched against a guessed shape: a pattern for "looks
-    like a slot" has to decide whether `- must handle <= 3 retries` is one, and it will be wrong
-    in whichever direction it is written. `template_lint` holds documents against the same
-    payload for the same reason.
+    **The template's own text is not a record of anything.** A document nobody has clarified
+    anything in still carries the section's shape, and printing that back as somebody's judgement
+    is worse than printing nothing.
     """
-    try:
-        shipped = data.read_text(_SCAFFOLD_REQUIREMENTS)
-    except (OSError, FileNotFoundError) as exc:
-        # Not fatal, and not silent: the history is still readable, it just stops filtering. A
-        # missing payload means a broken install, which `rein doctor` is the place to hear about.
-        logger.warning(f"the packaged {_SCAFFOLD_REQUIREMENTS} could not be read ({exc}); placeholders are shown")
-        return frozenset()
-    return frozenset(_raw_bullets(shipped))
-
-
-def _raw_bullets(body: str) -> list[str]:
-    """Every bullet of `body`, comments stripped, in order."""
     found: list[str] = []
     for line in mdlite.strip_comments(body).splitlines():
         match = _BULLET_RE.match(line)
-        if match is not None and (text := match.group("text").strip()):
+        if match is None:
+            continue
+        text = match.group("text").strip()
+        if text and not _SLOT_RE.search(text):
             found.append(text)
     return found
-
-
-def _bullets(body: str) -> list[str]:
-    """The bullets of one section, minus the ones the scaffold already shipped."""
-    shipped = _template_bullets()
-    return [text for text in _raw_bullets(body) if text not in shipped]
 
 
 def _plan_decisions(rein_dir: Path) -> tuple[list[Decision], str | None]:

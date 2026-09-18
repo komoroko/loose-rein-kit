@@ -54,8 +54,10 @@ dedicated design section or task is fine (the trace only WARNs) — but every NF
 -
 
 ## Clarifications
-<!-- Audit trail of how ambiguities were closed: one bullet per resolved [NEEDS CLARIFICATION] marker / question. -->
-- Q: <question> → A: <the human's answer> (YYYY-MM-DD)
+<!-- Audit trail of how ambiguities were closed: one bullet per resolved [NEEDS CLARIFICATION] marker / question.
+     One bullet each, shaped: `- Q: <question> → A: <the human's answer> (YYYY-MM-DD)`. The shape lives in
+     this comment rather than as a bullet below it, because a bullet here is a record: `rein decisions`
+     reads this section across every cycle, and an unfilled example is a judgement nobody made. -->
 
 ## Open questions
 <!-- Points to confirm with the human. Resolve before the mandate. -->

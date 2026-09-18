@@ -931,6 +931,34 @@ def test_a_config_that_does_not_parse_is_neither_registered_nor_absent() -> None
     assert gate_guard.commit_stage_registration("") == gate_guard.COMMIT_STAGE_ABSENT
 
 
+def test_the_verb_may_be_in_args_too_because_pre_commit_imposes_no_split() -> None:
+    """Whether this hook *is* the guard is the same question as what it runs, so it is asked of
+    the whole word list. Selecting candidates on `entry` alone was a substring test surviving
+    inside the fix for substring tests: it reads this as no registration at all."""
+    text = (
+        "repos:\n  - repo: local\n    hooks:\n      - id: g\n        entry: rein\n        args: [guard, --check-diff]\n"
+    )
+
+    assert gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_REGISTERED
+
+
+def test_a_hook_whose_name_merely_starts_with_the_verb_is_not_the_guard() -> None:
+    text = "repos:\n  - repo: local\n    hooks:\n      - id: g\n        entry: rein guardian --check-diff\n"
+
+    assert gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_ABSENT
+
+
+def test_a_neutered_hook_does_not_hide_a_real_one_further_down() -> None:
+    """The verdict is the best registration in the file, not the last one read."""
+    text = (
+        "repos:\n  - repo: local\n    hooks:\n"
+        "      - id: a\n        entry: rein guard\n"
+        "      - id: b\n        entry: rein guard --check-diff\n"
+    )
+
+    assert gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_REGISTERED
+
+
 def test_a_commented_out_registration_is_not_one() -> None:
     """The substring reading called this registered, which is the same error in the other
     direction: a PASS over a checkpoint that does not run."""

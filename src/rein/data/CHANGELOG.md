@@ -4,6 +4,132 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.8.1] - 2026-09-19
+
+**Six corrections from a third adversarial pass over 0.8.0, and the upgrade message 0.8.0 owed a
+repository with a cycle already open.** The method is the one that found the fourteen, turned on
+them: take each fix's claim, look for the input that breaks it, and look hardest at what the fix did
+*not* change. Six survived, and the shape repeated — **four of them are a fix that reached its own
+subject and stopped at the thing standing beside it.** Nothing here changes what a gate denies or
+what a lens does.
+
+The one entry that is not a correction of a correction is the upgrade path.
+`operator_surface.reversible` became required in 0.8.0 with no default, so an in-flight repository's
+frozen `plan.yaml` fails validation the moment it upgrades — and the message it got named no
+upgrade and offered a rollback that cannot reach what is wrong. There is a message for that now, and
+the other narrowing 0.8.0 shipped, the change-request id pattern, is withdrawn.
+
+**A classification cannot restore what nothing has a copy of.** Adding `speculative-work.md` to
+`cycle.CYCLE_DOCS` made `cycle-close` archive it. Restoring it is a different act, and it read from
+`.rein/scaffold/docs/`, a snapshot taken **once**, at `rein init`, that nothing has ever added to.
+The document is new in 0.8.0, so no repository initialized before it has a copy — and `_restore`
+skips what is absent, silently. Every such repository would have lost the document at its first
+close after upgrading, while five prompts went on telling agents to record in it. Classifying it is
+what made it disappear: unclassified, it was never archived, so it survived by not being touched.
+
+The root of that is a per-repository copy of packaged data. The per-cycle documents are exactly
+what `init` seeds from `src/rein/data/scaffold/docs/`, byte for byte, so the snapshot was a
+duplicate whose only possible future was to go stale. `cycle-close` restores them from the payload
+now — the same source `rein sync` refreshes the prompts, schemas and rules from — so a document
+follows the release instead of freezing at whatever version a repository was initialized with.
+`snapshot_scaffold` is `snapshot_ssot` and keeps only `plan.yaml` and `review.yaml`, which are
+*not* the payload: `init` fills the plan's cycle id and work branch, so this repository's pristine
+copy is the only one there is. `.rein/scaffold/docs/` is no longer written and no longer read; an
+existing one is inert and can be deleted.
+
+**A gate that stops existing took its change requests with it.** Approving the mandate re-derives
+the cycle's crossing gates from the plan it freezes, which is what lets a re-cut plan drop one. A
+request standing against a dropped gate survived that write pointing at a gate `State.gate_ids` no
+longer lists: it blocked nothing, because readiness only ever asks about a gate the cycle has, and
+it appeared under no `--gate` anybody could type. Recorded, and holding nothing shut — the exact
+state `changes add` refuses to create, reached from the other side one release after that refusal
+was written. The mandate now answers for two sets of requests: an **open** one against a gate this
+cut would delete blocks the approval, naming the request and both ways out, and an **addressed**
+one is closed by the approval that removes its gate, the same way every other addressed request is
+closed by the approval that covered it. Nothing is dropped, and nothing is dropped silently.
+The deleted set is read off the gate set the same transaction is about to write, rather than from a
+second reading of the plan, so the gates being removed and the gates being kept cannot disagree.
+
+**A substring test survived inside the fix for substring tests.** `commit_stage_registration` was
+added in 0.8.0 to stop reading `.pre-commit-config.yaml` as text — pre-commit splits an invocation
+across `entry` and `args`, so the word list has to be rebuilt from both before anything is asked of
+it. It rebuilt the list, and then selected which hooks to rebuild it for with `"rein guard" in
+entry`: blind to the same split, so `entry: rein` with `args: [guard, --check-diff]` read as no
+registration at all, and `entry: rein guardian` read as one. Both questions are asked of the whole
+word list now, and adjacency is what makes a command a command.
+
+**The cross-cycle reader imposed the present on the past after all.** `rein decisions` refuses to
+validate an archived `plan.yaml` against today's schema, for a stated reason: the history would go
+blank at the next schema change. It then filtered the archives' bullets by set difference against
+the bullets the **running release** ships, which is the same move in the same direction — a
+scaffold whose wording has since moved leaves an older cycle's placeholders unrecognised and prints
+them back as somebody's judgement. What a placeholder looks like is now read out of the bullet
+itself: an unfilled slot in the scaffold's own `<…>` notation, which travels with the document and
+still answers for an archive no payload describes any more. And the scaffold no longer ships an
+example bullet in either section — the shape lives in the section's HTML comment, because a bullet
+in `## Clarifications` *is* a record and an unfilled one is a judgement nobody made.
+
+**Two scopes in one table.** `rein observe --project X` resolved the repository from the working
+directory regardless, so asked for another project's readings from inside a repository it printed
+that repository's chained stop count beside them, under a heading that says "this repo". The
+chained figures are offered only when the repository in hand is the one the summary is about, and
+it says so when it leaves them out.
+
+**A comment that described a defect that never shipped.** `CYCLE_DOCS` explained the classification
+by recounting how `speculative-work.md` had been added unclassified and carried the last cycle's
+rows into the next — in the past tense, about a document 0.8.0 introduced already classified. It
+described an intermediate state of the branch that became 0.8.0 as released behaviour. The comment
+says what is true of any unclassified per-cycle log instead, which is the reason the list exists.
+
+### An upgrade that narrows a schema says so
+
+`operator_surface.reversible` became required in 0.8.0, and required with no default is the right
+answer — an omitted one read as "yes" by silence. What was missing is what an in-flight repository
+is told when it upgrades: its frozen `plan.yaml` predates the requirement, fails validation, and the
+repair on offer was the generic one — `rein revise --to mandate`, then fix it, then re-approve —
+which asks a human to rewind an approved gate to fix something a rollback cannot reach. Nothing
+anywhere said that an upgrade was what happened.
+
+`store.DocumentAheadError` is the mirror of `DocumentBehindError`, raised from the same place: the
+one method all four documents are read through. A newer release widened a schema this tool has the
+narrow version of; an older release wrote a document under a schema this one has since narrowed.
+Both make "the document is invalid" the wrong sentence, and the repair names the two releases so
+`rein upgrade` can print every changelog section between them. The sentence states the skew rather
+than diagnosing the document: an un-upgraded repository can also hold a genuinely damaged file, and
+claiming the upgrade caused *this* failure would attach a cause on no evidence. `doctor` prints it
+already, because it prefers `exc.repair` to its own table.
+
+The other narrowing 0.8.0 shipped is withdrawn. A change request's id went from `CR-{GATE}-{hex}`
+to `CR-{hex}` there, and the schema pattern went with it — which refuses every id written before
+that change, for nothing. The argument that retired the old pattern retires the new one: an id is
+an identity, a schema constraining its *shape* is a grammar to keep in step with, and which gate a
+request stands against is `gate`, one field down. The field declares that it is a non-empty string
+and stops.
+
+### Migration
+
+**Nothing, coming from 0.8.0.** Coming from anything earlier, one document edit, and only for a
+repository with a cycle already open: every `operator_surface` declaration in `.rein/plan.yaml`
+needs a `reversible: true|false` — 0.8.0's requirement, and the answer the architect already gave
+for that requirement and the design already carried into the task. The plan is frozen while the
+mandate stands, so `rein revise --to mandate` first if the edit is refused, then re-approve.
+`rein doctor` names the declaration that is missing it and says which two releases the repository is
+between. Nothing else needs touching: the change-request id pattern that would have refused older
+ids is gone, and `.rein/scaffold/docs/` is simply no longer read — an existing one is inert.
+
+### Format
+
+`lock.FORMAT` stays at `rein-grounded-v5`, and this is the first time the pin in
+`tests/test_lock.py` has been moved without it. `state.schema.json` drops the
+`change_requests[].id` pattern, which is a **widening**: every `state.yaml` 0.8.0 could read, this
+one reads, and every id this release writes is still `CR-{hex}`, so 0.8.0 reads back what 0.8.1
+writes. The failure the pin exists to catch is the other direction — a release that narrows a
+document's shape and leaves the string alone, shipping a repository a schema will refuse while the
+lock reports it fine — and a widening cannot produce it. Bumping would stop every verb in every
+0.8.0 repository and make `rein sync --force` the way back, overwriting materialized files to
+enforce a compatibility that is not at risk. The reason is recorded beside `_FORMAT_PIN` so the
+next digest-only change has to answer the same question rather than inherit this one.
+
 ## [0.8.0] - 2026-09-18
 
 **Fourteen entries, from two ways of reading the same code.** Ten came from reading a claim the

@@ -695,7 +695,7 @@ command: notify-send "rein"
 ## リポジトリ構成
 
 `rein init` が書き込むのは**状態だけ**である。SSOT の4文書(プレースホルダ入り)、docs の
-スキャフォールド、実体化された prompts/schema と初期スナップショット、`.rein/rein.lock`、
+スキャフォールド、実体化された prompts/schema と SSOT の初期スナップショット、`.rein/rein.lock`、
 `AGENTS.md` へのマーカー付きポインタブロックを配置し、作業ブランチを作成して切り替え、
 ゲートガードを有効にする。ビルドファイルや makefile は書き込まず、`rein install` を実行するまで
 エージェント連携ファイルも配置されない。既存ファイルを上書きすることもない。

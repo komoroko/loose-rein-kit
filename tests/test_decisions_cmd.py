@@ -128,9 +128,8 @@ def test_cycles_come_back_oldest_first_with_the_open_one_last(repo: repo_mod.Rep
 
 
 def test_the_templates_own_bullets_are_not_somebody_s_judgement(repo: repo_mod.Repo) -> None:
-    """A repository that has clarified nothing still carries the scaffold's `- Q: <question> → A:
-    …` line. Printing it back as a decision is worse than printing nothing, and which lines are
-    placeholders is read off the packaged scaffold rather than matched against a guessed shape."""
+    """A document nobody has clarified anything in still carries the section's shape. Printing it
+    back as a decision is worse than printing nothing."""
     _archive(repo.root, "2026-08-01-first")
 
     cycles, _ = decisions_cmd.history(repo)
@@ -138,6 +137,42 @@ def test_the_templates_own_bullets_are_not_somebody_s_judgement(repo: repo_mod.R
     summaries = [d.summary for d in cycles[0].decisions]
     assert "Q: where does a cycle end → A: at the acceptance approval (2026-08-01)" in summaries
     assert not any("<question>" in s for s in summaries)
+
+
+def test_a_placeholder_from_a_release_whose_wording_has_moved_is_still_one(repo: repo_mod.Repo) -> None:
+    """The reading is per-cycle and the payload is not. A set difference against the *running*
+    release's scaffold left an older cycle's placeholders unrecognised and printed them back as
+    judgements — the same failure as validating an archive against today's schema."""
+    doc = repo.path("docs") / "10-requirements.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(
+        "## Clarifications\n"
+        "- Q: <the question, as an older release worded its slot> → A: <the answer> (YYYY-MM-DD)\n"
+        "- Q: does the reading survive an upgrade → A: yes (2026-09-02)\n",
+        encoding="utf-8",
+    )
+
+    cycles, _ = decisions_cmd.history(repo)
+
+    summaries = [d.summary for d in cycles[-1].decisions]
+    assert "Q: does the reading survive an upgrade → A: yes (2026-09-02)" in summaries
+    assert not any("older release worded its slot" in s for s in summaries)
+
+
+def test_a_comparison_in_a_clarification_is_not_a_placeholder(repo: repo_mod.Repo) -> None:
+    """The other direction: a slot test wide enough to swallow real prose drops records."""
+    doc = repo.path("docs") / "10-requirements.md"
+    doc.parent.mkdir(parents=True, exist_ok=True)
+    doc.write_text(
+        "## Clarifications\n"
+        "- Q: how many retries → A: must handle <= 3 retries (2026-09-02)\n"
+        "- Q: which way round → A: a < b and c > d (2026-09-02)\n",
+        encoding="utf-8",
+    )
+
+    cycles, _ = decisions_cmd.history(repo)
+
+    assert len([d for d in cycles[-1].decisions if d.where == "clarified"]) == 2
 
 
 def test_bullets_under_another_heading_are_not_decisions(repo: repo_mod.Repo) -> None:

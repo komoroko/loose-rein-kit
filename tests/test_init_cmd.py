@@ -174,10 +174,13 @@ def test_run_init_seeds_a_bare_directory(tmp_path: Path, capsys: pytest.CaptureF
     # The four SSOT documents, each valid against its own schema (seeded from the scaffold).
     for name in ("plan", "state", "review", "config"):
         assert (tmp_path / ".rein" / f"{name}.yaml").exists()
-    # Docs scaffolds + the pristine snapshot cycle-close restores from.
+    # Docs scaffolds, and the pristine SSOT snapshot cycle-close restores the plan from. The
+    # per-cycle documents are NOT copied aside: they are packaged data, and a per-repository copy
+    # of them could only go stale — `cycle-close` restores those from the payload.
     assert (tmp_path / "docs" / "00-product-brief.md").is_file()
     assert (tmp_path / "docs" / "10-requirements.md").is_file()
-    assert (tmp_path / ".rein" / "scaffold" / "docs" / "10-requirements.md").is_file()
+    assert (tmp_path / ".rein" / "scaffold" / "rein" / "plan.yaml").is_file()
+    assert not (tmp_path / ".rein" / "scaffold" / "docs").exists()
     # Materialized artifacts (repo-relative — the wrappers' @-imports depend on these paths).
     assert (tmp_path / ".rein" / "prompts" / "commands" / "req.md").is_file()
     assert (tmp_path / ".rein" / "schema" / "config.schema.json").is_file()

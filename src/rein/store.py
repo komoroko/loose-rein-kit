@@ -105,6 +105,34 @@ class DocumentBehindError(models.DocumentError):
         )
 
 
+class DocumentAheadError(models.DocumentError):
+    """A document this tool cannot parse *because it was written before this release narrowed the
+    schema*.
+
+    The mirror of :class:`DocumentBehindError`, and it exists for the same reason: "invalid" and
+    "written by an older release" are different facts with different repairs, and the generic
+    repair — `rein revise --to mandate`, then fix it, then re-approve — asks a human to rewind an
+    approved gate, which is the most expensive move the workflow has and repairs nothing when what
+    changed is the reader. This release requires `operator_surface.reversible`; an in-flight
+    repository's frozen `plan.yaml` predates the requirement and fails on it, and nothing anywhere
+    said that an upgrade was what happened.
+
+    The sentence states the skew rather than diagnosing this document: an un-upgraded repository
+    can also hold a genuinely damaged file, and claiming the upgrade caused *this* failure would
+    attach a cause on no evidence. The schema errors stay on `.errors`, and the repair names the
+    changelog sections between the two releases, which is where a narrowing is written down.
+    """
+
+    def __init__(self, what: str, errors: Sequence[str], ahead: str) -> None:
+        super().__init__(what, errors)
+        self.ahead = ahead
+        self.repair = (
+            f"{ahead}. Read the sections it prints for a field this release requires, then edit "
+            "the document to carry it — the plan is frozen while the mandate stands, so "
+            "`rein revise --to mandate` first if the edit is refused."
+        )
+
+
 class StoreError(common.ReinError, RuntimeError):
     """The store cannot be used: unusable runtime directory, lock failure, damaged journal."""
 
@@ -441,6 +469,21 @@ class Store:
         except lock_mod.LockError:
             return None
 
+    def ahead(self) -> str | None:
+        """Why this tool is newer than the release that last wrote this repository, or None.
+
+        Only ever used to explain a failure, never to refuse one: being ahead is the normal state
+        of a repository between an upgrade and the next `rein sync`, and it costs nothing until a
+        document written under the older schema is read. The refusal direction is :meth:`behind`,
+        where the risk is writing bytes this process cannot vouch for.
+
+        A lock nobody can read answers None, for the reason :meth:`behind` gives.
+        """
+        try:
+            return lock_mod.ahead_summary(self.repo, rein.__version__)
+        except lock_mod.LockError:
+            return None
+
     def write_refusal(self) -> str | None:
         """Why this tool must not write this repository's SSOT, or None. Two reasons, one posture.
 
@@ -464,14 +507,24 @@ class Store:
         )
 
     def _read(self, reader: Callable[[], _T]) -> _T:
-        """Run one document reader, and say "behind" instead of "invalid" when that is the truth."""
+        """Run one document reader, and name the version skew when there is one.
+
+        Both directions, because both of them make "the document is invalid" the wrong sentence and
+        `rein revise --to mandate` the wrong repair. A newer release widened a schema and this tool
+        has the narrow one; an older release wrote a document and this one narrowed the schema
+        under it. Asked here, at the single place all four documents are read, so no caller has to
+        know to ask — the answer arrives with the failure.
+        """
         try:
             return reader()
         except models.DocumentError as exc:
             behind = self.behind()
-            if behind is None:
-                raise
-            raise DocumentBehindError(exc.what, exc.errors, behind) from None
+            if behind is not None:
+                raise DocumentBehindError(exc.what, exc.errors, behind) from None
+            ahead = self.ahead()
+            if ahead is not None:
+                raise DocumentAheadError(exc.what, exc.errors, ahead) from None
+            raise
 
     def read_plan(self) -> models.Plan | None:
         return self._read(self._plan)

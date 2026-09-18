@@ -151,11 +151,12 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
         try:
             value = reader()
         except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
-            # `exc.repair` when the raiser knew better than this table does. It does in exactly
-            # one case: a repository written by a newer rein, where "invalid document" is a fact
-            # about the reader — that release widened a schema, this tool has the narrow one, and
-            # the key it rejects is one the repo is entitled to carry. Saying `rein revise --to
-            # tasks` there sends a human to rewind an approved gate to fix nothing.
+            # `exc.repair` when the raiser knew better than this table does. It does in the two
+            # cases where "invalid document" is a fact about the *reader* rather than the document:
+            # a repository written by a newer rein, whose release widened a schema this tool has
+            # the narrow version of, and one written by an older rein, under a schema this release
+            # has since narrowed. Either way, rewinding an approved gate fixes nothing, and this
+            # table's generic repair is the sentence that sends a human to do it.
             repair = getattr(exc, "repair", "") or _DOCUMENT_REPAIR[name]
             findings.append(Finding("FAIL", "format", f"{name}.yaml: {exc}\n  repair: {repair}"))
             continue

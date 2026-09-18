@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from rein import approve, digests, models, review_reading
+from rein import approve, change_request, digests, models, review_reading
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import (
@@ -1286,3 +1286,119 @@ def test_a_crossing_screen_names_only_the_task_about_to_run(tmp_path: Path) -> N
 
     assert [row["task_id"] for row in approve.naming(repo, "T-003")["crossing"]] == ["T-003"]
     assert approve.naming(repo, "acceptance")["crossing"] == []
+
+
+# --- a gate that stops existing takes its change requests with it ------------------
+
+
+def _recut(tmp_path: Path, *, reversible: bool) -> None:
+    """Re-cut the draft plan so T-001 is, or is no longer, an irreversible point."""
+    path = tmp_path / ".rein" / "plan.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for task in document["tasks"]:
+        for surface in task.get("operator_surface", []):
+            surface["reversible"] = reversible
+    path.write_text(yaml.safe_dump(document, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def test_an_open_request_against_a_crossing_refuses_the_freeze_that_would_delete_it(tmp_path: Path) -> None:
+    """The mandate is the one approval that can end another gate's existence. A request standing
+    against a gate this cut deletes would survive as a record holding nothing shut, which is the
+    state `changes add` already refuses to create."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"},
+            plan_status="draft",
+        ),
+        plan=make_plan(claims=[make_claim("C-001")], tasks=[_crossing_task("T-001")]),
+    )
+    request_id = change_request.add(repo, "T-001", target="T-001", reason="the schema is wrong")
+    _recut(tmp_path, reversible=True)
+
+    blockers = approve.readiness(repo, "mandate", already_approved_blocks=False)
+
+    assert any(request_id in b and "no longer declares irreversible" in b for b in blockers)
+
+
+def test_addressing_it_lets_the_freeze_through_and_the_approval_closes_it(tmp_path: Path) -> None:
+    repo = repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"},
+            plan_status="draft",
+        ),
+        plan=make_plan(claims=[make_claim("C-001")], tasks=[_crossing_task("T-001")]),
+    )
+    request_id = change_request.add(repo, "T-001", target="T-001", reason="the schema is wrong")
+    change_request.address(repo, request_id, "the task no longer writes the table")
+    _recut(tmp_path, reversible=True)
+
+    assert not any(request_id in b for b in approve.readiness(repo, "mandate", already_approved_blocks=False))
+
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+
+    state = _state_of(repo)
+    assert state.gate_ids == ("mandate", "acceptance")
+    closed = next(cr for cr in state.change_requests if cr["id"] == request_id)
+    assert closed["status"] == "resolved", "a request whose gate was deleted is closed, never orphaned"
+
+
+def test_a_request_against_a_crossing_the_cut_keeps_is_untouched(tmp_path: Path) -> None:
+    repo = repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"},
+            plan_status="draft",
+        ),
+        plan=make_plan(claims=[make_claim("C-001")], tasks=[_crossing_task("T-001")]),
+    )
+    request_id = change_request.add(repo, "T-001", target="T-001", reason="the schema is wrong")
+
+    assert not any(request_id in b for b in approve.readiness(repo, "mandate", already_approved_blocks=False))
+
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+
+    state = _state_of(repo)
+    assert "T-001" in state.gate_ids
+    still_open = next(cr for cr in state.change_requests if cr["id"] == request_id)
+    assert still_open["status"] == "open"
+    assert any(request_id in b for b in approve.readiness(repo, "T-001"))
+
+
+def test_no_plan_drops_no_gate(tmp_path: Path) -> None:
+    """`Plan.crossing_task_ids` is `()` both for a plan that declares nothing irreversible and for
+    a plan that is not there, and subtracting the second from this cycle's gates says every
+    crossing is about to be deleted. The question is asked of a plan or not asked."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"},
+            plan_status="draft",
+        ),
+        plan=make_plan(claims=[make_claim("C-001")], tasks=[_crossing_task("T-001")]),
+    )
+    request_id = change_request.add(repo, "T-001", target="T-001", reason="the schema is wrong")
+    (tmp_path / ".rein" / "plan.yaml").unlink()
+
+    blockers = approve.readiness(repo, "mandate", already_approved_blocks=False)
+
+    assert not any(request_id in b for b in blockers)
+    assert any("plan.yaml" in b for b in blockers), "the absent plan is still reported"
+
+
+def test_approving_a_crossing_closes_no_other_gates_requests(tmp_path: Path) -> None:
+    """Only the mandate re-derives the gate set, so only the mandate can delete one. Reading the
+    deleted set off an empty `crossings` at any other gate would name every crossing there is."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates={"mandate": "approved", "T-001": "pending", "T-002": "pending"}),
+        plan=make_plan(claims=[make_claim("C-001")], tasks=[_crossing_task("T-001"), _crossing_task("T-002")]),
+    )
+    other = change_request.add(repo, "T-002", target="T-002", reason="not yet")
+    change_request.address(repo, other, "changed the migration")
+
+    approve.record_approval(repo, "T-001", approve.approval_subject(repo, "T-001"))
+
+    still = next(cr for cr in _state_of(repo).change_requests if cr["id"] == other)
+    assert still["status"] == "addressed", "T-002's gate still exists, so its request is still its own"

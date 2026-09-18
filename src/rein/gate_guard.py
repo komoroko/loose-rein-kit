@@ -780,9 +780,12 @@ def commit_stage_registration(text: str) -> str:
     A substring search cannot answer this. pre-commit splits an invocation across two keys —
     `entry: rein guard` with `args: [--check-diff]` is the idiom the tool's own documentation
     uses — so a regex over one line reports a working registration as a neutered one, and a
-    commented-out block as a working one. One reader, because `doctor.check_hook` tells the
-    repository's owner what it has and `policy_check` refuses a head that takes it away, and those
-    two disagreeing is the drift that makes the refusal worthless.
+    commented-out block as a working one. The word list is rebuilt from both keys before anything
+    is asked of it (:func:`_invocation`), including *whether this hook is the guard at all*: a
+    candidate chosen by `"rein guard" in entry` is still a substring test, and it is blind to the
+    same split it exists to handle. One reader, because `doctor.check_hook` tells the repository's
+    owner what it has and `policy_check` refuses a head that takes it away, and those two
+    disagreeing is the drift that makes the refusal worthless.
     """
     from rein import strict_yaml  # lazy: keep `import gate_guard` cheap on the hook path
 
@@ -797,16 +800,40 @@ def commit_stage_registration(text: str) -> str:
     for repo_entry in repos if isinstance(repos, list) else []:
         hooks = repo_entry.get("hooks") if isinstance(repo_entry, dict) else ()
         for hook in hooks if isinstance(hooks, list) else ():
-            if not isinstance(hook, dict) or "rein guard" not in str(hook.get("entry", "")):
+            if not isinstance(hook, dict):
                 continue
-            args = hook.get("args")
-            words = str(hook["entry"]).split()
-            if isinstance(args, list):
-                words += [str(arg) for arg in args]
-            if "--check-diff" in words:
-                return COMMIT_STAGE_REGISTERED
-            verdict = COMMIT_STAGE_NEUTERED
+            words = _invocation(hook)
+            if not _invokes_guard(words):
+                continue
+            verdict = COMMIT_STAGE_REGISTERED if "--check-diff" in words else COMMIT_STAGE_NEUTERED
+            if verdict == COMMIT_STAGE_REGISTERED:
+                return verdict
     return verdict
+
+
+def _invocation(hook: Mapping[str, Any]) -> list[str]:
+    """The whole command line a pre-commit hook runs, `entry` and `args` as one word list.
+
+    pre-commit splits an invocation across the two keys and imposes no rule about where the split
+    falls, so every question about *what this hook runs* is a question about the concatenation.
+    Asking it of `entry` alone is the defect this replaced twice over: first a regex over one line,
+    then a substring test that selected candidate hooks on `entry` before joining the words, which
+    reads `entry: rein` with `args: [guard, --check-diff]` as no registration at all.
+    """
+    words = str(hook.get("entry", "")).split()
+    args = hook.get("args")
+    if isinstance(args, list):
+        words += [str(arg) for arg in args]
+    return words
+
+
+def _invokes_guard(words: Sequence[str]) -> bool:
+    """Does this command line run `rein guard`? Adjacent words, because that is what a command is.
+
+    `"rein guard" in text` said yes to `rein guardian`, to a `--exclude` naming the phrase, and to
+    the word appearing in two unrelated places.
+    """
+    return any(word == "rein" and words[i + 1 : i + 2] == ["guard"] for i, word in enumerate(words))
 
 
 #: The guard has exactly two invocations, and a human asking about them is a third thing entirely.

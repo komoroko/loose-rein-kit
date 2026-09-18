@@ -35,9 +35,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{dropped} observation(s) dropped; the most recent {args.prune} are kept")
         return 0
 
-    # The chain is per-repository and this store is user-global, so the chained stop count is only
-    # offered when a repository is in hand. `--project` alone names a project in the store, which
-    # is not a path to a chain and never a reason to guess at one.
+    # The chain is per-repository and this store is user-global, so the chained figures are only
+    # offered when the repository in hand is the one the summary is about. `--project` names a
+    # project in the store, which is not a path to a chain: asked for another project's readings
+    # from inside this repository, the table would have put this repository's stop count beside
+    # them under a heading that says "this repo", and the two scopes would have read as one.
     repo = None
     try:
         repo = repo_mod.get(args.repo)
@@ -50,6 +52,13 @@ def main(argv: list[str] | None = None) -> int:
     project = args.project
     if project is None and repo is not None:
         project = repo.root.name
+    if repo is not None and project != repo.root.name:
+        logger.info(
+            f"showing project {project!r}, and this repository is {repo.root.name!r} — the chained "
+            "stop figures are that repository's audit chain, so they are left out rather than "
+            "printed beside readings they are not about."
+        )
+        repo = None
 
     entries = observations.read()
     summary = observations.summarize(entries, project=project or "")

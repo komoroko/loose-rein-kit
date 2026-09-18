@@ -483,6 +483,69 @@ def test_a_document_a_newer_release_wrote_is_behind_and_not_invalid(tmp_path: Pa
     assert exc.errors and "Additional properties" in exc.errors[0]
 
 
+def _ahead_repo(tmp_path: Path) -> repo_mod.Repo:
+    """A repository an older rein wrote: the lock says so, and one document proves it.
+
+    The document is missing something this release requires, which is what narrowing a schema does
+    to every repository written before it — `operator_surface.reversible` is 0.8.0's.
+    """
+    from rein import lock as lock_mod
+
+    _seed_plan_without_reversible(tmp_path)
+    lock_mod.write(tmp_path / ".rein" / "rein.lock", lock_mod.new("0.1.0", "git+https://github.com/o/r@v0.1.0"))
+    return repo_mod.Repo(tmp_path)
+
+
+def _seed_plan_without_reversible(tmp_path: Path) -> None:
+    """A `plan.yaml` shaped the way an older release wrote one: an `operator_surface` declaration
+    with no `reversible`. Written past the fixture validator on purpose — the point is a document
+    this release refuses, which the validator exists to keep out of every *other* test."""
+    import yaml
+
+    from tests._support import make_claim, make_plan, make_state, make_task, seed_repo
+
+    task = make_task("T-001", claim_ids=["C-001"])
+    task["operator_surface"] = [
+        {"kind": "persistence", "name": "the users table", "paths": ["db/schema.sql"], "reversible": False}
+    ]
+    seed_repo(tmp_path, state=make_state(), plan=make_plan(claims=[make_claim("C-001")], tasks=[task]))
+    path = tmp_path / ".rein" / "plan.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    del document["tasks"][0]["operator_surface"][0]["reversible"]
+    path.write_text(yaml.safe_dump(document, sort_keys=False, allow_unicode=True), encoding="utf-8")
+
+
+def test_a_document_an_older_release_wrote_says_so_instead_of_sending_a_human_to_rewind(
+    tmp_path: Path,
+) -> None:
+    """The mirror of "behind", and the same argument: a release that narrows a schema leaves every
+    repository written before it failing validation on a document nothing damaged. The generic
+    repair rewinds an approved gate to fix something a rollback cannot reach."""
+    with pytest.raises(models.DocumentError) as caught:
+        store.Store(_ahead_repo(tmp_path)).read_plan()
+
+    exc = caught.value
+    assert isinstance(exc, store.DocumentAheadError)
+    assert "last written by rein 0.1.0" in exc.repair
+    assert "rein upgrade" in exc.repair
+    assert exc.errors and "reversible" in exc.errors[0]
+
+
+def test_a_repository_at_this_release_still_reports_a_bad_document_as_bad(tmp_path: Path) -> None:
+    """The skew explains a failure; it must not become an excuse for every failure. With no skew
+    recorded, an invalid document is invalid."""
+    import rein
+    from rein import lock as lock_mod
+
+    _seed_plan_without_reversible(tmp_path)
+    lock_mod.write(tmp_path / ".rein" / "rein.lock", lock_mod.new(rein.__version__, ""))
+
+    with pytest.raises(models.DocumentError) as caught:
+        store.Store(repo_mod.Repo(tmp_path)).read_plan()
+
+    assert not isinstance(caught.value, (store.DocumentAheadError, store.DocumentBehindError))
+
+
 def test_a_tool_behind_the_repository_may_not_write_it(tmp_path: Path) -> None:
     """At the one door every SSOT mutation passes, rather than in front of the writes somebody
     thought of. A gate receipt binds digests the writing process computed and records which

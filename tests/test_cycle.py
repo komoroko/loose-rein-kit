@@ -9,6 +9,7 @@ happened.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -129,15 +130,60 @@ def test_the_next_state_carries_only_the_project_identity(tmp_path: Path) -> Non
 # --- the snapshot -------------------------------------------------------------
 
 
-def test_the_snapshot_is_taken_once_and_never_overwritten(tmp_path: Path) -> None:
+def test_the_ssot_snapshot_is_taken_once_and_never_overwritten(tmp_path: Path) -> None:
     repo = finished_repo(tmp_path)
-    assert cycle.snapshot_scaffold(repo) is True
-    pristine = tmp_path / ".rein" / "scaffold" / "docs" / "10-requirements.md"
+    assert cycle.snapshot_ssot(repo) is True
+    pristine = tmp_path / ".rein" / "scaffold" / "rein" / "plan.yaml"
     assert pristine.exists()
+    before = pristine.read_text(encoding="utf-8")
 
-    (tmp_path / "docs" / "10-requirements.md").write_text("filled in by the human\n", encoding="utf-8")
-    cycle.snapshot_scaffold(repo)
-    assert "scaffold:" in pristine.read_text(encoding="utf-8")  # the pristine copy survived
+    (tmp_path / ".rein" / "plan.yaml").write_text("tasks: []\n", encoding="utf-8")
+    cycle.snapshot_ssot(repo)
+    assert pristine.read_text(encoding="utf-8") == before  # the pristine copy survived
+
+
+def test_the_per_cycle_documents_are_not_copied_into_the_repository(tmp_path: Path) -> None:
+    """They are packaged data, so a per-repository copy could only ever go stale — which is what
+    made a document the release began shipping vanish at the first close after an upgrade."""
+    repo = finished_repo(tmp_path)
+    cycle.snapshot_ssot(repo)
+    assert not (tmp_path / ".rein" / "scaffold" / "docs").exists()
+
+
+def test_a_document_this_release_ships_is_restored_even_in_an_older_repository(tmp_path: Path) -> None:
+    """The regression: the snapshot was taken once at `init` and never gained anything, so a
+    per-cycle document added by a later release was archived and then silently not restored."""
+    from rein import data as data_mod
+
+    repo = finished_repo(tmp_path)
+    # A repository initialized before this release: it has the old snapshot directory and no copy
+    # of whatever the payload has since added.
+    (tmp_path / ".rein" / "scaffold" / "docs").mkdir(parents=True, exist_ok=True)
+    for name in cycle.CYCLE_DOCS:
+        doc = tmp_path / "docs" / name
+        if doc.is_dir():
+            shutil.rmtree(doc)
+        elif doc.exists():
+            doc.unlink()
+
+    restored = cycle._restore(repo)
+
+    prefix = len("scaffold/docs/")
+    shipped = {rel[prefix:] for rel, _ in data_mod.iter_files("scaffold/docs")}
+    expected = {rel for rel in shipped if rel.split("/")[0] in set(cycle.CYCLE_DOCS)}
+    assert {r[len("docs/") :] for r in restored if r.startswith("docs/")} == expected
+    assert (tmp_path / "docs" / "speculative-work.md").exists()
+    assert (tmp_path / "docs" / "tasks" / "T-template.md").exists()
+
+
+def test_restoring_never_overwrites_a_document_the_archive_could_not_take(tmp_path: Path) -> None:
+    repo = finished_repo(tmp_path)
+    kept = tmp_path / "docs" / "retrospective.md"
+    kept.write_text("work the git mv could not take\n", encoding="utf-8")
+
+    cycle._restore(repo)
+
+    assert kept.read_text(encoding="utf-8") == "work the git mv could not take\n"
 
 
 # --- the whole close ----------------------------------------------------------
@@ -152,7 +198,7 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
     repo = finished_repo(tmp_path, git=True, events=chain("cycle_initialized"))
     _git(tmp_path, "config", "user.email", "t@e.x")
     _git(tmp_path, "config", "user.name", "T")
-    cycle.snapshot_scaffold(repo)
+    cycle.snapshot_ssot(repo)
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "baseline")
 
@@ -188,7 +234,7 @@ def test_the_reset_state_is_schema_valid_and_lands_with_its_event(tmp_path: Path
     repo = finished_repo(tmp_path, git=True, events=chain("cycle_initialized"))
     _git(tmp_path, "config", "user.email", "t@e.x")
     _git(tmp_path, "config", "user.name", "T")
-    cycle.snapshot_scaffold(repo)
+    cycle.snapshot_ssot(repo)
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-q", "-m", "baseline")
 

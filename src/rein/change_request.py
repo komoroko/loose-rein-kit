@@ -27,7 +27,8 @@ import argparse
 import json
 import logging
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 from rein import common, event_chain, models, observations
 from rein import repo as repo_mod
@@ -206,22 +207,43 @@ def address(repo: repo_mod.Repo, request_id: str, note: str) -> str:
     return str(existing.get("gate"))
 
 
-def resolve_addressed(raw: dict[str, object], gate: str) -> list[str]:
-    """Close `gate`'s addressed requests in-place. Returns their ids.
+def resolve_addressed(raw: dict[str, object], gates: Iterable[str]) -> list[str]:
+    """Close the addressed requests standing against any of `gates`, in place. Returns their ids.
 
     Called from inside `approve.record_approval`'s transaction: the approval is what closes them,
     because the approval is the human reading the notes and deciding they are answered. Open
     requests are untouched — readiness refused before this point, so there should be none.
+
+    **Several gates, because one approval can end more than one gate's life.** Approving the
+    mandate re-derives the cycle's crossing gates from the plan it freezes, so a crossing the new
+    cut no longer declares irreversible stops existing in that same write. A request standing
+    against it used to be left behind pointing at a gate `State.gate_ids` no longer lists: it
+    blocked nothing, because readiness only ever asks about a gate it has, and it appeared in no
+    `rein changes list --gate <one this cycle has>`. Recorded, and holding nothing shut — the exact
+    state :func:`add` refuses to create. The gate it stood against is gone, so the approval that
+    removed it closes it, and the receipt of that approval is what the record points back to.
     """
+    wanted = set(gates)
     closed: list[str] = []
     entries = raw.get("change_requests")
     if not isinstance(entries, list):
         return closed
     for entry in entries:
-        if isinstance(entry, dict) and entry.get("gate") == gate and entry.get("status") == "addressed":
+        if isinstance(entry, dict) and entry.get("gate") in wanted and entry.get("status") == "addressed":
             entry["status"] = "resolved"
             closed.append(str(entry.get("id")))
     return closed
+
+
+def open_against(state: models.State, gates: Iterable[str]) -> list[Mapping[str, Any]]:
+    """Every still-open request standing against one of `gates`, grouped by gate in that order.
+
+    Built on `State.change_requests_for` rather than filtering `change_requests` again, so "what
+    is open against a gate" keeps one definition: the readiness check that refuses a gate and this
+    one, which refuses to let a gate be removed out from under a request, must not be able to
+    disagree about which requests count.
+    """
+    return [cr for gate in gates for cr in state.change_requests_for(gate, "open")]
 
 
 # --- CLI ---------------------------------------------------------------------------
