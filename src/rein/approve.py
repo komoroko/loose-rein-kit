@@ -829,7 +829,12 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
             "Run this in your shell — there is deliberately no flag that skips it."
         )
     print(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
-    crossing = crossing_declarations(repo, gate)
+    # One source for both routes. This function used to call `crossing_declarations` and
+    # `_unasked_decisions` itself and never learned about the third list, which is how the lens
+    # selection came to exist on one screen only: two screens assembling the same panel from
+    # different parts is a panel that can differ, and it did.
+    named = naming(repo, gate)
+    crossing = named["crossing"]
     if crossing:
         # At the mandate this is the count of stops still to come; at a crossing gate it is the
         # thing about to become permanent. Either way it is the one item on the screen that no
@@ -843,14 +848,24 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         else:
             print("This approval lets the loop do something it cannot undo:")
         print(render_crossing(crossing) + "\n")
-    unasked = _unasked_decisions(repo, gate)
+    unasked = named["unasked"]
     if unasked:
         # The one thing on this screen that is not a digest. Everything else says what was decided
         # with this human; this says what was decided without them, which is the part an approval
         # silently ratifies unless it is put in front of somebody.
         print(f"{len(unasked)} decision(s) the loop settled without asking you:")
         print(render_unasked(unasked) + "")
-        print(f"  {OVERRULE_COST}\n")
+        print(f"  {named['overrule_cost']}\n")
+    lens_rows = named["lenses"]
+    if lens_rows:
+        # Not folded away. `proposed` is the half a human is being *asked* about, and a list that
+        # has to be opened before anything can be dropped is a list whose default is "keep them
+        # all" — the always-on set the class system replaced, re-entering through a closed
+        # disclosure rather than through an empty `when:`.
+        droppable = sum(1 for row in lens_rows if row["status"] == lens_lib.SELECTION_PROPOSED)
+        asked = f" — {droppable} of them yours to keep or drop" if droppable else ""
+        print(f"{len(lens_rows)} review lens(es) this mandate would freeze{asked}:")
+        print(render_lenses(lens_rows) + "")
     addressed = addressed_requests(repo, gate)
     if addressed:
         # Read before deciding, not after. These are the changes this human asked for last time;
@@ -891,7 +906,10 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
     attention with what does not, and loses.
 
     The rule this restores: **whatever a gate requires on screen belongs on every route that can
-    open that gate.** The dashboard grew a second approval route and this did not follow it.
+    open that gate.** The dashboard grew a second approval route and this did not follow it — and
+    then the lens list, added here in the same change, went the other way: built by this function
+    and rendered only by the dashboard. Both routes now render everything this returns, which is
+    what makes the rule checkable rather than remembered.
 
     The lens list is the plan's whole selection, not one task's. At the moment of approving nothing
     has been narrowed yet (`lenses.for_task` runs at the hand-off to a reviewer), and what the
@@ -1018,15 +1036,33 @@ def _unasked_decisions(repo: repo_mod.Repo, gate: str) -> list[models.Decision]:
     return [d for d in plan.decisions if d.unasked and d.is_local] if plan is not None else []
 
 
-def render_unasked(decisions: Sequence[models.Decision]) -> str:
+def render_unasked(rows: Sequence[Mapping[str, str]]) -> str:
+    """The rows `naming` carries, not `models.Decision` — so the terminal renders what the
+    dashboard renders rather than a second reading of the same plan."""
     lines: list[str] = []
-    for d in decisions:
-        lines.append(f"  - {d.id} {d.subject}")
-        lines.append(f"      settled: {d.answer or '(no answer recorded)'}")
+    for row in rows:
+        lines.append(f"  - {row['id']} {row['subject']}")
+        lines.append(f"      settled: {row['answer'] or '(no answer recorded)'}")
         # `rationale` is required for `local` by the schema, so "(none recorded)" can only appear
         # under a plan nothing validated. Printed rather than skipped: the reach claim with no
         # reasoning behind it is the one most worth looking at, not the one to leave off the list.
-        lines.append(f"      local because: {d.rationale or '(none recorded — the reach claim is unsupported)'}")
+        lines.append(f"      local because: {row['rationale'] or '(none recorded — the reach claim is unsupported)'}")
+    return "\n".join(lines)
+
+
+def render_lenses(rows: Sequence[Mapping[str, str]]) -> str:
+    """What this mandate would freeze a reviewer to look for, in the words the library uses.
+
+    `applies_when` is the lens's own account of when it is worth applying, and for a `proposed`
+    one it is the whole of what the human is deciding against: its `when:` block is what a machine
+    could settle, and for these lenses that is not the condition — the condition is in the prose,
+    and settling it takes reading the deliverable.
+    """
+    lines: list[str] = []
+    for row in rows:
+        lines.append(f"  - {row['id']} [{row['stage']}] {row['attack']}")
+        prefix = "proposed — yours to keep or drop" if row["status"] == lens_lib.SELECTION_PROPOSED else "applies when"
+        lines.append(f"      {prefix}: {row['applies_when']}")
     return "\n".join(lines)
 
 

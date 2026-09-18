@@ -42,6 +42,44 @@ async function readingRoom({ readiness = { ok: true, covers: { plan: "sha256:aa"
 
 const APPROVE = { text: "Approve gate mandate" };
 
+// A lens list that has to be opened before anything can be dropped has "keep them all" as its
+// default — the always-on set the class system replaced, re-entering through a closed disclosure
+// rather than through an empty `when:`.
+const lensRow = (status) => ({
+  id: `L-CODE-${status.toUpperCase()}`,
+  stage: "code",
+  status,
+  attack: "interleave the change against itself",
+  applies_when: "the change introduces shared mutable state; the diff says, the paths do not",
+});
+
+const withLenses = (...rows) => ({
+  ok: true,
+  covers: { plan: "sha256:aa" },
+  naming: { unasked: [], overrule_cost: "", crossing: [], lenses: rows },
+});
+
+test("the lens list opens itself when one of them is the human's to drop", async () => {
+  const { app } = await readingRoom({ readiness: withLenses(lensRow("proposed")) });
+
+  await app.click(APPROVE);
+
+  const details = app.window.document.querySelector("#rvFoot details");
+  assert.ok(details, "the selection this mandate would freeze belongs on the panel");
+  assert.equal(details.open, true, "nothing can be dropped from a list nobody opened");
+  assert.match(app.text("rvFoot"), /1 of them yours to keep or drop/);
+});
+
+test("with nothing to decide, the lens list stays folded", async () => {
+  const { app } = await readingRoom({ readiness: withLenses(lensRow("applied")) });
+
+  await app.click(APPROVE);
+
+  const details = app.window.document.querySelector("#rvFoot details");
+  assert.equal(details.open, false, "applied lenses are not a question — nobody is being asked");
+  assert.doesNotMatch(app.text("rvFoot"), /yours to keep or drop/);
+});
+
 test("the footer offers the decision, and the panel says what it would bind", async () => {
   const { app } = await readingRoom();
   assert.match(app.text("rvFoot"), /Approve gate mandate/);

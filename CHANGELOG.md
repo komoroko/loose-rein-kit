@@ -4,6 +4,31 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [Unreleased]
+
+### A rule restored in one direction, broken in the other
+
+0.6.1 restored the rule that **whatever a gate requires on screen belongs on every route that can
+open that gate**: the dashboard had grown a second approval route, and the `unasked` decisions —
+what the loop settled without being asked — reached only the terminal. The same change added the
+lens selection to that panel, and it went the other way. `approve.naming` built the list; only
+`Gate.jsx` rendered it. `rein approve` printed the digests, the crossing declarations and the
+unasked decisions, and never named a single lens this mandate was about to freeze.
+
+Both routes render everything `naming` returns now, and `confirm_locally` reads that function
+rather than re-deriving its half of it — two screens assembling the same panel from different
+parts is a panel that can differ, and it did. A check holds the rule instead of a person
+remembering it: every list `naming` carries has to reach the terminal, so the next list added is
+not the next one to go missing.
+
+**And the list nobody opened kept everything in it.** The dashboard folded the selection into a
+closed `<details>`, including the `conditional` lenses — the half whose condition a machine cannot
+settle, proposed precisely so a human keeps or drops them. A list that has to be opened before
+anything can be dropped has "keep them all" as its default, which is the always-on set the class
+system replaced, re-entering through a closed disclosure rather than through an empty `when:`. It
+opens itself when any lens is `proposed`, says how many of them are the reader's to drop, and stays
+folded when they are all `applied` and nobody is being asked anything.
+
 ## [0.8.1] - 2026-09-19
 
 **Six corrections from a third adversarial pass over 0.8.0, and the upgrade message 0.8.0 owed a
