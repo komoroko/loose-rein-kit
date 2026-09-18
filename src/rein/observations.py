@@ -29,7 +29,11 @@ comprehension is a         `acceptance_reopened` — acceptance approved and the
 by-product of deciding     back. The heaviest row: somebody said yes to something they
                            turned out not to have understood.
 the harness owns waiting   `waited_seconds` — from the decision being derived to it
-                           being answered.
+                           being answered, under each of the two conditions it could
+                           be spent in. What this falsifies is that the harness owns
+                           the channel at all, not how much a notification helps: the
+                           arm is a property of the machine, so the columns sit side
+                           by side and are not a controlled comparison.
 selection by reach         the *count* of those same readings: one per wait, so it is
 settles how often work     how often work stopped. Read off `waited_seconds` rather
 stops                      than recorded again, and never split by arm — whether a
@@ -115,7 +119,12 @@ class Arms:
     #: Closed. Every reading of this kind is in exactly one of them; there is no unarmed bucket,
     #: because a figure pooled from readings that never shared a condition is what arms prevent.
     values: frozenset[str]
-    #: Printed when the record has some arms and not others, saying what would fill the gap.
+    #: Printed when the record has some arms and not others, saying what the missing side would
+    #: take — which is not always something anybody can, or should, go and do. For
+    #: `reach_overruled` it is a gesture somebody makes in the normal course of work; for
+    #: `waited_seconds` it is a condition of this machine that may simply not recur, and saying so
+    #: is the point: a note that reads as a chore leaves a person arranging their work around a
+    #: comparison that will not become identifiable however they arrange it.
     one_sided: str
     #: Where readings written before this kind was armed belong. Provenance rather than a guess:
     #: it is read off the one code path that wrote them. "" means the kind was armed from its
@@ -127,12 +136,12 @@ ARMS: Mapping[str, Arms] = {
     "waited_seconds": Arms(
         values=frozenset({ARM_NOTIFIED, ARM_SILENT}),
         one_sided=(
-            "The claim is that a channel shortens the wait, and one arm cannot say — but this "
-            "record may never hold both, so do not wait for it to. The arm is this machine's "
-            "`command:` setting, which is one setting for every project here, and a cycle run "
-            "without `rein ui` records no wait at all. What fills the other side without "
-            "spoiling what is being measured: the cycles run before a channel was set up, and "
-            "any delivery that failed."
+            "Not a gap to go and fill. The arm is this machine's `command:` setting — one setting "
+            "for every project here — and a cycle run without `rein ui` records no wait on either "
+            "side, so the other column appears only by accident: the cycles somebody ran before "
+            "setting a channel up, or a delivery that failed. Nothing anybody should do about it; "
+            "the only way to make the two columns comparable on purpose is to stop notifying "
+            "somebody."
         ),
     ),
     "reach_overruled": Arms(
@@ -163,8 +172,8 @@ CLAIMS: Mapping[str, str] = {
     "judgement_raised": "...measured against this: findings that needed a human to sort code from plan",
     "acceptance_reopened": "comprehension is a by-product of deciding — a reopened acceptance says it was not",
     "waited_seconds": (
-        "the harness owns waiting: how long a decision sat, with a notification delivered and without "
-        "one — a configured channel that did not deliver is a wait nobody was told about"
+        "the harness owns waiting: how long a decision sat, kept apart for the waits somebody was told "
+        "about and the waits nobody was — two conditions recorded, never a controlled comparison"
     ),
 }
 

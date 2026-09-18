@@ -311,6 +311,25 @@ def test_the_missing_arm_is_never_filled_by_turning_the_channel_off(store: Path)
     assert "rein ui" in advice
 
 
+def test_the_two_arms_are_not_presented_as_a_comparison_to_complete(store: Path) -> None:
+    """Item 8 settled here. The arm is one setting for the whole machine, so the columns are two
+    conditions that were spent under, not an assignment anybody made; the only way to make them
+    comparable on purpose is to stop notifying somebody, which is measuring by damaging what is
+    measured. A figure that keeps calling itself an unfinished comparison leaves a person
+    arranging their work around one that cannot become identifiable however they arrange it.
+
+    The phrase is the canary, not the prose: what must not come back is the record presenting the
+    effect of a notification as something it settles."""
+    observations.record("waited_seconds", project="a", cycle_id="c-1", value=60, arm=observations.ARM_NOTIFIED)
+    observations.record("waited_seconds", project="a", cycle_id="c-1", value=90, arm=observations.ARM_SILENT)
+
+    out = observations.render(observations.summarize(observations.read()))
+
+    # Printed even when both arms are on record, which is exactly when it would be misread.
+    assert "never a controlled comparison" in out
+    assert "no readings in" not in out
+
+
 def test_the_chained_stop_time_sits_beside_the_timed_one_and_is_not_pooled(store: Path) -> None:
     """Two different spans. `waited_seconds` starts when the decision became derivable, which only
     a running watcher sees; the chained one starts at the loop's last event, so it also holds

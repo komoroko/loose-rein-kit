@@ -856,8 +856,8 @@ def check_notification_channel() -> list[Finding]:
                 "env",
                 f"no notification channel — nothing tells you a decision is waiting unless the "
                 f"dashboard is open. Set `command:` in {notify.config_path()}. Cycles you run "
-                "with the dashboard up before setting one are timed in the `silent` arm "
-                "(`rein observe`), which is what the configured case gets compared against.",
+                "with the dashboard up meanwhile are timed in the `silent` arm (`rein observe`); "
+                "that is a record of what this condition cost, not a comparison to complete.",
             )
         ]
     program = channel.program()

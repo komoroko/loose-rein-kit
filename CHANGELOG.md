@@ -401,6 +401,30 @@ enumeration of cycles, so the four reports that span them — `--cost`, `rein le
 (`docs/archive/2026-08-01-first`) rather than its chain file; a defect is still reported against
 the file it was found in.
 
+### `waited_seconds` stops calling itself an unfinished comparison
+
+The last open item. `waited_seconds` is split into `notified` and `silent`, and every surface that
+mentioned it described the split as a comparison one arm short. It is not short; it is not a
+comparison. The arm is read from `notify.yaml`, which is **one setting for the whole machine**,
+beside a store that never leaves that machine — so both columns of a record come from one person
+under one setting, and the only way to assign them on purpose is to withhold notifications from
+somebody. That is measuring by damaging what is measured, which this design ruled out when it
+first considered it.
+
+So the arms stay — pooling them would produce a mean wait that answers nothing, and the store
+refuses an unarmed reading for exactly that reason — and what changes is what they claim. Two
+conditions recorded apart, printed as such, with a note that the effect of a notification is not
+what they settle. The one-sided note says the missing column is not a gap to go and fill. What
+`notify.py` does claim is structural and needs no measurement waiting on it: how soon a person
+finds out is set inside this design rather than by which CLI was in use and whether a window
+happened to be open — true or false by reading the module. And what a contact point costs is
+measured in full elsewhere, for every cycle and every host, by the chained count and the chained
+stopped time.
+
+**A falsification quantity has to attach to the falsifiable part of a claim.** Attached to an
+effect size a design cannot identify, it reads as "waiting for data" forever, and the claim goes
+unchecked for as long as the wait lasts.
+
 ## [0.6.1] - 2026-09-17
 
 Four corrections with one thing in common: **each was found by reading the shipped code against
