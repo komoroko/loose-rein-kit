@@ -340,6 +340,34 @@ classes: a documented `rein approve|revise|changes` gate argument must be one th
 `AGENTS.md` must spell the `T-NNN` form, every scaffold document must be classified, and every
 `retrospective §N` reference must resolve to a section that exists.
 
+### Two more, from reading the last two open items the same way
+
+Both had been left as "waiting for operating data". Neither was.
+
+**Waiting will not produce the second arm, and the report was asking for it the one way that was
+ruled out.** `waited_seconds` is split into `notified` and `silent` so that "a channel shortens the
+wait" is a claim somebody can check, and a record holding one arm printed "run some cycles with
+`command:` unset too". That is the option the design had already rejected — degrading the thing
+being measured in order to measure it — and it survived the release that removed the need for it.
+It could also never work as advice: `notify.yaml` and `observations.ndjson` sit in the same
+user-global directory, so one record is one machine under one channel setting, and a cycle without
+`rein ui` records no wait on either side. The advice now names what actually fills the gap without
+spoiling anything — the cycles run before a channel was set up, and any delivery that failed — and
+says why the gap may not close. `doctor` and `notify` said versions of the same thing and are
+corrected with it.
+
+**How long the work sat stopped is in the chain, and only the dashboard was ever asked.** The count
+moved to the chain last release; the duration stayed behind because it looked like the same
+question as `waited_seconds`. It is not. `waited_seconds` starts when the decision becomes
+*derivable*, which takes something watching — but the moment the work stopped is simply the last
+event the loop wrote before a human opened or refused the gate, and the chain is ordered and
+stamped. `events.stop_durations` reads it off the record that was already there: nothing new is
+appended, so the pending gate stays the single record of its own stop. `rein observe` prints it
+beside the timed figures under its own claim, never pooled with them — the chained span also holds
+whatever somebody had to fix before the gate would open, including edits to `docs/10-requirements.md`
+that this harness does not own and never sees. Available on every host, both approval paths, and
+across archived cycles. A chain that fails its own verification yields no figure at all.
+
 ## [0.6.1] - 2026-09-17
 
 Four corrections with one thing in common: **each was found by reading the shipped code against

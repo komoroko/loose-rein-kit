@@ -140,7 +140,11 @@ def read_channel() -> Channel | None:
     None is not a failure. Running without a channel is the supported default: the dashboard still
     badges its tab and `rein next` still prints the decision. What is missing is only the path that
     reaches somebody who is not looking — and the wait is still measured, in the `silent` arm, which
-    is what makes "the channel shortens it" a claim anybody can check.
+    is what keeps "the channel shortens it" checkable at all.
+
+    Checkable, not easily: this file is one setting for every project on this machine, so a record
+    usually holds one arm. The comparison is really against the cycles somebody ran before setting
+    `command:`, which is why nothing here ever suggests unsetting it to obtain the other side.
     """
     path = config_path()
     try:

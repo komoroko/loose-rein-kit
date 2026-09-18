@@ -35,6 +35,12 @@ settles how often work     how often work stopped. Read off `waited_seconds` rat
 stops                      than recorded again, and never split by arm — whether a
                            channel was configured has nothing to do with whether the
                            criterion settles the number of stops.
+a contact point costs      how long the work sat stopped, read off the audit chain's
+time as well as count      own order (`events.stop_durations`) rather than recorded
+                           here. Derived on read for the same reason the chained count
+                           is: it is a fact about one repository, and this store holds
+                           several. Unarmed, and never pooled with `waited_seconds` —
+                           a different span, described at `_STOP_TIME_SOURCES`.
 =========================  ==========================================================
 
 **An observation is read-only and never an input.** Nothing here is read by a gate, a review or a
@@ -121,8 +127,12 @@ ARMS: Mapping[str, Arms] = {
     "waited_seconds": Arms(
         values=frozenset({ARM_NOTIFIED, ARM_SILENT}),
         one_sided=(
-            "The claim is that a channel shortens the wait, and one arm cannot say: run some "
-            "cycles with `command:` unset too."
+            "The claim is that a channel shortens the wait, and one arm cannot say — but this "
+            "record may never hold both, so do not wait for it to. The arm is this machine's "
+            "`command:` setting, which is one setting for every project here, and a cycle run "
+            "without `rein ui` records no wait at all. What fills the other side without "
+            "spoiling what is being measured: the cycles run before a channel was set up, and "
+            "any delivery that failed."
         ),
     ),
     "reach_overruled": Arms(
@@ -173,6 +183,25 @@ DURATION_KINDS = frozenset({"waited_seconds"})
 #: ceiling. A ceiling on how often a human may be asked gets answered by not asking, which is the
 #: failure selection by reach exists to prevent.
 STOP_COUNT_CLAIM = "selection by reach settles how often work stops — the count of blocking points, never a ceiling"
+
+#: The other half of what a contact point costs. `STOP_COUNT_CLAIM` is how often the work stopped;
+#: this is how long it stayed stopped, which `00-concept.md` names in the same breath and which
+#: nothing measured across every cycle until now.
+#:
+#: Unarmed, exactly like the count. The chain says the work stopped and when it started again; it
+#: does not say whether anybody was told, so splitting this by `notified`/`silent` would label
+#: readings with a condition they were never observed under.
+STOP_TIME_CLAIM = (
+    "what a contact point costs is also how long the work sat stopped — every cycle and every "
+    "host, never split by arm: a chain records that it stopped, not who was told"
+)
+
+#: Printed when both stopped-time figures are on screen, because they are not the same span.
+_STOP_TIME_SOURCES = (
+    "the two measure different spans: timed = from the decision becoming derivable to it being "
+    "answered, which is what a notification moves; chained = from the loop's last event to the "
+    "human's, which also holds whatever they had to fix before the gate would open"
+)
 
 #: Said whenever both stop counts are printed, because they are not the same quantity and a reader
 #: who takes them for one will read the gap as drift. The timed count is waits the dashboard saw
@@ -353,19 +382,25 @@ def summarize(entries: Sequence[Observation], *, project: str = "") -> dict[str,
     return out
 
 
-def render(summary: Mapping[str, Mapping[str, float]], chain_stops: int | None = None) -> str:
+def render(
+    summary: Mapping[str, Mapping[str, float]],
+    chain_stops: int | None = None,
+    chain_stopped: Sequence[float] = (),
+) -> str:
     """The figures, each beside the claim it tests.
 
-    `chain_stops` is the same question as the `stops` line below, asked of a source that does not
-    need `rein ui` (`events.stops`). It is passed in rather than read here because it is a fact
-    about one repository and this store is user-global — and it is printed *beside* the timed
-    count, never instead of it, because the two are not the same quantity. See `_STOP_SOURCES`.
+    `chain_stops` and `chain_stopped` are the count and the duration of the same stops, asked of a
+    source that does not need `rein ui` (`events.stops`, `events.stop_durations`). Both are passed
+    in rather than read here because they are facts about one repository and this store is
+    user-global — and both are printed *beside* the timed figures, never instead of them, because
+    neither is the same quantity as the one it sits next to. See `_STOP_SOURCES` and
+    `_STOP_TIME_SOURCES`.
     """
     # An empty store with a chain behind it is the case this figure was added for: a cycle run from
     # the terminal alone records no observation and still stopped for a human every time it did.
     # Returning the "nothing recorded yet" line here would have withheld the count at exactly the
     # moment it is the only one there is.
-    if not summary and not chain_stops:
+    if not summary and not chain_stops and not chain_stopped:
         nothing = (
             f"nothing recorded yet ({store_path()}).\n"
             "Observations accumulate as cycles run; one cycle answers none of the questions they "
@@ -397,6 +432,17 @@ def render(summary: Mapping[str, Mapping[str, float]], chain_stops: int | None =
         lines.append(f"  {STOP_COUNT_CLAIM}")
         if stops and chain_stops is not None:
             lines.append(f"  {_STOP_SOURCES}")
+
+    # The durations of those same chained stops. Printed under their own claim rather than folded
+    # into `waited_seconds`: one is how long the work sat, the other is how long the decision sat,
+    # and a mean over both would answer neither question.
+    if chain_stopped:
+        mean = sum(chain_stopped) / len(chain_stopped)
+        timed = f"{'stopped (this repo, chained)':<30} {len(chain_stopped):>5} stops, mean {mean / 60:.1f} min"
+        lines.append(timed)
+        lines.append(f"  {STOP_TIME_CLAIM}")
+        if any(key.split("/", 1)[0] == "waited_seconds" for key in summary):
+            lines.append(f"  {_STOP_TIME_SOURCES}")
 
     for kind, spec in ARMS.items():
         present = {key.split("/", 1)[1] for key in summary if key.startswith(f"{kind}/")}

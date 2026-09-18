@@ -54,31 +54,38 @@ def main(argv: list[str] | None = None) -> int:
     entries = observations.read()
     summary = observations.summarize(entries, project=project or "")
     scope = f"project {project}" if project else f"{len({e.project for e in entries})} project(s)"
+    stops, stopped = _chain_cost(repo)
     print(f"{len(entries)} observation(s), {scope} — {observations.store_path()}\n")
-    print(observations.render(summary, chain_stops=_chain_stops(repo)))
+    print(observations.render(summary, chain_stops=stops, chain_stopped=stopped))
     return 0
 
 
-def _chain_stops(repo: repo_mod.Repo | None) -> int | None:
-    """How many stops this repository's chain records, archives included — or None when there is
-    no repository to ask, or its log cannot be read.
+def _chain_cost(repo: repo_mod.Repo | None) -> tuple[int | None, list[float]]:
+    """What this repository's chain says a cycle cost: how many times it stopped, and for how
+    long each time. `(None, [])` when there is no repository to ask, or its log cannot be read.
+
+    One pass for both. They come from the same scan of the same chains, and splitting them into
+    two functions would walk every archive twice and report each unreadable one twice to the
+    person reading a single table.
 
     Across archives for the same reason `rein lens --stats` is: `cycle-close` moves the chain that
     answers this into `docs/archive/`, and reading only the live one makes the figure go blank at
     the moment a second cycle makes it worth reading. An archive that does not verify is named and
-    left out rather than folded in — a count assembled from a log that failed its own check would
-    be the one thing this figure must not be.
+    left out rather than folded in — a figure assembled from a log that failed its own check would
+    be the one thing these must not be.
     """
     if repo is None:
-        return None
+        return None, []
     live, defects = event_chain.scan(repo.events)
     if defects:
-        logger.warning(f"{repo.events} has {len(defects)} chain defect(s); no chained stop count")
-        return None
+        logger.warning(f"{repo.events} has {len(defects)} chain defect(s); no chained stop figures")
+        return None, []
     sources, unreadable = events_mod.cost_sources(repo, live)
     for rel in unreadable:
         logger.warning(f"{rel} could not be verified, so its stops are not counted")
-    return sum(events_mod.stops(chain) for _, chain in sources)
+    stops = sum(events_mod.stops(chain) for _, chain in sources)
+    stopped = [d for _, chain in sources for d in events_mod.stop_durations(chain)]
+    return stops, stopped
 
 
 if __name__ == "__main__":

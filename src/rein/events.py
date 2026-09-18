@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 
 from rein import common, cycle, event_chain, models, run_record
 from rein import repo as repo_mod
@@ -38,11 +39,12 @@ ATTENTION_EVENTS = frozenset(
 #: Chain events that each mark one stop at a gate: the work halted and a human acted. Both need a
 #: person — `gate_approved` is one opening a gate and `changes_requested` is one refusing to.
 #:
-#: This exists because the stop *count* and the stop *duration* have different availability, and
-#: living in one store made them look like one question. Duration comes from `notify.Watcher`,
-#: which only `rein ui` starts, so a cycle run from the terminal alone records none. The count does
-#: not need the watcher: every stop that ended is already in the chain, written inside a
-#: `store.Transaction` on every host and every path.
+#: This exists because the stop *count* and the stop *duration* had looked like one question by
+#: living in one store. Neither needs the watcher: every stop that ended is already in the chain,
+#: written inside a `store.Transaction` on every host and every path, and the chain's own order
+#: bounds how long it lasted (:func:`stop_durations`). What does need `rein ui` is the narrower
+#: `waited_seconds` — the span a notification is supposed to move, which starts when the decision
+#: became derivable rather than when the work stopped.
 #:
 #: `gate_revised` is deliberately out. `/revise` reopens a gate a person has usually just refused,
 #: and that refusal is `changes_requested` — counting both would count one stop twice. So is
@@ -84,6 +86,67 @@ def stops(events: Sequence[models.Event]) -> int:
     """
     gates = sum(1 for e in events if e.event in GATE_STOP_EVENTS)
     return gates + len(open_conditions(events, task_outcomes(events)))
+
+
+def stop_durations(events: Sequence[models.Event]) -> list[float]:
+    """How long each gate stop held the work, in seconds, read off the chain's own order.
+
+    Nothing is added to the chain to get this. The stop was already recorded — a pending gate is
+    the record of it, which is why no escalation is written beside one — and the chain is totally
+    ordered, so the last thing the loop wrote before a human opened or refused that gate is the
+    moment the work stopped, and the human's own event is the moment it started again.
+
+    **Not the same quantity as `waited_seconds`, and never pooled with it.** That one runs from
+    the decision becoming *derivable* to it being answered, and only a running `notify.Watcher`
+    can see the near end of it: noticing the moment a blocker clears takes something that is
+    watching. Between the loop's last event and that moment a person may still be clearing what
+    blocked the gate, and some of that leaves no trace here at all — `approve.readiness` reads
+    `docs/10-requirements.md` and `docs/20-design.md` through `dag_trace`, and editing those
+    writes no event, because they are not documents this harness owns. That work is inside this
+    figure and outside the timed one. So this answers "how long did the work sit", which is the
+    cost a contact point has, and the timed one answers "how long did the decision sit", which is
+    what a notification is supposed to move.
+
+    Available wherever the chain is: every host, both approval paths, archived cycles included.
+    Only gate stops are timed — the conditions `stops` also counts are the ones still open, and an
+    open stop has no end to measure to.
+    """
+    durations: list[float] = []
+    previous: models.Event | None = None
+    for event in events:
+        if event.event in GATE_STOP_EVENTS:
+            if previous is not None and (elapsed := _elapsed(previous, event)) is not None:
+                durations.append(elapsed)
+            # `previous` is deliberately not advanced. Two gates opened in one sitting were both
+            # held by the same stop, and reading the second one's from the first one's approval
+            # would report it as instant — which is the shape a fan of crossings produces every
+            # time somebody answers them together.
+            continue
+        previous = event
+    return durations
+
+
+def _elapsed(start: models.Event, end: models.Event) -> float | None:
+    """Seconds between two events, or None when the chain's own clocks cannot say.
+
+    Refused rather than clamped. These timestamps come from whatever machine wrote each event, so
+    two of them can disagree; a figure that quietly read that as zero would hide the disagreement
+    inside a mean, which is the one place it could never be found.
+    """
+    try:
+        began = datetime.fromisoformat(start.ts)
+        ended = datetime.fromisoformat(end.ts)
+    except ValueError:
+        logger.warning(f"event {start.seq} or {end.seq} carries an unreadable timestamp; that stop is not timed")
+        return None
+    if began.tzinfo is None or ended.tzinfo is None:
+        logger.warning(f"event {start.seq} or {end.seq} has a timestamp with no offset; that stop is not timed")
+        return None
+    seconds = (ended - began).total_seconds()
+    if seconds < 0:
+        logger.warning(f"event {end.seq} is stamped before event {start.seq}; that stop is not timed")
+        return None
+    return seconds
 
 
 #: `ATTENTION_EVENTS` a task's own later success can retire. Both are the build loop's per-attempt
