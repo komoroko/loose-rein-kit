@@ -16,10 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import pathlib
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 
-from rein import common, event_chain, lenses, models
+from rein import common, event_chain, lens_judge, lenses, models, review_reading
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -115,6 +116,154 @@ def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lens
     lines.append("")
     lines.append(_SCOPE_NOTE)
     return "\n".join(lines)
+
+
+# --- the conditions that take reading --------------------------------------------
+
+
+def _text(path: pathlib.Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def _deliverable(repo: repo_mod.Repo, plan: models.Plan, state: models.State | None, stage: str, task_id: str) -> str:
+    """What a `conditional` lens's prose condition is decided against, for one stage.
+
+    Each of the six packaged ones names its own source and says the plan is not it: the
+    requirements, the design document, `docs/decisions/`, the tickets, the diff. So this is not a
+    second reading of `plan.yaml` — everything decidable from the plan is a `standard` lens's
+    `when:` block, already settled before anyone gets here.
+
+    An empty string is the honest answer for a deliverable that is missing, unreadable, or (at the
+    code stage) a diff git could not produce, and it ends in `unavailable` rather than in a verdict.
+    """
+    root = repo.root
+    if stage == "requirements":
+        return _text(root / "docs" / "10-requirements.md")
+    if stage == "design":
+        # The ADR lens asks whether a rejected option's downside is underplayed, and says the plan
+        # does not index `docs/decisions/`. Nothing else would carry that.
+        parts = [_text(root / "docs" / "20-design.md")]
+        parts += [_text(adr) for adr in sorted((root / "docs" / "decisions").glob("ADR-*.md"))]
+        return "\n\n".join(part for part in parts if part.strip())
+    if stage == "tasks":
+        tickets = sorted((root / "docs" / "tasks").glob("T-*.md"))
+        if task_id:
+            tickets = [ticket for ticket in tickets if ticket.stem == task_id]
+        return "\n\n".join(part for part in (_text(ticket) for ticket in tickets) if part.strip())
+    if stage != "code":
+        return ""
+    base = plan.base_commit
+    if not base or set(base) == {"0"}:
+        return ""  # a cycle that never recorded what it branched from has no diff to read
+    include: tuple[str, ...] = ()
+    if task_id:
+        task = next((t for t in plan.tasks if t.id == task_id), None)
+        include = tuple(task.scope_include) if task is not None else ()
+    try:
+        return review_reading.diff_of(repo, base, "HEAD", review_reading.not_the_product(repo, state), include=include)
+    except Exception as exc:  # noqa: BLE001 - every failure here is "review more than necessary"
+        logger.warning(f"the diff this stage's conditions are decided against could not be read: {exc}")
+        return ""
+
+
+def _recorded(events: Sequence[models.Event], stage: str, task_id: str) -> list[lens_judge.Verdict]:
+    """The verdicts already in the chain for this hand-off, newest first, or `[]`.
+
+    Asked once. The selection is resolved once against the plan and read back from it for the rest
+    of the cycle, and a judgement re-run on every call would put the review's inputs back where the
+    freeze took them from — a reviewer and the person who approved the gate could be looking at two
+    different answers to the same question, with nothing saying so.
+    """
+    for event in reversed(events):
+        if event.event != "lens_judged":
+            continue
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        if str(detail.get("stage") or "") != stage or str(detail.get("task") or "") != task_id:
+            continue
+        raw = detail.get("verdicts")
+        if not isinstance(raw, list):
+            return []
+        found = [lens_judge.Verdict.from_dict(row) for row in raw if isinstance(row, Mapping)]
+        return [verdict for verdict in found if verdict is not None]
+    return []
+
+
+def render_verdicts(verdicts: Sequence[lens_judge.Verdict], settings: lens_judge.Settings) -> str:
+    """What was asked, what came back, and — when it changed nothing — that it changed nothing."""
+    lines: list[str] = []
+    for verdict in verdicts:
+        at = "" if verdict.probability is None else f" p={verdict.probability:.2f}"
+        note = f" ({verdict.reason})" if verdict.reason else ""
+        lines.append(f"  {verdict.lens_id}: {verdict.outcome}{at}{note}")
+    if not settings.may_drop and any(v.outcome == lens_judge.DOES_NOT_HOLD for v in verdicts):
+        lines.append(
+            "  (recorded only — `review_policy.lens_judgement.may_drop` is off, so none of these "
+            "was removed from the hand-off)"
+        )
+    return "\n".join(lines)
+
+
+def _judge_handoff(
+    repo: repo_mod.Repo,
+    store: store_mod.Store,
+    plan: models.Plan,
+    state: models.State | None,
+    stage: str,
+    task_id: str,
+    proposed: Sequence[lenses.Lens],
+    settings: lens_judge.Settings,
+) -> tuple[list[lens_judge.Verdict], list[lenses.Lens]]:
+    """`(verdicts, what still goes to the reviewer)` for the `conditional` half of a hand-off.
+
+    This is the place because it is where the narrowing already happens. The selection is resolved
+    once, against the whole plan, and that unit is right — `min_claims` counts what the plan states
+    and no single task has a value for it. What was wrong was handing one list to readers with
+    different reach, and the fix put the narrowing at the hand-off. A condition that takes reading
+    the deliverable belongs at the same point, and for the same reason: **this is the first moment
+    the deliverable exists.**
+
+    Asked once per stage and task. A judgement re-run on every call would let a reviewer and the
+    person who approved the gate hold two different answers to one question, which is the property
+    the freeze exists to remove.
+    """
+    questions = {lens.id: lens.applies_when for lens in proposed if lens.applies_when}
+    if not questions:
+        return [], list(proposed)
+    live, _ = event_chain.scan(repo.events)
+    verdicts = _recorded(live, stage, task_id)
+    if not verdicts:
+        if not settings.configured:
+            # Nothing is asked and nothing is recorded. The lenses stay candidates, which is what
+            # this repository does today, and an event per call saying so would fill the chain with
+            # the absence of a feature.
+            return [], list(proposed)
+        verdicts = lens_judge.judge(
+            settings,
+            state=_deliverable(repo, plan, state, stage, task_id),
+            questions=questions,
+        )
+        with store.transaction() as tx:
+            tx.append(
+                "lens_judged",
+                cycle_id=state.cycle_id if state is not None else "",
+                subject_ids=sorted(questions),
+                detail={
+                    "stage": stage,
+                    "task": task_id,
+                    # Recorded beside the verdicts rather than looked up later: `config.yaml` is
+                    # frozen at the mandate, but a reading of this chain years from now should not
+                    # have to reconstruct which value was in force to know what the probabilities
+                    # were compared against.
+                    "threshold": settings.threshold,
+                    "may_drop": settings.may_drop,
+                    "verdicts": [verdict.as_dict() for verdict in verdicts],
+                },
+            )
+    removed = lens_judge.dropped(verdicts, settings)
+    return verdicts, [lens for lens in proposed if lens.id not in removed]
 
 
 def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str, task_id: str = "") -> int:
@@ -218,6 +367,14 @@ def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str, tas
         if dropped:
             narrowed += f" — {dropped} dropped, their paths are outside this task's scope"
 
+    # The `conditional` half, decided against the thing its condition names. Only after the freeze:
+    # before it there is no design document, no ticket and no diff to read, which is the whole
+    # reason these lenses could not be settled from the plan in the first place.
+    verdicts: list[lens_judge.Verdict] = []
+    settings = lens_judge.Settings.of(store.read_config())
+    if frozen_plan and proposed:
+        verdicts, proposed = _judge_handoff(repo, store, plan, state, stage, task_id, proposed, settings)
+
     print(f"{stage}: {len(applied)} applied, {len(proposed)} proposed ({where}{narrowed})")
     if applied:
         print("\napplied (the condition is decidable, so nobody is asked):")
@@ -225,6 +382,9 @@ def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str, tas
     if proposed:
         print("\nproposed (deciding the condition takes judgement — keep or drop at the mandate):")
         print(lenses.render(proposed))
+    if verdicts:
+        print("\ndecided against this stage's deliverable:")
+        print(render_verdicts(verdicts, settings))
     off = [lens.id for lens in library if lens.stage == stage and lens.lens_class == lenses.CLASS_UNCLASSIFIED]
     if off:
         print(f"\noff, no condition written down yet: {', '.join(off)}")

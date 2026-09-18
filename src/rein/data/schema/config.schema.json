@@ -290,6 +290,43 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 5
+        },
+        "lens_judgement": {
+          "description": "Who settles the lens conditions the plan cannot answer. A `conditional` lens states its condition in prose (`applies_when`) because deciding it takes reading the deliverable — the design document, the tickets, the diff — none of which exists at the mandate, where a human is nonetheless the only thing deciding it today. Absent, nothing is asked and every conditional lens stays a candidate: the degradation is toward more review, never less. Frozen with the rest of this file at the mandate, so a threshold cannot move between the approval and the reviewer.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "description": "How the decider is reached: an argv array, never a shell string — the same rule `quality_gate` steps follow, and for the same reason. It is handed one JSON object on stdin (`{state, questions}`, one `noul` question per lens, keyed by lens id) and must answer with one on stdout (`{answers: {<lens id>: {probability}}}`). Nothing else in `rein` opens a socket, and this does not either: the vendor, the credential and the retry policy stay in a script somebody can read.",
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              }
+            },
+            "threshold": {
+              "description": "The probability at or above which a condition counts as met. Default 0.5. It is recorded on every verdict alongside the probability itself, so moving it can be an informed act rather than a guess: what a past cycle would have dropped at another setting is a question the audit chain can answer.",
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "may_drop": {
+              "description": "Whether a verdict may actually remove a lens from a hand-off, or only be recorded. Default false, and that is the point: judging and acting on the judgement are separate decisions. The period in which the decider's verdicts and a human's own calls at the gate both exist is the only one in which they can be read side by side, and it ends the moment the decider replaces the person.",
+              "type": "boolean"
+            },
+            "timeout_seconds": {
+              "description": "How long the decider gets. Default 60. A timeout is `unavailable`, never `false` — a decider that did not answer and one that answered 'this cannot happen here' are different facts, and the cycle proceeds either way.",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 600
+            }
+          },
+          "required": [
+            "command"
+          ]
         }
       }
     },

@@ -651,3 +651,231 @@ def test_the_stats_point_at_where_a_lens_gets_in_not_only_at_what_to_remove() ->
     assert "section 2 of docs/retrospective.md" in out
     # After the advice it qualifies, like the scope note: a reader holds both by the time they act.
     assert out.index("docs/retrospective.md") > out.index("never found anything")
+
+
+# --- the conditions a machine cannot read off the plan -----------------------------
+#
+# Six packaged lenses are `conditional`, and each of them says in its own words that the plan is
+# not where its answer is: "the plan cannot see that; the design document can", "whether it does
+# takes reading the diff". Their `when:` blocks are `min_claims: 1` — true of any cycle that
+# reaches a gate — so what actually decided them was a human at the mandate, which is *before* the
+# document, the ticket and the diff exist.
+
+
+def _decider(tmp_path: Path, body: str) -> list[str]:
+    """A decider on disk. Argv, stdin, stdout — no network in a test, and none in the product."""
+    import sys
+
+    script = tmp_path / "decider.py"
+    script.write_text(body, encoding="utf-8")
+    return [sys.executable, str(script)]
+
+
+_ECHO = """
+import json, sys
+body = json.load(sys.stdin)
+print(json.dumps({"answers": {lens: {"probability": 0.9} for lens in body["questions"]}}))
+"""
+
+_DENY = """
+import json, sys
+body = json.load(sys.stdin)
+print(json.dumps({"answers": {lens: {"probability": 0.1} for lens in body["questions"]}}))
+"""
+
+
+def test_a_condition_nobody_can_be_asked_about_is_unavailable_never_false() -> None:
+    """With no decider configured, nothing was asked. Saying "the condition does not hold" would
+    turn the absence of a feature into a finding about the change."""
+    from rein import lens_judge
+
+    verdicts = lens_judge.judge(lens_judge.Settings(), state="a design", questions={"L-A": "does it?"})
+
+    assert [v.outcome for v in verdicts] == [lens_judge.UNAVAILABLE]
+    assert verdicts[0].probability is None
+
+
+def test_a_decider_that_does_not_answer_leaves_every_lens_a_candidate() -> None:
+    """The degradation runs toward *more* review. That costs tokens and finds nothing; the
+    opposite degradation would cost findings."""
+    from rein import lens_judge
+
+    def broken(command: object, payload: object, *, timeout: int) -> str:
+        raise RuntimeError("connection refused")
+
+    settings = lens_judge.Settings(command=("decide",))
+    verdicts = lens_judge.judge(settings, state="a design", questions={"L-A": "?"}, transport=broken)
+
+    assert [v.outcome for v in verdicts] == [lens_judge.UNAVAILABLE]
+    assert lens_judge.dropped(verdicts, lens_judge.Settings(command=("decide",), may_drop=True)) == set()
+
+
+@pytest.mark.parametrize("reply", ["not json at all", "{}", '{"answers": []}', '{"answers": {"L-A": {}}}'])
+def test_a_reply_this_cannot_read_is_unavailable_rather_than_guessed_at(reply: str) -> None:
+    """A verdict nobody can trace back to what was asked is worth less than no verdict."""
+    from rein import lens_judge
+
+    settings = lens_judge.Settings(command=("decide",))
+    verdicts = lens_judge.judge(
+        settings, state="a design", questions={"L-A": "?"}, transport=lambda c, p, *, timeout: reply
+    )
+
+    assert [v.outcome for v in verdicts] == [lens_judge.UNAVAILABLE]
+
+
+def test_the_probability_is_kept_even_when_it_changed_nothing() -> None:
+    """A threshold is a knob somebody has to be able to move, and the only thing that makes moving
+    it informed is the distribution it would have been applied to. Which side of the line a lens
+    fell on says nothing about how far."""
+    from rein import lens_judge
+
+    settings = lens_judge.Settings(command=("decide",), threshold=0.5)
+    verdicts = lens_judge.judge(
+        settings,
+        state="a design",
+        questions={"L-A": "?", "L-B": "?"},
+        transport=lambda c, p, *, timeout: '{"answers": {"L-A": {"probability": 0.51}, "L-B": {"probability": 0.02}}}',
+    )
+
+    assert [(v.lens_id, v.outcome) for v in verdicts] == [
+        ("L-A", lens_judge.HOLDS),
+        ("L-B", lens_judge.DOES_NOT_HOLD),
+    ]
+    assert [v.probability for v in verdicts] == [0.51, 0.02]
+
+
+def test_a_verdict_removes_nothing_unless_the_settings_say_it_may() -> None:
+    """Judging and acting on the judgement are separate decisions, and `may_drop` off is what
+    ships. The period in which a decider's verdicts and a human's own calls at the gate both exist
+    is the only one in which they can be read side by side."""
+    from rein import lens_judge
+
+    verdicts = [lens_judge.Verdict("L-A", lens_judge.DOES_NOT_HOLD, probability=0.1)]
+
+    assert lens_judge.dropped(verdicts, lens_judge.Settings(command=("d",))) == set()
+    assert lens_judge.dropped(verdicts, lens_judge.Settings(command=("d",), may_drop=True)) == {"L-A"}
+
+
+def test_the_request_carries_the_lens_s_own_words_unchanged() -> None:
+    """`applies_when` *is* the question. A second field holding a differently-worded one for the
+    machine would be the same claim in two places, and one of them would go stale."""
+    from rein import lens_judge
+
+    body = json.loads(lens_judge.request("a design", {"L-A": "the design names a process boundary"}))
+
+    assert body["state"] == "a design"
+    assert body["questions"]["L-A"] == {"type": "noul", "instructions": "the design names a process boundary"}
+
+
+def _judged_repo(tmp_path: Path, command: list[str], *, may_drop: bool = False) -> Any:
+    from rein import repo as repo_mod
+    from tests._support import SANDBOXED_PROFILES, make_claim, make_config, make_plan, make_state, make_task
+
+    config = make_config(profiles=SANDBOXED_PROFILES)
+    config.setdefault("review_policy", {})["lens_judgement"] = {"command": command, "may_drop": may_drop}
+    seed_repo(
+        tmp_path,
+        state=make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending"), plan_status="draft"),
+        plan=make_plan(
+            claims=[make_claim("C-001", requirement_ids=["R-1"])],
+            tasks=[make_task("T-001", claim_ids=["C-001"], scope_include=["src/**"])],
+        ),
+        config=config,
+    )
+    design = tmp_path / "docs" / "20-design.md"
+    design.parent.mkdir(parents=True, exist_ok=True)
+    design.write_text("# Design\n\nOne component, no process boundary.\n", encoding="utf-8")
+    return repo_mod.Repo(tmp_path)
+
+
+def _judgements(repo: Any) -> list[models.Event]:
+    from rein import event_chain
+
+    live, _ = event_chain.scan(repo.events)
+    return [event for event in live if event.event == "lens_judged"]
+
+
+def test_nothing_is_asked_before_the_freeze(tmp_path: Path, config_home: Path) -> None:
+    """The condition names the deliverable, and at the mandate there is no design document under
+    approval yet — which is the whole reason these lenses could not be settled from the plan."""
+    repo = _judged_repo(tmp_path, _decider(tmp_path, _ECHO))
+
+    assert lens_cmd.main(["--select", "design", "--repo", str(tmp_path)]) == 0
+
+    assert _judgements(repo) == []
+
+
+def test_the_conditional_half_is_decided_against_the_deliverable_after_the_freeze(
+    tmp_path: Path, config_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _judged_repo(tmp_path, _decider(tmp_path, _ECHO))
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+    _approve_mandate(repo)
+    capsys.readouterr()
+
+    assert lens_cmd.main(["--select", "design", "--repo", str(tmp_path)]) == 0
+
+    judged = _judgements(repo)
+    assert len(judged) == 1
+    detail = judged[0].detail
+    assert detail["stage"] == "design" and detail["threshold"] == 0.5
+    outcomes = {row["lens"]: row["outcome"] for row in detail["verdicts"]}
+    assert outcomes and set(outcomes.values()) == {"holds"}
+    # The probability is on the record even though it decided nothing here.
+    assert all(row["probability"] == 0.9 for row in detail["verdicts"])
+    assert "decided against this stage's deliverable" in capsys.readouterr().out
+
+
+def test_the_hand_off_asks_once_and_reads_the_answer_back(tmp_path: Path, config_home: Path) -> None:
+    """A judgement re-run on every call would let a reviewer and the person who approved the gate
+    hold two different answers to one question — the property the freeze exists to remove."""
+    repo = _judged_repo(tmp_path, _decider(tmp_path, _ECHO))
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+    _approve_mandate(repo)
+
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+    # The decider is replaced between the two calls. If it were asked again the answer would move.
+    (tmp_path / "decider.py").write_text(_DENY, encoding="utf-8")
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+
+    judged = _judgements(repo)
+    assert len(judged) == 1
+    assert {row["outcome"] for row in judged[0].detail["verdicts"]} == {"holds"}
+
+
+def test_a_verdict_that_may_drop_narrows_the_hand_off_and_not_the_plan(
+    tmp_path: Path, config_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It can only ever remove, and only from what this reviewer is sent to look for. What the
+    mandate approved is the ceiling, and the frozen record of it does not move."""
+    from rein import store as store_mod
+
+    repo = _judged_repo(tmp_path, _decider(tmp_path, _DENY), may_drop=True)
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+    frozen = [dict(entry.raw) for entry in _plan(store_mod, repo).lenses]
+    _approve_mandate(repo)
+    capsys.readouterr()
+
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert "0 proposed" in out
+    assert "does_not_hold" in out
+    # The audit guarantee is untouched: the plan still records every lens the human approved.
+    assert [dict(entry.raw) for entry in _plan(store_mod, repo).lenses] == frozen
+
+
+def test_a_verdict_the_settings_do_not_act_on_says_so(
+    tmp_path: Path, config_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _judged_repo(tmp_path, _decider(tmp_path, _DENY))
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+    _approve_mandate(repo)
+    capsys.readouterr()
+
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert "does_not_hold" in out
+    assert "recorded only" in out
+    assert "0 proposed" not in out

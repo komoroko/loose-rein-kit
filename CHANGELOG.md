@@ -6,6 +6,61 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [Unreleased]
 
+### The conditions a machine cannot read off the plan
+
+Six of the twenty-five packaged lenses are `conditional`, and each of them says, in its own words,
+that the plan is not where its answer is. "Nothing in the plan says whether they do; it takes
+reading them." "The plan cannot see that; the design document can." "Whether it does takes reading
+the diff." Their `when:` blocks are `min_claims: 1` or `min_tasks: 1` — true of any cycle that
+reaches a gate — because there was nothing else to write: **the condition was in prose, and nothing
+read prose.**
+
+What decided them was the human at the mandate. The mandate is before the design document, the
+tickets and the diff exist, so the person being asked had exactly what `applies_when` says is not
+enough — the plan. A condition that takes reading the deliverable was being settled by the one
+reader who could not read it.
+
+`review_policy.lens_judgement` names a decider for that half. The question put to it *is*
+`applies_when`, unchanged: a second field holding a differently-worded question for the machine
+would be the same claim in two places, and one of them would go stale. It runs at the hand-off to a
+reviewer — the point the per-task path narrowing already happens, and the first moment the
+deliverable exists — against the requirements, the design document and its ADRs, the tickets, or
+the diff of the task's scope.
+
+**It is reached as a command, not as an HTTP call.** Nothing in `rein` opens a socket; git, `gh`,
+the agent CLIs and the container runtime are all subprocesses, and this is one too — an argv array,
+never a shell string, the same rule `quality_gate` steps follow. One JSON object on stdin
+(`{state, questions}`, one question per lens, keyed by lens id), one on stdout
+(`{answers: {<lens id>: {probability}}}`). The vendor, the credential and the retry policy stay in
+a script somebody can read.
+
+Four properties hold it in place:
+
+- **It only ever removes.** A verdict never adds a lens to the frozen selection, so the guarantee
+  that nothing reaches a reviewer without a human having seen it on the approval screen does not
+  depend on any of this. The plan is not rewritten; the hand-off is narrowed.
+- **It is not a gate input.** No decider, an unreachable one, a timeout, a reply in the wrong
+  shape — every one of those is `unavailable`, every conditional lens stays a candidate, and the
+  cycle proceeds. The degradation runs toward *more* review, which costs tokens and finds nothing;
+  the opposite would cost findings. `unavailable` is deliberately not `false`: a decider that was
+  never reachable and one that decided nothing applies are different facts.
+- **It asks once.** The verdict goes into the audit chain and is read back from there, the same way
+  the selection itself is resolved once and read back. A reviewer and the person who approved the
+  gate holding two different answers to one question is the property the freeze exists to remove.
+- **`may_drop` is off by default.** Judging and acting on the judgement are separate decisions.
+  While it is off the verdicts are recorded and nothing is removed — which is the only period in
+  which the decider's calls and the human's own calls at the gate both exist and can be read side
+  by side, and it ends the moment one replaces the other.
+
+The probability is recorded on every verdict, including the ones where it changed nothing, together
+with the threshold in force. A threshold is a knob somebody has to be able to move, and the only
+thing that makes moving it an informed act is the distribution it would have been applied to; which
+side of the line a lens fell on says nothing about how far.
+
+**`lock.FORMAT` moves to `rein-grounded-v6`.** `review_policy` is closed, so a repository that
+configures a decider holds a `config.yaml` that 0.8.1 refuses. A repository that configures nothing
+writes exactly what it wrote before and needs only `rein sync --force`.
+
 ### A rule restored in one direction, broken in the other
 
 0.6.1 restored the rule that **whatever a gate requires on screen belongs on every route that can

@@ -462,6 +462,14 @@ EVENT_ORDER: tuple[str, ...] = (
     # without the record, a selection that changed between the gate screen and the reviewer would
     # leave nothing behind saying it had.
     "lens_selected",
+    # A conditional lens was put to a decider against the deliverable its condition names, and what
+    # came back. Its own kind rather than a field on `lens_selected`: that one is about the plan,
+    # written once before the freeze, and this is about a hand-off that happens after it, once per
+    # stage and task. Outside `ATTENTION_EVENTS` — it asks nobody to judge anything now. It carries
+    # the probability even when the probability did not change the outcome, because a threshold is
+    # a knob somebody has to be able to move and the distribution it would have been applied to is
+    # the only thing that makes moving it an informed act.
+    "lens_judged",
     # What the draft plan said each decision's `reach` was, at the last pre-freeze pass rein made
     # over it. Its own kind because it is the only "before" the freeze can be compared against: a
     # human who moves a decision from `mandate` to `local` is saying the loop asked about something
@@ -1927,6 +1935,19 @@ class Config:
         policy = self.raw.get("review_policy")
         value = policy.get("composition") if isinstance(policy, dict) else None
         return value if value in COMPOSITION_MODE_VALUES else "auto"
+
+    @property
+    def lens_judgement(self) -> Mapping[str, Any]:
+        """`review_policy.lens_judgement` — who decides the conditions the plan cannot answer.
+
+        Absent by default, and absent means nothing is asked: every `conditional` lens stays a
+        candidate and the review costs what it costs today. Frozen with the rest of `config.yaml`
+        at the mandate, for the same reason `quality_gate` is — a threshold that could move between
+        the approval and the reviewer is a selection the approval did not see.
+        """
+        policy = self.raw.get("review_policy")
+        value = policy.get("lens_judgement") if isinstance(policy, dict) else None
+        return value if isinstance(value, dict) else {}
 
     @property
     def github(self) -> Mapping[str, Any]:
