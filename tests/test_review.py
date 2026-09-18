@@ -184,7 +184,7 @@ def test_what_the_change_requires_of_a_person_survives_the_schema_validated_writ
     plan_path = review_repo / ".rein" / "plan.yaml"
     plan = yaml.safe_load(plan_path.read_text(encoding="utf-8"))
     plan["tasks"][0]["operator_surface"] = [
-        {"kind": "persistence", "name": "users", "paths": ["db/schema.sql"], "adr": "ADR-001"}
+        {"kind": "persistence", "name": "users", "paths": ["db/schema.sql"], "reversible": True, "adr": "ADR-001"}
     ]
     plan_path.write_text(yaml.safe_dump(plan, sort_keys=False), encoding="utf-8")
     _git(review_repo, "add", "-A")

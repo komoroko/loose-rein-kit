@@ -1,10 +1,20 @@
 """The mechanism layer: deny in code what the convention layer merely asks agents not to do.
 
 Registered as a PreToolUse hook by `rein install <agent>`, this fires on every
-editor write and answers one question — may this path be written right now? It also runs at
-commit stage (`--check-diff`) over every changed path, so an agent whose environment cannot
-intercept edits, or a write that bypassed the hook (a shell redirect, `sed -i`), is still
-checked before the change lands.
+editor write and answers one question — may this path be written right now? That is one of three
+checkpoints, and the only one a host's capabilities decide:
+
+* **edit-time** — this hook. `rein install` registers it on the four hosts that have one.
+* **commit-stage** — `--check-diff`, over every path in the diff. Registered by a repository's own
+  `.pre-commit-config.yaml`; `rein` neither installs one nor ships one, so this checkpoint is a
+  fact about the repository and `rein doctor` reports whether it holds.
+* **merge-stage** — `build_loop._gate_violations`, in code inside `rein build`, over every path a
+  task changed before it lands. No host, hook or config can be missing it.
+
+So an agent whose environment cannot intercept edits, or a write that bypassed the hook (a shell
+redirect, `sed -i`), is still checked — by the third one, which is also the reason the first two
+being absent degrades *when a violation is caught*, not *whether the boundary holds*. What has no
+checkpoint rein installs is a change that never goes through `rein build` at all.
 
 Four rules, in order of severity:
 
@@ -681,13 +691,14 @@ def patch_targets(command: str) -> list[str]:
 #: question. Claude Code sends `file_path` for Write/Edit and `notebook_path` for NotebookEdit;
 #: VS Code Copilot camelCases both. A notebook is source like any other file — a `.ipynb` under a
 #: guarded prefix was reaching the guard with no path it could read, so the edit-stage check passed
-#: it and only the commit-stage one (extension-blind, walking `git status`) ever saw it.
+#: it and nothing looked at it again until `rein build` landed it.
 PATH_KEYS: tuple[str, ...] = ("file_path", "filePath", "notebook_path", "notebookPath")
 
 #: The Claude Code tools that write a file, and therefore all have to reach the guard. This tuple is
 #: the claim; `doctor.check_hook` holds the installed PreToolUse matcher against it, and `PATH_KEYS`
 #: is what makes the coverage real once a call actually arrives. A tool absent from both is a hole
-#: nothing reports: the matcher never fires and the commit-stage check becomes the only layer left.
+#: nothing reports: the matcher never fires, and what the tool writes is not looked at again until
+#: `rein build` lands it — a whole task later, as an escalation rather than a denied write.
 #:
 #: `MultiEdit` is retired upstream and stays. This is a foreign host's tool namespace, not a format
 #: of ours to keep tidy — a dead alternative in a regex costs nothing and keeps an older host covered.
@@ -747,14 +758,66 @@ def hook_paths(tool_input: Mapping[str, Any]) -> list[str]:
     return patch_targets(command) if isinstance(command, str) else []
 
 
+#: Where a repository registers the commit-stage check, when it registers one. `rein install` does
+#: not write this file and `src/rein/data/` does not ship one, so whether the checkpoint holds is a
+#: fact about the repository — looked at, never assumed.
+PRE_COMMIT_PATH = ".pre-commit-config.yaml"
+
+#: What :func:`commit_stage_registration` can answer. `NEUTERED` is the one worth naming: `rein
+#: guard` **alone** is the *hook* invocation — it reads a host's JSON payload on stdin, so under
+#: pre-commit it is handed none, warns, and allows. A hook that runs on every commit and checks
+#: nothing is not the commit-stage check, and reading the bare name as one is what let the claim
+#: "the commit-stage check still applies" be printed over it.
+COMMIT_STAGE_REGISTERED = "registered"
+COMMIT_STAGE_NEUTERED = "neutered"
+COMMIT_STAGE_ABSENT = "absent"
+COMMIT_STAGE_UNREADABLE = "unreadable"
+
+
+def commit_stage_registration(text: str) -> str:
+    """Which of the four a `.pre-commit-config.yaml` text is, read **as a config and not as text**.
+
+    A substring search cannot answer this. pre-commit splits an invocation across two keys —
+    `entry: rein guard` with `args: [--check-diff]` is the idiom the tool's own documentation
+    uses — so a regex over one line reports a working registration as a neutered one, and a
+    commented-out block as a working one. One reader, because `doctor.check_hook` tells the
+    repository's owner what it has and `policy_check` refuses a head that takes it away, and those
+    two disagreeing is the drift that makes the refusal worthless.
+    """
+    from rein import strict_yaml  # lazy: keep `import gate_guard` cheap on the hook path
+
+    if not text.strip():
+        return COMMIT_STAGE_ABSENT
+    try:
+        document = strict_yaml.load_mapping(text, what=PRE_COMMIT_PATH)
+    except strict_yaml.StrictParseError:
+        return COMMIT_STAGE_UNREADABLE
+    verdict = COMMIT_STAGE_ABSENT
+    repos = document.get("repos")
+    for repo_entry in repos if isinstance(repos, list) else []:
+        hooks = repo_entry.get("hooks") if isinstance(repo_entry, dict) else ()
+        for hook in hooks if isinstance(hooks, list) else ():
+            if not isinstance(hook, dict) or "rein guard" not in str(hook.get("entry", "")):
+                continue
+            args = hook.get("args")
+            words = str(hook["entry"]).split()
+            if isinstance(args, list):
+                words += [str(arg) for arg in args]
+            if "--check-diff" in words:
+                return COMMIT_STAGE_REGISTERED
+            verdict = COMMIT_STAGE_NEUTERED
+    return verdict
+
+
 #: The guard has exactly two invocations, and a human asking about them is a third thing entirely.
 USAGE = """usage: rein guard [--check-diff]
 
   (no arguments)  pre-tool hook mode (Claude Code `PreToolUse`, Gemini CLI `BeforeTool`, and the
                   hosts that copied either): reads the host's JSON payload on stdin and answers
                   whether the paths it is about to write may be written right now.
-  --check-diff    commit-stage mode: checks every path in the diff against HEAD. This is what
-                  .pre-commit-config.yaml registers, and what `make check` runs.
+  --check-diff    commit-stage mode: checks every path in the diff against HEAD. This is what a
+                  repository's own .pre-commit-config.yaml registers — `rein` neither installs one
+                  nor ships one, so `rein doctor` reports whether this repository has it.
 """
 
 
@@ -779,7 +842,8 @@ def main(argv: list[str] | None = None) -> int:
     except (json.JSONDecodeError, ValueError):
         # Fail-open by design: some hosts fire hooks for every tool and a malformed payload must
         # not block path-less tools — but leave a trace, so a guard that stopped guarding is
-        # visible in the hook log rather than silently absent. The commit-stage check still runs.
+        # visible in the hook log rather than silently absent. What the write changes is still
+        # re-checked where `rein build` lands it.
         logger.warning("gate_guard: unparseable hook payload on stdin — allowing without a gate check")
         return 0
     tool_input = tool_arguments(payload)
@@ -791,7 +855,7 @@ def main(argv: list[str] | None = None) -> int:
         # allows every edit.
         logger.warning(
             f"gate_guard: this host names the tool call's arguments none of {', '.join(TOOL_ARGS_KEYS)} "
-            "— allowing without a gate check. The commit-stage `rein guard --check-diff` still runs."
+            "— allowing without a gate check. What this writes is re-checked where `rein build` lands it."
         )
         return 0
     paths = hook_paths(tool_input)

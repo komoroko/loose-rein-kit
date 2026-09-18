@@ -31,9 +31,13 @@
 > machine-readable copy lives in `.rein/plan.yaml` under this task's `operator_surface:`**, and that
 > is the one acceptance reads. Each entry names a `kind` (`persistence` / `public_interface` /
 > `dependency` / `default_value` / `observability` / `security_boundary` — the same words the blind
-> extractor uses), what a person deals with, where it can be read at the end, and the ADR that
-> decided it. Nothing to declare is a fine answer; what the code turns out to require still reaches
-> acceptance, just as something nobody foresaw.
+> extractor uses), what a person deals with, where it can be read at the end, **whether it can be
+> undone**, and the ADR that decided it. Nothing to declare is a fine answer; what the code turns out
+> to require still reaches acceptance, just as something nobody foresaw.
+>
+> `reversible: false` is not a label — it makes this task its own contact point. The loop stops in
+> front of it and a human runs `rein approve T-NNN` before it runs, because afterwards there is
+> nothing to approve. Take the answer from the design's reversibility line; do not decide it here.
 
 - **<kind>**: <what a person deals with> — read at `<path>` (ADR-NNN)
 

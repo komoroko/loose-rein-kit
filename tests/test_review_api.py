@@ -451,3 +451,65 @@ class TestAsBuilt:
         monkeypatch.setattr(review_api, "AS_BUILT_MAX_BYTES", 1)
         payload = review_api.as_built(root, "db/schema.sql")
         assert payload["too_large"] is True and payload["limit"] == 1 and "content" not in payload
+
+
+# --- the reading room for a gate named after a task ---------------------------
+
+
+def _crossing_repo(make_repo: MakeRepo, **state_kwargs: Any) -> Path:
+    from tests._support import make_plan, make_task
+
+    task = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        operator_surface=[
+            {
+                "kind": "persistence",
+                "name": "the users table, migrated",
+                "paths": ["db/schema.sql"],
+                "reversible": False,
+                "adr": "ADR-007",
+            }
+        ],
+    )
+    gates = {"mandate": "approved", "T-001": "pending", "T-003": "pending", "acceptance": "pending"}
+    gates.update(state_kwargs.pop("gates", {}))
+    root = make_repo(plan=make_plan(tasks=[task, make_task("T-003")]), state=make_state(gates=gates), **state_kwargs)
+    (root / "docs" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / "tasks" / "T-001.md").write_text("# T-001\n\nmigrate users\n", encoding="utf-8")
+    (root / "docs" / "decisions").mkdir(parents=True, exist_ok=True)
+    (root / "docs" / "decisions" / "ADR-007.md").write_text("# ADR-007\n\nwhy it cannot be undone\n", encoding="utf-8")
+    return root
+
+
+def test_a_crossing_gate_reads_its_ticket_and_the_adr_its_declaration_points_at(make_repo: MakeRepo) -> None:
+    """Derived, because the gate is: it exists because this plan froze this task. The ADR is where
+    the reversibility was argued, which is what `operator_surface.adr` has always been for."""
+    payload = _review(_crossing_repo(make_repo), "T-001")
+
+    assert [d["label"] for d in payload["deliverables"]] == ["docs/tasks/T-001.md", "docs/decisions/ADR-007.md"]
+    assert [d["label"] for d in payload["context"]] == ["docs/20-design.md"]
+
+
+def test_a_task_id_this_cycle_never_made_a_gate_is_an_unknown_gate(make_repo: MakeRepo) -> None:
+    """Not an empty reading room. A well-formed id is not a gate until the mandate froze it as one."""
+    with pytest.raises(review_api.ReviewError):
+        _review(_crossing_repo(make_repo), "T-009")
+
+
+def test_two_crossings_are_both_open_for_a_decision_at_once(make_repo: MakeRepo) -> None:
+    """They carry no order against each other — each rests on the mandate and nothing else. Reading
+    `is_awaiting` as "first in the list" told a human the second was not theirs to decide."""
+    root = _crossing_repo(make_repo)
+
+    assert _review(root, "T-001")["is_awaiting"] is True
+    assert _review(root, "T-003")["is_awaiting"] is True
+    # …and acceptance is not, because it rests on both.
+    assert _review(root, "acceptance")["is_awaiting"] is False
+
+
+def test_an_approved_gate_is_not_open_for_a_decision(make_repo: MakeRepo) -> None:
+    root = _crossing_repo(make_repo, gates={"T-001": "approved"})
+
+    assert _review(root, "T-001")["is_awaiting"] is False
+    assert _review(root, "T-001")["status"] == "approved"

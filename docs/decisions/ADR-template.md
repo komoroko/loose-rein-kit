@@ -2,7 +2,7 @@
 
 - **Status**: proposed | accepted | rejected | superseded (ADR-NNN)
 - **Date**: YYYY-MM-DD
-- **Decider**: human (finalized at gate ②)
+- **Decider**: human (finalized at the mandate gate)
 - **Related requirements**: R-x
 
 ## Background / problem

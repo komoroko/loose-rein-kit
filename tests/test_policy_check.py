@@ -360,7 +360,9 @@ def test_a_head_that_feeds_the_check_a_base_it_chose_is_refused(repo: repo_mod.R
 @pytest.mark.integration
 def test_a_head_that_removes_the_commit_stage_guard_is_refused(repo: repo_mod.Repo) -> None:
     hook = repo.root / ".pre-commit-config.yaml"
-    hook.write_text("repos:\n  - repo: local\n    hooks:\n      - id: g\n        entry: rein guard\n", "utf-8")
+    hook.write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: g\n        entry: rein guard --check-diff\n", "utf-8"
+    )
     _git(repo.root, "add", "-A")
     _git(repo.root, "commit", "-qm", "wire the guard")
     base = _head(repo)
@@ -368,6 +370,28 @@ def test_a_head_that_removes_the_commit_stage_guard_is_refused(repo: repo_mod.Re
     hook.write_text("repos: []\n", encoding="utf-8")
     _git(repo.root, "add", "-A")
     _git(repo.root, "commit", "-qm", "unwire the guard")
+    problems = policy_check.check(repo, base, _head(repo))
+    assert any("commit-stage gate guard" in p for p in problems)
+
+
+@pytest.mark.integration
+def test_a_head_that_neuters_the_commit_stage_guard_is_refused(repo: repo_mod.Repo) -> None:
+    """Deleting the hook is the obvious move; leaving it and taking `--check-diff` off is the
+    cheap one. `rein guard` alone reads a host's JSON payload on stdin, so under pre-commit it is
+    handed none, warns and allows — a hook that runs on every commit and checks nothing. The
+    marker was the substring `rein guard`, which that rewrite keeps, so this passed.
+    """
+    hook = repo.root / ".pre-commit-config.yaml"
+    hook.write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: g\n        entry: rein guard --check-diff\n", "utf-8"
+    )
+    _git(repo.root, "add", "-A")
+    _git(repo.root, "commit", "-qm", "wire the guard")
+    base = _head(repo)
+
+    hook.write_text("repos:\n  - repo: local\n    hooks:\n      - id: g\n        entry: rein guard\n", "utf-8")
+    _git(repo.root, "add", "-A")
+    _git(repo.root, "commit", "-qm", "keep the name, drop the check")
     problems = policy_check.check(repo, base, _head(repo))
     assert any("commit-stage gate guard" in p for p in problems)
 

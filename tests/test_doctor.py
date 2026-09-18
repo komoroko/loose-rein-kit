@@ -281,7 +281,7 @@ def test_unparseable_settings_warn_rather_than_pass(tmp_path: Path) -> None:
 
 
 def test_no_gate_approved_yet_is_info(tmp_path: Path) -> None:
-    state = models.State(make_state(gates=dict.fromkeys(models.GATE_ORDER, "pending")))
+    state = models.State(make_state(gates=dict.fromkeys(models.GATE_ENDS, "pending")))
     results = doctor.check_receipts(state)
     assert [f.level for f in results] == ["INFO"]
 
@@ -831,8 +831,92 @@ def _levels(findings: list[doctor.Finding], text: str) -> list[str]:
 def test_a_repo_with_no_hook_host_is_warned(tmp_path: Path) -> None:
     seed_repo(tmp_path)
     findings = doctor.check_hook(repo_mod.Repo(tmp_path))
-    assert [f.level for f in findings] == ["WARN"]
+    assert [f.level for f in findings] == ["WARN", "INFO"]
     assert "edit-time enforcement is absent" in findings[0].message
+
+
+def test_the_absent_hook_warning_names_what_still_holds(tmp_path: Path) -> None:
+    """It used to end "the commit-stage check still applies **if** the pre-commit hook is
+    installed" — a condition nothing had checked, offered where the operator is looking for
+    reassurance. What actually holds without any host hook is merge-stage, which is in code."""
+    seed_repo(tmp_path)
+    warning = doctor.check_hook(repo_mod.Repo(tmp_path))[0].message
+    assert "Merge-stage still holds" in warning
+    assert "rein build" in warning
+    assert "if the pre-commit hook is installed" not in warning
+
+
+def test_the_commit_stage_checkpoint_is_looked_at_not_assumed(tmp_path: Path) -> None:
+    """rein installs no `.pre-commit-config.yaml` and ships none, so whether the commit-stage
+    check runs is a fact about the repository. A diagnostic that can read it must not hedge."""
+    seed_repo(tmp_path)
+    assert _levels(doctor.check_hook(repo_mod.Repo(tmp_path)), "commit-stage") == ["INFO"]
+    absent = [f for f in doctor.check_hook(repo_mod.Repo(tmp_path)) if "commit-stage" in f.message][0]
+    assert "does not register" in absent.message
+    # …and a change made outside `rein build` is where the gap actually is.
+    assert "outside `rein build`" in absent.message
+
+    (tmp_path / doctor.PRE_COMMIT_PATH).write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: rein-guard\n        entry: rein guard --check-diff\n",
+        encoding="utf-8",
+    )
+    assert _levels(doctor.check_hook(repo_mod.Repo(tmp_path)), "commit-stage") == ["PASS"]
+
+
+def test_a_commit_stage_entry_without_check_diff_is_not_a_registration(tmp_path: Path) -> None:
+    """`rein guard` alone is the *hook* invocation — it reads a host's JSON payload on stdin. Run
+    from pre-commit it is handed no payload, warns, and returns the allow code, so the hook fires
+    on every commit and checks nothing. Reporting that as PASS would be the same class of claim
+    this reading was written to stop making, one file further in."""
+    seed_repo(tmp_path)
+    (tmp_path / doctor.PRE_COMMIT_PATH).write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: rein-guard\n        entry: rein guard\n",
+        encoding="utf-8",
+    )
+    findings = [f for f in doctor.check_hook(repo_mod.Repo(tmp_path)) if "commit-stage" in f.message]
+    assert [f.level for f in findings] == ["INFO"]
+    assert "without `--check-diff`" in findings[0].message
+    assert "reads no payload, warns and allows" in findings[0].message
+
+
+def test_the_registration_is_read_as_a_config_and_not_as_text(tmp_path: Path) -> None:
+    """pre-commit splits an invocation across `entry` and `args`, and its own documentation does.
+
+    A line-wise regex called that working registration a neutered one — an INFO asserting the hook
+    "reads no payload, warns and allows" about a repository where the checkpoint holds. Wrong in
+    the safe direction is still wrong: this reading exists to say only what it verified.
+    """
+    seed_repo(tmp_path)
+    (tmp_path / doctor.PRE_COMMIT_PATH).write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: rein-guard\n        entry: rein guard\n"
+        "        args: [--check-diff]\n",
+        encoding="utf-8",
+    )
+    assert _levels(doctor.check_hook(repo_mod.Repo(tmp_path)), "commit-stage") == ["PASS"]
+
+
+def test_a_config_that_cannot_be_parsed_is_said_to_be_unreadable(tmp_path: Path) -> None:
+    """Not "absent". A file nobody can read is a question this check could not answer, and the
+    tri-state is the whole reason it is worth reading at all."""
+    seed_repo(tmp_path)
+    (tmp_path / doctor.PRE_COMMIT_PATH).write_text("repos: [oops\n", encoding="utf-8")
+
+    findings = [f for f in doctor.check_hook(repo_mod.Repo(tmp_path)) if "commit-stage" in f.message]
+    assert [f.level for f in findings] == ["INFO"]
+    assert "could not be read as an unambiguous YAML document" in findings[0].message
+
+
+def test_the_commit_stage_finding_is_reported_with_a_hook_host_too(tmp_path: Path) -> None:
+    """The three checkpoints are independent. Having an edit-time hook says nothing about
+    whether the commit-stage one is registered, so the reading is not conditioned on it."""
+    seed_repo(
+        tmp_path,
+        settings='{"hooks": {"PreToolUse": [{"matcher": "Write|Edit|MultiEdit|NotebookEdit", '
+        '"hooks": [{"type": "command", "command": "rein guard"}]}]}}',
+    )
+    findings = doctor.check_hook(repo_mod.Repo(tmp_path))
+    assert _levels(findings, "gate guard registered") == ["PASS"]
+    assert _levels(findings, "commit-stage") == ["INFO"]
 
 
 def test_the_codex_hook_file_alone_registers_the_guard(tmp_path: Path) -> None:
@@ -866,6 +950,11 @@ def test_the_codex_registration_does_not_claim_to_be_active(tmp_path: Path) -> N
     )
     findings = doctor.check_hook(repo_mod.Repo(tmp_path))
     assert _levels(findings, "only once the project is trusted") == ["INFO"]
+    # It used to say the session "falls back to the commit-stage check" — which rein does not
+    # install. What catches an untrusted-project session's changes is where `rein build` lands them.
+    message = [f for f in findings if "only once the project is trusted" in f.message][0].message
+    assert "falls back to the commit-stage check" not in message
+    assert "`rein build` lands it" in message
 
 
 def test_a_matcher_that_misses_a_write_tool_is_reported(tmp_path: Path) -> None:

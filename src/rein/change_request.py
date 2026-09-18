@@ -40,8 +40,17 @@ class ChangeRequestError(RuntimeError):
     """The request cannot be recorded, or does not exist."""
 
 
-def new_id(gate: str) -> str:
-    return f"CR-{gate.upper()}-{event_chain.new_id()[:8].upper()}"
+def new_id() -> str:
+    """An identity, and nothing else.
+
+    It used to carry the gate name — `CR-{gate.upper()}-{hex}` — which made the id's own schema
+    pattern a second, weaker copy of the gate vocabulary. The copy went stale the moment a cycle
+    could grow a gate named `T-001`: every request against a crossing died on
+    `'CR-T-001-…' does not match '^CR-[A-Z]+-[0-9A-F]+$'`, so the one gate kind a human could not
+    refuse was the irreversible one. Which gate a request stands against is the record's `gate`
+    field; an id that restates it is a grammar to keep in step with for nothing.
+    """
+    return f"CR-{event_chain.new_id()[:8].upper()}"
 
 
 def _find(state: models.State, request_id: str) -> Mapping[str, object] | None:
@@ -72,8 +81,8 @@ def add(repo: repo_mod.Repo, gate: str, target: str, reason: str) -> str:
     case it exists for. It needs no authority of any kind, because it can only ever *narrow* what
     happens next.
     """
-    if gate not in models.GATE_VALUES:
-        raise ChangeRequestError(f"unknown gate {gate!r} (one of {', '.join(models.GATE_ORDER)})")
+    if not models.gate_name_ok(gate):
+        raise ChangeRequestError(f"unknown gate {gate!r} ({models.gate_names()})")
     if not target.strip():
         raise ChangeRequestError(
             "a change request needs a --target: the file#anchor or id it is about "
@@ -87,7 +96,12 @@ def add(repo: repo_mod.Repo, gate: str, target: str, reason: str) -> str:
     state = store.read_state()
     if state is None:
         raise ChangeRequestError("no .rein/state.yaml — run `rein init` first")
-    request_id = new_id(gate)
+    # Spelling was checked above; this is the other question, and the one a caller holding a state
+    # owes. A request filed against a gate this cycle does not have holds nothing shut and appears
+    # in no `rein changes list --gate <one it has>`, which reads as "recorded" and is not.
+    if absent := state.gate_absence_reason(gate):
+        raise ChangeRequestError(absent)
+    request_id = new_id()
 
     with store.transaction() as tx:
         current = tx.store.read_state()
@@ -220,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     add_p = sub.add_parser("add", help="record a change request against a gate (holds it shut)")
-    add_p.add_argument("gate", help=f"one of: {', '.join(models.GATE_ORDER)}")
+    add_p.add_argument("gate", help=models.gate_names())
     add_p.add_argument("--target", required=True, help="what it is about: docs/10-requirements.md#R-3, T-004, C-001")
     add_p.add_argument("--reason", required=True, help="what is wrong")
 

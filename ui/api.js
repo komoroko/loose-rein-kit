@@ -9,12 +9,8 @@
 export const TOKEN = window.TOKEN;
 export const READ_ONLY = window.READ_ONLY;
 
-// Gate indices in the notation the documents use (AGENTS.md, the phase commands, the review pane's
-// own prose) — so the dashboard and the docs name the same gate the same way.
-const CIRCLED = ["", "①", "②", "③", "④", "⑤"];
-export function circled(i) {
-  return CIRCLED[i] || "g" + i;
-}
+// Gates are named, never numbered. They were ①..⑤, then ①② — a position in a fixed ladder, which
+// stops being true the moment a cycle declares an irreversible point and grows a gate of its own.
 
 // ---- toasts ----
 // A store rather than a hook, because the callers are event handlers and async writes, not
@@ -98,8 +94,11 @@ export async function getJson(path) {
 
 // The gate the human is standing at: the first one not yet approved. Derived once — the spine, the
 // tab badge, the review pane and the notifier all have to agree on it.
+// The gate to read next, and the ◆ on the spine. `decidable` is the server's answer
+// (`models.State.decidable_gates`), not "the first unapproved one" — that reading is a position in
+// a ladder, and with a crossing pending it points at a gate whose upstream is still shut.
 export function awaitingGate(status) {
-  return ((status || {}).gates || []).find((g) => g.status !== "approved") || null;
+  return ((status || {}).gates || []).find((g) => g.decidable) || null;
 }
 
 export function copyCmd(cmd, el) {

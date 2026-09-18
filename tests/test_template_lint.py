@@ -36,7 +36,10 @@ _CONFIG = store.dump_yaml(
     )
 ).decode()
 
-_AGENTS = "kinds: foundation / parallel / integration. gates: mandate, acceptance. steps: test, review.\n"
+_AGENTS = (
+    "kinds: foundation / parallel / integration. gates: mandate, acceptance, and T-NNN for an "
+    "irreversible point. steps: test, review.\n"
+)
 _TASKS_CMD = (
     "kind: foundation | parallel | integration. "
     "status: todo in-progress blocked needs-revision awaiting-evidence done.\n"
@@ -63,7 +66,17 @@ def _files(**overrides: str) -> dict[str, str]:
 def test_gate_names_come_from_the_vocabulary_not_a_scraped_file() -> None:
     """Read from a document's front matter these would drift. A constant cannot drift from the
     code that acts on it, which is the whole point of a canary."""
-    assert template_lint.gate_names() == sorted(models.GATE_ORDER)
+    assert template_lint.gate_names() == sorted([*models.GATE_ENDS, "T-NNN"])
+
+
+def test_the_always_loaded_rules_have_to_name_the_third_kind_of_gate() -> None:
+    """A cycle grows a gate per irreversible point, and the file an agent always has loaded said
+    the lifecycle had two. There is no *name* to echo — those are per cycle — but there is a
+    spelling, and leaving it unrequired is how the rules came to describe a lifecycle the loop had
+    stopped having."""
+    files = _files(**{template_lint.AGENTS_MD: _AGENTS.replace(", and T-NNN for an irreversible point", "")})
+
+    assert any("AGENTS.md" in f and "`T-NNN`" in f for f in template_lint.check_vocabulary(files))
 
 
 def test_quality_gate_steps_reads_the_dod_names() -> None:
@@ -207,7 +220,16 @@ def test_check_wrapper_parity_trips_on_description_drift(tmp_path: Path) -> None
 _CLAUDE_MAP = "| `structured-question` | AskUserQuestion |\n| `notify-and-wait` | PushNotification |\n"
 _COPILOT_MAP = "| `structured-question` | numbered options in chat |\n| `notify-and-wait` | end the turn |\n"
 _CODEX_MAP = "| `structured-question` | numbered options in chat |\n| `notify-and-wait` | end the turn |\n"
-_AGENTS_VOCAB = "vocabulary: `structured-question`, `notify-and-wait`.\n"
+# AGENTS.md's capability section. It is a **table** here because that is the only form that
+# declares a degradation: `capability_degradations` reads the third column, and a row that has
+# fallen out of the table has no column at all.
+_AGENTS_VOCAB = (
+    "## Capability vocabulary (portable verbs)\n\n"
+    "| Capability | Meaning | Lacking it |\n"
+    "|---|---|---|\n"
+    "| `structured-question` | batched questions | numbered chat options, then wait |\n"
+    "| `notify-and-wait` | flag a pending decision | state it, end the turn |\n"
+)
 
 
 def _maps(claude: str = _CLAUDE_MAP, copilot: str = _COPILOT_MAP, codex: str = _CODEX_MAP) -> dict[str, str]:
@@ -237,14 +259,54 @@ def test_check_capability_mapping_covers_the_codex_mapping() -> None:
             claude=_CLAUDE_MAP + "| `session-compaction` | /compact |\n",
             copilot=_COPILOT_MAP + "| `session-compaction` | /compact |\n",
         ),
-        _AGENTS_VOCAB + " `session-compaction`\n",
+        _AGENTS_VOCAB + "| `session-compaction` | reset at a checkpoint | a fresh session |\n",
     )
     assert [f for f in failures if template_lint.CODEX_MAPPING in f and "session-compaction" in f]
 
 
 def test_check_capability_mapping_trips_on_undefined_token() -> None:
-    failures = template_lint.check_capability_mapping(_maps(), "vocabulary: `notify-and-wait`.\n")
-    assert any("`structured-question` is mapped but never defined" in f for f in failures)
+    vocab = _AGENTS_VOCAB.replace(
+        "| `structured-question` | batched questions | numbered chat options, then wait |\n", ""
+    )
+    failures = template_lint.check_capability_mapping(_maps(), vocab)
+    assert any("`structured-question` is mapped but has no row" in f for f in failures)
+
+
+def test_a_row_that_follows_a_paragraph_is_not_a_row() -> None:
+    """The defect this check was rewritten for. A prose paragraph had been inserted between two
+    rows of the live table, which ends the table above it and leaves everything below as paragraph
+    text — five capabilities with no degradation column at all. The old check asked whether
+    `` `token` `` appeared *somewhere in the file*, so every token was still there and nothing
+    failed for as long as it took to read the rendered page.
+    """
+    split = _AGENTS_VOCAB.replace(
+        "| `notify-and-wait` | flag a pending decision | state it, end the turn |\n",
+        "\nsome prose about `notify-and-wait` that belongs below the table\n"
+        "| `notify-and-wait` | flag a pending decision | state it, end the turn |\n",
+    )
+    assert "`notify-and-wait`" in split  # the substring test the old check used still passes
+    assert sorted(template_lint.capability_degradations(split)) == ["structured-question"]
+    failures = template_lint.check_capability_mapping(_maps(), split)
+    assert any("`notify-and-wait` is mapped but has no row" in f for f in failures)
+
+
+def test_a_row_with_an_empty_degradation_cell_trips() -> None:
+    """A capability is portable because it says what to do without it. A blank cell is a row the
+    table has and the vocabulary does not."""
+    blank = _AGENTS_VOCAB.replace(
+        "| `notify-and-wait` | flag a pending decision | state it, end the turn |",
+        "| `notify-and-wait` | flag a pending decision |  |",
+    )
+    failures = template_lint.check_capability_mapping(_maps(), blank)
+    assert any("`notify-and-wait` declares no degradation" in f for f in failures)
+
+
+def test_the_live_vocabulary_table_declares_every_degradation() -> None:
+    """Run against the shipped AGENTS.md rather than a fixture: the column that makes the verbs
+    portable is the one nothing used to read."""
+    table = template_lint.capability_degradations((_REPO_ROOT / template_lint.AGENTS_MD).read_text(encoding="utf-8"))
+    assert len(table) == 8
+    assert all(table.values()), [name for name, lacking in table.items() if not lacking]
 
 
 def test_check_neutral_vocabulary_trips_on_dialect_leak() -> None:
@@ -677,3 +739,42 @@ def test_the_upgrade_canary_refuses_to_pass_when_it_could_not_look(tmp_path: Pat
     template_lint._tracked_texts.cache_clear()
     with pytest.raises(OSError, match="could not list git-tracked files"):
         template_lint._tracked_texts(tmp_path)  # not a git checkout
+
+
+def test_a_documented_gate_that_the_vocabulary_does_not_have_is_drift() -> None:
+    """`rein approve build`, `rein approve requirements` and `rein approve design` outlived the
+    five-gate lifecycle by two releases — in printed handovers and in the scaffold a new
+    repository is seeded from, where they read as instructions and exit 2. A gate name is
+    checkable against the vocabulary, and nothing was checking it."""
+    failures = template_lint.check_documented_invocations(
+        _REPO_ROOT, {"docs/x.md": "then run `rein approve design` and `rein revise --to build`"}
+    )
+
+    assert [f for f in failures if "design" in f] and [f for f in failures if "build" in f]
+
+
+def test_a_documented_gate_the_vocabulary_does_have_is_not_drift() -> None:
+    """Including the crossing spelling and the shapes a document legitimately writes."""
+    text = (
+        "`rein approve mandate`, `rein approve acceptance`, `rein approve T-004`, "
+        "`rein approve T-NNN`, `rein approve <gate>`, `rein revise --to T-004`, "
+        "`rein changes add acceptance --target T-1 --reason x`, `rein changes list --gate mandate`"
+    )
+
+    assert template_lint.check_documented_invocations(_REPO_ROOT, {"docs/x.md": text}) == []
+
+
+def test_every_shipped_scaffold_document_is_classified() -> None:
+    assert template_lint.check_scaffold_docs_classified(_REPO_ROOT) == []
+
+
+def test_a_reference_to_a_retrospective_section_that_does_not_exist_is_drift() -> None:
+    """Four documents send someone to a numbered section to finalize something there. Inserting a
+    section renumbers everything below it and the references do not move with it."""
+    failures = template_lint.check_retrospective_sections(_REPO_ROOT, {"x.md": "finalize it in retrospective §9"})
+
+    assert len(failures) == 1 and "§9" in failures[0]
+
+
+def test_the_shipped_references_to_retrospective_sections_all_resolve() -> None:
+    assert template_lint.check_retrospective_sections(_REPO_ROOT, template_lint.neutral_texts(_REPO_ROOT)) == []

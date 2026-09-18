@@ -37,7 +37,15 @@ SCAFFOLD_DOCS = ".rein/scaffold/docs"
 SCAFFOLD_REIN = ".rein/scaffold/rein"
 ARCHIVE_DIR = "docs/archive"
 
-#: Per-cycle deliverables under docs/. Everything else persists across cycles.
+#: Per-cycle deliverables under docs/: archived with the cycle, then restored from the pristine
+#: snapshot for the next one. Everything in :data:`PERSISTENT_DOCS` is the other answer.
+#:
+#: Every scaffold document is one or the other, and `scripts/template_lint.py` holds the two lists
+#: against `src/rein/data/scaffold/docs/` so that adding a scaffold file without classifying it
+#: fails there. `speculative-work.md` was added unclassified: it is filled in per cycle and its
+#: rows are finalized in that cycle's retrospective, and because it was in neither list it was
+#: neither archived nor reset — the next cycle opened holding the last one's rows, and `/status`
+#: went on naming them as still undecided.
 CYCLE_DOCS: tuple[str, ...] = (
     "10-requirements.md",
     "20-design.md",
@@ -45,6 +53,14 @@ CYCLE_DOCS: tuple[str, ...] = (
     "tasks",
     "test",
     "retrospective.md",
+    "speculative-work.md",
+)
+
+#: Scaffold documents that are **not** per-cycle: the product's identity and the brownfield
+#: intake, which describe the repository rather than the change being made in it.
+PERSISTENT_DOCS: tuple[str, ...] = (
+    "00-product-brief.md",
+    "05-current-state.md",
 )
 
 #: The cycle's machine record. Archived under `<archive>/rein/` (plan §27).
@@ -96,7 +112,7 @@ def readiness(repo: repo_mod.Repo) -> list[str]:
     if defects:
         blockers.append(f"the audit chain has {len(defects)} defect(s); the archive would record an unreadable log")
 
-    for gate in models.GATE_ORDER:
+    for gate in state.gate_ids:
         receipt = state.gate_receipt(gate)
         if state.gate_status(gate) != "approved" or receipt is None:
             continue
@@ -168,7 +184,9 @@ def next_state(previous: models.State, slug: str) -> dict[str, object]:
         "project": previous.project,
         "cycle_id": slug,
         "updated_at": event_chain.now_iso(),
-        "gates": {gate: {"status": "pending", "receipt": None} for gate in models.GATE_ORDER},
+        # The two ends only. What this cycle will build is not known yet, so neither is how many
+        # irreversible points it has — `approve mandate` adds those when it freezes the plan.
+        "gates": {gate: {"status": "pending", "receipt": None} for gate in models.GATE_ENDS},
         "plan": {"status": "draft"},
         "execution": {"status": "idle"},
         "tasks": {},

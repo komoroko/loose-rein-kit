@@ -15,7 +15,8 @@ from __future__ import annotations
 import argparse
 import logging
 
-from rein import common, observations
+from rein import common, event_chain, observations
+from rein import events as events_mod
 from rein import repo as repo_mod
 
 logger = logging.getLogger(__name__)
@@ -34,20 +35,57 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{dropped} observation(s) dropped; the most recent {args.prune} are kept")
         return 0
 
-    project = args.project
-    if project is None and args.repo is not None:
-        try:
-            project = repo_mod.get(args.repo).root.name
-        except repo_mod.RepoNotFoundError as exc:
+    # The chain is per-repository and this store is user-global, so the chained stop count is only
+    # offered when a repository is in hand. `--project` alone names a project in the store, which
+    # is not a path to a chain and never a reason to guess at one.
+    repo = None
+    try:
+        repo = repo_mod.get(args.repo)
+    except repo_mod.RepoNotFoundError as exc:
+        if args.repo is not None:
             logger.error(str(exc))
             return 1
+        logger.debug(f"no repository here, so no chained stop count: {exc}")
+
+    project = args.project
+    if project is None and repo is not None:
+        project = repo.root.name
 
     entries = observations.read()
     summary = observations.summarize(entries, project=project or "")
     scope = f"project {project}" if project else f"{len({e.project for e in entries})} project(s)"
+    stops, stopped = _chain_cost(repo)
     print(f"{len(entries)} observation(s), {scope} — {observations.store_path()}\n")
-    print(observations.render(summary))
+    print(observations.render(summary, chain_stops=stops, chain_stopped=stopped))
     return 0
+
+
+def _chain_cost(repo: repo_mod.Repo | None) -> tuple[int | None, list[float]]:
+    """What this repository's chain says a cycle cost: how many times it stopped, and for how
+    long each time. `(None, [])` when there is no repository to ask, or its log cannot be read.
+
+    One pass for both. They come from the same scan of the same chains, and splitting them into
+    two functions would walk every archive twice and report each unreadable one twice to the
+    person reading a single table.
+
+    Across archives for the same reason `rein lens --stats` is: `cycle-close` moves the chain that
+    answers this into `docs/archive/`, and reading only the live one makes the figure go blank at
+    the moment a second cycle makes it worth reading. An archive that does not verify is named and
+    left out rather than folded in — a figure assembled from a log that failed its own check would
+    be the one thing these must not be.
+    """
+    if repo is None:
+        return None, []
+    live, defects = event_chain.scan(repo.events)
+    if defects:
+        logger.warning(f"{repo.events} has {len(defects)} chain defect(s); no chained stop figures")
+        return None, []
+    sources, unreadable = events_mod.cycle_sources(repo, live)
+    for rel in unreadable:
+        logger.warning(f"{rel} could not be verified, so its stops are not counted")
+    stops = sum(events_mod.stops(source.events) for source in sources)
+    stopped = [d for source in sources for d in events_mod.stop_durations(source.events)]
+    return stops, stopped
 
 
 if __name__ == "__main__":

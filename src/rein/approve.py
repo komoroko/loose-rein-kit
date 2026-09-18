@@ -13,13 +13,20 @@ Three steps, in this order, none skippable:
      freezes it in that same transaction: `state.plan` gains `frozen` plus the digests the freeze
      covers, which is what `rein build` requires and what `rein guard` rule 2 protects.
 
-**Two gates, because a human decides twice** (`models.GATE_ORDER`). `mandate` says what the loop
-may change and what it must prove; `acceptance` says whether the change, with that evidence, is
-taken. There were five — one per phase — and the same transaction that recorded an approval also
-advanced `current_phase`, so authority and progress were one write and every permission question
-arrived as an ordering question. Every mechanical precondition the five enforced is still here, as
-a readiness check on one of these two; what is gone is the claim that the *order* of the work is a
-human's to authorize.
+**A gate wherever undoing gets expensive, and nowhere else.** `mandate` says what the loop may
+change and what it must prove; `acceptance` says whether the change, with that evidence, is taken.
+There were five — one per phase — and the same transaction that recorded an approval also advanced
+`current_phase`, so authority and progress were one write and every permission question arrived as
+an ordering question. Every mechanical precondition the five enforced is still here, as a readiness
+check; what is gone is the claim that the *order* of the work is a human's to authorize.
+
+Two is where that criterion lands for a change that is only code, and for a while two was also what
+the tool could represent — a fixed tuple and a `gates` object that refused any other key. That is a
+ceiling on how often a human is asked, which is the thing the approval-screen budget already got
+wrong once. So the count is derived now: a task that freezes an `operator_surface` it cannot undo
+is an irreversible point of its own, it gets a gate named for that task, and `rein build` stops
+there before running it. `approve mandate` is what adds them, out of the plan it is freezing — the
+act that fixes what will be built is the act that fixes how many more times this cycle stops.
 
 There is no `--force` and no `--by`: an identity you can type is not an identity, so the
 receipt records that *a* human confirmed, never which one.
@@ -84,7 +91,7 @@ def _chain_blockers(state: models.State, gate: str, *, already_approved_blocks: 
     if pending:
         return [
             f"gate '{pending}' is still pending — approving '{gate}' now would leave a decision "
-            "standing on one that was never made (gates open in order)"
+            "standing on one that was never made (a gate opens only once everything it rests on has)"
         ]
     if already_approved_blocks and state.gate_status(gate) == "approved":
         return [f"gate '{gate}' is already approved"]
@@ -351,8 +358,8 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     already-approved gate reporting itself as its own blocker would read a healthy board as
     unready.
     """
-    if gate not in models.GATE_VALUES:
-        raise ApprovalError(f"unknown gate {gate!r} (one of {', '.join(models.GATE_ORDER)})")
+    if not models.gate_name_ok(gate):
+        raise ApprovalError(f"unknown gate {gate!r} ({models.gate_names()})")
 
     store = store_mod.Store(repo)
     # Before the documents are read, not after. A newer release widens a schema, so the very
@@ -378,6 +385,8 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
 
     if state is None:
         return ["no .rein/state.yaml — run `rein init` first"]
+    if absent := state.gate_absence_reason(gate):
+        raise ApprovalError(absent)
 
     blockers: list[str] = []
     _, defects = event_chain.scan(repo.events)
@@ -537,6 +546,15 @@ def _frozen_plan_block(repo: repo_mod.Repo, subject: Mapping[str, str]) -> dict[
     }
 
 
+def _crossing_task_ids(repo: repo_mod.Repo) -> tuple[str, ...]:
+    """The tasks the draft plan declares irreversible. `()` when there is no readable plan."""
+    try:
+        plan = store_mod.Store(repo).read_plan()
+    except models.DocumentError:
+        return ()
+    return plan.crossing_task_ids if plan is not None else ()
+
+
 def record_approval(
     repo: repo_mod.Repo, gate: str, subject: Mapping[str, str], *, confirmed_via: str = "terminal"
 ) -> str:
@@ -568,6 +586,10 @@ def record_approval(
     # approval, and the plan it counts is the one this approval is about to freeze.
     admitted = _unknowns_admitted(repo) if gate == FREEZING_GATE else 0
     demoted, reaches = _reach_movement(repo) if gate == FREEZING_GATE else ([], None)
+    # The tasks this mandate is about to make into gates of their own. Read here, out of the plan
+    # this approval freezes, because after the freeze it is the same bytes and before it there is
+    # nothing binding to read.
+    crossings = _crossing_task_ids(repo) if gate == FREEZING_GATE else ()
 
     # Everything below runs under the store lock. The chain-root binding is only meaningful if
     # nothing can append between the check and the receipt that pins it, and a gate approval
@@ -621,6 +643,14 @@ def record_approval(
         # `rein build` both key off, and the only one in the codebase that sets
         # `plan.status = "frozen"`.
         if gate == FREEZING_GATE:
+            # The cycle's gates, recomputed from the plan being frozen rather than added to. A roll
+            # back to the mandate un-freezes the plan and the next mandate may cut different tasks,
+            # so a crossing gate that no longer has a task behind it has to go — otherwise
+            # acceptance waits on a point nothing will ever reach. Nothing approved is lost: the
+            # roll back that made this re-approval possible already reset everything downstream.
+            raw["gates"] = {g: v for g, v in raw["gates"].items() if g in models.GATE_ENDS} | {
+                task_id: {"status": "pending", "receipt": None} for task_id in crossings
+            }
             raw["plan"] = _frozen_plan_block(repo, subject)
             tx.append(
                 "plan_frozen",
@@ -753,6 +783,20 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
             "Run this in your shell — there is deliberately no flag that skips it."
         )
     print(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
+    crossing = crossing_declarations(repo, gate)
+    if crossing:
+        # At the mandate this is the count of stops still to come; at a crossing gate it is the
+        # thing about to become permanent. Either way it is the one item on the screen that no
+        # later gate can reconsider.
+        if gate == FREEZING_GATE:
+            tasks = sorted({row["task_id"] for row in crossing})
+            print(
+                f"{len(tasks)} further stop(s) this mandate creates — one before each task that "
+                "declares work it cannot take back:"
+            )
+        else:
+            print("This approval lets the loop do something it cannot undo:")
+        print(render_crossing(crossing) + "\n")
     unasked = _unasked_decisions(repo, gate)
     if unasked:
         # The one thing on this screen that is not a digest. Everything else says what was decided
@@ -787,6 +831,7 @@ class Naming(TypedDict):
     unasked: list[dict[str, str]]
     overrule_cost: str
     lenses: list[dict[str, str]]
+    crossing: list[dict[str, str]]
 
 
 def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> Naming:
@@ -814,7 +859,8 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
     reader holding the write session: the one who would be doing the approving has it, and nobody
     else gets a file from outside the repository because a page was left open.
     """
-    out: Naming = {"unasked": [], "overrule_cost": OVERRULE_COST, "lenses": []}
+    out: Naming = {"unasked": [], "overrule_cost": OVERRULE_COST, "lenses": [], "crossing": []}
+    out["crossing"] = crossing_declarations(repo, gate)
     unasked = _unasked_decisions(repo, gate)
     out["unasked"] = [
         {
@@ -856,6 +902,56 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         for entry in plan.lenses
     ]
     return out
+
+
+def crossing_declarations(repo: repo_mod.Repo, gate: str) -> list[dict[str, str]]:
+    """The irreversible declarations this gate is about.
+
+    At a crossing gate: the ones on the task about to run, which is what the approval authorizes.
+    At the mandate: *every* one in the plan, because the mandate is where they become gates and a
+    human approving it is entitled to see how many more times this cycle will stop. That is the
+    difference between a count that follows from the change and a count somebody has to discover
+    later, one stop at a time.
+
+    Empty everywhere else, including at acceptance: by then every crossing has been approved or
+    the chain check has already refused.
+    """
+    if gate == models.GATE_LAST:
+        return []
+    try:
+        plan = store_mod.Store(repo).read_plan()
+    except models.DocumentError:
+        return []  # a plan that does not parse is `_plan_blockers`' to report, not this screen's
+    if plan is None:
+        return []
+    wanted = plan.crossing_task_ids if gate == FREEZING_GATE else (gate,)
+    rows: list[dict[str, str]] = []
+    for task in plan.tasks:
+        if task.id not in wanted:
+            continue
+        for entry in task.irreversible_surfaces:
+            rows.append(
+                {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "kind": str(entry.get("kind", "")),
+                    "name": str(entry.get("name", "")),
+                    # Where the decision and its reversibility were argued. Optional in the schema,
+                    # so an empty string here means the plan pointed at nothing, not that this
+                    # screen dropped it.
+                    "adr": str(entry.get("adr", "")),
+                }
+            )
+    return rows
+
+
+def render_crossing(rows: Sequence[Mapping[str, str]]) -> str:
+    lines: list[str] = []
+    for row in rows:
+        lines.append(f"  - {row['task_id']} {row['title']}")
+        lines.append(f"      cannot be undone: {row['name']} ({row['kind']})")
+        lines.append(f"      decided in: {row['adr'] or '(no ADR recorded — the reversibility claim is unsupported)'}")
+    return "\n".join(lines)
 
 
 def _unasked_decisions(repo: repo_mod.Repo, gate: str) -> list[models.Decision]:
@@ -912,7 +1008,7 @@ def render_blockers(gate: str, blockers: list[str]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="check a gate's readiness, then take the human's confirmation")
-    parser.add_argument("gate", help=f"one of: {', '.join(models.GATE_ORDER)}")
+    parser.add_argument("gate", help=models.gate_names())
     parser.add_argument("--check", action="store_true", help="readiness only; ask for nothing, open nothing")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)

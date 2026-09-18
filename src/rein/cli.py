@@ -100,6 +100,10 @@ VERBS: dict[str, Verb] = {
         "lens_cmd",
         "the review lens library: --list what exists, --select what applies, --stats what it found",
     ),
+    "decisions": Verb(
+        "decisions_cmd",
+        "every decision on record, oldest cycle first — `rein decision` (singular) is how one is written",
+    ),
     "events": Verb("events", "read the hash-chained audit log (--cost sums what runs billed)", human=False),
     "task": Verb("task_cmd", "task reset <id> --reason … — put a blocked task back on the frontier", human=False),
     "guard": Verb("gate_guard", "the gate-guard hook / commit-stage check", human=False),

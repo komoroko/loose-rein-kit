@@ -15,7 +15,7 @@ from rein import models, pr_draft
 from rein import repo as repo_mod
 from tests._support import chain, make_plan, make_review, make_state, make_task, seed_repo
 
-ALL_APPROVED = dict.fromkeys(models.GATE_ORDER, "approved")
+ALL_APPROVED = dict.fromkeys(models.GATE_ENDS, "approved")
 
 
 def body_for(tmp_path: Path, **kwargs: object) -> str:
@@ -72,7 +72,7 @@ def test_an_unrecorded_digest_says_so_rather_than_being_omitted(tmp_path: Path) 
 
 def test_every_gate_is_listed_with_its_approval(tmp_path: Path) -> None:
     body = body_for(tmp_path, state=make_state(gates=ALL_APPROVED))
-    for gate in models.GATE_ORDER:
+    for gate in models.GATE_ENDS:
         assert f"- {gate}: approved (approval: GA-{gate.upper()}-0001)" in body
 
 

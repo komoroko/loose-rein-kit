@@ -2,8 +2,9 @@
 
 Serves the page in `ui_assets/` — a React bundle built from `ui/` and committed, plus its
 stylesheet — over stdlib `http.server`, same-origin with zero external references so the dashboard
-stays offline-safe. The lifecycle is the page's navigation: five gates in a spine, and
-the one awaiting a decision is the only inverted block on the screen. **Now** (next recommended
+stays offline-safe. The lifecycle is the page's navigation: this cycle's gates in a spine — the
+two ends and one for each irreversible point the plan froze — and the ones open for a decision are
+the only inverted blocks on the screen. **Now** (next recommended
 command and the pending queue — from status_api.collect_status()); a gate's **reading room**
 (`#gate/<name>`: its deliverables rendered server-side by mdlite with the self-assessment pinned,
 acceptance's stages, diff and security-review freshness — from review_api.collect_review() — ending in
@@ -304,8 +305,8 @@ def action_argv(action: str, params: dict[str, object]) -> list[str]:
     # not evidence of anything, and dispositions live in `review.yaml`, where they are signed.
     if action == "revise":
         gate = str(params.get("gate") or "")
-        if gate not in models.GATE_VALUES:
-            raise UiActionError(HTTPStatus.BAD_REQUEST, f"revise 'gate' must be one of {', '.join(models.GATE_ORDER)}")
+        if not models.gate_name_ok(gate):
+            raise UiActionError(HTTPStatus.BAD_REQUEST, f"revise 'gate' must be {models.gate_names()}")
         reason = str(params.get("reason") or "").strip()
         if not reason:
             raise UiActionError(HTTPStatus.BAD_REQUEST, "revise needs a non-empty 'reason'")

@@ -14,7 +14,7 @@ Write acceptance criteria as **measurable, technology-agnostic** checks (a numbe
 <!-- While drafting, mark anything undecided inline as a `[NEEDS CLARIFICATION: <what>]` marker at the
      exact spot it affects, instead of picking a plausible default. There is no cap on how many:
      every marker is asked of the human or demoted to Open questions with its assumption written
-     out, and `rein approve requirements` refuses while any is left standing in the prose. -->
+     out, and `rein approve mandate` refuses while any is left standing in the prose. -->
 
 ### R-1: <title>
 - **Overview**:

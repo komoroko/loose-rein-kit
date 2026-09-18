@@ -67,7 +67,7 @@ You drive this project's requirements definition. **Human on the Loop**: you do 
 Write the deliverable (`docs/10-requirements.md`) in the user's language.
 
 ## While the mandate is unapproved
-No product code (`rein guard` denies it), and only **throwaway-by-default** work recorded as speculative-work events (rules: `.rein/prompts/rules/gate-workflow.md` "While a gate is pending"):
+No product code (`rein guard` denies it), and only **throwaway-by-default** work recorded in `docs/speculative-work.md` (rules: `.rein/prompts/rules/gate-workflow.md` "While a gate is pending"):
 - Repo scaffolding / directory layout / skeleton of the dev environment and CI.
 - **Read-only investigation** of candidate technologies surfaced in the brief.
 

@@ -21,7 +21,8 @@ Notes:
 - The gates' **mechanism layer** runs under Codex: `.codex/hooks.json` registers `rein guard`
   as a PreToolUse hook on `apply_patch`, which denies edits to next-phase deliverables while the
   prerequisite gate is `pending`. Project-scoped Codex config is read **only once you trust the
-  project** — until then the guard is not registered and only the commit-stage check runs.
+  project** — until then the guard is not registered, and what a session writes is not checked
+  until `rein build` lands it.
 - `command-preauthorization` is **not** what keeps gate rule 2. `rein approve` refuses unless it
   is at an interactive terminal, where it asks for the gate name to be typed out. No Codex
   setting can hand an agent a gate.

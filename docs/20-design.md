@@ -2,7 +2,7 @@
 
 > `/design` generates this, starting from `docs/10-requirements.md` (approved).
 > Important technical choices are **decided by the human via a `structured-question`** and recorded in `docs/decisions/ADR-*.md`.
-> Finalized once a human approves at **gate ②**.
+> Finalized once a human approves at **the mandate gate**.
 
 ## Architecture overview
 <!-- Overall structure. Component diagram or data flow in prose / a simple diagram -->
@@ -56,9 +56,9 @@
 -
 
 ## Adversarial review
-> Findings from the independent `adversarial-reviewer` round before gate ② (procedure: design.md step 6),
+> Findings from the independent `adversarial-reviewer` round before the mandate gate (procedure: design.md step 6),
 > with the lead's disposition per finding. Blockers must be `fixed` or `disputed` (with the reason)
-> before the gate; the human sees this table — and settles any unresolved dispute — at gate ②.
+> before the gate; the human sees this table — and settles any unresolved dispute — at the mandate gate.
 
 | ID | Severity (blocker/major/minor) | Finding (with counterexample) | Disposition (revise_* / request_expert / run_experiment / reduce_scope / dispute_finding: why) |
 |----|--------------------------------|-------------------------------|-----------------------------------------------------|
@@ -66,7 +66,7 @@
 
 
 ## Self-assessment (assumptions, confidence)
-> Communicated to the human at gate ② as `.rein/prompts/rules/gate-workflow.md` "Gate self-assessment". Do not hide low-confidence design spots.
+> Communicated to the human at the mandate gate as `.rein/prompts/rules/gate-workflow.md` "Gate self-assessment". Do not hide low-confidence design spots.
 - **Assumptions made**: <assumptions taken as given about requirements, existing assets, technical choices>
 - **Confidence**: per area high / medium / low (e.g. architecture=high / technical choices=medium / non-functional=low). **Attach a reason for low spots.**
 - **Open questions / points for the human to decide**:

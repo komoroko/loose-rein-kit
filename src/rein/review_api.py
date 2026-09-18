@@ -3,8 +3,8 @@
 status_api.py answers "where does the lifecycle stand"; this module answers the companion question
 "what do I read to approve the gate in front of me". `collect_review(root, gate)` returns one JSON
 object per gate: the phase deliverables rendered through mdlite (escape-first — see its threat
-model), each deliverable's Self-assessment section split out so the pane can pin it, and for gate
-④ the work-branch diff plus the generated review's freshness.
+model), each deliverable's Self-assessment section split out so the pane can pin it, and for
+acceptance the work-branch diff plus the generated review's freshness.
 
 Reach is fixed server-side, the same way ui.action_argv fixes command lines: the client sends only
 a gate name; which files are read comes from the `_GATE_SPEC` constant plus a template-excluding
@@ -78,6 +78,40 @@ _GATE_SPEC: dict[str, dict[str, list[_SpecItem]]] = {
 
 class ReviewError(Exception):
     """An unknown gate name — the only input error this module can be handed."""
+
+
+def _raw_plan(root: Path) -> models.Plan | None:
+    """plan.yaml wrapped without schema validation, or None when it cannot be read at all.
+
+    Same posture as :func:`_raw_state`: a document that would fail its schema must not take the
+    pane down, because the pane is where a person goes to find out what is wrong.
+    """
+    try:
+        return models.Plan(strict_yaml.load_mapping((root / ".rein" / "plan.yaml").read_text(encoding="utf-8")))
+    except (OSError, strict_yaml.StrictParseError):
+        return None
+
+
+def _crossing_spec(root: Path, gate: str) -> dict[str, list[_SpecItem]] | None:
+    """What a human reads to open a gate named after a task, or None when this cycle has no such gate.
+
+    Derived rather than declared, because the gate itself is: it exists because *this* plan froze
+    *this* task as work it cannot take back. The reading is that task's ticket and the decision
+    records its declarations point at — which is exactly where the reversibility was argued, and
+    what `operator_surface.adr` has always been for. The design travels as context, the same way
+    the brief travels with the mandate.
+
+    Validated against the state, not only the plan: a task id that is well-formed but never became
+    a gate is an unknown gate, not an empty reading room.
+    """
+    state = _raw_state(root)
+    if state is None or gate not in state.crossing_gates:
+        return None
+    plan = _raw_plan(root)
+    task = next((t for t in plan.tasks if t.id == gate), None) if plan is not None else None
+    adrs = sorted({str(entry["adr"]) for entry in task.irreversible_surfaces if entry.get("adr")}) if task else []
+    main: list[_SpecItem] = [f"docs/tasks/{gate}.md", *(f"docs/decisions/{adr}.md" for adr in adrs)]
+    return {"main": main, "context": ["docs/20-design.md"]}
 
 
 def _confidence(section_md: str) -> str | None:
@@ -268,26 +302,36 @@ def _gate_statuses(root: Path) -> dict[str, str]:
     state = _raw_state(root)
     if state is None:
         return {}
-    return {gate: state.gate_status(gate) for gate in models.GATE_ORDER}
+    # Every gate of this cycle, in this cycle's shape — `awaiting` is read off this, and a pane
+    # that listed only the two ends would say acceptance is next while a crossing stands unopened.
+    return {gate: state.gate_status(gate) for gate in state.gate_ids}
 
 
 def collect_review(root: str | Path, gate: str) -> dict[str, object]:
     """Everything the review pane shows for `gate`. Raises ReviewError only for an unknown gate."""
-    if gate not in _GATE_SPEC:
-        raise ReviewError(f"unknown gate '{gate}' (expected one of {', '.join(models.GATE_ORDER)})")
     root = Path(root)
+    spec = _GATE_SPEC.get(gate) or _crossing_spec(root, gate)
+    if spec is None:
+        raise ReviewError(f"unknown gate '{gate}' ({models.gate_names()})")
 
     gates = _gate_statuses(root)
-    awaiting = next((g for g in models.GATE_ORDER if gates.get(g) != "approved"), None)
+    state = _raw_state(root)
+    decidable = state.decidable_gates if state is not None else ()
+    # What to read next when this pane is not it. The first *decidable* gate, not the first
+    # unapproved one: with a crossing pending, the unapproved list starts at a gate the mandate
+    # may not even have reached.
+    awaiting = decidable[0] if decidable else None
 
     result: dict[str, object] = {
         "gate": gate,
-        "index": models.GATE_ORDER.index(gate) + 1,
         "status": gates.get(gate, "pending"),
         "awaiting": awaiting,
-        "is_awaiting": gate == awaiting,
-        "deliverables": _expand(root, _GATE_SPEC[gate]["main"]),
-        "context": _expand(root, _GATE_SPEC[gate]["context"]),
+        # Decidable now, which is not the same as "first in the list". Two crossings carry no order
+        # against each other, so a pane that read `gate == awaiting` would tell a human the second
+        # one is not theirs to decide — when the only thing it rests on, the mandate, is open.
+        "is_awaiting": gate in decidable,
+        "deliverables": _expand(root, spec["main"]),
+        "context": _expand(root, spec["context"]),
         "diff": None,
         "review_meta": None,
         "open_escalations": None,

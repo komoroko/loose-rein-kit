@@ -31,7 +31,7 @@ from tests._support import (
     seed_repo,
 )
 
-PENDING_ALL = dict.fromkeys(models.GATE_ORDER, "pending")
+PENDING_ALL = dict.fromkeys(models.GATE_ENDS, "pending")
 
 
 def repo_at(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:
@@ -245,7 +245,7 @@ def test_a_tool_behind_the_repository_may_not_write_a_receipt(tmp_path: Path) ->
     config = repo.root / ".rein" / "config.yaml"
     config.write_text(config.read_text(encoding="utf-8") + "\nsecurity:\n  future_key: 1\n", encoding="utf-8")
 
-    for gate in models.GATE_ORDER:
+    for gate in models.GATE_ENDS:
         blockers = approve.readiness(repo, gate, already_approved_blocks=False)
         assert any("written by rein 99.0.0" in b for b in blockers), gate
         assert not [b for b in blockers if "Additional properties" in b], gate
@@ -993,7 +993,7 @@ def test_the_naming_layer_is_the_mandate_s_alone(tmp_path: Path) -> None:
         plan=make_plan(decisions=[make_decision("D-001")]),
     )
 
-    empty: approve.Naming = {"unasked": [], "overrule_cost": approve.OVERRULE_COST, "lenses": []}
+    empty: approve.Naming = {"unasked": [], "overrule_cost": approve.OVERRULE_COST, "lenses": [], "crossing": []}
     assert approve.naming(repo, "acceptance") == empty
 
 
@@ -1144,3 +1144,145 @@ def test_a_decision_with_no_snapshot_behind_it_is_not_guessed_at(tmp_path: Path)
     )
 
     assert approve._reach_movement(repo)[0] == []  # nothing derived at all
+
+
+# --- how many times this cycle stops ----------------------------------------------
+
+
+#: A task whose work leaves the repository. Anything not exactly `False` is not a declaration that
+#: something is irreversible, so the fixtures spell the flag out both ways.
+def _state_of(repo: repo_mod.Repo) -> models.State:
+    state = store_mod.Store(repo).read_state()
+    assert state is not None
+    return state
+
+
+def _crossing_task(task_id: str = "T-001", *, reversible: bool = False) -> dict[str, object]:
+    return make_task(
+        task_id,
+        claim_ids=["C-001"],
+        operator_surface=[
+            {
+                "kind": "persistence",
+                "name": f"{task_id}: the users table",
+                "paths": ["db/schema.sql"],
+                "reversible": reversible,
+                "adr": "ADR-001",
+            }
+        ],
+    )
+
+
+def test_a_cycle_that_declares_nothing_irreversible_keeps_two_gates(tmp_path: Path) -> None:
+    """Two is what the criterion gives a change that is only code — never a ceiling the tool holds."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(tasks=[_crossing_task("T-001", reversible=True)]),
+    )
+
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+
+    assert _state_of(repo).gate_ids == ("mandate", "acceptance")
+
+
+def test_freezing_a_mandate_gives_every_irreversible_task_a_gate_of_its_own(tmp_path: Path) -> None:
+    """The act that fixes what will be built is the act that fixes how many more times this stops."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            tasks=[_crossing_task("T-001"), _crossing_task("T-002", reversible=True), _crossing_task("T-003")]
+        ),
+    )
+
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+
+    state = _state_of(repo)
+    assert state.gate_ids == ("mandate", "T-001", "T-003", "acceptance")
+    assert [state.gate_status(g) for g in ("T-001", "T-003")] == ["pending", "pending"]
+
+
+def test_a_crossing_stands_on_the_mandate_alone_and_never_on_another_crossing(tmp_path: Path) -> None:
+    """Ordering two crossings against each other would be authorizing execution order, which
+    `00-concept.md` puts inside the delegation. Each is downstream of the mandate, and acceptance
+    is downstream of all of them."""
+    state = models.State(
+        make_state(gates={"mandate": "approved", "T-001": "pending", "T-003": "pending", "acceptance": "pending"})
+    )
+
+    assert state.upstream_of("T-001") == ("mandate",)
+    assert state.upstream_of("T-003") == ("mandate",)
+    assert state.upstream_of("acceptance") == ("mandate", "T-001", "T-003")
+    assert state.pending_upstream("T-003") is None  # the other crossing does not hold it shut
+    assert state.pending_upstream("acceptance") == "T-001"
+
+
+def test_acceptance_is_not_ready_while_a_crossing_is_pending(tmp_path: Path) -> None:
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"}),
+        plan=make_plan(tasks=[_crossing_task("T-001")]),
+    )
+
+    assert any("T-001" in b for b in approve.readiness(repo, "acceptance"))
+
+
+def test_a_gate_this_cycle_does_not_have_is_refused_rather_than_read_as_pending(tmp_path: Path) -> None:
+    """`gate_status` answers `pending` for a name it does not hold, so a membership test that was
+    not there would have made every well-formed task id an approvable gate."""
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
+
+    with pytest.raises(approve.ApprovalError, match="has no gate 'T-009'"):
+        approve.readiness(repo, "T-009")
+
+
+def test_re_approving_a_mandate_replaces_the_crossings_rather_than_adding_to_them(tmp_path: Path) -> None:
+    """A roll back un-freezes the plan and the next mandate may cut different tasks. A crossing
+    gate left behind with no task to reach it is a gate acceptance waits on forever."""
+    from rein import revise
+
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(tasks=[_crossing_task("T-001")]),
+    )
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    assert _state_of(repo).crossing_gates == ("T-001",)
+
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "the breakdown was wrong")
+    (repo.root / ".rein" / "plan.yaml").write_text(
+        yaml.safe_dump(make_plan(tasks=[_crossing_task("T-002")]), sort_keys=False), encoding="utf-8"
+    )
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+
+    assert _state_of(repo).crossing_gates == ("T-002",)
+
+
+def test_the_mandate_screen_names_every_stop_it_is_about_to_create(tmp_path: Path) -> None:
+    """A count that follows from the change, seen while approving the change — not one discovered
+    later, one stop at a time."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(tasks=[_crossing_task("T-001"), _crossing_task("T-002", reversible=True)]),
+    )
+
+    named = approve.naming(repo, "mandate")["crossing"]
+
+    assert [row["task_id"] for row in named] == ["T-001"]
+    assert named[0]["adr"] == "ADR-001"
+    assert "cannot be undone" in approve.render_crossing(named)
+
+
+def test_a_crossing_screen_names_only_the_task_about_to_run(tmp_path: Path) -> None:
+    repo = repo_at(
+        tmp_path,
+        state=make_state(
+            gates={"mandate": "approved", "T-001": "pending", "T-003": "pending", "acceptance": "pending"}
+        ),
+        plan=make_plan(tasks=[_crossing_task("T-001"), _crossing_task("T-003")]),
+    )
+
+    assert [row["task_id"] for row in approve.naming(repo, "T-003")["crossing"]] == ["T-003"]
+    assert approve.naming(repo, "acceptance")["crossing"] == []

@@ -7,6 +7,7 @@ absence is asserted here.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -135,7 +136,8 @@ def _chain(*specs: tuple[str, tuple[str, ...]]) -> list[models.Event]:
     built: list[models.Event] = []
     previous: models.Event | None = None
     for name, subjects in specs:
-        linked = event_chain.link(previous, event_chain.make(name, "demo-cycle", subject_ids=subjects))
+        detail: dict[str, object] | None = {"status": "done"} if name == "task_completed" else None
+        linked = event_chain.link(previous, event_chain.make(name, "demo-cycle", subject_ids=subjects, detail=detail))
         built.append(linked)
         previous = linked
     return built
@@ -260,7 +262,7 @@ def test_cost_counts_this_cycle_and_the_archived_ones(tmp_path: Path, capsys: py
     out = capsys.readouterr().out
     assert "live-cycle — 1 run(s)" in out
     assert "old-cycle — 1 run(s)" in out
-    assert "[docs/archive/2026-01-01-first/rein/events.ndjson]" in out
+    assert "[docs/archive/2026-01-01-first]" in out
     assert "implementer" in out and "comparator" in out
     # Oldest first: an archive directory is `<YYYY-MM-DD>-<slug>`, and the cycle still open is the
     # end of the trend, not the start of it. Reading the newest bill first is reading a number;
@@ -299,3 +301,168 @@ def test_cost_on_a_repository_that_has_launched_nothing(tmp_path: Path, capsys: 
     _seed(tmp_path, "cycle_initialized")
     assert events.main(["--cost", "--repo", str(tmp_path)]) == 0
     assert "no run has recorded what it cost yet" in capsys.readouterr().out
+
+
+# --- how often the work stopped, asked of the chain ----------------------------
+
+
+def test_stops_counts_gate_stops_and_distinct_escalations() -> None:
+    """The count and the duration of a stop have different availability, and living in one store
+    made them look like one question. `notify.Watcher` only runs under `rein ui`, so a cycle driven
+    from the terminal records no duration — but every stop that ended is in the chain already."""
+    built = _chain(
+        ("gate_approved", ("mandate",)),
+        ("changes_requested", ("acceptance",)),
+        ("gate_approved", ("acceptance",)),
+        ("task_started", ("T-1",)),  # nobody stopped for this
+    )
+    assert events.stops(built) == 3
+
+
+def test_a_repeated_escalation_is_one_stop() -> None:
+    """Eight supervised attempts against one session limit file eight rows and are one thing to
+    decide. `open_conditions` groups by `(kind, subjects)` for that reason; counting stops by any
+    other rule would make two surfaces answer one question differently."""
+    built = _chain(*[("task_failed", ("T-1",))] * 8)
+    assert events.stops(built) == 1
+
+    both = _chain(("task_failed", ("T-1",)), ("task_failed", ("T-2",)))
+    assert events.stops(both) == 2
+
+
+def test_a_revision_is_not_counted_on_top_of_the_refusal_that_caused_it() -> None:
+    """`/revise` reopens a gate a person has usually just refused, and that refusal is already
+    `changes_requested`. `decision_declared` is out for a different reason: five call sites use it
+    for salvage branches, the PR-stack ledger and task declarations, so it does not mean one thing."""
+    built = _chain(
+        ("changes_requested", ("mandate",)),
+        ("gate_revised", ("mandate",)),
+        ("decision_declared", ("T-1",)),
+    )
+    assert events.stops(built) == 1
+
+
+def test_a_failure_the_loop_recovered_from_by_itself_is_not_a_stop() -> None:
+    """A stop is a human contact point. The loop failing a task twice and passing on the third
+    attempt never reached anybody, and every surface that asks "what awaits you" says so —
+    `stops` read raw `ATTENTION_EVENTS` with no retirement and counted it anyway.
+    """
+    recovered = _chain(("task_failed", ("T-1",)), ("task_failed", ("T-1",)), ("task_completed", ("T-1",)))
+
+    assert events.open_conditions(recovered, events.task_outcomes(recovered)) == []
+    assert events.stops(recovered) == 0
+
+
+def test_a_task_that_never_came_back_is_still_a_stop() -> None:
+    """The other half: retirement is the task's own later success, not the passage of time."""
+    assert events.stops(_chain(("task_failed", ("T-1",)))) == 1
+
+
+# --- how long the work sat, asked of the same chain ----------------------------
+
+
+def _at(built: list[models.Event], *stamps: str) -> list[models.Event]:
+    """The same chain with its timestamps chosen. The digests go stale and nothing minds:
+    `stop_durations` reads `ts` and the chain's order, and verification is `event_chain`'s job."""
+    return [replace(event, ts=stamp) for event, stamp in zip(built, stamps, strict=True)]
+
+
+def test_a_stop_lasts_from_the_loops_last_event_to_the_humans() -> None:
+    """Nothing is written to record this. The pending gate was already the record of the stop —
+    which is why no escalation is written beside one — and the chain is ordered, so the last thing
+    the loop did before a person acted is when the work stopped."""
+    chain = _at(
+        _chain(("review_generated", ()), ("gate_approved", ("acceptance",))),
+        "2026-01-05T09:00:00+09:00",
+        "2026-01-05T10:30:00+09:00",
+    )
+
+    assert events.stop_durations(chain) == [5400.0]
+
+
+def test_two_gates_answered_in_one_sitting_both_held_the_same_stop() -> None:
+    """A cycle's crossings are a fan with no order among them, so they are presented together and
+    answered together. Reading the second one's stop from the first one's approval would report it
+    as instant — the work had been sitting just as long for both."""
+    chain = _at(
+        _chain(("task_completed", ("T-1",)), ("gate_approved", ("T-001",)), ("gate_approved", ("T-002",))),
+        "2026-01-05T09:00:00+09:00",
+        "2026-01-05T10:00:00+09:00",
+        "2026-01-05T10:00:05+09:00",
+    )
+
+    assert events.stop_durations(chain) == [3600.0, 3605.0]
+
+
+def test_a_refusal_ends_one_stop_and_the_work_that_follows_begins_the_next() -> None:
+    """`changes_requested` is a person acting, so it closes the stop it was the end of. What
+    starts the next one is the loop moving again, not the refusal."""
+    chain = _at(
+        _chain(
+            ("review_generated", ()),
+            ("changes_requested", ("acceptance",)),
+            ("review_generated", ()),
+            ("gate_approved", ("acceptance",)),
+        ),
+        "2026-01-05T09:00:00+09:00",
+        "2026-01-05T10:00:00+09:00",
+        "2026-01-05T11:00:00+09:00",
+        "2026-01-05T11:30:00+09:00",
+    )
+
+    assert events.stop_durations(chain) == [3600.0, 1800.0]
+
+
+def test_a_stop_stamped_before_the_work_it_followed_is_refused_not_clamped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """These timestamps come from whatever machine wrote each event, so two of them can disagree.
+    Read as zero, the disagreement would disappear into the mean, which is the one place nobody
+    could find it."""
+    chain = _at(
+        _chain(("review_generated", ()), ("gate_approved", ("acceptance",))),
+        "2026-01-05T10:00:00+09:00",
+        "2026-01-05T09:00:00+09:00",
+    )
+
+    with caplog.at_level("WARNING"):
+        assert events.stop_durations(chain) == []
+    assert "stamped before" in caplog.text
+
+
+def test_an_unreadable_timestamp_loses_its_stop_and_not_the_others(caplog: pytest.LogCaptureFixture) -> None:
+    chain = _at(
+        _chain(("review_generated", ()), ("gate_approved", ("T-001",)), ("gate_approved", ("acceptance",))),
+        "2026-01-05T09:00:00+09:00",
+        "not a timestamp",
+        "2026-01-05T10:00:00+09:00",
+    )
+
+    with caplog.at_level("WARNING"):
+        assert events.stop_durations(chain) == [3600.0]
+    assert "unreadable timestamp" in caplog.text
+
+
+def test_a_condition_still_open_has_no_end_to_measure_to() -> None:
+    """`stops` counts it — somebody has to deal with it — and it has not finished, so there is no
+    span. Only gate stops are timed, and the report says how many it timed for that reason."""
+    chain = _chain(("task_started", ("T-1",)), ("task_failed", ("T-1",)))
+
+    assert events.stops(chain) == 1
+    assert events.stop_durations(chain) == []
+
+
+def test_a_chain_that_opens_with_a_gate_stop_times_nothing_before_it() -> None:
+    """An archived chain can begin anywhere. There is no earlier event to measure from, and
+    inventing one would put the cycle's whole age into its first stop."""
+    chain = _at(_chain(("gate_approved", ("mandate",))), "2026-01-05T09:00:00+09:00")
+
+    assert events.stop_durations(chain) == []
+
+
+def test_the_chain_answers_for_its_own_task_outcomes() -> None:
+    """`state.yaml` is the authority while a cycle is live and exactly what an archive lacks. The
+    status travels on the event, so one retirement rule can serve the live chain and the archives."""
+    chain = _chain(("task_started", ("T-1",)), ("task_completed", ("T-1",)))
+
+    assert events.task_outcomes(chain)["T-1"] == "done"

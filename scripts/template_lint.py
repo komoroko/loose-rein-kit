@@ -87,6 +87,12 @@ _REIN_INVOCATION_RE = re.compile(r"`rein ([^`\n]+)`")
 _FLAG_RE = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]*)")
 # A capability token is the backticked kebab word opening a mapping-table row.
 _CAPABILITY_ROW_RE = re.compile(r"^\|\s*`([a-z][a-z-]+)`\s*\|", re.MULTILINE)
+# The spelling a document uses for "a gate named after a task", which no single cycle's state can
+# confirm. Everything else a document names as a gate has to be a name the vocabulary holds.
+_GATE_PLACEHOLDER = "T-NNN"
+# The section AGENTS.md declares the vocabulary in — where the degradation column lives.
+_CAPABILITY_HEADING = "## Capability vocabulary"
+_TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 # `description:` in YAML frontmatter, `description = "…"` in a Codex subagent's TOML.
 _DESCRIPTION_RE = re.compile(r"^description\s*[:=]\s*(.+?)\s*$", re.MULTILINE)
 _TOML_ESCAPE_RE = re.compile(r"\\(.)")
@@ -121,8 +127,15 @@ def _require(text: str, path: str, terms: list[str], what: str) -> list[str]:
 
 
 def gate_names() -> list[str]:
-    """The canonical gate list (models.GATE_ORDER) the prose must echo verbatim."""
-    return sorted(models.GATE_ORDER)
+    """What AGENTS.md has to spell out about gates: the two ends, and the third kind's shape.
+
+    The two ends verbatim (`models.GATE_ENDS`). A cycle's other gates are named per cycle, after
+    the tasks that declared themselves irreversible, so there is no name for a template to echo —
+    but there is a *spelling*, and leaving it out of the always-loaded file is how the rules an
+    agent reads came to describe a two-gate lifecycle the loop had stopped having. `T-NNN` is that
+    spelling, the same one `models.gate_names()` prints in every error message.
+    """
+    return sorted([*models.GATE_ENDS, _GATE_PLACEHOLDER])
 
 
 def quality_gate_steps(config_text: str) -> list[str]:
@@ -143,7 +156,7 @@ def check_vocabulary(files: dict[str, str]) -> list[str]:
     failures += _require(files[AGENTS_MD], AGENTS_MD, kinds, "task kind (dag.KIND_VALUES)")
     failures += _require(files[TASKS_CMD], TASKS_CMD, kinds, "task kind (dag.KIND_VALUES)")
     failures += _require(files[TASKS_CMD], TASKS_CMD, sorted(dag.STATUS_VALUES), "task status (dag.STATUS_VALUES)")
-    failures += _require(files[AGENTS_MD], AGENTS_MD, gate_names(), "gate (models.GATE_ORDER)")
+    failures += _require(files[AGENTS_MD], AGENTS_MD, gate_names(), "gate (models.gate_names)")
     # The DoD step names are defined once (config.yaml) but narrated in several prose homes —
     # every copy must keep echoing them, or a renamed step teaches stale vocabulary somewhere.
     steps = quality_gate_steps(files[CONFIG_PATH])
@@ -253,12 +266,104 @@ def check_adapter_lists(root: Path) -> list[str]:
     return failures
 
 
+def capability_degradations(agents_text: str) -> dict[str, str]:
+    """`{capability: what to do lacking it}`, read out of AGENTS.md's own table **as a table**.
+
+    The vocabulary is portable because every capability declares what to do without it. That
+    declaration is a column, and a column only exists while the rows are one table.
+
+    This replaced a substring test — does `` `token` `` appear anywhere in AGENTS.md — and the
+    substring test is what let the table sit broken: a prose paragraph had been inserted between
+    two rows, which ends the table above it and leaves the five rows below as paragraph text. The
+    tokens were all still *in the file*, so nothing failed, and five capabilities silently had no
+    degradation column at all.
+    """
+    lines = agents_text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith(_CAPABILITY_HEADING))
+    except StopIteration:
+        return {}
+    body = lines[start + 1 :]
+    end = next((i for i, line in enumerate(body) if line.startswith("## ")), len(body))
+    body = body[:end]  # this section only — a section with no table must not borrow the next one's
+    try:  # the separator row is what makes the lines above and below it one table
+        sep = next(i for i, line in enumerate(body) if _TABLE_SEPARATOR_RE.match(line))
+    except StopIteration:
+        return {}
+    table: dict[str, str] = {}
+    # Contiguous rows only. A table ends at the first line that is not one, which is the whole
+    # point: rows that continue after a paragraph are not rows, and reading them as if they were
+    # is how this went unnoticed for as long as it did.
+    for line in body[sep + 1 :]:
+        if not line.startswith("|"):
+            break
+        match = _CAPABILITY_ROW_RE.match(line)
+        if match is None:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        table[match.group(1)] = cells[2] if len(cells) > 2 else ""
+    return table
+
+
+#: A cross-document reference to one of the retrospective's numbered sections, in either notation
+#: the shipped texts use (`retrospective §4`, "section 2 of docs/retrospective.md").
+_RETRO_SECTION_RE = re.compile(r"retrospective[^§\n]{0,6}§\s*(\d+)|section (\d+) of docs/retrospective\.md")
+_RETRO_HEADING_RE = re.compile(r"^## (\d+)\.", re.MULTILINE)
+
+
+def check_retrospective_sections(root: Path, texts: dict[str, str]) -> list[str]:
+    """Every `retrospective §N` a document points at is a section the retrospective has.
+
+    Four documents send a human or an agent to a numbered section of `docs/retrospective.md` to
+    finalize something. Inserting a section renumbers the ones below it, and the references do not
+    move with it — which is the same defect as naming a document that does not exist, one heading
+    in. The retrospective's own internal `§N` references are its to keep consistent, so they are
+    not read here.
+    """
+    scaffold = (root / "src" / "rein" / "data" / "scaffold" / "docs" / "retrospective.md").read_text(encoding="utf-8")
+    sections = {int(n) for n in _RETRO_HEADING_RE.findall(scaffold)}
+    failures: list[str] = []
+    for path, text in sorted(texts.items()):
+        if path.endswith("retrospective.md"):
+            continue
+        for match in _RETRO_SECTION_RE.finditer(text):
+            named = int(match.group(1) or match.group(2))
+            if named not in sections:
+                failures.append(
+                    f"{path}: points at retrospective §{named}, which docs/retrospective.md does not have "
+                    f"(it has {', '.join(f'§{n}' for n in sorted(sections))})"
+                )
+    return failures
+
+
+def check_scaffold_docs_classified(root: Path) -> list[str]:
+    """Every shipped scaffold document is either per-cycle or persistent, and says which.
+
+    `cycle-close` archives `cycle.CYCLE_DOCS` and restores them from the pristine snapshot; a
+    document in neither list is simply left where it is. That is a real answer for
+    `00-product-brief.md` and a silent wrong one for a per-cycle log, which then carries the last
+    cycle's rows into the next — so the classification is required rather than remembered.
+    """
+    from rein import cycle
+
+    known = set(cycle.CYCLE_DOCS) | set(cycle.PERSISTENT_DOCS)
+    scaffold = root / "src" / "rein" / "data" / "scaffold" / "docs"
+    return [
+        f"src/rein/data/scaffold/docs/{item.name}: in neither cycle.CYCLE_DOCS nor "
+        "cycle.PERSISTENT_DOCS — say whether `rein cycle-close` archives it or leaves it"
+        for item in sorted(scaffold.iterdir())
+        if item.name not in known
+    ]
+
+
 def check_capability_mapping(mappings: dict[str, str], agents_text: str) -> list[str]:
     """Every capability mapping covers the same token set, and AGENTS.md defines every token.
 
     The mapping tables (CLAUDE.md, the Copilot instructions file, the Codex one) are
     hand-maintained mirrors; the vocabulary itself lives in AGENTS.md. A capability added to one
-    mapping only — or one that AGENTS.md never defines — is the drift.
+    mapping only — or one that AGENTS.md's table has no row for — is the drift. `never defines` used
+    to mean `the token appears somewhere in the file`; it means a row with a degradation now
+    (:func:`capability_degradations`).
 
     Keyed by path rather than fixed to two arguments so that adding a host adds a mapping here
     and nothing else: a mapping this function does not receive is a mapping no canary holds,
@@ -273,9 +378,17 @@ def check_capability_mapping(mappings: dict[str, str], agents_text: str) -> list
         for token in elsewhere:
             others = ", ".join(sorted(p for p, ts in per_path.items() if token in ts))
             failures.append(f"{path}: missing capability `{token}` (mapped in {others})")
+    defined = capability_degradations(agents_text)
     for token in sorted(union):
-        if f"`{token}`" not in agents_text:
-            failures.append(f"{AGENTS_MD}: capability `{token}` is mapped but never defined here")
+        if token not in defined:
+            failures.append(
+                f"{AGENTS_MD}: capability `{token}` is mapped but has no row in the vocabulary table "
+                f"(a row outside the table is prose, not a declaration)"
+            )
+        elif not defined[token]:
+            failures.append(
+                f"{AGENTS_MD}: capability `{token}` declares no degradation — its `Lacking it` cell is empty"
+            )
     return failures
 
 
@@ -390,6 +503,30 @@ def _declares_flag(source: str, flag: str) -> bool:
     return re.search(rf"""["']{re.escape(flag)}["']""", source) is not None
 
 
+def _gate_argument_failures(path: str, verb: str, words: list[str]) -> list[str]:
+    """Gate names a document tells an agent to type, held against the vocabulary that has them.
+
+    Three commands take a gate, and a document naming one the tool does not have is not a typo an
+    agent can see: `rein approve build`, `rein approve requirements` and `rein approve design`
+    outlived the five-gate lifecycle by two releases, in printed handovers and in the scaffold a
+    new repository is seeded from, where they read as instructions and exit 2.
+    """
+    if verb == "approve":
+        named = [w for w in words[1:] if not w.startswith("-")][:1]
+    elif verb == "revise":
+        named = [w for i, w in enumerate(words) if i and words[i - 1] == "--to"]
+    elif verb == "changes":
+        named = [w for i, w in enumerate(words) if i and words[i - 1] == "--gate"]
+        named += [w for w in words[2:3] if words[1:2] == ["add"] and not w.startswith("-")]
+    else:
+        return []
+    return [
+        f"{path}: `rein {verb} … {gate}` names a gate the vocabulary does not have ({models.gate_names()})"
+        for gate in named
+        if "<" not in gate and gate != _GATE_PLACEHOLDER and not models.gate_name_ok(gate)
+    ]
+
+
 def check_documented_invocations(root: Path, texts: dict[str, str]) -> list[str]:
     """Every ``rein …`` command line a document tells an agent to run must actually parse.
 
@@ -418,6 +555,7 @@ def check_documented_invocations(root: Path, texts: dict[str, str]) -> list[str]
             if verb not in known_verbs:
                 failures.append(f"{path}: `rein {verb}` is not a verb — see cli.VERBS")
                 continue
+            failures += _gate_argument_failures(path, verb, words)
             entry = cli.VERBS.get(verb)
             # `help` is not a module: cli.py answers it (and `--all`) before dispatch.
             module = entry.spec.partition(":")[0] if entry else "cli"
@@ -1025,6 +1163,8 @@ def main(argv: list[str] | None = None) -> int:
         failures = check_vocabulary(files)
         failures += check_wrapper_parity(root)
         failures += check_adapter_lists(root)
+        failures += check_scaffold_docs_classified(root)
+        failures += check_retrospective_sections(root, neutral_texts(root))
         failures += check_capability_mapping(
             {path: (root / path).read_text(encoding="utf-8") for path in CAPABILITY_MAPPINGS},
             files[AGENTS_MD],

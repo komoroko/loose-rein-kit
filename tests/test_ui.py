@@ -138,7 +138,7 @@ def _seed_repo(base: Path, project: str) -> Path:
     base.mkdir(parents=True, exist_ok=True)
     seed_repo(
         base,
-        state=make_state(project=project, gates=dict.fromkeys(models.GATE_ORDER, "pending"), plan_status="draft"),
+        state=make_state(project=project, gates=dict.fromkeys(models.GATE_ENDS, "pending"), plan_status="draft"),
         config=make_config(profiles=SANDBOXED_PROFILES),
     )
     return base
@@ -383,7 +383,7 @@ def _repo_with_tasks(tmp_path: Path) -> Path:
         base,
         state=make_state(
             project="demo",
-            gates=dict.fromkeys(models.GATE_ORDER, "pending"),
+            gates=dict.fromkeys(models.GATE_ENDS, "pending"),
             plan_status="frozen",
             tasks={"T-001": "done", "T-002": "in-progress"},
         ),
@@ -899,8 +899,12 @@ def test_the_frontend_fixture_still_looks_like_a_real_status_payload(repo: Path)
     # The `repo` fixture has no plan, so its `tasks` is None; the frontend fixture's has one, and
     # the block's own shape is pinned by test_status_payload_carries_every_field_the_modules_read.
     assert set(fixture["tasks"]["counts"]) == set(models.TASK_STATUS_ORDER)
+    # Against the live row rather than a list written out here: a second hand-maintained copy of
+    # the payload's shape is the drift this test exists to catch, one level down.
+    live_gate_keys = {frozenset(gate) for gate in live["gates"]}
+    assert len(live_gate_keys) == 1
     for gate in fixture["gates"]:
-        assert set(gate) == {"name", "status", "index", "approval_id"}
+        assert frozenset(gate) in live_gate_keys, "the fixture's gate rows are not the payload's any more"
 
 
 def test_status_reads_the_event_log_through_the_cache(repo: Path) -> None:
@@ -927,7 +931,7 @@ def test_get_review_serves_rendered_deliverable(server: ui.DashboardServer, repo
     status, data = _request(server, "GET", "/api/review/mandate")
     assert status == 200
     payload = json.loads(data)
-    assert payload["is_awaiting"] is True and payload["index"] == 1
+    assert payload["is_awaiting"] is True and payload["gate"] == "mandate"
     (main,) = [d for d in payload["deliverables"] if d["label"] == "docs/10-requirements.md"]
     assert "<h1>Requirements</h1>" in main["html"]
     assert "<script" not in main["html"]  # XSS regression: agent markup arrives inert
@@ -1002,7 +1006,7 @@ def review_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
     root.mkdir()
     seed_repo(
         root,
-        state=make_state(project="rv", gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+        state=make_state(project="rv", gates=dict.fromkeys(models.GATE_ENDS, "pending")),
         config=make_config(profiles=SANDBOXED_PROFILES),
         review=_generated_review_with_card(),
     )
@@ -1264,7 +1268,7 @@ def test_the_pane_can_record_a_change_request(server: ui.DashboardServer, repo: 
         {"gate": "mandate", "target": "docs/10-requirements.md#R-3", "reason": "unmeasurable"},
     )
     assert status == 200
-    assert json.loads(body)["id"].startswith("CR-MANDATE-")
+    assert json.loads(body)["id"].startswith("CR-")
 
     blockers = approve.readiness(repo_mod.Repo(repo), "mandate")
     assert any("open change request" in b for b in blockers)
@@ -1295,3 +1299,87 @@ def test_the_readiness_payload_carries_what_the_terminal_names_before_its_prompt
 
     assert ready["naming"]["overrule_cost"] == approve.OVERRULE_COST
     assert ready["naming"]["unasked"] == approve.naming(repo_mod.Repo(repo), "mandate")["unasked"]
+
+
+# --- an irreversible point, decided in the dashboard --------------------------
+
+
+@pytest.fixture
+def crossing_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
+    """A cycle past its mandate, stopped in front of a task it cannot take back."""
+    from tests._support import make_plan, make_task
+
+    root = tmp_path / "cx"
+    root.mkdir()
+    task = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        operator_surface=[
+            {
+                "kind": "persistence",
+                "name": "the users table, migrated",
+                "paths": ["db/schema.sql"],
+                "reversible": False,
+                "adr": "ADR-007",
+            }
+        ],
+    )
+    seed_repo(
+        root,
+        plan=make_plan(tasks=[task]),
+        state=make_state(project="cx", gates={"mandate": "approved", "T-001": "pending", "acceptance": "pending"}),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+    )
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=root, read_only=False)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+
+
+def test_an_irreversible_point_is_approved_from_the_dashboard(crossing_server: ui.DashboardServer) -> None:
+    """The terminal is not the only route. Whatever a gate requires on screen belongs on every
+    route that can open it — and a route that cannot open it at all is the same gap one step out."""
+    ready = _readiness(crossing_server, "T-001")
+    assert ready["ok"], ready["blockers"]
+    assert [row["task_id"] for row in ready["naming"]["crossing"]] == ["T-001"]
+
+    status, body = write(crossing_server, "/api/gate/approve", {"gate": "T-001", "covers": ready["covers"]})
+    assert status == 200, body
+
+    from rein import repo as repo_mod
+    from rein import store as store_mod
+
+    state = store_mod.Store(repo_mod.Repo(crossing_server.active_root())).read_state()
+    assert state is not None and state.gate_status("T-001") == "approved"
+    assert (state.gate_receipt("T-001") or {})["confirmed_via"] == "ui-session"
+
+
+def test_the_board_lists_the_gate_the_cycle_grew(crossing_server: ui.DashboardServer) -> None:
+    payload: dict[str, Any] = ui._collect_status(crossing_server.active_root())
+
+    assert [g["name"] for g in payload["gates"]] == ["mandate", "T-001", "acceptance"]
+
+
+def test_acceptance_is_refused_while_the_point_is_uncrossed(crossing_server: ui.DashboardServer) -> None:
+    ready = _readiness(crossing_server, "acceptance")
+
+    assert not ready["ok"]
+    assert any("T-001" in b for b in ready["blockers"])
+
+
+def test_an_irreversible_point_can_be_refused_from_the_dashboard(crossing_server: ui.DashboardServer) -> None:
+    """The footer offers "request changes" at every gate; at a crossing it returned 400 with a
+    raw schema error, because the request id was built out of the gate's name. A gate a human may
+    approve and may not decline is not a decision, whichever route they are on."""
+    status, body = write(
+        crossing_server, "/api/changes", {"gate": "T-001", "target": "T-001", "reason": "migrate in two steps"}
+    )
+    assert status == 200, body
+
+    from rein import approve as approve_mod
+    from rein import repo as repo_mod
+
+    blockers = approve_mod.readiness(repo_mod.Repo(crossing_server.active_root()), "T-001")
+    assert any("two steps" in b for b in blockers)

@@ -37,7 +37,7 @@ test("a read-only page offers no way to write and says where the authority is", 
     readOnly: true,
     routes: baseRoutes((url) =>
       url.startsWith("/api/review/")
-        ? { gate: "acceptance", index: 4, status: "pending", is_awaiting: true, deliverables: [], context: [] }
+        ? { gate: "acceptance", status: "pending", is_awaiting: true, deliverables: [], context: [] }
         : undefined,
     ),
   });

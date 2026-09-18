@@ -4,6 +4,427 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.8.0] - 2026-09-18
+
+**Fourteen entries, from two ways of reading the same code.** Ten came from reading a claim the
+code makes about itself against the code that makes it. That method can only ever reach what
+exists, so the other four came from reading the *principles* against the code instead — and two of
+those were invisible to the first, because nothing was there to make a false claim.
+
+The ten: three named a guarantee at a point nothing verified it. Three read one store, or one
+event, where the question needed two. Three described a record that no file contained. One was a
+table that had stopped being a table. Nothing among them changes what a gate denies or what a lens
+does; what changes is what a reader is told — and, in four places, the check that would have caught
+the drift. They arrived in two passes, and the second began by reviewing the first: two of them are
+defects in the fixes above them.
+
+### The gate guard has three checkpoints, and only one of them is unconditional
+
+Asked what holds on a host with no editor hook, this release used to answer: "the commit-stage
+check (`rein guard --check-diff`) still applies if the pre-commit hook is installed." `rein install`
+does not write `.pre-commit-config.yaml`, `src/rein/data/` does not ship one, and `rein doctor`
+never looked for one — so that sentence offered reassurance on a condition nothing had checked, at
+exactly the point where an operator is deciding whether the boundary is real. `rein guard`'s own
+usage made it worse with a definite article: "this is what .pre-commit-config.yaml registers",
+describing *this* repository's config as though it were the reader's.
+
+What actually holds is the third checkpoint, which none of these texts mentioned.
+`build_loop._gate_violations` re-checks every path a task changed before the leaf branch merges —
+in code, inside `rein build`, on every host, with no registration to be missing. It has been there
+since 0.1.0 and its own docstring gives the reason: "an implementer may commit with hooks absent or
+bypassed". So a host without an edit-time hook does not drop the boundary to the convention layer.
+It changes **when** a violation is caught: edit-time denies the write and the agent reroutes before
+doing the work; merge-stage denies a whole task later and escalates it as `gate_violation` for a
+human. Same boundary, different price.
+
+`doctor` now reads the commit-stage registration instead of hedging about it — a diagnostic that
+can open a file and speculates instead is worse than one that stays quiet — and says which of the
+three this repository has. The absent-hook warning names merge-stage as what still holds; the
+matcher warning ("an edit made with `MultiEdit` never reaches the guard") no longer claims the
+commit-stage check "becomes the only layer"; and the Codex note no longer says an untrusted project
+"falls back to the commit-stage check". `gate_guard`'s module docstring and usage, and the
+"Enforcement detail" paragraph in `gate-workflow.md`, now describe all three and mark which are
+conditional.
+
+The gap this leaves is stated rather than papered over: a change that never goes through
+`rein build` passes no checkpoint `rein` installs. Nothing here closes it — that is a separate
+decision — but `doctor` now says so out loud.
+
+### A commit-stage registration is `rein guard --check-diff`, and the bare name is worse than nothing
+
+That commit-stage reading shipped checking for `rein guard` in `.pre-commit-config.yaml`, which
+would have called a broken registration a PASS. `rein guard` **alone** is the hook invocation: it reads a
+host's JSON payload on stdin. Run from pre-commit it is handed no payload, logs "unparseable hook
+payload — allowing without a gate check", and returns the allow code. That is a hook firing on
+every commit and checking nothing — the precise thing a green `doctor` must never cover for. The
+reading requires `--check-diff`, and names the bare-entry case separately from the absent one.
+
+### The same claim, in five more places
+
+`doctor` was the diagnostic; the claim was in the guard itself. `gate_guard.main`'s two fail-open
+paths — an unparseable payload, and a host that names its tool arguments something this release has
+not seen — both told the reader "the commit-stage check still runs". Those are the two places where
+the edit-time guard has just stopped guarding, so they are exactly where the reassurance had to be
+true. `PATH_KEYS` and `CLAUDE_WRITE_TOOLS` carried it as commentary, and the Codex integration file
+shipped it to users: "until then the guard is not registered and only the commit-stage check runs."
+All five now name what actually catches the write, which is where `rein build` lands it.
+
+### A capability that fell out of the vocabulary table kept its name and lost its degradation
+
+Portable verbs work because every one of them declares what to do on a host that lacks it. That
+declaration is the table's third column in `AGENTS.md`. A prose paragraph about `notify-and-wait`
+had been placed directly beneath its row, which ends the table there — the five rows after it
+(`approval-presentation`, `session-compaction`, `role-delegation`, `command-preauthorization`,
+`background-wait`) continued as paragraph text. Five of the eight capabilities had no degradation
+column at all, in the file that exists to give them one.
+
+`check_capability_mapping` did not catch it because of how it asked. Its test for "AGENTS.md
+defines this capability" was whether `` `token` `` appeared *somewhere in the file*, and every
+token still did. It now reads the section as a table — contiguous rows after the separator, ending
+at the first line that is not a row, which is what a Markdown renderer does — and requires each
+mapped capability to be a row with a non-empty `Lacking it` cell. Run against the broken file, the
+new check reports all five.
+
+The paragraph moved below the table, where it was always meant to be read.
+
+### `rein lens --stats` was reading one of the two events it needs
+
+A `proposed` lens is dropped by deleting it from the plan before the freeze. It then leaves no
+`lens_applied` behind and reads exactly like a lens whose condition never held — both are simply
+absent from the tally. So a lens whose condition is wide enough to be proposed every cycle and
+dropped every cycle costs a judgement every cycle, and the retirement rule could not see it.
+
+Nothing needed recording that was not already recorded. `lens_selected` names every lens the
+resolution wrote into the plan, `proposed` ones included, and `--stats` was reading `lens_applied`
+alone. It now counts both and names the lenses selected into a plan and never recorded as applied
+— without claiming a cause, because three produce it (dropped at the gate, not recorded by the
+reviewer, or an open cycle) and the tally cannot tell them apart. What it can say is that such a
+lens was not simply absent.
+
+No `dropped` status was added. The plan schema is `additionalProperties: false` and, more to the
+point, a record of a human's edit does not belong inside the digest that edit changes.
+
+### …and the counts say whose they are before inviting an edit to a shared library
+
+`--stats` reads this repository's chain and its archives. The library it then tells you to narrow
+or drop from lives in `$XDG_CONFIG_HOME` and is shared by every repository you use. The output
+ended "Narrow it in <that path>, or drop it" with nothing saying the reading behind the instruction
+was narrower than the thing it would change. It now says so. Which range the statistics *should*
+cover is a separate question; saying which one they do cover is not.
+
+### The speculative work log did not exist anywhere
+
+"While a gate is pending" is the rule that lets work continue without compromising a gate: only
+outcome-independent work, outside `guard.paths`, throwaway-by-default, **recorded**. Four procedure
+files named where to record it and named three different places. `req.md`, `tasks.md` and
+`build.md` said "speculative-work events" — a record the closed event vocabulary has no name for,
+which `models.EVENT_KINDS`'s own comment calls out as a claim about the log that is not true.
+`design.md` said a "speculative work log" in `docs/20-design.md`. `gate-workflow.md` said the phase
+deliverable's log. `/status` step 4 reads one, and `docs/retrospective.md` §3 finalizes its "Adopt?
+(human)" column at the end of every cycle.
+
+No scaffold document has ever contained that section. The record every one of those texts depends
+on was in none of them.
+
+There is one log now, `docs/speculative-work.md`, scaffolded with the columns the retrospective
+already asks for, and every text points at it. One file rather than one per phase because the
+question asked of it later — did waiting cost anything? — is one question. No event kind was added:
+this is work whose adoption a human decides after the gate, which is a document's judgement and not
+a state transition the chain has to defend.
+
+### A notification that did not arrive was filed as one that did
+
+`waited_seconds` is an armed reading: how long a decision sat with a notification and without one.
+`Watcher.tick` set the arm from `read_channel() is not None` and *then* called `send`. `send`
+returns False when the channel fails — a command that is not installed, a non-zero exit, a timeout
+— and nothing read that. So a repository with a configured, broken channel filed every one of its
+waits as `notified`, and the treatment arm held waits where nobody had been told anything, which is
+the one distinction the comparison exists to make.
+
+The arm follows the delivery now. Exactly one send happens per wait, so that one result is the
+wait's condition, fixed at its start exactly as before.
+
+This also answers something the control arm needed. The `silent` series was thought to require a
+cycle with notification deliberately switched off — measuring by degrading the thing measured, on
+a hypothesis whose size is what the measurement was for. A failed delivery is that same condition,
+occurring without anyone choosing it, and the harness already knew: `send` had told it and the arm
+had thrown it away. It is a control condition that can be picked up, not a control group that was
+designed — failures cluster in time — and that is worth saying beside the figure.
+
+### `rein start` says what is new in the observation store
+
+`rein observe` is pull-only, on purpose: a trigger needs a level to fire at, and a level is exactly
+what a store that nothing reads back must not have. The consequence was a store nobody has to open
+— the same rot the lens library's retirement rule exists against.
+
+The occasion that needs no level was already built for the other store. `rein start` reports what
+moved since this reader last looked, against a per-person watermark that is not in `.rein/` because
+"this person has read up to here" is not a change to the project's state. The observation store
+gets the same treatment: a count, in the reader's own state beside their place in the chain, and
+one line in a reading somebody is already doing. It asks for no answer and is not on the
+notification channel — that channel carries decisions waiting on a person, and these wait on
+nobody. Reading the figures does not write to the store they came from.
+
+The mark is a count rather than a sequence because the store has none, and `--prune` can shrink it;
+a mark above the total means the store was trimmed, and the delta is reported as zero rather than
+as a negative.
+
+### How often the work stopped, asked of the chain instead of the dashboard
+
+The stop count came from counting `waited_seconds` readings. Those are written by `notify.Watcher`,
+which only `rein ui` starts — so a cycle driven from the terminal recorded no stops, and a count of
+zero meant either "nothing stopped" or "nobody opened the dashboard". The count and the duration of
+a stop were sharing a store, which made them look like one question with one answer.
+
+They are not. A duration needs the moment a wait began, and for a gate that moment is not an event.
+A count does not: every stop that *ended* is in the chain already — `gate_approved` is a person
+opening a gate, `changes_requested` is one refusing to, and an escalation is one being asked. All
+written inside a `store.Transaction`, on every host, with or without a dashboard.
+
+`events.stops` counts them, over the live chain and every archive (the figure would otherwise go
+blank at the second cycle, which is when it starts being worth reading). Escalations are counted
+by `open_conditions` over the chain's own task outcomes — the *same* rule every board narrows by,
+so a condition the loop recovered from by itself is not counted as one a human had to act on, and
+a repeated escalation is one thing to decide however often it was recorded. `gate_revised` is
+excluded: `/revise` reopens a gate somebody has just refused, and that refusal is already counted.
+So is `decision_declared`, which five call sites use for three unrelated things.
+
+`rein observe` prints both counts, labelled by what they count, and never one instead of the other:
+they cover different scopes and are not corrections of each other. Neither has a ceiling, and the
+reason is still structural — nothing reads this store back to decide anything.
+
+**The four below were not found this way.** Nothing makes a false claim about a thing that was
+never built, so these began from `00-concept.md` read against `src/rein`.
+
+### The number of times a human is asked is no longer a constant of this tool
+
+`GATE_ORDER` was a two-element tuple and `state.gates` refused every other key, so a cycle had two
+contact points whatever it contained. That is a ceiling on how often a human is asked — the mistake
+the approval-screen budget already made once, except that this one could not even be raised.
+
+A human is asked wherever undoing gets expensive, so the count now follows the change. A task that
+freezes an `operator_surface` it cannot undo is an irreversible point of its own: it gets a gate
+named for it, `rein build` stops in front of it, and a human runs `rein approve T-NNN`. Approving
+the mandate is what adds them, out of the plan it is freezing — the act that fixes what will be
+built is the act that fixes how many more times this cycle stops, and the approver sees the count
+while approving the thing that creates it. There is no cap on how many.
+
+**Every route that can open a gate opens all of them.** The dashboard is not a second-class route
+for two of the gate kinds: a crossing gate has a reading room derived from the plan that created it
+(the task's ticket and the decision records its declarations point at — which is what
+`operator_surface.adr` has always been for), it is approved through the same session-bound endpoint,
+and the board lists it. `is_awaiting` now means *decidable now* rather than *first in the list*,
+because two crossings carry no order against each other and a pane reading position would have told
+a human the second was not theirs to decide.
+
+**Gates are named, never numbered.** The ①..⑤ notation, then ①②, was a position in a fixed ladder.
+It is gone from the dashboard, the browser-tab flag, the board's text rendering and both payloads —
+an ordinal cannot survive a count that follows the change.
+
+`State.gate_ids` replaces the constant everywhere it was read, `State.upstream_of` replaces the
+index arithmetic, and the gates of a cycle are a fan rather than a line: each crossing is downstream
+of the mandate and upstream of acceptance, and they carry no order among themselves. Ordering two of
+them against each other would be authorizing execution order, which the concept puts inside the
+delegation. `rein revise` withdraws a crossing like any other approval and now says the one thing it
+cannot do — the operation stays done.
+
+### `operator_surface` keeps the answer the design already gave
+
+`architect.md` requires every requirement to state what it needs of a person **and whether it can be
+undone**; `design.md` carries that into the tasks. The frozen record kept `{kind, name, paths, adr}`
+and dropped the reversibility, leaving it in prose that only the acceptance brief opens — by which
+time the thing has happened. `reversible` is now a required boolean on every declaration, with no
+default, because an omitted answer read as "yes" by silence.
+
+### Review lenses can get in, not only out
+
+`rein lens --stats` counted the lenses you have and argued, with no threshold anywhere, for removing
+the ones that had stopped earning their place. Nothing anywhere added one: `lenses.py` only reads the
+library, and `lenses.yaml` appeared in no prompt, no scaffold and no retrospective. A library read
+through that output alone can only shrink.
+
+The mechanism for entry already existed — the retrospective promotes durable lessons into the
+always-loaded files and records where each landed — and the library was missing from the list of
+destinations. `docs/retrospective.md` gains section 2, which holds this cycle's root causes against
+the lenses that were watching for them; `/verify` asks the question; the promotion targets name the
+library; and `--stats` says, where its removal advice is read, that it can only ever argue one way.
+No machine matching: no identifier ties a cause in one cycle to a cause in the last, so recurrence
+is the human's judgement, made with both lists in front of them.
+
+### The observation store's invariant is fixed against the source
+
+`00-concept.md` argues the stop count cannot become a ceiling *because there is no path by which it
+could* — a claim about every future edit. The test asserting it checked two strings in a rendered
+report and stated the invariant in its docstring, so a `read()` added to `approve.py` tomorrow would
+have passed. It now parses `src/rein` and pins the set of modules that read the store, with the gate,
+the build, the roll back and the change request named separately as the four the guarantee is about.
+
+### Nine more, from reading the fourteen above adversarially
+
+A third pass, run the way `adversarial-reviewer.md` says to run one: try to break it, look hardest
+at what did **not** change, and keep only what survives an attempt to refute it. Nine did. Most are
+defects in the fourteen above; the rest is older drift they walked past — a base-side check that
+never learned what `doctor` learned, and printed commands naming gates deleted two releases ago.
+
+**A gate a human may approve and may not refuse is not a decision.** A change request's id was
+built out of the gate's name — `CR-{gate.upper()}-{hex}` — so the id's own schema pattern,
+`^CR-[A-Z]+-[0-9A-F]+$`, was a second and weaker copy of the gate vocabulary. It did not follow
+when a cycle could grow a gate named `T-001`: every request against a crossing died on that
+pattern, at the CLI and as a 400 in the pane, which left the irreversible point as the one gate a
+human could open and could not decline. The id is an identity now (`CR-1A2B3C4D`) and says nothing
+about the gate; which gate a request stands against is the record's `gate` field, one line down.
+
+**The surfaces that point a person at a decision were still counting two gates.** `is_awaiting` was
+fixed in the review pane and nowhere else. `status_api` probed "the gate this stage ends with", and
+a stage is derived from the two ends — so with a crossing pending, the board recommended `/build`,
+reported `waiting_on_human: false`, and offered `rein approve acceptance --check` as the action for
+a row whose blocker was the crossing. The gate a person could actually open appeared on no surface
+that points anywhere, and the notification channel never fired for it. Decidability is one property
+now, `models.State.decidable_gates`, read by the board, the pane and the spine; the payload carries
+`decidable` per gate, so the page no longer re-derives it as "the first unapproved one" — a position
+in a ladder, which marks the second of two crossings as nobody's to decide.
+
+**The base-side verifier still read the commit-stage guard as a substring.** `doctor` learned that
+bare `rein guard` is a hook invocation that checks nothing; `policy_check` did not. Its enforcement
+marker was the string `"rein guard"`, so a head rewriting `entry: rein guard --check-diff` into
+`entry: rein guard` kept the marker and passed the check whose whole job is refusing that move. The
+markers are predicates now, and the commit-stage one is `gate_guard`'s own reader — the same
+function `rein doctor` reports from, because two readers of one registration is how the refusal
+becomes worthless.
+
+**A registration is a config, not a line of text.** That reader was a regex over one line, and
+pre-commit splits an invocation across `entry` and `args` exactly as its own documentation does. A
+repository with `entry: rein guard` + `args: [--check-diff]` — a working checkpoint — was told it
+"reads no payload, warns and allows". It is parsed as YAML now, and answers four ways: registered,
+neutered, absent, or unreadable, which is not the same as absent.
+
+**`docs/speculative-work.md` was archived by nothing.** The new log is per-cycle — its rows are
+finalized in that cycle's retrospective — and it was in neither `CYCLE_DOCS` nor anything else, so
+`cycle-close` neither archived nor reset it and the next cycle opened holding the last one's rows.
+It is a cycle doc now, and `PERSISTENT_DOCS` names the other answer, so a scaffold document in
+neither list fails template-lint rather than quietly persisting.
+
+**A stop the loop recovered from by itself was counted as a human stop.** `events.stops` read raw
+`ATTENTION_EVENTS` with no retirement rule, so a task that failed twice and passed on the third
+attempt added one to a figure whose label is "the work stopped and a human had to act" — while
+every surface that asks what awaits a person correctly said nothing did. It counts
+`open_conditions` now, over outcomes read from the chain itself (`events.task_outcomes`), so the
+live board and an archived cycle narrow by the same rule.
+
+**The spelling check was standing in for the membership check.** `models.gate_name_ok` answers
+whether a string could name a gate; whether *this* cycle has it is a different question, and
+`approve` was the only caller asking it. `rein revise --to T-404` planned an empty roll back — which
+reads as "already rolled back" — and then wrote a `gate_revised` event naming a gate that never
+existed; `rein changes add` had the same hole. Both were impossible before the vocabulary opened up.
+`State.gate_absence_reason` is that question, with one wording, and every caller holding a state
+now asks it.
+
+**The stop at an irreversible point was recorded twice.** The loop escalated a `knowledge_gap`
+beside the pending gate. The gate is already the record that the work stopped and a human must act,
+and the chain records how it ends — so the escalation was a second record of one fact, one that no
+approval closes, that made `rein next` recommend `rein events --summary` instead of the approval,
+and that `events.stops` counted again when `gate_approved` landed. It was also re-filed on every
+batch that went past it. Reaching acceptance prints its handover and files nothing
+(`_present_gate4`); reaching a crossing now does the same, once, after the rest of the batch has
+run.
+
+**And the documents still described a two-gate lifecycle.** `AGENTS.md` — the always-loaded one —
+said "the two gates say how often the work stops", listed `--to mandate` and `--to acceptance` as
+the roll-back targets, and never mentioned a crossing at all; both READMEs said the same; the new
+speculative-work log told a reader the pending gate was `mandate` or `acceptance`. Worse, three
+printed lines still named gates deleted two releases ago: `rein approve build` in the acceptance
+handover and after freezing a review, and `rein approve requirements` / `rein approve design` in
+the scaffold a new repository is seeded from — instructions that exit 2. The prose is corrected,
+the printed ones are spelled from `models.GATE_LAST` rather than typed, and four canaries close the
+classes: a documented `rein approve|revise|changes` gate argument must be one the vocabulary has,
+`AGENTS.md` must spell the `T-NNN` form, every scaffold document must be classified, and every
+`retrospective §N` reference must resolve to a section that exists.
+
+### Two more, from reading the last two open items the same way
+
+Both had been left as "waiting for operating data". Neither was.
+
+**Waiting will not produce the second arm, and the report was asking for it the one way that was
+ruled out.** `waited_seconds` is split into `notified` and `silent` so that "a channel shortens the
+wait" is a claim somebody can check, and a record holding one arm printed "run some cycles with
+`command:` unset too". That is the option the design had already rejected — degrading the thing
+being measured in order to measure it — and it survived the release that removed the need for it.
+It could also never work as advice: `notify.yaml` and `observations.ndjson` sit in the same
+user-global directory, so one record is one machine under one channel setting, and a cycle without
+`rein ui` records no wait on either side. The advice now names what actually fills the gap without
+spoiling anything — the cycles run before a channel was set up, and any delivery that failed — and
+says why the gap may not close. `doctor` and `notify` said versions of the same thing and are
+corrected with it.
+
+**How long the work sat stopped is in the chain, and only the dashboard was ever asked.** The count
+moved to the chain last release; the duration stayed behind because it looked like the same
+question as `waited_seconds`. It is not. `waited_seconds` starts when the decision becomes
+*derivable*, which takes something watching — but the moment the work stopped is simply the last
+event the loop wrote before a human opened or refused the gate, and the chain is ordered and
+stamped. `events.stop_durations` reads it off the record that was already there: nothing new is
+appended, so the pending gate stays the single record of its own stop. `rein observe` prints it
+beside the timed figures under its own claim, never pooled with them — the chained span also holds
+whatever somebody had to fix before the gate would open, including edits to `docs/10-requirements.md`
+that this harness does not own and never sees. Available on every host, both approval paths, and
+across archived cycles. A chain that fails its own verification yields no figure at all.
+
+### `rein decisions` — the judgement history, read across cycles
+
+`00-concept.md` names three things a human has to keep hold of for delegation to be real: the
+claims, the scope, and **the history of their own judgements**. The third had four write sites —
+`plan.yaml`'s `decisions`, an ADR, `## Clarifications`, `## Open questions` — and no reader.
+
+It was left open on the grounds that the decision was only about *when* to wire it, since the
+read path already existed. Writing it turned up why it could not wait: **all four write sites are
+per-cycle.** `cycle.CYCLE_DOCS` contains `decisions`, so `cycle-close` archives the ADR directory
+along with `10-requirements.md` and `plan.yaml`, then restores the first two from the pristine
+snapshot. A decision settled last cycle is not merely harder to find in the working tree; it is
+not in `docs/` at all. A person asking "what did I already decide about this" had no way to be
+answered, and the four places the concept document calls a distribution problem had quietly become
+four places that empty.
+
+The write sites do not move — a fifth write path and four migrations would not make the reasons
+they are separate go away. What is new is the read: `rein decisions` prints every cycle oldest
+first, the open one last, each record tagged with which site it came from, because they are not
+interchangeable (an `## Open questions` entry is an assumption still standing, not a settled
+decision). No schema is imposed on the past: an archived `plan.yaml` was written by whatever
+release closed that cycle, and validating it against today's would make the history go blank on
+the next schema change. An archive that fails its own verification is named and left out; so is a
+document that cannot be read. The scaffold's own placeholder bullets are not printed as somebody's
+judgement, and which lines those are is read off the packaged scaffold rather than matched against
+a guessed shape.
+
+`events.cost_sources` is `events.cycle_sources` now, and returns what a cycle *is* rather than only
+its chain: the label, the events, and where that cycle's `rein/` and documents live. It is the one
+enumeration of cycles, so the four reports that span them — `--cost`, `rein lens --stats`,
+`rein observe`, and this — cannot drift about which archives count. The label names the cycle
+(`docs/archive/2026-08-01-first`) rather than its chain file; a defect is still reported against
+the file it was found in.
+
+### `waited_seconds` stops calling itself an unfinished comparison
+
+The last open item. `waited_seconds` is split into `notified` and `silent`, and every surface that
+mentioned it described the split as a comparison one arm short. It is not short; it is not a
+comparison. The arm is read from `notify.yaml`, which is **one setting for the whole machine**,
+beside a store that never leaves that machine — so both columns of a record come from one person
+under one setting, and the only way to assign them on purpose is to withhold notifications from
+somebody. That is measuring by damaging what is measured, which this design ruled out when it
+first considered it.
+
+So the arms stay — pooling them would produce a mean wait that answers nothing, and the store
+refuses an unarmed reading for exactly that reason — and what changes is what they claim. Two
+conditions recorded apart, printed as such, with a note that the effect of a notification is not
+what they settle. The one-sided note says the missing column is not a gap to go and fill. What
+`notify.py` does claim is structural and needs no measurement waiting on it: how soon a person
+finds out is set inside this design rather than by which CLI was in use and whether a window
+happened to be open — true or false by reading the module. And what a contact point costs is
+measured in full elsewhere, for every cycle and every host, by the chained count and the chained
+stopped time.
+
+**A falsification quantity has to attach to the falsifiable part of a claim.** Attached to an
+effect size a design cannot identify, it reads as "waiting for data" forever, and the claim goes
+unchecked for as long as the wait lasts.
+
 ## [0.6.1] - 2026-09-17
 
 Four corrections with one thing in common: **each was found by reading the shipped code against

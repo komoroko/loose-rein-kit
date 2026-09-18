@@ -85,7 +85,7 @@ def cycle_facts(
         lines.append(f"- **Audit chain: {len(defects)} defect(s)** — this PR must not be merged as it stands")
 
     lines += ["", "### Gates", ""]
-    for gate in models.GATE_ORDER:
+    for gate in state.gate_ids:
         receipt = state.gate_receipt(gate) or {}
         approval = receipt.get("approval_id") or "-"
         lines.append(f"- {gate}: {state.gate_status(gate)} (approval: {approval})")

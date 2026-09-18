@@ -44,5 +44,8 @@ tasks: []
 #      - kind: persistence            #   acceptance can sort what the code turned out to require by
 #        name: users.email_verified   #   whether anybody foresaw it. kind is one of the extractor's
 #        paths: [db/schema/users.sql] #   own words, so both sides compare without a translation
-#        adr: ADR-004                 #   table. paths is where the surface can be READ at the end —
-#                                     #   also what acceptance serves as the as-built view.
+#        reversible: false            #   table. paths is where the surface can be READ at the end —
+#        adr: ADR-004                 #   also what acceptance serves as the as-built view.
+#                                     # reversible comes from the design ("can this be undone?") and
+#                                     #   false makes this task a gate of its own: the loop stops in
+#                                     #   front of it and a human runs `rein approve T-00N`.

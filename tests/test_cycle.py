@@ -19,7 +19,7 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import chain, make_state, seed_repo
 
-ALL_APPROVED = dict.fromkeys(models.GATE_ORDER, "approved")
+ALL_APPROVED = dict.fromkeys(models.GATE_ENDS, "approved")
 
 
 def finished_repo(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:
@@ -68,6 +68,29 @@ def test_the_product_baseline_persists_across_cycles(tmp_path: Path) -> None:
     sources = {src for _, src, _ in cycle.plan_close(repo, "payment", "2026-07-23")}
     assert "docs/00-product-brief.md" not in sources
     assert "docs/05-current-state.md" not in sources
+
+
+def test_the_speculative_work_log_is_archived_with_its_cycle(tmp_path: Path) -> None:
+    """It is filled in per cycle and its rows are finalized in that cycle's retrospective.
+
+    Classified as neither, it was archived by nothing and restored by nothing: the next cycle
+    opened holding the last one's rows, and `/status` went on naming them as still undecided.
+    """
+    repo = finished_repo(tmp_path)
+    rows = {src: dst for _, src, dst in cycle.plan_close(repo, "payment", "2026-07-23")}
+
+    assert rows["docs/speculative-work.md"] == "docs/archive/2026-07-23-payment/speculative-work.md"
+
+
+def test_every_scaffold_document_is_classified_one_way_or_the_other(tmp_path: Path) -> None:
+    """The two lists are the whole answer, so a document in neither is not a third policy — it is
+    a per-cycle log that silently persists, or a persistent file nobody said persists."""
+    from rein import data as data_mod
+
+    prefix = len("scaffold/docs/")
+    shipped = {rel[prefix:].split("/")[0] for rel, _ in data_mod.iter_files("scaffold/docs")}
+
+    assert shipped <= set(cycle.CYCLE_DOCS) | set(cycle.PERSISTENT_DOCS)
 
 
 def test_an_absent_item_is_skipped_which_is_what_makes_a_rerun_idempotent(tmp_path: Path) -> None:

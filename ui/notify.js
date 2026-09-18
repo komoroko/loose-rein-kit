@@ -24,7 +24,6 @@ function snapshot(d) {
   return {
     project: d.project || "",
     awaiting: awaiting ? awaiting.name : null,
-    awaitingIndex: awaiting ? awaiting.index : 0,
     // How much is waiting comes from the status queue's counts, not from the event list. An
     // escalation is only one way a repository stops moving: a review bound to a commit that is no
     // longer HEAD, or an undispositioned finding, blocks the gate and writes no event at all — so
@@ -107,7 +106,7 @@ export function useNotifier(status) {
       : s.openItems > 0
         ? `(◆${s.openItems}) `
         : s.awaiting
-          ? `(◆g${s.awaitingIndex}) `
+          ? `(◆ ${s.awaiting}) `
           : "";
     document.title = flag + "Loose Rein — " + (s.project || "dashboard");
 

@@ -29,8 +29,19 @@ write capability that travelled with it would be the gate's authority following 
 a channel can do is tell somebody to come back.
 
 **The wait is timed whether or not a channel exists.** `Watcher` runs either way and records every
-wait in the arm it was spent in (`notified` / `silent`, :mod:`rein.observations`). A channel that
-was only measured when it was switched on could never be shown to have helped.
+wait in the arm it was spent in (`notified` / `silent`, :mod:`rein.observations`). Measuring only
+the switched-on case would leave the figure with nothing beside it.
+
+**What that record can settle, and what it cannot.** The claim made here is that the channel is
+*owned* — that how soon a person finds out is set inside this design rather than by which CLI was
+in use and whether a window happened to be open. That is structural: it is true or false by
+reading this module and `ui.py`, and no measurement is waiting on it. How many minutes a
+notification saves is a different question, and this record cannot answer it: the arm is one
+setting for the whole machine, so the two columns are two conditions that were spent under, not a
+comparison anybody assigned. Making them comparable on purpose would mean withholding
+notifications from somebody, which is measuring by damaging the thing measured. So the columns
+are printed apart, and `rein observe` says they are not a controlled comparison rather than
+inviting somebody to go and even them up.
 """
 
 from __future__ import annotations
@@ -140,7 +151,11 @@ def read_channel() -> Channel | None:
     None is not a failure. Running without a channel is the supported default: the dashboard still
     badges its tab and `rein next` still prints the decision. What is missing is only the path that
     reaches somebody who is not looking — and the wait is still measured, in the `silent` arm, which
-    is what makes "the channel shortens it" a claim anybody can check.
+    is what keeps the figure from being one-sided by construction.
+
+    One setting for every project on this machine, so a record usually holds one arm — and that is
+    left alone. Nothing here suggests unsetting `command:` to obtain the other side, and nothing
+    asks anybody to: the module docstring says which part of this claim a measurement settles.
     """
     path = config_path()
     try:
@@ -223,9 +238,10 @@ class Watcher:
     """Re-derives the pending decision on a timer, notifies when it changes, and times every wait.
 
     Two jobs, and only one of them depends on a channel being configured. Notifying does. Measuring
-    does not, and must not: `waited_seconds` is there to answer whether a channel shortens the wait,
-    and a watcher that only runs when a channel exists records one arm of that comparison and calls
-    it evidence. So it runs either way, and each wait carries the arm it was spent in.
+    does not, and must not: a watcher that only ran when a channel existed would record the
+    notified condition alone and let it read as what waiting costs here. So it runs either way,
+    and each wait carries the condition it was spent under. What that record is and is not is in
+    the module docstring — two conditions, not an assignment.
 
     The one piece of state that survives a tick is the decision currently being waited on and when
     it started being waited on. That is what makes "one decision, one notification" true across a
@@ -292,11 +308,22 @@ class Watcher:
         if not current:
             return False
         channel = read_channel()
-        self._arm = observations.ARM_NOTIFIED if channel is not None else observations.ARM_SILENT
         if channel is None:
+            self._arm = observations.ARM_SILENT
             return False
         assert isinstance(decision, Mapping)
-        return send(render(decision, project=self._project, url=self._url), command=list(channel.argv))
+        sent = send(render(decision, project=self._project, url=self._url), command=list(channel.argv))
+        # The arm is what the wait was *spent under*, and a channel that did not deliver is a wait
+        # the person was not told about. It used to be set from `channel is not None` before this
+        # call, so a configured-but-broken channel — a command that is not installed, a non-zero
+        # exit, a timeout — filed every one of its waits as `notified`. The comparison then had a
+        # treatment arm holding waits where nobody was notified, which is the one thing it exists
+        # to distinguish. `send` already knew; the arm was reading the config instead of the outcome.
+        #
+        # Exactly one send happens per wait (the id has to change for `tick` to get this far), so
+        # this one result is that wait's condition, fixed at its start like the other arm is.
+        self._arm = observations.ARM_NOTIFIED if sent else observations.ARM_SILENT
+        return sent
 
     def _close_wait(self) -> None:
         """File the wait that just ended, in the arm it was spent in.

@@ -41,28 +41,61 @@ from rein import common, data, digests, strict_yaml
 RISK_ORDER: tuple[str, ...] = ("low", "medium", "high", "critical")
 RISK_VALUES = frozenset(RISK_ORDER)
 
-#: The two things a human approves, in the order they are approved. A roll back resets a chain of
-#: these (plan §16).
+#: The two ends every cycle has, whatever it contains. A roll back resets a chain of gates (plan §16).
 #:
 #: **Authority, not procedure.** There were five, one per phase, and `approve` advanced
 #: `current_phase` in the same write that flipped a gate — so every question about *permission*
 #: arrived as a question about *order*, and the number of approvals was fixed by the number of
-#: stages rather than by the number of decisions. What a human actually decides is twice:
+#: stages rather than by the number of decisions.
 #:
 #: * ``mandate`` — what the loop may change, what must become true, and what evidence counts.
 #:   The requirements, the design and the task breakdown are the material it is written from; none
 #:   of them is a thing to approve on its own.
 #: * ``acceptance`` — whether this change, with the evidence now on the record, is taken.
 #:
-#: Everything the five gates enforced survives as a *readiness* check on one of these two
+#: Everything the five gates enforced survives as a *readiness* check on one of these
 #: (`approve.readiness`). What does not survive is the claim that the *order* of the work is a
 #: human's to authorize: inside an approved mandate the loop consumes the DAG, reorders what it may
 #: and re-runs what went red without asking. What it may not do is re-cut the plan — `plan.yaml` is
 #: frozen whole, because a task's `acceptance` list lives in it and softening a criterion is
 #: exactly the widening `revise` exists for.
-GATE_ORDER: tuple[str, ...] = ("mandate", "acceptance")
-GATE_VALUES = frozenset(GATE_ORDER)
+GATE_FIRST = "mandate"
+GATE_LAST = "acceptance"
+GATE_ENDS: tuple[str, str] = (GATE_FIRST, GATE_LAST)
+
+#: **These two are not a total.** They were, as a fixed `GATE_ORDER` tuple and a `gates` object that
+#: refused any other key, and that is a ceiling on how many times a human is asked — the mistake the
+#: approval-screen budget already made once. A human is asked wherever undoing gets expensive, and
+#: whether a cycle has a third such point is a fact about the cycle, not about this file: a task
+#: that declares an `operator_surface` it cannot undo becomes one, and the stop lands before that
+#: task runs rather than at acceptance, where the brief reads the declaration today and the thing
+#: has already happened. The frozen plan says how many there are, so approving the mandate is what
+#: fixes the count — the same act that fixes what will be built.
+#:
+#: A crossing gate is named for the task that crosses it, and `State.gate_ids` orders them only so
+#: that output is stable. They carry **no order among themselves**: each is downstream of the
+#: mandate and upstream of acceptance, and nothing more. Which one the loop reaches first is
+#: execution order, which `00-concept.md` puts inside the delegation and not at a contact point.
+CROSSING_GATE_RE = re.compile(r"^T-[0-9]+$")
 GATE_STATUS_VALUES = frozenset({"pending", "approved"})
+
+
+def gate_name_ok(gate: str) -> bool:
+    """Whether `gate` could name a gate at all — a spelling check, nothing more.
+
+    Whether *this* cycle has it is `State.gate_absence_reason`, and that is the question every
+    caller holding a state has to ask instead of this one: a crossing gate exists only for a task
+    the frozen plan said was irreversible, so `T-009` is well-formed and usually absent. This is
+    for the one caller with no state yet — an argument parser, or a readiness check before the
+    documents are read.
+    """
+    return gate in GATE_ENDS or CROSSING_GATE_RE.match(gate) is not None
+
+
+def gate_names() -> str:
+    """How to spell a gate, for an error message written before any state has been read."""
+    return f"{GATE_FIRST}, {GATE_LAST}, or a task id (T-NNN) this cycle froze as irreversible"
+
 
 #: Commands that run, exit zero, and establish nothing. `["true"]` is what the scaffold ships for
 #: its launch step; the others are the same gesture written differently. Shared vocabulary because
@@ -272,7 +305,7 @@ DISPOSITION_VALUES = frozenset(
 )
 
 #: How far the human half of the acceptance review has got. `frozen` is the end state: the answers
-#: are sealed and digested, and `rein approve build` is what a human runs next.
+#: are sealed and digested, and `rein approve acceptance` is what a human runs next.
 HUMAN_REVIEW_STATUS_ORDER: tuple[str, ...] = ("not_started", "in_progress", "frozen")
 HUMAN_REVIEW_STATUS_VALUES = frozenset(HUMAN_REVIEW_STATUS_ORDER)
 #: Whether a machine review exists at all. An explicit status rather than an inference from
@@ -789,6 +822,19 @@ class Task(Element):
         value = self.raw.get("operator_surface")
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
+    @property
+    def irreversible_surfaces(self) -> tuple[Mapping[str, Any], ...]:
+        """The declarations on this task that say they cannot be undone.
+
+        `reversible` is not a new question — the architect answers it for every requirement
+        (`architect.md`) and the design carries it into the tasks (`design.md`). What was new is
+        that the frozen record kept `{kind, name, paths, adr}` and dropped the answer, leaving it
+        in prose that only the acceptance brief ever opens. Read strictly: anything that is not
+        exactly `False` is not a declaration that this is irreversible, and a missing key is a
+        plan the schema would not have written.
+        """
+        return tuple(entry for entry in self.operator_surface if entry.get("reversible") is False)
+
 
 class Decision(Element):
     """One thing the drafting phase had to settle, and who settled it.
@@ -1005,6 +1051,15 @@ class Plan:
         return self._section("tasks")
 
     @property
+    def crossing_task_ids(self) -> tuple[str, ...]:
+        """The tasks whose work cannot be undone once it runs — this cycle's extra contact points.
+
+        Sorted, and unique: a task with three irreversible declarations is still one stop, because
+        what is being authorized is crossing that point, not each surface behind it.
+        """
+        return tuple(sorted({task.id for task in self.tasks if task.irreversible_surfaces}))
+
+    @property
     def decisions(self) -> tuple[Decision, ...]:
         return self._section("decisions")
 
@@ -1087,8 +1142,67 @@ class State:
         return receipt if isinstance(receipt, dict) else None
 
     @property
+    def crossing_gates(self) -> tuple[str, ...]:
+        """The irreversible points this cycle declared, named for the task that crosses each.
+
+        Sorted for stable output only. They have no order among themselves — see `CROSSING_GATE_RE`.
+        """
+        return tuple(sorted(g for g in self.gates if g not in GATE_ENDS))
+
+    @property
+    def gate_ids(self) -> tuple[str, ...]:
+        """Every gate of this cycle, in the order a person reads them.
+
+        Not a constant: a cycle with two irreversible points has four gates, and one with none has
+        two. `mandate` and `acceptance` are always present because the state schema requires them.
+        """
+        return (GATE_FIRST, *self.crossing_gates, GATE_LAST)
+
+    def upstream_of(self, gate: str) -> tuple[str, ...]:
+        """The gates that must already be approved before `gate` can be.
+
+        The shape is a fan, not a line: the mandate authorizes the cycle, each crossing stands on
+        it alone, and acceptance stands on all of them. Ordering two crossings against each other
+        would be authorizing execution order.
+        """
+        if gate == GATE_FIRST:
+            return ()
+        if gate == GATE_LAST:
+            return (GATE_FIRST, *self.crossing_gates)
+        return (GATE_FIRST,)
+
+    @property
     def approved_gates(self) -> tuple[str, ...]:
-        return tuple(g for g in GATE_ORDER if self.gate_status(g) == "approved")
+        return tuple(g for g in self.gate_ids if self.gate_status(g) == "approved")
+
+    @property
+    def decidable_gates(self) -> tuple[str, ...]:
+        """The gates a human could open *right now*: not approved, with nothing they rest on pending.
+
+        **Not "the first unapproved one".** That reading is a position in a ladder, and crossings
+        carry no order against each other, so it tells the person holding the second one that it is
+        not theirs to decide. One rule, here, because the surfaces that ask it had begun to answer
+        differently: the board's recommendation said a crossing was nobody's to decide while the
+        review pane said it was open.
+        """
+        return tuple(g for g in self.gate_ids if self.gate_status(g) != "approved" and self.pending_upstream(g) is None)
+
+    def gate_absence_reason(self, gate: str) -> str | None:
+        """Why `gate` is not one of this cycle's gates, or None when it is one.
+
+        The wording lives here because every caller holding a state owes the same answer, and the
+        two that skipped the question did not skip it deliberately: `gate_name_ok` reads like a
+        validation and is only a spelling check.
+        """
+        if gate in self.gate_ids:
+            return None
+        if not gate_name_ok(gate):
+            return f"unknown gate {gate!r} ({gate_names()})"
+        return (
+            f"this cycle has no gate {gate!r} — it has {', '.join(self.gate_ids)}. A crossing gate "
+            "exists only for a task the frozen plan declared irreversible, and it appears when the "
+            "mandate is approved."
+        )
 
     @property
     def plan_status(self) -> str:
@@ -1215,23 +1329,23 @@ class State:
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
     def gate_chain_violations(self) -> list[tuple[str, str]]:
-        """Every (approved gate, first pending gate upstream of it) pair.
+        """Every (approved gate, pending gate upstream of it) pair.
 
         A non-empty result means an approval survived a roll back: downstream work is standing
         on a decision that has been withdrawn (AGENTS.md "Roll back").
         """
         violations: list[tuple[str, str]] = []
-        first_pending: str | None = None
-        for gate in GATE_ORDER:
+        for gate in self.gate_ids:
             if self.gate_status(gate) != "approved":
-                first_pending = first_pending or gate
-            elif first_pending is not None:
-                violations.append((gate, first_pending))
+                continue
+            pending = self.pending_upstream(gate)
+            if pending is not None:
+                violations.append((gate, pending))
         return violations
 
     def pending_upstream(self, gate: str) -> str | None:
-        """The first not-approved gate upstream of `gate`, or None when the chain is clear."""
-        for upstream in GATE_ORDER[: GATE_ORDER.index(gate)]:
+        """A not-approved gate upstream of `gate`, or None when the chain is clear."""
+        for upstream in self.upstream_of(gate):
             if self.gate_status(upstream) != "approved":
                 return upstream
         return None

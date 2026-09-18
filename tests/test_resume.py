@@ -26,7 +26,7 @@ def repo(tmp_path: Path) -> Path:
     root.mkdir()
     seed_repo(
         root,
-        state=make_state(project="rt", gates=dict.fromkeys(models.GATE_ORDER, "pending")),
+        state=make_state(project="rt", gates=dict.fromkeys(models.GATE_ENDS, "pending")),
         config=make_config(profiles=SANDBOXED_PROFILES),
     )
     return root
@@ -177,3 +177,75 @@ def test_start_never_reaches_the_network(repo: Path, monkeypatch: pytest.MonkeyP
     upstream.write_cache("o/r", "v999.0.0")
     _log(repo, "task_completed")
     resume.run(repo)
+
+
+# --- the observation store's own delta, in a reading already being done --------
+
+
+def _observe(project: str, count: int) -> None:
+    from rein import observations
+
+    for _ in range(count):
+        observations.record("judgement_raised", project=project, cycle_id="c")
+
+
+def test_new_observations_are_named_in_the_reading_a_person_already_does(repo: Path) -> None:
+    """The alternative was a trigger, and a trigger needs a level to fire at — the one thing the
+    observation store refuses to have. So the occasion is one that already exists: `rein start`
+    already reports what moved since this reader last looked, with a watermark and no threshold."""
+    _log(repo, "gate_approved")
+    _observe("rt", 3)
+
+    assert "3 new observation(s)" in resume.run(repo)
+    # …and reading them is a visit: nothing is new on the way back in.
+    assert "new observation(s)" not in resume.run(repo)
+
+    _observe("rt", 1)
+    assert "1 new observation(s)" in resume.run(repo)
+
+
+def test_another_project_s_observations_are_not_this_repository_s_news(repo: Path) -> None:
+    """The store is user-global and the reading is about one repository."""
+    _log(repo, "gate_approved")
+    _observe("somewhere-else", 5)
+
+    assert "new observation(s)" not in resume.run(repo)
+
+
+def test_a_peek_does_not_advance_the_observation_mark(repo: Path) -> None:
+    _log(repo, "gate_approved")
+    _observe("rt", 2)
+
+    assert "2 new observation(s)" in resume.run(repo, mark=False)
+    assert "2 new observation(s)" in resume.run(repo)
+
+
+def test_a_pruned_store_reports_nothing_new_rather_than_a_negative(repo: Path) -> None:
+    """`rein observe --prune` trims the store, so the total can fall below where a reader got to.
+    That means the readings were trimmed, not that any arrived — and "nothing new" is the true
+    answer to the question this line asks."""
+    from rein import observations
+
+    _log(repo, "gate_approved")
+    _observe("rt", 4)
+    resume.run(repo)
+    observations.prune(1)
+
+    assert "new observation(s)" not in resume.run(repo)
+    assert resume.read_observed(repo.resolve()) == 1
+
+
+def test_the_observation_mark_never_lands_in_the_repository_or_the_store(repo: Path) -> None:
+    """Reading the figures must not change them: a store that records having been read is an input
+    to something. The mark is the reader's own state, beside their place in the chain."""
+    from rein import observations
+
+    _log(repo, "gate_approved")
+    _observe("rt", 2)
+    before = observations.store_path().read_text(encoding="utf-8")
+
+    resume.run(repo)
+
+    assert observations.store_path().read_text(encoding="utf-8") == before
+    assert resume.observed_path() != observations.store_path()
+    assert not list(repo.rglob("observed.json"))

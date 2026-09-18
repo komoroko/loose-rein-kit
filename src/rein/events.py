@@ -15,6 +15,9 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 from rein import common, cycle, event_chain, models, run_record
 from rein import repo as repo_mod
@@ -33,6 +36,119 @@ ATTENTION_EVENTS = frozenset(
         "plan_invalidated",
     }
 )
+
+
+#: Chain events that each mark one stop at a gate: the work halted and a human acted. Both need a
+#: person — `gate_approved` is one opening a gate and `changes_requested` is one refusing to.
+#:
+#: This exists because the stop *count* and the stop *duration* had looked like one question by
+#: living in one store. Neither needs the watcher: every stop that ended is already in the chain,
+#: written inside a `store.Transaction` on every host and every path, and the chain's own order
+#: bounds how long it lasted (:func:`stop_durations`). What does need `rein ui` is the narrower
+#: `waited_seconds` — the span a notification is supposed to move, which starts when the decision
+#: became derivable rather than when the work stopped.
+#:
+#: `gate_revised` is deliberately out. `/revise` reopens a gate a person has usually just refused,
+#: and that refusal is `changes_requested` — counting both would count one stop twice. So is
+#: `decision_declared`, which five call sites use for salvage branches, the PR-stack ledger and
+#: task declarations; a name that means several things cannot be one of them here.
+GATE_STOP_EVENTS = frozenset({"gate_approved", "changes_requested"})
+
+
+def task_outcomes(events: Sequence[models.Event]) -> dict[str, str]:
+    """The last task status **the chain itself** recorded, per subject.
+
+    `state.yaml` is the authority while a cycle is live, and it is exactly what an archived chain
+    does not come with. Every status the loop writes goes out with its event
+    (`build_loop.set_task_status` puts it in `detail.status`), so the chain can answer the same
+    question about its own past — which is what lets one retirement rule serve both.
+    """
+    outcomes: dict[str, str] = {}
+    for event in events:
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        status = detail.get("status")
+        if isinstance(status, str):
+            outcomes.update(dict.fromkeys(event.subject_ids, status))
+    return outcomes
+
+
+def stops(events: Sequence[models.Event]) -> int:
+    """How many times this chain says the work stopped and a human had to act.
+
+    The gate stops above, plus the conditions that actually reached a person —
+    :func:`open_conditions` over this chain's own outcomes, so the *same* rule that decides what a
+    board calls pending decides what this counts. It read raw `ATTENTION_EVENTS` before, with no
+    retirement at all: a task that failed twice and passed on the third attempt was counted as a
+    stop a human had to act on, while every surface that asks "what awaits you" correctly said
+    nothing did. A figure about human contact points may not count the loop recovering by itself.
+
+    Counted over whatever chain it is handed, so an archived cycle counts the same as the live one.
+    Never a ceiling: nothing reads this back to decide anything, which is the invariant that keeps
+    a figure from becoming a budget (`observations.STOP_COUNT_CLAIM`).
+    """
+    gates = sum(1 for e in events if e.event in GATE_STOP_EVENTS)
+    return gates + len(open_conditions(events, task_outcomes(events)))
+
+
+def stop_durations(events: Sequence[models.Event]) -> list[float]:
+    """How long each gate stop held the work, in seconds, read off the chain's own order.
+
+    Nothing is added to the chain to get this. The stop was already recorded — a pending gate is
+    the record of it, which is why no escalation is written beside one — and the chain is totally
+    ordered, so the last thing the loop wrote before a human opened or refused that gate is the
+    moment the work stopped, and the human's own event is the moment it started again.
+
+    **Not the same quantity as `waited_seconds`, and never pooled with it.** That one runs from
+    the decision becoming *derivable* to it being answered, and only a running `notify.Watcher`
+    can see the near end of it: noticing the moment a blocker clears takes something that is
+    watching. Between the loop's last event and that moment a person may still be clearing what
+    blocked the gate, and some of that leaves no trace here at all — `approve.readiness` reads
+    `docs/10-requirements.md` and `docs/20-design.md` through `dag_trace`, and editing those
+    writes no event, because they are not documents this harness owns. That work is inside this
+    figure and outside the timed one. So this answers "how long did the work sit", which is the
+    cost a contact point has, and the timed one answers "how long did the decision sit", which is
+    what a notification is supposed to move.
+
+    Available wherever the chain is: every host, both approval paths, archived cycles included.
+    Only gate stops are timed — the conditions `stops` also counts are the ones still open, and an
+    open stop has no end to measure to.
+    """
+    durations: list[float] = []
+    previous: models.Event | None = None
+    for event in events:
+        if event.event in GATE_STOP_EVENTS:
+            if previous is not None and (elapsed := _elapsed(previous, event)) is not None:
+                durations.append(elapsed)
+            # `previous` is deliberately not advanced. Two gates opened in one sitting were both
+            # held by the same stop, and reading the second one's from the first one's approval
+            # would report it as instant — which is the shape a fan of crossings produces every
+            # time somebody answers them together.
+            continue
+        previous = event
+    return durations
+
+
+def _elapsed(start: models.Event, end: models.Event) -> float | None:
+    """Seconds between two events, or None when the chain's own clocks cannot say.
+
+    Refused rather than clamped. These timestamps come from whatever machine wrote each event, so
+    two of them can disagree; a figure that quietly read that as zero would hide the disagreement
+    inside a mean, which is the one place it could never be found.
+    """
+    try:
+        began = datetime.fromisoformat(start.ts)
+        ended = datetime.fromisoformat(end.ts)
+    except ValueError:
+        logger.warning(f"event {start.seq} or {end.seq} carries an unreadable timestamp; that stop is not timed")
+        return None
+    if began.tzinfo is None or ended.tzinfo is None:
+        logger.warning(f"event {start.seq} or {end.seq} has a timestamp with no offset; that stop is not timed")
+        return None
+    seconds = (ended - began).total_seconds()
+    if seconds < 0:
+        logger.warning(f"event {end.seq} is stamped before event {start.seq}; that stop is not timed")
+        return None
+    return seconds
 
 
 #: `ATTENTION_EVENTS` a task's own later success can retire. Both are the build loop's per-attempt
@@ -165,33 +281,56 @@ def render_verification(path: str, defects: list[event_chain.ChainDefect]) -> st
     )
 
 
-def cost_sources(
-    repo: repo_mod.Repo, live: Sequence[models.Event]
-) -> tuple[list[tuple[str, Sequence[models.Event]]], list[str]]:
-    """`(what to count, what could not be counted)` — this cycle's chain plus every archived one.
+@dataclass(frozen=True)
+class CycleSource:
+    """One cycle's own records: what to call it, and where that cycle's documents live.
 
-    Cost is a question about *cycles*, and `cycle-close` moves the chain that answers it into
-    `docs/archive/<date>-<slug>/rein/`. Reading only the live chain would make the report go blank
-    the moment a cycle is closed, which is exactly when the comparison becomes interesting.
+    `label` names the *cycle* — the archive directory, or `""` for the one still open, which the
+    renderers print as the current one. A defect is reported against the file it was found in
+    instead (`cycle_sources`' second list): the axis of a report is the cycle, and the axis of a
+    broken chain is the chain.
+
+    `rein_dir` and `docs_dir` differ between the two cases because `cycle-close` lays an archive
+    out as `<base>/rein/` and `<base>/`, while the open cycle is `.rein/` and `docs/`; a reader
+    that guessed would read the wrong half of one of them.
+    """
+
+    label: str
+    events: Sequence[models.Event]
+    rein_dir: Path
+    docs_dir: Path
+
+
+def cycle_sources(repo: repo_mod.Repo, live: Sequence[models.Event]) -> tuple[list[CycleSource], list[str]]:
+    """`(what to read, what could not be read)` — this cycle plus every archived one, oldest first.
+
+    **The one enumeration of cycles.** Anything asked across cycles — what runs cost, which lenses
+    earned their place, how often the work stopped, what was decided — is asked of this list, so
+    that a second glob cannot drift from this one about which archives count.
+
+    `cycle-close` moves a cycle's records into `docs/archive/<date>-<slug>/`. Reading only the live
+    ones would make every such report go blank the moment a cycle is closed, which is exactly when
+    the comparison becomes interesting.
 
     Each archive is scanned on its own (`scan`, not `load`): one damaged archive must not take the
     current cycle's figures down with it, and must not be folded in as though it were readable
     either. It comes back in the second list, to be named in the report.
     """
-    sources: list[tuple[str, Sequence[models.Event]]] = []
+    sources: list[CycleSource] = []
     unreadable: list[str] = []
     archives = repo.path(cycle.ARCHIVE_DIR)
-    # Archives first, and the live chain last, because `run_record.costs` renders in the order it
+    # Archives first, and the live cycle last, because `run_record.costs` renders in the order it
     # is handed: an archive directory is `<YYYY-MM-DD>-<slug>`, so sorting the paths sorts the
     # cycles, and the one still open belongs at the bottom where the trend ends.
     for path in sorted(archives.glob(f"*/rein/{repo.events.name}")):
-        rel = path.relative_to(repo.root).as_posix()
         archived, defects = event_chain.scan(path)
         if defects:
-            unreadable.append(rel)
+            unreadable.append(path.relative_to(repo.root).as_posix())
         else:
-            sources.append((rel, archived))
-    sources.append(("", live))
+            base = path.parent.parent
+            label = base.relative_to(repo.root).as_posix()
+            sources.append(CycleSource(label, archived, rein_dir=path.parent, docs_dir=base))
+    sources.append(CycleSource("", live, rein_dir=repo.rein_dir, docs_dir=repo.path(cycle.DOCS_DIR)))
     return sources, unreadable
 
 
@@ -237,8 +376,9 @@ def main(argv: list[str] | None = None) -> int:
     # Also whole-chain, and for the same reason: a cycle's total computed over a window is not
     # that cycle's total. `--cost` is answered per cycle, which is the axis spending has.
     if args.cost:
-        sources, unreadable = cost_sources(repo, events)
-        print(run_record.render_costs(run_record.costs(sources), unreadable=unreadable))
+        sources, unreadable = cycle_sources(repo, events)
+        billed = [(source.label, source.events) for source in sources]
+        print(run_record.render_costs(run_record.costs(billed), unreadable=unreadable))
         return 0
     if args.since is not None:
         events = [e for e in events if e.seq > args.since]

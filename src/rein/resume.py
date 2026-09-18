@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import rein
-from rein import common, event_chain, models, registry, status_api, upstream
+from rein import common, event_chain, models, observations, registry, status_api, upstream
 from rein import lock as lock_mod
 from rein import repo as repo_mod
 
@@ -92,28 +92,67 @@ def watermark_path() -> Path:
     return state_home() / "seen.json"
 
 
-def _load_marks() -> dict[str, int]:
+def observed_path() -> Path:
+    """The reader's place in the **observation** store, kept apart from their place in the chain.
+
+    Two marks because they mark two stores: the chain is per-repository and sequenced, the
+    observation store is user-global and counted. Merging them into one file would mean one of the
+    two questions answering in the other's units.
+    """
+    return state_home() / "observed.json"
+
+
+def _load_marks(path: Path) -> dict[str, int]:
     try:
-        raw = json.loads(watermark_path().read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return {str(k): int(v) for k, v in raw.items() if isinstance(v, int)} if isinstance(raw, dict) else {}
 
 
+def _write_mark(path: Path, key: str, value: int, what: str) -> None:
+    """Record one mark. A failure here is logged, never raised: not being able to remember where
+    you were is a degraded experience, not a reason to fail the command you actually ran."""
+    marks = {**_load_marks(path), key: int(value)}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(marks, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.warning(f"could not record the {what}: {exc}")
+
+
 def read_mark(root: Path) -> int:
     """The last event seq this user had seen in `root`, or 0 — a first visit sees everything."""
-    return _load_marks().get(str(root.resolve()), 0)
+    return _load_marks(watermark_path()).get(str(root.resolve()), 0)
 
 
 def write_mark(root: Path, seq: int) -> None:
-    """Record the watermark. A failure here is logged, never raised: not being able to remember
-    where you were is a degraded experience, not a reason to fail the command you actually ran."""
-    marks = {**_load_marks(), str(root.resolve()): int(seq)}
-    try:
-        watermark_path().parent.mkdir(parents=True, exist_ok=True)
-        watermark_path().write_text(json.dumps(marks, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    except OSError as exc:
-        logger.warning(f"could not record the resume watermark: {exc}")
+    _write_mark(watermark_path(), str(root.resolve()), seq, "resume watermark")
+
+
+def read_observed(root: Path) -> int:
+    """How many observations this user had already seen for `root`'s project, or 0."""
+    return _load_marks(observed_path()).get(str(root.resolve()), 0)
+
+
+def write_observed(root: Path, count: int) -> None:
+    _write_mark(observed_path(), str(root.resolve()), count, "observation watermark")
+
+
+def observation_delta(root: Path, project: str) -> tuple[int, int]:
+    """`(how many are there now, how many are new since this reader last looked)`.
+
+    A count rather than a sequence because the store has no seq — and it can *shrink*, since
+    `rein observe --prune` trims it. A mark above the current total therefore means the store was
+    trimmed, not that readings vanished, and the delta is reported as zero rather than as a
+    negative: there is nothing new to read, which is the true answer to the question asked.
+
+    No threshold. The question is "what is new since you looked", never "is it a lot" — a figure
+    with a level attached to it gets managed instead of read, which is the whole reason the
+    observation store is never an input to anything.
+    """
+    total = sum(1 for entry in observations.read() if entry.project == project)
+    return total, max(0, total - read_observed(root))
 
 
 @dataclass(frozen=True)
@@ -151,7 +190,7 @@ def build(events: Sequence[models.Event], since: int) -> Packet:
     )
 
 
-def render(packet: Packet, status: dict[str, Any], upstream_note: str = "") -> str:
+def render(packet: Packet, status: dict[str, Any], upstream_note: str = "", observed_new: int = 0) -> str:
     """The packet as text. Short by construction — it is read at the start of every session.
 
     `upstream_note` is passed in rather than fetched: this function runs from the SessionStart
@@ -201,6 +240,14 @@ def render(packet: Packet, status: dict[str, Any], upstream_note: str = "") -> s
         lines.append(f"▸ {decision.get('action', '')}")
     else:
         lines.append(status_api.render_next(status.get("next") or {}))
+    # The observation store's own delta. It is here, in a reading the person is already doing, and
+    # nowhere else: the alternative was a trigger, and a trigger needs a level to fire at. A level
+    # is the thing `observations` refuses to have, so the occasion has to be one that already
+    # exists. It asks for no answer and is not on the notification channel — that channel carries
+    # decisions waiting on a person, and these readings wait on nobody.
+    if observed_new:
+        lines.append("")
+        lines.append(f"{observed_new} new observation(s) about this harness — `rein observe`")
     if not packet.first_visit and not packet.empty:
         lines.append("")
         lines.append(f"Full state: `rein start --full`  ·  this log: `rein events --since {packet.since}`")
@@ -216,13 +263,20 @@ def run(root: Path | None = None, *, full: bool = False, mark: bool = True) -> s
     events, defects = event_chain.scan(repo.events)
     packet = build(events, read_mark(repo.root))
     status = status_api.collect_status(repo)
-    text = render(packet, status, _upstream_note(repo))
+    observed_total, observed_new = observation_delta(repo.root, repo.root.name)
+    text = render(packet, status, _upstream_note(repo), observed_new)
     if defects:
         text = f"⚠ the audit chain has {len(defects)} defect(s) — `rein events --verify`\n\n{text}"
     if full:
         text = f"{text}\n\n{status_api.render(status)}"
     if mark and packet.latest:
         write_mark(repo.root, packet.latest)
+    if mark:
+        # Unconditionally, unlike the chain mark above: a total of zero is a real place to be, and
+        # a store that was pruned back to zero must not keep re-reporting the readings it no longer
+        # holds. This write lands in the reader's own state, never in the observation store —
+        # reading the figures may not change them, or they would be an input to something.
+        write_observed(repo.root, observed_total)
     return text
 
 
@@ -259,4 +313,18 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["Packet", "build", "main", "read_mark", "registry", "render", "run", "watermark_path", "write_mark"]
+__all__ = [
+    "Packet",
+    "build",
+    "main",
+    "observation_delta",
+    "observed_path",
+    "read_mark",
+    "read_observed",
+    "registry",
+    "render",
+    "run",
+    "watermark_path",
+    "write_mark",
+    "write_observed",
+]

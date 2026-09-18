@@ -23,19 +23,19 @@ or a way of running something — with these neutral capabilities, never an agen
 | `phase-invocation` | run a phase procedure (`/req` … `/status`) | read the command body, execute it |
 | `structured-question` | batched multiple-choice questions | numbered chat options, then wait |
 | `notify-and-wait` | flag a pending decision, then stop | state it, end the turn |
-
-`notify-and-wait` is how *you* hand a decision back. Reaching the person who is not looking is
-not yours and does not degrade with the host: `rein ui` watches the SSOT for as long as it runs
-and runs the channel configured in `$XDG_CONFIG_HOME/rein/notify.yaml` when the decision waiting
-on a human changes. The two gates say how often the work stops; this is what decides how long
-each stop lasts, so it is the harness's and not the CLI's. A notification carries what is waited
-on and where — never the evidence, and never a way to answer: the page it names is read-only
-unless that browser already holds a session.
 | `approval-presentation` | present a deliverable for approval | ask for an explicit "approve" |
 | `session-compaction` | human-run session reset at a checkpoint | a fresh session; SSOT rehydrates |
 | `role-delegation` | delegate a phase's work to a role agent (analyst/architect/reviewer) | adopt the role inline, then return |
 | `command-preauthorization` | pre-authorize known-safe commands | approve each interactively |
 | `background-wait` | wait out a command that runs longer than one turn's worth of patience, without asking it anything: either the host re-enters you when it exits, or the tool call itself waits | run it in the foreground with the longest wait the host allows; only when even that cannot hold it, detach with the output in a file, end the turn, and read the log when a human brings you back |
+
+`notify-and-wait` is how *you* hand a decision back. Reaching the person who is not looking is
+not yours and does not degrade with the host: `rein ui` watches the SSOT for as long as it runs
+and runs the channel configured in `$XDG_CONFIG_HOME/rein/notify.yaml` when the decision waiting
+on a human changes. The gates say how often the work stops; this is what decides how long
+each stop lasts, so it is the harness's and not the CLI's. A notification carries what is waited
+on and where — never the evidence, and never a way to answer: the page it names is read-only
+unless that browser already holds a session.
 
 ## Language
 
@@ -45,15 +45,17 @@ values, `epistemic_status`) stays as-is in every language.
 
 ## Development lifecycle
 
-**A human approves twice, and neither approval is about the order of the work.**
+**A human approves at both ends, plus once at every irreversible point between them, and no
+approval is about the order of the work.**
 
 ```
                     ┌─ mandate ─────────────────┐   ┌─ acceptance ───────────┐
 drafting ───────────┤ what the loop may change, ├───┤ the evidence is there, ├─── done
   /req /design      │ what it must make true,   │   │ take the change        │
   /tasks (any       │ what evidence counts      │   └────────────────────────┘
-  order, repeated)  └───────────────────────────┘        ▲gate②
-                             ▲gate①                      /verify presents it
+  order, repeated)  └───────────────────────────┘      ▲acceptance
+                          ▲mandate    ▲T-NNN, one per   /verify presents it
+                                       irreversible point, if the plan froze any
 ```
 
 `/req`→`docs/10-requirements.md`+the claims · `/design`→`docs/20-design.md`+ADRs ·
@@ -121,9 +123,12 @@ Four documents, distinct roles — do not conflate them:
   elsewhere.
 - **A lens earns its place the second time, and loses it by never finding.** A one-off finding is
   recorded `unclassified` — once is an incident, twice is what tells you the condition. The reverse
-  rule is `rein lens --stats`: applied and found counts per lens, across archived cycles, naming
-  the ones that keep applying and never find. Counted, never capped — a ceiling on how many lenses
-  may exist gets answered by deleting whichever is cheapest to delete.
+  rule is `rein lens --stats`: selected, applied and found counts per lens, across archived cycles,
+  naming the ones that keep applying and never find — and the ones selected into a plan and never
+  recorded as applied, which is where a lens dropped at the gate every cycle shows up instead of
+  reading as one that never came up. Counted, never capped — a ceiling on how many lenses may exist
+  gets answered by deleting whichever is cheapest to delete. The counts are **this repository's**;
+  the library is user-global, so the output says so before inviting an edit to it.
 - **`status: unknown` is an answer.** Record it rather than filling it in with a default, and never
   write a claim for it: a claim nothing can make true cannot be judged. A `mandate` decision left
   `unknown` is refused by `rein approve mandate` — narrow the mandate so it does not reach it, or
@@ -166,12 +171,29 @@ Enforcement is layered: `rein guard` denies violations in code at edit/commit/me
 stage; unreadable gates and an unreadable scope **fail closed**. **A guard denial marks a boundary
 of what was delegated — never disable, relax, or bypass it** (detail: the rules module).
 
+## How many gates a cycle has
+
+**Two ends, plus one for every point the plan froze as irreversible.** `mandate` says what the loop
+may change and what it must prove; `acceptance` takes the change on the evidence recorded. Between
+them a cycle has one gate, named `T-NNN` after the task, for each task whose `operator_surface`
+declares `reversible: false` — data that moves, a version published, a charge made. Those gates
+appear when the mandate is approved, out of the plan that approval freezes, and `rein build` stops
+in front of each such task and hands back with `rein approve T-NNN`: afterwards there is nothing
+left to approve. **How many times a human is asked is a property of the change, never a constant of
+this tool** — a ceiling on it is the same mistake as a budget for questions.
+
+They are a fan, not a line: each crossing stands on the mandate alone and acceptance stands on all
+of them, and two crossings carry no order against each other, because ordering them would be
+authorizing the execution order the loop owns. `rein next` names whichever gate you can open now.
+
 ## Roll back (returning upstream)
 
 On a confirmed defect in what was authorized, roll back at the human's discretion with `/revise
---to mandate` (or `--to acceptance`): **gates reset in a chain** — an upstream `pending` never
-leaves a downstream gate `approved`, and it invalidates the receipts and the review built on top of
-it. **Rewinding approval is a human privilege**, never automatic. Reclassify each task the impact analysis (`rein dag
+--to mandate` (or `--to acceptance`, or `--to T-NNN`): **gates reset in a chain** — an upstream
+`pending` never leaves a downstream gate `approved`, and it invalidates the receipts and the review
+built on top of it. Rewinding a crossing withdraws the approval; what the task already did stays
+done, and the roll back says so. **Rewinding approval is a human privilege**, never automatic.
+Reclassify each task the impact analysis (`rein dag
 --impacted`) flags, never discard (procedure: revise.md, tasks.md).
 
 ## Task dependency graph
@@ -256,7 +278,8 @@ human decides *whether*; the loop does the work.
 - **Context isolation and hygiene.** Delegate phase work to role agents; keep deliverables and
   logs lean (tiers, GC, compaction: the rules module).
 - **Promote durable lessons** from `docs/retrospective.md` into the always-loaded files at
-  acceptance, not archived away.
+  acceptance, not archived away. The lens library is one of those destinations: it is the only
+  way a review lens is ever added, and `rein lens --stats` argues only for removal.
 - If anything behaves oddly, run `rein doctor` first.
 - **The verb list is in the CLI, not in this file.** `rein help --all` names every verb (the
   default listing carries only the ones a human types) and `rein <verb> --help` gives its

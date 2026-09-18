@@ -36,8 +36,9 @@ drip-feeding one question at a time, never a budget for the phase. Pull forward 
 outcome-independent work** (scaffolding, dev-env/CI setup, read-only investigation, fixtures)
 — never deliverables premised on the pending decision. Speculative work stays **outside
 `guard.paths`** (`tests/` is deliberately unguarded for this); a gate_guard denial marks
-the boundary. It is throwaway-by-default, recorded in the phase deliverable's "speculative work
-log" (per-phase specifics: each procedure file's "While waiting for approval" section).
+the boundary. It is throwaway-by-default, recorded in `docs/speculative-work.md` — **one log for every
+phase**, because the question asked of it later ("did waiting cost anything?") is one question
+(per-phase specifics: each procedure file's "While waiting for approval" section).
 
 ## The human review before acceptance
 
@@ -158,9 +159,12 @@ at the next `/verify`. Abandonment is `rein cycle-close --name abandoned-<slug>`
 ## Enforcement detail (the gate rules' mechanism layer)
 
 The installed `rein guard` denies in code at three checkpoints — **edit-time** (editor
-hook on deliverable writes), **commit-stage** (`rein guard --check-diff` in pre-commit /
-the quality gate), and **merge-stage** (`rein build` re-checks every path a task changed
-before it lands; violations escalate as `gate_violation`). Guarded paths: `guard.paths`.
+hook on deliverable writes; registered on the hosts that have one), **commit-stage**
+(`rein guard --check-diff`, when this repository's own pre-commit config registers it — `rein`
+does not install one), and **merge-stage** (`rein build` re-checks every path a task changed
+before it lands; violations escalate as `gate_violation`). Only the third is unconditional, so a
+host without an edit-time hook changes *when* a violation is caught, not whether the boundary
+holds; `rein doctor` reports which of the three this repository has. Guarded paths: `guard.paths`.
 A `state.yaml` gate flip to `approved` written by hand is denied: the only write path is
 `approve.record_approval`, reached by a human confirming at their own terminal or in the dashboard
 (AGENTS.md "Gate rules" 2). Both check readiness first, print the digests the approval would cover,
@@ -173,7 +177,21 @@ while the repo IS the template. Detail: the `guard` block's comments in `config.
 
 Declining is a first-class answer, not a dead end: answering `n`, or using the dashboard's
 "request changes", records a change request against the gate (`rein changes`) that **holds the
-gate shut until it is answered** and survives the session.
+gate shut until it is answered** and survives the session. It is available at every gate a human
+can open, the irreversible points included — a gate you may approve and may not refuse is not a
+decision.
+
+## The gates a cycle has
+
+`mandate` and `acceptance` are the two ends, and a cycle has one more gate — named `T-NNN` after
+the task — for every task whose `operator_surface` declares `reversible: false`. They are added
+when the mandate is approved, out of the plan that approval freezes, and `rein build` stops in
+front of each such task rather than running it and finding out at acceptance that it has already
+happened. The count therefore comes from the change, not from this tool; there is no ceiling on
+it. Each crossing stands on the mandate alone and acceptance stands on all of them, and crossings
+carry **no order against each other** — ordering them would be authorizing the execution order the
+loop owns. `rein approve T-NNN`, `rein revise --to T-NNN` and `rein changes add T-NNN` all work
+exactly as they do for the two ends.
 
 ## Repo map
 

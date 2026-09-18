@@ -1591,7 +1591,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "complete":
             complete(repo)
-            print("human review frozen — `rein approve build` can now be run")
+            print(f"human review frozen — `rein approve {models.GATE_LAST}` can now be run")
             return 0
         if args.cmd == "show":
             text = repo.review.read_text(encoding="utf-8") if repo.review.exists() else "(no review.yaml yet)"

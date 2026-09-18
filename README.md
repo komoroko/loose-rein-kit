@@ -24,10 +24,10 @@ flowchart LR
         tasks["/tasks<br/>scope + task DAG"]:::agent
     end
 
-    g1{"① mandate<br/>what may change,<br/>what must be true,<br/>what evidence counts"}:::human
+    g1{"mandate<br/>what may change,<br/>what must be true,<br/>what evidence counts"}:::human
     build["/build<br/>implementation loop"]:::agent
     verify["/verify<br/>verification"]:::agent
-    g2{"② acceptance<br/>take the change"}:::human
+    g2{"acceptance<br/>take the change"}:::human
     done(["done"])
 
     subgraph TASKS["task set (dependency graph DAG) — frozen with the mandate; the loop picks the order"]
@@ -61,7 +61,7 @@ flowchart LR
     style done fill:#ffffff,stroke:#9aa0a6,color:#26282b;
 ```
 
-- **Green** marks where a human acts: the brief, the two gates, and `/revise`.
+- **Green** marks where a human acts: the brief, the gates, and `/revise`.
 - **Blue** marks what the agent runs: each command, and the task set it consumes.
 - **Red dotted arrows** are a rollback, at the human's discretion.
 
@@ -78,9 +78,19 @@ that document is frozen whole, so a new breakdown is `/revise --to mandate`.
 
 | Step | Command | What happens | Your role |
 |------|----------|--------------|-----------|
-| drafting | `/req` `/design` `/tasks` | claims, approach, scope and the task DAG — any order | ① approve the **mandate**: the scope, the claims, the acceptance criteria |
+| drafting | `/req` `/design` `/tasks` | claims, approach, scope and the task DAG — any order | approve the **mandate**: the scope, the claims, the acceptance criteria |
 | implementation | `/build`  | autonomous loop inside the mandate (test-green condition) | — nothing; it repairs its own review findings |
-| verification | `/verify` | functional + non-functional tests, dependency audit, the grounded review | ② approve **acceptance**: take the change |
+| verification | `/verify` | functional + non-functional tests, dependency audit, the grounded review | approve **acceptance**: take the change |
+
+**A third kind of gate, when the change has one.** A task whose `operator_surface` declares
+`reversible: false` — data that moves, a version published, a charge made — becomes a contact
+point of its own: the cycle gains a gate named `T-NNN` after it, `rein build` stops in front of
+that task, and you run `rein approve T-NNN` before it runs rather than reading at acceptance that
+it has already happened. Those gates appear when the mandate is approved, out of the plan that
+approval freezes — so the act that fixes what will be built is the act that fixes how many more
+times this cycle stops, and you approve that count as part of the mandate. **There is no ceiling
+on it**: how often you are asked is a property of the change, not of this tool. Crossings carry no
+order against each other; each stands on the mandate, and acceptance stands on all of them.
 
 ## Setup
 
@@ -283,8 +293,8 @@ Then, per cycle:
      refuses on, so the board can never say "nothing needs attention" about a gate that will not
      open. `--full` adds the whole board; `--no-mark` looks without advancing your place.
    - `/status` — the same board in chat, plus the task DAG
-   - `rein ui` — the dashboard. The lifecycle is the navigation: the two gates stand in a spine
-     down the left, and the one waiting on you is the only inverted block on the page. **Now**
+   - `rein ui` — the dashboard. The lifecycle is the navigation: this cycle's gates stand in a
+     spine down the left, and the ones waiting on you are the only inverted blocks on the page. **Now**
      carries that queue and the next command. Opening a gate opens its reading room
      (`#gate/<name>`) — for acceptance, scope → what changed and how it was reviewed → what the change
      now requires of a person → Decision Cards for every unsettled claim, gap, or finding, each
@@ -521,7 +531,7 @@ steps keep their ceiling (`command_timeout_sec`) — their runtime is knowable.
 
 ## Being told it is your turn
 
-Two gates say how often the work stops. How long each stop lasts is set by how soon you find out,
+The gates say how often the work stops. How long each stop lasts is set by how soon you find out,
 so the channel is the harness's own rather than the agent CLI's: `rein ui` watches the SSOT for as
 long as it runs — no browser needed — and runs your command when the decision waiting on you
 changes.
