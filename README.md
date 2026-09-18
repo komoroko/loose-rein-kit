@@ -307,6 +307,11 @@ Then, per cycle:
      diagnostics, and decision recording (approve / resolve / revise / cycle-close); phase
      execution and push/PR are not available here.
    - `rein dag --mermaid` — render the task dependency diagram
+   - `rein decisions` — every judgement on record, oldest cycle first. A decision lands in one of
+     four places (`plan.yaml`'s `decisions`, an ADR, `## Clarifications`, `## Open questions`) and
+     all four are per-cycle: `cycle-close` archives them and restores fresh ones, so the working
+     tree only ever shows the cycle now open. This reads the archives back along the axis the
+     judgements were written on. Writing one is `rein decision add` (singular).
 
 7. **Ship as a PR** — `rein pr-draft` assembles the PR body from the SSOT into
    `.rein/pr-draft.md` (read-only). Creating and pushing the PR stays yours.
@@ -369,6 +374,12 @@ Keeping the installation current:
 - **Rewinding an approval is a human privilege too.** `/revise` resets gates from the target onward
   in a chain, invalidating the receipts and the review built on top of them; an upstream `pending`
   never leaves a downstream gate `approved`. Nothing rewinds automatically.
+- **Waiting is not idling, and what was done while waiting is on the record.** While a gate is
+  pending, only **outcome-independent** work may go on — scaffolding, dev-env and CI setup,
+  read-only investigation, fixtures — outside `guard.paths` and throwaway-by-default. It is written
+  in `docs/speculative-work.md`, one log for every phase, each row naming what it was premised on;
+  a human finalizes `adopt` / `discard` in `docs/retrospective.md` §4 at the end of the cycle. A row
+  that cannot name what would waste it was not speculative work, it was the deliverable.
 
 ### Settings you provide yourself
 
@@ -480,6 +491,12 @@ is decided on. What is:
   in cannot change after that review was approved. The agent CLI that *wrote* it has its own box
   (`executors.agent_profile`, `kind: oci-agent`, digest-pinned the same way) — optional, since the
   image has to carry the CLI, and reported either way.
+- **What the reading was told to look for is a library, not a habit.** `rein lens --list` prints
+  every review lens — the packaged ones and your own in `$XDG_CONFIG_HOME/rein/lenses.yaml` — each
+  with the stage it reads at and the condition that makes it apply. `rein lens --select <stage>`
+  resolves those conditions against the plan and writes the result into it, so a review is
+  answerable for which lenses it was given; `--task T-NNN` drops the ones whose paths fall outside
+  a task's scope.
 - **All of it lands on a hash-chained log.** `.rein/events.ndjson` records every state change and
   why; a gate receipt pins the chain root, so a deleted, reordered, or re-hashed line breaks the
   chain that receipt stands on.
@@ -558,6 +575,23 @@ run, resolved the same way the watcher will resolve it.
 The watcher runs whether or not you have configured a channel. Without one it notifies nothing and
 still times each wait, in the `silent` arm — which is what the `notified` arm gets compared against
 when you ask `rein observe` whether the channel helped.
+
+## What this harness measures about itself
+
+Every rule here was argued for, and the arguments are checkable. `rein observe` prints the figures
+this harness keeps about itself with **the claim each one tests beside it** — a figure with no claim
+attached is one somebody reads as a score. The store is user-global
+(`$XDG_CONFIG_HOME/rein/observations.ndjson`), so a question about a rule can be asked across every
+repository you run this in rather than one cycle at a time; `--project` narrows it to one, and
+`--prune KEEP` drops all but the most recent entries.
+
+`rein lens --stats` answers one of those arguments on its own: applied and found counts per lens,
+across this cycle and the archived ones, so a lens that has never found anything can be narrowed or
+dropped. It names whose chain the counts came from before it invites an edit to the shared library,
+because the library is shared by every repository and the reading was of one.
+
+There are no thresholds and none are coming. A number with a ceiling on it gets managed instead of
+read.
 
 ## Security review
 
@@ -672,7 +706,7 @@ to with the gate guard flipped live. No build files, no makefile, and no agent s
 | `.rein/AGENTS.rein.md` | the operating-rules body, imported by the agent surfaces — materialized |
 | `AGENTS.md` / `CLAUDE.md` | the agent-neutral operating rules / the Claude Code capability mapping (Claude Code reads CLAUDE.md, not AGENTS.md; its `@AGENTS.md` import loads the rules exactly once. `rein install claude` writes the mapping block and the `.claude/` wrappers into a product repo) |
 | `.claude/`, `.github/` | per-agent entry points, role wrappers, and gate-guard hook registration (opt-in via `rein install`) |
-| `docs/` | phase deliverables (requirements, design, ADR, task tickets, test plan) |
+| `docs/` | phase deliverables (requirements, design, ADR, task tickets, test plan), the speculative work log, and the retrospective |
 
 The orchestration code itself lives in the installed `rein` package, not in the repo.
 
