@@ -15,7 +15,9 @@ from __future__ import annotations
 import argparse
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from rein import common, cycle, event_chain, models, run_record
 from rein import repo as repo_mod
@@ -279,33 +281,56 @@ def render_verification(path: str, defects: list[event_chain.ChainDefect]) -> st
     )
 
 
-def cost_sources(
-    repo: repo_mod.Repo, live: Sequence[models.Event]
-) -> tuple[list[tuple[str, Sequence[models.Event]]], list[str]]:
-    """`(what to count, what could not be counted)` — this cycle's chain plus every archived one.
+@dataclass(frozen=True)
+class CycleSource:
+    """One cycle's own records: what to call it, and where that cycle's documents live.
 
-    Cost is a question about *cycles*, and `cycle-close` moves the chain that answers it into
-    `docs/archive/<date>-<slug>/rein/`. Reading only the live chain would make the report go blank
-    the moment a cycle is closed, which is exactly when the comparison becomes interesting.
+    `label` names the *cycle* — the archive directory, or `""` for the one still open, which the
+    renderers print as the current one. A defect is reported against the file it was found in
+    instead (`cycle_sources`' second list): the axis of a report is the cycle, and the axis of a
+    broken chain is the chain.
+
+    `rein_dir` and `docs_dir` differ between the two cases because `cycle-close` lays an archive
+    out as `<base>/rein/` and `<base>/`, while the open cycle is `.rein/` and `docs/`; a reader
+    that guessed would read the wrong half of one of them.
+    """
+
+    label: str
+    events: Sequence[models.Event]
+    rein_dir: Path
+    docs_dir: Path
+
+
+def cycle_sources(repo: repo_mod.Repo, live: Sequence[models.Event]) -> tuple[list[CycleSource], list[str]]:
+    """`(what to read, what could not be read)` — this cycle plus every archived one, oldest first.
+
+    **The one enumeration of cycles.** Anything asked across cycles — what runs cost, which lenses
+    earned their place, how often the work stopped, what was decided — is asked of this list, so
+    that a second glob cannot drift from this one about which archives count.
+
+    `cycle-close` moves a cycle's records into `docs/archive/<date>-<slug>/`. Reading only the live
+    ones would make every such report go blank the moment a cycle is closed, which is exactly when
+    the comparison becomes interesting.
 
     Each archive is scanned on its own (`scan`, not `load`): one damaged archive must not take the
     current cycle's figures down with it, and must not be folded in as though it were readable
     either. It comes back in the second list, to be named in the report.
     """
-    sources: list[tuple[str, Sequence[models.Event]]] = []
+    sources: list[CycleSource] = []
     unreadable: list[str] = []
     archives = repo.path(cycle.ARCHIVE_DIR)
-    # Archives first, and the live chain last, because `run_record.costs` renders in the order it
+    # Archives first, and the live cycle last, because `run_record.costs` renders in the order it
     # is handed: an archive directory is `<YYYY-MM-DD>-<slug>`, so sorting the paths sorts the
     # cycles, and the one still open belongs at the bottom where the trend ends.
     for path in sorted(archives.glob(f"*/rein/{repo.events.name}")):
-        rel = path.relative_to(repo.root).as_posix()
         archived, defects = event_chain.scan(path)
         if defects:
-            unreadable.append(rel)
+            unreadable.append(path.relative_to(repo.root).as_posix())
         else:
-            sources.append((rel, archived))
-    sources.append(("", live))
+            base = path.parent.parent
+            label = base.relative_to(repo.root).as_posix()
+            sources.append(CycleSource(label, archived, rein_dir=path.parent, docs_dir=base))
+    sources.append(CycleSource("", live, rein_dir=repo.rein_dir, docs_dir=repo.path(cycle.DOCS_DIR)))
     return sources, unreadable
 
 
@@ -351,8 +376,9 @@ def main(argv: list[str] | None = None) -> int:
     # Also whole-chain, and for the same reason: a cycle's total computed over a window is not
     # that cycle's total. `--cost` is answered per cycle, which is the axis spending has.
     if args.cost:
-        sources, unreadable = cost_sources(repo, events)
-        print(run_record.render_costs(run_record.costs(sources), unreadable=unreadable))
+        sources, unreadable = cycle_sources(repo, events)
+        billed = [(source.label, source.events) for source in sources]
+        print(run_record.render_costs(run_record.costs(billed), unreadable=unreadable))
         return 0
     if args.since is not None:
         events = [e for e in events if e.seq > args.since]

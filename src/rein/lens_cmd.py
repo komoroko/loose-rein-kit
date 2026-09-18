@@ -314,8 +314,8 @@ def main(argv: list[str] | None = None) -> int:
         # over several cycles, and `cycle-close` moves the chain that would show it into the
         # archive — reading only the live one makes the answer go blank exactly when it matters.
         live, _ = event_chain.scan(repo.events)
-        sources, unreadable = events_mod.cost_sources(repo, live)
-        every = [event for _, chain in sources for event in chain]
+        sources, unreadable = events_mod.cycle_sources(repo, live)
+        every = [event for source in sources for event in source.events]
         print(render_stats(stats(every), library))
         for rel in unreadable:
             logger.warning(f"{rel} could not be verified, so its lens counts are not included")

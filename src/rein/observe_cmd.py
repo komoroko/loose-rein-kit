@@ -80,11 +80,11 @@ def _chain_cost(repo: repo_mod.Repo | None) -> tuple[int | None, list[float]]:
     if defects:
         logger.warning(f"{repo.events} has {len(defects)} chain defect(s); no chained stop figures")
         return None, []
-    sources, unreadable = events_mod.cost_sources(repo, live)
+    sources, unreadable = events_mod.cycle_sources(repo, live)
     for rel in unreadable:
         logger.warning(f"{rel} could not be verified, so its stops are not counted")
-    stops = sum(events_mod.stops(chain) for _, chain in sources)
-    stopped = [d for _, chain in sources for d in events_mod.stop_durations(chain)]
+    stops = sum(events_mod.stops(source.events) for source in sources)
+    stopped = [d for source in sources for d in events_mod.stop_durations(source.events)]
     return stops, stopped
 
 

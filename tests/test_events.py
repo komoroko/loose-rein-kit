@@ -262,7 +262,7 @@ def test_cost_counts_this_cycle_and_the_archived_ones(tmp_path: Path, capsys: py
     out = capsys.readouterr().out
     assert "live-cycle — 1 run(s)" in out
     assert "old-cycle — 1 run(s)" in out
-    assert "[docs/archive/2026-01-01-first/rein/events.ndjson]" in out
+    assert "[docs/archive/2026-01-01-first]" in out
     assert "implementer" in out and "comparator" in out
     # Oldest first: an archive directory is `<YYYY-MM-DD>-<slug>`, and the cycle still open is the
     # end of the trend, not the start of it. Reading the newest bill first is reading a number;

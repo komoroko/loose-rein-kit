@@ -368,6 +368,39 @@ whatever somebody had to fix before the gate would open, including edits to `doc
 that this harness does not own and never sees. Available on every host, both approval paths, and
 across archived cycles. A chain that fails its own verification yields no figure at all.
 
+### `rein decisions` — the judgement history, read across cycles
+
+`00-concept.md` names three things a human has to keep hold of for delegation to be real: the
+claims, the scope, and **the history of their own judgements**. The third had four write sites —
+`plan.yaml`'s `decisions`, an ADR, `## Clarifications`, `## Open questions` — and no reader.
+
+It was left open on the grounds that the decision was only about *when* to wire it, since the
+read path already existed. Writing it turned up why it could not wait: **all four write sites are
+per-cycle.** `cycle.CYCLE_DOCS` contains `decisions`, so `cycle-close` archives the ADR directory
+along with `10-requirements.md` and `plan.yaml`, then restores the first two from the pristine
+snapshot. A decision settled last cycle is not merely harder to find in the working tree; it is
+not in `docs/` at all. A person asking "what did I already decide about this" had no way to be
+answered, and the four places the concept document calls a distribution problem had quietly become
+four places that empty.
+
+The write sites do not move — a fifth write path and four migrations would not make the reasons
+they are separate go away. What is new is the read: `rein decisions` prints every cycle oldest
+first, the open one last, each record tagged with which site it came from, because they are not
+interchangeable (an `## Open questions` entry is an assumption still standing, not a settled
+decision). No schema is imposed on the past: an archived `plan.yaml` was written by whatever
+release closed that cycle, and validating it against today's would make the history go blank on
+the next schema change. An archive that fails its own verification is named and left out; so is a
+document that cannot be read. The scaffold's own placeholder bullets are not printed as somebody's
+judgement, and which lines those are is read off the packaged scaffold rather than matched against
+a guessed shape.
+
+`events.cost_sources` is `events.cycle_sources` now, and returns what a cycle *is* rather than only
+its chain: the label, the events, and where that cycle's `rein/` and documents live. It is the one
+enumeration of cycles, so the four reports that span them — `--cost`, `rein lens --stats`,
+`rein observe`, and this — cannot drift about which archives count. The label names the cycle
+(`docs/archive/2026-08-01-first`) rather than its chain file; a defect is still reported against
+the file it was found in.
+
 ## [0.6.1] - 2026-09-17
 
 Four corrections with one thing in common: **each was found by reading the shipped code against

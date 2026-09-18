@@ -131,7 +131,7 @@ def costs(sources: Iterable[tuple[str, Sequence[models.Event]]]) -> list[CycleCo
     """Every cycle's spend, in the order `sources` is given — so a reader sees the trend.
 
     `sources` is `(where it was read from, its events)`: whatever archived cycles the caller
-    found, oldest first, and the live chain last (`events.cost_sources` orders them). Ordering is
+    found, oldest first, and the live chain last (`events.cycle_sources` orders them). Ordering is
     the caller's because only the caller knows which chain is which; this function will not
     re-sort by a cycle id it has no calendar for. A cycle id appearing in two sources would be two
     different chains saying different things, so they stay separate rows rather than merged.
