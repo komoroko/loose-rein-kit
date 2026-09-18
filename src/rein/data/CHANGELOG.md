@@ -6,84 +6,16 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [0.8.0] - 2026-09-18
 
-**Three things the concept asked for that the code had not built.** The previous release found ten
-defects by reading the code's claims about itself against the code. That method can only ever reach
-what exists; two of these three were invisible to it, because nothing was there to make a false
-claim. They came from reading the *principles* against the code instead.
+**Fourteen entries, from two ways of reading the same code.** Ten came from reading a claim the
+code makes about itself against the code that makes it. That method can only ever reach what
+exists, so the other four came from reading the *principles* against the code instead — and two of
+those were invisible to the first, because nothing was there to make a false claim.
 
-### The number of times a human is asked is no longer a constant of this tool
-
-`GATE_ORDER` was a two-element tuple and `state.gates` refused every other key, so a cycle had two
-contact points whatever it contained. That is a ceiling on how often a human is asked — the mistake
-the approval-screen budget already made once, except that this one could not even be raised.
-
-A human is asked wherever undoing gets expensive, so the count now follows the change. A task that
-freezes an `operator_surface` it cannot undo is an irreversible point of its own: it gets a gate
-named for it, `rein build` stops in front of it, and a human runs `rein approve T-NNN`. Approving
-the mandate is what adds them, out of the plan it is freezing — the act that fixes what will be
-built is the act that fixes how many more times this cycle stops, and the approver sees the count
-while approving the thing that creates it. There is no cap on how many.
-
-**Every route that can open a gate opens all of them.** The dashboard is not a second-class route
-for two of the gate kinds: a crossing gate has a reading room derived from the plan that created it
-(the task's ticket and the decision records its declarations point at — which is what
-`operator_surface.adr` has always been for), it is approved through the same session-bound endpoint,
-and the board lists it. `is_awaiting` now means *decidable now* rather than *first in the list*,
-because two crossings carry no order against each other and a pane reading position would have told
-a human the second was not theirs to decide.
-
-**Gates are named, never numbered.** The ①..⑤ notation, then ①②, was a position in a fixed ladder.
-It is gone from the dashboard, the browser-tab flag, the board's text rendering and both payloads —
-an ordinal cannot survive a count that follows the change.
-
-`State.gate_ids` replaces the constant everywhere it was read, `State.upstream_of` replaces the
-index arithmetic, and the gates of a cycle are a fan rather than a line: each crossing is downstream
-of the mandate and upstream of acceptance, and they carry no order among themselves. Ordering two of
-them against each other would be authorizing execution order, which the concept puts inside the
-delegation. `rein revise` withdraws a crossing like any other approval and now says the one thing it
-cannot do — the operation stays done.
-
-### `operator_surface` keeps the answer the design already gave
-
-`architect.md` requires every requirement to state what it needs of a person **and whether it can be
-undone**; `design.md` carries that into the tasks. The frozen record kept `{kind, name, paths, adr}`
-and dropped the reversibility, leaving it in prose that only the acceptance brief opens — by which
-time the thing has happened. `reversible` is now a required boolean on every declaration, with no
-default, because an omitted answer read as "yes" by silence.
-
-### Review lenses can get in, not only out
-
-`rein lens --stats` counted the lenses you have and argued, with no threshold anywhere, for removing
-the ones that had stopped earning their place. Nothing anywhere added one: `lenses.py` only reads the
-library, and `lenses.yaml` appeared in no prompt, no scaffold and no retrospective. A library read
-through that output alone can only shrink.
-
-The mechanism for entry already existed — the retrospective promotes durable lessons into the
-always-loaded files and records where each landed — and the library was missing from the list of
-destinations. `docs/retrospective.md` gains section 2, which holds this cycle's root causes against
-the lenses that were watching for them; `/verify` asks the question; the promotion targets name the
-library; and `--stats` says, where its removal advice is read, that it can only ever argue one way.
-No machine matching: no identifier ties a cause in one cycle to a cause in the last, so recurrence
-is the human's judgement, made with both lists in front of them.
-
-### The observation store's invariant is fixed against the source
-
-`00-concept.md` argues the stop count cannot become a ceiling *because there is no path by which it
-could* — a claim about every future edit. The test asserting it checked two strings in a rendered
-report and stated the invariant in its docstring, so a `read()` added to `approve.py` tomorrow would
-have passed. It now parses `src/rein` and pins the set of modules that read the store, with the gate,
-the build, the roll back and the change request named separately as the four the guarantee is about.
-
-## [0.7.0] - 2026-09-18
-
-**Ten corrections, every one found by reading a claim the code makes about itself against the code
-that makes it.** Three named a guarantee at a point nothing verified it. Three read one store, or
-one event, where the question needed two. Three described a record that no file contained. One was
-a table that had stopped being a table. Nothing here changes what a gate denies or what a lens
+The ten: three named a guarantee at a point nothing verified it. Three read one store, or one
+event, where the question needed two. Three described a record that no file contained. One was a
+table that had stopped being a table. Nothing among them changes what a gate denies or what a lens
 does; what changes is what a reader is told — and, in four places, the check that would have caught
-the drift.
-
-They arrived in two passes, and the second pass began by reviewing the first: two of these are
+the drift. They arrived in two passes, and the second began by reviewing the first: two of them are
 defects in the fixes above them.
 
 ### The gate guard has three checkpoints, and only one of them is unconditional
@@ -259,6 +191,72 @@ sites use for three unrelated things.
 `rein observe` prints both counts, labelled by what they count, and never one instead of the other:
 they cover different scopes and are not corrections of each other. Neither has a ceiling, and the
 reason is still structural — nothing reads this store back to decide anything.
+
+**The four below were not found this way.** Nothing makes a false claim about a thing that was
+never built, so these began from `00-concept.md` read against `src/rein`.
+
+### The number of times a human is asked is no longer a constant of this tool
+
+`GATE_ORDER` was a two-element tuple and `state.gates` refused every other key, so a cycle had two
+contact points whatever it contained. That is a ceiling on how often a human is asked — the mistake
+the approval-screen budget already made once, except that this one could not even be raised.
+
+A human is asked wherever undoing gets expensive, so the count now follows the change. A task that
+freezes an `operator_surface` it cannot undo is an irreversible point of its own: it gets a gate
+named for it, `rein build` stops in front of it, and a human runs `rein approve T-NNN`. Approving
+the mandate is what adds them, out of the plan it is freezing — the act that fixes what will be
+built is the act that fixes how many more times this cycle stops, and the approver sees the count
+while approving the thing that creates it. There is no cap on how many.
+
+**Every route that can open a gate opens all of them.** The dashboard is not a second-class route
+for two of the gate kinds: a crossing gate has a reading room derived from the plan that created it
+(the task's ticket and the decision records its declarations point at — which is what
+`operator_surface.adr` has always been for), it is approved through the same session-bound endpoint,
+and the board lists it. `is_awaiting` now means *decidable now* rather than *first in the list*,
+because two crossings carry no order against each other and a pane reading position would have told
+a human the second was not theirs to decide.
+
+**Gates are named, never numbered.** The ①..⑤ notation, then ①②, was a position in a fixed ladder.
+It is gone from the dashboard, the browser-tab flag, the board's text rendering and both payloads —
+an ordinal cannot survive a count that follows the change.
+
+`State.gate_ids` replaces the constant everywhere it was read, `State.upstream_of` replaces the
+index arithmetic, and the gates of a cycle are a fan rather than a line: each crossing is downstream
+of the mandate and upstream of acceptance, and they carry no order among themselves. Ordering two of
+them against each other would be authorizing execution order, which the concept puts inside the
+delegation. `rein revise` withdraws a crossing like any other approval and now says the one thing it
+cannot do — the operation stays done.
+
+### `operator_surface` keeps the answer the design already gave
+
+`architect.md` requires every requirement to state what it needs of a person **and whether it can be
+undone**; `design.md` carries that into the tasks. The frozen record kept `{kind, name, paths, adr}`
+and dropped the reversibility, leaving it in prose that only the acceptance brief opens — by which
+time the thing has happened. `reversible` is now a required boolean on every declaration, with no
+default, because an omitted answer read as "yes" by silence.
+
+### Review lenses can get in, not only out
+
+`rein lens --stats` counted the lenses you have and argued, with no threshold anywhere, for removing
+the ones that had stopped earning their place. Nothing anywhere added one: `lenses.py` only reads the
+library, and `lenses.yaml` appeared in no prompt, no scaffold and no retrospective. A library read
+through that output alone can only shrink.
+
+The mechanism for entry already existed — the retrospective promotes durable lessons into the
+always-loaded files and records where each landed — and the library was missing from the list of
+destinations. `docs/retrospective.md` gains section 2, which holds this cycle's root causes against
+the lenses that were watching for them; `/verify` asks the question; the promotion targets name the
+library; and `--stats` says, where its removal advice is read, that it can only ever argue one way.
+No machine matching: no identifier ties a cause in one cycle to a cause in the last, so recurrence
+is the human's judgement, made with both lists in front of them.
+
+### The observation store's invariant is fixed against the source
+
+`00-concept.md` argues the stop count cannot become a ceiling *because there is no path by which it
+could* — a claim about every future edit. The test asserting it checked two strings in a rendered
+report and stated the invariant in its docstring, so a `read()` added to `approve.py` tomorrow would
+have passed. It now parses `src/rein` and pins the set of modules that read the store, with the gate,
+the build, the roll back and the change request named separately as the four the guarantee is about.
 
 ## [0.6.1] - 2026-09-17
 
