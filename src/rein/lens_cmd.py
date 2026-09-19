@@ -155,6 +155,11 @@ UNJUDGED = "unjudged"
 DROPPED = "dropped"
 ABSENT = "absent"
 PENDING = "pending"
+#: Not an absence at all, and the reason it is named rather than left blank. A `code` lens is read
+#: per task and the other stages are read against the plan as a whole, so every row has columns
+#: that are not its to answer for. Rendered blank, it would be a fourth absence beside three whose
+#: difference is the whole of what this screen is for — and the one with no entry in the key.
+NOT_APPLICABLE = "n/a"
 
 #: One line each, for the reader who is looking at a colour and wants to know what it claims.
 CELL_MEANING: dict[str, str] = {
@@ -166,6 +171,9 @@ CELL_MEANING: dict[str, str] = {
     DROPPED: "frozen into no plan: named in the selection and removed before the mandate closed",
     ABSENT: "its condition did not hold for this cycle at all",
     PENDING: "frozen and not recorded as applied — not yet, not reported, or not by this reviewer",
+    NOT_APPLICABLE: (
+        "not this row's column: `code` lenses are read per task, and the other stages against the plan as a whole"
+    ),
 }
 
 #: The column for a lens whose stage has no tasks in it. `requirements`, `design` and `tasks` are
@@ -241,7 +249,6 @@ def grid(
     applications = _applications(events)
     verdicts_by = _verdict_state(events)
     tasks = [task.id for task in plan.tasks] if plan is not None else []
-    known = {lens.id: lens for lens in library}
 
     def cell(lens: lenses.Lens, task: Any, column: str) -> dict[str, Any]:
         for key in ((lens.id, column), (lens.id, "")):
@@ -261,26 +268,31 @@ def grid(
                 return {"state": state, **({"probability": probability} if probability is not None else {})}
         return {"state": PENDING}
 
+    every_column = [PLAN_COLUMN, *tasks]
+    by_id = {task.id: task for task in plan.tasks} if plan is not None else {}
     rows: list[dict[str, Any]] = []
     for lens in library:
-        columns: list[dict[str, Any]] = []
         if lens.stage == "code" and tasks:
-            for task in plan.tasks:
-                columns.append({"column": task.id, **cell(lens, task, task.id)})
+            placed = {task_id: cell(lens, by_id[task_id], task_id) for task_id in tasks}
         else:
-            columns.append({"column": PLAN_COLUMN, **cell(lens, None, "")})
+            placed = {PLAN_COLUMN: cell(lens, None, "")}
+        # Every row carries every column, and the ones it does not answer for say so. A row that
+        # simply stopped short would leave both renderers filling the gap with a glyph of their
+        # own, which is a state on the screen that the key does not explain.
         rows.append(
             {
                 "lens": lens.id,
                 "stage": lens.stage,
                 "class": lens.lens_class,
-                "applies_when": known[lens.id].applies_when if lens.id in known else "",
-                "cells": columns,
+                "applies_when": lens.applies_when,
+                "cells": [
+                    {"column": column, **placed.get(column, {"state": NOT_APPLICABLE})} for column in every_column
+                ],
             }
         )
     placeless = sorted({lens_id for lens_id, task in applications if not task})
     return {
-        "columns": [PLAN_COLUMN, *tasks],
+        "columns": every_column,
         "rows": rows,
         "meaning": CELL_MEANING,
         # Read where the reader is about to be invited to edit something (CR-8). The library is
@@ -304,7 +316,7 @@ def render_grid(built: Mapping[str, Any]) -> str:
     lines = [head]
     for row in rows:
         by_column = {cell["column"]: cell for cell in row["cells"]}
-        cells = "  ".join(f"{by_column.get(column, {}).get('state', '-'):<12}" for column in columns)
+        cells = "  ".join(f"{by_column[column]['state']:<12}" for column in columns)
         lines.append(f"{row['lens']:<{width}}  {cells}")
     lines.append("")
     for state, meaning in built["meaning"].items():
@@ -522,13 +534,22 @@ def _deliverable(repo: repo_mod.Repo, plan: models.Plan, state: models.State | N
         return ""
 
 
-def _recorded(events: Sequence[models.Event], stage: str, task_id: str) -> list[lens_judge.Verdict]:
-    """The verdicts already in the chain for this hand-off, newest first, or `[]`.
+def _recorded(
+    events: Sequence[models.Event], stage: str, task_id: str, questions: Mapping[str, str]
+) -> list[lens_judge.Verdict]:
+    """The **answers** already in the chain for this hand-off, or `[]` if the question is still open.
 
-    Asked once. The selection is resolved once against the plan and read back from it for the rest
-    of the cycle, and a judgement re-run on every call would put the review's inputs back where the
-    freeze took them from — a reviewer and the person who approved the gate could be looking at two
-    different answers to the same question, with nothing saying so.
+    An answer is asked once. The selection is resolved once against the plan and read back from it
+    for the rest of the cycle, and a judgement re-run on every call would put the review's inputs
+    back where the freeze took them from — a reviewer and the person who approved the gate could be
+    looking at two different answers to the same question, with nothing saying so.
+
+    **An `unavailable` is not an answer.** The decider was down, or the deliverable was not written
+    yet, or the reply was unreadable; nothing was settled, and reading that back as though it had
+    been would let one outage decide a whole cycle. The record of the outage stays in the chain —
+    it is a fact about what happened, and `--grid` shows it — but it does not close the question.
+    A lens the last recording has no verdict for reopens it too: the selection can grow between two
+    hand-offs, and a new lens has never been asked about.
     """
     for event in reversed(events):
         if event.event != "lens_judged":
@@ -540,18 +561,30 @@ def _recorded(events: Sequence[models.Event], stage: str, task_id: str) -> list[
         if not isinstance(raw, list):
             return []
         found = [lens_judge.Verdict.from_dict(row) for row in raw if isinstance(row, Mapping)]
-        return [verdict for verdict in found if verdict is not None]
+        answers = [verdict for verdict in found if verdict is not None and verdict.outcome != lens_judge.UNAVAILABLE]
+        if {verdict.lens_id for verdict in answers} >= set(questions):
+            return answers
+        return []
     return []
 
 
-def render_verdicts(verdicts: Sequence[lens_judge.Verdict], settings: lens_judge.Settings) -> str:
-    """What was asked, what came back, and — when it changed nothing — that it changed nothing."""
+def render_verdicts(verdicts: Sequence[lens_judge.Verdict], settings: lens_judge.Settings, *, may_remove: bool) -> str:
+    """What was asked, what came back, and — when it changed nothing — why it changed nothing."""
     lines: list[str] = []
     for verdict in verdicts:
         at = "" if verdict.probability is None else f" p={verdict.probability:.2f}"
         note = f" ({verdict.reason})" if verdict.reason else ""
         lines.append(f"  {verdict.lens_id}: {verdict.outcome}{at}{note}")
-    if not settings.may_drop and any(v.outcome == lens_judge.DOES_NOT_HOLD for v in verdicts):
+    if not any(v.outcome == lens_judge.DOES_NOT_HOLD for v in verdicts):
+        return "\n".join(lines)
+    if not may_remove:
+        # Two different reasons, and saying the wrong one would send somebody to edit a setting
+        # that was never what held the lens in place.
+        lines.append(
+            "  (recorded only — this is before the mandate, and what the approval screen shows is "
+            "the selection the plan holds, not one a decider narrowed on the way to it)"
+        )
+    elif not settings.may_drop:
         lines.append(
             "  (recorded only — `review_policy.lens_judgement.may_drop` is off, so none of these "
             "was removed from the hand-off)"
@@ -568,36 +601,50 @@ def _judge_handoff(
     task_id: str,
     proposed: Sequence[lenses.Lens],
     settings: lens_judge.Settings,
+    *,
+    may_remove: bool,
 ) -> tuple[list[lens_judge.Verdict], list[lenses.Lens]]:
     """`(verdicts, what still goes to the reviewer)` for the `conditional` half of a hand-off.
 
     This is the place because it is where the narrowing already happens. The selection is resolved
     once, against the whole plan, and that unit is right — `min_claims` counts what the plan states
     and no single task has a value for it. What was wrong was handing one list to readers with
-    different reach, and the fix put the narrowing at the hand-off. A condition that takes reading
-    the deliverable belongs at the same point, and for the same reason: **this is the first moment
-    the deliverable exists.**
+    different reach, and the fix put the narrowing at the hand-off.
 
-    Asked once per stage and task. A judgement re-run on every call would let a reviewer and the
-    person who approved the gate hold two different answers to one question, which is the property
-    the freeze exists to remove.
+    **Asked wherever the deliverable exists, and it removes only after the freeze.** Four of the
+    six conditional lenses are at `requirements`, `design` and `tasks`, whose deliverables are
+    written *before* the mandate — the document is step 4 of `/design` and the selection is step 6
+    — so a judgement gated on the freeze would never reach them at all. What the freeze governs is
+    not whether the question can be answered but whether an answer may narrow anything: before it,
+    the list on the approval screen has to be the one the plan holds, or a human would be approving
+    a selection a decider had already cut. `may_remove` is that line, and it is separate from
+    `may_drop`, which is the operator's own switch on top of it.
+
+    Asked once per stage and task, and an `unavailable` does not count as an asking: nothing was
+    settled, so the question stays open for the call that can answer it (:func:`_recorded`). A
+    hand-off with no deliverable to read asks nothing and records nothing, for the same reason a
+    repository with no decider does — an event per call would fill the chain with the absence of
+    an input rather than with a judgement.
     """
     questions = {lens.id: lens.applies_when for lens in proposed if lens.applies_when}
     if not questions:
         return [], list(proposed)
     live, _ = event_chain.scan(repo.events)
-    verdicts = _recorded(live, stage, task_id)
+    verdicts = _recorded(live, stage, task_id, questions)
     if not verdicts:
         if not settings.configured:
             # Nothing is asked and nothing is recorded. The lenses stay candidates, which is what
             # this repository does today, and an event per call saying so would fill the chain with
             # the absence of a feature.
             return [], list(proposed)
-        verdicts = lens_judge.judge(
-            settings,
-            state=_deliverable(repo, plan, state, stage, task_id),
-            questions=questions,
-        )
+        deliverable = _deliverable(repo, plan, state, stage, task_id)
+        if not deliverable.strip():
+            logger.warning(
+                f"the {stage} deliverable these conditions are decided against is not readable yet, "
+                "so nothing was asked — every conditional lens stays a candidate."
+            )
+            return [], list(proposed)
+        verdicts = lens_judge.judge(settings, state=deliverable, questions=questions)
         with store.transaction() as tx:
             tx.append(
                 "lens_judged",
@@ -615,7 +662,7 @@ def _judge_handoff(
                     "verdicts": [verdict.as_dict() for verdict in verdicts],
                 },
             )
-    removed = lens_judge.dropped(verdicts, settings)
+    removed = lens_judge.dropped(verdicts, settings) if may_remove else set()
     return verdicts, [lens for lens in proposed if lens.id not in removed]
 
 
@@ -720,13 +767,18 @@ def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str, tas
         if dropped:
             narrowed += f" — {dropped} dropped, their paths are outside this task's scope"
 
-    # The `conditional` half, decided against the thing its condition names. Only after the freeze:
-    # before it there is no design document, no ticket and no diff to read, which is the whole
-    # reason these lenses could not be settled from the plan in the first place.
+    # The `conditional` half, decided against the thing its condition names — wherever that thing
+    # is readable. At `requirements`, `design` and `tasks` it is written before the mandate, which
+    # is where four of the six conditional lenses live; gating the question on the freeze would
+    # leave them exactly as unanswered as the prose they were written in. The freeze governs what
+    # an answer may *do*: before it, nothing is removed, because the selection on the approval
+    # screen has to be the one the plan holds.
     verdicts: list[lens_judge.Verdict] = []
     settings = lens_judge.Settings.of(store.read_config())
-    if frozen_plan and proposed:
-        verdicts, proposed = _judge_handoff(repo, store, plan, state, stage, task_id, proposed, settings)
+    if proposed:
+        verdicts, proposed = _judge_handoff(
+            repo, store, plan, state, stage, task_id, proposed, settings, may_remove=frozen_plan
+        )
 
     print(f"{stage}: {len(applied)} applied, {len(proposed)} proposed ({where}{narrowed})")
     if applied:
@@ -737,7 +789,7 @@ def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str, tas
         print(lenses.render(proposed))
     if verdicts:
         print("\ndecided against this stage's deliverable:")
-        print(render_verdicts(verdicts, settings))
+        print(render_verdicts(verdicts, settings, may_remove=frozen_plan))
     off = [lens.id for lens in library if lens.stage == stage and lens.lens_class == lenses.CLASS_UNCLASSIFIED]
     if off:
         print(f"\noff, no condition written down yet: {', '.join(off)}")
@@ -825,6 +877,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.stage and args.stage not in lenses.STAGE_VALUES:
             logger.error(f"unknown stage {args.stage!r} — one of {', '.join(lenses.STAGES)}")
             return 2
+        if args.task:
+            # Refused on the same ground `--select --task` is, and it was the half that was
+            # missing. A place the plan does not hold is worse than no place at all: `--grid`
+            # matches a row to a column by task id, so an application recorded against a name no
+            # column carries is invisible on the screen built to show where each lens went — and
+            # `unplaced` cannot name it either, because that list is the ones with no place.
+            try:
+                plan = store.read_plan()
+            except models.DocumentError as exc:
+                logger.error(str(exc))
+                return 2
+            if plan is None or args.task not in {task.id for task in plan.tasks}:
+                logger.error(f"no task {args.task!r} in this plan — `rein dag` names the ones it holds")
+                return 2
         with store.transaction() as tx:
             tx.append(
                 "lens_applied",
@@ -834,7 +900,8 @@ def main(argv: list[str] | None = None) -> int:
                 # right and the grid cannot place the row: a lens applied to one task reads the
                 # same as one applied to the whole cycle. Optional rather than required because a
                 # recording that refuses to happen is a count lost for a field, and the grid names
-                # the ones that arrived without a place rather than putting them somewhere.
+                # the ones that arrived without a place rather than putting them somewhere. A place
+                # that is *wrong* is not that case and is refused above: it would be named nowhere.
                 detail={
                     "lens": args.record,
                     "found": args.found == "yes",

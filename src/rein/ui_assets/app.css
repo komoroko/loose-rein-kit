@@ -562,6 +562,10 @@ table.lens-grid td.mono { font-size: .8rem; }
 .cell-declined { color: var(--ink-2); font-style: italic; }
 .cell-unknown  { color: var(--ink-3); }
 .cell-off      { color: var(--ink-3); opacity: .7; }
+/* Not one of the three absences: a column this row was never going to answer for. Held apart from
+   them on purpose — reading it as `absent` would be reading a fact about the grid's shape as a
+   fact about the cycle. */
+.cell-na       { color: var(--ink-3); opacity: .35; }
 .lens-key { margin: .8rem 0 0; display: grid; grid-template-columns: max-content 1fr; gap: .1rem .8rem; }
 .lens-key > div { display: contents; }
 .lens-key dt { font-family: var(--mono); font-size: .78rem; }

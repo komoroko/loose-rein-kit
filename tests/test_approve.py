@@ -11,6 +11,7 @@ its own terminal. Two channels of the same kind, one recording path, and the rec
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 import pytest
@@ -1103,6 +1104,21 @@ def test_every_list_the_naming_layer_carries_reaches_the_terminal(
         for row in rows:
             token = row.get("task_id") or row.get("id") or ""
             assert token and token in printed, f"`naming` carries {key} and the terminal never prints it"
+
+
+def test_every_list_the_naming_layer_carries_reaches_the_dashboard() -> None:
+    """The mirror image, and the direction the defect actually ran in. The list that went missing
+    was built here and rendered by one route only — so a check that reads the terminal alone would
+    have passed while the bug was live, and passes again the next time it is the other screen's
+    turn. `Gate.jsx` reaches each list by the key `naming` carries it under, so the keys are what
+    the source has to mention; `tests/ui/decide.test.mjs` is where they are rendered and read back.
+    """
+    panel = (Path(__file__).resolve().parent.parent / "ui" / "gate" / "Gate.jsx").read_text(encoding="utf-8")
+
+    for key in approve.Naming.__annotations__:
+        # Word-bounded: a key renamed on one side only would otherwise pass as a prefix of the
+        # other side's new name, which is the same silent drift this is here to catch.
+        assert re.search(rf"\b{re.escape(key)}\b", panel), f"`naming` carries {key} and ui/gate/Gate.jsx never reads it"
 
 
 # --- the other side of a misjudged reach ------------------------------------------

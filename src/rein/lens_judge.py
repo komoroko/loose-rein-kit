@@ -80,9 +80,11 @@ DOES_NOT_HOLD = "does_not_hold"
 UNAVAILABLE = "unavailable"
 OUTCOMES = frozenset({HOLDS, DOES_NOT_HOLD, UNAVAILABLE})
 
-#: What one deliverable may be sent as. Past this the state is the wrong size for one decision and
-#: the honest answer is `unavailable` — a truncated design document answers a different question
-#: than the one `applies_when` asks, and answers it confidently.
+#: What one deliverable may be sent as, in UTF-8 bytes — which is what a transport carries, and
+#: what a design document written in a language outside ASCII is three times as many of per
+#: character. Past this the state is the wrong size for one decision and the honest answer is
+#: `unavailable`: a truncated design document answers a different question than the one
+#: `applies_when` asks, and answers it confidently.
 MAX_STATE = 200_000
 
 
@@ -218,6 +220,15 @@ def _answers(raw: str) -> dict[str, float]:
         value = answer.get("probability") if isinstance(answer, Mapping) else None
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
+        # A probability is a finite number in [0, 1], and being one is what makes the comparison
+        # against a threshold mean anything. `json.loads` accepts `NaN` and `Infinity` by default,
+        # and NaN compares false against every threshold — so a decider answering with one would
+        # come back as `does_not_hold` and drop the lens, while carrying a value the audit chain
+        # has no canonical form for. Anything outside the range is the same class of answer: not a
+        # probability, and there is no honest way to read one out of it.
+        if value != value or value in (float("inf"), float("-inf")) or not 0.0 <= value <= 1.0:
+            logger.warning(f"the lens decider answered {lens_id} with {value!r}, which is not a probability")
+            continue
         out[str(lens_id)] = float(value)
     return out
 
@@ -231,18 +242,20 @@ def judge(
 ) -> list[Verdict]:
     """One verdict per question, in id order. Every failure path ends in `unavailable`.
 
-    Never raises. Everything this can be handed — no decider, an empty deliverable, a command that
-    does not exist, one that times out, one that answers with a web page — is a reason to review
-    more than necessary, and none of them is a reason to stop the cycle.
+    Never raises. Everything this can be handed — no decider, a command that does not exist, one
+    that times out, one that answers with a web page — is a reason to review more than necessary,
+    and none of them is a reason to stop the cycle.
+
+    Whether there is a deliverable to decide against is the caller's question, not this one's: a
+    hand-off with nothing to read has nothing to record either, and `lens_cmd._judge_handoff` is
+    where that difference can be acted on.
     """
     if not questions:
         return []
     ordered = sorted(questions)
     if not settings.configured:
         return [Verdict(lens_id, UNAVAILABLE, reason="no decider configured") for lens_id in ordered]
-    if not state.strip():
-        return [Verdict(lens_id, UNAVAILABLE, reason="the deliverable is empty or unreadable") for lens_id in ordered]
-    if len(state) > MAX_STATE:
+    if len(state.encode("utf-8")) > MAX_STATE:
         return [
             Verdict(lens_id, UNAVAILABLE, reason=f"the deliverable is over {MAX_STATE} bytes") for lens_id in ordered
         ]
@@ -261,7 +274,7 @@ def judge(
     for lens_id in ordered:
         probability = answers.get(lens_id)
         if probability is None:
-            out.append(Verdict(lens_id, UNAVAILABLE, reason="no answer for this lens"))
+            out.append(Verdict(lens_id, UNAVAILABLE, reason="no answer for this lens, or not a probability"))
             continue
         outcome = HOLDS if probability >= settings.threshold else DOES_NOT_HOLD
         out.append(Verdict(lens_id, outcome, probability=probability))

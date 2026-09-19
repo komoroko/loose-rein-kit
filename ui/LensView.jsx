@@ -18,6 +18,10 @@ import { Empty, Scroll, Warn } from "./parts.jsx";
 // Applied-and-found and applied-and-found-nothing are deliberately not one colour. "Found nothing"
 // is a fact about this change; a lens that keeps finding nothing is a fact about the lens, and that
 // is the tally's question, over cycles, not this screen's.
+//
+// `n/a` gets a treatment of its own rather than the muted one the three absences share: it is not
+// an absence, it is a column this row was never going to answer for, and a cell nobody can tell
+// from `absent` is the fourth state the key does not explain.
 const CELL_CLASS = {
   found: "cell-found",
   applied: "cell-applied",
@@ -27,10 +31,12 @@ const CELL_CLASS = {
   dropped: "cell-off",
   absent: "cell-off",
   pending: "cell-unknown",
+  "n/a": "cell-na",
 };
 
+// Every row carries a cell for every column — `grid()` fills the ones a row does not answer for
+// with `n/a`, so there is no gap here to paper over with a glyph the key never mentions.
 function Cell({ cell, meaning }) {
-  if (!cell) return <td className="cell-off">·</td>;
   const title = meaning[cell.state] || cell.state;
   const at = cell.probability === undefined ? "" : ` (p=${cell.probability.toFixed(2)})`;
   return (

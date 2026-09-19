@@ -59,6 +59,32 @@ const withLenses = (...rows) => ({
   naming: { unasked: [], overrule_cost: "", crossing: [], lenses: rows },
 });
 
+// The mirror of `test_every_list_the_naming_layer_carries_reaches_the_terminal`. The defect ran in
+// this direction — a list `naming` built and only one route rendered — so checking the terminal
+// alone would have passed while it was live.
+test("every list the naming layer carries reaches this route too", async () => {
+  const { app } = await readingRoom({
+    readiness: {
+      ok: true,
+      covers: { plan: "sha256:aa" },
+      naming: {
+        unasked: [{ id: "D-001", subject: "which store", answer: "the chain", rationale: "one task" }],
+        overrule_cost: "Overruling one now costs a task.",
+        lenses: [lensRow("proposed")],
+        crossing: [{ task_id: "T-001", title: "cut over", name: "the old table", detail: "dropped" }],
+      },
+    },
+  });
+
+  await app.click(APPROVE);
+
+  const shown = app.text("rvFoot");
+  assert.match(shown, /D-001/, "the decisions the loop settled without asking");
+  assert.match(shown, /Overruling one now costs a task/, "what overruling one costs");
+  assert.match(shown, /L-CODE-PROPOSED/, "the selection this mandate would freeze");
+  assert.match(shown, /T-001/, "the stops this mandate creates");
+});
+
 test("the lens list opens itself when one of them is the human's to drop", async () => {
   const { app } = await readingRoom({ readiness: withLenses(lensRow("proposed")) });
 

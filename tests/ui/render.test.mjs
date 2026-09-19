@@ -194,6 +194,7 @@ const GRID = {
     dropped: "frozen into no plan: named in the selection and removed before the mandate closed",
     absent: "its condition did not hold for this cycle at all",
     pending: "frozen and not recorded as applied — not yet, not reported, or not by this reviewer",
+    "n/a": "not this row's column: `code` lenses are read per task, and the other stages against the plan as a whole",
   },
   scope_note: "These counts are this repository's chain and archives only.",
   unplaced: ["L-OLD"],
@@ -203,14 +204,30 @@ const GRID = {
       stage: "code",
       class: "conditional",
       applies_when: "the change introduces shared mutable state",
-      cells: [{ column: "T-001", state: "declined", probability: 0.12 }],
+      cells: [
+        { column: "(plan)", state: "n/a" },
+        { column: "T-001", state: "declined", probability: 0.12 },
+      ],
     },
     {
       lens: "L-CODE-SCHEMA-DRIFT",
       stage: "code",
       class: "standard",
       applies_when: "the change touches a schema",
-      cells: [{ column: "T-001", state: "found" }],
+      cells: [
+        { column: "(plan)", state: "n/a" },
+        { column: "T-001", state: "found" },
+      ],
+    },
+    {
+      lens: "L-DES-YAGNI",
+      stage: "design",
+      class: "standard",
+      applies_when: "the design adds a seam nothing asked for",
+      cells: [
+        { column: "(plan)", state: "pending" },
+        { column: "T-001", state: "n/a" },
+      ],
     },
   ],
 };
@@ -248,4 +265,26 @@ test("a cell reports the record and the key says what each state claims", async 
   assert.match(view, /not yet, not reported, or not by this reviewer/);
   // Read where somebody is about to be invited to edit a user-global library.
   assert.match(app.window.document.getElementById("lensScope").textContent, /this repository's chain/);
+});
+
+test("a column a row does not answer for is named, not left as an unexplained mark", async () => {
+  const app = await boot({
+    hash: "#lenses",
+    routes: baseRoutes((url) => (url === "/api/lenses" ? GRID : undefined)),
+  });
+  await app.open();
+
+  const cells = [...app.window.document.querySelectorAll("#lensGrid td")];
+  const na = cells.filter((td) => td.textContent === "n/a");
+  assert.equal(na.length, 3, "a code row has no (plan) cell to answer for, and a design row no task");
+  // Not the muted treatment the three absences share: it is not an absence.
+  assert.ok(
+    na.every((td) => td.className === "cell-na"),
+    "`n/a` read as `absent` would be the grid's shape read as a fact about the cycle",
+  );
+  assert.match(
+    app.window.document.getElementById("view-lenses").textContent,
+    /not this row's column/,
+    "and the key explains it, like every other state on the screen",
+  );
 });

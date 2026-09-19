@@ -8,12 +8,14 @@ the reader's attention. Over-reviewing is not thorough, so the condition is what
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from rein import approve as approve_mod
 from rein import lens_cmd, lenses, models
 from tests._support import seed_repo
 
@@ -572,6 +574,25 @@ def test_narrowing_to_a_task_no_plan_holds_is_refused(tmp_path: Path, config_hom
     assert lens_cmd.main(["--select", "code", "--task", "T-404", "--repo", str(tmp_path)]) == 2
 
 
+def test_recording_against_a_task_no_plan_holds_is_refused(tmp_path: Path, config_home: Path) -> None:
+    """The half `--select` already refused, and the one that was missing. A place the plan does not
+    hold is worse than no place: `--grid` matches a row to a column by task id, so a record against
+    a name no column carries is invisible on the screen built to show where each lens went — and
+    `unplaced` cannot name it either, because that list is the ones with no place at all."""
+    from rein import event_chain
+
+    repo = _repo(tmp_path)
+    library = lenses.library()
+    lens_id = next(lens.id for lens in library if lens.stage == "code")
+
+    argv = ["--record", lens_id, "--found", "yes", "--stage", "code", "--repo", str(tmp_path)]
+    assert lens_cmd.main([*argv, "--task", "T-404"]) == 2
+
+    live, _ = event_chain.scan(repo.events)
+    assert [event for event in live if event.event == "lens_applied"] == []
+    assert lens_cmd.main([*argv, "--task", "T-001"]) == 0
+
+
 def test_task_without_select_is_refused(tmp_path: Path, config_home: Path) -> None:
     _repo(tmp_path)
 
@@ -723,6 +744,67 @@ def test_a_reply_this_cannot_read_is_unavailable_rather_than_guessed_at(reply: s
     assert [v.outcome for v in verdicts] == [lens_judge.UNAVAILABLE]
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "NaN",  # `json.loads` accepts it by default, and it compares false against every threshold
+        "Infinity",
+        "-Infinity",
+        "1.5",
+        "-3.0",
+    ],
+)
+def test_a_number_that_is_not_a_probability_is_unavailable_rather_than_a_verdict(value: str) -> None:
+    """A probability is a finite number in [0, 1], and being one is what makes the comparison
+    against a threshold mean anything. NaN in particular reads as `does_not_hold` — it compares
+    false against everything — so a decider answering with one would *drop* a lens while carrying a
+    value the audit chain has no canonical form for."""
+    from rein import lens_judge
+
+    settings = lens_judge.Settings(command=("decide",), may_drop=True)
+    verdicts = lens_judge.judge(
+        settings,
+        state="a design",
+        questions={"L-A": "?"},
+        transport=lambda c, p, *, timeout: f'{{"answers": {{"L-A": {{"probability": {value}}}}}}}',
+    )
+
+    assert [v.outcome for v in verdicts] == [lens_judge.UNAVAILABLE]
+    assert verdicts[0].probability is None
+    assert lens_judge.dropped(verdicts, settings) == set()
+
+
+def test_a_reply_that_is_not_a_probability_leaves_the_cycle_running(tmp_path: Path, config_home: Path) -> None:
+    """The end of the same path, and the one that mattered: an unreadable answer has to cost a
+    review nobody needed, never the command. `digests.canonical` refuses NaN, so a verdict carrying
+    one reaches the chain write and takes `rein lens --select` down with it."""
+    nan = "import json, sys\nb = json.load(sys.stdin)\n" + (
+        'sys.stdout.write(\'{"answers": {\' + ", ".join(\'"%s": {"probability": NaN}\' % k '
+        "for k in b[\"questions\"]) + '}}')\n"
+    )
+    repo = _judged_repo(tmp_path, _decider(tmp_path, nan), may_drop=True)
+
+    assert lens_cmd.main(["--select", "design", "--repo", str(tmp_path)]) == 0
+
+    assert {row["outcome"] for row in _judgements(repo)[0].detail["verdicts"]} == {"unavailable"}
+
+
+def test_a_deliverable_is_measured_in_the_bytes_a_transport_carries() -> None:
+    """`MAX_STATE` is a size on the wire. Counting characters would let a document outside ASCII
+    through at three times the limit it names, and the message says bytes."""
+    from rein import lens_judge
+
+    settings = lens_judge.Settings(command=("decide",))
+    over = "あ" * (lens_judge.MAX_STATE // 3 + 1)
+
+    assert len(over) < lens_judge.MAX_STATE < len(over.encode("utf-8"))
+    verdicts = lens_judge.judge(
+        settings, state=over, questions={"L-A": "?"}, transport=lambda c, p, *, timeout: "unreachable"
+    )
+    assert [v.outcome for v in verdicts] == [lens_judge.UNAVAILABLE]
+    assert "bytes" in verdicts[0].reason
+
+
 def test_the_probability_is_kept_even_when_it_changed_nothing() -> None:
     """A threshold is a knob somebody has to be able to move, and the only thing that makes moving
     it informed is the distribution it would have been applied to. Which side of the line a lens
@@ -795,14 +877,64 @@ def _judgements(repo: Any) -> list[models.Event]:
     return [event for event in live if event.event == "lens_judged"]
 
 
-def test_nothing_is_asked_before_the_freeze(tmp_path: Path, config_home: Path) -> None:
-    """The condition names the deliverable, and at the mandate there is no design document under
-    approval yet — which is the whole reason these lenses could not be settled from the plan."""
+def test_nothing_is_removed_before_the_freeze(tmp_path: Path, config_home: Path) -> None:
+    """Asked, because `docs/20-design.md` is written at step 4 and the selection is step 6 — the
+    deliverable these conditions name exists well before the mandate. Removing nothing, because
+    the list on the approval screen has to be the one the plan holds: a human cannot keep or drop
+    a lens a decider cut on the way to the gate."""
+    repo = _judged_repo(tmp_path, _decider(tmp_path, _DENY), may_drop=True)
+
+    assert lens_cmd.main(["--select", "design", "--repo", str(tmp_path)]) == 0
+
+    judged = _judgements(repo)
+    assert len(judged) == 1
+    assert {row["outcome"] for row in judged[0].detail["verdicts"]} == {"does_not_hold"}
+    named = approve_mod.naming(repo, "mandate")
+    assert {row["id"] for row in named["lenses"]} >= {row["lens"] for row in judged[0].detail["verdicts"]}
+
+
+def test_a_stage_whose_deliverable_is_not_written_yet_asks_nothing_and_records_nothing(
+    tmp_path: Path, config_home: Path
+) -> None:
+    """Nothing was asked, so there is no judgement to record — the same reason a repository with
+    no decider records none. An event per call would fill the chain with the absence of an input,
+    and reading one back later would let a document that did not exist yet decide a cycle."""
     repo = _judged_repo(tmp_path, _decider(tmp_path, _ECHO))
+    (tmp_path / "docs" / "20-design.md").unlink()
 
     assert lens_cmd.main(["--select", "design", "--repo", str(tmp_path)]) == 0
 
     assert _judgements(repo) == []
+
+
+def test_an_outage_does_not_close_the_question(tmp_path: Path, config_home: Path) -> None:
+    """An `unavailable` is not an answer. The decider was down, or the reply was unreadable;
+    nothing was settled, and reading that back as though it had been would let one outage decide a
+    whole cycle. The record of the outage stays — it is a fact about what happened — and the
+    question stays open for the call that can answer it."""
+    repo = _judged_repo(tmp_path, _decider(tmp_path, "import sys\nsys.exit(3)\n"))
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+
+    assert {row["outcome"] for row in _judgements(repo)[0].detail["verdicts"]} == {"unavailable"}
+
+    (tmp_path / "decider.py").write_text(_ECHO, encoding="utf-8")
+    lens_cmd.main(["--select", "design", "--repo", str(tmp_path)])
+
+    judged = _judgements(repo)
+    assert len(judged) == 2, "the outage is recorded, and it did not answer the question"
+    assert {row["outcome"] for row in judged[-1].detail["verdicts"]} == {"holds"}
+
+
+def test_a_lens_the_last_recording_never_covered_reopens_the_question(tmp_path: Path, config_home: Path) -> None:
+    """The selection can grow between two hand-offs, and a lens nobody was asked about has no
+    answer to read back — however many answers sit beside it."""
+    from rein import lens_judge
+
+    answered = [lens_judge.Verdict("L-A", lens_judge.HOLDS, probability=0.9)]
+    event = _judged(("L-A", 0.9))
+
+    assert lens_cmd._recorded([event], "design", "", {"L-A": "?"}) == answered
+    assert lens_cmd._recorded([event], "design", "", {"L-A": "?", "L-B": "?"}) == []
 
 
 def test_the_conditional_half_is_decided_against_the_deliverable_after_the_freeze(
@@ -887,7 +1019,7 @@ def test_a_verdict_the_settings_do_not_act_on_says_so(
 def _judged(*rows: tuple[str, float | None], threshold: float = 0.5, cycle: str = "demo-cycle") -> models.Event:
     from rein import event_chain
 
-    verdicts = []
+    verdicts: list[dict[str, Any]] = []
     for lens_id, probability in rows:
         if probability is None:
             verdicts.append({"lens": lens_id, "outcome": "unavailable"})
@@ -967,16 +1099,66 @@ def test_the_verdict_half_is_printed_before_the_notes_that_bound_it() -> None:
     assert out.index("conditional lens(es), at threshold") < out.index("shared across every repository")
 
 
-#: Every module under `src/rein` allowed to name a recorded verdict, and what for. `models` holds
+#: Every module under `src/rein` allowed to reach a recorded verdict, and what for. `models` holds
 #: the event vocabulary; `lens_cmd` writes one, reads it back for the same hand-off, and reports.
+#: `lens_judge` is not here because it never reads a stored one — it makes them.
 VERDICT_READERS = {"models", "lens_cmd"}
+
+#: The event kind, which is what a chain reader has to match on to find a verdict at all.
+VERDICT_EVENT = "lens_judged"
+
+#: The module that produces verdicts. Importing it, or reaching anything through it, is a path to
+#: a probability, so the import itself counts.
+JUDGE_MODULE = "lens_judge"
+
+#: The `lens_cmd` functions that hand back a *stored* probability. Qualified rather than bare:
+#: `verdicts` and `_recorded` are ordinary words this package already uses for other things
+#: (`review`, `build_loop`, `evidence_cmd`), and a check that flagged those would be noise nobody
+#: could keep passing.
+VERDICT_READING_CALLS = frozenset(
+    {
+        "verdicts",
+        "verdict_counts",
+        "at_threshold",
+        "found_anyway",
+        "render_verdicts_stats",
+        "_verdict_state",
+        "_recorded",
+    }
+)
+
+
+def _verdict_references(tree: ast.AST) -> set[str]:
+    """Every way this module could reach a recorded verdict, named.
+
+    Read as references rather than as text. `lens_cmd.verdicts(events)` hands back the recorded
+    probabilities and the word `lens_judged` lives in *its* body, not in its caller's — so a check
+    that matched the file's characters would have let any module in the package read them by
+    importing one function.
+    """
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and node.value == VERDICT_EVENT:
+            found.add(VERDICT_EVENT)
+        elif isinstance(node, ast.alias) and node.name.rsplit(".", 1)[-1] == JUDGE_MODULE:
+            found.add(f"import {JUDGE_MODULE}")
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").rsplit(".", 1)[-1] == JUDGE_MODULE:
+            found.add(f"import {JUDGE_MODULE}")
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == JUDGE_MODULE:
+                found.add(f"{JUDGE_MODULE}.{node.attr}")
+            elif node.value.id == "lens_cmd" and node.attr in VERDICT_READING_CALLS:
+                found.add(f"lens_cmd.{node.attr}")
+    return found
 
 
 def _modules_naming_a_verdict() -> set[str]:
     source_root = Path(__file__).resolve().parent.parent / "src" / "rein"
-    return {
-        path.stem for path in sorted(source_root.rglob("*.py")) if "lens_judged" in path.read_text(encoding="utf-8")
-    }
+    out: set[str] = set()
+    for path in sorted(source_root.rglob("*.py")):
+        if _verdict_references(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            out.add(path.stem)
+    return out
 
 
 def test_only_these_modules_read_a_recorded_verdict() -> None:
@@ -985,10 +1167,25 @@ def test_only_these_modules_read_a_recorded_verdict() -> None:
     A probability becomes an input the moment something consults it to decide. The guarantee is
     that there is **no path** by which cycle N's verdicts could change cycle N+1's selection — a
     property about every future edit, which no assertion about one report's text can hold. So read
-    the source: a `lens_judged` appearing in `approve`, `build_loop`, `review` or `lenses` fails
-    here, and whoever added it decides whether the guarantee or the caller goes.
+    the source: a verdict reached from `approve`, `build_loop`, `review` or `lenses` fails here,
+    and whoever added it decides whether the guarantee or the caller goes.
     """
     assert _modules_naming_a_verdict() == VERDICT_READERS
+
+
+@pytest.mark.parametrize(
+    "borrowed",
+    [
+        # Neither of these contains the event kind, and both hold every recorded probability.
+        "def pick(events):\n    return [p for _c, _l, p, _t in lens_cmd.verdicts(events)]\n",
+        "from rein import lens_judge\n\ndef pick(rows):\n    return [lens_judge.Verdict.from_dict(r) for r in rows]\n",
+    ],
+)
+def test_the_check_catches_a_reader_that_never_spells_the_event_kind(borrowed: str) -> None:
+    """The failure mode the text match had: a module can reach the probabilities through one
+    import and never write the characters a grep for the event kind would look for."""
+    assert VERDICT_EVENT not in borrowed
+    assert _verdict_references(ast.parse(borrowed))
 
 
 def test_the_selection_is_resolved_without_ever_seeing_a_verdict() -> None:
@@ -1073,8 +1270,11 @@ def test_a_code_lens_gets_a_column_per_task_and_the_others_get_the_plan() -> Non
 
     cells = _cells(built)
     assert built["columns"] == ["(plan)", "T-001", "T-002"]
-    assert cells["L-CODE"] == {"T-001": "pending", "T-002": "narrowed"}
-    assert cells["L-DESIGN"] == {"(plan)": "pending"}
+    # Every row carries every column, and the ones it was never going to answer for say so rather
+    # than stopping short — a gap is a state on the screen that the key does not explain.
+    assert cells["L-CODE"] == {"(plan)": "n/a", "T-001": "pending", "T-002": "narrowed"}
+    assert cells["L-DESIGN"] == {"(plan)": "pending", "T-001": "n/a", "T-002": "n/a"}
+    assert built["meaning"]["n/a"]
 
 
 def test_a_verdict_shows_where_it_removed_a_lens_and_where_it_could_not_be_taken() -> None:
@@ -1142,6 +1342,26 @@ def test_an_application_with_no_place_is_named_rather_than_put_somewhere() -> No
 
     assert built["unplaced"] == ["L-1"]
     assert "recorded without a stage or task" in lens_cmd.render_grid(built)
+
+
+def test_the_terminal_grid_prints_no_state_the_key_does_not_explain() -> None:
+    """Every mark in the table is a state with a line in the key. A row that stopped short of the
+    columns it does not answer for left the renderer filling the gap with a dash — a fourth absence
+    beside three whose difference is the whole of what this screen is for, and the one nothing
+    explained."""
+    from tests._support import make_claim, make_task
+
+    library = [_lens("L-CODE", stage="code"), _lens("L-DESIGN")]
+    plan = _grid_plan(
+        claims=[make_claim("C-001", requirement_ids=["R-1"])],
+        tasks=[make_task("T-001", claim_ids=["C-001"])],
+        lenses=[_entry("L-CODE", stage="code"), _entry("L-DESIGN")],
+    )
+    built = lens_cmd.grid(plan, library, [_selected("L-CODE", "L-DESIGN")])
+
+    table = lens_cmd.render_grid(built).split("\n\n")[0]
+    marks = {word for line in table.split("\n")[1:] for word in line.split()[1:]}
+    assert marks and marks <= set(built["meaning"])
 
 
 def test_the_grid_says_how_far_its_numbers_reach() -> None:
