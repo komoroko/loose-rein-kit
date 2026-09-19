@@ -179,3 +179,73 @@ test("acceptance with no review says a generation is running instead of falling 
   await app.push("status", running());
   assert.match(app.html("rvBar"), /generating the grounded review/);
 });
+
+
+// The lens grid: where each review was sent to look, and where it was not. Served from the audit
+// chain, so a cycle nobody had this dashboard open during still answers.
+const GRID = {
+  columns: ["(plan)", "T-001"],
+  meaning: {
+    found: "applied, and it found something",
+    applied: "applied, and it found nothing — which is a fact about this change, not about the lens",
+    narrowed: "its paths are outside this task's scope, so the hand-off dropped it",
+    declined: "a verdict put its condition below the threshold, and the settings let that remove it",
+    unjudged: "its condition takes reading the deliverable and the decider could not be asked",
+    dropped: "frozen into no plan: named in the selection and removed before the mandate closed",
+    absent: "its condition did not hold for this cycle at all",
+    pending: "frozen and not recorded as applied — not yet, not reported, or not by this reviewer",
+  },
+  scope_note: "These counts are this repository's chain and archives only.",
+  unplaced: ["L-OLD"],
+  rows: [
+    {
+      lens: "L-CODE-CONCURRENCY",
+      stage: "code",
+      class: "conditional",
+      applies_when: "the change introduces shared mutable state",
+      cells: [{ column: "T-001", state: "declined", probability: 0.12 }],
+    },
+    {
+      lens: "L-CODE-SCHEMA-DRIFT",
+      stage: "code",
+      class: "standard",
+      applies_when: "the change touches a schema",
+      cells: [{ column: "T-001", state: "found" }],
+    },
+  ],
+};
+
+test("the lens grid shows where each one went, and names what it cannot place", async () => {
+  const app = await boot({
+    hash: "#lenses",
+    routes: baseRoutes((url) => (url === "/api/lenses" ? GRID : undefined)),
+  });
+  await app.open();
+
+  const grid = app.window.document.getElementById("lensGrid");
+  assert.ok(grid, "the view is routed and the table is rendered");
+  const text = grid.textContent;
+  assert.match(text, /L-CODE-CONCURRENCY/);
+  // How far below the line, not merely which side.
+  assert.match(text, /declined \(p=0\.12\)/);
+  assert.match(text, /found/);
+  // An application with no place is named, never put in a column it was not recorded against.
+  assert.match(app.window.document.getElementById("view-lenses").textContent, /L-OLD/);
+  assert.match(app.window.document.getElementById("view-lenses").textContent, /without a stage or task/);
+});
+
+test("a cell reports the record and the key says what each state claims", async () => {
+  const app = await boot({
+    hash: "#lenses",
+    routes: baseRoutes((url) => (url === "/api/lenses" ? GRID : undefined)),
+  });
+  await app.open();
+
+  const view = app.window.document.getElementById("view-lenses").textContent;
+  // The three absences are three things, and the key is what tells them apart.
+  assert.match(view, /named in the selection and removed before the mandate closed/);
+  assert.match(view, /did not hold for this cycle at all/);
+  assert.match(view, /not yet, not reported, or not by this reviewer/);
+  // Read where somebody is about to be invited to edit a user-global library.
+  assert.match(app.window.document.getElementById("lensScope").textContent, /this repository's chain/);
+});

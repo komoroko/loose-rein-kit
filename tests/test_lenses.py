@@ -1000,3 +1000,153 @@ def test_the_selection_is_resolved_without_ever_seeing_a_verdict() -> None:
     assert "event" not in inspect.signature(lenses.resolve).parameters
     assert "event" not in inspect.signature(lenses.select).parameters
     assert "event" not in inspect.signature(lenses.Facts.of).parameters
+
+
+# --- where each lens went, and where it did not ------------------------------------
+
+
+def _grid_plan(**kwargs: Any) -> Any:
+    from tests._support import make_plan
+
+    return models.Plan(make_plan(**kwargs))
+
+
+def _entry(lens_id: str, stage: str = "design", status: str = "applied") -> dict[str, str]:
+    return {"id": lens_id, "stage": stage, "status": status}
+
+
+def _cells(built: dict[str, Any]) -> dict[str, dict[str, str]]:
+    return {row["lens"]: {cell["column"]: cell["state"] for cell in row["cells"]} for row in built["rows"]}
+
+
+def test_three_absences_with_different_provenance_stay_three_things() -> None:
+    """`dropped` is named in `lens_selected` and gone from the frozen plan, `absent` is in neither,
+    `pending` is in both with nothing recorded. The tally already refuses to guess between the last
+    one's three causes, and a grid that collapsed them would be guessing for it."""
+    library = [_lens("L-KEPT"), _lens("L-DROPPED"), _lens("L-NEVER")]
+    plan = _grid_plan(lenses=[_entry("L-KEPT")], tasks=[])
+    events = [_selected("L-KEPT", "L-DROPPED")]
+
+    built = lens_cmd.grid(plan, library, events)
+
+    assert _cells(built) == {
+        "L-KEPT": {"(plan)": "pending"},
+        "L-DROPPED": {"(plan)": "dropped"},
+        "L-NEVER": {"(plan)": "absent"},
+    }
+    assert set(built["meaning"]) >= {"dropped", "absent", "pending"}
+
+
+def test_applied_and_found_is_not_the_same_colour_as_applied_and_found_nothing() -> None:
+    """ "Found nothing" is a fact about this change. A lens that keeps finding nothing is a fact
+    about the lens, and that is the tally's question, over cycles, not this screen's."""
+    library = [_lens("L-1"), _lens("L-2")]
+    plan = _grid_plan(lenses=[_entry("L-1"), _entry("L-2")], tasks=[])
+    events = [_selected("L-1", "L-2"), _applied("L-1", True), _applied("L-2", False)]
+
+    assert _cells(lens_cmd.grid(plan, library, events)) == {
+        "L-1": {"(plan)": "found"},
+        "L-2": {"(plan)": "applied"},
+    }
+
+
+def test_a_code_lens_gets_a_column_per_task_and_the_others_get_the_plan() -> None:
+    """`requirements`, `design` and `tasks` are judged against the plan as a whole. A column per
+    task there would copy one answer across the row and invite it to be read as several."""
+    from tests._support import make_claim, make_task
+
+    library = [
+        _lens("L-CODE", stage="code", when=lenses.Condition(paths=("**/*.sql",))),
+        _lens("L-DESIGN"),
+    ]
+    plan = _grid_plan(
+        claims=[make_claim("C-001", requirement_ids=["R-1"])],
+        tasks=[
+            make_task("T-001", claim_ids=["C-001"], scope_include=["db/schema.sql"]),
+            make_task("T-002", claim_ids=["C-001"], scope_include=["src/app.py"]),
+        ],
+        lenses=[_entry("L-CODE", stage="code"), _entry("L-DESIGN")],
+    )
+    events = [_selected("L-CODE", "L-DESIGN")]
+
+    built = lens_cmd.grid(plan, library, events, tracked=("db/schema.sql", "src/app.py"))
+
+    cells = _cells(built)
+    assert built["columns"] == ["(plan)", "T-001", "T-002"]
+    assert cells["L-CODE"] == {"T-001": "pending", "T-002": "narrowed"}
+    assert cells["L-DESIGN"] == {"(plan)": "pending"}
+
+
+def test_a_verdict_shows_where_it_removed_a_lens_and_where_it_could_not_be_taken() -> None:
+    """A `does_not_hold` the settings did not act on is not a cell state: the lens went to the
+    reviewer, and the grid has to show where it went."""
+    from rein import event_chain
+
+    library = [_lens("L-DECLINED"), _lens("L-UNJUDGED"), _lens("L-KEPT")]
+    plan = _grid_plan(lenses=[_entry("L-DECLINED"), _entry("L-UNJUDGED"), _entry("L-KEPT")], tasks=[])
+    judged = event_chain.make(
+        "lens_judged",
+        "demo-cycle",
+        subject_ids=["L-DECLINED", "L-KEPT", "L-UNJUDGED"],
+        detail={
+            "stage": "design",
+            "task": "",
+            "threshold": 0.5,
+            "may_drop": True,
+            "verdicts": [
+                {"lens": "L-DECLINED", "outcome": "does_not_hold", "probability": 0.12},
+                {"lens": "L-UNJUDGED", "outcome": "unavailable"},
+                {"lens": "L-KEPT", "outcome": "holds", "probability": 0.8},
+            ],
+        },
+    )
+
+    built = lens_cmd.grid(plan, library, [_selected("L-DECLINED", "L-UNJUDGED", "L-KEPT"), judged])
+
+    cells = _cells(built)
+    assert cells["L-DECLINED"]["(plan)"] == "declined"
+    assert cells["L-UNJUDGED"]["(plan)"] == "unjudged"
+    assert cells["L-KEPT"]["(plan)"] == "pending"
+    declined = next(row for row in built["rows"] if row["lens"] == "L-DECLINED")
+    # How far below the line, not merely which side — the same reason the probability is recorded.
+    assert declined["cells"][0]["probability"] == 0.12
+
+
+def test_a_verdict_the_settings_did_not_act_on_leaves_the_cell_alone() -> None:
+    from rein import event_chain
+
+    library = [_lens("L-1")]
+    plan = _grid_plan(lenses=[_entry("L-1")], tasks=[])
+    judged = event_chain.make(
+        "lens_judged",
+        "demo-cycle",
+        subject_ids=["L-1"],
+        detail={
+            "stage": "design",
+            "task": "",
+            "threshold": 0.5,
+            "may_drop": False,
+            "verdicts": [{"lens": "L-1", "outcome": "does_not_hold", "probability": 0.1}],
+        },
+    )
+
+    assert _cells(lens_cmd.grid(plan, library, [_selected("L-1"), judged]))["L-1"]["(plan)"] == "pending"
+
+
+def test_an_application_with_no_place_is_named_rather_than_put_somewhere() -> None:
+    """Recorded before `--stage`/`--task` existed, or by a reviewer that did not pass them. Placing
+    it in one column would be the grid inventing a fact the record does not hold."""
+    library = [_lens("L-1", stage="code")]
+    plan = _grid_plan(lenses=[_entry("L-1", stage="code")], tasks=[])
+    built = lens_cmd.grid(plan, library, [_selected("L-1"), _applied("L-1", True)])
+
+    assert built["unplaced"] == ["L-1"]
+    assert "recorded without a stage or task" in lens_cmd.render_grid(built)
+
+
+def test_the_grid_says_how_far_its_numbers_reach() -> None:
+    """The cells are one repository's cycle; the library they are about is user-global (CR-8)."""
+    built = lens_cmd.grid(_grid_plan(tasks=[]), [_lens("L-1")], [])
+
+    assert "shared across every repository" in built["scope_note"]
+    assert built["scope_note"] in lens_cmd.render_grid(built)

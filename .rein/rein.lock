@@ -13,13 +13,13 @@ prompts:
     prompts/agents/architect.md: sha256:2f5d25fbbb939eab00a26db15241c1418283f7c627fb3c639ede199f4a4bdf8f
     prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64
     prompts/agents/requirements-analyst.md: sha256:0c928038ded17cc8224febce1ba72c555b8fb182d0c35254e03df3fa63241f8d
-    prompts/commands/build.md: sha256:5dd0e0bdc1835f7f56c1a600f851463cee5c6d31aa8ded5b3ad2b2c8b3b8c47a
-    prompts/commands/design.md: sha256:4f585adfca57cc8858f6138164b670550ff3b2befa898f3e94b8a8c76b92c02c
+    prompts/commands/build.md: sha256:94f2b5bf0bca60317843a6cb69de8cbefe495493f5c466dd33010c18750f4fd3
+    prompts/commands/design.md: sha256:4e7c8bdeb5ba9756278d4c7e965b1efa0f63667bf1c5fbb932f400cb05476f84
     prompts/commands/onboard.md: sha256:8f7fb990edecf93c16c9812ef123ff9653d69ebe3cdb568b58256e774fadd339
-    prompts/commands/req.md: sha256:c653fd742c686c1d68b9c41b479a32d68f69272292c0ca3e0fd1c3a149bbb9d8
+    prompts/commands/req.md: sha256:b812919787119a3b11d1644a71fedacd75c3523abf4a3ac9c4baeba5fb83f650
     prompts/commands/revise.md: sha256:c4c9f03a03f012822cf64ce1c78a4e18e43574383d422b6f133a14d9e6ca9cb7
     prompts/commands/status.md: sha256:6f31d2c1b46f62b0e511300838251dc6a35fb33c3d1b03dfbed1543e76f4de2d
-    prompts/commands/tasks.md: sha256:4703e0af45ea6d8d5f22d276f377371d04a8f3b5052159f45b5e40378d366032
+    prompts/commands/tasks.md: sha256:a55e9f7ca47b47aa1dbf6c73286025830a1edac513b3d02b30f743dfab9a240d
     prompts/commands/verify.md: sha256:c64d82b267e0e988ee98dfd6cc5a3063f7195ff7a08a55e2b4c43ac2d26d258d
     prompts/rules/gate-workflow.md: sha256:23dd5793f0a3039cbd4b9f68d2b8215574b995e15eb1c97341802884af6f4465
     schema/config.schema.json: sha256:bc7f5173af6d855c7baf858f752f037f455ce1087614fdced59f0c7ce39bc3c3

@@ -6,6 +6,36 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [Unreleased]
 
+### Where each lens went, and where it did not
+
+The counts say which lenses earn their place over cycles. They could not say **where** a lens went,
+which is the question a person actually has after a review: this task was read for these six things
+and not for those nineteen — why not? Every answer was already in the chain and the frozen plan;
+what was missing was a shape that put them beside each other.
+
+`rein lens --grid`, and a **Lenses** screen on the dashboard: task by lens, one cell each. Built
+from the audit chain and the frozen plan rather than from the observation store, which is what
+makes it answerable for a cycle nobody had the dashboard open during — the same reason the stop
+counts and the stopped time moved there. Nothing new is recorded: `lens_selected` says what the
+resolution wrote, the plan says what survived the gate, `lens_judged` says what a decider was
+asked, `lens_applied` says what a reviewer did, and the path narrowing is recomputed from the
+scopes the plan already froze.
+
+**A cell reports the record and never a reason.** Three of its states are an absence with different
+provenance — `dropped` is named in `lens_selected` and gone from the frozen plan, `absent` is in
+neither, `pending` is in both with no application recorded — and the difference is the whole of what
+the screen is for. The tally already refuses to guess between `pending`'s three causes (a reviewer
+that has not reported, a cycle still open, a lens nobody got to); a grid that collapsed them would
+be guessing on its behalf. `found` and `applied` are likewise not one colour: "found nothing" is a
+fact about this change, while a lens that keeps finding nothing is a fact about the lens, and that
+is the tally's question, not this screen's.
+
+For the grid to place a row at all, an application has to say where it happened. `rein lens
+--record` takes `--stage` and `--task`, and the four phase prompts pass them. They are optional
+rather than required — a recording that refuses to happen is a count lost for the sake of a field —
+and an application that arrives without a place is **named** rather than put in a column it was
+never recorded against.
+
 ### A threshold nobody can see the shape of is a threshold nobody can move
 
 `rein lens --stats` gains the verdict half: per conditional lens, how often it was judged and how

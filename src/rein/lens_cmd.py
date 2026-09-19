@@ -19,6 +19,7 @@ import logging
 import pathlib
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from rein import common, event_chain, lens_judge, lenses, models, review_reading
 from rein import events as events_mod
@@ -130,6 +131,193 @@ def render_stats(
     lines.append(_ENTRY_NOTE.format(path=lenses.library_path()))
     lines.append("")
     lines.append(_SCOPE_NOTE)
+    return "\n".join(lines)
+
+
+# --- where each lens went, and where it did not ------------------------------------
+#
+# The counts say which lenses earn their place. They cannot say *where* a lens went, and that is
+# the question a person asks after a review: this task was read for these six things and not for
+# those nineteen — why not? Every answer is already in the chain and the frozen plan; what was
+# missing was a shape that put them beside each other.
+
+#: The states a cell may take. **A cell reports what the record says, never why.** Three of these
+#: are an absence with a different provenance, and the difference is exactly what the chain can
+#: still tell: `dropped` is named in `lens_selected` and gone from the frozen plan, `absent` is in
+#: neither, `pending` is in both and has no application recorded — which is a reviewer that has not
+#: reported, a cycle that is still open, or a lens nobody got to. The tally says the same thing
+#: about the same three, and neither of them guesses between them.
+FOUND = "found"
+APPLIED = "applied"
+NARROWED = "narrowed"
+DECLINED = "declined"
+UNJUDGED = "unjudged"
+DROPPED = "dropped"
+ABSENT = "absent"
+PENDING = "pending"
+
+#: One line each, for the reader who is looking at a colour and wants to know what it claims.
+CELL_MEANING: dict[str, str] = {
+    FOUND: "applied, and it found something",
+    APPLIED: "applied, and it found nothing — which is a fact about this change, not about the lens",
+    NARROWED: "its paths are outside this task's scope, so the hand-off dropped it",
+    DECLINED: "a verdict put its condition below the threshold, and the settings let that remove it",
+    UNJUDGED: "its condition takes reading the deliverable and the decider could not be asked",
+    DROPPED: "frozen into no plan: named in the selection and removed before the mandate closed",
+    ABSENT: "its condition did not hold for this cycle at all",
+    PENDING: "frozen and not recorded as applied — not yet, not reported, or not by this reviewer",
+}
+
+#: The column for a lens whose stage has no tasks in it. `requirements`, `design` and `tasks` are
+#: judged against the plan as a whole, and giving them a column per task would copy one answer
+#: across the row and invite it to be read as several.
+PLAN_COLUMN = "(plan)"
+
+
+def _applications(events: Sequence[models.Event]) -> dict[tuple[str, str], bool]:
+    """`{(lens, task): found}` — `task` is `""` for one recorded without a place."""
+    out: dict[tuple[str, str], bool] = {}
+    for event in events:
+        if event.event != "lens_applied":
+            continue
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        lens_id = str(detail.get("lens") or "")
+        if not lens_id:
+            continue
+        key = (lens_id, str(detail.get("task") or ""))
+        out[key] = bool(out.get(key)) or detail.get("found") is True
+    return out
+
+
+def _verdict_state(events: Sequence[models.Event]) -> dict[tuple[str, str], tuple[str, float | None]]:
+    """`{(lens, task): (outcome, probability)}` from the recorded verdicts, with `may_drop` folded in.
+
+    A `does_not_hold` that the settings did not act on is not a cell state: the lens went to the
+    reviewer, and the grid has to show where it went. The probability travels with it so the cell
+    can say how far from the line it was without the reader opening the chain.
+    """
+    out: dict[tuple[str, str], tuple[str, float | None]] = {}
+    for event in events:
+        if event.event != "lens_judged":
+            continue
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        task = str(detail.get("task") or "")
+        may_drop = detail.get("may_drop") is True
+        rows = detail.get("verdicts")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            verdict = lens_judge.Verdict.from_dict(row) if isinstance(row, Mapping) else None
+            if verdict is None:
+                continue
+            if verdict.outcome == lens_judge.UNAVAILABLE:
+                out[(verdict.lens_id, task)] = (UNJUDGED, None)
+            elif verdict.outcome == lens_judge.DOES_NOT_HOLD and may_drop:
+                out[(verdict.lens_id, task)] = (DECLINED, verdict.probability)
+    return out
+
+
+def grid(
+    plan: Any,
+    library: Sequence[lenses.Lens],
+    events: Sequence[models.Event],
+    *,
+    tracked: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Task by lens, for this cycle, out of the chain and the frozen plan.
+
+    Built from the audit chain rather than the observation store, which is what makes it answerable
+    for a cycle nobody had the dashboard open during — the same reason the stop counts and the
+    stopped time moved there. Nothing here is a new record: `lens_selected` says what the
+    resolution wrote, the frozen plan says what survived the gate, `lens_judged` says what a
+    decider was asked, `lens_applied` says what a reviewer did, and the path narrowing is
+    recomputed from the scopes the plan already froze.
+    """
+    selected: set[str] = set()
+    for event in events:
+        if event.event == "lens_selected":
+            selected |= {str(lens_id) for lens_id in event.subject_ids}
+    frozen_ids = {entry.id for entry in plan.lenses} if plan is not None else set()
+    applications = _applications(events)
+    verdicts_by = _verdict_state(events)
+    tasks = [task.id for task in plan.tasks] if plan is not None else []
+    known = {lens.id: lens for lens in library}
+
+    def cell(lens: lenses.Lens, task: Any, column: str) -> dict[str, Any]:
+        for key in ((lens.id, column), (lens.id, "")):
+            if key in applications:
+                return {"state": FOUND if applications[key] else APPLIED}
+        if lens.id not in frozen_ids:
+            return {"state": DROPPED if lens.id in selected else ABSENT}
+        if (
+            task is not None
+            and task.scope_include
+            and not lens.when.paths_hold(lenses.scope_paths(task.scope_include, tracked))
+        ):
+            return {"state": NARROWED}
+        for key in ((lens.id, column), (lens.id, "")):
+            if key in verdicts_by:
+                state, probability = verdicts_by[key]
+                return {"state": state, **({"probability": probability} if probability is not None else {})}
+        return {"state": PENDING}
+
+    rows: list[dict[str, Any]] = []
+    for lens in library:
+        columns: list[dict[str, Any]] = []
+        if lens.stage == "code" and tasks:
+            for task in plan.tasks:
+                columns.append({"column": task.id, **cell(lens, task, task.id)})
+        else:
+            columns.append({"column": PLAN_COLUMN, **cell(lens, None, "")})
+        rows.append(
+            {
+                "lens": lens.id,
+                "stage": lens.stage,
+                "class": lens.lens_class,
+                "applies_when": known[lens.id].applies_when if lens.id in known else "",
+                "cells": columns,
+            }
+        )
+    placeless = sorted({lens_id for lens_id, task in applications if not task})
+    return {
+        "columns": [PLAN_COLUMN, *tasks],
+        "rows": rows,
+        "meaning": CELL_MEANING,
+        # Read where the reader is about to be invited to edit something (CR-8). The library is
+        # user-global; these cells are one repository's cycle.
+        "scope_note": _SCOPE_NOTE,
+        # Named rather than placed. An application recorded before `--stage`/`--task` existed, or by
+        # a reviewer that did not pass them, belongs to no column — putting it in one would be the
+        # grid inventing a fact the record does not hold.
+        "unplaced": placeless,
+    }
+
+
+def render_grid(built: Mapping[str, Any]) -> str:
+    """The grid at a terminal. Same cells, same refusal to say why."""
+    rows = built["rows"]
+    if not rows:
+        return "no lens in the library — nothing to place"
+    columns: list[str] = list(built["columns"])
+    width = max(len(row["lens"]) for row in rows)
+    head = f"{'lens':<{width}}  " + "  ".join(f"{column:<12}" for column in columns)
+    lines = [head]
+    for row in rows:
+        by_column = {cell["column"]: cell for cell in row["cells"]}
+        cells = "  ".join(f"{by_column.get(column, {}).get('state', '-'):<12}" for column in columns)
+        lines.append(f"{row['lens']:<{width}}  {cells}")
+    lines.append("")
+    for state, meaning in built["meaning"].items():
+        lines.append(f"  {state:<10} {meaning}")
+    if built["unplaced"]:
+        lines.append("")
+        lines.append(
+            f"{len(built['unplaced'])} application(s) recorded without a stage or task: "
+            f"{', '.join(built['unplaced'])}. They count, and they are shown in every column they "
+            "could belong to rather than placed in one."
+        )
+    lines.append("")
+    lines.append(built["scope_note"])
     return "\n".join(lines)
 
 
@@ -579,6 +767,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stats", action="store_true", help="applied/found counts per lens, across archived cycles")
     parser.add_argument("--record", metavar="LENS", help="record that this lens was applied (with --found)")
     parser.add_argument("--found", choices=("yes", "no"), help="whether --record's lens found anything")
+    parser.add_argument(
+        "--stage",
+        metavar="STAGE",
+        default="",
+        help="which stage --record's application was at; without it the grid cannot place the row",
+    )
+    parser.add_argument("--grid", action="store_true", help="task by lens: where each one was applied, and where not")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -599,8 +794,11 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
-    if args.task and not args.select:
-        logger.error("--task narrows --select; on its own it names a task with nothing to narrow")
+    if args.task and not (args.select or args.record):
+        logger.error("--task narrows --select or places --record; on its own it names a task with nothing to do")
+        return 2
+    if args.stage and not args.record:
+        logger.error("--stage places --record; --select already names the stage it is asked about")
         return 2
 
     if args.select:
@@ -624,14 +822,43 @@ def main(argv: list[str] | None = None) -> int:
         if state is None:
             logger.error("no .rein/state.yaml — run `rein init` first")
             return 2
+        if args.stage and args.stage not in lenses.STAGE_VALUES:
+            logger.error(f"unknown stage {args.stage!r} — one of {', '.join(lenses.STAGES)}")
+            return 2
         with store.transaction() as tx:
             tx.append(
                 "lens_applied",
                 cycle_id=state.cycle_id,
                 subject_ids=[args.record],
-                detail={"lens": args.record, "found": args.found == "yes"},
+                # `stage` and `task` say *where* it was applied. Without them the count is still
+                # right and the grid cannot place the row: a lens applied to one task reads the
+                # same as one applied to the whole cycle. Optional rather than required because a
+                # recording that refuses to happen is a count lost for a field, and the grid names
+                # the ones that arrived without a place rather than putting them somewhere.
+                detail={
+                    "lens": args.record,
+                    "found": args.found == "yes",
+                    **({"stage": args.stage} if args.stage else {}),
+                    **({"task": args.task} if args.task else {}),
+                },
             )
-        print(f"recorded: {args.record} applied, found={args.found}")
+        where = f" at {args.stage}" if args.stage else ""
+        where += f" on {args.task}" if args.task else ""
+        print(f"recorded: {args.record} applied{where}, found={args.found}")
+        return 0
+
+    if args.grid:
+        store = store_mod.Store(repo)
+        try:
+            plan = store.read_plan()
+        except models.DocumentError as exc:
+            logger.error(str(exc))
+            return 2
+        # The live cycle only. The chain of a closed one is archived and readable, but the path
+        # narrowing is recomputed against the tree as it is *now*, and a scope resolved against a
+        # different tree is an answer to a question nobody asked.
+        live, _ = event_chain.scan(repo.events)
+        print(render_grid(grid(plan, library, live, tracked=repo.tracked_paths() or ())))
         return 0
 
     if args.stats:
