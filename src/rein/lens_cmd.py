@@ -80,11 +80,21 @@ _ENTRY_NOTE = (
 )
 
 
-def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lenses.Lens]) -> str:
+def render_stats(
+    counts: Mapping[str, Mapping[str, int]],
+    library: Sequence[lenses.Lens],
+    *,
+    events: Sequence[models.Event] = (),
+) -> str:
     known = {lens.id: lens for lens in library}
     rows = sorted(counts.items(), key=lambda kv: (-kv[1]["applied"], kv[0]))
+    # Computed before the empty case, because a chain can hold verdicts and no applications: a
+    # cycle whose decider answered and whose reviewers have not recorded anything yet. Returning
+    # "nothing to say" there would hide the half that *is* there.
+    decided = render_verdicts_stats(verdicts(events), events)
     if not rows:
-        return "no lens has been selected or applied yet — nothing to say about which ones earn their place"
+        empty = "no lens has been selected or applied yet — nothing to say about which ones earn their place"
+        return f"{empty}\n{decided}\n\n{_SCOPE_NOTE}" if decided else empty
     lines = [f"{'lens':<32} {'selected':>8} {'applied':>8} {'found':>6}  condition"]
     for lens_id, count in rows:
         lens = known.get(lens_id)
@@ -111,10 +121,165 @@ def render_stats(counts: Mapping[str, Mapping[str, int]], library: Sequence[lens
             f"{', '.join(unapplied)}. Dropped at the gate, not recorded by the reviewer, or still "
             "in an open cycle — this tally cannot tell which, only that it was not simply absent."
         )
+    # Before the two notes, never after: both of them are about what this whole report may be read
+    # to justify, and a section that arrived after the scope note would be a set of numbers with
+    # nothing saying how far they reach (CR-8's rule, applied to the half added later).
+    if decided:
+        lines.append(decided)
     lines.append("")
     lines.append(_ENTRY_NOTE.format(path=lenses.library_path()))
     lines.append("")
     lines.append(_SCOPE_NOTE)
+    return "\n".join(lines)
+
+
+# --- what a verdict would have been at another threshold ---------------------------
+
+
+#: What the counterfactual is computed at, beside whatever was in force. Fixed rather than derived
+#: from the recorded probabilities: a grid that moves with the data cannot be compared between two
+#: readings of it, and the question this answers — "what would I get if I moved the knob" — is
+#: about settings somebody might choose, not about the values that happened to come back.
+THRESHOLDS: tuple[float, ...] = (0.3, 0.5, 0.7, 0.9)
+
+
+def verdicts(events: Sequence[models.Event]) -> list[tuple[str, str, float | None, float]]:
+    """`(cycle_id, lens_id, probability, threshold)` for every verdict in these events.
+
+    Flat rather than grouped because both readers want different groupings, and a shape that
+    already picked one would make the second reader undo it.
+    """
+    out: list[tuple[str, str, float | None, float]] = []
+    for event in events:
+        if event.event != "lens_judged":
+            continue
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        threshold = detail.get("threshold")
+        in_force = float(threshold) if isinstance(threshold, (int, float)) and not isinstance(threshold, bool) else 0.5
+        rows = detail.get("verdicts")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            verdict = lens_judge.Verdict.from_dict(row) if isinstance(row, Mapping) else None
+            if verdict is None:
+                continue
+            out.append((str(event.cycle_id or ""), verdict.lens_id, verdict.probability, in_force))
+    return out
+
+
+def verdict_counts(rows: Sequence[tuple[str, str, float | None, float]]) -> dict[str, dict[str, int]]:
+    """Per lens: judged, and how the answers fell. `unavailable` is counted, never folded.
+
+    A decider that was never reachable and one that decided nothing applies are different facts,
+    and a tally that cannot tell them apart reads an outage as a finding about the library.
+    """
+    counts: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"judged": 0, "holds": 0, "does_not_hold": 0, "unavailable": 0}
+    )
+    for _cycle, lens_id, probability, threshold in rows:
+        counts[lens_id]["judged"] += 1
+        if probability is None:
+            counts[lens_id]["unavailable"] += 1
+        elif probability >= threshold:
+            counts[lens_id]["holds"] += 1
+        else:
+            counts[lens_id]["does_not_hold"] += 1
+    return dict(counts)
+
+
+def at_threshold(rows: Sequence[tuple[str, str, float | None, float]], threshold: float) -> tuple[int, int]:
+    """`(holds, does_not_hold)` this set of probabilities would have given at `threshold`.
+
+    Only the verdicts that carried a probability. An `unavailable` one is not a number on the
+    wrong side of a line — nothing was asked, or nothing came back, and no setting of the knob
+    would have changed that.
+    """
+    answered = [probability for _cycle, _lens, probability, _t in rows if probability is not None]
+    holds = sum(1 for probability in answered if probability >= threshold)
+    return holds, len(answered) - holds
+
+
+def found_anyway(rows: Sequence[tuple[str, str, float | None, float]], events: Sequence[models.Event]) -> list[str]:
+    """Lenses a verdict placed below the line, that found something in the same cycle regardless.
+
+    **The other arm, and a lower bound rather than a rate.** The first arm — a lens that keeps
+    being applied and never finds — is already in the main tally, and reading only that one makes a
+    narrowing selection look better the more it removes. This is what the chain can say about the
+    opposite error: the lens was judged not to apply *somewhere*, and somewhere else in the same
+    cycle it was applied and did find something.
+
+    What it cannot say is anything about a lens nothing else looked for. That is the whole of the
+    counterfactual and it is not in any record, which is why this counts occurrences and never
+    divides by anything.
+    """
+    below: set[tuple[str, str]] = {
+        (cycle, lens_id)
+        for cycle, lens_id, probability, threshold in rows
+        if probability is not None and probability < threshold
+    }
+    if not below:
+        return []
+    found: set[tuple[str, str]] = set()
+    for event in events:
+        if event.event != "lens_applied":
+            continue
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        if detail.get("found") is True:
+            found.add((str(event.cycle_id or ""), str(detail.get("lens") or "")))
+    return sorted({lens_id for cycle, lens_id in below & found})
+
+
+def render_verdicts_stats(rows: Sequence[tuple[str, str, float | None, float]], events: Sequence[models.Event]) -> str:
+    """The verdict half of `--stats`: what was decided, and what another threshold would have given.
+
+    The point of printing the counterfactual is that **a threshold is a knob somebody has to be
+    able to move, and moving it is only an informed act beside the distribution it would have been
+    applied to.** Which side of the line a verdict fell on says nothing about how far, and a report
+    that showed only the outcomes would leave the knob to be turned by feel.
+
+    Nothing here moves it. There is no path from this function to `config.yaml`, and the threshold
+    in force is frozen with the mandate — the settings a reader might choose are shown, and a
+    person chooses.
+    """
+    if not rows:
+        return ""
+    counts = verdict_counts(rows)
+    in_force = sorted({threshold for _c, _l, _p, threshold in rows})
+    force_note = f"{in_force[0]:.2f}" if len(in_force) == 1 else ", ".join(f"{t:.2f}" for t in in_force)
+    lines = [
+        "",
+        f"{len(rows)} verdict(s) on {len(counts)} conditional lens(es), at threshold {force_note}:",
+        f"{'lens':<32} {'judged':>7} {'holds':>7} {'does not':>9} {'unavailable':>12}",
+    ]
+    for lens_id, count in sorted(counts.items(), key=lambda kv: (-kv[1]["judged"], kv[0])):
+        lines.append(
+            f"{lens_id:<32} {count['judged']:>7} {count['holds']:>7} "
+            f"{count['does_not_hold']:>9} {count['unavailable']:>12}"
+        )
+    answered = sum(1 for _c, _l, probability, _t in rows if probability is not None)
+    if answered:
+        lines.append("")
+        lines.append(f"the same {answered} answered verdict(s), had the threshold been set elsewhere:")
+        for threshold in THRESHOLDS:
+            holds, misses = at_threshold(rows, threshold)
+            mark = "  <- in force" if len(in_force) == 1 and abs(threshold - in_force[0]) < 1e-9 else ""
+            lines.append(f"  {threshold:.2f}   {holds:>4} would hold, {misses:>4} would not{mark}")
+        lines.append(
+            "  Moving it is a human edit to `review_policy.lens_judgement.threshold`, which the "
+            "mandate freezes. Nothing here changes it, and nothing reads these numbers to decide "
+            "anything."
+        )
+    missed = found_anyway(rows, events)
+    if missed:
+        lines.append("")
+        lines.append(
+            f"{len(missed)} lens(es) a verdict placed below the line, that found something in the "
+            f"same cycle anyway: {', '.join(missed)}. **A lower bound, not a rate** — it can only "
+            "see a lens that was applied somewhere else in the same cycle, and says nothing about "
+            "one nothing else looked for. Read it beside the tally above, which is the opposite "
+            "error: a selection that removes too much and one that removes too little do not show "
+            "up in the same number."
+        )
     return "\n".join(lines)
 
 
@@ -476,7 +641,7 @@ def main(argv: list[str] | None = None) -> int:
         live, _ = event_chain.scan(repo.events)
         sources, unreadable = events_mod.cycle_sources(repo, live)
         every = [event for source in sources for event in source.events]
-        print(render_stats(stats(every), library))
+        print(render_stats(stats(every), library, events=every))
         for rel in unreadable:
             logger.warning(f"{rel} could not be verified, so its lens counts are not included")
         return 0

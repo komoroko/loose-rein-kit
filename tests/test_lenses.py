@@ -879,3 +879,124 @@ def test_a_verdict_the_settings_do_not_act_on_says_so(
     assert "does_not_hold" in out
     assert "recorded only" in out
     assert "0 proposed" not in out
+
+
+# --- the threshold is a knob, and the record is what makes moving it informed -------
+
+
+def _judged(*rows: tuple[str, float | None], threshold: float = 0.5, cycle: str = "demo-cycle") -> models.Event:
+    from rein import event_chain
+
+    verdicts = []
+    for lens_id, probability in rows:
+        if probability is None:
+            verdicts.append({"lens": lens_id, "outcome": "unavailable"})
+        elif probability >= threshold:
+            verdicts.append({"lens": lens_id, "outcome": "holds", "probability": probability})
+        else:
+            verdicts.append({"lens": lens_id, "outcome": "does_not_hold", "probability": probability})
+    return event_chain.make(
+        "lens_judged",
+        cycle,
+        subject_ids=sorted(lens_id for lens_id, _p in rows),
+        detail={"stage": "design", "task": "", "threshold": threshold, "may_drop": False, "verdicts": verdicts},
+    )
+
+
+def test_a_verdict_that_could_not_be_taken_is_counted_and_never_folded() -> None:
+    """An outage and a decision that nothing applies are different facts, and a tally that cannot
+    tell them apart reads the first as a finding about the library."""
+    rows = lens_cmd.verdicts([_judged(("L-1", 0.9), ("L-2", 0.1), ("L-3", None))])
+
+    assert lens_cmd.verdict_counts(rows) == {
+        "L-1": {"judged": 1, "holds": 1, "does_not_hold": 0, "unavailable": 0},
+        "L-2": {"judged": 1, "holds": 0, "does_not_hold": 1, "unavailable": 0},
+        "L-3": {"judged": 1, "holds": 0, "does_not_hold": 0, "unavailable": 1},
+    }
+
+
+def test_the_counterfactual_is_over_the_answers_not_the_outcomes() -> None:
+    """Which side of the line a verdict fell on says nothing about how far, which is the whole
+    reason the probability is kept when it changed nothing. An `unavailable` one is not a number on
+    the wrong side of a line — no setting of the knob would have changed it."""
+    rows = lens_cmd.verdicts([_judged(("L-1", 0.95), ("L-2", 0.55), ("L-3", 0.2), ("L-4", None))])
+
+    assert lens_cmd.at_threshold(rows, 0.5) == (2, 1)
+    assert lens_cmd.at_threshold(rows, 0.7) == (1, 2)
+    assert lens_cmd.at_threshold(rows, 0.1) == (3, 0)
+
+
+def test_the_report_shows_what_another_threshold_would_have_given() -> None:
+    events = [_judged(("L-1", 0.95), ("L-2", 0.2))]
+    out = lens_cmd.render_stats(lens_cmd.stats(events), lenses.library(), events=events)
+
+    assert "2 verdict(s) on 2 conditional lens(es), at threshold 0.50" in out
+    assert "had the threshold been set elsewhere" in out
+    assert "0.70      1 would hold,    1 would not" in out
+    assert "<- in force" in out
+    # A knob a report turns by itself is not a knob anybody has to be able to move.
+    assert "Nothing here changes it" in out
+
+
+def test_the_other_arm_is_counted_and_says_it_is_a_lower_bound() -> None:
+    """Reading only "applied and never found" makes a narrowing selection look better the more it
+    removes. This is what the chain can say about the opposite error, and what it cannot."""
+    events = [_judged(("L-1", 0.2)), _applied("L-1", True), _judged(("L-2", 0.2)), _applied("L-2", False)]
+
+    out = lens_cmd.render_stats(lens_cmd.stats(events), lenses.library(), events=events)
+
+    assert lens_cmd.found_anyway(lens_cmd.verdicts(events), events) == ["L-1"]
+    assert "found something in the same cycle anyway: L-1" in out
+    assert "lower bound, not a rate" in out
+
+
+def test_a_verdict_in_another_cycle_is_not_that_cycle_s_miss() -> None:
+    """The pairing is per cycle. A lens judged not to apply last month and applied today is two
+    facts about two changes, and joining them would invent a miss nobody had."""
+    events = [_judged(("L-1", 0.2), cycle="cycle-1"), _applied("L-1", True)]
+
+    assert lens_cmd.found_anyway(lens_cmd.verdicts(events), events) == []
+
+
+def test_the_verdict_half_is_printed_before_the_notes_that_bound_it() -> None:
+    """Both notes are about what the whole report may be read to justify. A section arriving after
+    the scope note would be numbers with nothing saying how far they reach."""
+    events = [_judged(("L-1", 0.95))]
+    out = lens_cmd.render_stats(lens_cmd.stats(events), lenses.library(), events=events)
+
+    assert out.index("conditional lens(es), at threshold") < out.index("shared across every repository")
+
+
+#: Every module under `src/rein` allowed to name a recorded verdict, and what for. `models` holds
+#: the event vocabulary; `lens_cmd` writes one, reads it back for the same hand-off, and reports.
+VERDICT_READERS = {"models", "lens_cmd"}
+
+
+def _modules_naming_a_verdict() -> set[str]:
+    source_root = Path(__file__).resolve().parent.parent / "src" / "rein"
+    return {
+        path.stem for path in sorted(source_root.rglob("*.py")) if "lens_judged" in path.read_text(encoding="utf-8")
+    }
+
+
+def test_only_these_modules_read_a_recorded_verdict() -> None:
+    """The invariant CR-29 rests on, fixed against the source rather than remembered.
+
+    A probability becomes an input the moment something consults it to decide. The guarantee is
+    that there is **no path** by which cycle N's verdicts could change cycle N+1's selection — a
+    property about every future edit, which no assertion about one report's text can hold. So read
+    the source: a `lens_judged` appearing in `approve`, `build_loop`, `review` or `lenses` fails
+    here, and whoever added it decides whether the guarantee or the caller goes.
+    """
+    assert _modules_naming_a_verdict() == VERDICT_READERS
+
+
+def test_the_selection_is_resolved_without_ever_seeing_a_verdict() -> None:
+    """The other half of the same guarantee, from the behaviour rather than the source. `resolve`
+    is a function of the library and the plan's facts, and there is no argument through which a
+    past answer could reach it."""
+    import inspect
+
+    assert "event" not in inspect.signature(lenses.resolve).parameters
+    assert "event" not in inspect.signature(lenses.select).parameters
+    assert "event" not in inspect.signature(lenses.Facts.of).parameters

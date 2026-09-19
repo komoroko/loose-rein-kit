@@ -6,6 +6,34 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [Unreleased]
 
+### A threshold nobody can see the shape of is a threshold nobody can move
+
+`rein lens --stats` gains the verdict half: per conditional lens, how often it was judged and how
+the answers fell — `holds`, `does not`, and `unavailable` counted separately, never folded, because
+a decider that was unreachable and one that decided nothing applies are different facts.
+
+Beside it, **the same answers at four other thresholds.** The probability is on the record even
+when it changed nothing, and this is what that is for: which side of the line a verdict fell on
+says nothing about how far, so a report showing only outcomes would leave the knob to be turned by
+feel. Moving it stays a human edit to `review_policy.lens_judgement.threshold`, which the mandate
+freezes — there is no path from this report to `config.yaml`, and the report says so where somebody
+reading the numbers will see it.
+
+**And the other arm.** "Applied and never found anything" is the error of a selection that keeps
+too much, and reading only that one makes a narrowing selection look better the more it removes.
+The opposite error is a lens a verdict placed below the line that would have found something, and
+the counterfactual for it is in no record. What the chain *can* say is where a lens was judged not
+to apply and, somewhere else in the same cycle, was applied and did find something — counted per
+cycle, named, and stated as a lower bound rather than a rate. It divides by nothing, because the
+denominator it would need is the part nobody looked for.
+
+The invariant under all of it is fixed against the source rather than remembered: a test reads
+`src/rein` and fails if any module outside `models` and `lens_cmd` so much as names a recorded
+verdict. **A probability becomes an input the moment something consults it to decide**, and the
+guarantee is that no path exists by which one cycle's verdicts could reach the next cycle's
+selection — a property about every future edit, which no assertion about one report's text could
+hold.
+
 ### The conditions a machine cannot read off the plan
 
 Six of the twenty-five packaged lenses are `conditional`, and each of them says, in its own words,
