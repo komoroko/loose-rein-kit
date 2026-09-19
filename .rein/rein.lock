@@ -1,7 +1,7 @@
 # .rein/rein.lock — machine-written by `rein init|sync|install|uninstall|upgrade`.
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
-format: rein-grounded-v5
+format: rein-grounded-v6
 tool_version: 0.8.1
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
@@ -13,17 +13,17 @@ prompts:
     prompts/agents/architect.md: sha256:2f5d25fbbb939eab00a26db15241c1418283f7c627fb3c639ede199f4a4bdf8f
     prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64
     prompts/agents/requirements-analyst.md: sha256:0c928038ded17cc8224febce1ba72c555b8fb182d0c35254e03df3fa63241f8d
-    prompts/commands/build.md: sha256:5dd0e0bdc1835f7f56c1a600f851463cee5c6d31aa8ded5b3ad2b2c8b3b8c47a
-    prompts/commands/design.md: sha256:4f585adfca57cc8858f6138164b670550ff3b2befa898f3e94b8a8c76b92c02c
+    prompts/commands/build.md: sha256:94f2b5bf0bca60317843a6cb69de8cbefe495493f5c466dd33010c18750f4fd3
+    prompts/commands/design.md: sha256:4e7c8bdeb5ba9756278d4c7e965b1efa0f63667bf1c5fbb932f400cb05476f84
     prompts/commands/onboard.md: sha256:8f7fb990edecf93c16c9812ef123ff9653d69ebe3cdb568b58256e774fadd339
-    prompts/commands/req.md: sha256:c653fd742c686c1d68b9c41b479a32d68f69272292c0ca3e0fd1c3a149bbb9d8
+    prompts/commands/req.md: sha256:b812919787119a3b11d1644a71fedacd75c3523abf4a3ac9c4baeba5fb83f650
     prompts/commands/revise.md: sha256:c4c9f03a03f012822cf64ce1c78a4e18e43574383d422b6f133a14d9e6ca9cb7
     prompts/commands/status.md: sha256:6f31d2c1b46f62b0e511300838251dc6a35fb33c3d1b03dfbed1543e76f4de2d
-    prompts/commands/tasks.md: sha256:4703e0af45ea6d8d5f22d276f377371d04a8f3b5052159f45b5e40378d366032
+    prompts/commands/tasks.md: sha256:a55e9f7ca47b47aa1dbf6c73286025830a1edac513b3d02b30f743dfab9a240d
     prompts/commands/verify.md: sha256:c64d82b267e0e988ee98dfd6cc5a3063f7195ff7a08a55e2b4c43ac2d26d258d
     prompts/rules/gate-workflow.md: sha256:23dd5793f0a3039cbd4b9f68d2b8215574b995e15eb1c97341802884af6f4465
-    schema/config.schema.json: sha256:baae846af091c01b0789813422ae6dd2c66e1a9604bcb71e97c4d94caea04102
-    schema/event.schema.json: sha256:c61ae420544b173bbfc6f12a40d78be01bbfd2dcc314c7599b021ac6fc8ac114
+    schema/config.schema.json: sha256:bc7f5173af6d855c7baf858f752f037f455ce1087614fdced59f0c7ce39bc3c3
+    schema/event.schema.json: sha256:78badffd296cdea1cb68c22b90b4bdbdbe00f5ece7e721d6b1c84f6c3136c77a
     schema/plan.schema.json: sha256:fbb4eb02c4f2adf2af1cd5d0a9c16424e99aff44d4b87da6e1bb9639dd192c62
     schema/review.schema.json: sha256:4c85846abac24fa88c5108a33d839c1bda6ee741c8b2a8e83e0d79bd50840540
     schema/state.schema.json: sha256:e0a94002f47167941ebb27fe6b6288e5ab2aaf95f15a7bba817d764ce79aea74
@@ -116,4 +116,4 @@ integrations:
             command: rein guard
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-09-18'
+updated_at: '2026-09-19'

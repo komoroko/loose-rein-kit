@@ -234,6 +234,11 @@ is the point; never fold them into the implementer's session.
   pass over the diff and returns "attacked, nothing" while the findings that *are* possible compete
   with it for attention. The narrowing only ever removes: a path matching one task's scope matches
   the union too, so nothing outside the frozen selection can reach a reviewer through it.
+  Each lens the reviewer actually applies is recorded with `rein lens --record <id> --found
+  <yes|no> --stage code --task <T-NNN>` — no `--task` for the integration reading, which is about
+  the merged tree and not about one task. **`--stage` and `--task` are what say *where* it was
+  applied**: without them the count is still right and `rein lens --grid` cannot place the row, so
+  a lens applied to one task reads the same as one applied to the whole cycle.
   Both disciplines are **named to the host that has them**: under Claude Code the reviewer is
   pointed at `/code-review` and `/simplify`, which read the branch it is on — with the two rules
   those commands do not carry themselves, that `/simplify`'s fix-applying phase must not run here

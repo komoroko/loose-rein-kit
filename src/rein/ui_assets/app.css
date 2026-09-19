@@ -548,3 +548,25 @@ pre.patch {
   svg.dag .nd.in-progress { animation: breathe 1.8s ease-in-out infinite; }
   @keyframes breathe { 50% { opacity: .5; } }
 }
+
+/* --- the lens grid -------------------------------------------------------------
+   Task by lens: where each review was sent to look, and where it was not. Applied-and-found and
+   applied-and-found-nothing are deliberately not one colour — "found nothing" is a fact about this
+   change, while a lens that keeps finding nothing is a fact about the lens, and that is the
+   tally's question over cycles, not this screen's. The three absences share a muted treatment
+   because a cell reports the record and not a reason; their names are what tells them apart. */
+table.lens-grid td, table.lens-grid th { white-space: nowrap; font-size: .82rem; }
+table.lens-grid td.mono { font-size: .8rem; }
+.cell-found    { color: var(--blk-ink); background: var(--blk-bg); font-weight: 700; }
+.cell-applied  { color: var(--ok); }
+.cell-declined { color: var(--ink-2); font-style: italic; }
+.cell-unknown  { color: var(--ink-3); }
+.cell-off      { color: var(--ink-3); opacity: .7; }
+/* Not one of the three absences: a column this row was never going to answer for. Held apart from
+   them on purpose — reading it as `absent` would be reading a fact about the grid's shape as a
+   fact about the cycle. */
+.cell-na       { color: var(--ink-3); opacity: .35; }
+.lens-key { margin: .8rem 0 0; display: grid; grid-template-columns: max-content 1fr; gap: .1rem .8rem; }
+.lens-key > div { display: contents; }
+.lens-key dt { font-family: var(--mono); font-size: .78rem; }
+.lens-key dd { margin: 0; }

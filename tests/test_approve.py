@@ -11,6 +11,7 @@ its own terminal. Two channels of the same kind, one recording path, and the rec
 from __future__ import annotations
 
 import io
+import re
 from pathlib import Path
 
 import pytest
@@ -949,9 +950,9 @@ def test_the_confirmation_lists_what_the_loop_settled_without_asking(tmp_path: P
         state=make_state(gates=PENDING_ALL, plan_status="draft"),
         plan=make_plan(decisions=[make_decision("D-001"), make_decision("D-002", settled_by="human")]),
     )
-    unasked = approve._unasked_decisions(repo, "mandate")
+    unasked = approve.naming(repo, "mandate")["unasked"]
 
-    assert [d.id for d in unasked] == ["D-001"]  # D-002 is one the human already saw
+    assert [d["id"] for d in unasked] == ["D-001"]  # D-002 is one the human already saw
     rendered = approve.render_unasked(unasked)
     assert "D-001" in rendered and "local because" in rendered
     assert approve._unasked_decisions(repo, "acceptance") == []
@@ -1052,6 +1053,72 @@ def test_the_library_text_is_not_handed_to_a_reader_without_a_session(tmp_path: 
     assert withheld["id"] == given["id"] == "L-CODE-SCHEMA-DRIFT"
     assert withheld["attack"] == "" and withheld["applies_when"] == ""
     assert given["attack"] and given["applies_when"]
+
+
+def test_the_terminal_route_prints_the_lens_selection_the_dashboard_shows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`naming` built this list and only the dashboard rendered it — the same rule CR-2 restored,
+    broken in the other direction by the change that restored it."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(lenses=[{"id": "L-CODE-CONCURRENCY", "stage": "code", "status": "proposed"}]),
+    )
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
+
+    approve.confirm_locally(repo, "mandate", {"plan": "sha256:0"})
+
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "L-CODE-CONCURRENCY" in printed
+    # The half being asked about says so, and says what it costs to be wrong about it.
+    assert "yours to keep or drop" in printed
+    assert "1 of them yours to keep or drop" in printed
+
+
+def test_every_list_the_naming_layer_carries_reaches_the_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The rule, held as a check rather than as something to remember. A list `naming` assembles
+    and no route renders is the defect this fixes, and the next list added is the one that would
+    repeat it."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(
+            tasks=[_crossing_task("T-001")],
+            decisions=[make_decision("D-001")],
+            lenses=[{"id": "L-CODE-CONCURRENCY", "stage": "code", "status": "proposed"}],
+        ),
+    )
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
+
+    approve.confirm_locally(repo, "mandate", {"plan": "sha256:0"})
+
+    printed = " ".join(capsys.readouterr().out.split())
+    named = approve.naming(repo, "mandate")
+    rows_by_list = {key: value for key, value in named.items() if isinstance(value, list)}
+    # Without this the loop below passes by having nothing to iterate over.
+    assert rows_by_list and all(rows_by_list.values())
+    for key, rows in rows_by_list.items():
+        for row in rows:
+            token = row.get("task_id") or row.get("id") or ""
+            assert token and token in printed, f"`naming` carries {key} and the terminal never prints it"
+
+
+def test_every_list_the_naming_layer_carries_reaches_the_dashboard() -> None:
+    """The mirror image, and the direction the defect actually ran in. The list that went missing
+    was built here and rendered by one route only — so a check that reads the terminal alone would
+    have passed while the bug was live, and passes again the next time it is the other screen's
+    turn. `Gate.jsx` reaches each list by the key `naming` carries it under, so the keys are what
+    the source has to mention; `tests/ui/decide.test.mjs` is where they are rendered and read back.
+    """
+    panel = (Path(__file__).resolve().parent.parent / "ui" / "gate" / "Gate.jsx").read_text(encoding="utf-8")
+
+    for key in approve.Naming.__annotations__:
+        # Word-bounded: a key renamed on one side only would otherwise pass as a prefix of the
+        # other side's new name, which is the same silent drift this is here to catch.
+        assert re.search(rf"\b{re.escape(key)}\b", panel), f"`naming` carries {key} and ui/gate/Gate.jsx never reads it"
 
 
 # --- the other side of a misjudged reach ------------------------------------------

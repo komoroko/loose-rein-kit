@@ -31,9 +31,16 @@ _PROSE_KEYS = frozenset({"description", "title", "$comment", "examples"})
 #: refuse a document the old one accepted, and a widening cannot do that — while a bump would stop
 #: every verb in every 0.8.0 repository over a compatibility that was never at risk. A shape change
 #: that removes nothing, or that removes and adds, is not this case and takes the bump.
+#:
+#: `v6` is the bump: `review_policy` gained `lens_judgement`, and `review_policy` is closed
+#: (`additionalProperties: false`). A repository that configures a decider therefore holds a
+#: `config.yaml` that 0.8.1 refuses — opt-in, but a real refusal, and the direction this string
+#: exists to announce. A repository that configures nothing writes exactly what it wrote before;
+#: the bump costs it a `rein sync --force`, and the alternative costs the ones that did opt in a
+#: schema error with no version anywhere to explain it.
 _FORMAT_PIN: tuple[str, str] = (
-    "rein-grounded-v5",
-    "sha256:7caf65002a2fc2717ba956c668cd45b735cf3d6d977cc992f8601be2fb55cdb2",
+    "rein-grounded-v6",
+    "sha256:cdee0362fe28033d7d7d47377e50781f71eb0cf547630b885b18ed49a284e36e",
 )
 
 

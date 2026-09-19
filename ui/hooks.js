@@ -8,7 +8,7 @@ import { subscribeToasts, toastList } from "./api.js";
 // The hash carries the gate: a reading room is a place you can link to, bookmark and come back to,
 // not a selection held in a module variable. Unknown or empty lands on `now`, the screen that says
 // what to do.
-const PLAIN_VIEWS = ["now", "board", "record", "console"];
+const PLAIN_VIEWS = ["now", "board", "record", "lenses", "console"];
 
 function readRoute() {
   const h = location.hash.replace(/^#/, "");

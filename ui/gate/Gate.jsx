@@ -81,6 +81,7 @@ function Naming({ naming, gate }) {
   const crossing = (naming || {}).crossing || [];
   if (!unasked.length && !lenses.length && !crossing.length) return null;
   const crossingTasks = [...new Set(crossing.map((c) => c.task_id))];
+  const proposedCount = lenses.filter((l) => l.status === "proposed").length;
   return (
     <>
       {crossing.length ? (
@@ -138,8 +139,15 @@ function Naming({ naming, gate }) {
         </>
       ) : null}
       {lenses.length ? (
-        <details style={{ marginTop: ".8rem" }}>
-          <summary>{lenses.length} review lens(es) this mandate would freeze</summary>
+        /* Open when any of them is `proposed`. A list that has to be opened before anything can be
+           dropped has "keep them all" as its default, which is the always-on set the class system
+           replaced — re-entering through a closed disclosure instead of through an empty `when:`.
+           With nothing to decide it stays folded: those are applied, and nobody is being asked. */
+        <details style={{ marginTop: ".8rem" }} open={lenses.some((l) => l.status === "proposed")}>
+          <summary>
+            {lenses.length} review lens(es) this mandate would freeze
+            {proposedCount ? ` — ${proposedCount} of them yours to keep or drop` : ""}
+          </summary>
           <table>
             <tbody>
               {lenses.map((l) => (

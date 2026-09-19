@@ -12,6 +12,7 @@ import { useRoute, useStream, useTheme, useToasts } from "./hooks.js";
 import { useNotifier } from "./notify.js";
 import Now from "./Now.jsx";
 import Board from "./Board.jsx";
+import LensView from "./LensView.jsx";
 import RecordView from "./RecordView.jsx";
 import ConsoleView from "./ConsoleView.jsx";
 import Gate from "./gate/Gate.jsx";
@@ -73,6 +74,7 @@ function Spine({ status, route }) {
       <p className="spine-label">Inspect</p>
       {item("board", "Board")}
       {item("record", "Record")}
+      {item("lenses", "Lenses")}
       {item("console", "Console")}
     </nav>
   );
@@ -196,6 +198,7 @@ export default function App() {
           )}
           {route.view === "board" && <Board status={status} />}
           {route.view === "record" && <RecordView recordSeq={recordSeq} />}
+          {route.view === "lenses" && <LensView recordSeq={recordSeq} />}
           {route.view === "console" && <ConsoleView status={status} />}
         </main>
       </div>

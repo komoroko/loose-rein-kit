@@ -89,6 +89,7 @@ from rein import (
     common,
     event_chain,
     human_review,
+    lens_cmd,
     models,
     notify,
     review_api,
@@ -97,6 +98,7 @@ from rein import (
     status_api,
 )
 from rein import events as events_mod
+from rein import lenses as lenses_mod
 from rein import registry as registry_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -468,6 +470,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         elif self.path == "/api/projects":
             reg = self.server.registry()
             self._send_json(HTTPStatus.OK, {"projects": reg.entries(), "active": reg.active})
+        elif self.path == "/api/lenses":
+            self._send_lens_grid()
         elif self.path == "/api/events" or self.path.startswith("/api/events?"):
             self._send_events()
         elif self.path.startswith("/api/gate/") and self.path.endswith("/readiness"):
@@ -604,6 +608,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b": alive\n\n")  # a quiet stream still has to prove it is one
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass  # the reader closed the tab; EventSource reconnects on its own if it comes back
+
+    def _send_lens_grid(self) -> None:
+        """Task by lens: where each one was applied, and where it was not.
+
+        Served from the audit chain and the frozen plan, which is what makes it answerable for a
+        cycle nobody had this dashboard open during — the same reason the stop counts moved there.
+        A cell says what the record says and never why: three of its states are an absence with a
+        different provenance, and the difference is the whole of what is being shown.
+        """
+        root = self.server.active_root()
+        try:
+            repo = repo_mod.Repo(root)
+            plan = store_mod.Store(repo).read_plan()
+        except (models.DocumentError, OSError) as exc:
+            self._send_json(HTTPStatus.OK, {"error": str(exc), "rows": [], "columns": []})
+            return
+        events = _load_events_cached(root / ".rein" / "events.ndjson")
+        built = lens_cmd.grid(plan, lenses_mod.library(), events, tracked=repo.tracked_paths() or ())
+        self._send_json(HTTPStatus.OK, built)
 
     def _send_events(self) -> None:
         """The tail of events.ndjson, newest first — the Activity feed watching a headless build.

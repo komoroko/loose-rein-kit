@@ -58,6 +58,7 @@
         "decision_declared",
         "lens_applied",
         "lens_selected",
+        "lens_judged",
         "decisions_derived",
         "baseline_measured",
         "dependency_audit_run",

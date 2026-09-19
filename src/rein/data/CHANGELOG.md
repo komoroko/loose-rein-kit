@@ -4,6 +4,170 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [Unreleased]
+
+### Where each lens went, and where it did not
+
+The counts say which lenses earn their place over cycles. They could not say **where** a lens went,
+which is the question a person actually has after a review: this task was read for these six things
+and not for those nineteen — why not? Every answer was already in the chain and the frozen plan;
+what was missing was a shape that put them beside each other.
+
+`rein lens --grid`, and a **Lenses** screen on the dashboard: task by lens, one cell each. Built
+from the audit chain and the frozen plan rather than from the observation store, which is what
+makes it answerable for a cycle nobody had the dashboard open during — the same reason the stop
+counts and the stopped time moved there. Nothing new is recorded: `lens_selected` says what the
+resolution wrote, the plan says what survived the gate, `lens_judged` says what a decider was
+asked, `lens_applied` says what a reviewer did, and the path narrowing is recomputed from the
+scopes the plan already froze.
+
+**A cell reports the record and never a reason.** Three of its states are an absence with different
+provenance — `dropped` is named in `lens_selected` and gone from the frozen plan, `absent` is in
+neither, `pending` is in both with no application recorded — and the difference is the whole of what
+the screen is for. The tally already refuses to guess between `pending`'s three causes (a reviewer
+that has not reported, a cycle still open, a lens nobody got to); a grid that collapsed them would
+be guessing on its behalf. `found` and `applied` are likewise not one colour: "found nothing" is a
+fact about this change, while a lens that keeps finding nothing is a fact about the lens, and that
+is the tally's question, not this screen's.
+
+For the grid to place a row at all, an application has to say where it happened. `rein lens
+--record` takes `--stage` and `--task`, and the four phase prompts pass them. They are optional
+rather than required — a recording that refuses to happen is a count lost for the sake of a field —
+and an application that arrives without a place is **named** rather than put in a column it was
+never recorded against. A place that is *wrong* is neither: `--task` naming a task the plan does
+not hold is refused, on the same ground `--select --task` already refused it, because a row matched
+to no column is invisible on the screen built to show where each lens went and `unplaced` cannot
+name it either.
+
+Every row carries a cell for every column, and the ones it was never going to answer for say `n/a`
+— `code` lenses are read per task, the other stages against the plan as a whole. A row that stopped
+short would leave each renderer filling the gap with a mark of its own, which is a state on the
+screen the key does not explain.
+
+### A threshold nobody can see the shape of is a threshold nobody can move
+
+`rein lens --stats` gains the verdict half: per conditional lens, how often it was judged and how
+the answers fell — `holds`, `does not`, and `unavailable` counted separately, never folded, because
+a decider that was unreachable and one that decided nothing applies are different facts.
+
+Beside it, **the same answers at four other thresholds.** The probability is on the record even
+when it changed nothing, and this is what that is for: which side of the line a verdict fell on
+says nothing about how far, so a report showing only outcomes would leave the knob to be turned by
+feel. Moving it stays a human edit to `review_policy.lens_judgement.threshold`, which the mandate
+freezes — there is no path from this report to `config.yaml`, and the report says so where somebody
+reading the numbers will see it.
+
+**And the other arm.** "Applied and never found anything" is the error of a selection that keeps
+too much, and reading only that one makes a narrowing selection look better the more it removes.
+The opposite error is a lens a verdict placed below the line that would have found something, and
+the counterfactual for it is in no record. What the chain *can* say is where a lens was judged not
+to apply and, somewhere else in the same cycle, was applied and did find something — counted per
+cycle, named, and stated as a lower bound rather than a rate. It divides by nothing, because the
+denominator it would need is the part nobody looked for.
+
+The invariant under all of it is fixed against the source rather than remembered: a test parses
+`src/rein` and fails if any module outside `models` and `lens_cmd` can reach a recorded verdict —
+by the event kind, by importing the module that makes one, or by calling one of the functions that
+hands a stored probability back. Parsed rather than searched as text, because `lens_cmd.verdicts()`
+returns the probabilities and the event kind appears in *its* body, not in its caller's. **A
+probability becomes an input the moment something consults it to decide**, and the guarantee is
+that no path exists by which one cycle's verdicts could reach the next cycle's selection — a
+property about every future edit, which no assertion about one report's text could hold.
+
+### The conditions a machine cannot read off the plan
+
+Six of the twenty-five packaged lenses are `conditional`, and each of them says, in its own words,
+that the plan is not where its answer is. "Nothing in the plan says whether they do; it takes
+reading them." "The plan cannot see that; the design document can." "Whether it does takes reading
+the diff." Their `when:` blocks are `min_claims: 1` or `min_tasks: 1` — true of any cycle that
+reaches a gate — because there was nothing else to write: **the condition was in prose, and nothing
+read prose.**
+
+What decided them was the human at the mandate. The mandate is before the design document, the
+tickets and the diff exist, so the person being asked had exactly what `applies_when` says is not
+enough — the plan. A condition that takes reading the deliverable was being settled by the one
+reader who could not read it.
+
+`review_policy.lens_judgement` names a decider for that half. The question put to it *is*
+`applies_when`, unchanged: a second field holding a differently-worded question for the machine
+would be the same claim in two places, and one of them would go stale. It runs at the hand-off to a
+reviewer — the point the per-task path narrowing already happens — against the requirements, the
+design document and its ADRs, the tickets, or the diff of the task's scope: **wherever that
+deliverable is readable.** Four of the six conditional lenses are at `requirements`, `design` and
+`tasks`, whose deliverables are written well before the mandate — the design document is step 4 of
+`/design` and the selection is step 6 — so asking only after the freeze would have left exactly
+those four as unanswered as the prose they were written in. What the freeze governs is not whether
+the question can be answered but whether an answer may narrow anything.
+
+**It is reached as a command, not as an HTTP call.** Nothing in `rein` opens a socket; git, `gh`,
+the agent CLIs and the container runtime are all subprocesses, and this is one too — an argv array,
+never a shell string, the same rule `quality_gate` steps follow. One JSON object on stdin
+(`{state, questions}`, one question per lens, keyed by lens id), one on stdout
+(`{answers: {<lens id>: {probability}}}`). The vendor, the credential and the retry policy stay in
+a script somebody can read.
+
+Four properties hold it in place:
+
+- **It only ever removes, and only after the freeze.** A verdict never adds a lens to the frozen
+  selection, so the guarantee that nothing reaches a reviewer without a human having seen it on the
+  approval screen does not depend on any of this. The plan is not rewritten; the hand-off is
+  narrowed. Before the mandate nothing is narrowed at all — the list on the approval screen has to
+  be the one the plan holds, or a human would be keeping and dropping what a decider had already
+  cut on the way to the gate.
+- **It is not a gate input.** No decider, an unreachable one, a timeout, a reply in the wrong
+  shape, an answer that is not a probability at all — every one of those is `unavailable`, every
+  conditional lens stays a candidate, and the cycle proceeds. `NaN` is the one worth naming: JSON
+  parsers accept it, and it compares false against every threshold, so a decider answering with one
+  would have *dropped* a lens while carrying a value the audit chain has no canonical form for. The degradation runs toward *more* review, which costs tokens and finds nothing;
+  the opposite would cost findings. `unavailable` is deliberately not `false`: a decider that was
+  never reachable and one that decided nothing applies are different facts.
+- **It asks once, and an `unavailable` is not an asking.** An answer goes into the audit chain and
+  is read back from there, the same way the selection itself is resolved once and read back: a
+  reviewer and the person who approved the gate holding two different answers to one question is
+  the property the freeze exists to remove. But a decider that was down, a deliverable not written
+  yet and a reply nobody could read settled nothing, and reading one of those back as though it had
+  would let a single outage decide a whole cycle. The outage stays in the chain, because it is a
+  fact about what happened; the question stays open for the call that can answer it. A hand-off
+  with no deliverable to read asks nothing and records nothing, for the same reason a repository
+  with no decider does.
+- **`may_drop` is off by default.** Judging and acting on the judgement are separate decisions.
+  While it is off the verdicts are recorded and nothing is removed — which is the only period in
+  which the decider's calls and the human's own calls at the gate both exist and can be read side
+  by side, and it ends the moment one replaces the other.
+
+The probability is recorded on every verdict, including the ones where it changed nothing, together
+with the threshold in force. A threshold is a knob somebody has to be able to move, and the only
+thing that makes moving it an informed act is the distribution it would have been applied to; which
+side of the line a lens fell on says nothing about how far.
+
+**`lock.FORMAT` moves to `rein-grounded-v6`.** `review_policy` is closed, so a repository that
+configures a decider holds a `config.yaml` that 0.8.1 refuses. A repository that configures nothing
+writes exactly what it wrote before and needs only `rein sync --force`.
+
+### A rule restored in one direction, broken in the other
+
+0.6.1 restored the rule that **whatever a gate requires on screen belongs on every route that can
+open that gate**: the dashboard had grown a second approval route, and the `unasked` decisions —
+what the loop settled without being asked — reached only the terminal. The same change added the
+lens selection to that panel, and it went the other way. `approve.naming` built the list; only
+`Gate.jsx` rendered it. `rein approve` printed the digests, the crossing declarations and the
+unasked decisions, and never named a single lens this mandate was about to freeze.
+
+Both routes render everything `naming` returns now, and `confirm_locally` reads that function
+rather than re-deriving its half of it — two screens assembling the same panel from different
+parts is a panel that can differ, and it did. A check holds the rule instead of a person
+remembering it, in **both** directions: every list `naming` carries has to reach the terminal, and
+every key it carries has to be one `Gate.jsx` reads. One direction alone would have passed while
+this defect was live, and would pass again the next time it is the other screen's turn.
+
+**And the list nobody opened kept everything in it.** The dashboard folded the selection into a
+closed `<details>`, including the `conditional` lenses — the half whose condition a machine cannot
+settle, proposed precisely so a human keeps or drops them. A list that has to be opened before
+anything can be dropped has "keep them all" as its default, which is the always-on set the class
+system replaced, re-entering through a closed disclosure rather than through an empty `when:`. It
+opens itself when any lens is `proposed`, says how many of them are the reader's to drop, and stays
+folded when they are all `applied` and nobody is being asked anything.
+
 ## [0.8.1] - 2026-09-19
 
 **Six corrections from a third adversarial pass over 0.8.0, and the upgrade message 0.8.0 owed a
