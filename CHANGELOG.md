@@ -4,7 +4,7 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
-## [Unreleased]
+## [0.8.2] - 2026-09-21
 
 ### Three the principles asked for and the code had never built
 
@@ -236,6 +236,30 @@ anything can be dropped has "keep them all" as its default, which is the always-
 system replaced, re-entering through a closed disclosure rather than through an empty `when:`. It
 opens itself when any lens is `proposed`, says how many of them are the reader's to drop, and stays
 folded when they are all `applied` and nobody is being asked anything.
+
+### Migration
+
+**`rein sync --force`, once, in every repository** — then nothing else. The format string moves
+(below), so every verb refuses until the materialized `.rein/prompts|schema|rules` match this
+release's payload, and `rein doctor` says which two releases the repository is between until it
+does. No document needs an edit: both keys this release adds are opt-in and absent means what it
+meant before — no lens decider, and no spend ceiling.
+
+A repository with a cycle already open is safe to upgrade at any point in it. The plan stays
+frozen, the receipts stay valid, and the new acceptance check reads the review's own recorded
+span, so a cycle whose work went through `rein build` sees nothing new at its gate.
+
+### Format
+
+**`lock.FORMAT` moves to `rein-grounded-v6`.** Two closed objects gained a key:
+`review_policy.lens_judgement` and `execution.max_cost_usd`. Both are `additionalProperties:
+false`, so a repository that configures either holds a `config.yaml` that 0.8.1 refuses — opt-in,
+but a real refusal, and announcing it is what this string is for. A repository that configures
+neither writes exactly what it wrote before and pays only the `rein sync --force` above.
+
+The pin in `tests/test_lock.py` moved twice within this release, once per key, and the reason is
+recorded beside it: a digest may move without the string only while the string itself is
+unreleased, because no repository anywhere has yet read `v6` as meaning the earlier shape.
 
 ## [0.8.1] - 2026-09-19
 
