@@ -4,7 +4,12 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
-## [0.8.2] - 2026-09-21
+## [0.9.0] - 2026-09-21
+
+**A minor release because the format moves.** It was cut as 0.8.2, and a patch number would have
+said the opposite of what `lock.FORMAT` says: every repository has to run `rein sync --force`
+before any verb runs again. 0.8.1 refused to move the string for exactly this cost; a release that
+does move it names itself accordingly.
 
 ### Three the principles asked for and the code had never built
 
