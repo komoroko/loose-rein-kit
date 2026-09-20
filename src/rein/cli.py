@@ -104,6 +104,10 @@ VERBS: dict[str, Verb] = {
         "decisions_cmd",
         "every decision on record, oldest cycle first — `rein decision` (singular) is how one is written",
     ),
+    "claims": Verb(
+        "claims_cmd",
+        "what each cycle committed to and what it could touch, oldest cycle first",
+    ),
     "events": Verb("events", "read the hash-chained audit log (--cost sums what runs billed)", human=False),
     "task": Verb("task_cmd", "task reset <id> --reason … — put a blocked task back on the frontier", human=False),
     "guard": Verb("gate_guard", "the gate-guard hook / commit-stage check", human=False),

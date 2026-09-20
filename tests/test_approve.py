@@ -1469,3 +1469,191 @@ def test_approving_a_crossing_closes_no_other_gates_requests(tmp_path: Path) -> 
 
     still = next(cr for cr in _state_of(repo).change_requests if cr["id"] == other)
     assert still["status"] == "addressed", "T-002's gate still exists, so its request is still its own"
+
+
+# --- acceptance checks the boundary, not only the records ----------------------
+
+
+def _git(root: Path, *args: str) -> str:
+    import subprocess
+
+    done = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True)
+    return done.stdout.strip()
+
+
+def _cycle_with_a_commit(
+    tmp_path: Path,
+    *,
+    path: str,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    config: dict[str, object] | None = None,
+) -> repo_mod.Repo:
+    """A cycle whose work is one commit touching `path`, with the mandate frozen over `include`.
+
+    The commit is made with plain git, which is the case the check exists for: nothing about it
+    went through `rein build`, so merge-stage never saw it.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "t@example.com")
+    _git(tmp_path, "config", "user.name", "t")
+    (tmp_path / "README.md").write_text("start\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("print('hello')\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "the change nobody authorized")
+    head = _git(tmp_path, "rev-parse", "HEAD")
+
+    plan = make_plan(claims=[make_claim("C-001")], tasks=[make_task(claim_ids=["C-001"])])
+    plan["scope"] = {"include": include if include is not None else ["src/kept"], "exclude": exclude or []}
+    return repo_at(
+        tmp_path,
+        state=make_state(tasks={"T-001": "done"}),
+        plan=plan,
+        review=make_review(generated=True, base_sha=base, head_sha=head),
+        config=config or make_config(),
+    )
+
+
+def test_a_path_the_mandate_never_covered_blocks_acceptance(tmp_path: Path) -> None:
+    """The one point every change reaches. All three of rule 3's checkpoints sit on the path a
+    change takes through `rein build`; a commit made outside it met none of them, and acceptance
+    was reading records rather than the tree."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+
+    blockers = approve.readiness(repo, "acceptance")
+
+    assert any("src/elsewhere/thing.py" in b and "outside the approved mandate's scope" in b for b in blockers)
+
+
+def test_the_blocker_names_a_move_that_exists_at_acceptance(tmp_path: Path) -> None:
+    """Why this may block at all. The approval-screen budget named "split the scope", which does
+    not exist once every task is done, so it was raised instead of obeyed. Both of these do."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+
+    blocker = next(b for b in approve.readiness(repo, "acceptance") if "src/elsewhere" in b)
+
+    assert "rein revise --to mandate" in blocker and "out of the branch" in blocker
+
+
+def test_work_inside_the_frozen_scope_is_not_a_finding(tmp_path: Path) -> None:
+    """A cycle that stayed inside the mandate produces nothing here — and a cycle that went
+    through `rein build` cannot produce anything either, because merge-stage refused those paths
+    one at a time before they landed."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/kept/thing.py")
+
+    assert not [b for b in approve.readiness(repo, "acceptance") if "mandate's scope" in b]
+
+
+def test_an_unguarded_path_outside_the_scope_is_not_a_finding(tmp_path: Path) -> None:
+    """`include` narrows the guarded set and says nothing about a path that was never guarded.
+    `tests/` is deliberately unguarded — preparing fixtures is sanctioned work, not a violation."""
+    repo = _cycle_with_a_commit(tmp_path, path="tests/test_thing.py")
+
+    assert not [b for b in approve.readiness(repo, "acceptance") if "mandate's scope" in b]
+
+
+def test_an_excluded_path_blocks_even_where_nothing_is_guarded(tmp_path: Path) -> None:
+    """`exclude` is a human writing "not this", so it binds wherever it points — the asymmetry
+    `gate_guard._inside_the_mandate` keeps, read here by the same function."""
+    repo = _cycle_with_a_commit(tmp_path, path="vendor/lib.py", exclude=["vendor"])
+
+    blockers = approve.readiness(repo, "acceptance")
+
+    assert any("vendor/lib.py" in b and "excluded by the approved mandate's scope" in b for b in blockers)
+
+
+def test_template_mode_turns_the_check_off_with_rule_three(tmp_path: Path) -> None:
+    """One switch, not two. `guard.template_mode` relaxes rule 3, and a check of rule 3 that
+    ignored it would enforce at acceptance what the hook was told not to enforce."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py", config=make_config(template_mode=True))
+
+    assert not [b for b in approve.readiness(repo, "acceptance") if "mandate's scope" in b]
+
+
+def test_an_unreadable_config_is_a_blocker_before_the_boundary_is_ever_claimed(tmp_path: Path) -> None:
+    """Fails closed, for the reason the guard does: a boundary that cannot be determined must not
+    be reported as held. `readiness` reads the documents before it checks anything, so an
+    unreadable `config.yaml` is the whole answer and this check never gets to report a clean one."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+    (tmp_path / ".rein" / "config.yaml").write_text("guard:\n  paths: not-a-list\n", encoding="utf-8")
+
+    blockers = approve.readiness(repo, "acceptance")
+
+    assert blockers and all("mandate's scope" not in b for b in blockers)
+
+
+def test_a_review_that_does_not_name_its_commits_blocks(tmp_path: Path) -> None:
+    """The span checked is the review's own. A review that does not say which one it read leaves
+    acceptance with no subject to measure, which is not the same as a clean one."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/kept/thing.py")
+    review = yaml.safe_load((tmp_path / ".rein" / "review.yaml").read_text(encoding="utf-8"))
+    del review["machine"]["binding"]["trusted_base_sha"]
+    (tmp_path / ".rein" / "review.yaml").write_text(yaml.safe_dump(review), encoding="utf-8")
+
+    assert any("does not say which commits it read" in b for b in approve.readiness(repo, "acceptance"))
+
+
+def test_commits_the_review_cannot_be_diffed_against_block(tmp_path: Path) -> None:
+    """A checkout without the commits the review was taken on cannot answer the question, so it
+    says so and names the repair rather than reporting a boundary it never checked."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/kept/thing.py")
+    review = yaml.safe_load((tmp_path / ".rein" / "review.yaml").read_text(encoding="utf-8"))
+    review["machine"]["binding"]["trusted_base_sha"] = "0" * 40
+    (tmp_path / ".rein" / "review.yaml").write_text(yaml.safe_dump(review), encoding="utf-8")
+
+    assert any("Fetch the commits the review was taken on" in b for b in approve.readiness(repo, "acceptance"))
+
+
+def test_an_ungenerated_review_leaves_the_boundary_to_the_review_blocker(tmp_path: Path) -> None:
+    """No subject, no check — and no second complaint about the same absence."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+    (tmp_path / ".rein" / "review.yaml").write_text(
+        yaml.safe_dump({"machine": {"status": "not_generated"}, "human": {"status": "not_started"}}), encoding="utf-8"
+    )
+
+    blockers = approve.readiness(repo, "acceptance")
+
+    assert not [b for b in blockers if "mandate's scope" in b]
+    assert any("not on a green test run" in b for b in blockers)
+
+
+def test_a_non_ascii_path_outside_the_mandate_blocks_like_any_other(tmp_path: Path) -> None:
+    """`core.quotePath` defaults to true, so `git diff --name-only` prints a path with any
+    non-ASCII byte as `"src/\\346\\227\\245.py"` — quoted and octal-escaped. Read as lines, that
+    string matches no prefix in the mandate, so the check reported "inside" about a file it never
+    recognised, while the editor hook, handed the real path, blocked it. One rule answering two
+    ways for one class of filename is the disagreement `outside_the_mandate` exists to prevent."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/よそ/もの.py")
+
+    blockers = approve.readiness(repo, "acceptance")
+
+    assert any("src/よそ/もの.py" in b and "outside the approved mandate's scope" in b for b in blockers)
+
+
+def test_the_blocker_does_not_claim_the_cycle_wrote_what_it_may_not_have(tmp_path: Path) -> None:
+    """The span is two trees compared, so it cannot say who wrote a path — a branch that took in
+    history from elsewhere carries those paths too. The finding holds of the change being
+    accepted either way; what must not happen is a sentence asserting authorship and naming only
+    the two repairs that presuppose it."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+
+    blocker = next(b for b in approve.readiness(repo, "acceptance") if "src/elsewhere" in b)
+
+    assert "this cycle changed" not in blocker
+    assert "in the change this review read" in blocker
+    assert "cycle.base_commit" in blocker
+
+
+def test_the_mandate_gate_is_not_asked_this_question(tmp_path: Path) -> None:
+    """Nothing has been built yet at the mandate, and the scope it would be measured against is
+    the one being approved in that same act."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+
+    assert not [b for b in approve.readiness(repo, "mandate", already_approved_blocks=False) if "scope" in b]

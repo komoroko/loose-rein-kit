@@ -478,3 +478,108 @@ class Ledger:
         """A copy — the caller must not hold the lock's data."""
         with self._lock:
             return dict(self._rows)
+
+
+# --- the one spend ceiling ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Spend:
+    """What has been spent on one cycle so far, and how much of it could be priced at all.
+
+    `unpriced_launches` is the half that keeps this honest: an adapter that reports no usage
+    records :meth:`Usage.unavailable`, never zero, so a ceiling that summed only dollars would
+    read a blind run as a free one and let it go on forever. :func:`over_ceiling` reads both
+    numbers for exactly that reason — see :meth:`blind`.
+    """
+
+    usd: float = 0.0
+    launches: int = 0
+    unpriced_launches: int = 0
+
+    @classmethod
+    def of(cls, rows: Mapping[str, Usage]) -> Spend:
+        """The spend of one run's per-role totals."""
+        return cls(
+            usd=sum(row.cost_usd for row in rows.values()),
+            launches=sum(row.launches for row in rows.values()),
+            unpriced_launches=sum(row.launches for row in rows.values() if not row.available),
+        )
+
+    def __add__(self, other: Spend) -> Spend:
+        return Spend(
+            usd=self.usd + other.usd,
+            launches=self.launches + other.launches,
+            unpriced_launches=self.unpriced_launches + other.unpriced_launches,
+        )
+
+    @property
+    def blind(self) -> bool:
+        """Launches happened and **not one** of them could be priced, so there is no figure at all.
+
+        The sharp form of "unmeasured", and the only one a ceiling can act on without inventing a
+        number: some launches priced means the total grows and the ceiling is reached late, which
+        the stop already says; *nothing* priced means the total never grows and the ceiling is not
+        late, it is absent. The launches that record `Usage.unavailable` are the failure paths —
+        an adapter that timed out, one whose envelope would not parse — which is the shape a
+        runaway takes, so this is the case where a ceiling is needed most and had least effect.
+
+        A cycle whose priced launches genuinely cost nothing reads `blind` as False: they were
+        priced, at zero.
+        """
+        return self.usd == 0.0 and self.unpriced_launches > 0
+
+
+def over_ceiling(limit: float, spend: Spend) -> str:
+    """Why the ceiling stops this cycle, or `""` when it does not. `limit <= 0` is unset.
+
+    **The one place the rule is written**, because two callers stop on it — `rein build` before
+    it starts another batch, and `rein review generate` before it launches the reviewers — and a
+    limit two functions decide separately is two limits.
+
+    `00-concept.md` (論点 A) allows a ceiling exactly here and nowhere near the human's side: a
+    loop cannot judge whether it is wasting, so something outside it has to stop it. What it must
+    not do is *degrade* — no cheaper model, no fewer lenses, no skipped reviewer — because that is
+    an automatic judgement about quality made by the side that cannot judge quality. So the only
+    thing over the ceiling is a stop, and the only thing that lifts it is a person.
+
+    Unset by default on purpose. A shipped number would be this tool deciding what a cycle is
+    worth, which is the one thing the reader of this line knows better than its writer.
+
+    **Two ways to stop, because "under the ceiling" and "no figure to compare" are not the same
+    answer.** Comparing only dollars made them the same: a cycle whose every launch came back
+    unpriced summed to `$0.00`, stayed under any ceiling, and ran without a bound while its
+    `config.yaml` said it had one. That is the silent fallback this file refuses everywhere else —
+    an adapter that reports nothing records `unavailable`, never zero — and the ceiling was the
+    one reader that undid it. So a ceiling that cannot be measured at all stops too, and says
+    which of the two happened. What it still does not do is *estimate*: nothing here prices an
+    unpriced launch, then or now (:attr:`Spend.blind`).
+    """
+    if limit <= 0:
+        return ""
+    if spend.blind:
+        return (
+            f"this cycle set a ${limit:.2f} ceiling (`execution.max_cost_usd`) and not one of its "
+            f"{spend.launches} launch(es) reported a cost, so there is no figure to hold against "
+            "it — the run was unbounded, not free. Nothing is priced on its behalf here: a guess "
+            "would be a ceiling enforced against a number nobody measured. Find out why the "
+            "adapter reports no usage (`rein events --cost` shows what it did record), or take "
+            "`execution.max_cost_usd` out and bound the run by `review_policy.repair_rounds` "
+            "instead, which counts what it can see."
+        )
+    if spend.usd < limit:
+        return ""
+    unpriced = (
+        f", and {spend.unpriced_launches} launch(es) reported no cost at all, so the real figure "
+        "is higher than this one"
+        if spend.unpriced_launches
+        else ""
+    )
+    return (
+        f"this cycle has spent ${spend.usd:.2f} of the ${limit:.2f} ceiling "
+        f"(`execution.max_cost_usd`) over {spend.launches} launch(es){unpriced}. Nothing is "
+        "degraded to carry on under it — a cheaper model or a thinner review would be this loop "
+        "deciding what quality is worth, which is the judgement it cannot make. Read what the "
+        "spend went on (`rein events --cost`), then either raise the ceiling or fix what is "
+        "repeating: a run that burned it on one task's send-backs will burn the next one too."
+    )

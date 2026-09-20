@@ -457,6 +457,17 @@ def generate(
         cycle = cycle or (plan.cycle_id if plan else "")
         if not cycle:
             raise ReviewError("no cycle to record this review under — .rein/state.yaml names none; run `rein doctor`")
+        # The spend ceiling, before anything deterministic and long before anything is launched.
+        # `rein build` stops on the same rule between batches (`build_loop._stop_if_over_ceiling`)
+        # and the reviewers are the other place a cycle spends, so a review that carried on past
+        # the number would leave the ceiling bounding half the machine. Recorded as a failed
+        # review by the handler below, which is what makes the stop visible to `rein start`
+        # rather than only to whoever was watching this terminal.
+        if reason := usage_mod.over_ceiling(
+            config.max_cost_usd if config is not None else 0.0,
+            run_record.cycle_spend(event_chain.scan(repo.events)[0], cycle),
+        ):
+            raise ReviewError(reason)
         entered("coverage")
         rc, head_out = repo._git_rc("rev-parse", "HEAD")
         if rc != 0:

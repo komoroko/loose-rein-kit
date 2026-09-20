@@ -11,7 +11,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from rein import build_loop, event_chain, review, run_record
+from rein import build_loop, event_chain, models, review, run_record
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
@@ -196,3 +196,52 @@ def test_the_replayed_line_carries_no_bill() -> None:
     free = usage_mod.Usage(available=True, launches=1, input_tokens=900, cost_usd=9.0)
     report = run_record.render_costs([run_record.CycleCost("c1", 1, {}, {"comparator": free})])
     assert "replayed:" in report and "$9.00 not charged" in report
+
+
+# --- what a cycle has already spent, for the ceiling ---------------------------
+
+
+def _measured(cycle: str, *rows: dict[str, object]) -> list[models.Event]:
+    return [
+        event_chain.make("run_measured", cycle, detail={"kind": "build", "run_id": f"r{i}", "outcome": "done", **row})
+        for i, row in enumerate(rows)
+    ]
+
+
+def test_a_cycles_spend_is_summed_over_the_runs_the_chain_recorded() -> None:
+    """The ceiling is per cycle and not per run: a runaway that gets restarted is the same
+    runaway, and the earlier runs said what they cost in the chain."""
+    paid = usage_mod.Usage(available=True, launches=2, cost_usd=1.25)
+    events = _measured(
+        "c1",
+        {"billed_by_role": {"implementer": paid.to_detail()}},
+        {"billed_by_role": {"reviewer": paid.to_detail()}},
+    )
+
+    assert run_record.cycle_spend(events, "c1") == usage_mod.Spend(usd=2.5, launches=4)
+
+
+def test_another_cycles_runs_are_not_this_cycles_spend() -> None:
+    paid = usage_mod.Usage(available=True, launches=1, cost_usd=3.0)
+    events = _measured("c1", {"billed_by_role": {"implementer": paid.to_detail()}}) + _measured(
+        "c2", {"billed_by_role": {"implementer": paid.to_detail()}}
+    )
+
+    assert run_record.cycle_spend(events, "c1").usd == 3.0
+
+
+def test_a_run_nobody_could_price_is_counted_and_left_unpriced() -> None:
+    """`Usage.unavailable` is a state with a name. Folding it into the dollars as a zero is how a
+    ceiling comes to be enforced against a figure that is missing most of the run."""
+    events = _measured("c1", {"billed_by_role": {"reviewer": usage_mod.Usage.unavailable().to_detail()}})
+
+    assert run_record.cycle_spend(events, "c1") == usage_mod.Spend(usd=0.0, launches=1, unpriced_launches=1)
+
+
+def test_what_a_cache_replayed_is_not_part_of_the_spend() -> None:
+    """`reused_by_role` is what nobody paid for a second time. Charging it to the ceiling would
+    make a well-cached cycle hit the limit a wasteful one earned."""
+    paid = usage_mod.Usage(available=True, launches=1, cost_usd=4.0)
+    events = _measured("c1", {"reused_by_role": {"reviewer": paid.to_detail()}})
+
+    assert run_record.cycle_spend(events, "c1") == usage_mod.Spend()

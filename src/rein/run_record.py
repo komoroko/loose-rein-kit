@@ -127,6 +127,26 @@ def _fold(into: dict[str, usage_mod.Usage], rows: Any) -> None:
             usage_mod.merged(into, str(role), usage_mod.Usage.from_detail(detail))
 
 
+def cycle_spend(events: Sequence[models.Event], cycle_id: str) -> usage_mod.Spend:
+    """What earlier runs of `cycle_id` already spent, out of the chain that recorded them.
+
+    The ceiling is per cycle, not per run — a runaway that gets restarted is still the same
+    runaway — and the cycle's own audit chain is where the earlier runs said what they cost. Read
+    once when a run starts; the run then adds what it spends itself.
+
+    Only the live chain is asked: an archived cycle is a closed one, and a closed cycle cannot
+    spend anything more.
+    """
+    total = usage_mod.Spend()
+    for event in events:
+        if event.event != EVENT or event.cycle_id != cycle_id:
+            continue
+        rows: dict[str, usage_mod.Usage] = {}
+        _fold(rows, event.detail.get("billed_by_role"))
+        total = total + usage_mod.Spend.of(rows)
+    return total
+
+
 def costs(sources: Iterable[tuple[str, Sequence[models.Event]]]) -> list[CycleCost]:
     """Every cycle's spend, in the order `sources` is given — so a reader sees the trend.
 

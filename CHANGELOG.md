@@ -4,7 +4,117 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
-## [Unreleased]
+## [0.9.0] - 2026-09-21
+
+**A minor release because the format moves.** It was cut as 0.8.2, and a patch number would have
+said the opposite of what `lock.FORMAT` says: every repository has to run `rein sync --force`
+before any verb runs again. 0.8.1 refused to move the string for exactly this cost; a release that
+does move it names itself accordingly.
+
+### Three the principles asked for and the code had never built
+
+Every entry above this one came from reading the code: a claim it makes about itself against the
+code that makes it, or a thing it built against the reasoning that asked for it. **That method
+cannot reach what was never built.** These three came from the other direction — the principles
+read against the code — and each is an absence rather than a defect.
+
+**Acceptance was reading records, never the tree.** Rule 3 has three checkpoints and all three sit
+on the path a change takes through the loop: the editor hook, which is a host capability; the
+commit-stage check, which is a repository's own `.pre-commit-config.yaml`; and
+`build_loop._gate_violations`, inside `rein build`. `gate_guard`'s own module docstring names what
+that leaves — "a change that never goes through `rein build` at all" — and nothing caught it
+afterwards. A human's own commit, an agent on a host with no hook, a `git commit -n`: each lands
+on the work branch and reaches acceptance with the readiness check asking about the chain, the
+review and the requests, and nothing asking whether the change is inside the mandate that
+authorized it.
+
+`approve._boundary_blockers` reads the same rule once over the cycle's committed diff. Not a
+fourth layer of enforcement: nothing here denies a write, and a cycle whose work went through
+`rein build` produces no finding, because merge-stage already refused those paths one at a time.
+The rule itself moved into `gate_guard.outside_the_mandate` so there is one of it — a boundary two
+functions can answer about separately is a boundary that can disagree with itself. The span
+checked is the review's own `binding.trusted_base_sha..subject_head_sha`, which is what the
+reviewers read and what the approval takes; re-resolving a base here would check a different
+change from the one being accepted.
+
+**It blocks, and the approval-screen budget is why that is allowed.** A limit whose remedy does
+not exist where it fires gets raised instead of obeyed — that budget named "split the scope" at a
+point where every task is done. Both of this one's remedies exist at acceptance: `rein revise --to
+mandate` widens the scope a human approved, or the change comes out of the branch.
+
+**`rein claims` — what each cycle committed to, and what it could touch.** `rein decisions` was
+built on the observation that all four write sites of a judgement are per-cycle, and it said the
+judgement history was *the* one of `00-concept.md`'s three things that went out of reach when a
+cycle closed. One write site short: `cycle.CYCLE_STATE` archives `plan.yaml`, which carries both
+the frozen claims and the frozen `scope`, and `CYCLE_DOCS` archives `10-requirements.md` beside
+it. All three vanish at the same moment; one of them had a way back. This is the same read one
+axis over — the same `events.cycle_sources` enumeration, the same refusal to validate an archive
+against today's schema, the same naming of what could not be read.
+
+Each claim carries the acceptance review's verdict **and its three axes, printed apart**, for the
+reason `review.schema.json` gives for having no single `verified`: integrity is a fact, semantic
+support is a judgement, conformance is an observation. A claim from a cycle whose review was never
+generated reads `unreviewed`, which is an absence and not a verdict — and so are the two things
+next to it that must not collapse into it: `not-in-review` is a generated review with no row for
+that claim, which is a hole in its coverage, and `review-unreadable` is a `review.yaml` nobody
+could parse. An archive with no `plan.yaml` at all says so rather than rendering as a cycle that
+promised nothing over an unbounded scope, which is an absence printed as a fact.
+
+**A ceiling on what a cycle may spend — `execution.max_cost_usd`, unset by default.** The
+principle that refuses a ceiling on how often a human is asked allows exactly one: a loop cannot
+judge whether it is wasting, so something outside it has to stop it. `repair_rounds` is that, and
+the cost half of the same paragraph had never been built. Spend was measured (`usage.py`),
+accumulated per role (`build_loop._usage`) and totalled per cycle (`rein events --cost`); nothing
+compared it to anything. What bounded a run was iteration counts — `launch_retries`, each step's
+`retries`, `repair_rounds` — whose product over tasks and steps is a number nobody chose as money.
+
+`usage.over_ceiling` is the whole rule and two callers stop on it: `rein build` before it starts
+another batch, and `rein review generate` before it launches the reviewers. **Between batches,
+never inside one.** A leaf that is running has been paid for, and this file already refuses to
+discard a batch that earned its merge; raised inside a leaf, a stop would become that task's
+verdict, and a spend figure that can fail a task is a spend figure the judgement path reads. A
+test fixes the set of modules allowed to consult the number, the way one fixes the readers of the
+observation store.
+
+**Unmeasured is not free, and the ceiling stops on that too.** An adapter that reports no usage
+records `Usage.unavailable()`, never zero. Summing only dollars would have undone that at the one
+place it mattered: a cycle whose every launch came back unpriced totals `$0.00`, stays under any
+ceiling, and runs with no bound at all while its `config.yaml` says it has one — and `unavailable`
+is what a timed-out or unparseable launch records, which is the shape a runaway takes. So "at or
+over the ceiling" and "no figure to hold against it" are two stops with two messages
+(`Spend.blind`), and neither invents a price for a launch nobody measured. A cycle that partly
+priced still stops on what was priced, and says how many launches were not, so the reader knows
+the real figure is above the one printed. The default is no ceiling at all: a number shipped here
+would be this tool deciding what a cycle is worth.
+
+The config key rides the `rein-grounded-v6` format move this release already makes for the lens
+threshold; it costs no second migration.
+
+### A non-ASCII filename was invisible to rule 3
+
+`core.quotePath` defaults to *true*, so git prints any path holding a byte outside ASCII as
+`"src/\346\227\245.py"` — quoted, octal-escaped. Everything that turns git's output back into
+paths then compared that string against a real prefix and concluded the path was not covered. Rule
+3 is where it showed: the editor hook is handed a real relative path and blocks, while the
+merge-stage check (`build_git.branch_changed_paths`) and acceptance (`approve._boundary_blockers`)
+read git and did not — one rule, three callers, and a disagreement that appears only for filenames
+that are not ASCII. `dirty_paths` had a `.strip('"')` that removed the quotes and left the escapes,
+which is the same wrong answer one character in.
+
+Asked for at the runner (`repo.GIT_QUOTING_OFF`, and the same wrapper around the injected one in
+`build_git`) rather than at each reader, because a reader that forgets is silently wrong. The
+boundary check asks with `-z` on top, which is exact whatever the bytes are.
+
+**The boundary blocker no longer claims the cycle wrote what it found.** Its span is two trees
+compared, so it cannot say who wrote a path: a branch that took in history from elsewhere carries
+those paths too, and the reviewers were shown that code for the same reason. The finding holds of
+the change being accepted either way, and the sentence now names the third repair that case needs
+(`cycle.base_commit`) instead of only the two that presuppose authorship.
+
+**The ceiling does not stop a dry run.** `_preflight`'s reason, applied to the same run: a dry run
+launches nothing and enters no sandbox, so it adds nothing to the figure the ceiling compares.
+Refusing to print the control flow because earlier runs spent the number withheld the one answer a
+dry run exists to give — from the person the ceiling had just handed the cycle back to.
 
 ### Where each lens went, and where it did not
 
@@ -167,6 +277,30 @@ anything can be dropped has "keep them all" as its default, which is the always-
 system replaced, re-entering through a closed disclosure rather than through an empty `when:`. It
 opens itself when any lens is `proposed`, says how many of them are the reader's to drop, and stays
 folded when they are all `applied` and nobody is being asked anything.
+
+### Migration
+
+**`rein sync --force`, once, in every repository** — then nothing else. The format string moves
+(below), so every verb refuses until the materialized `.rein/prompts|schema|rules` match this
+release's payload, and `rein doctor` says which two releases the repository is between until it
+does. No document needs an edit: both keys this release adds are opt-in and absent means what it
+meant before — no lens decider, and no spend ceiling.
+
+A repository with a cycle already open is safe to upgrade at any point in it. The plan stays
+frozen, the receipts stay valid, and the new acceptance check reads the review's own recorded
+span, so a cycle whose work went through `rein build` sees nothing new at its gate.
+
+### Format
+
+**`lock.FORMAT` moves to `rein-grounded-v6`.** Two closed objects gained a key:
+`review_policy.lens_judgement` and `execution.max_cost_usd`. Both are `additionalProperties:
+false`, so a repository that configures either holds a `config.yaml` that 0.8.1 refuses — opt-in,
+but a real refusal, and announcing it is what this string is for. A repository that configures
+neither writes exactly what it wrote before and pays only the `rein sync --force` above.
+
+The pin in `tests/test_lock.py` moved twice within this release, once per key, and the reason is
+recorded beside it: a digest may move without the string only while the string itself is
+unreleased, because no repository anywhere has yet read `v6` as meaning the earlier shape.
 
 ## [0.8.1] - 2026-09-19
 

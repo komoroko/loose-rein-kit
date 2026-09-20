@@ -378,20 +378,33 @@ def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[
             " what is wrong with it."
         )
     include, exclude = models.Plan(document).scope
-    if common.longest_cover(rel, {p: p for p in exclude}) is not None:
-        return False, (
-            f"Blocked: {rel} is excluded by the approved mandate's scope. Widening what the loop"
-            " may change is a human's decision — `rein revise --to mandate` re-opens it."
-        )
-    if not common.longest_cover(rel, {p: p for p in guarded}):
+    why = outside_the_mandate(rel, include=include, exclude=exclude, guarded=guarded)
+    if not why:
         return True, ""
+    return False, (
+        f"Blocked: {rel} is {why}. Widening what the loop may change is a human's decision —"
+        " `rein revise --to mandate` re-opens it."
+    )
+
+
+def outside_the_mandate(rel: str, *, include: Sequence[str], exclude: Sequence[str], guarded: Sequence[str]) -> str:
+    """Why rule 3 refuses this path under an approved mandate, or `""` when it does not.
+
+    The rule with nothing read off disk, so the same sentence decides a write at the hook and a
+    whole cycle's diff at acceptance (`approve._boundary_blockers`). **Two callers, one rule.** A
+    second spelling of "inside the mandate" is a boundary that can disagree with itself, and a
+    boundary two answers can be given about is a convention.
+
+    The asymmetry is :func:`_inside_the_mandate`'s: `exclude` binds wherever it points, `include`
+    only narrows the guarded set, and an empty `include` is unbounded rather than empty.
+    """
+    if common.longest_cover(rel, {p: p for p in exclude}) is not None:
+        return "excluded by the approved mandate's scope"
+    if not common.longest_cover(rel, {p: p for p in guarded}):
+        return ""
     if include and common.longest_cover(rel, {p: p for p in include}) is None:
-        return False, (
-            f"Blocked: {rel} is outside the approved mandate's scope ({', '.join(include)})."
-            " Widening what the loop may change is a human's decision — `rein revise --to mandate`"
-            " re-opens it."
-        )
-    return True, ""
+        return f"outside the approved mandate's scope ({', '.join(include)})"
+    return ""
 
 
 def _frozen_artifact_failures(repo: repo_mod.Repo) -> list[str]:
