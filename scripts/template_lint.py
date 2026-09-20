@@ -90,6 +90,10 @@ _CAPABILITY_ROW_RE = re.compile(r"^\|\s*`([a-z][a-z-]+)`\s*\|", re.MULTILINE)
 # The spelling a document uses for "a gate named after a task", which no single cycle's state can
 # confirm. Everything else a document names as a gate has to be a name the vocabulary holds.
 _GATE_PLACEHOLDER = "T-NNN"
+# The shape `rein` prints a gate name in — `gate 'acceptance' is ready`, `Approve gate 'mandate'?`,
+# `Roll back to gate 'T-004':`. A document echoing that output is quoting the tool rather than
+# telling an agent what to type, which is why `_gate_argument_failures` cannot see it.
+_GATE_QUOTED_RE = re.compile(r"gate '([^'\n]+)'")
 # The section AGENTS.md declares the vocabulary in — where the degradation column lives.
 _CAPABILITY_HEADING = "## Capability vocabulary"
 _TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
@@ -525,6 +529,27 @@ def _gate_argument_failures(path: str, verb: str, words: list[str]) -> list[str]
         for gate in named
         if "<" not in gate and gate != _GATE_PLACEHOLDER and not models.gate_name_ok(gate)
     ]
+
+
+def check_quoted_gate_names(texts: dict[str, str]) -> list[str]:
+    """Gate names a document quotes out of `rein`'s own output rather than off a command line.
+
+    `_gate_argument_failures` reads the argument position of `approve` / `revise` / `changes`, so
+    the sample transcripts were never checked: both READMEs printed `gate 'build' is ready` for a
+    `rein approve acceptance` for two releases after `build` stopped being a gate name. A reader
+    copies what a transcript *means*, not its argv, so a stale one describes a tool that no longer
+    exists — and every other canary in this file let it through.
+    """
+    failures: list[str] = []
+    for path, text in sorted(texts.items()):
+        for gate in dict.fromkeys(_GATE_QUOTED_RE.findall(text)):
+            if "<" in gate or gate == _GATE_PLACEHOLDER or models.gate_name_ok(gate):
+                continue
+            failures.append(
+                f"{path}: `gate '{gate}'` quotes output naming a gate the vocabulary does not "
+                f"have ({models.gate_names()})"
+            )
+    return failures
 
 
 def check_documented_invocations(root: Path, texts: dict[str, str]) -> list[str]:
@@ -1174,6 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
         failures += check_banned_absence(texts)
         failures += check_rules_wiring(root, texts)
         failures += check_documented_invocations(root, {**texts, **files})
+        failures += check_quoted_gate_names({**texts, **files})
         failures += check_data_parity(root)
         failures += check_guard_defaults(files[CONFIG_PATH])
         gitignore = root / GITIGNORE_PATH

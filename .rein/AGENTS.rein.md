@@ -61,8 +61,12 @@ drafting ───────────┤ what the loop may change, ├─�
 `/req`→`docs/10-requirements.md`+the claims · `/design`→`docs/20-design.md`+ADRs ·
 `/tasks`→`docs/tasks/T-*.md`+`plan.yaml`'s task DAG+a measured **baseline**. The three write **one
 mandate** between them and are material for it, not gates of their own: run them in whatever order
-the change calls for, repeat them, or skip one whose answer is already obvious. `rein approve
-mandate` is the single decision that covers all three.
+the change calls for, and repeat them. **The order is free; the content is not** — `rein approve
+mandate` refuses a plan that states no claim and one that declares no task, so `/req` and `/tasks`
+are answered however they were reached. `/design` is the one that may be left out, and the
+traceability thread then reports the design dimension as **unchecked** rather than passing it —
+which is what "we did not look" is supposed to look like on the record. That single approval
+covers all three.
 
 Inside an approved mandate, `/build` implements and verifies — decomposing, reordering and
 re-running as it needs to, because none of that changes what it may touch or what it must prove.
