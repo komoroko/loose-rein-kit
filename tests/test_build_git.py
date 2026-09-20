@@ -357,3 +357,25 @@ def test_a_capped_listing_is_a_prefix_and_not_the_answer(
     with pytest.raises(common.StopLoop) as caught:
         ws.dirty_paths(str(root))
     assert "prefix rather than the answer" in str(caught.value)
+
+
+def test_a_non_ascii_path_comes_back_as_itself_and_not_as_git_quoted_it(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """`core.quotePath` defaults to true, so git prints any path with a non-ASCII byte as
+    `"src/\\346\\227\\245.py"` — quoted and octal-escaped. Every reader here turns that output back
+    into paths and then compares it against a real prefix: rule 3's merge-stage check, what a task
+    is credited with changing, what the gate is told its scope is. A mangled string matches
+    nothing, so each of them answered "clean" about a file it never recognised, and only ever for
+    filenames that are not ASCII. Asked for at the runner (`repo.GIT_QUOTING_OFF`), because a
+    reader that forgets is wrong silently."""
+    root, ws, _ = workspace
+    (root / "src" / "よそ").mkdir(parents=True)
+    (root / "src" / "よそ" / "もの.py").write_text("x\n", encoding="utf-8")
+
+    assert ws.dirty_paths(str(root)) == ["src/よそ/もの.py"]
+
+    commit(root, "src/よそ/もの.py", "y\n")
+    base = git(root, "rev-parse", "HEAD~1")
+
+    assert ws.changed_since(base) == ["src/よそ/もの.py"]

@@ -489,8 +489,8 @@ class Spend:
 
     `unpriced_launches` is the half that keeps this honest: an adapter that reports no usage
     records :meth:`Usage.unavailable`, never zero, so a ceiling that summed only dollars would
-    read a blind run as a free one and let it go on forever. The number travels with the total
-    and is printed beside it.
+    read a blind run as a free one and let it go on forever. :func:`over_ceiling` reads both
+    numbers for exactly that reason — see :meth:`blind`.
     """
 
     usd: float = 0.0
@@ -513,6 +513,22 @@ class Spend:
             unpriced_launches=self.unpriced_launches + other.unpriced_launches,
         )
 
+    @property
+    def blind(self) -> bool:
+        """Launches happened and **not one** of them could be priced, so there is no figure at all.
+
+        The sharp form of "unmeasured", and the only one a ceiling can act on without inventing a
+        number: some launches priced means the total grows and the ceiling is reached late, which
+        the stop already says; *nothing* priced means the total never grows and the ceiling is not
+        late, it is absent. The launches that record `Usage.unavailable` are the failure paths —
+        an adapter that timed out, one whose envelope would not parse — which is the shape a
+        runaway takes, so this is the case where a ceiling is needed most and had least effect.
+
+        A cycle whose priced launches genuinely cost nothing reads `blind` as False: they were
+        priced, at zero.
+        """
+        return self.usd == 0.0 and self.unpriced_launches > 0
+
 
 def over_ceiling(limit: float, spend: Spend) -> str:
     """Why the ceiling stops this cycle, or `""` when it does not. `limit <= 0` is unset.
@@ -529,8 +545,29 @@ def over_ceiling(limit: float, spend: Spend) -> str:
 
     Unset by default on purpose. A shipped number would be this tool deciding what a cycle is
     worth, which is the one thing the reader of this line knows better than its writer.
+
+    **Two ways to stop, because "under the ceiling" and "no figure to compare" are not the same
+    answer.** Comparing only dollars made them the same: a cycle whose every launch came back
+    unpriced summed to `$0.00`, stayed under any ceiling, and ran without a bound while its
+    `config.yaml` said it had one. That is the silent fallback this file refuses everywhere else —
+    an adapter that reports nothing records `unavailable`, never zero — and the ceiling was the
+    one reader that undid it. So a ceiling that cannot be measured at all stops too, and says
+    which of the two happened. What it still does not do is *estimate*: nothing here prices an
+    unpriced launch, then or now (:attr:`Spend.blind`).
     """
-    if limit <= 0 or spend.usd < limit:
+    if limit <= 0:
+        return ""
+    if spend.blind:
+        return (
+            f"this cycle set a ${limit:.2f} ceiling (`execution.max_cost_usd`) and not one of its "
+            f"{spend.launches} launch(es) reported a cost, so there is no figure to hold against "
+            "it — the run was unbounded, not free. Nothing is priced on its behalf here: a guess "
+            "would be a ceiling enforced against a number nobody measured. Find out why the "
+            "adapter reports no usage (`rein events --cost` shows what it did record), or take "
+            "`execution.max_cost_usd` out and bound the run by `review_policy.repair_rounds` "
+            "instead, which counts what it can see."
+        )
+    if spend.usd < limit:
         return ""
     unpriced = (
         f", and {spend.unpriced_launches} launch(es) reported no cost at all, so the real figure "

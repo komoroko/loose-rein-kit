@@ -54,7 +54,11 @@ against today's schema, the same naming of what could not be read.
 Each claim carries the acceptance review's verdict **and its three axes, printed apart**, for the
 reason `review.schema.json` gives for having no single `verified`: integrity is a fact, semantic
 support is a judgement, conformance is an observation. A claim from a cycle whose review was never
-generated reads `unreviewed`, which is an absence and not a verdict.
+generated reads `unreviewed`, which is an absence and not a verdict — and so are the two things
+next to it that must not collapse into it: `not-in-review` is a generated review with no row for
+that claim, which is a hole in its coverage, and `review-unreadable` is a `review.yaml` nobody
+could parse. An archive with no `plan.yaml` at all says so rather than rendering as a cycle that
+promised nothing over an unbounded scope, which is an absence printed as a fact.
 
 **A ceiling on what a cycle may spend — `execution.max_cost_usd`, unset by default.** The
 principle that refuses a ceiling on how often a human is asked allows exactly one: a loop cannot
@@ -72,13 +76,45 @@ verdict, and a spend figure that can fail a task is a spend figure the judgement
 test fixes the set of modules allowed to consult the number, the way one fixes the readers of the
 observation store.
 
-**Unmeasured is not free.** An adapter that reports no usage records `Usage.unavailable()`, so the
-ceiling compares only what was priced, says how many launches were not, and never fires on a
-figure that is mostly missing. And the default is no ceiling at all: a number shipped here would
-be this tool deciding what a cycle is worth.
+**Unmeasured is not free, and the ceiling stops on that too.** An adapter that reports no usage
+records `Usage.unavailable()`, never zero. Summing only dollars would have undone that at the one
+place it mattered: a cycle whose every launch came back unpriced totals `$0.00`, stays under any
+ceiling, and runs with no bound at all while its `config.yaml` says it has one — and `unavailable`
+is what a timed-out or unparseable launch records, which is the shape a runaway takes. So "at or
+over the ceiling" and "no figure to hold against it" are two stops with two messages
+(`Spend.blind`), and neither invents a price for a launch nobody measured. A cycle that partly
+priced still stops on what was priced, and says how many launches were not, so the reader knows
+the real figure is above the one printed. The default is no ceiling at all: a number shipped here
+would be this tool deciding what a cycle is worth.
 
 The config key rides the `rein-grounded-v6` format move this release already makes for the lens
 threshold; it costs no second migration.
+
+### A non-ASCII filename was invisible to rule 3
+
+`core.quotePath` defaults to *true*, so git prints any path holding a byte outside ASCII as
+`"src/\346\227\245.py"` — quoted, octal-escaped. Everything that turns git's output back into
+paths then compared that string against a real prefix and concluded the path was not covered. Rule
+3 is where it showed: the editor hook is handed a real relative path and blocks, while the
+merge-stage check (`build_git.branch_changed_paths`) and acceptance (`approve._boundary_blockers`)
+read git and did not — one rule, three callers, and a disagreement that appears only for filenames
+that are not ASCII. `dirty_paths` had a `.strip('"')` that removed the quotes and left the escapes,
+which is the same wrong answer one character in.
+
+Asked for at the runner (`repo.GIT_QUOTING_OFF`, and the same wrapper around the injected one in
+`build_git`) rather than at each reader, because a reader that forgets is silently wrong. The
+boundary check asks with `-z` on top, which is exact whatever the bytes are.
+
+**The boundary blocker no longer claims the cycle wrote what it found.** Its span is two trees
+compared, so it cannot say who wrote a path: a branch that took in history from elsewhere carries
+those paths too, and the reviewers were shown that code for the same reason. The finding holds of
+the change being accepted either way, and the sentence now names the third repair that case needs
+(`cycle.base_commit`) instead of only the two that presuppose authorship.
+
+**The ceiling does not stop a dry run.** `_preflight`'s reason, applied to the same run: a dry run
+launches nothing and enters no sandbox, so it adds nothing to the figure the ceiling compares.
+Refusing to print the control flow because earlier runs spent the number withheld the one answer a
+dry run exists to give — from the person the ceiling had just handed the cycle back to.
 
 ### Where each lens went, and where it did not
 

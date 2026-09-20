@@ -323,21 +323,52 @@ def test_reaching_it_stops_and_offers_no_cheaper_way_to_carry_on() -> None:
 
 
 def test_launches_nobody_could_price_are_named_rather_than_counted_as_free() -> None:
-    """An adapter that reports no usage records `unavailable`, never zero. A ceiling that summed
-    only dollars would read a blind run as a free one and let it run forever."""
+    """An adapter that reports no usage records `unavailable`, never zero. What was priced still
+    decides the stop; the count of what was not says the real figure is above it."""
     spend = usage.Spend.of({"implementer": _priced(6.0, 2), "reviewer": usage.Usage.unavailable()})
 
     assert spend == usage.Spend(usd=6.0, launches=3, unpriced_launches=1)
     assert "1 launch(es) reported no cost at all" in usage.over_ceiling(5.0, spend)
 
 
-def test_an_unpriced_run_alone_cannot_trip_a_ceiling_it_cannot_measure() -> None:
-    """The honest half of the same rule: with nothing measured there is no figure to compare, and
-    inventing one would be the estimate this module exists to refuse."""
-    spend = usage.Spend.of({"reviewer": usage.Usage.unavailable()})
+def test_a_run_nothing_could_price_stops_rather_than_running_unbounded() -> None:
+    """The hole the old rule left. Summing only dollars made a cycle whose every launch came back
+    unpriced total `$0.00`, stay under any ceiling, and run with no bound at all while its
+    `config.yaml` said it had one — and the launches that record `unavailable` are the failure
+    paths, which is the shape a runaway takes. "No figure to compare" is its own answer."""
+    spend = usage.Spend.of({"reviewer": usage.Usage.unavailable(), "implementer": usage.Usage.unavailable()})
 
-    assert spend.usd == 0.0
+    assert spend.usd == 0.0 and spend.blind
+    reason = usage.over_ceiling(5.0, spend)
+
+    assert "not one of its 2 launch(es) reported a cost" in reason
+    assert "unbounded, not free" in reason
+
+
+def test_the_stop_on_an_unmeasurable_run_prices_nothing_on_its_behalf() -> None:
+    """It refuses the run, never the estimate. Charging an unpriced launch at some average would
+    enforce a ceiling against a number nobody measured, which is the thing this module exists to
+    refuse — so the message names the repair and no dollar figure is invented."""
+    reason = usage.over_ceiling(5.0, usage.Spend(usd=0.0, launches=3, unpriced_launches=3))
+
+    assert "$0.00" not in reason
+    assert "why the adapter reports no usage" in reason
+
+
+def test_a_cycle_that_really_cost_nothing_is_not_an_unmeasurable_one() -> None:
+    """`blind` is "nothing could be priced", not "the price was zero". A launch priced at $0.00 was
+    measured, so a free cycle under a ceiling goes on exactly as before."""
+    spend = usage.Spend.of({"implementer": _priced(0.0, 4)})
+
+    assert not spend.blind
     assert usage.over_ceiling(5.0, spend) == ""
+
+
+def test_no_ceiling_means_an_unmeasurable_run_is_nobody_business() -> None:
+    """The stop belongs to the ceiling, not to the measurement. With no ceiling set there is
+    nothing to enforce and nothing to say — a repository that never asked for a bound is not told
+    its adapter reports no cost."""
+    assert usage.over_ceiling(0.0, usage.Spend(usd=0.0, launches=9, unpriced_launches=9)) == ""
 
 
 #: The only two places allowed to consult the ceiling, and what each stops: `rein build` before it
@@ -346,8 +377,21 @@ def test_an_unpriced_run_alone_cannot_trip_a_ceiling_it_cannot_measure() -> None
 CEILING_READERS = {"build_loop", "review"}
 
 
+#: The two names that are the ceiling: the rule, and the accessor that reads the number.
+_CEILING_NAMES = frozenset({"over_ceiling", "max_cost_usd"})
+
+
 def _modules_consulting_the_ceiling() -> set[str]:
-    """Every module under `src/rein` that calls `over_ceiling` or reads `max_cost_usd`."""
+    """Every module under `src/rein` that calls `over_ceiling` or reads `max_cost_usd`.
+
+    **Every way of naming them, not one.** Matching `ast.Attribute` alone meant the guarantee
+    held only against `usage_mod.over_ceiling(...)`: an `approve.py` that wrote
+    `from rein.usage import over_ceiling` and then called the bare name passed this test, which
+    is the one import form somebody reaching for a function they were told not to use would
+    naturally write. `ast.Name` catches the call, and `ast.ImportFrom` catches the import even
+    where the name is then aliased — a check that can be stepped around by a spelling is a
+    convention, which is the same thing this file says about a boundary.
+    """
     import ast
     from pathlib import Path
 
@@ -358,7 +402,12 @@ def _modules_consulting_the_ceiling() -> set[str]:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr in {"over_ceiling", "max_cost_usd"}:
+            named = (
+                (isinstance(node, ast.Attribute) and node.attr in _CEILING_NAMES)
+                or (isinstance(node, ast.Name) and node.id in _CEILING_NAMES)
+                or (isinstance(node, ast.ImportFrom) and any(a.name in _CEILING_NAMES for a in node.names))
+            )
+            if named:
                 found.add(path.stem)
     return found
 
@@ -373,3 +422,20 @@ def test_only_the_two_launchers_consult_the_ceiling() -> None:
     decides whether the guarantee or the caller goes.
     """
     assert _modules_consulting_the_ceiling() == CEILING_READERS
+
+
+def test_the_guarantee_holds_whatever_import_form_the_caller_writes() -> None:
+    """The check itself, checked. It read attribute access only, so the bare-name call that a
+    `from rein.usage import over_ceiling` produces went straight past it — and that is the form
+    somebody adds when they want the function and not the module."""
+    import ast
+
+    module = ast.parse("from rein.usage import over_ceiling\n\n\ndef f(s):\n    return over_ceiling(1.0, s)\n")
+    hits = [
+        node
+        for node in ast.walk(module)
+        if (isinstance(node, ast.Name) and node.id in _CEILING_NAMES)
+        or (isinstance(node, ast.ImportFrom) and any(a.name in _CEILING_NAMES for a in node.names))
+    ]
+
+    assert hits, "a caller importing the name directly must still be seen by the guarantee"

@@ -32,6 +32,7 @@ claims:
 """
 
 _REVIEW = """machine:
+  status: generated
   claims:
     - claim_id: C-001
       verdict: aligned
@@ -117,15 +118,18 @@ def test_the_three_axes_are_not_collapsed_into_one_word(repo: repo_mod.Repo) -> 
     assert reviewed.axes == (("integrity", "verified"), ("semantics", "supported"), ("conformance", "pass"))
 
 
-def test_a_claim_no_review_covered_is_unreviewed_not_unverified(repo: repo_mod.Repo) -> None:
-    """ "nobody looked" and "we looked and could not tell" must never render the same (plan §2.4).
-    `unverified` is a verdict the review reached; this is the absence of one."""
+def test_a_claim_a_generated_review_left_out_is_a_gap_not_an_absence(repo: repo_mod.Repo) -> None:
+    """ "nobody looked" and "we looked and could not tell" must never render the same (plan §2.4),
+    and neither may "we looked and never mentioned it". A review ran over this cycle and has no
+    row for C-002: that is a hole in its coverage — something to go and look at — where
+    `unreviewed` is a cycle that never asked and `unverified` is a verdict one reached."""
     _archive(repo.root, "2026-08-01-first")
 
     cycles, _ = claims_cmd.history(repo)
 
     uncovered = next(c for c in cycles[0].claims if c.ident == "C-002")
-    assert uncovered.verdict == claims_cmd.UNREVIEWED and uncovered.axes == ()
+    assert uncovered.verdict == claims_cmd.UNCOVERED and uncovered.axes == ()
+    assert uncovered.verdict != claims_cmd.UNREVIEWED
 
 
 def test_a_cycle_whose_review_was_never_generated_says_so_for_every_claim(repo: repo_mod.Repo) -> None:
@@ -187,7 +191,9 @@ def test_a_review_that_is_not_a_document_is_named_and_the_claims_still_print(rep
 
     assert [c.ident for c in cycles[0].claims] == ["C-001", "C-002"]
     assert cycles[0].unreadable and "review.yaml" in cycles[0].unreadable[0]
-    assert {c.verdict for c in cycles[0].claims} == {claims_cmd.UNREVIEWED}
+    # Not `unreviewed`: there is a review.yaml, and saying no review was generated would be this
+    # command answering a question the broken file took away from it.
+    assert {c.verdict for c in cycles[0].claims} == {claims_cmd.UNREADABLE_REVIEW}
 
 
 def test_an_archive_whose_chain_is_damaged_is_named_and_left_out(repo: repo_mod.Repo) -> None:
@@ -201,6 +207,24 @@ def test_an_archive_whose_chain_is_damaged_is_named_and_left_out(repo: repo_mod.
     assert unverified == ["docs/archive/2026-08-01-first/rein/events.ndjson"]
     assert [c.label for c in cycles] == [""]
     assert "did not verify" in claims_cmd.render(cycles, unverified)
+
+
+def test_an_archive_with_no_plan_says_nothing_is_recorded_rather_than_nothing_was_promised(
+    repo: repo_mod.Repo,
+) -> None:
+    """An empty `include` means "unbounded — every guarded path" when a plan says so, and means
+    nothing at all when there is no plan. Rendered the same, a cycle whose record is missing read
+    as one that promised nothing and could touch everything: an absence printed as a fact."""
+    base = _archive(repo.root, "2026-08-01-first")
+    (base / "rein" / "plan.yaml").unlink()
+
+    cycles, _ = claims_cmd.history(repo)
+    block = claims_cmd.render(cycles).split("\n\n")[0]
+
+    assert cycles[0].recorded is False and cycles[0].claims == []
+    assert "no plan.yaml in this archive" in block
+    assert "no claim was frozen" not in block
+    assert "unbounded" not in block, "with no plan there is no scope to call unbounded"
 
 
 def test_an_empty_history_says_where_claims_will_come_from(tmp_path: Path) -> None:

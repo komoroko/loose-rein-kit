@@ -31,6 +31,18 @@ from rein import common
 
 GIT_TIMEOUT_SEC = 10
 
+#: Read before every git invocation this module makes. `core.quotePath` defaults to *true*, which
+#: makes git print `"src/\\346\\227\\245.py"` — quoted, octal-escaped — for any path with a
+#: byte outside ASCII. Everything that turns git's output back into paths then compares a mangled
+#: string against a real prefix and concludes the path is not covered, so a check answers "clean"
+#: about a file it never recognised. Rule 3 is the one that matters: the editor hook is handed a
+#: real relative path and blocks, while the merge-stage check and acceptance read git and do not —
+#: one rule, two callers, and a disagreement that only shows up for a non-ASCII filename.
+#:
+#: Turned off here rather than at each reader, because a reader that forgets is silently wrong.
+#: It does not cover a path containing a newline; the readers that must be exact ask with `-z`.
+GIT_QUOTING_OFF = ("-c", "core.quotePath=false")
+
 #: The SSOT directory as a POSIX prefix. Everything under it is orchestration state and never the
 #: product, so it is excluded from four answers that have to agree: what "the tree" is
 #: (`build_git.fingerprint`), what a task is credited with changing (`dirty_paths`), what its commit
@@ -165,7 +177,7 @@ class Repo:
         """One read-only git query against this root; "" on any failure (git absent, not a repo)."""
         try:
             proc = subprocess.run(
-                ["git", "-C", str(self.root), *args],
+                ["git", *GIT_QUOTING_OFF, "-C", str(self.root), *args],
                 capture_output=True,
                 text=True,
                 timeout=GIT_TIMEOUT_SEC,
@@ -195,7 +207,7 @@ class Repo:
         """
         try:
             proc = subprocess.run(
-                ["git", "-C", str(self.root), *args],
+                ["git", *GIT_QUOTING_OFF, "-C", str(self.root), *args],
                 capture_output=True,
                 text=True,
                 timeout=GIT_TIMEOUT_SEC,

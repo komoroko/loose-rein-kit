@@ -3711,51 +3711,60 @@ def _ceiling_config(usd: float) -> dict[str, Any]:
     return config
 
 
-def test_a_cycle_that_has_spent_its_ceiling_stops_before_the_next_batch(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_a_cycle_that_has_spent_its_ceiling_stops_before_the_next_batch(tmp_path: Path) -> None:
     """The machine cannot tell whether it is wasting, which is the one condition under which a
     ceiling is honest (`00-concept.md` 論点 A). Reaching it hands the cycle back to a person."""
-    root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent(DEMO_CYCLE, 6.0))
+    loop = orchestrator(tmp_path, config=_ceiling_config(5.0), events=_spent(DEMO_CYCLE, 6.0))
 
-    assert build_loop.main(["--dry-run", "--repo", str(root)]) == common.EXIT_HUMAN_NEEDED
+    with pytest.raises(common.StopLoop, match=r"of the \$5\.00 ceiling") as stopped:
+        loop._stop_if_over_ceiling()
 
-    assert "of the $5.00 ceiling" in capsys.readouterr().err
+    assert stopped.value.code == common.EXIT_HUMAN_NEEDED
 
 
 def test_the_stop_marks_no_task_and_offers_no_cheaper_way_through(tmp_path: Path) -> None:
     """A spend figure that can fail a task is a spend figure the judgement path reads. This one
     ends the run instead: every task stands exactly where it stood."""
     root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent(DEMO_CYCLE, 6.0))
-    before = store_mod.Store(repo_mod.Repo(root)).document_digest("state")
+    repo = repo_mod.Repo(root)
+    before = store_mod.Store(repo).document_digest("state")
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
 
-    build_loop.main(["--dry-run", "--repo", str(root)])
+    with pytest.raises(common.StopLoop):
+        loop._stop_if_over_ceiling()
 
     assert store_mod.Store(repo_mod.Repo(root)).document_digest("state") == before
 
 
 def test_a_cycle_under_its_ceiling_runs_exactly_as_before(tmp_path: Path) -> None:
-    root = build_repo(tmp_path, config=_ceiling_config(50.0), events=_spent(DEMO_CYCLE, 6.0))
-
-    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+    orchestrator(tmp_path, config=_ceiling_config(50.0), events=_spent(DEMO_CYCLE, 6.0))._stop_if_over_ceiling()
 
 
 def test_no_ceiling_is_the_default_and_a_spent_cycle_still_runs(tmp_path: Path) -> None:
     """Absent means unbounded. A default here would be this tool deciding what a cycle is worth."""
-    root = build_repo(tmp_path, events=_spent(DEMO_CYCLE, 4_000.0))
-
-    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+    orchestrator(tmp_path, events=_spent(DEMO_CYCLE, 4_000.0))._stop_if_over_ceiling()
 
 
 def test_another_cycles_spend_is_not_charged_to_this_one(tmp_path: Path) -> None:
-    root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent("some-other-cycle", 900.0))
+    loop = orchestrator(tmp_path, config=_ceiling_config(5.0), events=_spent("some-other-cycle", 900.0))
 
-    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+    loop._stop_if_over_ceiling()
 
 
-def test_launches_nobody_could_price_do_not_trip_a_ceiling_they_cannot_measure(tmp_path: Path) -> None:
-    """The honest half: with nothing measured there is no figure to compare against, and the
-    ceiling says so by not firing rather than by inventing one."""
-    root = build_repo(tmp_path, config=_ceiling_config(0.01), events=_spent(DEMO_CYCLE, 0.0, measured=False))
+def test_a_cycle_no_launch_of_which_could_be_priced_stops_too(tmp_path: Path) -> None:
+    """The hole the rule left. Nothing priced summed to `$0.00`, stayed under every ceiling, and
+    ran unbounded while `config.yaml` said it had a bound — and `unavailable` is what a timed-out
+    or unparseable launch records, which is the shape a runaway takes."""
+    loop = orchestrator(tmp_path, config=_ceiling_config(0.01), events=_spent(DEMO_CYCLE, 0.0, measured=False))
+
+    with pytest.raises(common.StopLoop, match="unbounded, not free"):
+        loop._stop_if_over_ceiling()
+
+
+def test_a_dry_run_is_never_stopped_by_a_ceiling_it_cannot_add_to(tmp_path: Path) -> None:
+    """`_preflight`'s reason, applied to the same run. A dry run launches nothing and enters no
+    sandbox, so it spends nothing — and the person reading it is the one the ceiling just handed
+    the cycle back to, deciding whether to raise the number."""
+    root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent(DEMO_CYCLE, 6.0))
 
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0

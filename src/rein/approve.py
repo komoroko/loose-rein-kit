@@ -251,6 +251,13 @@ def _boundary_blockers(
     nothing here — `_review_blockers` already holds the gate shut, and there is no subject to
     measure until it does.
 
+    That span is two trees compared, so it cannot say *who* wrote a path, and this does not
+    claim it can. A branch that took in history from elsewhere — a mainline merged back in
+    mid-cycle — carries those paths in the span too, and the reviewers were shown that code as
+    part of this change for the same reason. The finding is true of the change being accepted
+    either way, and the blocker names the third repair that case needs (`cycle.base_commit`)
+    rather than asserting the cycle wrote what it may not have.
+
     Fails closed on every question it cannot answer, for the reason the guard does: a boundary
     that cannot be determined must not be reported as held. A config this cannot read is not one
     of those questions — `readiness` reads the document before it calls anything, and an
@@ -270,7 +277,12 @@ def _boundary_blockers(
     settings = gate_guard.guard_settings(repo)
     if settings.template_mode:
         return []
-    rc, out = repo._git_rc("diff", "--name-only", f"{base}..{head}")
+    # `-z`: NUL-separated and never quoted, whatever `core.quotePath` says and whatever bytes the
+    # filename holds. Read as lines, a path with a non-ASCII byte comes back as `"src/\346\227\245.py"`
+    # — a string no prefix in the mandate matches, so the check reports "inside" about a file it
+    # never recognised, while the editor hook, handed the real path, blocks it. One rule answering
+    # two ways is exactly what `gate_guard.outside_the_mandate` exists to prevent.
+    rc, out = repo._git_rc("diff", "-z", "--name-only", f"{base}..{head}")
     if rc != 0:
         return [
             f"`git diff --name-only {base[:12]}..{head[:12]}` failed, so the paths this change "
@@ -280,7 +292,7 @@ def _boundary_blockers(
     include, exclude = plan.scope
     outside = [
         (path, why)
-        for path in sorted({line.strip() for line in out.splitlines() if line.strip()})
+        for path in sorted({entry for entry in out.split("\0") if entry})
         if (why := gate_guard.outside_the_mandate(path, include=include, exclude=exclude, guarded=settings.paths))
     ]
     if not outside:
@@ -289,11 +301,14 @@ def _boundary_blockers(
     more = f" (and {len(outside) - _NAMED_PATHS} more)" if len(outside) > _NAMED_PATHS else ""
     reasons = sorted({why for _, why in outside})
     return [
-        f"{len(outside)} path(s) this cycle changed are {' and '.join(reasons)}: {named}{more}. "
-        "The mandate is what authorizes a change to the product, and these were not covered by "
-        "the one that was approved — a change that never went through `rein build` meets no other "
-        "checkpoint. Either widen the scope a human approved (`rein revise --to mandate`, then "
-        "re-approve) or take the change out of the branch."
+        f"{len(outside)} path(s) in the change this review read are {' and '.join(reasons)}: "
+        f"{named}{more}. The mandate is what authorizes a change to the product, and these were "
+        "not covered by the one that was approved — a change that never went through `rein build` "
+        "meets no other checkpoint. Either widen the scope a human approved "
+        "(`rein revise --to mandate`, then re-approve), or take the change out of the branch. If "
+        "a path is here because the branch took in history from elsewhere, it is "
+        f"`cycle.base_commit` that is wrong: the reviewers read {base[:12]}..{head[:12]} as this "
+        "cycle's change and were shown that code too."
     ]
 
 

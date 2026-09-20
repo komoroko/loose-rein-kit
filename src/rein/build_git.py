@@ -130,7 +130,12 @@ class GitWorkspace:
         self.excluded: tuple[str, ...] = (repo_mod.SSOT_DIR, worktree_dir.rstrip("/") + "/")
         self.pathspec: tuple[str, ...] = repo_mod.pathspec_excluding(self.excluded)
         self.branch_pattern = branch_pattern
-        self._run = run
+        # Every call below is a git call, and three of them turn git's output back into paths.
+        # `repo.GIT_QUOTING_OFF` says why that has to be asked for: a non-ASCII filename comes
+        # back quoted and octal-escaped otherwise, and a path nothing recognises is a path no
+        # check covers. Wrapped once here rather than spelled at thirty call sites, because a
+        # site that forgets it is wrong silently and only for some filenames.
+        self._raw_run = run
         # Where this layer reports what it did. Injected rather than imported: git surgery
         # happens inside leaf worktrees, and a worktree that writes its own event log loses the
         # record when it is deleted (plan §11.1).
@@ -143,6 +148,10 @@ class GitWorkspace:
         # to the work branch instead would put the fix for slice 2 in a slice nobody has reviewed.
         # Empty for a first build, which is why nothing about that path changes.
         self.landing: dict[str, str] = dict(landing or {})
+
+    def _run(self, cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
+        """The injected runner with `core.quotePath` turned off. Every `cmd` here starts with git."""
+        return self._raw_run(["git", *repo_mod.GIT_QUOTING_OFF, *cmd[1:]], cwd=cwd, timeout=timeout)
 
     def git(self, args: list[str], cwd: str | None = None) -> None:
         """Run one git command; StopLoop on failure; prints and no-ops under dry-run."""
@@ -454,7 +463,7 @@ class GitWorkspace:
             path = line[3:]
             if " -> " in path:
                 path = path.split(" -> ", 1)[1]
-            paths.add(path.strip('"'))
+            paths.add(path)
         return sorted(paths)
 
     def changed_since(self, base: str, cwd: str = "") -> list[str]:

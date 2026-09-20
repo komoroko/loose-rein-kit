@@ -935,7 +935,14 @@ class Orchestrator:
           the judgement path reads** — the one thing `00-concept.md` (論点 A) forbids of this
           number. No gate, review or lens sees it; the only thing it decides is whether the loop
           keeps launching.
+        * **Not in a dry run**, for `_preflight`'s reason: a dry run launches nothing and enters
+          no sandbox, so it adds nothing to the figure this compares. Refusing to print the
+          control flow because earlier runs spent the ceiling would withhold the one answer a dry
+          run exists to give — and withhold it exactly from the person the ceiling just handed
+          the cycle back to, who is reading it to decide whether to raise the number.
         """
+        if self.dry_run:
+            return
         if reason := usage_mod.over_ceiling(self.config.max_cost_usd, self._spend_so_far()):
             self._escalate("cost_ceiling", reason)
             raise StopLoop(reason)

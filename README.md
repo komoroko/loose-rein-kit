@@ -550,9 +550,11 @@ steps keep their ceiling (`command_timeout_sec`) — their runtime is knowable.
 bounds the cycle's *measured* spend — what the adapters reported, the figure `rein events --cost`
 prints — and reaching it stops the loop between batches and hands the cycle back to you. Nothing
 degrades to stay under it: no cheaper model, no thinner review, because that would be the loop
-deciding what quality is worth. Launches an adapter reports no cost for are counted and named
-rather than priced at zero, so a ceiling never fires on a figure that is mostly missing. No gate,
-review or lens reads this number; the only thing it decides is whether the next batch starts.
+deciding what quality is worth. Launches an adapter reports no cost for are counted, never priced
+at zero — so a cycle where *nothing* could be priced stops as well, saying it was unbounded rather
+than free, because a ceiling with no figure to compare against is not a ceiling. Nothing is
+estimated either way. No gate, review or lens reads this number; the only thing it decides is
+whether the next batch starts.
 
 > **DoD commands are the project's own**: `quality_gate` names them once. The shipped defaults
 > (`python -m pytest`, `python -m compileall`) are the floor the packaged `python` sandbox image

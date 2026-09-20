@@ -1624,6 +1624,33 @@ def test_an_ungenerated_review_leaves_the_boundary_to_the_review_blocker(tmp_pat
     assert any("not on a green test run" in b for b in blockers)
 
 
+def test_a_non_ascii_path_outside_the_mandate_blocks_like_any_other(tmp_path: Path) -> None:
+    """`core.quotePath` defaults to true, so `git diff --name-only` prints a path with any
+    non-ASCII byte as `"src/\\346\\227\\245.py"` — quoted and octal-escaped. Read as lines, that
+    string matches no prefix in the mandate, so the check reported "inside" about a file it never
+    recognised, while the editor hook, handed the real path, blocked it. One rule answering two
+    ways for one class of filename is the disagreement `outside_the_mandate` exists to prevent."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/よそ/もの.py")
+
+    blockers = approve.readiness(repo, "acceptance")
+
+    assert any("src/よそ/もの.py" in b and "outside the approved mandate's scope" in b for b in blockers)
+
+
+def test_the_blocker_does_not_claim_the_cycle_wrote_what_it_may_not_have(tmp_path: Path) -> None:
+    """The span is two trees compared, so it cannot say who wrote a path — a branch that took in
+    history from elsewhere carries those paths too. The finding holds of the change being
+    accepted either way; what must not happen is a sentence asserting authorship and naming only
+    the two repairs that presuppose it."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+
+    blocker = next(b for b in approve.readiness(repo, "acceptance") if "src/elsewhere" in b)
+
+    assert "this cycle changed" not in blocker
+    assert "in the change this review read" in blocker
+    assert "cycle.base_commit" in blocker
+
+
 def test_the_mandate_gate_is_not_asked_this_question(tmp_path: Path) -> None:
     """Nothing has been built yet at the mandate, and the scope it would be measured against is
     the one being approved in that same act."""
