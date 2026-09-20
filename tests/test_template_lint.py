@@ -778,3 +778,26 @@ def test_a_reference_to_a_retrospective_section_that_does_not_exist_is_drift() -
 
 def test_the_shipped_references_to_retrospective_sections_all_resolve() -> None:
     assert template_lint.check_retrospective_sections(_REPO_ROOT, template_lint.neutral_texts(_REPO_ROOT)) == []
+
+
+# --- quoted gate names -----------------------------------------------------------
+
+
+def test_check_quoted_gate_names_is_green_for_a_live_gate() -> None:
+    assert template_lint.check_quoted_gate_names({"README.md": "gate 'acceptance' is ready.\n"}) == []
+
+
+def test_check_quoted_gate_names_trips_on_a_retired_gate() -> None:
+    failures = template_lint.check_quoted_gate_names({"README.md": "#   gate 'build' is ready.\n"})
+    assert len(failures) == 1
+    assert "README.md: `gate 'build'`" in failures[0]
+
+
+def test_check_quoted_gate_names_accepts_a_crossing_gate_and_its_spelling() -> None:
+    text = "Approve gate 'T-004'? and gate 'T-NNN' and gate '<gate>'\n"
+    assert template_lint.check_quoted_gate_names({"AGENTS.md": text}) == []
+
+
+def test_check_quoted_gate_names_reports_a_name_once_per_file() -> None:
+    text = "gate 'design' is ready.\nApprove gate 'design'?\n"
+    assert len(template_lint.check_quoted_gate_names({"README.md": text})) == 1
