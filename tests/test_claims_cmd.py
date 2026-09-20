@@ -118,7 +118,7 @@ def test_the_three_axes_are_not_collapsed_into_one_word(repo: repo_mod.Repo) -> 
 
 
 def test_a_claim_no_review_covered_is_unreviewed_not_unverified(repo: repo_mod.Repo) -> None:
-    """"nobody looked" and "we looked and could not tell" must never render the same (plan §2.4).
+    """ "nobody looked" and "we looked and could not tell" must never render the same (plan §2.4).
     `unverified` is a verdict the review reached; this is the absence of one."""
     _archive(repo.root, "2026-08-01-first")
 
