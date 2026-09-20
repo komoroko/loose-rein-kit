@@ -56,6 +56,7 @@ from rein import (
     dag_trace,
     digests,
     event_chain,
+    gate_guard,
     mdlite,
     models,
     observations,
@@ -207,6 +208,93 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
         max_age=audit.max_age_days(config),
     )
     return [reason] if reason else []
+
+
+#: How many out-of-mandate paths one blocker names before it says how many more there are. A cut
+#: that did not say it was a cut would make "these are the paths" and "these are some of them"
+#: read the same, which is the distinction the Coverage Manifest exists for (plan §2.4).
+_NAMED_PATHS = 10
+
+
+def _boundary_blockers(
+    repo: repo_mod.Repo,
+    plan: models.Plan | None,
+    state: models.State | None,
+    review: models.Review | None,
+    gate: str,
+) -> list[str]:
+    """Is what acceptance is about to ratify inside the mandate that authorized it?
+
+    **Rule 3 has three checkpoints and all three sit on the path a change takes through the loop**
+    (`gate_guard`): the editor hook, which is a host capability; the commit-stage check, which is
+    a repository's own `.pre-commit-config.yaml`; and `build_loop._gate_violations`, which is
+    inside `rein build`. A change that never went through `rein build` — a human's own commit, an
+    agent on a host with no hook, `git commit -n` — passes none of them. The guard's module
+    docstring has said so; what it does not say is where that is caught instead, and the answer
+    was nowhere. Acceptance is the one point every change in the cycle reaches, and everything it
+    asked was about records: the chain, the review, the requests. Never about the tree.
+
+    So: the same rule, read once over the cycle's committed diff, at the moment a human is about
+    to take it. **Not a fourth layer of enforcement** — nothing here denies a write, and a cycle
+    whose work went through `rein build` produces no finding, because merge-stage already refused
+    those paths one at a time.
+
+    It blocks rather than merely naming, and the approval-screen budget is the reason that is
+    allowed: a limit whose remedy does not exist at the point it fires gets raised instead of
+    obeyed. Both of this one's remedies exist here — `rein revise --to mandate` widens the scope a
+    human approved, or the change comes out of the branch.
+
+    **The subject is the review's own, not one resolved a second time here.**
+    `binding.trusted_base_sha..subject_head_sha` is the change the reviewers read and the change
+    this approval takes; re-deriving a base would let the boundary be checked over a different
+    span from the one being accepted. It follows that an absent or ungenerated review produces
+    nothing here — `_review_blockers` already holds the gate shut, and there is no subject to
+    measure until it does.
+
+    Fails closed on every question it cannot answer, for the reason the guard does: a boundary
+    that cannot be determined must not be reported as held. A config this cannot read is not one
+    of those questions — `readiness` reads the document before it calls anything, and an
+    unreadable one is already the whole answer.
+    """
+    if gate != "acceptance" or plan is None or state is None or state.plan_status != "frozen":
+        return []
+    if review is None or not review.is_generated:
+        return []
+    base, head = str(review.binding.get("trusted_base_sha") or ""), review.subject_head_sha
+    if not base or not head:
+        return [
+            "the review does not say which commits it read (`binding.trusted_base_sha` / "
+            "`subject_head_sha`), so acceptance cannot tell whether the change stayed inside the "
+            "mandate. Regenerate it with `rein review generate`."
+        ]
+    settings = gate_guard.guard_settings(repo)
+    if settings.template_mode:
+        return []
+    rc, out = repo._git_rc("diff", "--name-only", f"{base}..{head}")
+    if rc != 0:
+        return [
+            f"`git diff --name-only {base[:12]}..{head[:12]}` failed, so the paths this change "
+            "carries are unknown and acceptance cannot tell whether they are inside the mandate. "
+            "Fetch the commits the review was taken on, then ask again."
+        ]
+    include, exclude = plan.scope
+    outside = [
+        (path, why)
+        for path in sorted({line.strip() for line in out.splitlines() if line.strip()})
+        if (why := gate_guard.outside_the_mandate(path, include=include, exclude=exclude, guarded=settings.paths))
+    ]
+    if not outside:
+        return []
+    named = ", ".join(path for path, _ in outside[:_NAMED_PATHS])
+    more = f" (and {len(outside) - _NAMED_PATHS} more)" if len(outside) > _NAMED_PATHS else ""
+    reasons = sorted({why for _, why in outside})
+    return [
+        f"{len(outside)} path(s) this cycle changed are {' and '.join(reasons)}: {named}{more}. "
+        "The mandate is what authorizes a change to the product, and these were not covered by "
+        "the one that was approved — a change that never went through `rein build` meets no other "
+        "checkpoint. Either widen the scope a human approved (`rein revise --to mandate`, then "
+        "re-approve) or take the change out of the branch."
+    ]
 
 
 def _baseline_blockers(state: models.State, gate: str) -> list[str]:
@@ -430,6 +518,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
         )
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
     blockers += _baseline_blockers(state, gate)
+    blockers += _boundary_blockers(repo, plan, state, review, gate)
     blockers += _audit_blockers(repo, state, config, gate)
     blockers += _change_request_blockers(plan, state, gate)
     blockers += _clarification_blockers(repo, gate)

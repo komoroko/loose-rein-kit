@@ -60,6 +60,11 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 10
+        },
+        "max_cost_usd": {
+          "description": "The most this cycle may spend on agent launches, in US dollars, before the loop stops and hands back to a human. Absent means no ceiling, which is the shipped default: a number here would be this tool deciding what a cycle is worth. Measured, never estimated — it is what the adapters reported (`rein events --cost`), and launches whose cost an adapter does not report are counted and named rather than priced at zero. Reaching it stops the run and degrades nothing: no cheaper model, no thinner review. It bounds the machine, which cannot tell whether it is wasting; it is never read by a gate, a review or a lens.",
+          "type": "number",
+          "exclusiveMinimum": 0
         }
       }
     },

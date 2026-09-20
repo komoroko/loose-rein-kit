@@ -6,6 +6,75 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ## [Unreleased]
 
+### Three the principles asked for and the code had never built
+
+Every entry above this one came from reading the code: a claim it makes about itself against the
+code that makes it, or a thing it built against the reasoning that asked for it. **That method
+cannot reach what was never built.** These three came from the other direction — the principles
+read against the code — and each is an absence rather than a defect.
+
+**Acceptance was reading records, never the tree.** Rule 3 has three checkpoints and all three sit
+on the path a change takes through the loop: the editor hook, which is a host capability; the
+commit-stage check, which is a repository's own `.pre-commit-config.yaml`; and
+`build_loop._gate_violations`, inside `rein build`. `gate_guard`'s own module docstring names what
+that leaves — "a change that never goes through `rein build` at all" — and nothing caught it
+afterwards. A human's own commit, an agent on a host with no hook, a `git commit -n`: each lands
+on the work branch and reaches acceptance with the readiness check asking about the chain, the
+review and the requests, and nothing asking whether the change is inside the mandate that
+authorized it.
+
+`approve._boundary_blockers` reads the same rule once over the cycle's committed diff. Not a
+fourth layer of enforcement: nothing here denies a write, and a cycle whose work went through
+`rein build` produces no finding, because merge-stage already refused those paths one at a time.
+The rule itself moved into `gate_guard.outside_the_mandate` so there is one of it — a boundary two
+functions can answer about separately is a boundary that can disagree with itself. The span
+checked is the review's own `binding.trusted_base_sha..subject_head_sha`, which is what the
+reviewers read and what the approval takes; re-resolving a base here would check a different
+change from the one being accepted.
+
+**It blocks, and the approval-screen budget is why that is allowed.** A limit whose remedy does
+not exist where it fires gets raised instead of obeyed — that budget named "split the scope" at a
+point where every task is done. Both of this one's remedies exist at acceptance: `rein revise --to
+mandate` widens the scope a human approved, or the change comes out of the branch.
+
+**`rein claims` — what each cycle committed to, and what it could touch.** `rein decisions` was
+built on the observation that all four write sites of a judgement are per-cycle, and it said the
+judgement history was *the* one of `00-concept.md`'s three things that went out of reach when a
+cycle closed. One write site short: `cycle.CYCLE_STATE` archives `plan.yaml`, which carries both
+the frozen claims and the frozen `scope`, and `CYCLE_DOCS` archives `10-requirements.md` beside
+it. All three vanish at the same moment; one of them had a way back. This is the same read one
+axis over — the same `events.cycle_sources` enumeration, the same refusal to validate an archive
+against today's schema, the same naming of what could not be read.
+
+Each claim carries the acceptance review's verdict **and its three axes, printed apart**, for the
+reason `review.schema.json` gives for having no single `verified`: integrity is a fact, semantic
+support is a judgement, conformance is an observation. A claim from a cycle whose review was never
+generated reads `unreviewed`, which is an absence and not a verdict.
+
+**A ceiling on what a cycle may spend — `execution.max_cost_usd`, unset by default.** The
+principle that refuses a ceiling on how often a human is asked allows exactly one: a loop cannot
+judge whether it is wasting, so something outside it has to stop it. `repair_rounds` is that, and
+the cost half of the same paragraph had never been built. Spend was measured (`usage.py`),
+accumulated per role (`build_loop._usage`) and totalled per cycle (`rein events --cost`); nothing
+compared it to anything. What bounded a run was iteration counts — `launch_retries`, each step's
+`retries`, `repair_rounds` — whose product over tasks and steps is a number nobody chose as money.
+
+`usage.over_ceiling` is the whole rule and two callers stop on it: `rein build` before it starts
+another batch, and `rein review generate` before it launches the reviewers. **Between batches,
+never inside one.** A leaf that is running has been paid for, and this file already refuses to
+discard a batch that earned its merge; raised inside a leaf, a stop would become that task's
+verdict, and a spend figure that can fail a task is a spend figure the judgement path reads. A
+test fixes the set of modules allowed to consult the number, the way one fixes the readers of the
+observation store.
+
+**Unmeasured is not free.** An adapter that reports no usage records `Usage.unavailable()`, so the
+ceiling compares only what was priced, says how many launches were not, and never fires on a
+figure that is mostly missing. And the default is no ceiling at all: a number shipped here would
+be this tool deciding what a cycle is worth.
+
+The config key rides the `rein-grounded-v6` format move this release already makes for the lens
+threshold; it costs no second migration.
+
 ### Where each lens went, and where it did not
 
 The counts say which lenses earn their place over cycles. They could not say **where** a lens went,

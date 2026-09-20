@@ -32,6 +32,7 @@ from rein import (
     dag,
     digests,
     dossier,
+    event_chain,
     evidence,
     executors,
     faults,
@@ -48,6 +49,7 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
 from tests._support import (
+    DEMO_CYCLE,
     agent_output,
     fake_git,
     make_config,
@@ -3678,3 +3680,82 @@ def test_a_task_with_no_gate_of_its_own_is_never_read_as_an_unapproved_one(tmp_p
     loop = orchestrator(tmp_path)
 
     assert loop._awaits_crossing("T-001") is False
+
+
+# --- the spend ceiling stops the run, and decides nothing else -----------------
+
+
+def _spent(cycle: str, usd: float, *, launches: int = 4, measured: bool = True) -> list[models.Event]:
+    """A chain holding one finished run of `cycle` that cost `usd`."""
+    row = usage_mod.Usage(available=measured, launches=launches, cost_usd=usd if measured else 0.0)
+    return [
+        event_chain.link(
+            None,
+            event_chain.make(
+                "run_measured",
+                cycle,
+                detail={
+                    "kind": "build",
+                    "run_id": "r0",
+                    "outcome": "done",
+                    "billed_by_role": {"implementer": row.to_detail()},
+                },
+            ),
+        )
+    ]
+
+
+def _ceiling_config(usd: float) -> dict[str, Any]:
+    config = make_config()
+    config["execution"]["max_cost_usd"] = usd
+    return config
+
+
+def test_a_cycle_that_has_spent_its_ceiling_stops_before_the_next_batch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The machine cannot tell whether it is wasting, which is the one condition under which a
+    ceiling is honest (`00-concept.md` 論点 A). Reaching it hands the cycle back to a person."""
+    root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent(DEMO_CYCLE, 6.0))
+
+    assert build_loop.main(["--dry-run", "--repo", str(root)]) == common.EXIT_HUMAN_NEEDED
+
+    assert "of the $5.00 ceiling" in capsys.readouterr().err
+
+
+def test_the_stop_marks_no_task_and_offers_no_cheaper_way_through(tmp_path: Path) -> None:
+    """A spend figure that can fail a task is a spend figure the judgement path reads. This one
+    ends the run instead: every task stands exactly where it stood."""
+    root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent(DEMO_CYCLE, 6.0))
+    before = store_mod.Store(repo_mod.Repo(root)).document_digest("state")
+
+    build_loop.main(["--dry-run", "--repo", str(root)])
+
+    assert store_mod.Store(repo_mod.Repo(root)).document_digest("state") == before
+
+
+def test_a_cycle_under_its_ceiling_runs_exactly_as_before(tmp_path: Path) -> None:
+    root = build_repo(tmp_path, config=_ceiling_config(50.0), events=_spent(DEMO_CYCLE, 6.0))
+
+    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+
+
+def test_no_ceiling_is_the_default_and_a_spent_cycle_still_runs(tmp_path: Path) -> None:
+    """Absent means unbounded. A default here would be this tool deciding what a cycle is worth."""
+    root = build_repo(tmp_path, events=_spent(DEMO_CYCLE, 4_000.0))
+
+    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+
+
+def test_another_cycles_spend_is_not_charged_to_this_one(tmp_path: Path) -> None:
+    root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent("some-other-cycle", 900.0))
+
+    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+
+
+def test_launches_nobody_could_price_do_not_trip_a_ceiling_they_cannot_measure(tmp_path: Path) -> None:
+    """The honest half: with nothing measured there is no figure to compare against, and the
+    ceiling says so by not firing rather than by inventing one."""
+    root = build_repo(tmp_path, config=_ceiling_config(0.01), events=_spent(DEMO_CYCLE, 0.0, measured=False))
+
+    assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0

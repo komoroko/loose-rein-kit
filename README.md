@@ -312,6 +312,12 @@ Then, per cycle:
      all four are per-cycle: `cycle-close` archives them and restores fresh ones, so the working
      tree only ever shows the cycle now open. This reads the archives back along the axis the
      judgements were written on. Writing one is `rein decision add` (singular).
+   - `rein claims` — what each cycle committed to, and what that commitment was allowed to
+     reach, oldest cycle first. The same read one axis over: the frozen claims and the frozen
+     `scope` both live in `plan.yaml`, which `cycle-close` archives too, so a closed cycle's
+     promises are no more in the working tree than its judgements were. Each claim carries the
+     acceptance review's verdict and its three axes printed apart — a claim from a cycle with no
+     generated review reads `unreviewed`, which is an absence, not a verdict.
 
 7. **Ship as a PR** — `rein pr-draft` assembles the PR body from the SSOT into
    `.rein/pr-draft.md` (read-only). Creating and pushing the PR stays yours.
@@ -539,6 +545,14 @@ An agent launch has **no time limit** by default (`execution.agent_timeout_sec: 
 tell a model that is working from one that is stuck, and killing a working one throws the launch
 away and makes the retry pay for it again; Ctrl-C stops a stuck one, and now reaches it. Command
 steps keep their ceiling (`command_timeout_sec`) — their runtime is knowable.
+
+**There is no spend ceiling by default**, and `execution.max_cost_usd` is where you set one. It
+bounds the cycle's *measured* spend — what the adapters reported, the figure `rein events --cost`
+prints — and reaching it stops the loop between batches and hands the cycle back to you. Nothing
+degrades to stay under it: no cheaper model, no thinner review, because that would be the loop
+deciding what quality is worth. Launches an adapter reports no cost for are counted and named
+rather than priced at zero, so a ceiling never fires on a figure that is mostly missing. No gate,
+review or lens reads this number; the only thing it decides is whether the next batch starts.
 
 > **DoD commands are the project's own**: `quality_gate` names them once. The shipped defaults
 > (`python -m pytest`, `python -m compileall`) are the floor the packaged `python` sandbox image

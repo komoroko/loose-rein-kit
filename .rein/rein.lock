@@ -22,7 +22,7 @@ prompts:
     prompts/commands/tasks.md: sha256:a55e9f7ca47b47aa1dbf6c73286025830a1edac513b3d02b30f743dfab9a240d
     prompts/commands/verify.md: sha256:c64d82b267e0e988ee98dfd6cc5a3063f7195ff7a08a55e2b4c43ac2d26d258d
     prompts/rules/gate-workflow.md: sha256:23dd5793f0a3039cbd4b9f68d2b8215574b995e15eb1c97341802884af6f4465
-    schema/config.schema.json: sha256:bc7f5173af6d855c7baf858f752f037f455ce1087614fdced59f0c7ce39bc3c3
+    schema/config.schema.json: sha256:42220e6293128eccba2308a2d86740a25ce6bba9158867e8f75974d92637625b
     schema/event.schema.json: sha256:78badffd296cdea1cb68c22b90b4bdbdbe00f5ece7e721d6b1c84f6c3136c77a
     schema/plan.schema.json: sha256:fbb4eb02c4f2adf2af1cd5d0a9c16424e99aff44d4b87da6e1bb9639dd192c62
     schema/review.schema.json: sha256:4c85846abac24fa88c5108a33d839c1bda6ee741c8b2a8e83e0d79bd50840540
@@ -116,4 +116,4 @@ integrations:
             command: rein guard
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-09-19'
+updated_at: '2026-09-21'

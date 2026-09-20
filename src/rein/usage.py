@@ -478,3 +478,71 @@ class Ledger:
         """A copy — the caller must not hold the lock's data."""
         with self._lock:
             return dict(self._rows)
+
+
+# --- the one spend ceiling ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Spend:
+    """What has been spent on one cycle so far, and how much of it could be priced at all.
+
+    `unpriced_launches` is the half that keeps this honest: an adapter that reports no usage
+    records :meth:`Usage.unavailable`, never zero, so a ceiling that summed only dollars would
+    read a blind run as a free one and let it go on forever. The number travels with the total
+    and is printed beside it.
+    """
+
+    usd: float = 0.0
+    launches: int = 0
+    unpriced_launches: int = 0
+
+    @classmethod
+    def of(cls, rows: Mapping[str, Usage]) -> Spend:
+        """The spend of one run's per-role totals."""
+        return cls(
+            usd=sum(row.cost_usd for row in rows.values()),
+            launches=sum(row.launches for row in rows.values()),
+            unpriced_launches=sum(row.launches for row in rows.values() if not row.available),
+        )
+
+    def __add__(self, other: Spend) -> Spend:
+        return Spend(
+            usd=self.usd + other.usd,
+            launches=self.launches + other.launches,
+            unpriced_launches=self.unpriced_launches + other.unpriced_launches,
+        )
+
+
+def over_ceiling(limit: float, spend: Spend) -> str:
+    """Why the ceiling stops this cycle, or `""` when it does not. `limit <= 0` is unset.
+
+    **The one place the rule is written**, because two callers stop on it — `rein build` before
+    it starts another batch, and `rein review generate` before it launches the reviewers — and a
+    limit two functions decide separately is two limits.
+
+    `00-concept.md` (論点 A) allows a ceiling exactly here and nowhere near the human's side: a
+    loop cannot judge whether it is wasting, so something outside it has to stop it. What it must
+    not do is *degrade* — no cheaper model, no fewer lenses, no skipped reviewer — because that is
+    an automatic judgement about quality made by the side that cannot judge quality. So the only
+    thing over the ceiling is a stop, and the only thing that lifts it is a person.
+
+    Unset by default on purpose. A shipped number would be this tool deciding what a cycle is
+    worth, which is the one thing the reader of this line knows better than its writer.
+    """
+    if limit <= 0 or spend.usd < limit:
+        return ""
+    unpriced = (
+        f", and {spend.unpriced_launches} launch(es) reported no cost at all, so the real figure "
+        "is higher than this one"
+        if spend.unpriced_launches
+        else ""
+    )
+    return (
+        f"this cycle has spent ${spend.usd:.2f} of the ${limit:.2f} ceiling "
+        f"(`execution.max_cost_usd`) over {spend.launches} launch(es){unpriced}. Nothing is "
+        "degraded to carry on under it — a cheaper model or a thinner review would be this loop "
+        "deciding what quality is worth, which is the judgement it cannot make. Read what the "
+        "spend went on (`rein events --cost`), then either raise the ceiling or fix what is "
+        "repeating: a run that burned it on one task's send-backs will burn the next one too."
+    )

@@ -3150,3 +3150,39 @@ def test_a_change_that_is_all_lockfile_says_so(tmp_path: Path) -> None:
     # "It is all product code" stays silent: there is nothing to remove.
     source = review.ChangeOutlook(900_000, 900_000, 500_000, (), "sufficient", "low", (("source", 900_000),))
     assert source.made_of() == ""
+
+
+# --- the spend ceiling, before anything is launched ----------------------------
+
+
+@pytest.mark.integration
+def test_a_review_refuses_to_launch_past_the_cycles_spend_ceiling(review_repo: Path) -> None:
+    """The reviewers are the other place a cycle spends, so the ceiling `rein build` stops on
+    between batches has to stop this too — otherwise it bounds half the machine.
+
+    Before the deterministic work as well as before the launches: reading a diff to then refuse
+    to review it is the cost the refusal exists to avoid.
+    """
+    import yaml
+
+    from rein import event_chain, run_record, usage
+
+    repo = repo_mod.Repo(review_repo)
+    config = make_config()
+    config["execution"]["max_cost_usd"] = 1.0
+    (review_repo / ".rein" / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    store = store_mod.Store(repo)
+    cycle = store.read_state().cycle_id  # type: ignore[union-attr]
+    run_record.record(
+        store,
+        kind="build",
+        cycle=cycle,
+        run_id="r0",
+        outcome="done",
+        billed={"implementer": usage.Usage(available=True, launches=2, cost_usd=4.0)},
+    )
+
+    with pytest.raises(review.ReviewError, match="ceiling"):
+        review.generate(repo, _reviewers(_fake_reviewer))
+
+    assert event_chain.load(repo.events), "the refusal is recorded, not only printed"

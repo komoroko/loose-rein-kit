@@ -293,3 +293,83 @@ def test_an_opencode_error_event_is_not_read_as_an_answer() -> None:
         usage.parse_opencode_envelope('{"type": "error", "error": {"message": "rate limited"}}')
     with pytest.raises(usage.AdapterEnvelopeError, match="no events"):
         usage.parse_opencode_envelope("just some words")
+
+
+# --- the spend ceiling: the one limit on the side that cannot judge -------------
+
+
+def _priced(cost: float, launches: int = 1) -> usage.Usage:
+    return usage.Usage(available=True, launches=launches, cost_usd=cost)
+
+
+def test_no_ceiling_is_the_default_and_never_binds() -> None:
+    """Absent is unbounded, not zero. A shipped number would be this tool deciding what a cycle
+    is worth, which is the reader's judgement and not its writer's."""
+    assert usage.over_ceiling(0.0, usage.Spend(usd=999.0, launches=40)) == ""
+
+
+def test_spend_under_the_ceiling_says_nothing() -> None:
+    assert usage.over_ceiling(10.0, usage.Spend(usd=9.99, launches=3)) == ""
+
+
+def test_reaching_it_stops_and_offers_no_cheaper_way_to_carry_on() -> None:
+    """The stop is the whole behaviour. Degrading instead — a cheaper model, a thinner review —
+    is an automatic judgement about quality by the side that cannot judge quality."""
+    reason = usage.over_ceiling(10.0, usage.Spend(usd=10.0, launches=7))
+
+    assert "$10.00 of the $10.00 ceiling" in reason
+    assert "Nothing is degraded" in reason
+    assert "raise the ceiling or fix what is repeating" in reason
+
+
+def test_launches_nobody_could_price_are_named_rather_than_counted_as_free() -> None:
+    """An adapter that reports no usage records `unavailable`, never zero. A ceiling that summed
+    only dollars would read a blind run as a free one and let it run forever."""
+    spend = usage.Spend.of({"implementer": _priced(6.0, 2), "reviewer": usage.Usage.unavailable()})
+
+    assert spend == usage.Spend(usd=6.0, launches=3, unpriced_launches=1)
+    assert "1 launch(es) reported no cost at all" in usage.over_ceiling(5.0, spend)
+
+
+def test_an_unpriced_run_alone_cannot_trip_a_ceiling_it_cannot_measure() -> None:
+    """The honest half of the same rule: with nothing measured there is no figure to compare, and
+    inventing one would be the estimate this module exists to refuse."""
+    spend = usage.Spend.of({"reviewer": usage.Usage.unavailable()})
+
+    assert spend.usd == 0.0
+    assert usage.over_ceiling(5.0, spend) == ""
+
+
+#: The only two places allowed to consult the ceiling, and what each stops: `rein build` before it
+#: starts another batch, `rein review generate` before it launches the reviewers. Both stop; neither
+#: decides anything about the code.
+CEILING_READERS = {"build_loop", "review"}
+
+
+def _modules_consulting_the_ceiling() -> set[str]:
+    """Every module under `src/rein` that calls `over_ceiling` or reads `max_cost_usd`."""
+    import ast
+    from pathlib import Path
+
+    source_root = Path(__file__).resolve().parent.parent / "src" / "rein"
+    found: set[str] = set()
+    for path in sorted(source_root.rglob("*.py")):
+        if path.stem in {"usage", "models"}:  # where the rule and the accessor are defined
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in {"over_ceiling", "max_cost_usd"}:
+                found.add(path.stem)
+    return found
+
+
+def test_only_the_two_launchers_consult_the_ceiling() -> None:
+    """`00-concept.md` (論点 A) allows this number to bound the machine and nothing else. A
+    ceiling something consults to *decide* is the kind of limit that degrades quality: the
+    approval-screen budget became one, was raised twice, and came out.
+
+    So the guarantee is a property of the source, not of a message: an `over_ceiling` appearing in
+    `approve`, `review_policy`, `lens_cmd` or `gate_guard` fails here, and whoever put it there
+    decides whether the guarantee or the caller goes.
+    """
+    assert _modules_consulting_the_ceiling() == CEILING_READERS

@@ -1764,6 +1764,17 @@ class Config:
         return _str(self.execution, "worktree_dir", ".worktrees")
 
     @property
+    def max_cost_usd(self) -> float:
+        """The cycle's spend ceiling in dollars; `0.0` when none is set, which is the default.
+
+        Absent is unbounded rather than zero, because a shipped number would be a limit nobody
+        chose. What it bounds is the machine (`usage.over_ceiling`): the loop cannot tell whether
+        it is wasting, which is the one condition under which a ceiling is honest.
+        """
+        value = self.execution.get("max_cost_usd")
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+
+    @property
     def command_timeout_sec(self) -> int:
         return common.as_int(self.execution.get("command_timeout_sec"), 1800)
 

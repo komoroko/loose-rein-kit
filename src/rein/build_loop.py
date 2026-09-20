@@ -294,6 +294,8 @@ class Config:
     timeout_agent: float | None
     adapter_argv: tuple[str, ...]
     launch_retries: int
+    #: Dollars this cycle may spend before the loop stops and hands back. 0.0 = no ceiling.
+    max_cost_usd: float = 0.0
 
     @property
     def gate_cmds(self) -> list[str]:
@@ -343,6 +345,7 @@ class Config:
             timeout_cmd=float(config.command_timeout_sec) or None,
             timeout_agent=float(config.agent_timeout_sec) or None,
             adapter_argv=argv,
+            max_cost_usd=config.max_cost_usd,
             launch_retries=max(0, config.launch_retries),
         )
 
@@ -825,6 +828,9 @@ class Orchestrator:
         #: What the provider billed for each role's launches, when the adapter reports it.
         self._usage: dict[str, usage_mod.Usage] = {}
         self._spend_lock = threading.Lock()
+        #: What earlier runs of this cycle already spent, read from the chain once on first ask.
+        #: `None` is "not read yet"; a cycle with no recorded run reads as a zero `Spend`.
+        self._spend_before: usage_mod.Spend | None = None
         # Tasks whose attempt ended before the quality gate, and the status that ending calls for.
         # The caller reads this instead of assuming every unsuccessful attempt is `blocked`: an
         # implementer that found the *design* wrong has said `needs-revision`, and overwriting
@@ -906,6 +912,33 @@ class Orchestrator:
         """This run's measured cost, by role. A copy — the caller must not hold the lock's data."""
         with self._spend_lock:
             return dict(self._usage)
+
+    def _spend_so_far(self) -> usage_mod.Spend:
+        """What this cycle has spent: the runs the chain records, plus what this run has added."""
+        if self._spend_before is None:
+            live, _ = event_chain.scan(self.repo.events)
+            self._spend_before = run_record.cycle_spend(live, self.cycle_id)
+        return self._spend_before + usage_mod.Spend.of(self.usage_totals())
+
+    def _stop_if_over_ceiling(self) -> None:
+        """Stop the run when this cycle has spent its ceiling. Raises :class:`StopLoop`.
+
+        **Between batches, never inside one**, and that placement is the whole design:
+
+        * A leaf that is running has been paid for, and this file already refuses to throw away a
+          batch that earned its merge because something else went wrong (`_run_batch`). So the
+          ceiling stops the *next* batch, and a run can cross it by the batch that crossed it —
+          which the message says rather than implying a precision it does not have.
+        * Raised here, it is a `StopLoop` on the run's own thread, which `_run_loop` turns into a
+          message and `EXIT_HUMAN_NEEDED`. Raised inside a leaf it would become that task's
+          verdict (`_safe_run_task`), and **a spend figure that can fail a task is a spend figure
+          the judgement path reads** — the one thing `00-concept.md` (論点 A) forbids of this
+          number. No gate, review or lens sees it; the only thing it decides is whether the loop
+          keeps launching.
+        """
+        if reason := usage_mod.over_ceiling(self.config.max_cost_usd, self._spend_so_far()):
+            self._escalate("cost_ceiling", reason)
+            raise StopLoop(reason)
 
     def _spend_handover(self, role: str, handed_bytes: int) -> None:
         """Count what a launch was *told to read*, as opposed to what was sent in its argv.
@@ -3186,6 +3219,7 @@ class Orchestrator:
     def _consume(self) -> int:
         self._recover_in_progress()
         while True:
+            self._stop_if_over_ceiling()
             graph = self._load_graph()
             if self._promote_observed(graph):
                 graph = self._load_graph()
