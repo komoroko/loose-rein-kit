@@ -4,6 +4,47 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.9.1] - 2026-09-21
+
+### The README said more than it knew, and one thing the code refuses
+
+Both READMEs had grown to the point where the instructions were the smaller half. A third of the
+text argued for the design — why a gate is placed where it is, why a figure has no threshold, why
+a stack is never rebased — and every one of those arguments is already in `AGENTS.md`, which the
+README's own first paragraph points at. A reader who wanted to install this had to walk past all
+of it. The arguments stay where they were written; the README keeps the steps, the tables, and
+the things that will actually bite (the 128 KiB argument cap on the non-stdin adapters, the
+sandbox that is not a boundary against exfiltration, the stack that must not be merged in part).
+
+`README.md` 49.9 KB → 33.3 KB, `README.ja.md` 66.4 KB → 43.6 KB, with `rein sync`/`upgrade`/
+`doctor` lifted out of "daily use" into a section of their own and the notification channel and
+the self-measurement folded into the sections they belong to. Section count 14 → 13 in both, so
+`check_readme_parity` still holds them together.
+
+**The drafting phases are order-free, not skippable — and three documents said otherwise.**
+`AGENTS.md` and both READMEs invited a reader to "skip one whose answer is already obvious",
+naming `/req`, `/design` and `/tasks` as equals. `approve.readiness` does not agree: `_plan_blockers`
+refuses a plan that states no claim and one that declares no task, so the two commands that write
+them are answered however they were reached. The one that may actually be left out is `/design`,
+and `dag_trace` then reports the design dimension as unchecked rather than passing it. That is the
+honest shape of the licence, and it is now what the three documents say. Nothing in the code
+moved: the mismatch was the prose claiming a freedom the gate had never granted.
+
+**A stale gate name sat in a sample transcript for two releases, and nothing was looking there.**
+The approval example in both READMEs printed `gate 'build' is ready` for a `rein approve
+acceptance`; `build` stopped being a gate name when the mandate/acceptance pair replaced the
+five-phase chain. No canary refused it, and none would have: `_gate_argument_failures` reads the
+*argument position* of `approve` / `revise` / `changes`, and a transcript is not a command line.
+`check_quoted_gate_names` is the one that reads the other half — every `gate '…'` in the shape
+`rein` prints one, over the same documents — so the next stale transcript fails the lint instead
+of shipping. It tolerates `T-NNN` and `<gate>`, since a crossing gate has no name until a plan
+freezes one.
+
+Two more things the cut had taken with it, both restored: the `policy-check` job needs a
+`runs-on:` (the snippet is the only place an adopter can get that job, and without it the job does
+not start), and `gh stack merge` needs `gh extension install github/gh-stack`, which `rein doctor`
+reports on and no other document in the repository states.
+
 ## [0.9.0] - 2026-09-21
 
 **A minor release because the format moves.** It was cut as 0.8.2, and a patch number would have
