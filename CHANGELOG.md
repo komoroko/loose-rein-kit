@@ -4,6 +4,31 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.9.2] - 2026-09-21
+
+### A tool should be usable without knowing how it is built
+
+0.9.1 cut the arguments out of the READMEs and left the descriptions of the machinery standing.
+Three sections — "Authority to open a gate", "Evidence over the agent's account", "The build
+loop" — told a reader how the loop convinces itself: how a receipt binds a digest, why the blind
+extractor is launched outside the repository, what the three review axes are. That is `AGENTS.md`'s
+subject, and none of it is something a person has to know to install this and run a cycle. They
+are gone, and the parts a reader *acts* on came out of them first — only a human opens a gate and
+there is no `--force` (three lines in "How it works"), and the execution knobs that were narrated
+across two pages of prose are now a table of the six keys in `.rein/config.yaml` a project
+actually sets.
+
+`README.md` 33.3 KB → 24.0 KB (552 → 440 lines), `README.ja.md` 43.6 KB → 30.7 KB (540 → 436
+lines); section count 13 → 11 in both, so `check_readme_parity` still holds them together.
+
+**One thing the cut recovered rather than removed.** `awaiting-evidence` is a state a repository
+reaches on its own — an acceptance criterion marked `external` parks the task there — and the one
+way out is `rein evidence record`. It was named once, inside the section on how evidence is
+judged, which is not where anyone looks while a task is stuck. It is a troubleshooting entry now.
+
+No code moved in this release: it is the two READMEs and the version stamps, so `rein upgrade`
+from 0.9.1 changes nothing a repository runs.
+
 ## [0.9.1] - 2026-09-21
 
 ### The README said more than it knew, and one thing the code refuses
