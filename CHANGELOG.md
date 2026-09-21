@@ -4,6 +4,70 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.9.3] - 2026-09-21
+
+### Six from an adversarial pass over the cut, and the unit that made it look better than it was
+
+An adversarial read of 0.9.2 against the code it describes. Three of the six are the cut removing
+something that had no other home, or narrowing a sentence the code does not narrow; one is a
+figure that flattered the release.
+
+**The sizes in 0.9.2's own entry were measured in KiB and compared against KB.** Every earlier
+figure in this file is decimal — `49864` bytes was recorded as `49.9 KB`, `66409` as `66.4 KB` —
+and 0.9.2 wrote its "after" in KiB while quoting a decimal "before" in the same sentence. The
+reduction read larger than it was. Corrected in place: `24.6 KB` and `31.4 KB`.
+
+**The reasons Windows native is unvalidated had no other home.** 0.9.2 compressed them to "not
+validated — use WSL", and `msvcrt` appears nowhere else in the repository outside `store.py`.
+Worse, `common.py` has been telling readers for several releases to go and look: *"one of the
+reasons the supported-environment table calls Windows native unvalidated"* — a table that never
+existed. It does now, in both READMEs, with the four failure modes spelled out beside it,
+including the one no README had ever carried: a command step that hangs leaves its children
+behind, because there is no `killpg` to reach them. The point a reader needs first is restored
+too — **nothing refuses to start**.
+
+**The release that deleted three sections on the grounds that `AGENTS.md` holds them also
+relabelled `AGENTS.md` as the agent's file.** "The always-true rules live in `AGENTS.md`" had
+become "the rules *the agent itself* follows", in the same commit that sent a reader there for
+the trust story. The pointer now says what that file is for and who it is for.
+
+Three smaller ones. `execution.command_timeout_sec` is in the config table, which had named the
+agent timeout, said "command steps keep their own ceiling", and left the reader without the key
+that sets it. The table's lead no longer implies it is exhaustive or that `rein init` detects
+anything but the quality-gate commands it recognizes — `detect_commands` is best-effort
+test/check detection and nothing more. And the `awaiting-evidence` entry 0.9.2 added names
+`rein evidence show` before `rein evidence record`: a task is stuck *first*, and listing what is
+waited on comes before recording an answer to it.
+
+`README.md` 24.6 KB → 25.6 KB (440 → 459 lines), `README.ja.md` 31.4 KB → 32.6 KB (436 → 452
+lines). The cut gave back a page of what it should not have taken, and no code moved in this
+release either.
+
+## [0.9.2] - 2026-09-21
+
+### A tool should be usable without knowing how it is built
+
+0.9.1 cut the arguments out of the READMEs and left the descriptions of the machinery standing.
+Three sections — "Authority to open a gate", "Evidence over the agent's account", "The build
+loop" — told a reader how the loop convinces itself: how a receipt binds a digest, why the blind
+extractor is launched outside the repository, what the three review axes are. That is `AGENTS.md`'s
+subject, and none of it is something a person has to know to install this and run a cycle. They
+are gone, and the parts a reader *acts* on came out of them first — only a human opens a gate and
+there is no `--force` (three lines in "How it works"), and the execution knobs that were narrated
+across two pages of prose are now a table of the six keys in `.rein/config.yaml` a project
+actually sets.
+
+`README.md` 33.3 KB → 24.6 KB (552 → 440 lines), `README.ja.md` 43.6 KB → 31.4 KB (540 → 436
+lines); section count 13 → 11 in both, so `check_readme_parity` still holds them together.
+
+**One thing the cut recovered rather than removed.** `awaiting-evidence` is a state a repository
+reaches on its own — an acceptance criterion marked `external` parks the task there — and the one
+way out is `rein evidence record`. It was named once, inside the section on how evidence is
+judged, which is not where anyone looks while a task is stuck. It is a troubleshooting entry now.
+
+No code moved in this release: it is the two READMEs and the version stamps, so `rein upgrade`
+from 0.9.1 changes nothing a repository runs.
+
 ## [0.9.1] - 2026-09-21
 
 ### The README said more than it knew, and one thing the code refuses
