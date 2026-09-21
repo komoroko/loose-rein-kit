@@ -8,8 +8,12 @@ produces the evidence; you approve at the phase boundaries — the *gates*.
 The harness is an installed CLI (`rein`). Your repository carries only its state: `.rein/` (the
 SSOT, the lock, the materialized prompts and schema) and `docs/` (the deliverables).
 
-This page is how to set it up and run it. `rein help --all` names every verb and `rein <verb>
---help` gives its arguments; the rules the agent itself follows are in [`AGENTS.md`](AGENTS.md).
+This page is how to set it up and run it: `rein help --all` names every verb and `rein <verb>
+--help` gives its arguments. [`AGENTS.md`](AGENTS.md) is the other half, and it is written to be
+read by a person as much as by an agent — the always-true rules, and the reasoning under them:
+why a gate is where it is, how a claim is judged, why the review is taken from a reader that
+never saw the plan. Go there when you want to know why this is trustworthy rather than how to
+run it.
 
 ## How it works
 
@@ -95,7 +99,18 @@ Six steps. `rein doctor` checks every one of them at any point; when it is green
 session and start with `/req`.
 
 **1. Prerequisites** — a POSIX environment, plus a container runtime (docker or podman) for the
-sandbox. Linux, WSL and macOS are supported. Windows native is **not validated** — use WSL.
+sandbox.
+
+| Environment | |
+|---|---|
+| Linux, WSL | supported |
+| macOS | supported |
+| Windows native | **not validated** |
+
+Windows native is the one to be careful with, because **nothing refuses to start**: file locking
+falls back to `msvcrt`, directory `fsync` is skipped, the control plane a parallel build talks to
+needs a Unix domain socket, and a command step that hangs leaves its children behind because
+there is no `killpg` to reach them. Use WSL.
 
 **2. Install the CLI** so the hooks resolve it on PATH:
 
@@ -265,13 +280,16 @@ never a way to answer: the page it names is read-only unless that browser alread
 
 ## What you can configure
 
-The knobs are in `.rein/config.yaml`; `rein init` fills in what it can detect in an existing repo.
+`.rein/config.yaml` carries every knob, commented where it sits; these are the ones a project
+usually touches. In an existing repo `rein init` fills in the quality-gate commands it recognizes
+from your tooling, and nothing else.
 
 | Key | What it decides |
 |---|---|
 | `quality_gate` | the single definition of done: `test`, then `check`, then a `review` step, then a `smoke` launch for runnable deliverables (set that one `required: true` once yours runs). The commands are your project's own; each step has its own retry budget, and a step can scope itself to `paths:` |
 | `execution.max_parallel` | how many leaf tasks run at once, isolated in `git worktree`s and merged in ascending task order |
-| `execution.agent_timeout_sec` | `0` — no limit — by default: a clock cannot tell a model that is working from one that is stuck. Command steps keep their own ceiling |
+| `execution.agent_timeout_sec` | `0` — no limit — by default: a clock cannot tell a model that is working from one that is stuck |
+| `execution.command_timeout_sec` | the ceiling on one command step, which *does* have a knowable runtime (1800 by default). A hang past it kills the step and everything it started |
 | `execution.max_cost_usd` | unset by default. Bounds the cycle's *measured* spend — what the adapters reported, the figure `rein events --cost` prints — and stops the loop between batches. Nothing degrades to stay under it |
 | `review_policy.repair_rounds` | how many times the reviewer re-reads after an implementer resolves its findings |
 | `guard.paths` | what a pending gate freezes |
@@ -377,8 +395,9 @@ Most of the situations below surface there.
   edit. The reset keeps the handoff so the retry budget is not silently refilled (`--fresh`
   discards it and says so). If the cause is an upstream defect, use `/revise <phase>` instead.
 - **A task sits at `awaiting-evidence`** — one of its acceptance criteria is marked `external`: a
-  staging check, a device, a person. The work is merged and the task waits until somebody records
-  what they saw with `rein evidence record`. That record binds the tree it was made against, so
+  staging check, a device, a person. `rein evidence show` lists every external criterion and
+  whether it has been observed; the work is merged and the task waits until somebody records what
+  they saw with `rein evidence record`. That record binds the tree it was made against, so
   changing the code retires it.
 - **The run stopped and nothing looks wrong** — no blocked task, no escalation, the board
   unchanged. That is a machine failure rather than a task's: a capacity limit, a killed process, a
