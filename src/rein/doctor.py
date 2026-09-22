@@ -502,6 +502,35 @@ def check_receipts(state: models.State | None) -> list[Finding]:
 # --- runtime and sandbox ---------------------------------------------------------
 
 
+def _journal_block(store: store_mod.Store) -> str:
+    """Why an interrupted transaction cannot be finished, or "" when it can.
+
+    `doctor` used to say recovery was automatic whenever a journal existed. When it is not — the
+    log's last record unreadable, or no longer the one the journal's events link onto — that line
+    sends the operator away from the one place they could still act, to wait for a command that
+    will only raise.
+    """
+    try:
+        journal = store.read_journal()
+    except store_mod.StoreError as exc:
+        return str(exc)
+    if journal is None or str(journal.get("phase", "")) != "files_replaced":
+        return ""  # nothing to append: recovery rolls back or just clears the journal
+    payloads = [entry for entry in (journal.get("event_payloads") or []) if isinstance(entry, dict)]
+    if not payloads:
+        return ""
+    try:
+        tail = event_chain.tail_digest(store.repo.events)
+    except event_chain.ChainError as exc:
+        return str(exc)
+    if str(payloads[0].get("prev_event_digest", "")) != tail:
+        return (
+            f"the journal's events link onto a record {store.repo.events} no longer ends with "
+            "(the log moved after the transaction was interrupted)."
+        )
+    return ""
+
+
 def check_runtime(repo: repo_mod.Repo) -> list[Finding]:
     """The runtime directory, its privacy, and any leftovers from an interrupted run."""
     findings: list[Finding] = []
@@ -524,8 +553,16 @@ def check_runtime(repo: repo_mod.Repo) -> list[Finding]:
             findings.append(Finding("FAIL", "runtime", str(exc)))
         store = store_mod.Store(repo)
         if store.journal.exists():
+            blocked = _journal_block(store)
             findings.append(
                 Finding(
+                    "FAIL",
+                    "runtime",
+                    f"a store journal is present and the next command cannot finish it: {blocked} "
+                    "No command that writes can run until that is repaired.",
+                )
+                if blocked
+                else Finding(
                     "WARN",
                     "runtime",
                     "a store journal is present — a transaction was interrupted. The next command recovers it "
@@ -1240,7 +1277,6 @@ _SSOT_MUST_COMMIT: tuple[str, ...] = (
     ".rein/events.ndjson",
     ".rein/rein.lock",
     ".rein/prompts/",
-    ".rein/schema/",
     ".rein/scaffold/",
     "docs/",
 )

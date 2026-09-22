@@ -693,8 +693,6 @@ def check_tracked_artifacts(root: Path, config_text: str) -> list[str]:
 # the .claude/.github wrappers @-import. A fix landing in only one home is the drift.
 _DATA_PARITY: tuple[tuple[str, str], ...] = (
     (".rein/prompts", "prompts"),
-    (".rein/schema", "schema"),
-    (".rein/oci", "oci"),
     ("AGENTS.md", "rules/AGENTS.md"),
     (".claude/commands", "integrations/claude/commands"),
     (".claude/agents", "integrations/claude/agents"),

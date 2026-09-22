@@ -183,7 +183,6 @@ def test_run_init_seeds_a_bare_directory(tmp_path: Path, capsys: pytest.CaptureF
     assert not (tmp_path / ".rein" / "scaffold" / "docs").exists()
     # Materialized artifacts (repo-relative — the wrappers' @-imports depend on these paths).
     assert (tmp_path / ".rein" / "prompts" / "commands" / "req.md").is_file()
-    assert (tmp_path / ".rein" / "schema" / "config.schema.json").is_file()
     assert (tmp_path / ".rein" / "AGENTS.rein.md").is_file()
     # The agent-neutral pointer, and NO agent surfaces (those are opt-in).
     assert "rein-rules" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")

@@ -1129,7 +1129,7 @@ def _derived(repo: repo_mod.Repo, reaches: dict[str, str]) -> None:
     from rein import store as store_mod
 
     with store_mod.Store(repo).transaction() as tx:
-        tx.append("decisions_derived", cycle_id="demo-cycle", subject_ids=sorted(reaches), detail={"reaches": reaches})
+        tx.append("decisions_derived", cycle_id="demo-cycle", detail={"reaches": reaches})
 
 
 def test_a_reach_the_human_walked_back_is_recorded_against_the_criterion(tmp_path: Path) -> None:

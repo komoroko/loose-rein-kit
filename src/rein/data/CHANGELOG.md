@@ -4,6 +4,84 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.9.4] - 2026-09-22
+
+### The writer was exempt from the validator, and four issues came out of it
+
+Three of the four issues filed against 0.9.3 (#73, #74, #75) are one defect seen from three
+distances. `Transaction.write` refuses a document the schema rejects, at staging time.
+`Transaction.append` refused nothing — its docstring said so: *"Chained and sealed at commit, not
+here."* So `rein approve mandate` on a plan with 77 decisions wrote a `decisions_derived` event
+carrying one `subject_ids` entry per decision, against a cap of 64, and the event landed.
+
+What the operator then saw was a repository that reported itself tampered with immediately after a
+human opened a gate. `rein events --verify` failed on the line the approval had just written.
+`rein next` refused to issue a receipt against a damaged log. `rein revise --to mandate` — the
+documented way out — died inside `Store._append_events` for the same reason, after it had already
+replaced the documents, so the state rolled back and the log did not say so. The journal that
+exists to close exactly that window could not run either: `_recover` rolls forward by calling
+`_append_events`, which calls `event_chain.load`, which refuses a damaged chain. Recovery was
+gated on the condition it exists to repair.
+
+And both messages printed the same remedy — *restore it from git* — which in this state would have
+deleted the record of the approval. The advice assumes a human edited the log. It had no case for
+"rein wrote it".
+
+**Events are now chained and validated before any document moves.** `_chain_events` links, seals
+and validates; `_write_events` appends. `_commit` calls them in that order, so everything able to
+refuse a transaction refuses it while the journal is still in `prepared` — the one phase recovery
+rolls *back*. A rejected event costs nothing now; rejected after the writes, it left the state
+moved with nothing recorded, which is the precise condition `Transaction`'s docstring claims to
+make impossible.
+
+**Recovery checks the join point, not the whole history.** `event_chain.tail_digest` reads the
+log's last record only, and `_write_events` verifies that the events link onto it. A defect in a
+line the append does not touch no longer decides whether an interrupted transaction can be
+finished. `event_chain.load` keeps refusing a damaged chain for every ordinary caller, which is
+right: what was wrong was routing the repair through it.
+
+**`subject_ids` had two upper bounds that disagreed.** `strict_yaml.EVENT_LIMITS` already caps a
+log line at 64 KiB and any collection in it at 512 entries; `event.schema.json` capped this one
+field at 64. It is written by rein, never by a user, and its length is a function of the repository
+it describes — a plan, a lens selection, the gates a revision resets. The second bound is gone and
+the field says why in its own description.
+
+**`decisions_derived` no longer enumerates the decisions.** `detail.reaches` carries the same ids
+as keys, `event_chain.derived_reaches` reads that, and nothing anywhere read the id list — it was
+a 77-entry duplicate of the payload beside it, rendered into every `rein events` listing. The
+subject of that event is the cycle, which `cycle_id` already names.
+
+### Two `.rein/` copies that were installed, locked, guarded, and read by nobody (#76)
+
+`rein sync` materialized `data/schema/` into `.rein/schema/` and `data/oci/` into `.rein/oci/`.
+Validation reads the packaged schema (`models.schema` → `data.read_text`), and `rein oci build`
+builds the packaged context. Nothing read either copy. `Repo.schema_dir` was deleted several
+releases ago for this exact reason — *"it pointed at `.rein/schema/` while validation reads the
+packaged copy"* — and the pointer went while the files stayed.
+
+Every signal around them said otherwise. `rein.lock` carried a hash per file. `rein guard` refused
+an agent's edit with *"bound by the receipt the human signed — changing it now would leave the
+approval covering bytes nobody read"*, which was true of the copy in a sense it did not intend.
+The reporter edited `maxItems` in `.rein/schema/event.schema.json` to get past #73, re-ran
+`rein events --verify`, and got the identical failure; the same shape cost a `docker history` to
+catch on the OCI side, where an edited Containerfile reported a successful build of an image that
+did not contain the edit.
+
+**Neither is materialized any more**, and `sync` removes the copies from repositories that already
+have them. `.rein/oci/` remains what the scaffolded `config.yaml` already documented — a place a
+*user* may put a Containerfile, named by a profile's `dockerfile:` — and stays frozen by the
+mandate, because that one is read.
+
+### `rein doctor` said recovery was automatic when no command could run
+
+The journal WARN was unconditional: *"a store journal is present — the next command recovers it
+automatically."* In the state above, every next command raised instead. A check that tells the
+operator the problem is self-healing, when it is not, sends them away from the one place they
+could still act. It now reports FAIL, and names what blocks the recovery, whenever the journal's
+events cannot be appended. `Store.read_journal` is public for it: whether an interrupted
+transaction can still be finished is a question about that file, and answering it by assumption
+was the bug.
+
 ## [0.9.3] - 2026-09-21
 
 ### Six from an adversarial pass over the cut, and the unit that made it look better than it was

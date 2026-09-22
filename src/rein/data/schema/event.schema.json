@@ -91,8 +91,8 @@
       "maxLength": 200
     },
     "subject_ids": {
+      "description": "What the event is about. Written by rein, never by a user, and bounded by the repository it describes — the count is capped once, by the parser's per-line limits (strict_yaml.EVENT_LIMITS), not a second time here with a different number.",
       "type": "array",
-      "maxItems": 64,
       "items": {
         "type": "string",
         "maxLength": 64

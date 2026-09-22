@@ -239,7 +239,7 @@ def test_only_a_forced_sync_gets_past_the_lock_check(chdir_tmp: Path, capsys: py
     assert cli.main(["sync", "--force"]) == 0
     printed = capsys.readouterr()
     assert "is in format" not in printed.err, "the dispatcher let it through"
-    assert (chdir_tmp / ".rein" / "schema" / "state.schema.json").is_file(), "and it did the work"
+    assert (chdir_tmp / ".rein" / "AGENTS.rein.md").is_file(), "and it did the work"
 
 
 def test_a_lock_the_head_wrote_cannot_stop_the_base_side_verifier(

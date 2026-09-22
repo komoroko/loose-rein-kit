@@ -199,6 +199,37 @@ def load(path: str | Path) -> list[models.Event]:
     return events
 
 
+def tail_digest(path: str | Path) -> str:
+    """The `event_digest` of the log's last record — what the next append must link onto.
+
+    Reads only the final line, so a defect *earlier* in the chain does not decide whether an
+    interrupted transaction can be finished. That distinction is the point: recovery is the one
+    operation whose job is to get a repository out of a bad state, and routing it through
+    :func:`load` made it refuse exactly when it was needed. The join point is all an append
+    depends on, so the join point is all it checks.
+
+    An unreadable final line still raises: appending onto bytes nobody can parse would bury the
+    torn record in the middle of the chain instead of reporting it.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        raise ChainError(f"{path}: cannot read the audit log: {exc}") from None
+    lines = text.splitlines()
+    if not lines:
+        return ""
+    try:
+        raw = strict_yaml.load_json_mapping(lines[-1], limits=strict_yaml.EVENT_LIMITS, what=f"event line {len(lines)}")
+    except strict_yaml.StrictParseError as exc:
+        raise ChainError(f"{path}: the log's last record is unreadable ({exc}) — run `rein doctor`") from None
+    problems = models.schema_errors(raw, "event")
+    if problems:
+        raise ChainError(f"{path}: the log's last record is invalid ({'; '.join(problems)}) — run `rein doctor`")
+    return models.Event.from_mapping(raw).event_digest
+
+
 def verify_root(events: Sequence[models.Event], expected_root: str) -> bool:
     """True when `events` hash to `expected_root` — how a signed checkpoint is re-checked."""
     return digests.matches(chain_root(events), expected_root)

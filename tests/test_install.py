@@ -135,6 +135,34 @@ def test_sync_refreshes_a_pristine_file_deleted_locally(repo: repo_mod.Repo) -> 
     assert req.is_file()
 
 
+def test_nothing_materializes_a_copy_no_code_reads(repo: repo_mod.Repo) -> None:
+    """`.rein/schema/` and the packaged `.rein/oci/` copies were installed, hashed in the lock and
+    defended by `rein guard` as receipt-bound, while validation read the packaged schema and
+    `rein oci build` built the packaged context. Editing one changed nothing and said nothing —
+    every signal around the file claimed otherwise. A copy nothing reads is not shipped."""
+    assert install.sync(repo) == 0
+    assert not repo.path(".rein/schema").exists()
+    recorded = install.materialized_record(repo)
+    assert not [rel for rel in recorded if rel.startswith(".rein/schema/") or rel.startswith(".rein/oci/")]
+    assert models.schema("event")["properties"]["subject_ids"], "validation still reads the packaged schema"
+
+
+def test_sync_removes_a_schema_copy_an_earlier_release_installed(repo: repo_mod.Repo) -> None:
+    """The upgrade path: a repository that crossed this release has the copies taken away rather
+    than left behind belonging to no release."""
+    assert install.sync(repo) == 0
+    stale = repo.path(".rein/schema/event.schema.json")
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}\n", encoding="utf-8")
+    data = lock_mod.read(repo.lock)
+    assert data is not None
+    data["prompts"]["files"]["schema/event.schema.json"] = lock_mod.norm_hash(stale.read_bytes())
+    lock_mod.write(repo.lock, data)
+
+    assert install.sync(repo) == 0
+    assert not stale.exists()
+
+
 def test_sync_prunes_a_lock_entry_whose_file_left_the_payload(repo: repo_mod.Repo) -> None:
     """A schema/prompt dropped from a later release must not haunt the lock forever."""
     assert install.sync(repo) == 0

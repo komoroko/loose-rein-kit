@@ -118,7 +118,7 @@ def test_the_registration_rule_does_not_block_committing_it(tmp_path: Path) -> N
         ".rein/plan.yaml",
         ".rein/config.yaml",
         ".rein/prompts/commands/build.md",
-        ".rein/schema/plan.schema.json",
+        ".rein/oci/custom/Containerfile",
     ],
 )
 def test_a_frozen_plan_pins_its_artifacts(tmp_path: Path, rel: str) -> None:

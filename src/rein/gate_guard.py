@@ -108,7 +108,8 @@ FROZEN_AFTER_GATE_THREE: tuple[str, ...] = (
     ".rein/plan.yaml",
     CONFIG_PATH,
     ".rein/prompts/",
-    ".rein/schema/",
+    # A Containerfile a profile's `dockerfile:` names — an input the evidence was produced in.
+    # Not the packaged ones: those are no longer copied here, because nothing read the copy.
     ".rein/oci/",
 )
 
