@@ -819,7 +819,6 @@ def record_approval(
                     "decisions_derived",
                     cycle_id=state.cycle_id,
                     actor="local-confirmation",
-                    subject_ids=sorted(reaches),
                     detail={"reaches": reaches},
                 )
 

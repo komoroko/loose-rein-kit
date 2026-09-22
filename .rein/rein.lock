@@ -2,13 +2,12 @@
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
 format: rein-grounded-v6
-tool_version: 0.9.3
+tool_version: 0.9.4
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.9.3
+  version: 0.9.4
   files:
     AGENTS.rein.md: sha256:53dfb821a7410cc4f6c4b45dbf40867ee48d890d67e8f50d240ec7679efa79ad
-    oci/python/Containerfile: sha256:9e311e179f5794659968fe7bb0d14ef9831c28c818afd3d10f3abe3b87b7afd7
     prompts/agents/adversarial-reviewer.md: sha256:f9efecb651e7d72d7ee991457c1f3644f618487df15d9ddd9f6dd5a4c2d3f349
     prompts/agents/architect.md: sha256:2f5d25fbbb939eab00a26db15241c1418283f7c627fb3c639ede199f4a4bdf8f
     prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64
@@ -22,15 +21,9 @@ prompts:
     prompts/commands/tasks.md: sha256:a55e9f7ca47b47aa1dbf6c73286025830a1edac513b3d02b30f743dfab9a240d
     prompts/commands/verify.md: sha256:c64d82b267e0e988ee98dfd6cc5a3063f7195ff7a08a55e2b4c43ac2d26d258d
     prompts/rules/gate-workflow.md: sha256:23dd5793f0a3039cbd4b9f68d2b8215574b995e15eb1c97341802884af6f4465
-    schema/config.schema.json: sha256:dffd17877041781834d90e3b4e1baed600bc4fa33ba1e0dbef7cac25efa82876
-    schema/event.schema.json: sha256:78badffd296cdea1cb68c22b90b4bdbdbe00f5ece7e721d6b1c84f6c3136c77a
-    schema/plan.schema.json: sha256:fbb4eb02c4f2adf2af1cd5d0a9c16424e99aff44d4b87da6e1bb9639dd192c62
-    schema/review.schema.json: sha256:4c85846abac24fa88c5108a33d839c1bda6ee741c8b2a8e83e0d79bd50840540
-    schema/state.schema.json: sha256:e0a94002f47167941ebb27fe6b6288e5ab2aaf95f15a7bba817d764ce79aea74
-    oci/agent/Containerfile: sha256:724870d2f55ce6903144039a6f9f9ad2587e7837e76705ef4049fa62a26599ee
 integrations:
   claude:
-    version: 0.9.3
+    version: 0.9.4
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:a4fd4c68f39502bad42327168e79fbb43402d7ddff17788237ffb0d32eab4d8f
@@ -50,7 +43,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.9.3
+    version: 0.9.4
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:1faced739cd80c70a96c30fdf3fa7bb4992ccaffdcad2a2e16277c09f0859c5e
@@ -68,7 +61,7 @@ integrations:
       .codex/hooks.json: sha256:7b64f50c947287ac882d04f0816a79df4d8c7c6b3060137cfb9014d274af0909
       .codex/rein.md: sha256:1d75d677e7b6039c1d9852e45c4d56b06f9011df5be4063e782d320c34e54f96
   copilot:
-    version: 0.9.3
+    version: 0.9.4
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:7007cdf39b9475bbb9875091056f792d14b0c9d87bf4e9f451f84d3d53029199
@@ -86,7 +79,7 @@ integrations:
       .github/prompts/tasks.prompt.md: sha256:090fcd0790776db37ce0839676a580c1592a97f5c352b9eb60507e9be2a6500e
       .github/prompts/verify.prompt.md: sha256:715158e2e17ebe65f6969fef87a7d7b326a90f04f9d4a2452302df56801157fd
   gemini:
-    version: 0.9.3
+    version: 0.9.4
     installed_at: '2026-09-03'
     files:
       .gemini/commands/build.toml: sha256:77d029397582376f3f8bba02f3acd3064bfda91cf1a63e2221765e64705be7b8
@@ -116,4 +109,4 @@ integrations:
             command: rein guard
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-09-21'
+updated_at: '2026-09-22'

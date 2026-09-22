@@ -153,7 +153,7 @@ def test_a_lock_hash_the_payload_no_longer_has_is_reported(tmp_path: Path) -> No
     assert install.sync(repo) == 0  # the record only exists once something materialized the payload
     recorded = {k.removeprefix(".rein/"): v for k, v in install.materialized_record(repo).items()}
     assert recorded, "seed_repo is expected to leave a populated materialized record"
-    victim = "schema/event.schema.json"
+    victim = "prompts/commands/build.md"
     _materialized_lock(tmp_path, {**recorded, victim: "sha256:" + "0" * 64})
 
     results = doctor.check_materialized(repo)
@@ -584,6 +584,53 @@ def test_a_leftover_journal_is_reported(tmp_path: Path) -> None:
     store_mod.ensure_private_dir(store.runtime)
     store._write_journal({"tx_id": "abc", "phase": "prepared"})
     assert any("transaction was interrupted" in f.message for f in doctor.check_runtime(repo))
+
+
+def test_a_journal_no_command_can_finish_is_a_failure_not_a_reassurance(tmp_path: Path) -> None:
+    """Telling the operator that the next command recovers it, when every command raises instead,
+    sends them away from the one place they could still act. The state is reachable whenever the
+    log's last record cannot be read — the join point an append has to link onto."""
+    from rein import event_chain
+    from rein import store as store_mod
+
+    repo = healthy(tmp_path)
+    store = store_mod.Store(repo)
+    store_mod.ensure_private_dir(store.runtime)
+    pending = event_chain.link(
+        None,
+        event_chain.make("cycle_closed", "demo-cycle"),
+    )
+    store._write_journal({"tx_id": pending.tx_id, "phase": "files_replaced", "event_payloads": [pending.to_mapping()]})
+    repo.events.write_text("{not json\n", encoding="utf-8")
+
+    results = doctor.check_runtime(repo)
+    assert any(f.level == "FAIL" and "cannot finish it" in f.message for f in results)
+    assert not any("recovers it" in f.message for f in results)
+
+
+def test_doctor_refuses_on_exactly_what_recovery_refuses_on(tmp_path: Path) -> None:
+    """One predicate, asked twice. `doctor` re-derived a subset of the conditions and reported the
+    reassuring line for a journal holding an event the log cannot hold — which every command then
+    raised on. A diagnosis written twice eventually disagrees with the behaviour it describes."""
+    from rein import event_chain
+    from rein import store as store_mod
+
+    repo = healthy(tmp_path)
+    store = store_mod.Store(repo)
+    store_mod.ensure_private_dir(store.runtime)
+    # Within the schema, over `EVENT_LIMITS`: no append can ever land it.
+    pending = event_chain.make("task_failed", "demo-cycle", subject_ids=["T1"], detail={"stderr": "x" * 9000})
+    store._write_journal({"tx_id": pending.tx_id, "phase": "files_replaced", "event_payloads": [pending.to_mapping()]})
+
+    blocker = store.journal_blocker()
+    assert blocker, "recovery refuses this journal; doctor must say so"
+    with pytest.raises(models.DocumentError):
+        store._recover()
+
+    results = doctor.check_runtime(repo)
+    assert any(f.level == "FAIL" and "cannot finish it" in f.message for f in results)
+    assert any(str(store.journal) in f.message for f in results), "the operator is not told where the record is"
+    assert not any("recovers it" in f.message for f in results)
 
 
 # --- gates and the traceability thread -----------------------------------------

@@ -736,7 +736,6 @@ def _select(repo: repo_mod.Repo, library: Sequence[lenses.Lens], stage: str, tas
                     tx.append(
                         "decisions_derived",
                         cycle_id=cycle_id,
-                        subject_ids=sorted(reaches),
                         detail={"reaches": reaches},
                     )
             if lens_changed:

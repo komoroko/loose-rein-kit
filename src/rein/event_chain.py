@@ -118,6 +118,29 @@ def dumps(event: models.Event) -> str:
     return digests.canonical(event.to_mapping()).decode("utf-8")
 
 
+def line_for(event: models.Event) -> str:
+    """The NDJSON line `event` becomes — raising unless the log's own reader accepts it.
+
+    Serialize, then read the bytes back the way :func:`scan` will: the parser's per-line limits
+    *and* the event schema, in that order. One function, so "what may be written" and "what may be
+    read" cannot answer differently. They did: the writer checked the schema alone, so an event
+    within the schema but over `EVENT_LIMITS` — a detail scalar past 8 KiB, a nested collection
+    past 512 entries — was appended and then refused on the next read, reporting a repository
+    nobody had touched as tampered with. A second bound nobody enforced at write time is not a
+    bound; it is the same defect with a larger number.
+    """
+    line = dumps(event)
+    what = f"events.ndjson ({event.event!r})"
+    try:
+        raw = strict_yaml.load_json_mapping(line, limits=strict_yaml.EVENT_LIMITS, what="the event")
+    except strict_yaml.StrictParseError as exc:
+        raise models.DocumentError(what, [str(exc)]) from None
+    problems = models.schema_errors(raw, "event")
+    if problems:
+        raise models.DocumentError(what, problems)
+    return line
+
+
 def scan(path: str | Path) -> tuple[list[models.Event], list[ChainDefect]]:
     """Read the log, returning what parsed and every defect found. Never raises on damage.
 
@@ -199,6 +222,37 @@ def load(path: str | Path) -> list[models.Event]:
     return events
 
 
+def tail_event(path: str | Path) -> models.Event | None:
+    """The log's last record — what the next append links onto — or None when the log is empty.
+
+    Only the final line is *parsed*. That is the distinction that matters: a defect earlier in the
+    chain does not decide whether an interrupted transaction can be finished. Recovery is the one
+    operation whose job is to get a repository out of a bad state, and routing it through
+    :func:`load` made it refuse exactly when it was needed. (The file itself is read whole, as
+    :func:`load` reads it; nothing here promises otherwise.)
+
+    An unreadable final line still raises: appending onto bytes nobody can parse would bury the
+    torn record in the middle of the chain instead of reporting it.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ChainError(f"{path}: cannot read the audit log: {exc}") from None
+    lines = text.splitlines()
+    if not lines:
+        return None
+    try:
+        raw = strict_yaml.load_json_mapping(lines[-1], limits=strict_yaml.EVENT_LIMITS, what=f"event line {len(lines)}")
+    except strict_yaml.StrictParseError as exc:
+        raise ChainError(f"{path}: the log's last record is unreadable ({exc}) — run `rein doctor`") from None
+    problems = models.schema_errors(raw, "event")
+    if problems:
+        raise ChainError(f"{path}: the log's last record is invalid ({'; '.join(problems)}) — run `rein doctor`")
+    return models.Event.from_mapping(raw)
+
+
 def verify_root(events: Sequence[models.Event], expected_root: str) -> bool:
     """True when `events` hash to `expected_root` — how a signed checkpoint is re-checked."""
     return digests.matches(chain_root(events), expected_root)
@@ -207,14 +261,18 @@ def verify_root(events: Sequence[models.Event], expected_root: str) -> bool:
 def append_lines(path: str | Path, events: Iterable[models.Event]) -> None:
     """Append sealed events to the log. Caller holds the store lock; see :mod:`rein.store`.
 
+    Every line goes through :func:`line_for`, so nothing reaches the file that the log's own
+    reader would refuse.
+
     Deliberately not public API for command code: an event appended outside a store
     transaction is an event with no corresponding state change (or vice versa).
     """
+    lines = [line_for(event) for event in events]
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as handle:
-        for event in events:
-            handle.write(dumps(event) + "\n")
+        for line in lines:
+            handle.write(line + "\n")
         handle.flush()
         os.fsync(handle.fileno())
 

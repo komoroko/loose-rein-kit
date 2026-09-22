@@ -4,8 +4,8 @@ The harness ships everything non-code inside the wheel (see data.py); a reposito
 *materializations* of it, each tracked by a content hash in `.rein/rein.lock`:
 
   sync       — (re)write the shared artifacts every agent reads from the repo: the prompt
-               bodies (`.rein/prompts/`), the JSON schemas (`.rein/schema/`), and
-               the rules body (`.rein/AGENTS.rein.md`). They must live in the repo
+               bodies (`.rein/prompts/`) and the rules body (`.rein/AGENTS.rein.md`).
+               They must live in the repo
                because Claude Code's `@`-imports and Copilot's prompt files can only reference
                repo-relative paths. Pristine files (on-disk hash == lock hash) are refreshed;
                locally modified ones are skipped and listed (--force overrides); --check
@@ -56,12 +56,18 @@ AGENTS_MARKER_END = "<!-- /rein-rules -->"
 REIN_RULES_PATH = ".rein/AGENTS.rein.md"
 
 # What sync materializes: data payload prefix (or file) → repo-relative destination.
+#
+# Only what something in the repository actually reads. `schema/` and `oci/` used to be here and
+# were read by nobody: validation loads the packaged schema (`models.schema`) and `rein oci build`
+# builds the packaged context, while the copies were hashed in the lock, defended by `rein guard`
+# as receipt-bound, and named after the thing they appeared to configure. Editing one changed
+# nothing and said nothing — the guard even refused the edit on the grounds that the approval
+# covered bytes nobody read, which was true of the copy in a way it did not mean. A repository
+# file that decides nothing is worse than an absent one, because every signal around it claims
+# otherwise. `.rein/oci/` remains a place a *user* may put a Containerfile, named by a profile's
+# `dockerfile:`; that one is read, which is the whole difference.
 MATERIALIZED: tuple[tuple[str, str], ...] = (
     ("prompts/", ".rein/prompts/"),
-    ("schema/", ".rein/schema/"),
-    # The Containerfiles are materialized so the sandbox a review ran in is reviewable in the
-    # repository, not only inside the wheel that built it.
-    ("oci/", ".rein/oci/"),
     ("rules/AGENTS.md", ".rein/AGENTS.rein.md"),
 )
 

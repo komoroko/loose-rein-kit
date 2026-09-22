@@ -66,7 +66,7 @@ test:
 template-lint:
 	uv run --frozen python scripts/template_lint.py
 
-# The materialized .rein/prompts|schema|rules must match the packaged payload.
+# The materialized .rein/prompts and .rein/AGENTS.rein.md must match the packaged payload.
 sync-check:
 	uv run --frozen rein sync --check
 

@@ -430,7 +430,7 @@ never overwritten. The orchestration code lives in the installed package, not in
 | `.rein/events.ndjson` | the hash-chained audit log. Every launch records what the provider billed, so `rein events --cost` answers where a cycle's tokens went, by role |
 | `.rein/config.yaml` | the deterministic-execution knobs and the single DoD (`quality_gate`) |
 | `.rein/rein.lock` | the document format, the tool version and source, and a content hash per installed file |
-| `.rein/schema/`, `.rein/prompts/` | JSON Schemas for the SSOT; the phase procedures, role definitions and rules modules every agent reads — both materialized |
+| `.rein/prompts/` | The phase procedures, role definitions and rules modules every agent reads — materialized from the package |
 | `AGENTS.md`, `CLAUDE.md` | the agent-neutral operating rules, and the Claude Code capability mapping that imports them |
 | `.claude/`, `.github/` | per-agent entry points and gate-guard hook registration, opt-in via `rein install` |
 | `docs/` | the phase deliverables, the speculative work log, and the retrospective |

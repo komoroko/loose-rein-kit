@@ -524,8 +524,16 @@ def check_runtime(repo: repo_mod.Repo) -> list[Finding]:
             findings.append(Finding("FAIL", "runtime", str(exc)))
         store = store_mod.Store(repo)
         if store.journal.exists():
+            blocked = store.journal_blocker()
             findings.append(
                 Finding(
+                    "FAIL",
+                    "runtime",
+                    f"a store journal is present and the next command cannot finish it: {blocked} "
+                    "No command that writes can run until that is repaired.",
+                )
+                if blocked
+                else Finding(
                     "WARN",
                     "runtime",
                     "a store journal is present — a transaction was interrupted. The next command recovers it "
@@ -1240,7 +1248,6 @@ _SSOT_MUST_COMMIT: tuple[str, ...] = (
     ".rein/events.ndjson",
     ".rein/rein.lock",
     ".rein/prompts/",
-    ".rein/schema/",
     ".rein/scaffold/",
     "docs/",
 )
