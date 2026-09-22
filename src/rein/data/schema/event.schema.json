@@ -91,7 +91,7 @@
       "maxLength": 200
     },
     "subject_ids": {
-      "description": "What the event is about. Written by rein, never by a user, and bounded by the repository it describes — the count is capped once, by the parser's per-line limits (strict_yaml.EVENT_LIMITS), not a second time here with a different number.",
+      "description": "What the event is about. Written by rein, never by a user, and bounded by the repository it describes — the count is capped once, by the per-line limits the log is read with (strict_yaml.EVENT_LIMITS), which event_chain.line_for applies before the line is written. Not a second time here with a different number.",
       "type": "array",
       "items": {
         "type": "string",

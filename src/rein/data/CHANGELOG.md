@@ -27,29 +27,43 @@ And both messages printed the same remedy — *restore it from git* — which in
 deleted the record of the approval. The advice assumes a human edited the log. It had no case for
 "rein wrote it".
 
-**Events are now chained and validated before any document moves.** `_chain_events` links, seals
-and validates; `_write_events` appends. `_commit` calls them in that order, so everything able to
-refuse a transaction refuses it while the journal is still in `prepared` — the one phase recovery
-rolls *back*. A rejected event costs nothing now; rejected after the writes, it left the state
-moved with nothing recorded, which is the precise condition `Transaction`'s docstring claims to
-make impossible.
+**One definition of a line the log can hold.** `event_chain.line_for` serializes the event and
+reads the bytes back the way `scan` will — the parser's per-line limits *and* the schema — and
+`append_lines` writes only what it returns. The writer used to check the schema alone, so an event
+within the schema and over `EVENT_LIMITS` (a `detail` scalar past 8192 characters, a nested
+collection past 512 entries) was still appended and still refused on the next read. Two validators
+that answer differently is the defect; the fix is one function, not a second list of bounds.
 
-**Recovery checks the join point, not the whole history.** `event_chain.tail_digest` reads the
-log's last record only, and `_write_events` verifies that the events link onto it. A defect in a
-line the append does not touch no longer decides whether an interrupted transaction can be
-finished. `event_chain.load` keeps refusing a damaged chain for every ordinary caller, which is
-right: what was wrong was routing the repair through it.
+**Nothing moves before that refusal.** `_precheck_events` links, seals and validates against the
+whole verified chain; `_write_events` links onto the log's last record and appends. `_commit` calls
+them either side of the writes, so everything able to refuse a transaction refuses it while the
+journal is still in `prepared` — the one phase recovery rolls *back*. A rejected event costs
+nothing now; rejected after the writes, it left the state moved with nothing recorded, which is the
+precise condition `Transaction`'s docstring claims to make impossible.
+
+**The journal records intent; the chain is derived at the append.** `seq`, `prev_event_digest` and
+`event_digest` are a function of the log at the moment an event lands and of nothing else, so
+`_write_events` computes them from `event_chain.tail_event` — the log's last record, the only line
+it parses. A defect in a line the append does not touch no longer decides whether an interrupted
+transaction can be finished, and neither does a log that moved while the repository was down: the
+events link onto wherever it now ends. Storing the chain in the journal instead would gate recovery
+on the log still ending exactly where it did at the interruption — a condition no operator can
+restore, which a journal written by an earlier release could never satisfy, and which would leave
+the documents moved and the event unrecorded for good. `event_chain.load` keeps refusing a damaged
+chain for every ordinary caller, which is right: what was wrong was routing the repair through it.
 
 **`subject_ids` had two upper bounds that disagreed.** `strict_yaml.EVENT_LIMITS` already caps a
 log line at 64 KiB and any collection in it at 512 entries; `event.schema.json` capped this one
 field at 64. It is written by rein, never by a user, and its length is a function of the repository
-it describes — a plan, a lens selection, the gates a revision resets. The second bound is gone and
-the field says why in its own description.
+it describes — a plan, a lens selection, the gates a revision resets. The second bound is gone, the
+field says why in its own description, and the remaining one is now enforced where the event is
+written rather than only where it is read.
 
 **`decisions_derived` no longer enumerates the decisions.** `detail.reaches` carries the same ids
-as keys, `event_chain.derived_reaches` reads that, and nothing anywhere read the id list — it was
-a 77-entry duplicate of the payload beside it, rendered into every `rein events` listing. The
-subject of that event is the cycle, which `cycle_id` already names.
+as keys and `event_chain.derived_reaches` reads that. No decision anywhere read the id list; the
+one thing that did was the `rein events` table, which put a plan-sized list of ids into a column
+meant to name what the event is about. That column now reads `-` for this event, and what the event
+measured is in `detail`, where the reader already looks.
 
 ### Two `.rein/` copies that were installed, locked, guarded, and read by nobody (#76)
 
@@ -77,10 +91,14 @@ mandate, because that one is read.
 The journal WARN was unconditional: *"a store journal is present — the next command recovers it
 automatically."* In the state above, every next command raised instead. A check that tells the
 operator the problem is self-healing, when it is not, sends them away from the one place they
-could still act. It now reports FAIL, and names what blocks the recovery, whenever the journal's
-events cannot be appended. `Store.read_journal` is public for it: whether an interrupted
-transaction can still be finished is a question about that file, and answering it by assumption
-was the bug.
+could still act. It now reports FAIL whenever the journal's events cannot be appended, names the
+blocker, and names the file the unrecorded event is still sitting in — because "repair it" is not
+an instruction unless it says where.
+
+It asks `Store.journal_blocker`, which is the same append `_recover` performs, run without writing.
+`doctor` first re-derived a subset of the conditions itself and so reported the reassuring line for
+a journal holding an event no append could land. A diagnosis written twice eventually disagrees
+with the behaviour it describes.
 
 ## [0.9.3] - 2026-09-21
 

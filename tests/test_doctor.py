@@ -608,6 +608,31 @@ def test_a_journal_no_command_can_finish_is_a_failure_not_a_reassurance(tmp_path
     assert not any("recovers it" in f.message for f in results)
 
 
+def test_doctor_refuses_on_exactly_what_recovery_refuses_on(tmp_path: Path) -> None:
+    """One predicate, asked twice. `doctor` re-derived a subset of the conditions and reported the
+    reassuring line for a journal holding an event the log cannot hold — which every command then
+    raised on. A diagnosis written twice eventually disagrees with the behaviour it describes."""
+    from rein import event_chain
+    from rein import store as store_mod
+
+    repo = healthy(tmp_path)
+    store = store_mod.Store(repo)
+    store_mod.ensure_private_dir(store.runtime)
+    # Within the schema, over `EVENT_LIMITS`: no append can ever land it.
+    pending = event_chain.make("task_failed", "demo-cycle", subject_ids=["T1"], detail={"stderr": "x" * 9000})
+    store._write_journal({"tx_id": pending.tx_id, "phase": "files_replaced", "event_payloads": [pending.to_mapping()]})
+
+    blocker = store.journal_blocker()
+    assert blocker, "recovery refuses this journal; doctor must say so"
+    with pytest.raises(models.DocumentError):
+        store._recover()
+
+    results = doctor.check_runtime(repo)
+    assert any(f.level == "FAIL" and "cannot finish it" in f.message for f in results)
+    assert any(str(store.journal) in f.message for f in results), "the operator is not told where the record is"
+    assert not any("recovers it" in f.message for f in results)
+
+
 # --- gates and the traceability thread -----------------------------------------
 
 

@@ -347,19 +347,16 @@ def test_recovery_rolls_a_files_replaced_transaction_forward(repo: repo_mod.Repo
     store.ensure_private_dir(st.runtime)
     store.atomic_write(repo.state, store.dump_yaml(STATE), mode=0o644)
 
-    # Chained, as a journal written by `_commit` holds it: the events are linked and validated
-    # before any document moves, so what recovery finds is ready to append.
-    pending = event_chain.link(
-        None,
-        models.Event(
-            seq=0,
-            id="11111111-1111-4111-8111-111111111111",
-            tx_id="22222222-2222-4222-8222-222222222222",
-            ts="2026-07-23T18:10:00+09:00",
-            event="gate_approved",
-            cycle_id="demo-cycle",
-            actor="alice",
-        ),
+    # As `_commit` writes it: the transaction's intent, with no chain fields. Those belong to
+    # the log and are derived when the append happens.
+    pending = models.Event(
+        seq=0,
+        id="11111111-1111-4111-8111-111111111111",
+        tx_id="22222222-2222-4222-8222-222222222222",
+        ts="2026-07-23T18:10:00+09:00",
+        event="gate_approved",
+        cycle_id="demo-cycle",
+        actor="alice",
     )
     st._write_journal({"tx_id": pending.tx_id, "phase": "files_replaced", "event_payloads": [pending.to_mapping()]})
 
@@ -418,16 +415,13 @@ def test_recovery_finishes_although_an_earlier_record_is_damaged(repo: repo_mod.
         tx.append("task_completed", cycle_id="demo-cycle")
     lines = repo.events.read_text(encoding="utf-8").splitlines()
 
-    pending = event_chain.link(
-        event_chain.scan(repo.events)[0][-1],
-        models.Event(
-            seq=0,
-            id="33333333-3333-4333-8333-333333333333",
-            tx_id="44444444-4444-4444-8444-444444444444",
-            ts="2026-07-23T18:10:00+09:00",
-            event="cycle_closed",
-            cycle_id="demo-cycle",
-        ),
+    pending = models.Event(
+        seq=0,
+        id="33333333-3333-4333-8333-333333333333",
+        tx_id="44444444-4444-4444-8444-444444444444",
+        ts="2026-07-23T18:10:00+09:00",
+        event="cycle_closed",
+        cycle_id="demo-cycle",
     )
     st._write_journal({"tx_id": pending.tx_id, "phase": "files_replaced", "event_payloads": [pending.to_mapping()]})
     lines[0] = lines[0].replace('"actor":""', '"actor":"tampered"')  # digest no longer matches: a defect
@@ -440,27 +434,57 @@ def test_recovery_finishes_although_an_earlier_record_is_damaged(repo: repo_mod.
     assert not st.journal.exists()
 
 
-def test_recovery_refuses_when_the_log_no_longer_ends_where_it_linked(repo: repo_mod.Repo) -> None:
-    """The join point is checked, so a journal whose events belong to a different log is refused
-    rather than appended into the middle of someone else's chain."""
+def test_recovery_links_onto_wherever_the_log_now_ends(repo: repo_mod.Repo) -> None:
+    """The join point is read at the append, not demanded of the operator.
+
+    Requiring the log to still end where it did when the transaction was interrupted made recovery
+    depend on a condition nobody can restore — and one a journal written by an earlier release, which
+    stored its events unchained, could never satisfy. The repository was then permanently stuck with
+    its documents moved and its event unrecorded, which is the state recovery exists to leave.
+    """
     st = store.Store(repo)
     with st.transaction() as tx:
         tx.append("gate_approved", cycle_id="demo-cycle")
-    orphan = event_chain.link(
-        None,
-        models.Event(
-            seq=0,
-            id="55555555-5555-4555-8555-555555555555",
-            tx_id="66666666-6666-4666-8666-666666666666",
-            ts="2026-07-23T18:10:00+09:00",
-            event="cycle_closed",
-            cycle_id="demo-cycle",
-        ),
+    pending = models.Event(
+        seq=0,
+        id="55555555-5555-4555-8555-555555555555",
+        tx_id="66666666-6666-4666-8666-666666666666",
+        ts="2026-07-23T18:10:00+09:00",
+        event="cycle_closed",
+        cycle_id="demo-cycle",
     )
-    st._write_journal({"tx_id": orphan.tx_id, "phase": "files_replaced", "event_payloads": [orphan.to_mapping()]})
+    # The log moved after the interruption: another record is now its last one.
+    st._write_events([event_chain.make("task_completed", "demo-cycle")])
+    st._write_journal({"tx_id": pending.tx_id, "phase": "files_replaced", "event_payloads": [pending.to_mapping()]})
 
-    with pytest.raises(store.StoreError, match="no longer the one they link to"):
-        st._recover()
+    st._recover()
+
+    events = event_chain.load(repo.events)  # the whole chain still verifies
+    assert [e.event for e in events] == ["gate_approved", "task_completed", "cycle_closed"]
+    assert [e.seq for e in events] == [1, 2, 3]
+    assert not st.journal.exists()
+
+
+def test_an_event_the_parser_refuses_moves_no_document(repo: repo_mod.Repo) -> None:
+    """The schema is not the whole of what the log accepts, so it is not the whole of the check.
+
+    `EVENT_LIMITS` bounds a line at 64 KiB, a scalar at 8192 characters and a collection at 512
+    entries; the schema bounds none of those. An event within the schema and over a limit passed the
+    writer's check, landed, and was refused on the next read — the same defect, through the bound the
+    schema's own description points at.
+    """
+    st = store.Store(repo)
+    store.atomic_write(repo.state, store.dump_yaml(STATE), mode=0o644)
+    before = repo.state.read_bytes()
+
+    with pytest.raises(models.DocumentError, match="events.ndjson"):
+        with st.transaction() as tx:
+            tx.write("state", {**STATE, "plan": {"status": "frozen"}})
+            tx.append("task_failed", cycle_id="demo-cycle", detail={"stderr": "x" * 9000})
+
+    assert repo.state.read_bytes() == before, "the document moved although the event was refused"
+    assert st.read_events() == []
+    assert not st.journal.exists()
 
 
 def test_recovery_does_not_duplicate_an_already_appended_event(repo: repo_mod.Repo) -> None:

@@ -675,8 +675,7 @@ class Store:
             # a state change with no event is exactly the invisible mutation we forbid.
             existing = {e.tx_id for e in event_chain.scan(self.repo.events)[0]}
             if tx_id not in existing:
-                payloads = journal.get("event_payloads") or []
-                self._write_events([models.Event.from_mapping(p) for p in payloads if isinstance(p, dict)])
+                self._write_events(self._journal_events(journal))
             self._clear_journal()
             return
 
@@ -686,64 +685,109 @@ class Store:
 
         raise StoreError(f"the store journal is in an unknown phase {phase!r} — run `rein doctor`")
 
-    def _chain_events(self, events: Sequence[models.Event]) -> list[models.Event]:
-        """Chain `events` onto the current log and validate them. Nothing is written.
+    def _journal_events(self, journal: Mapping[str, Any]) -> list[models.Event]:
+        """The events an interrupted transaction still owes the log.
 
-        Validation happens here, against the sealed and linked record, because that is the only
-        form the log will ever hold — `seq`, `prev_event_digest` and `event_digest` do not exist
-        before this. Staging a document already refuses one the schema rejects
-        (:meth:`Transaction.write`); events were exempt, so a record the tool's own validator
-        would refuse could land, and the next command to read the log found a damaged chain it
-        could only blame on tampering.
-
-        Caller holds the store lock.
+        Their chain fields are whatever the journal happens to carry and are not read: the seq and
+        the links are derived at the moment of the append (:meth:`_write_events`). What the journal
+        records is the transaction's intent.
         """
-        if not events:
-            return []
-        current = event_chain.load(self.repo.events)
-        previous = current[-1] if current else None
+        payloads = [entry for entry in (journal.get("event_payloads") or []) if isinstance(entry, Mapping)]
+        try:
+            return [models.Event.from_mapping(payload) for payload in payloads]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StoreError(f"the store journal {self.journal} does not describe an event: {exc}") from None
+
+    def journal_blocker(self) -> str:
+        """Why an interrupted transaction cannot be finished, or "" when it can.
+
+        The single predicate: :meth:`_recover` refuses on exactly this, because both run the same
+        append against the same log. `doctor` re-derived a subset of the conditions and called a
+        journal no command could finish "recovered automatically" — which sends the operator away
+        from the one place they could still act. A diagnosis that is written twice is a diagnosis
+        that will eventually disagree with the behaviour it describes.
+
+        Caller need not hold the store lock: nothing here writes.
+        """
+        try:
+            journal = self.read_journal()
+        except StoreError as exc:
+            return f"{exc} The event this transaction never appended is in that file and nowhere else."
+        if journal is None or str(journal.get("phase", "")) != "files_replaced":
+            return ""  # nothing to append: recovery rolls back, or only clears the journal
+        try:
+            events = self._journal_events(journal)
+            if events:
+                self._chained(events, event_chain.tail_event(self.repo.events))
+        except StoreError as exc:
+            return str(exc)
+        except event_chain.ChainError as exc:
+            return (
+                f"{exc} The event this transaction never appended is still in {self.journal}, so "
+                f"restoring {self.repo.events} from git costs nothing that is not already recorded "
+                "elsewhere — the next command appends it onto the restored log."
+            )
+        except models.DocumentError as exc:
+            return (
+                f"{exc}\nrein produced an event its own log cannot hold: the documents this "
+                f"transaction wrote are in place and this event never will be. The record of what "
+                f"happened is {self.journal} — keep it, and report it."
+            )
+        return ""
+
+    def _chained(self, events: Sequence[models.Event], previous: models.Event | None) -> list[models.Event]:
+        """`events` linked onto `previous` and validated as the lines they will become.
+
+        Validation happens against the linked and sealed record because that is the only form the
+        log will ever hold — `seq`, `prev_event_digest` and `event_digest` do not exist before
+        this. Staging a document already refuses one the schema rejects (:meth:`Transaction.write`);
+        events were exempt, so a record the tool's own reader would refuse could land, and the next
+        command to read the log found a damaged chain it could only blame on tampering.
+
+        :func:`event_chain.append_lines` runs the same check again at the file boundary, for any
+        caller that did not come through here. Checking early is what keeps the documents from
+        moving; checking there is what keeps the guarantee true of the file.
+        """
         chained: list[models.Event] = []
         for event in events:
             linked = event_chain.link(previous, event)
-            _refuse_invalid(linked)
+            event_chain.line_for(linked)
             chained.append(linked)
             previous = linked
         return chained
 
-    def _write_events(self, chained: Sequence[models.Event]) -> None:
-        """Append already-chained events, after checking they still link onto the log's last record.
+    def _precheck_events(self, events: Sequence[models.Event]) -> None:
+        """Refuse, before a single document moves, everything a commit can be refused for.
 
-        The check is the join point only (:func:`event_chain.tail_digest`), not the whole chain:
-        this is also the path :meth:`_recover` finishes an interrupted transaction on, and an
-        append that verified the entire history could not run in the state recovery exists for.
+        Including a log that is already damaged: a commit onto one is refused, which is what
+        :func:`event_chain.load` is for. Recovery deliberately does not check that much — see
+        :meth:`_write_events` — because the state it exists to leave is exactly the damaged one.
 
         Caller holds the store lock.
         """
-        if not chained:
+        if not events:
             return
-        tail = event_chain.tail_digest(self.repo.events)
-        if chained[0].prev_event_digest != tail:
-            raise StoreError(
-                f"{self.repo.events} moved since this transaction chained its events — refusing to append "
-                "onto a log that is no longer the one they link to. Run `rein doctor`."
-            )
-        # Checked again here, and not only in `_chain_events`, because this is the one place bytes
-        # become log lines and `_recover` reaches it with events read back out of a file.
-        for event in chained:
-            _refuse_invalid(event)
-        event_chain.append_lines(self.repo.events, chained)
+        current = event_chain.load(self.repo.events)
+        self._chained(events, current[-1] if current else None)
 
+    def _write_events(self, events: Sequence[models.Event]) -> None:
+        """Link `events` onto the log's last record and append them. The only writer.
 
-def _refuse_invalid(event: models.Event) -> None:
-    """Raise unless `event` is one the log's own schema accepts.
+        The chain fields are derived here, not read out of the journal, because they are a function
+        of the log at the moment of the append and of nothing else. A journal that carried them made
+        recovery demand that the log still end exactly where it did when the transaction was
+        interrupted — a condition no operator can restore, which a journal written by an earlier
+        release could never satisfy, and which recovery had no way to repair.
 
-    The log is only evidence if every line in it reads. An event the validator rejects used to be
-    appended anyway and refused on the *next* read, which reported a repository nobody had touched
-    as tampered with, and left `revise` — the way out — unable to run for the same reason.
-    """
-    problems = models.schema_errors(event.to_mapping(), "event")
-    if problems:
-        raise models.DocumentError(f"events.ndjson ({event.event!r})", problems)
+        Only the join point is read (:func:`event_chain.tail_event`), not the whole chain: this is
+        the path :meth:`_recover` finishes an interrupted transaction on, and an append that
+        verified the entire history could not run in the state recovery exists for.
+
+        Caller holds the store lock.
+        """
+        if not events:
+            return
+        event_chain.append_lines(self.repo.events, self._chained(events, event_chain.tail_event(self.repo.events)))
 
 
 @dataclass
@@ -835,12 +879,12 @@ class Transaction:
                 )
 
         tx_id = self.tx_id
-        # Chained and validated before a single document moves. Everything that can refuse this
-        # transaction — an unreadable chain, an event the schema rejects — has to refuse it while
-        # the journal is still in `prepared`, the one phase recovery rolls *back*. Doing it after
-        # the documents were replaced left the state moved with nothing recorded, which is the
-        # precise condition this class exists to make impossible.
-        chained = self.store._chain_events([self._with_tx(e, tx_id) for e in self._events])
+        events = [self._with_tx(e, tx_id) for e in self._events]
+        # Everything that can refuse this transaction — a damaged chain, an event the log cannot
+        # hold — has to refuse it while the journal is still in `prepared`, the one phase recovery
+        # rolls *back*. Refusing after the documents were replaced left the state moved with nothing
+        # recorded, the precise condition this class exists to make impossible.
+        self.store._precheck_events(events)
 
         payload: dict[str, Any] = {
             "tx_id": tx_id,
@@ -848,7 +892,9 @@ class Transaction:
             "expected_old_digests": dict(self._expect),
             "new_file_digests": {name: digests.of(body) for name, body in self._writes.items()},
             "temp_paths": {},
-            "event_payloads": [e.to_mapping() for e in chained],
+            # Unchained: `seq` and the links belong to the log, not to this transaction's
+            # intent, and are derived when the append happens.
+            "event_payloads": [e.to_mapping() for e in events],
         }
         self.store._write_journal(payload)
 
@@ -858,7 +904,7 @@ class Transaction:
         payload["phase"] = "files_replaced"
         self.store._write_journal(payload)
 
-        self.store._write_events(chained)
+        self.store._write_events(events)
 
         payload["phase"] = "event_appended"
         self.store._write_journal(payload)
