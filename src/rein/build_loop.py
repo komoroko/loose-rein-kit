@@ -264,6 +264,8 @@ class GateStep:
     #: Where this step runs: `task`, `integration`, or `both`. Never "whether" — every configured
     #: step still runs; this is how often the same confidence gets bought.
     stage: str = "both"
+    #: This step runs the tests — the only kind of step the negative control re-establishes.
+    runs_tests: bool = False
 
     @property
     def runnable(self) -> bool:
@@ -326,6 +328,7 @@ class Config:
                 ),
                 paths=step.paths,
                 stage=step.stage,
+                runs_tests=step.runs_tests,
             )
             for step in config.quality_gate
         )
@@ -1944,6 +1947,12 @@ class Orchestrator:
         the change is under test, and the green that would have closed the task is a fact about
         code that was already there.
 
+        **Only the steps that run the tests are re-established** (`runs_tests`). The question is
+        whether any test in the change exercises it, and only a test run answers that. A linter or
+        type checker over the base goes red on every new test file that imports a module the base
+        does not have — a test whose body is `pass` included — so taking its red as the answer
+        landed five of eight tasks of one recorded cycle on a fact true of any new test file.
+
         **Read the two outcomes for what each is worth — they are not symmetric.** A green control
         is the strong one: it is a fact about every test in the change at once, and no reading of
         the test files could establish it more cheaply or more surely. A red one says only that
@@ -1970,15 +1979,15 @@ class Orchestrator:
         * **every step green** — the block. It comes back through the same channel a red step does,
           so it spends that attempt's budget and the implementer is told what is missing.
         """
-        commands = [step for step in passed if step.kind == "command" and step.command]
+        commands = [step for step in passed if step.kind == "command" and step.command and step.runs_tests]
         if self.dry_run:
             return None, ""
         if not commands:
             # Recorded rather than returned in silence, for the same reason `no_tests_changed` is:
-            # a quality gate made only of agent steps, or one whose command steps are all
-            # unconfigured, leaves the task's `done` resting on nothing this experiment can negate.
-            # Saying so is the whole point of the record, and `brief._control` reads it.
-            return self._control_undetermined("the quality gate passed no command step to re-establish")
+            # a quality gate with no step that runs the tests — or none that ran for this task —
+            # leaves the task's `done` resting on nothing this experiment can negate. Saying so is
+            # the whole point of the record, and `brief._control` reads it.
+            return self._control_undetermined("no quality-gate step that ran for this task declares `runs_tests`")
         changed, _ = self._review_scope(task, cwd, base)
         tests = [path for path in changed if diff_facts.classify_path(path) == "test"]
         if not tests:

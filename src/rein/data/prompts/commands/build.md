@@ -33,9 +33,9 @@ loop decomposes, reorders and re-runs as it needs to.
 4. **DoD** — the `quality_gate` pipeline in `.rein/config.yaml` (default `test` → `check` →
    `review` → `smoke`), the single definition for every task; a task has no `test` command of its
    own. A step already established green against **this exact tree, in this exact image** is reused
-   rather than re-run (the evidence ledger). Then the **negative control**: the same command steps
-   are re-established over the base this change is a change to, with **only the task's test half
-   applied**. If every step is still green, no test in the change exercises it and the green that
+   rather than re-run (the evidence ledger). Then the **negative control**: the steps that run the tests
+   (`runs_tests: true` — never a linter, whose red is true of any new test file) are re-established
+   over the base this change is a change to, with **only the task's test half applied**. If every step is still green, no test in the change exercises it and the green that
    would have closed the task is a fact about code that was already there — so it goes back to the
    implementer like a red step. Read the outcomes for what each is worth: the **green** control is
    the strong one, a fact about every test in the change at once; a **red** one says the test half

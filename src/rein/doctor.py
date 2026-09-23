@@ -1502,6 +1502,15 @@ def check_quality_gate(config: models.Config | None) -> list[Finding]:
                     "Fine for a library; for anything with an entry point, set `required: true`.",
                 )
             )
+    if config.quality_gate and not any(s.kind == "command" and s.runs_tests for s in config.quality_gate):
+        findings.append(
+            Finding(
+                "WARN",
+                "quality-gate",
+                "no command step declares `runs_tests: true`, so the negative control has no test run to "
+                "take and every task's green is recorded as uncontrolled. Mark the step that runs the suite.",
+            )
+        )
     if not findings and config.quality_gate:
         message = f"all {len(config.quality_gate)} DoD step(s) establish something"
         findings.append(Finding("PASS", "quality-gate", message))

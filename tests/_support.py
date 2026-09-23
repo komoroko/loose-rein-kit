@@ -453,6 +453,7 @@ def make_config(
                 "executor_profile": "quality",
                 "retries": 2,
                 "required": True,
+                "runs_tests": True,
             },
             {
                 "name": "check",

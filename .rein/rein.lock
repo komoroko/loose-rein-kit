@@ -7,12 +7,12 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.9.4
   files:
-    AGENTS.rein.md: sha256:1e93d424317580929aa18e34f69a33315cec0ef83b1e730e07781295a336a4ec
+    AGENTS.rein.md: sha256:55ca5090e7e2692e0a0309a9e6ee3725a73ebb85f2adeb276abf8223f48d94d9
     prompts/agents/adversarial-reviewer.md: sha256:f9efecb651e7d72d7ee991457c1f3644f618487df15d9ddd9f6dd5a4c2d3f349
     prompts/agents/architect.md: sha256:2f5d25fbbb939eab00a26db15241c1418283f7c627fb3c639ede199f4a4bdf8f
     prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64
     prompts/agents/requirements-analyst.md: sha256:0c928038ded17cc8224febce1ba72c555b8fb182d0c35254e03df3fa63241f8d
-    prompts/commands/build.md: sha256:94f2b5bf0bca60317843a6cb69de8cbefe495493f5c466dd33010c18750f4fd3
+    prompts/commands/build.md: sha256:3035e1e14b4a4d922ed53aad1c2924a095aee2fbe2eb101ef893073db4976e54
     prompts/commands/design.md: sha256:4e7c8bdeb5ba9756278d4c7e965b1efa0f63667bf1c5fbb932f400cb05476f84
     prompts/commands/onboard.md: sha256:8f7fb990edecf93c16c9812ef123ff9653d69ebe3cdb568b58256e774fadd339
     prompts/commands/req.md: sha256:b812919787119a3b11d1644a71fedacd75c3523abf4a3ac9c4baeba5fb83f650

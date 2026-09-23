@@ -1653,6 +1653,11 @@ class GateStep:
         return bool(self.raw.get("required"))
 
     @property
+    def runs_tests(self) -> bool:
+        """Does this step run the test suite? What the negative control re-establishes (absent: no)."""
+        return self.raw.get("runs_tests") is True
+
+    @property
     def paths(self) -> tuple[str, ...]:
         """Glob patterns scoping this step to matching changed paths (empty: every task).
 

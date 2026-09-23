@@ -264,8 +264,9 @@ human decides *whether*; the loop does the work.
   anything. What it says is a claim (`--touched` is checked against the real diff), never a verdict.
 - **A green is evidence only if it could have been red.** The tests the DoD runs were written by
   the implementer in the same launch as the code, and re-running them defends against an agent that
-  *lies*, never against one that *self-confirms*. So the loop takes a **negative control**: the same
-  command steps re-established over the base, with only the task's test half applied. Still green
+  *lies*, never against one that *self-confirms*. So the loop takes a **negative control**: the steps
+  that run the tests (`runs_tests`) re-established over the base, with only the task's test half
+  applied — never a linter, whose red is true of any new test file. Still green
   means no test in the change exercises it, and the task goes back rather than landing. **The two
   outcomes are not worth the same**: a green control is a fact about every test in the change at
   once, while a red one says only that the test half is not inert against the old code — it cannot
