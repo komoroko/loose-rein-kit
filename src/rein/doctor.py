@@ -27,9 +27,10 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import rein
 from rein import (
@@ -448,6 +449,12 @@ def check_freeze_drift(
         if state.gate_status(gate) != "approved":
             continue
         receipt = state.gate_receipt(gate) or {}
+        if gate in state.crossing_gates:
+            # Bound to its task's subject rather than to the plan, which reads the ticket too — so,
+            # like the ticket drift above, it is only answerable with a checkout to read.
+            if repo is not None:
+                findings += _crossing_drift(repo, plan, config, gate, receipt)
+            continue
         for key, label in (("plan_digest", "plan.yaml"), ("config_digest", "config.yaml")):
             bound, recorded = receipt.get(key), frozen[key]
             if not bound or not recorded or bound == recorded:
@@ -462,6 +469,35 @@ def check_freeze_drift(
                 )
             )
     return findings
+
+
+def _crossing_drift(
+    repo: repo_mod.Repo,
+    plan: models.Plan | None,
+    config: models.Config | None,
+    gate: str,
+    receipt: Mapping[str, Any],
+) -> list[Finding]:
+    """A crossing receipt binds what its task authorizes (`approve.crossing_digest`), not the plan."""
+    from rein import approve
+
+    bound = receipt.get("crossing_digest")
+    if not bound:
+        return [
+            Finding("FAIL", "gates", f"gate '{gate}' receipt {receipt.get('approval_id')} binds no crossing digest")
+        ]
+    if plan is None or config is None or plan.task(gate) is None:
+        return [Finding("FAIL", "gates", f"gate '{gate}' is approved but its task cannot be read from the frozen plan")]
+    if bound != approve.crossing_digest(repo, plan, config, gate):
+        return [
+            Finding(
+                "FAIL",
+                "gates",
+                f"gate '{gate}' receipt {receipt.get('approval_id')} binds a task, claims, ticket or config "
+                "other than the ones that now stand — what it authorized has moved since a human confirmed it.",
+            )
+        ]
+    return []
 
 
 def check_receipts(state: models.State | None) -> list[Finding]:

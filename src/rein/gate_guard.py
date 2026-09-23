@@ -599,7 +599,9 @@ def _flip_failures(repo: repo_mod.Repo) -> list[str]:
 
     failures = []
     for gate in flips:
-        approved_at = _last_index(events, "gate_approved", gate)
+        # A crossing carried back by a mandate approval is backed by its `gate_carried`, which
+        # names the human confirmation the receipt carries.
+        approved_at = max(_last_index(events, "gate_approved", gate), _last_index(events, "gate_carried", gate))
         if approved_at < 0:
             failures.append(
                 f"gates.{gate}: flipped to approved with no gate_approved event — an approval is"

@@ -7,7 +7,7 @@ source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
   version: 0.9.4
   files:
-    AGENTS.rein.md: sha256:53dfb821a7410cc4f6c4b45dbf40867ee48d890d67e8f50d240ec7679efa79ad
+    AGENTS.rein.md: sha256:1e93d424317580929aa18e34f69a33315cec0ef83b1e730e07781295a336a4ec
     prompts/agents/adversarial-reviewer.md: sha256:f9efecb651e7d72d7ee991457c1f3644f618487df15d9ddd9f6dd5a4c2d3f349
     prompts/agents/architect.md: sha256:2f5d25fbbb939eab00a26db15241c1418283f7c627fb3c639ede199f4a4bdf8f
     prompts/agents/implementer.md: sha256:f69c4eaa843c8ff2587f3bc11b4a267a2cc9780328396cb3fcba2c549e946b64

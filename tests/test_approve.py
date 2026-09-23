@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import io
 import re
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -1324,6 +1326,104 @@ def test_re_approving_a_mandate_replaces_the_crossings_rather_than_adding_to_the
     approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
 
     assert _state_of(repo).crossing_gates == ("T-002",)
+
+
+def _cycle_with_approved_crossings(tmp_path: Path) -> repo_mod.Repo:
+    """A mandate approved over two irreversible tasks, and both crossings approved on top of it."""
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(tasks=[_crossing_task("T-001"), _crossing_task("T-002"), make_task("T-003")]),
+    )
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    for gate in ("T-001", "T-002"):
+        approve.record_approval(repo, gate, approve.approval_subject(repo, gate))
+    return repo
+
+
+def _edit_plan(repo: repo_mod.Repo, edit: Callable[[dict[str, Any]], None]) -> None:
+    path = repo.root / ".rein" / "plan.yaml"
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    edit(document)
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def _task_entry(document: dict[str, Any], task_id: str) -> dict[str, Any]:
+    return next(t for t in document["tasks"] if t["id"] == task_id)
+
+
+def test_a_crossing_receipt_binds_its_task_and_not_the_whole_plan(tmp_path: Path) -> None:
+    repo = _cycle_with_approved_crossings(tmp_path)
+    receipt = _state_of(repo).gate_receipt("T-001") or {}
+
+    assert receipt["crossing_digest"]
+    assert "plan_digest" not in receipt and "config_digest" not in receipt
+
+
+def test_a_mandate_revision_that_left_a_crossing_alone_carries_it_back(tmp_path: Path) -> None:
+    """The recorded cycle: a dependency edge and another task's scope moved, and two irreversible
+    approvals nothing had touched were asked for again. Now only the one whose task moved is."""
+    from rein import revise
+
+    repo = _cycle_with_approved_crossings(tmp_path)
+    confirmed = {g: (_state_of(repo).gate_receipt(g) or {})["approval_id"] for g in ("T-001", "T-002")}
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "one more scope path for T-003")
+    withdrawn = _state_of(repo)
+    assert withdrawn.gate_status("T-001") == "pending"
+    assert (withdrawn.gate_withdrawn("T-001") or {})["approval_id"] == confirmed["T-001"]
+
+    def edit(document: dict[str, Any]) -> None:
+        _task_entry(document, "T-001")["blocked_by"] = ["T-003"]  # order: no approval is about it
+        _task_entry(document, "T-003").setdefault("scope", {}).setdefault("include", []).append("docs/x.md")
+        _task_entry(document, "T-002")["title"] = "a different task now"  # what T-002 authorizes moved
+
+    _edit_plan(repo, edit)
+
+    named = {row["task_id"]: row["carried_from"] for row in approve.naming(repo, "mandate")["crossing"]}
+    assert named == {"T-001": confirmed["T-001"], "T-002": ""}
+
+    mandate = approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    state = _state_of(repo)
+    assert state.gate_status("T-001") == "approved"
+    carried = state.gate_receipt("T-001") or {}
+    assert carried["approval_id"] == confirmed["T-001"] and carried["carried_by"] == mandate
+    assert state.gate_status("T-002") == "pending" and state.gate_withdrawn("T-002") is None
+
+    events = store_mod.Store(repo).read_events()
+    carry = [e for e in events if e.event == "gate_carried"]
+    assert [e.subject_ids for e in carry] == [("T-001", confirmed["T-001"], mandate)]
+    # Not a stop: nobody was asked.
+    from rein import events as events_mod
+
+    assert events_mod.stops(events) == events_mod.stops([e for e in events if e.event != "gate_carried"])
+
+
+def test_doctor_reads_a_crossing_receipt_against_its_task_not_the_plan(tmp_path: Path) -> None:
+    from rein import doctor
+
+    repo = _cycle_with_approved_crossings(tmp_path)
+
+    def crossing_fails() -> list[str]:
+        store = store_mod.Store(repo)
+        findings = doctor.check_freeze_drift(store.read_state(), store.read_plan(), store.read_config(), repo)
+        return [f.message for f in findings if f.level == "FAIL" and "binds a task" in f.message]
+
+    assert crossing_fails() == []
+    _edit_plan(repo, lambda d: _task_entry(d, "T-001").__setitem__("blocked_by", ["T-003"]))
+    assert crossing_fails() == []
+    (repo.root / "docs" / "tasks").mkdir(parents=True, exist_ok=True)
+    (repo.root / "docs" / "tasks" / "T-002.md").write_text("# T-002, rewritten\n", encoding="utf-8")
+    assert [m.split("'")[1] for m in crossing_fails()] == ["T-002"]
+
+
+def test_a_crossing_rolled_back_as_the_target_is_never_carried_back(tmp_path: Path) -> None:
+    """Withdrawn *as* the decision: only a human confirming it again brings it back."""
+    from rein import revise
+
+    repo = _cycle_with_approved_crossings(tmp_path)
+    revise.apply(repo, revise.plan_revision(repo, "T-001", []), "that migration is wrong")
+
+    assert _state_of(repo).gate_withdrawn("T-001") is None
 
 
 def test_the_mandate_screen_names_every_stop_it_is_about_to_create(tmp_path: Path) -> None:

@@ -157,6 +157,11 @@ def render(revision: dict[str, object]) -> str:
             "is withdrawn and the task returns to the plan; whatever it already did is still done, "
             "and undoing that is yours to do outside this tool."
         )
+        if revision["target_gate"] not in crossed:
+            lines.append(
+                "- a withdrawn crossing whose task, claims, ticket and config are unchanged when the "
+                "mandate is approved again is carried back by that approval, not asked for a second time"
+            )
     if revision["unfreezes_plan"]:
         lines.append("- plan.status: frozen → draft (plan.yaml and config.yaml become editable)")
     if revision["invalidates_review"]:
@@ -193,8 +198,16 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
     raw = json.loads(json.dumps(state.raw))
     resets = revision["gates_reset"]
     assert isinstance(resets, list)
+    target = revision["target_gate"]
     for gate in resets:
+        receipt = state.gate_receipt(gate)
+        # A crossing withdrawn because something upstream of it rolled back keeps what it held, so
+        # the next mandate approval can carry it back if what it authorizes did not move
+        # (`approve.carried_crossings`). One rolled back as the target was withdrawn *as* the
+        # decision, and nothing may bring that back but a human confirming it again.
         raw["gates"][gate] = {"status": "pending", "receipt": None}
+        if gate in state.crossing_gates and gate != target and receipt is not None:
+            raw["gates"][gate]["withdrawn"] = dict(receipt)
     # Where the cycle now stands follows from those gates and is not written beside them
     # (`models.State.stage`). It used to be a second field this transaction set, which is how a
     # roll back could leave a phase and a gate set disagreeing.

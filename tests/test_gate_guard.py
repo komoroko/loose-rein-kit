@@ -646,6 +646,15 @@ def test_check_diff_catches_a_flip_re_approved_after_a_rollback(tmp_path: Path) 
 
 
 @pytest.mark.integration
+def test_check_diff_accepts_a_flip_a_carry_after_the_rollback_backs(tmp_path: Path) -> None:
+    """A crossing a mandate approval carried back has no second `gate_approved` — nobody was asked —
+    and its `gate_carried` names the human confirmation the receipt still carries."""
+    carried = ("gate_carried", ["acceptance", "GA-ACCEPTANCE-0001", "GA-MANDATE-0002"])
+    repo = _flip_fixture(tmp_path, events=_gate_events(_APPROVED, _REVISED, carried))
+    assert gate_guard.check_diff(repo) == 0
+
+
+@pytest.mark.integration
 def test_check_diff_catches_a_receipt_the_audit_event_does_not_name(tmp_path: Path) -> None:
     repo = _flip_fixture(tmp_path, events=_gate_events(_APPROVED), approval_id="GA-BUILD-9999")
     assert gate_guard.check_diff(repo) == 1

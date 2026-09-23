@@ -77,6 +77,9 @@ GATE_ENDS: tuple[str, str] = (GATE_FIRST, GATE_LAST)
 #: mandate and upstream of acceptance, and nothing more. Which one the loop reaches first is
 #: execution order, which `00-concept.md` puts inside the delegation and not at a contact point.
 CROSSING_GATE_RE = re.compile(r"^T-[0-9]+$")
+#: The fields of a task that place it in the order of the work rather than say what it may do:
+#: its edges, and the DAG-shape class derived with them. Outside a crossing gate's subject.
+TASK_ORDER_KEYS: tuple[str, ...] = ("blocked_by", "kind")
 GATE_STATUS_VALUES = frozenset({"pending", "approved"})
 
 
@@ -421,6 +424,11 @@ EVENT_ORDER: tuple[str, ...] = (
     "cycle_initialized",
     "knowledge_gap",
     "gate_approved",
+    # A crossing gate re-approved by the mandate approval that re-froze the plan, because nothing
+    # it authorizes moved since a human confirmed it (`approve.crossing_digest`). Its own kind, not
+    # a second `gate_approved`: that one is a person stopping to decide, and counting a carry as a
+    # stop would put an ask nobody was made to answer into `events.stops`.
+    "gate_carried",
     "gate_revised",
     "changes_requested",
     "changes_addressed",
@@ -1090,6 +1098,21 @@ class Plan:
         found = self.get("tasks", task_id)
         return found if isinstance(found, Task) else None
 
+    def crossing_subject(self, task_id: str) -> dict[str, Any]:
+        """What approving the crossing gate `task_id` authorizes, and nothing about when it runs.
+
+        The task's own entry without :data:`TASK_ORDER_KEYS`, and the claims it answers. Not the
+        rest of the plan: another task's scope, a dependency edge, a decision about something else
+        leave what this crossing lets the loop do exactly where it was, and "no approval is about
+        the order of the work" is a rule this is one of the places to keep.
+        """
+        task = self.task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        claims = {cid: dict(claim.raw) for cid in task.claim_ids if (claim := self.claim(cid)) is not None}
+        own = {k: v for k, v in task.raw.items() if k not in TASK_ORDER_KEYS}
+        return {"task": own, "claims": claims}
+
     def ids(self, section: str) -> frozenset[str]:
         return frozenset(self._index.get(section, {}))
 
@@ -1148,6 +1171,12 @@ class State:
         entry = self.gates.get(gate)
         receipt = entry.get("receipt") if entry else None
         return receipt if isinstance(receipt, dict) else None
+
+    def gate_withdrawn(self, gate: str) -> Mapping[str, Any] | None:
+        """The receipt a roll back withdrew from crossing `gate` as a side effect, or None."""
+        entry = self.gates.get(gate)
+        withdrawn = entry.get("withdrawn") if entry else None
+        return withdrawn if isinstance(withdrawn, dict) else None
 
     @property
     def crossing_gates(self) -> tuple[str, ...]:

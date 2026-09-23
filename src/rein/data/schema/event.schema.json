@@ -43,6 +43,7 @@
         "cycle_initialized",
         "knowledge_gap",
         "gate_approved",
+        "gate_carried",
         "gate_revised",
         "changes_requested",
         "changes_addressed",
