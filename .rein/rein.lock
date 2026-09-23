@@ -2,10 +2,10 @@
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
 format: rein-grounded-v7
-tool_version: 0.9.4
+tool_version: 0.9.5
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.9.4
+  version: 0.9.5
   files:
     AGENTS.rein.md: sha256:55ca5090e7e2692e0a0309a9e6ee3725a73ebb85f2adeb276abf8223f48d94d9
     prompts/agents/adversarial-reviewer.md: sha256:f9efecb651e7d72d7ee991457c1f3644f618487df15d9ddd9f6dd5a4c2d3f349
@@ -23,7 +23,7 @@ prompts:
     prompts/rules/gate-workflow.md: sha256:23dd5793f0a3039cbd4b9f68d2b8215574b995e15eb1c97341802884af6f4465
 integrations:
   claude:
-    version: 0.9.4
+    version: 0.9.5
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:a4fd4c68f39502bad42327168e79fbb43402d7ddff17788237ffb0d32eab4d8f
@@ -43,7 +43,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.9.4
+    version: 0.9.5
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:1faced739cd80c70a96c30fdf3fa7bb4992ccaffdcad2a2e16277c09f0859c5e
@@ -61,7 +61,7 @@ integrations:
       .codex/hooks.json: sha256:7b64f50c947287ac882d04f0816a79df4d8c7c6b3060137cfb9014d274af0909
       .codex/rein.md: sha256:1d75d677e7b6039c1d9852e45c4d56b06f9011df5be4063e782d320c34e54f96
   copilot:
-    version: 0.9.4
+    version: 0.9.5
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:7007cdf39b9475bbb9875091056f792d14b0c9d87bf4e9f451f84d3d53029199
@@ -79,7 +79,7 @@ integrations:
       .github/prompts/tasks.prompt.md: sha256:090fcd0790776db37ce0839676a580c1592a97f5c352b9eb60507e9be2a6500e
       .github/prompts/verify.prompt.md: sha256:715158e2e17ebe65f6969fef87a7d7b326a90f04f9d4a2452302df56801157fd
   gemini:
-    version: 0.9.4
+    version: 0.9.5
     installed_at: '2026-09-03'
     files:
       .gemini/commands/build.toml: sha256:77d029397582376f3f8bba02f3acd3064bfda91cf1a63e2221765e64705be7b8

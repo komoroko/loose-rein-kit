@@ -4,6 +4,45 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.9.5] - 2026-09-24
+
+### Six issues from one recorded cycle, each fixed where it starts
+
+**Document format `rein-grounded-v7`.** `state.yaml` gains `tasks.<id>.base`, a gate's `withdrawn`
+and a receipt's `crossing_digest` / `carried_by`; `config.yaml`'s quality-gate steps gain
+`runs_tests`; `review.yaml`'s coverage gains `evidence_files`; the audit log gains `gate_carried`.
+There is no migration: finish a cycle on 0.9.4, or start a fresh one — a format move in a patch release, at the operator's call.
+
+- **A serial task's base is pinned when it starts (#82).** The implementer commits straight onto the
+  work branch, and a run interrupted after that commit re-took HEAD as the base next time: the
+  diff was empty, the task was blocked as `no_implementation`, and the scope and gate-guard
+  re-checks skipped the commit they exist to see. The base is now recorded on the first
+  `in-progress`, reused by every attempt, and dropped when the task lands or by
+  `rein task reset --fresh`. A pinned base HEAD no longer descends from stops the run.
+- **A crossing approval binds what it authorizes (#80).** Its receipt bound the whole plan, so a
+  roll back to the mandate for a dependency edge or another task's scope asked for every
+  irreversible-point approval again — seven of ten approvals in the recorded cycle. A crossing now
+  binds its task entry without `blocked_by`/`kind`, its claims, its ticket and the frozen config;
+  a crossing withdrawn as a side effect is carried back by the next mandate approval when that is
+  unchanged (`gate_carried`, not a stop), and both approval screens say which. One rolled back as
+  the target is never carried.
+- **The negative control asks the step that runs the tests (#81).** It took the first red of any
+  command step, and a linter goes red over the base for every new test file that imports a module
+  the base lacks — a body of `pass` included. Five of eight tasks landed on that red. Steps now
+  declare `runs_tests: true`, and only those are re-established; with none, the control is recorded
+  undetermined and `rein doctor` warns. The packaged config marks `test`.
+- **`max_diff_bytes` is checked against what a launch is handed (#78).** It measured the plain
+  diff, before lockfile, generated and deleted-file bodies are folded to one line, and refused a
+  reading on bytes no reviewer receives. The Coverage Manifest still reads the whole diff.
+- **The plan refuses an artifact its own task cannot write (#83).** An `artifact` criterion whose
+  paths the task's `scope` does not cover is a plan error, so `rein approve mandate` stops it before
+  the task is built rather than after. The scope rule is one function, shared with the loop's diff
+  check.
+- **A binary the mandate declared as evidence is not unread code (#79).** A file no analyzer can
+  read that an `artifact` criterion covers is recorded in `evidence_files`, named on the review
+  screen, and no longer makes coverage insufficient. An undeclared binary still blocks, and the
+  block now names the remedy that exists: declare it as the criterion's artifact.
+
 ## [0.9.4] - 2026-09-22
 
 ### The writer was exempt from the validator, and four issues came out of it
