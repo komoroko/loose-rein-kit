@@ -28,7 +28,7 @@ import logging
 import re
 import sys
 import threading
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -448,6 +448,21 @@ def path_covered(path: str, pattern: str) -> bool:
     if not prefix:
         return False
     return path == prefix or path.startswith(prefix + "/")
+
+
+def outside_scope(paths: Sequence[str], include: Sequence[str], exclude: Sequence[str]) -> list[str]:
+    """The `paths` a task scope of `include`/`exclude` does not cover, sorted.
+
+    An empty `include` is unbounded — what an undeclared scope has always meant, not "nothing" —
+    and `exclude` wins over it. The one rule for "may this task touch that": the loop reads a
+    diff against it (`dossier.scope_violations`) and the plan reads a task's own declared
+    artifacts against it (`models._acceptance_errors`), so the two cannot disagree.
+    """
+    return sorted(
+        path
+        for path in paths
+        if any(path_covered(path, p) for p in exclude) or (include and not any(path_covered(path, p) for p in include))
+    )
 
 
 def longest_cover(path: str, patterns: Iterable[str]) -> str | None:

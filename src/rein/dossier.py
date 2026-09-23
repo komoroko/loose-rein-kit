@@ -104,16 +104,7 @@ def scope_violations(task: dag.Task, changed: Sequence[str]) -> list[str]:
     once — and the same rule whichever way they spell a directory, which is what it did not use
     to be.
     """
-    include, exclude = task.scope_include, task.scope_exclude
-    if not include and not exclude:
-        return []
-    return sorted(
-        path for path in changed if _matches_any(path, exclude) or (include and not _matches_any(path, include))
-    )
-
-
-def _matches_any(path: str, patterns: Sequence[str]) -> bool:
-    return any(common.path_covered(path, p) for p in patterns)
+    return common.outside_scope(changed, task.scope_include, task.scope_exclude)
 
 
 def build(

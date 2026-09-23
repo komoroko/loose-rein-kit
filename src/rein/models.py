@@ -2168,6 +2168,11 @@ def _acceptance_errors(task: Task) -> list[str]:
     Ids are unique *within the task* (they are scoped to it), and an evidence kind must carry
     what that kind is made of — a `command` with no argv, or an `artifact` naming no path, is a
     criterion that would report itself established by doing nothing at all.
+
+    An `artifact` must also lie inside the task's own scope. Otherwise the task is refused whichever
+    way it goes — writing the file is a scope violation, not writing it fails the criterion — and
+    that was found twice in one cycle only after the task had been implemented, each time costing a
+    roll back of the mandate. Both halves are in the plan, so it is refused here instead.
     """
     errors: list[str] = []
     seen: set[str] = set()
@@ -2184,6 +2189,13 @@ def _acceptance_errors(task: Task) -> list[str]:
             errors.append(f"tasks/{task.id}/{ac_id}: evidence kind 'command' with no command to run")
         if kind == "artifact" and not _ids(evidence, "paths"):
             errors.append(f"tasks/{task.id}/{ac_id}: evidence kind 'artifact' with no paths to require")
+        if kind == "artifact" and (
+            outside := common.outside_scope(_ids(evidence, "paths"), task.scope_include, task.scope_exclude)
+        ):
+            errors.append(
+                f"tasks/{task.id}/{ac_id}: requires {', '.join(outside)}, which the task's own scope does not "
+                "cover — the task could neither write it (a scope violation) nor pass without it"
+            )
     return errors
 
 
