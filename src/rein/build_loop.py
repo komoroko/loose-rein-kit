@@ -264,6 +264,8 @@ class GateStep:
     #: Where this step runs: `task`, `integration`, or `both`. Never "whether" — every configured
     #: step still runs; this is how often the same confidence gets bought.
     stage: str = "both"
+    #: This step runs the tests — the only kind of step the negative control re-establishes.
+    runs_tests: bool = False
 
     @property
     def runnable(self) -> bool:
@@ -326,6 +328,7 @@ class Config:
                 ),
                 paths=step.paths,
                 stage=step.stage,
+                runs_tests=step.runs_tests,
             )
             for step in config.quality_gate
         )
@@ -387,6 +390,8 @@ def set_task_status(
     commit: str = "",
     evidence: Mapping[str, Any] | None = None,
     handoff: Mapping[str, Any] | None = None,
+    base: str = "",
+    release_base: bool = False,
 ) -> None:
     """Write one task's status and the event that explains it, in one transaction.
 
@@ -399,6 +404,12 @@ def set_task_status(
     transaction rather than a later one, so there is no window in which a task is done and
     nothing says on what.
 
+    `base` is where a serial task's work began (`Orchestrator._serial_base`). Pinned by the
+    first `in-progress` that carries one and kept while that work is on the branch unlanded —
+    `blocked` included, since the attempt's commits stay there — then dropped with
+    `done`/`awaiting-evidence`, when the work it bounds has become the branch, or by
+    `release_base` when nothing of it is left on the branch (`Orchestrator._set_status`).
+
     `handoff` is a diagnostic patch riding along — what the last agent launch said, or the fault
     that stopped it. It travels with a status write rather than getting a write of its own,
     because a transaction here must record *why*, and "an agent produced some output" is not a
@@ -410,7 +421,15 @@ def set_task_status(
         raise ValueError(f"unknown task status {status!r}")
     store_mod.retry_on_stale(
         lambda: _set_task_status_once(
-            repo, task_id, status, note=note, commit=commit, evidence=evidence or {}, handoff=handoff or {}
+            repo,
+            task_id,
+            status,
+            note=note,
+            commit=commit,
+            evidence=evidence or {},
+            handoff=handoff or {},
+            base=base,
+            release_base=release_base,
         )
     )
 
@@ -450,6 +469,8 @@ def _set_task_status_once(
     commit: str,
     evidence: Mapping[str, Any],
     handoff: Mapping[str, Any],
+    base: str,
+    release_base: bool,
 ) -> None:
     store = store_mod.Store(repo)
     state = store.read_state()
@@ -465,7 +486,12 @@ def _set_task_status_once(
     if status == "in-progress":
         attempts += 1
     merged = {**entry, "status": status, "attempts": attempts, "note": note, "completed_commit": landed}
+    if status == "in-progress" and _COMMIT_RE.match(base) and not entry.get("base"):
+        merged["base"] = base
+    if release_base:
+        merged.pop("base", None)
     if status in {"done", "awaiting-evidence"}:
+        merged.pop("base", None)
         # Both mean the same thing about the code — the whole DoD was established against this
         # tree — and differ only in whether an observation nobody here could make is outstanding.
         # So both carry the record, and a promotion from one to the other keeps the one already
@@ -1024,11 +1050,21 @@ class Orchestrator:
         with self._evidence_lock:
             return self._pending_diagnostics.pop(task_id, {})
 
-    def _set_status(self, task_id: str, status: str, *, commit: str = "") -> None:
+    def _set_status(self, task_id: str, status: str, *, commit: str = "", base: str = "") -> None:
+        """Record a status; a serial task that stops short of landing with nothing of its work left
+        on the branch gives up its pinned base in the same write.
+
+        A pinned base is kept because the task's unlanded commits are on the work branch, and
+        while they are nothing else may land on top of them (`_task_holding_branch`). An attempt
+        that stopped having left nothing — no commit, no dirty path — holds nothing, and keeping
+        its base would both stop every other task and, once one landed, charge that task's work
+        to this one's next attempt.
+        """
         if self.dry_run:
             self._sim_status[task_id] = status
             print(f"    [dry-run] {task_id} → {status}")
             return
+        release = status not in {"in-progress", "done", "awaiting-evidence"} and self._left_nothing(task_id)
         set_task_status(
             self.repo,
             task_id,
@@ -1036,7 +1072,77 @@ class Orchestrator:
             commit=commit,
             evidence=self._evidence.get(task_id, {}),
             handoff=self._take_diagnostics(task_id),
+            base=base,
+            release_base=release,
         )
+
+    def _pinned_base(self, task_id: str) -> str:
+        """The commit a serial task's unlanded work began on (`state.tasks.<id>.base`), or "".
+
+        A pinned base that HEAD no longer descends from means the history under the task was
+        rewritten, and nothing about "what this task changed" can be said from it — stopped, not
+        re-pinned, because re-pinning is the silence the pin exists to end.
+        """
+        state = self.store.read_state()
+        entry = state.raw.get("tasks", {}).get(task_id) if state is not None else None
+        pinned = str(entry.get("base", "")) if isinstance(entry, dict) else ""
+        if pinned and not self.ws.is_ancestor(pinned):
+            raise StopLoop(
+                f"{task_id}: its work began on {pinned[:12]}, which HEAD no longer descends from — "
+                "the history under an unfinished task was rewritten, so what it changed cannot be "
+                f"read. Restore that history, or `rein task reset {task_id} --reason ...`, which "
+                "drops a base the branch no longer contains so the task starts over from HEAD.",
+                code=1,
+            )
+        return pinned
+
+    def _serial_base(self, task_id: str) -> str:
+        """The commit a serial task's work began on: pinned by its first attempt, reused by the rest.
+
+        A serial implementer commits straight onto the work branch, so HEAD at the start of a run
+        is not where the task began once an earlier run was interrupted after that commit — a
+        capacity stop is the common way. Re-taking HEAD made the interrupted attempt's work
+        invisible to the next one: an empty diff read as `no_implementation`, and the scope and
+        gate-guard re-checks over "what this task changed" skipped exactly the commit they exist
+        to see. A leaf has the same answer from `fork_point`; a serial task has no branch of its
+        own to ask, so the answer is written down and dropped when the task lands.
+
+        `base..HEAD` is this task's work only because nothing else lands above the base while it
+        is pinned (`_task_holding_branch`).
+        """
+        return self._pinned_base(task_id) or self.ws.head()
+
+    def _left_nothing(self, task_id: str) -> bool:
+        """Is a pinned base holding nothing — no commit since it, no dirty path?
+
+        A base HEAD no longer descends from answers "no" rather than raising: this runs on the way
+        out of a failed attempt, where a rewritten history is the next run's to stop on
+        (`_pinned_base`) and must not replace the fault being recorded.
+        """
+        state = self.store.read_state()
+        entry = state.raw.get("tasks", {}).get(task_id) if state is not None else None
+        pinned = str(entry.get("base", "")) if isinstance(entry, dict) else ""
+        return bool(pinned) and self.ws.is_ancestor(pinned) and not self.ws.changed_since(pinned)
+
+    def _task_holding_branch(self, graph: dag.Graph) -> dag.Task | None:
+        """The unlanded serial task whose work is on the work branch, if there is one.
+
+        A serial task's commits land on the work branch before it has passed anything, and its
+        pinned base is what says which commits are its own. Anything landing above them — another
+        serial task, a merged leaf — would stand on work nothing has verified, and would then be
+        read as part of this task's change by every check that asks what it did: scope, the gate
+        guard, the review, the negative control. So while one is there, it is the only thing that
+        runs, and when it cannot run the loop stops rather than build on it.
+        """
+        for task in graph.tasks:
+            if task.status in {"done", "awaiting-evidence", "in-progress"} or not self._pinned_base(task.id):
+                continue
+            if self._left_nothing(task.id):
+                # Its work was taken off the branch (reverted, reset to the base): nothing is held.
+                self._set_status(task.id, task.status)
+                continue
+            return task
+        return None
 
     # -- launching an agent (the machine's side of the boundary) --
 
@@ -1895,6 +2001,12 @@ class Orchestrator:
         the change is under test, and the green that would have closed the task is a fact about
         code that was already there.
 
+        **Only the steps that run the tests are re-established** (`runs_tests`). The question is
+        whether any test in the change exercises it, and only a test run answers that. A linter or
+        type checker over the base goes red on every new test file that imports a module the base
+        does not have — a test whose body is `pass` included — so taking its red as the answer
+        landed five of eight tasks of one recorded cycle on a fact true of any new test file.
+
         **Read the two outcomes for what each is worth — they are not symmetric.** A green control
         is the strong one: it is a fact about every test in the change at once, and no reading of
         the test files could establish it more cheaply or more surely. A red one says only that
@@ -1921,15 +2033,15 @@ class Orchestrator:
         * **every step green** — the block. It comes back through the same channel a red step does,
           so it spends that attempt's budget and the implementer is told what is missing.
         """
-        commands = [step for step in passed if step.kind == "command" and step.command]
+        commands = [step for step in passed if step.kind == "command" and step.command and step.runs_tests]
         if self.dry_run:
             return None, ""
         if not commands:
             # Recorded rather than returned in silence, for the same reason `no_tests_changed` is:
-            # a quality gate made only of agent steps, or one whose command steps are all
-            # unconfigured, leaves the task's `done` resting on nothing this experiment can negate.
-            # Saying so is the whole point of the record, and `brief._control` reads it.
-            return self._control_undetermined("the quality gate passed no command step to re-establish")
+            # a quality gate with no step that runs the tests — or none that ran for this task —
+            # leaves the task's `done` resting on nothing this experiment can negate. Saying so is
+            # the whole point of the record, and `brief._control` reads it.
+            return self._control_undetermined("no quality-gate step that ran for this task declares `runs_tests`")
         changed, _ = self._review_scope(task, cwd, base)
         tests = [path for path in changed if diff_facts.classify_path(path) == "test"]
         if not tests:
@@ -2144,6 +2256,7 @@ class Orchestrator:
                 head=head,
                 exclude=exclude,
                 limits=limits,
+                evidence=self._plan.artifact_paths if self._plan is not None else (),
                 risk_floor=risk_floor,
                 host_surface=review_reading.host_surface_digest(self.repo, head),
                 config=self.config.raw,
@@ -3235,7 +3348,20 @@ class Orchestrator:
             if unfinished == 0:
                 return self._close_gate4(graph)
 
-            batch = plan_batch(graph, self.config.max_parallel)
+            held = None if self.dry_run else self._task_holding_branch(graph)
+            if held is not None and held.id not in {t.id for t in graph.order_frontier()}:
+                base = self._pinned_base(held.id)
+                self._escalate(
+                    "no_runnable",
+                    f"{held.id} is {held.status}, and its unlanded work is on the work branch (since "
+                    f"{base[:12]}). Nothing else runs until it lands or is taken off: a task built on "
+                    "top of it would stand on work no gate has passed, and would be read as part of "
+                    f"{held.id}'s change. Put {held.id} back on the frontier (`rein task reset "
+                    f"{held.id} --reason ...`) to continue it, or revert its commits to drop them.",
+                    task=held.id,
+                )
+                return common.EXIT_HUMAN_NEEDED
+            batch = ("serial", [held]) if held is not None else plan_batch(graph, self.config.max_parallel)
             if batch is None:
                 # frontier empty & there are unfinished ones = all blocked/needs-revision. To the human.
                 # With the one command that moves it, taken from the same table `rein next` reads:
@@ -3318,16 +3444,17 @@ class Orchestrator:
     def _consume_serial(self, tasks: list[dag.Task]) -> None:
         """Finalize foundation tasks etc. serially on the work branch."""
         for task in tasks:
-            self._set_status(task.id, "in-progress")
+            pre_head = "" if self.dry_run else self._serial_base(task.id)
+            self._set_status(task.id, "in-progress", base=pre_head)
             print(f"  [serial] {task.id} {task.title}")
-            pre_head = "" if self.dry_run else self.ws.head()
             try:
                 ok, log = self._run_task_to_done(task, cwd=self.root, base=pre_head)
             except EnvironmentFault:
                 # No verdict was reached, so none is recorded: back to `todo` with its attempts,
-                # retry budgets and handoff intact, and the tree left as it stands for the next
-                # run's finalize/salvage to pick up. `blocked` here would take the task off the
-                # frontier, which is precisely what stops a re-run from ever continuing it.
+                # retry budgets, handoff and pinned base intact, and the tree left as it stands —
+                # the next run judges it from that same base (`_serial_base`). `blocked` here
+                # would take the task off the frontier, which is precisely what stops a re-run
+                # from ever continuing it.
                 self._set_status(task.id, "todo")
                 raise
             except GateViolationFault as exc:

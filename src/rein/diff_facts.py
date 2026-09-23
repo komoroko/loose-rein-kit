@@ -504,6 +504,9 @@ class CoverageManifest:
     #: analyzer name → the digest of the executable that answered, for every external analyzer
     #: whose reading is counted above. Nobody named means nobody to check.
     analyzers: dict[str, str] = field(default_factory=dict)
+    #: Unreadable files the frozen plan declares as an `artifact` criterion's evidence. Named, and
+    #: not a gap: nothing was meant to read them as code (`build_coverage`).
+    evidence_files: tuple[dict[str, str], ...] = ()
 
     def to_manifest(self) -> dict[str, object]:
         """The `coverage[]` entry for review.machine — only the schema's fields, no extras."""
@@ -520,6 +523,8 @@ class CoverageManifest:
             entry["unsupported_files"] = [dict(u) for u in self.unsupported_files]
         if self.generated_files:
             entry["generated_files"] = [dict(g) for g in self.generated_files]
+        if self.evidence_files:
+            entry["evidence_files"] = [dict(e) for e in self.evidence_files]
         if self.analyzers:
             entry["analyzers"] = dict(sorted(self.analyzers.items()))
         return entry
@@ -568,8 +573,22 @@ def _analysis_for(path: str, body: str = "") -> tuple[str, str] | None:
     return None
 
 
-def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence[Analyzer] = ()) -> CoverageManifest:
+def build_coverage(
+    diff_text: str, files: list[DiffFile], *, analyzers: Sequence[Analyzer] = (), evidence: Sequence[str] = ()
+) -> CoverageManifest:
     """Analyze a diff and record honestly what could not be analyzed (plan §13.3).
+
+    `evidence` is the frozen plan's `artifact` paths (`Plan.artifact_paths`). A file nothing here
+    can read that one of them *names* — a screenshot an acceptance criterion requires — is
+    recorded in `evidence_files` instead of `unsupported_files`. It was never code to be read: a
+    human approved that file as evidence at the mandate, and counting it as a gap shut acceptance
+    at high risk with no remedy, since taking it out of the change discards what the criterion
+    asks for and splitting the scope never removes a file.
+
+    Named exactly, never covered the way a scope covers a subtree. An `artifact` path may be a
+    directory (the criterion checks that it exists), and what a human approved there is that the
+    directory exists — not every unreadable file anybody later puts under it. A compiled binary
+    in `dist/` is still unread code.
 
     `analyzers` are external readers for file kinds this release cannot parse. They are asked
     only about files the built-in table cannot place, they answer in the same `(language,
@@ -581,6 +600,8 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
     analyzed = 0
     analyzed_hunks = 0
     unsupported: list[dict[str, str]] = []
+    declared: list[dict[str, str]] = []
+    named = {path.rstrip("/") for path in evidence}
     generated: list[dict[str, str]] = []
     languages: dict[str, str] = {}
     used_analyzers: dict[str, str] = {}
@@ -608,9 +629,13 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
         if _is_generated(file):
             generated.append({"path": file.path, "source_locator": ""})
             continue
+        is_evidence = file.path in named
         if file.binary:
             has_binary = True
-            unsupported.append({"path": file.path, "reason": "binary"})
+            if is_evidence:
+                declared.append({"path": file.path})
+            else:
+                unsupported.append({"path": file.path, "reason": "binary"})
             continue
         # The diff's own lines, which are what a `token_only` reader would read. Already
         # decoded — git marks a file it could not decode as binary, and that is handled above.
@@ -619,6 +644,9 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
             language_method, detail = _ask_analyzers(analyzers, file, used_analyzers)
         else:
             detail = ""
+        if language_method is None and is_evidence:
+            declared.append({"path": file.path})
+            continue
         if language_method is None:
             entry = {"path": file.path, "reason": "unsupported_language"}
             entry["detail"] = detail or f"no analyzer for {_extension(file.path) or 'a file with no extension'}"
@@ -639,6 +667,7 @@ def build_coverage(diff_text: str, files: list[DiffFile], *, analyzers: Sequence
         languages=languages,
         binary_semantics_analyzed=not has_binary,
         analyzers=used_analyzers,
+        evidence_files=tuple(declared),
     )
     # Status is decided against the effective risk by review_policy; a manifest on its own
     # reports the raw facts and a conservative default.
@@ -747,11 +776,14 @@ class DiffFacts:
         return models.max_risk([hit.risk for hit in self.signals])
 
 
-def analyze(diff_text: str, *, analyzers: Sequence[Analyzer] = ()) -> DiffFacts:
-    """Parse, detect signals, and build the coverage manifest for one diff."""
+def analyze(diff_text: str, *, analyzers: Sequence[Analyzer] = (), evidence: Sequence[str] = ()) -> DiffFacts:
+    """Parse, detect signals, and build the coverage manifest for one diff.
+
+    `evidence` is the frozen plan's `artifact` paths; see `build_coverage`.
+    """
     files = parse_diff(diff_text)
     return DiffFacts(
         files=tuple(files),
         signals=tuple(detect_signals(files)),
-        coverage=build_coverage(diff_text, files, analyzers=analyzers),
+        coverage=build_coverage(diff_text, files, analyzers=analyzers, evidence=evidence),
     )

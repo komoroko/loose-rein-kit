@@ -33,9 +33,9 @@ loop decomposes, reorders and re-runs as it needs to.
 4. **DoD** — the `quality_gate` pipeline in `.rein/config.yaml` (default `test` → `check` →
    `review` → `smoke`), the single definition for every task; a task has no `test` command of its
    own. A step already established green against **this exact tree, in this exact image** is reused
-   rather than re-run (the evidence ledger). Then the **negative control**: the same command steps
-   are re-established over the base this change is a change to, with **only the task's test half
-   applied**. If every step is still green, no test in the change exercises it and the green that
+   rather than re-run (the evidence ledger). Then the **negative control**: the steps that run the tests
+   (`runs_tests: true` — never a linter, whose red is true of any new test file) are re-established
+   over the base this change is a change to, with **only the task's test half applied**. If every step is still green, no test in the change exercises it and the green that
    would have closed the task is a fact about code that was already there — so it goes back to the
    implementer like a red step. Read the outcomes for what each is worth: the **green** control is
    the strong one, a fact about every test in the change at once; a **red** one says the test half
@@ -105,6 +105,14 @@ which wrote nothing, reaches the reviewer as part of the change under review, an
 lands it inside `T-NNN: <title>` — in the history the acceptance record names. A parallel leaf never
 had this problem: `git worktree add` hands it a clean checkout, so everything it finds afterwards
 is its own. The refusal is how a serial task gets the same guarantee. Commit or stash first.
+
+A serial task's commits land on the work branch before they have passed anything, so the commit it
+started on is **pinned** when it first starts and held until it lands: `base..HEAD` is its change
+across every attempt and every run. That holds only while nothing else lands above it, so **while an
+unlanded serial task's work is on the branch, it is the only task that runs**. A blocked one stops
+the run: `rein task reset` puts it back on the frontier (`--fresh` or not, the base stays, because
+the commits do), or revert its commits — once nothing of it is left on the branch the loop releases
+the base itself.
 
 It also refuses **before the first agent launch** on anything about the machine that this run
 cannot finish without: no container runtime while a step needs an OCI sandbox, a pinned image

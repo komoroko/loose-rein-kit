@@ -507,7 +507,7 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     recorded: dict[str, str] = {}
     tip = _tip(loop, monkeypatch, "a" * 40, "b" * 40, "c" * 40)
 
-    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": recorded.update({tid: commit}))
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: recorded.update({tid: commit}))
     _merging_batch(loop, monkeypatch)
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: tip())
 
@@ -559,7 +559,7 @@ def test_a_repaired_leaf_that_is_not_the_tip_keeps_its_own_merge_commit(
     done: dict[str, list[str]] = {}
     tip = _tip(loop, monkeypatch, "a" * 40, "b" * 40, "c" * 40)
 
-    def record(task_id: str, status: str, commit: str = "") -> None:
+    def record(task_id: str, status: str, commit: str = "", **_: object) -> None:
         if status == "done":
             done.setdefault(task_id, []).append(commit)
 
@@ -585,7 +585,7 @@ def test_a_repaired_leaf_that_is_still_the_tip_records_the_repair(
     done: dict[str, list[str]] = {}
     tip = _tip(loop, monkeypatch, "a" * 40, "c" * 40)
 
-    def record(task_id: str, status: str, commit: str = "") -> None:
+    def record(task_id: str, status: str, commit: str = "", **_: object) -> None:
         if status == "done":
             done.setdefault(task_id, []).append(commit)
 
@@ -644,7 +644,7 @@ def test_a_serial_task_records_the_repair_that_landed_on_top_of_it(
     monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
     monkeypatch.setattr(loop, "_repair_warm_findings", lambda task, readout: tip())
     monkeypatch.setattr(
-        loop, "_set_status", lambda tid, status, commit="": done.append(commit) if status == "done" else None
+        loop, "_set_status", lambda tid, status, commit="", **_: done.append(commit) if status == "done" else None
     )
 
     loop._consume_serial([dag.Task(id="T-001", title="foundation", kind="foundation")])
@@ -665,7 +665,7 @@ def test_a_serial_task_with_nothing_to_repair_is_recorded_once(tmp_path: Path, m
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: tip())
     monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
     monkeypatch.setattr(
-        loop, "_set_status", lambda tid, status, commit="": done.append(commit) if status == "done" else None
+        loop, "_set_status", lambda tid, status, commit="", **_: done.append(commit) if status == "done" else None
     )
 
     loop._consume_serial([dag.Task(id="T-001", title="foundation", kind="foundation")])
@@ -1862,7 +1862,7 @@ def test_a_stopped_leaf_keeps_its_worktree_while_its_batchmates_still_merge(
     cleaned: list[str] = []
     merged: list[str] = []
 
-    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": statuses.append((tid, status)))
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: statuses.append((tid, status)))
     monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
@@ -2556,7 +2556,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
     gated: list[list[str]] = []
 
-    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": None)
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: None)
     monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
@@ -2906,7 +2906,7 @@ def _controlled(
 
 def _cmd_steps() -> tuple[build_loop.GateStep, ...]:
     return (
-        build_loop.GateStep(name="test", kind="command", command=("make", "test")),
+        build_loop.GateStep(name="test", kind="command", command=("make", "test"), runs_tests=True),
         build_loop.GateStep(name="check", kind="command", command=("make", "check")),
     )
 
@@ -2925,7 +2925,7 @@ def test_a_dod_that_is_green_without_the_change_does_not_let_the_task_land(
 
     assert failed == build_loop.NEGATIVE_CONTROL
     assert "green without your change" in message
-    assert ran == ["test", "check"]
+    assert ran == ["test"]
     # Deliberately not recorded as evidence: `evidence.negative_control` justifies a `done`, and
     # this is the verdict that stops there being one. It travels as a task failure instead.
     assert loop._current_control == {}
@@ -2941,6 +2941,21 @@ def test_a_step_that_goes_red_without_the_change_is_what_makes_the_control_a_pas
     assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
     assert ran == ["test"]
     assert loop._current_control == {"result": "discriminating", "base": "a" * 40, "step": "test"}
+
+
+def test_a_linter_going_red_without_the_change_is_not_taken_as_the_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new test file importing a module the base lacks turns a linter red over the base whatever
+    the test asserts — `pass` included. Five of eight tasks of one cycle landed on that red. Only a
+    step that runs the tests is asked, so a test run that stays green still sends the task back."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"], reds={"check": "F401 unresolved"})
+
+    failed, _ = loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps())
+
+    assert failed == build_loop.NEGATIVE_CONTROL
+    assert ran == ["test"]
 
 
 def test_a_task_that_changed_no_test_is_recorded_rather_than_passed_or_blocked(
@@ -2984,7 +2999,7 @@ def test_a_dod_with_no_command_step_records_that_it_could_not_be_controlled(
     assert loop._negative_control(_task(), str(loop.root), "a" * 40, agents_only) == (None, "")
     assert ran == []
     assert loop._current_control["result"] == "undetermined"
-    assert "no command step" in loop._current_control["detail"]
+    assert "declares `runs_tests`" in loop._current_control["detail"]
 
 
 def test_a_diff_git_would_not_give_up_is_not_reported_as_an_empty_test_half(
@@ -3053,7 +3068,8 @@ def test_the_control_runs_only_the_command_steps_that_actually_passed(
     passed = (
         build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),
         build_loop.GateStep(name="smoke", kind="command"),
-        build_loop.GateStep(name="test", kind="command", command=("make", "test")),
+        build_loop.GateStep(name="lint", kind="command", command=("make", "lint")),
+        build_loop.GateStep(name="test", kind="command", command=("make", "test"), runs_tests=True),
     )
 
     loop._negative_control(_task(), str(loop.root), "a" * 40, passed)
@@ -3113,7 +3129,7 @@ def test_a_broken_negative_control_is_undetermined_and_not_an_abort(
     loop = orchestrator(tmp_path)
     monkeypatch.setattr(common, "run", fake_git())
     task = dag.Task(id="T-001", title="t", kind="parallel")
-    step = build_loop.GateStep(name="test", kind="command", command=("true",))
+    step = build_loop.GateStep(name="test", kind="command", command=("true",), runs_tests=True)
     monkeypatch.setattr(loop, "_review_scope", lambda t, cwd, base: (["tests/test_x.py"], "git diff"))
     monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
     monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "--- a\n+++ b\n")

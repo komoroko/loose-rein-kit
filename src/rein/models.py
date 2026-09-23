@@ -77,6 +77,9 @@ GATE_ENDS: tuple[str, str] = (GATE_FIRST, GATE_LAST)
 #: mandate and upstream of acceptance, and nothing more. Which one the loop reaches first is
 #: execution order, which `00-concept.md` puts inside the delegation and not at a contact point.
 CROSSING_GATE_RE = re.compile(r"^T-[0-9]+$")
+#: The fields of a task that place it in the order of the work rather than say what it may do:
+#: its edges, and the DAG-shape class derived with them. Outside a crossing gate's subject.
+TASK_ORDER_KEYS: tuple[str, ...] = ("blocked_by", "kind")
 GATE_STATUS_VALUES = frozenset({"pending", "approved"})
 
 
@@ -421,6 +424,11 @@ EVENT_ORDER: tuple[str, ...] = (
     "cycle_initialized",
     "knowledge_gap",
     "gate_approved",
+    # A crossing gate re-approved by the mandate approval that re-froze the plan, because nothing
+    # it authorizes moved since a human confirmed it (`approve.crossing_digest`). Its own kind, not
+    # a second `gate_approved`: that one is a person stopping to decide, and counting a carry as a
+    # stop would put an ask nobody was made to answer into `events.stops`.
+    "gate_carried",
     "gate_revised",
     "changes_requested",
     "changes_addressed",
@@ -1059,6 +1067,21 @@ class Plan:
         return self._section("tasks")
 
     @property
+    def artifact_paths(self) -> tuple[str, ...]:
+        """Every path an `artifact` acceptance criterion requires, across the plan, sorted.
+
+        What a human approved at the mandate as evidence the loop produces: a file one of these
+        names exactly, that no analyzer can read, is not unread code (`diff_facts.build_coverage`).
+        """
+        found: set[str] = set()
+        for task in self.tasks:
+            for entry in task.acceptance:
+                evidence = entry.get("evidence")
+                if isinstance(evidence, dict) and _str(evidence, "kind") == "artifact":
+                    found.update(_ids(evidence, "paths"))
+        return tuple(sorted(found))
+
+    @property
     def crossing_task_ids(self) -> tuple[str, ...]:
         """The tasks whose work cannot be undone once it runs — this cycle's extra contact points.
 
@@ -1089,6 +1112,21 @@ class Plan:
     def task(self, task_id: str) -> Task | None:
         found = self.get("tasks", task_id)
         return found if isinstance(found, Task) else None
+
+    def crossing_subject(self, task_id: str) -> dict[str, Any]:
+        """What approving the crossing gate `task_id` authorizes, and nothing about when it runs.
+
+        The task's own entry without :data:`TASK_ORDER_KEYS`, and the claims it answers. Not the
+        rest of the plan: another task's scope, a dependency edge, a decision about something else
+        leave what this crossing lets the loop do exactly where it was, and "no approval is about
+        the order of the work" is a rule this is one of the places to keep.
+        """
+        task = self.task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        claims = {cid: dict(claim.raw) for cid in task.claim_ids if (claim := self.claim(cid)) is not None}
+        own = {k: v for k, v in task.raw.items() if k not in TASK_ORDER_KEYS}
+        return {"task": own, "claims": claims}
 
     def ids(self, section: str) -> frozenset[str]:
         return frozenset(self._index.get(section, {}))
@@ -1624,6 +1662,11 @@ class GateStep:
         return bool(self.raw.get("required"))
 
     @property
+    def runs_tests(self) -> bool:
+        """Does this step run the test suite? What the negative control re-establishes (absent: no)."""
+        return self.raw.get("runs_tests") is True
+
+    @property
     def paths(self) -> tuple[str, ...]:
         """Glob patterns scoping this step to matching changed paths (empty: every task).
 
@@ -2134,6 +2177,11 @@ def _acceptance_errors(task: Task) -> list[str]:
     Ids are unique *within the task* (they are scoped to it), and an evidence kind must carry
     what that kind is made of — a `command` with no argv, or an `artifact` naming no path, is a
     criterion that would report itself established by doing nothing at all.
+
+    An `artifact` must also lie inside the task's own scope. Otherwise the task is refused whichever
+    way it goes — writing the file is a scope violation, not writing it fails the criterion — and
+    that was found twice in one cycle only after the task had been implemented, each time costing a
+    roll back of the mandate. Both halves are in the plan, so it is refused here instead.
     """
     errors: list[str] = []
     seen: set[str] = set()
@@ -2150,6 +2198,13 @@ def _acceptance_errors(task: Task) -> list[str]:
             errors.append(f"tasks/{task.id}/{ac_id}: evidence kind 'command' with no command to run")
         if kind == "artifact" and not _ids(evidence, "paths"):
             errors.append(f"tasks/{task.id}/{ac_id}: evidence kind 'artifact' with no paths to require")
+        if kind == "artifact" and (
+            outside := common.outside_scope(_ids(evidence, "paths"), task.scope_include, task.scope_exclude)
+        ):
+            errors.append(
+                f"tasks/{task.id}/{ac_id}: requires {', '.join(outside)}, which the task's own scope does not "
+                "cover — the task could neither write it (a scope violation) nor pass without it"
+            )
     return errors
 
 

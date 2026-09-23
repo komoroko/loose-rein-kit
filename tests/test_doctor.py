@@ -1282,10 +1282,12 @@ def test_an_adapter_that_cannot_resume_says_what_that_costs() -> None:
 
 
 def _gate(*steps: dict[str, object]) -> models.Config:
-    return models.Config(make_config(quality_gate=list(steps)))
+    """`steps` beside a step that runs the tests, so each test below sees only the shape it is about."""
+    suite = _cmd("suite", ["python", "-m", "pytest"], runs_tests=True)
+    return models.Config(make_config(quality_gate=[*steps, suite]))
 
 
-def _cmd(name: str, command: list[str], *, required: bool = True) -> dict[str, object]:
+def _cmd(name: str, command: list[str], *, required: bool = True, runs_tests: bool = False) -> dict[str, object]:
     return {
         "name": name,
         "kind": "command",
@@ -1293,7 +1295,16 @@ def _cmd(name: str, command: list[str], *, required: bool = True) -> dict[str, o
         "executor_profile": "quality",
         "retries": 1,
         "required": required,
+        "runs_tests": runs_tests,
     }
+
+
+def test_a_gate_with_no_step_that_runs_the_tests_leaves_the_control_nothing_to_take() -> None:
+    config = models.Config(make_config(quality_gate=[_cmd("lint", ["ruff", "check"])]))
+    results = doctor.check_quality_gate(config)
+
+    assert [f.level for f in results] == ["WARN"]
+    assert "runs_tests" in results[0].message
 
 
 def test_a_placeholder_command_is_reported() -> None:

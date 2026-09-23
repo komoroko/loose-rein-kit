@@ -573,6 +573,23 @@
                 }
               }
             },
+            "evidence_files": {
+              "description": "Files no analyzer could read that the frozen plan declares as an acceptance criterion's artifact (`evidence.kind: artifact`) — a screenshot, a golden image, a recorded sample. Nothing was supposed to read them as code: a human approved them as evidence at the mandate, so they are named here rather than counted as a coverage gap.",
+              "type": "array",
+              "maxItems": 512,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "path"
+                ],
+                "properties": {
+                  "path": {
+                    "$ref": "#/$defs/repoPath"
+                  }
+                }
+              }
+            },
             "languages": {
               "type": "object",
               "maxProperties": 64,

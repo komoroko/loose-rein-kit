@@ -27,9 +27,10 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import rein
 from rein import (
@@ -448,6 +449,12 @@ def check_freeze_drift(
         if state.gate_status(gate) != "approved":
             continue
         receipt = state.gate_receipt(gate) or {}
+        if gate in state.crossing_gates:
+            # Bound to its task's subject rather than to the plan, which reads the ticket too — so,
+            # like the ticket drift above, it is only answerable with a checkout to read.
+            if repo is not None:
+                findings += _crossing_drift(repo, plan, config, gate, receipt)
+            continue
         for key, label in (("plan_digest", "plan.yaml"), ("config_digest", "config.yaml")):
             bound, recorded = receipt.get(key), frozen[key]
             if not bound or not recorded or bound == recorded:
@@ -462,6 +469,35 @@ def check_freeze_drift(
                 )
             )
     return findings
+
+
+def _crossing_drift(
+    repo: repo_mod.Repo,
+    plan: models.Plan | None,
+    config: models.Config | None,
+    gate: str,
+    receipt: Mapping[str, Any],
+) -> list[Finding]:
+    """A crossing receipt binds what its task authorizes (`approve.crossing_digest`), not the plan."""
+    from rein import approve
+
+    bound = receipt.get("crossing_digest")
+    if not bound:
+        return [
+            Finding("FAIL", "gates", f"gate '{gate}' receipt {receipt.get('approval_id')} binds no crossing digest")
+        ]
+    if plan is None or config is None or plan.task(gate) is None:
+        return [Finding("FAIL", "gates", f"gate '{gate}' is approved but its task cannot be read from the frozen plan")]
+    if bound != approve.crossing_digest(repo, plan, config, gate):
+        return [
+            Finding(
+                "FAIL",
+                "gates",
+                f"gate '{gate}' receipt {receipt.get('approval_id')} binds a task, claims, ticket or config "
+                "other than the ones that now stand — what it authorized has moved since a human confirmed it.",
+            )
+        ]
+    return []
 
 
 def check_receipts(state: models.State | None) -> list[Finding]:
@@ -1466,6 +1502,15 @@ def check_quality_gate(config: models.Config | None) -> list[Finding]:
                     "Fine for a library; for anything with an entry point, set `required: true`.",
                 )
             )
+    if config.quality_gate and not any(s.kind == "command" and s.runs_tests for s in config.quality_gate):
+        findings.append(
+            Finding(
+                "WARN",
+                "quality-gate",
+                "no command step declares `runs_tests: true`, so the negative control has no test run to "
+                "take and every task's green is recorded as uncontrolled. Mark the step that runs the suite.",
+            )
+        )
     if not findings and config.quality_gate:
         message = f"all {len(config.quality_gate)} DoD step(s) establish something"
         findings.append(Finding("PASS", "quality-gate", message))
@@ -1674,8 +1719,9 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
                 f"{len(view.unreadable)} binary/unsupported file(s) are tracked in the change under "
                 f"review, so coverage will be `insufficient`"
                 + (f" and at {view.effective_risk} risk that blocks acceptance" if view.coverage_blocks_gate else "")
-                + f": {named}. Remove them from the change (gitignore the smoke-test output) or "
-                "split them out of this scope.",
+                + f": {named}. Remove them from the change (gitignore the smoke-test output), or — "
+                "for evidence an acceptance criterion needs — declare that file's own path as the "
+                "criterion's `artifact` while the mandate can still be edited.",
             )
         )
     return findings

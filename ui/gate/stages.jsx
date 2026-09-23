@@ -41,6 +41,7 @@ export function ScopeStage({ data }) {
   const c = s.counts || {};
   const unsupported = cov.unsupported_files || [];
   const generated = cov.generated_files || [];
+  const evidence = cov.evidence_files || [];
 
   return (
     <>
@@ -100,6 +101,13 @@ export function ScopeStage({ data }) {
         {generated.length ? (
           <div className="row" style={{ marginTop: ".5rem" }}>
             generated: <span className="mono">{generated.join(", ")}</span>
+          </div>
+        ) : null}
+        {/* Not a gap, and still named: a binary entered the change, and the only reason it is not
+            unread code is that the mandate declared it as an acceptance criterion's evidence. */}
+        {evidence.length ? (
+          <div className="row" style={{ marginTop: ".5rem" }}>
+            declared evidence, not read as code: <span className="mono">{evidence.join(", ")}</span>
           </div>
         ) : null}
         {cov.coverage_status !== "sufficient" ? (

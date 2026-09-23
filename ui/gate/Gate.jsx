@@ -80,7 +80,7 @@ function Naming({ naming, gate }) {
   const lenses = (naming || {}).lenses || [];
   const crossing = (naming || {}).crossing || [];
   if (!unasked.length && !lenses.length && !crossing.length) return null;
-  const crossingTasks = [...new Set(crossing.map((c) => c.task_id))];
+  const crossingTasks = [...new Set(crossing.filter((c) => !c.carried_from).map((c) => c.task_id))];
   const proposedCount = lenses.filter((l) => l.status === "proposed").length;
   return (
     <>
@@ -91,7 +91,7 @@ function Naming({ naming, gate }) {
               item on this screen that no later gate can reconsider. */}
           <div className="subhead" style={{ marginTop: ".8rem" }}>
             {gate === "mandate"
-              ? `${crossingTasks.length} further stop(s) this mandate creates — one before each task that declares work it cannot take back`
+              ? `${crossingTasks.length} further stop(s) this mandate creates — one before each task that declares work it cannot take back and was not already approved as it stands`
               : "This approval lets the loop do something it cannot undo"}
           </div>
           <table>
@@ -104,6 +104,11 @@ function Naming({ naming, gate }) {
                     <div className="note">
                       decided in: {c.adr || "(no ADR recorded — the reversibility claim is unsupported)"}
                     </div>
+                    {c.carried_from ? (
+                      <div className="note">
+                        unchanged since {c.carried_from} approved it — carried by this approval, not a stop
+                      </div>
+                    ) : null}
                   </td>
                 </tr>
               ))}

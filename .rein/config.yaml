@@ -167,6 +167,9 @@ quality_gate:
     executor_profile: quality
     retries: 2
     required: true
+    # The step that runs the tests: the one the negative control re-establishes over the base with
+    # only a task's test half applied. A linter's red there is true of any new test file.
+    runs_tests: true
   - name: check
     kind: command
     command: [python, -m, compileall, -q, .]

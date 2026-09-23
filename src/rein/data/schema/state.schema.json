@@ -181,6 +181,10 @@
           "completed_commit": {
             "$ref": "#/$defs/commit"
           },
+          "base": {
+            "description": "The work-branch commit a serially consumed task's work began on, pinned when it first goes in-progress and dropped when it lands. Every attempt is judged on the diff from here, so a commit an interrupted attempt already made stays inside what the next one is checked against.",
+            "$ref": "#/$defs/commit"
+          },
           "note": {
             "type": "string",
             "maxLength": 1000
@@ -776,6 +780,10 @@
         "plan_digest": {
           "$ref": "#/$defs/digest"
         },
+        "crossing_digest": {
+          "description": "A crossing gate's subject instead of the whole plan: that task's own entry without its place in the order of the work, the claims it answers, its ticket, and the frozen config (`approve.crossing_digest`). A dependency edge or another task's scope moving leaves it where it was.",
+          "$ref": "#/$defs/digest"
+        },
         "config_digest": {
           "$ref": "#/$defs/digest"
         },
@@ -796,6 +804,12 @@
         },
         "result_chain_root": {
           "$ref": "#/$defs/digest"
+        },
+        "carried_from": {
+          "description": "Set on a crossing opened by a mandate approval rather than confirmed again: the earlier crossing confirmation it carries, whose `crossing_digest` in the audit chain matches this one. `approval_id` is the mandate confirmation whose screen named the carry.",
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^GA-[A-Z0-9-]+$"
         }
       }
     },

@@ -567,10 +567,20 @@ def approval_subject(repo: repo_mod.Repo, gate: str) -> dict[str, str]:
         "cycle_id": state.cycle_id if state else "",
         "attested_chain_root": event_chain.chain_root(events),
     }
-    if plan is not None:
-        subject["plan_digest"] = plan.digest()
+    crossing = state is not None and gate in state.crossing_gates
+    if crossing:
+        # What this crossing authorizes, instead of the whole plan and config: a receipt that bound
+        # every byte of the plan went stale on a dependency edge between two other tasks, and the
+        # roll back that edit took withdrew an irreversible-point approval nothing had touched.
+        if plan is None or config is None:
+            raise ApprovalError(f"gate '{gate}' authorizes a task of the frozen plan, and there is no plan to read")
+        subject["crossing_digest"] = crossing_digest(repo, plan, config, gate)
+    else:
+        if plan is not None:
+            subject["plan_digest"] = plan.digest()
+        if config is not None:
+            subject["config_digest"] = config.frozen_digest()
     if config is not None:
-        subject["config_digest"] = config.frozen_digest()
         # Recorded, never compared against the freeze. The pin is allowed to move within a cycle
         # (a task adds a dependency, the image is rebuilt), so what a receipt can honestly say is
         # *which* environment the approval was taken over — which is what makes a later "the
@@ -591,12 +601,97 @@ def approval_subject(repo: repo_mod.Repo, gate: str) -> dict[str, str]:
     return subject
 
 
+def crossing_digest(repo: repo_mod.Repo, plan: models.Plan, config: models.Config, task_id: str) -> str:
+    """Everything approving crossing gate `task_id` authorizes, as one digest.
+
+    The task's entry and the claims it answers (`Plan.crossing_subject`), the ticket the
+    implementer is sent to read, and the frozen config the work will run under. Nothing about when
+    it runs, and nothing about any other task: those can move without changing what a human said
+    this task may do, and a digest that moved with them asked that human again for a decision whose
+    content had not changed.
+    """
+    ticket = repo.path(f"docs/tasks/{task_id}.md")
+    return digests.of(
+        {
+            **plan.crossing_subject(task_id),
+            "ticket": digests.of_file(ticket) if ticket.is_file() else "",
+            "config": config.frozen_digest(),
+        }
+    )
+
+
+def carried_crossings(
+    repo: repo_mod.Repo, events: Sequence[models.Event], plan: models.Plan, config: models.Config | None
+) -> dict[str, tuple[str, str]]:
+    """The crossing approvals a mandate approval over `plan` carries back.
+
+    Task id → `(the approval carried, the crossing digest it was confirmed over)`.
+
+    A roll back to the mandate withdraws every crossing — an upstream `pending` never leaves a
+    downstream gate `approved`. This is the other half: once the upstream is approved again, a
+    crossing withdrawn as a side effect whose `crossing_digest` still matches what the task
+    authorizes is the same decision about the same content, and asking for it again is one approval
+    too many. One that moved is asked for, which is exactly when the thing a human authorized
+    changed.
+
+    **Read off the audit chain, never off `state.yaml`.** What a human confirmed, and over which
+    digest, is what the hash-chained `gate_approved` records (`_withdrawn_approval`). A copy of the
+    receipt kept in `state.yaml` would be an approval anything able to write that file could mint,
+    and a carry nobody stops to decide is exactly where a minted one would go unnoticed.
+    """
+    if config is None:
+        return {}
+    carried: dict[str, tuple[str, str]] = {}
+    for task_id in plan.crossing_task_ids:
+        withdrawn = _withdrawn_approval(events, task_id)
+        if withdrawn is not None and withdrawn[1] == crossing_digest(repo, plan, config, task_id):
+            carried[task_id] = withdrawn
+    return carried
+
+
+def _withdrawn_approval(events: Sequence[models.Event], gate: str) -> tuple[str, str] | None:
+    """`(approval id, crossing digest)` of the approval a roll back withdrew from `gate` as a side
+    effect and no mandate approval has answered since — or None.
+
+    Walked backwards: the last `gate_revised` naming `gate` must not have targeted it (withdrawn
+    *as* the decision, only a human confirming it again brings it back), no mandate approval may
+    stand after it (that one already carried it or asked for it — a withdrawal is answered once),
+    and the event before it concerning `gate` must be the confirmation it withdrew. Another
+    `gate_revised` there means the gate was already pending when rolled back, so there was
+    nothing to withdraw.
+    """
+    revised = False
+    for event in reversed(events):
+        if event.event == "gate_approved" and event.subject_ids[:1] == (FREEZING_GATE,) and not revised:
+            return None
+        if event.event == "gate_revised":
+            if gate not in event.detail.get("gates_reset", ()):
+                continue
+        elif event.subject_ids[:1] != (gate,):
+            continue
+        if not revised:
+            if event.event != "gate_revised" or event.detail.get("target_gate") == gate:
+                return None
+            revised = True
+            continue
+        if event.event == "gate_approved":
+            original = event.subject_ids[1] if len(event.subject_ids) > 1 else ""
+        elif event.event == "gate_carried":
+            original = str(event.detail.get("carried_from", ""))
+        else:
+            return None
+        digest = str(event.detail.get("crossing_digest", ""))
+        return (original, digest) if original and digest else None
+    return None
+
+
 # --- recording an approval ---------------------------------------------------------
 
 #: Receipt keys carried straight from the subject. `repository_id` and `cycle_id` are not
 #: digests and already live in state.yaml, so they stay out of the receipt.
 _RECEIPT_DIGESTS = (
     "plan_digest",
+    "crossing_digest",
     "config_digest",
     "environment_digest",
     "machine_digest",
@@ -727,6 +822,8 @@ def record_approval(
     # this approval freezes, because after the freeze it is the same bytes and before it there is
     # nothing binding to read.
     crossings = _crossing_task_ids(repo) if gate == FREEZING_GATE else ()
+    frozen_plan = store.read_plan() if crossings else None
+    frozen_config = store.read_config() if crossings else None
 
     # Everything below runs under the store lock. The chain-root binding is only meaningful if
     # nothing can append between the check and the receipt that pins it, and a gate approval
@@ -745,12 +842,19 @@ def record_approval(
                 f"removed, or regenerated. Re-run `rein approve {gate}`."
             )
 
+        # Which crossings this approval carries back rather than creates, out of the chain this
+        # transaction just verified — the one the human's screen was attested against.
+        carried = carried_crossings(repo, events, frozen_plan, frozen_config) if frozen_plan is not None else {}
+        detail: dict[str, object] = {"attested_chain_root": root_before, "subject_digest": digests.of(dict(subject))}
+        if subject.get("crossing_digest"):
+            # In the chain, not only in the receipt: a later carry is decided from this record.
+            detail["crossing_digest"] = subject["crossing_digest"]
         tx.append(
             "gate_approved",
             cycle_id=state.cycle_id,
             actor="local-confirmation",
             subject_ids=[gate, approval_id],
-            detail={"attested_chain_root": root_before, "subject_digest": digests.of(dict(subject))},
+            detail=detail,
         )
 
         raw = json.loads(json.dumps(state.raw))  # plain deep copy; state.raw stays untouched
@@ -801,6 +905,23 @@ def record_approval(
             raw["gates"] = {g: v for g, v in raw["gates"].items() if g in models.GATE_ENDS} | {
                 task_id: {"status": "pending", "receipt": None} for task_id in crossings
             }
+            # Then the crossings whose subject did not move are opened by *this* confirmation — the
+            # one whose screen named the carry — and say which earlier one they carry. A
+            # `gate_carried` of their own rather than a `gate_approved`: nobody stopped to decide
+            # it, and the chain says which it was.
+            for task_id, (original, digest) in carried.items():
+                crossing_receipt = {k: v for k, v in receipt.items() if k not in ("plan_digest", "config_digest")}
+                raw["gates"][task_id] = {
+                    "status": "approved",
+                    "receipt": {**crossing_receipt, "crossing_digest": digest, "carried_from": original},
+                }
+                tx.append(
+                    "gate_carried",
+                    cycle_id=state.cycle_id,
+                    actor="local-confirmation",
+                    subject_ids=[task_id, approval_id],
+                    detail={"crossing_digest": digest, "carried_from": original},
+                )
             raw["plan"] = _frozen_plan_block(repo, subject)
             tx.append(
                 "plan_frozen",
@@ -943,10 +1064,10 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # thing about to become permanent. Either way it is the one item on the screen that no
         # later gate can reconsider.
         if gate == FREEZING_GATE:
-            tasks = sorted({row["task_id"] for row in crossing})
+            tasks = sorted({row["task_id"] for row in crossing if not row["carried_from"]})
             print(
                 f"{len(tasks)} further stop(s) this mandate creates — one before each task that "
-                "declares work it cannot take back:"
+                "declares work it cannot take back and was not already approved as it stands:"
             )
         else:
             print("This approval lets the loop do something it cannot undo:")
@@ -1092,6 +1213,15 @@ def crossing_declarations(repo: repo_mod.Repo, gate: str) -> list[dict[str, str]
     if plan is None:
         return []
     wanted = plan.crossing_task_ids if gate == FREEZING_GATE else (gate,)
+    # At the mandate, which crossings this approval carries back rather than creates as a stop.
+    # Named on the screen because the approval is what does it: a carry nobody was shown would be
+    # a decision taken on their behalf.
+    carried: dict[str, tuple[str, str]] = {}
+    if gate == FREEZING_GATE:
+        events, defects = event_chain.scan(repo.events)
+        # A damaged chain carries nothing: readiness refuses the approval over it anyway.
+        if not defects:
+            carried = carried_crossings(repo, events, plan, store_mod.Store(repo).read_config())
     rows: list[dict[str, str]] = []
     for task in plan.tasks:
         if task.id not in wanted:
@@ -1107,6 +1237,8 @@ def crossing_declarations(repo: repo_mod.Repo, gate: str) -> list[dict[str, str]
                     # so an empty string here means the plan pointed at nothing, not that this
                     # screen dropped it.
                     "adr": str(entry.get("adr", "")),
+                    # The human confirmation this approval carries back, or "" for a stop to come.
+                    "carried_from": carried[task.id][0] if task.id in carried else "",
                 }
             )
     return rows
@@ -1118,6 +1250,10 @@ def render_crossing(rows: Sequence[Mapping[str, str]]) -> str:
         lines.append(f"  - {row['task_id']} {row['title']}")
         lines.append(f"      cannot be undone: {row['name']} ({row['kind']})")
         lines.append(f"      decided in: {row['adr'] or '(no ADR recorded — the reversibility claim is unsupported)'}")
+        if row.get("carried_from"):
+            lines.append(
+                f"      unchanged since {row['carried_from']} approved it — carried by this approval, not a stop"
+            )
     return "\n".join(lines)
 
 

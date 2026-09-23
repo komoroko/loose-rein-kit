@@ -196,7 +196,12 @@ On a confirmed defect in what was authorized, roll back at the human's discretio
 --to mandate` (or `--to acceptance`, or `--to T-NNN`): **gates reset in a chain** — an upstream
 `pending` never leaves a downstream gate `approved`, and it invalidates the receipts and the review
 built on top of it. Rewinding a crossing withdraws the approval; what the task already did stays
-done, and the roll back says so. **Rewinding approval is a human privilege**, never automatic.
+done, and the roll back says so. A crossing withdrawn only because the mandate above it rolled
+back is **carried back** by the next mandate approval when what it authorizes — its task entry
+short of the dependency edges, its claims, its ticket, the frozen config — has not moved; a
+receipt binds that, not the whole plan. The carry is decided from the audit chain — the digest
+the withdrawn approval recorded there — never from a copy anything able to write `state.yaml` could
+mint, and the chain records it as such. **Rewinding approval is a human privilege**, never automatic.
 Reclassify each task the impact analysis (`rein dag
 --impacted`) flags, never discard (procedure: revise.md, tasks.md).
 
@@ -261,8 +266,9 @@ human decides *whether*; the loop does the work.
   anything. What it says is a claim (`--touched` is checked against the real diff), never a verdict.
 - **A green is evidence only if it could have been red.** The tests the DoD runs were written by
   the implementer in the same launch as the code, and re-running them defends against an agent that
-  *lies*, never against one that *self-confirms*. So the loop takes a **negative control**: the same
-  command steps re-established over the base, with only the task's test half applied. Still green
+  *lies*, never against one that *self-confirms*. So the loop takes a **negative control**: the steps
+  that run the tests (`runs_tests`) re-established over the base, with only the task's test half
+  applied — never a linter, whose red is true of any new test file. Still green
   means no test in the change exercises it, and the task goes back rather than landing. **The two
   outcomes are not worth the same**: a green control is a fact about every test in the change at
   once, while a red one says only that the test half is not inert against the old code — it cannot

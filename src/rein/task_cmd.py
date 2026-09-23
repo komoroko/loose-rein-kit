@@ -20,6 +20,13 @@ What it deliberately does **not** do:
     get an unlimited allowance by being reset in a loop. `--fresh` discards it, and says so in
     the record, because "start this one over from nothing" is a different decision and should
     read as one.
+  - It does not move a serial task's pinned `base` on anyone's say-so. The base says which commits
+    on the work branch are this task's unlanded work, and those commits are still there after any
+    reset — so the next attempt is judged on them too, `--fresh` or not, and nothing lands on the
+    branch above them until the task does. Taking the work off is a git operation (revert it, or
+    reset the branch to the base), after which the loop finds nothing held and releases the base
+    itself. The one base a reset drops is one HEAD no longer descends from: the history it named is
+    gone, so there is nothing left for it to bound, and the record says so.
   - It does not close the escalation. An escalation is concluded by a signed disposition in the
     review, never by a status somebody flipped (`rein events` is read-only by design).
   - It does not open anything. Gate approval has its own verb, its own TTY requirement, and its
@@ -31,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -54,6 +62,8 @@ class ResetResult:
 
     previous: str
     handoff: dict[str, Any]
+    #: The pinned base this reset dropped because HEAD no longer descends from it, or "".
+    dropped_base: str = ""
 
 
 def reset(repo: repo_mod.Repo, task_id: str, *, status: str, reason: str, fresh: bool = False) -> ResetResult:
@@ -84,6 +94,10 @@ def _reset_once(repo: repo_mod.Repo, task_id: str, status: str, reason: str, fre
     updated = {**entry, "status": status}
     if fresh:
         updated.pop("handoff", None)
+    pinned = str(entry.get("base", ""))
+    dropped = pinned if pinned and not _head_descends_from(repo, pinned) else ""
+    if dropped:
+        updated.pop("base", None)
     # `completed_commit` says which commit *completed* the task; a task leaving `done` has none.
     updated.pop("completed_commit", None)
     tasks[task_id] = {k: v for k, v in updated.items() if v != ""}
@@ -96,10 +110,40 @@ def _reset_once(repo: repo_mod.Repo, task_id: str, status: str, reason: str, fre
         "reason": reason[:_REASON_MAX],
         "handoff": "discarded" if fresh else "kept",
     }
+    if dropped:
+        detail["dropped_base"] = dropped
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=seen)
         tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
-    return ResetResult(previous=previous, handoff={} if fresh else handoff)
+    return ResetResult(previous=previous, handoff={} if fresh else handoff, dropped_base=dropped)
+
+
+def _head_descends_from(repo: repo_mod.Repo, commit: str) -> bool:
+    """Does HEAD descend from `commit`? Raises when git cannot answer — a guess either way would
+    either keep a base naming vanished history or drop one still bounding work on the branch."""
+    try:
+        proc = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=repo.root,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"cannot ask git whether HEAD descends from {commit[:12]}: {exc}") from exc
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    # A commit the object store no longer holds (the rewritten history was collected) is one HEAD
+    # does not descend from; anything else is git failing, which is not an answer.
+    gone = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True, text=True, timeout=30, cwd=repo.root
+    )
+    works = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, timeout=30, cwd=repo.root
+    )
+    if gone.returncode != 0 and works.returncode == 0:
+        return False
+    raise ValueError(f"cannot ask git whether HEAD descends from {commit[:12]}: {proc.stderr.strip()}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,6 +208,11 @@ def main(argv: list[str] | None = None) -> int:
                 "for a launch that reaches it again. `--fresh` is how you say you repaired something "
                 "outside the tree."
             )
+    if result.dropped_base:
+        print(
+            f"  pinned base {result.dropped_base[:12]} dropped — HEAD no longer descends from it, so the next "
+            "attempt starts from HEAD"
+        )
     print("  the escalation stays in the log; it is concluded by a disposition in the review, not by this.")
     return 0
 

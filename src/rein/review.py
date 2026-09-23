@@ -234,11 +234,11 @@ class ChangeOutlook:
     three readers of one answer rather than three spellings of it.
     """
 
-    #: The largest single reading — what one launch would be asked to hold, and what `ceiling`
-    #: bounds. For an uncomposed review this is the whole change, which is what it has always been.
+    #: The largest single reading as sent (folded) — what one launch would be asked to hold, and
+    #: what `ceiling` bounds. For an uncomposed review this is the whole change.
     diff_bytes: int
-    #: The whole change, which is what `composition` is a breakdown of and what a reader compares
-    #: the largest reading against. Required, and not defaulted to `diff_bytes`: an outlook that
+    #: The whole change as sent, which is what `composition` is a breakdown of and what a reader
+    #: compares the largest reading against. Required, and not defaulted to `diff_bytes`: an outlook that
     #: does not know how big the change is has nothing to say about what to remove from it.
     total_bytes: int
     ceiling: int
@@ -331,7 +331,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         diff_text = _diff(repo, trusted_base, "HEAD", not_the_product(repo, state))
     except ReviewError:
         return None
-    facts = diff_facts.analyze(diff_text)
+    facts = diff_facts.analyze(diff_text, evidence=plan.artifact_paths if plan is not None else ())
     limits = {**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})}
     unreadable = [
         str(entry.get("path", "")) for entry in (*facts.coverage.unsupported_files, *facts.coverage.generated_files)
@@ -350,17 +350,21 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
     # makes before it launches anything: a plan scopes every task, and at task 3 of 18 the other
     # fifteen readings have nothing in them to read. Counting them would put "in 18 readings" on
     # the board for a review that is going to take four.
-    sizes = review_reading.bytes_by_reading(diff_text, readings)
+    #
+    # Sized as sent — folded, as `read_facts` checks it — so the board and the refusal cannot
+    # disagree about whether a reading fits.
+    sent, _ = review_reading.fold_bodies(diff_text, facts.files, signalled=frozenset(h.path for h in facts.signals))
+    sizes = review_reading.bytes_by_reading(sent, readings)
     taken = {r.unit: sizes.get(r.unit, 0) for r in readings if r.whole or sizes.get(r.unit)}
     unit, largest = max(taken.items(), key=lambda item: item[1]) if taken else (review_reading.WHOLE, 0)
     return ChangeOutlook(
         diff_bytes=largest,
-        total_bytes=facts.coverage.analyzed_bytes,
+        total_bytes=len(sent.encode("utf-8")),
         ceiling=int(limits["max_diff_bytes"]),
         unreadable=tuple(sorted(p for p in unreadable if p)),
         coverage_status=facts.coverage.coverage_status,
         effective_risk=effective,
-        composition=tuple(bytes_by_kind(diff_text).items()),
+        composition=tuple(bytes_by_kind(sent).items()),
         unit=unit,
         readings=len(taken) or 1,
     )
@@ -497,7 +501,8 @@ def generate(
         # the whole here was a wall in front of a quantity nobody reads, and its own instruction —
         # split the scope — is not a move that exists at acceptance.
         whole_diff = review_reading.diff_of(repo, trusted_base, head, exclude)
-        facts = diff_facts.analyze(whole_diff)
+        evidence = plan.artifact_paths if plan is not None else ()
+        facts = diff_facts.analyze(whole_diff, evidence=evidence)
         effective = review_reading.effective_risk(facts, plan)
         changed = [f.path for f in facts.files]
 
@@ -515,7 +520,7 @@ def generate(
             plan, changed, mode=config.composition if config is not None else "auto", risk=effective
         )
         measures = review_reading.take_readings(
-            repo, readings, base=trusted_base, head=head, exclude=exclude, limits=limits
+            repo, readings, base=trusted_base, head=head, exclude=exclude, limits=limits, evidence=evidence
         )
         # A composition is a way of reading *this* change only if every finding carried into it
         # lands on a reading that can see the code it names. One that does not is not a finding to
@@ -529,7 +534,13 @@ def generate(
                 "whole instead of composing it"
             )
             measures = review_reading.take_readings(
-                repo, [review_reading.WHOLE_READING], base=trusted_base, head=head, exclude=exclude, limits=limits
+                repo,
+                [review_reading.WHOLE_READING],
+                base=trusted_base,
+                head=head,
+                exclude=exclude,
+                limits=limits,
+                evidence=evidence,
             )
         # **Highest-risk reading first.** Every reading is taken either way and none is priced
         # differently for it — what the order decides is which answers exist when a run does not

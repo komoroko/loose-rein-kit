@@ -728,3 +728,31 @@ def test_real_paths_a_character_allowlist_called_unsafe(path: str) -> None:
 def test_what_a_path_still_may_not_be(path: str) -> None:
     """No absolute form, no `..` segment, no empty segment, no backslash, no control character."""
     assert not models.is_repo_path(path)
+
+
+def _artifact_task(paths: list[str], scope_include: list[str]) -> dict[str, Any]:
+    criterion = {"id": "A-1", "statement": "the log is recorded", "evidence": {"kind": "artifact", "paths": paths}}
+    return make_task("T-007", claim_ids=["C-001"], acceptance=[criterion], scope_include=scope_include)
+
+
+def test_an_artifact_outside_its_own_task_scope_is_refused_by_the_plan() -> None:
+    """The task could neither write the file (a scope violation) nor pass without it. Twice in one
+    cycle that surfaced only after implementation, each time as a roll back of the mandate."""
+    plan = models.Plan(make_plan(tasks=[_artifact_task(["docs/test/pre-commit.md"], ["src/"])]))
+
+    errors = models.cross_reference_errors(plan)
+
+    assert any("T-007/A-1" in e and "docs/test/pre-commit.md" in e for e in errors), errors
+
+
+def test_an_artifact_inside_its_task_scope_or_an_unbounded_one_is_accepted() -> None:
+    for include in (["docs/test/"], []):
+        plan = models.Plan(make_plan(tasks=[_artifact_task(["docs/test/shots/ui.png"], include)]))
+        assert not [e for e in models.cross_reference_errors(plan) if "T-007/A-1" in e]
+
+
+def test_the_plan_names_every_artifact_path_its_criteria_require() -> None:
+    plan = models.Plan(
+        make_plan(tasks=[_artifact_task(["docs/b.png"], []), {**_artifact_task(["docs/a.md"], []), "id": "T-008"}])
+    )
+    assert plan.artifact_paths == ("docs/a.md", "docs/b.png")

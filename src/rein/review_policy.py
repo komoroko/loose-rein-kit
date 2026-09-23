@@ -678,7 +678,9 @@ def coverage_blocks(review: models.Review, effective: str) -> list[str]:
     return [
         f"coverage is insufficient for a {effective} change — {_unread_paths(manifest)} went "
         "unread, so Extra Behavior is undeterminable rather than zero. Take them out of the "
-        "change, or split them out of this scope"
+        "change; or, if one is evidence an acceptance criterion needs (a screenshot, a golden "
+        "file), declare that file's own path as the criterion's `artifact` through `/revise` — a "
+        "file an artifact names is evidence, not unread code; one under an artifact directory is not"
     ]
 
 

@@ -157,6 +157,11 @@ def render(revision: dict[str, object]) -> str:
             "is withdrawn and the task returns to the plan; whatever it already did is still done, "
             "and undoing that is yours to do outside this tool."
         )
+        if revision["target_gate"] not in crossed:
+            lines.append(
+                "- a withdrawn crossing whose task, claims, ticket and config are unchanged when the "
+                "mandate is approved again is carried back by that approval, not asked for a second time"
+            )
     if revision["unfreezes_plan"]:
         lines.append("- plan.status: frozen → draft (plan.yaml and config.yaml become editable)")
     if revision["invalidates_review"]:
@@ -249,7 +254,10 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
             "gate_revised",
             cycle_id=state.cycle_id,
             subject_ids=[*resets, *marked],
-            detail={"target_gate": revision["target_gate"], "reason": reason},
+            # `gates_reset` apart from the marked tasks, whose ids a crossing gate shares: what a
+            # later mandate approval may carry back is read off which gates this withdrew
+            # (`approve.carried_crossings`).
+            detail={"target_gate": revision["target_gate"], "gates_reset": list(resets), "reason": reason},
         )
         if revision["unfreezes_plan"]:
             tx.append("plan_invalidated", cycle_id=state.cycle_id, detail={"reason": reason})
