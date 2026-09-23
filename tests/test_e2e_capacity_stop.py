@@ -152,3 +152,79 @@ def test_a_missing_agent_cli_refuses_rather_than_asking_to_be_re_run(
     assert build(repo) == common.EXIT_CANNOT_PROCEED
     assert status_of(repo, "T-001")["status"] == "todo"
     assert status_of(repo, "T-002")["status"] == "todo"
+
+
+def test_a_serial_task_interrupted_after_committing_is_judged_on_its_commit_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A serial implementer commits straight onto the work branch. When the session dies after that
+    commit, the next run used to re-take HEAD as the task's base — the diff from there was empty,
+    and the task was blocked as `no_implementation` with its work one commit back."""
+    root = tmp_path / "product"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "t")
+    seed_repo(
+        root,
+        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
+        plan=make_plan(tasks=[make_task("T-001", kind="foundation", claim_ids=["C-001"])]),
+        state=make_state(plan_status="frozen"),
+    )
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "seed")
+    git(root, "checkout", "-q", "-b", WORK_BRANCH)
+    repo = repo_mod.Repo(root)
+    started_on = git(root, "rev-parse", "HEAD")
+
+    def committing_then_stopping(
+        cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object
+    ) -> tuple[int, str]:
+        if not cmd or cmd[0] != "claude":
+            return common.run(cmd, cwd, timeout)
+        (root / "T-001.py").write_text("# T-001 implementation\n", encoding="utf-8")
+        git(root, "add", "T-001.py")
+        git(root, "commit", "-q", "-m", "T-001: implement")
+        return SESSION_LIMIT
+
+    monkeypatch.setattr(build_loop, "_run", committing_then_stopping)
+    assert build(repo) == common.EXIT_RETRY_LATER
+    stopped = status_of(repo, "T-001")
+    assert stopped["status"] == "todo"
+    assert stopped["base"] == started_on
+    assert git(root, "rev-parse", "HEAD") != started_on
+
+    def idle(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
+        if not cmd or cmd[0] != "claude":
+            return common.run(cmd, cwd, timeout)
+        return 0, agent_envelope("")
+
+    monkeypatch.setattr(build_loop, "_run", idle)
+    assert build(repo) == common.EXIT_DONE
+    landed = status_of(repo, "T-001")
+    assert landed["status"] == "done"
+    assert "base" not in landed
+
+
+def test_a_serial_task_whose_pinned_base_left_history_stops_rather_than_re_pinning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "product"
+    root.mkdir()
+    git(root, "init", "-q", "-b", "main")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "t")
+    seed_repo(
+        root,
+        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
+        plan=make_plan(tasks=[make_task("T-001", kind="foundation", claim_ids=["C-001"])]),
+        state={**make_state(plan_status="frozen"), "tasks": {"T-001": {"status": "todo", "base": "0" * 40}}},
+    )
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "seed")
+    git(root, "checkout", "-q", "-b", WORK_BRANCH)
+    repo = repo_mod.Repo(root)
+    monkeypatch.setattr(build_loop, "_run", implementer_writing(root))
+
+    assert build(repo) == 1
+    assert status_of(repo, "T-001")["base"] == "0" * 40

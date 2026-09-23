@@ -19,7 +19,8 @@ What it deliberately does **not** do:
     much of that step's budget is actually left — is kept, so a task that cannot pass does not
     get an unlimited allowance by being reset in a loop. `--fresh` discards it, and says so in
     the record, because "start this one over from nothing" is a different decision and should
-    read as one.
+    read as one. It also drops a serial task's pinned `base`, so the next attempt is judged from
+    HEAD rather than on the work it abandoned.
   - It does not close the escalation. An escalation is concluded by a signed disposition in the
     review, never by a status somebody flipped (`rein events` is read-only by design).
   - It does not open anything. Gate approval has its own verb, its own TTY requirement, and its
@@ -84,6 +85,9 @@ def _reset_once(repo: repo_mod.Repo, task_id: str, status: str, reason: str, fre
     updated = {**entry, "status": status}
     if fresh:
         updated.pop("handoff", None)
+        # A serial task's pinned base goes with it: starting over means the next attempt is
+        # judged from HEAD, and keeping the old base would judge it on the abandoned work too.
+        updated.pop("base", None)
     # `completed_commit` says which commit *completed* the task; a task leaving `done` has none.
     updated.pop("completed_commit", None)
     tasks[task_id] = {k: v for k, v in updated.items() if v != ""}
@@ -121,7 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     reset_parser.add_argument(
         "--fresh",
         action="store_true",
-        help="also discard the handoff, so the next attempt starts with full retry budgets",
+        help="also discard the handoff and a serial task's pinned base, so the next attempt starts "
+        "with full retry budgets and is judged from HEAD",
     )
     reset_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
@@ -150,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"{task_id}: {result.previous} → {args.status} ({reason})")
     if args.fresh:
-        print("  handoff discarded — the next attempt starts with the configured retry budgets")
+        print("  handoff discarded — the next attempt starts with the configured retry budgets, judged from HEAD")
     elif result.handoff:
         step = result.handoff.get("failed_step")
         left = result.handoff.get("retries_left")

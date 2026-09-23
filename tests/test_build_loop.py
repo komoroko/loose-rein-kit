@@ -507,7 +507,7 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     recorded: dict[str, str] = {}
     tip = _tip(loop, monkeypatch, "a" * 40, "b" * 40, "c" * 40)
 
-    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": recorded.update({tid: commit}))
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: recorded.update({tid: commit}))
     _merging_batch(loop, monkeypatch)
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: tip())
 
@@ -559,7 +559,7 @@ def test_a_repaired_leaf_that_is_not_the_tip_keeps_its_own_merge_commit(
     done: dict[str, list[str]] = {}
     tip = _tip(loop, monkeypatch, "a" * 40, "b" * 40, "c" * 40)
 
-    def record(task_id: str, status: str, commit: str = "") -> None:
+    def record(task_id: str, status: str, commit: str = "", **_: object) -> None:
         if status == "done":
             done.setdefault(task_id, []).append(commit)
 
@@ -585,7 +585,7 @@ def test_a_repaired_leaf_that_is_still_the_tip_records_the_repair(
     done: dict[str, list[str]] = {}
     tip = _tip(loop, monkeypatch, "a" * 40, "c" * 40)
 
-    def record(task_id: str, status: str, commit: str = "") -> None:
+    def record(task_id: str, status: str, commit: str = "", **_: object) -> None:
         if status == "done":
             done.setdefault(task_id, []).append(commit)
 
@@ -644,7 +644,7 @@ def test_a_serial_task_records_the_repair_that_landed_on_top_of_it(
     monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
     monkeypatch.setattr(loop, "_repair_warm_findings", lambda task, readout: tip())
     monkeypatch.setattr(
-        loop, "_set_status", lambda tid, status, commit="": done.append(commit) if status == "done" else None
+        loop, "_set_status", lambda tid, status, commit="", **_: done.append(commit) if status == "done" else None
     )
 
     loop._consume_serial([dag.Task(id="T-001", title="foundation", kind="foundation")])
@@ -665,7 +665,7 @@ def test_a_serial_task_with_nothing_to_repair_is_recorded_once(tmp_path: Path, m
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: tip())
     monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
     monkeypatch.setattr(
-        loop, "_set_status", lambda tid, status, commit="": done.append(commit) if status == "done" else None
+        loop, "_set_status", lambda tid, status, commit="", **_: done.append(commit) if status == "done" else None
     )
 
     loop._consume_serial([dag.Task(id="T-001", title="foundation", kind="foundation")])
@@ -1862,7 +1862,7 @@ def test_a_stopped_leaf_keeps_its_worktree_while_its_batchmates_still_merge(
     cleaned: list[str] = []
     merged: list[str] = []
 
-    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": statuses.append((tid, status)))
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: statuses.append((tid, status)))
     monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
@@ -2556,7 +2556,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
     gated: list[list[str]] = []
 
-    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="": None)
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: None)
     monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)

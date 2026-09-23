@@ -1,7 +1,7 @@
 # .rein/rein.lock — machine-written by `rein init|sync|install|uninstall|upgrade`.
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
-format: rein-grounded-v6
+format: rein-grounded-v7
 tool_version: 0.9.4
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
@@ -109,4 +109,4 @@ integrations:
             command: rein guard
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-09-22'
+updated_at: '2026-09-24'

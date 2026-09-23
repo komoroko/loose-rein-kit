@@ -494,6 +494,11 @@ class GitWorkspace:
         rc, out = self._run(["git", "merge-base", ref, "HEAD"], cwd=cwd)
         return out.strip() if rc == 0 else ""
 
+    def is_ancestor(self, commit: str) -> bool:
+        """Does the repository root's HEAD descend from `commit`?"""
+        rc, _ = self._run(["git", "merge-base", "--is-ancestor", commit, "HEAD"], cwd=self.root)
+        return rc == 0
+
     def diff_from(self, base: str, cwd: str, paths: Sequence[str]) -> str | None:
         """`git diff <base> -- <paths>` taken in `cwd`: the change against `base`, dirty tree included.
 

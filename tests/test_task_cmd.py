@@ -70,6 +70,26 @@ def test_starting_over_is_a_separate_decision_and_is_recorded_as_one(tmp_path: P
     assert store_mod.Store(repo).read_events()[-1].detail["handoff"] == "discarded"
 
 
+def test_a_serial_base_survives_a_block_and_a_reset_and_goes_with_a_fresh_one(tmp_path: Path) -> None:
+    """The commits a blocked serial attempt made are still on the branch, so the base that bounds
+    them stays pinned until the task lands — or until a human says to start over."""
+    seed_repo(
+        tmp_path,
+        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
+        state=make_state(plan_status="frozen"),
+    )
+    repo = repo_mod.Repo(tmp_path)
+    build_loop.set_task_status(repo, "T-001", "in-progress", base="a" * 40)
+    build_loop.set_task_status(repo, "T-001", "in-progress", base="b" * 40)
+    assert entry_of(repo)["base"] == "a" * 40
+    build_loop.set_task_status(repo, "T-001", "blocked")
+    task_cmd.reset(repo, "T-001", status="todo", reason="worth one more look")
+    assert entry_of(repo)["base"] == "a" * 40
+
+    task_cmd.reset(repo, "T-001", status="todo", reason="reverted it by hand", fresh=True)
+    assert "base" not in entry_of(repo)
+
+
 def test_a_task_cannot_be_declared_done_by_hand(tmp_path: Path) -> None:
     """`done` means it passed the quality gate and landed a commit — the evidence acceptance reads."""
     repo = repo_with_a_blocked_task(tmp_path)
