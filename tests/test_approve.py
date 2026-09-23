@@ -1368,9 +1368,7 @@ def test_a_mandate_revision_that_left_a_crossing_alone_carries_it_back(tmp_path:
     repo = _cycle_with_approved_crossings(tmp_path)
     confirmed = {g: (_state_of(repo).gate_receipt(g) or {})["approval_id"] for g in ("T-001", "T-002")}
     revise.apply(repo, revise.plan_revision(repo, "mandate", []), "one more scope path for T-003")
-    withdrawn = _state_of(repo)
-    assert withdrawn.gate_status("T-001") == "pending"
-    assert (withdrawn.gate_withdrawn("T-001") or {})["approval_id"] == confirmed["T-001"]
+    assert _state_of(repo).gate_status("T-001") == "pending"
 
     def edit(document: dict[str, Any]) -> None:
         _task_entry(document, "T-001")["blocked_by"] = ["T-003"]  # order: no approval is about it
@@ -1386,16 +1384,64 @@ def test_a_mandate_revision_that_left_a_crossing_alone_carries_it_back(tmp_path:
     state = _state_of(repo)
     assert state.gate_status("T-001") == "approved"
     carried = state.gate_receipt("T-001") or {}
-    assert carried["approval_id"] == confirmed["T-001"] and carried["carried_by"] == mandate
-    assert state.gate_status("T-002") == "pending" and state.gate_withdrawn("T-002") is None
+    # Opened by the confirmation whose screen named the carry, and saying which one it carries.
+    assert carried["approval_id"] == mandate and carried["carried_from"] == confirmed["T-001"]
+    assert carried["crossing_digest"] and "plan_digest" not in carried
+    assert state.gate_status("T-002") == "pending"
 
     events = store_mod.Store(repo).read_events()
     carry = [e for e in events if e.event == "gate_carried"]
-    assert [e.subject_ids for e in carry] == [("T-001", confirmed["T-001"], mandate)]
+    assert [(e.subject_ids, e.detail["carried_from"]) for e in carry] == [(("T-001", mandate), confirmed["T-001"])]
     # Not a stop: nobody was asked.
     from rein import events as events_mod
 
     assert events_mod.stops(events) == events_mod.stops([e for e in events if e.event != "gate_carried"])
+
+    # And carried again by the next roll back: the chain names the original through the carry.
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "again")
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    assert (_state_of(repo).gate_receipt("T-001") or {})["carried_from"] == confirmed["T-001"]
+
+
+def test_a_carry_is_read_off_the_chain_not_off_state(tmp_path: Path) -> None:
+    """Anything able to write `state.yaml` could mint a receipt there. A crossing no human confirmed
+    is not carried, whatever the state file says it held."""
+    from rein import revise
+
+    repo = repo_at(
+        tmp_path,
+        state=make_state(gates=PENDING_ALL, plan_status="draft"),
+        plan=make_plan(tasks=[_crossing_task("T-001")]),
+    )
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "never crossed")
+    assert approve.naming(repo, "mandate")["crossing"][0]["carried_from"] == ""
+
+    # The shape that used to hold a withdrawn receipt in state.yaml no longer exists at all.
+    raw = yaml.safe_load(repo.state.read_text(encoding="utf-8"))
+    raw["gates"]["T-001"]["withdrawn"] = {"approval_id": "GA-T-001-FORGED"}
+    repo.state.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    with pytest.raises(models.DocumentError):
+        _state_of(repo)
+
+
+def test_a_withdrawn_crossing_is_answered_by_one_mandate_approval_only(tmp_path: Path) -> None:
+    """Moved at the next approval, it was asked for there; putting it back later does not revive
+    a confirmation a mandate approval already declined to carry."""
+    from rein import revise
+
+    repo = _cycle_with_approved_crossings(tmp_path)
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "T-001 changes")
+    original = yaml.safe_load((repo.root / ".rein" / "plan.yaml").read_text(encoding="utf-8"))
+    _edit_plan(repo, lambda d: _task_entry(d, "T-001").__setitem__("title", "moved"))
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    assert _state_of(repo).gate_status("T-001") == "pending"
+
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "put it back")
+    (repo.root / ".rein" / "plan.yaml").write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+
+    assert _state_of(repo).gate_status("T-001") == "pending"
 
 
 def test_doctor_reads_a_crossing_receipt_against_its_task_not_the_plan(tmp_path: Path) -> None:
@@ -1421,9 +1467,12 @@ def test_a_crossing_rolled_back_as_the_target_is_never_carried_back(tmp_path: Pa
     from rein import revise
 
     repo = _cycle_with_approved_crossings(tmp_path)
+    kept = (_state_of(repo).gate_receipt("T-002") or {})["approval_id"]
     revise.apply(repo, revise.plan_revision(repo, "T-001", []), "that migration is wrong")
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "and the mandate with it")
 
-    assert _state_of(repo).gate_withdrawn("T-001") is None
+    named = {row["task_id"]: row["carried_from"] for row in approve.naming(repo, "mandate")["crossing"]}
+    assert named == {"T-001": "", "T-002": kept}
 
 
 def test_the_mandate_screen_names_every_stop_it_is_about_to_create(tmp_path: Path) -> None:

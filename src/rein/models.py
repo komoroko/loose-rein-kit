@@ -1070,8 +1070,8 @@ class Plan:
     def artifact_paths(self) -> tuple[str, ...]:
         """Every path an `artifact` acceptance criterion requires, across the plan, sorted.
 
-        What a human approved at the mandate as evidence the loop produces: a file here that no
-        analyzer can read is not unread code (`diff_facts.build_coverage`).
+        What a human approved at the mandate as evidence the loop produces: a file one of these
+        names exactly, that no analyzer can read, is not unread code (`diff_facts.build_coverage`).
         """
         found: set[str] = set()
         for task in self.tasks:
@@ -1186,12 +1186,6 @@ class State:
         entry = self.gates.get(gate)
         receipt = entry.get("receipt") if entry else None
         return receipt if isinstance(receipt, dict) else None
-
-    def gate_withdrawn(self, gate: str) -> Mapping[str, Any] | None:
-        """The receipt a roll back withdrew from crossing `gate` as a side effect, or None."""
-        entry = self.gates.get(gate)
-        withdrawn = entry.get("withdrawn") if entry else None
-        return withdrawn if isinstance(withdrawn, dict) else None
 
     @property
     def crossing_gates(self) -> tuple[str, ...]:

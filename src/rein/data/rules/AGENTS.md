@@ -199,7 +199,9 @@ built on top of it. Rewinding a crossing withdraws the approval; what the task a
 done, and the roll back says so. A crossing withdrawn only because the mandate above it rolled
 back is **carried back** by the next mandate approval when what it authorizes — its task entry
 short of the dependency edges, its claims, its ticket, the frozen config — has not moved; a
-receipt binds that, not the whole plan, and the chain records the carry as such. **Rewinding approval is a human privilege**, never automatic.
+receipt binds that, not the whole plan. The carry is decided from the audit chain — the digest
+the withdrawn approval recorded there — never from a copy anything able to write `state.yaml` could
+mint, and the chain records it as such. **Rewinding approval is a human privilege**, never automatic.
 Reclassify each task the impact analysis (`rein dag
 --impacted`) flags, never discard (procedure: revise.md, tasks.md).
 

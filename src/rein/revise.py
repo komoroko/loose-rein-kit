@@ -198,16 +198,8 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
     raw = json.loads(json.dumps(state.raw))
     resets = revision["gates_reset"]
     assert isinstance(resets, list)
-    target = revision["target_gate"]
     for gate in resets:
-        receipt = state.gate_receipt(gate)
-        # A crossing withdrawn because something upstream of it rolled back keeps what it held, so
-        # the next mandate approval can carry it back if what it authorizes did not move
-        # (`approve.carried_crossings`). One rolled back as the target was withdrawn *as* the
-        # decision, and nothing may bring that back but a human confirming it again.
         raw["gates"][gate] = {"status": "pending", "receipt": None}
-        if gate in state.crossing_gates and gate != target and receipt is not None:
-            raw["gates"][gate]["withdrawn"] = dict(receipt)
     # Where the cycle now stands follows from those gates and is not written beside them
     # (`models.State.stage`). It used to be a second field this transaction set, which is how a
     # roll back could leave a phase and a gate set disagreeing.
@@ -262,7 +254,10 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
             "gate_revised",
             cycle_id=state.cycle_id,
             subject_ids=[*resets, *marked],
-            detail={"target_gate": revision["target_gate"], "reason": reason},
+            # `gates_reset` apart from the marked tasks, whose ids a crossing gate shares: what a
+            # later mandate approval may carry back is read off which gates this withdrew
+            # (`approve.carried_crossings`).
+            detail={"target_gate": revision["target_gate"], "gates_reset": list(resets), "reason": reason},
         )
         if revision["unfreezes_plan"]:
             tx.append("plan_invalidated", cycle_id=state.cycle_id, detail={"reason": reason})

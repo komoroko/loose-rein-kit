@@ -8,24 +8,32 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 ### Six issues from one recorded cycle, each fixed where it starts
 
-**Document format `rein-grounded-v7`.** `state.yaml` gains `tasks.<id>.base`, a gate's `withdrawn`
-and a receipt's `crossing_digest` / `carried_by`; `config.yaml`'s quality-gate steps gain
-`runs_tests`; `review.yaml`'s coverage gains `evidence_files`; the audit log gains `gate_carried`.
+**Document format `rein-grounded-v7`.** `state.yaml` gains `tasks.<id>.base` and a receipt's
+`crossing_digest` / `carried_from`; `config.yaml`'s quality-gate steps gain `runs_tests`;
+`review.yaml`'s coverage gains `evidence_files`; the audit log gains `gate_carried`, a crossing's
+`gate_approved` records its `crossing_digest`, and `gate_revised` records `gates_reset`.
 There is no migration: finish a cycle on 0.9.4, or start a fresh one — a format move in a patch release, at the operator's call.
 
 - **A serial task's base is pinned when it starts (#82).** The implementer commits straight onto the
   work branch, and a run interrupted after that commit re-took HEAD as the base next time: the
   diff was empty, the task was blocked as `no_implementation`, and the scope and gate-guard
   re-checks skipped the commit they exist to see. The base is now recorded on the first
-  `in-progress`, reused by every attempt, and dropped when the task lands or by
-  `rein task reset --fresh`. A pinned base HEAD no longer descends from stops the run.
+  `in-progress`, reused by every attempt, and dropped when the task lands, when nothing of its work
+  is left on the branch, or by a `rein task reset` once HEAD no longer descends from it — never by
+  `--fresh`, because the abandoned commits are still on the branch and still land with the task.
+  While an unlanded serial task's work is on the branch it is the only task that runs: anything
+  landing above it would stand on unverified work and be read as part of its change. A pinned base
+  HEAD no longer descends from stops the run.
 - **A crossing approval binds what it authorizes (#80).** Its receipt bound the whole plan, so a
   roll back to the mandate for a dependency edge or another task's scope asked for every
   irreversible-point approval again — seven of ten approvals in the recorded cycle. A crossing now
   binds its task entry without `blocked_by`/`kind`, its claims, its ticket and the frozen config;
   a crossing withdrawn as a side effect is carried back by the next mandate approval when that is
-  unchanged (`gate_carried`, not a stop), and both approval screens say which. One rolled back as
-  the target is never carried.
+  unchanged (`gate_carried`, not a stop), and both approval screens say which. The carry is read
+  off the audit chain — the digest the withdrawn `gate_approved` recorded — never off `state.yaml`,
+  and the carried receipt is the mandate confirmation's, naming the one it carries in
+  `carried_from`. One rolled back as the target is never carried, and a withdrawal is answered by
+  one mandate approval only.
 - **The negative control asks the step that runs the tests (#81).** It took the first red of any
   command step, and a linter goes red over the base for every new test file that imports a module
   the base lacks — a body of `pass` included. Five of eight tasks landed on that red. Steps now
@@ -39,9 +47,11 @@ There is no migration: finish a cycle on 0.9.4, or start a fresh one — a forma
   the task is built rather than after. The scope rule is one function, shared with the loop's diff
   check.
 - **A binary the mandate declared as evidence is not unread code (#79).** A file no analyzer can
-  read that an `artifact` criterion covers is recorded in `evidence_files`, named on the review
-  screen, and no longer makes coverage insufficient. An undeclared binary still blocks, and the
-  block now names the remedy that exists: declare it as the criterion's artifact.
+  read that an `artifact` criterion names exactly is recorded in `evidence_files`, named on the
+  review screen, and no longer makes coverage insufficient. A directory artifact exempts nothing
+  under it — it asserts the directory exists, not that whatever lands there is evidence. An
+  undeclared binary still blocks, and the block now names the remedy that exists: declare that
+  file's own path as the criterion's artifact.
 
 ## [0.9.4] - 2026-09-22
 

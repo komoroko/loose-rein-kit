@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from rein import common, digests, models
+from rein import digests, models
 
 # --- diff model ---------------------------------------------------------------
 
@@ -579,11 +579,16 @@ def build_coverage(
     """Analyze a diff and record honestly what could not be analyzed (plan §13.3).
 
     `evidence` is the frozen plan's `artifact` paths (`Plan.artifact_paths`). A file nothing here
-    can read that one of them covers — a screenshot an acceptance criterion requires — is recorded
-    in `evidence_files` instead of `unsupported_files`. It was never code to be read: a human
-    approved it as evidence at the mandate, and counting it as a gap shut acceptance at high risk
-    with no remedy, since taking it out of the change discards what the criterion asks for and
-    splitting the scope never removes a file.
+    can read that one of them *names* — a screenshot an acceptance criterion requires — is
+    recorded in `evidence_files` instead of `unsupported_files`. It was never code to be read: a
+    human approved that file as evidence at the mandate, and counting it as a gap shut acceptance
+    at high risk with no remedy, since taking it out of the change discards what the criterion
+    asks for and splitting the scope never removes a file.
+
+    Named exactly, never covered the way a scope covers a subtree. An `artifact` path may be a
+    directory (the criterion checks that it exists), and what a human approved there is that the
+    directory exists — not every unreadable file anybody later puts under it. A compiled binary
+    in `dist/` is still unread code.
 
     `analyzers` are external readers for file kinds this release cannot parse. They are asked
     only about files the built-in table cannot place, they answer in the same `(language,
@@ -596,6 +601,7 @@ def build_coverage(
     analyzed_hunks = 0
     unsupported: list[dict[str, str]] = []
     declared: list[dict[str, str]] = []
+    named = {path.rstrip("/") for path in evidence}
     generated: list[dict[str, str]] = []
     languages: dict[str, str] = {}
     used_analyzers: dict[str, str] = {}
@@ -623,7 +629,7 @@ def build_coverage(
         if _is_generated(file):
             generated.append({"path": file.path, "source_locator": ""})
             continue
-        is_evidence = any(common.path_covered(file.path, pattern) for pattern in evidence)
+        is_evidence = file.path in named
         if file.binary:
             has_binary = True
             if is_evidence:

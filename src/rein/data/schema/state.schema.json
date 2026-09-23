@@ -720,10 +720,6 @@
               "$ref": "#/$defs/receipt"
             }
           ]
-        },
-        "withdrawn": {
-          "description": "A crossing approval a roll back to an upstream gate withdrew as a consequence rather than as its target: the receipt it held. Read once, by the next mandate approval, which carries it back when the crossing's subject is unchanged and drops it either way.",
-          "$ref": "#/$defs/receipt"
         }
       },
       "allOf": [
@@ -809,8 +805,8 @@
         "result_chain_root": {
           "$ref": "#/$defs/digest"
         },
-        "carried_by": {
-          "description": "Set when this receipt was carried forward rather than confirmed again: the mandate approval that re-froze the plan and found this crossing's subject unchanged. `approval_id` stays the human confirmation it carries.",
+        "carried_from": {
+          "description": "Set on a crossing opened by a mandate approval rather than confirmed again: the earlier crossing confirmation it carries, whose `crossing_digest` in the audit chain matches this one. `approval_id` is the mandate confirmation whose screen named the carry.",
           "type": "string",
           "maxLength": 128,
           "pattern": "^GA-[A-Z0-9-]+$"

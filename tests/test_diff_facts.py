@@ -153,15 +153,25 @@ def test_a_binary_the_plan_declares_as_evidence_is_named_and_not_a_gap() -> None
         "diff --git a/assets/blob.bin b/assets/blob.bin\n"
         "Binary files /dev/null and b/assets/blob.bin differ\n"
     )
-    declared = diff_facts.analyze(diff, evidence=["docs/test/ui-e2e/"]).coverage
+    declared = diff_facts.analyze(diff, evidence=["docs/test/ui-e2e/shot.png"]).coverage
     assert declared.evidence_files == ({"path": "docs/test/ui-e2e/shot.png"},)
     assert [u["path"] for u in declared.unsupported_files] == ["assets/blob.bin"]
     assert declared.coverage_status == "insufficient"
 
-    only_evidence = diff_facts.analyze(diff.split("diff --git a/assets")[0], evidence=["docs/test/ui-e2e/"]).coverage
-    assert only_evidence.coverage_status == "sufficient"
-    manifest = only_evidence.to_manifest()
-    assert manifest["evidence_files"] == [{"path": "docs/test/ui-e2e/shot.png"}]
+    only_evidence = diff.split("diff --git a/assets")[0]
+    coverage = diff_facts.analyze(only_evidence, evidence=["docs/test/ui-e2e/shot.png"]).coverage
+    assert coverage.coverage_status == "sufficient"
+    assert coverage.to_manifest()["evidence_files"] == [{"path": "docs/test/ui-e2e/shot.png"}]
+
+
+def test_an_artifact_directory_does_not_turn_what_lands_under_it_into_evidence() -> None:
+    """A directory artifact asserts that the directory exists. A compiled binary somebody later puts
+    under it was never approved as evidence, and is unread code like any other."""
+    diff = "diff --git a/dist/app.so b/dist/app.so\nBinary files /dev/null and b/dist/app.so differ\n"
+    for spelled in ("dist", "dist/"):
+        coverage = diff_facts.analyze(diff, evidence=[spelled]).coverage
+        assert coverage.evidence_files == ()
+        assert [u["path"] for u in coverage.unsupported_files] == ["dist/app.so"]
 
 
 def test_a_removed_binary_is_not_an_unread_one() -> None:

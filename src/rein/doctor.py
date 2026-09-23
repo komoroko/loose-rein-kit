@@ -1720,8 +1720,8 @@ def check_review_outlook(repo: repo_mod.Repo) -> list[Finding]:
                 f"review, so coverage will be `insufficient`"
                 + (f" and at {view.effective_risk} risk that blocks acceptance" if view.coverage_blocks_gate else "")
                 + f": {named}. Remove them from the change (gitignore the smoke-test output), or — "
-                "for evidence an acceptance criterion needs — declare the path as that criterion's "
-                "`artifact` while the mandate can still be edited.",
+                "for evidence an acceptance criterion needs — declare that file's own path as the "
+                "criterion's `artifact` while the mandate can still be edited.",
             )
         )
     return findings

@@ -106,6 +106,14 @@ lands it inside `T-NNN: <title>` — in the history the acceptance record names.
 had this problem: `git worktree add` hands it a clean checkout, so everything it finds afterwards
 is its own. The refusal is how a serial task gets the same guarantee. Commit or stash first.
 
+A serial task's commits land on the work branch before they have passed anything, so the commit it
+started on is **pinned** when it first starts and held until it lands: `base..HEAD` is its change
+across every attempt and every run. That holds only while nothing else lands above it, so **while an
+unlanded serial task's work is on the branch, it is the only task that runs**. A blocked one stops
+the run: `rein task reset` puts it back on the frontier (`--fresh` or not, the base stays, because
+the commits do), or revert its commits — once nothing of it is left on the branch the loop releases
+the base itself.
+
 It also refuses **before the first agent launch** on anything about the machine that this run
 cannot finish without: no container runtime while a step needs an OCI sandbox, a pinned image
 nobody built here, an agent CLI that is not on PATH, a `quality_gate` step marked `required:` with
