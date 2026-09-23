@@ -395,6 +395,7 @@ def _coverage_totals(review: models.Review) -> dict[str, object]:
             "coverage_status": "unknown",
             "unsupported_files": [],
             "generated_files": [],
+            "evidence_files": [],
         }
     unsupported = [
         {
@@ -414,6 +415,7 @@ def _coverage_totals(review: models.Review) -> dict[str, object]:
         "coverage_status": str(manifest.get("coverage_status", "unknown")),
         "unsupported_files": unsupported,
         "generated_files": sorted(set(generated)),
+        "evidence_files": sorted({str(item.get("path", "")) for item in manifest.get("evidence_files", []) or []}),
     }
 
 

@@ -1067,6 +1067,21 @@ class Plan:
         return self._section("tasks")
 
     @property
+    def artifact_paths(self) -> tuple[str, ...]:
+        """Every path an `artifact` acceptance criterion requires, across the plan, sorted.
+
+        What a human approved at the mandate as evidence the loop produces: a file here that no
+        analyzer can read is not unread code (`diff_facts.build_coverage`).
+        """
+        found: set[str] = set()
+        for task in self.tasks:
+            for entry in task.acceptance:
+                evidence = entry.get("evidence")
+                if isinstance(evidence, dict) and _str(evidence, "kind") == "artifact":
+                    found.update(_ids(evidence, "paths"))
+        return tuple(sorted(found))
+
+    @property
     def crossing_task_ids(self) -> tuple[str, ...]:
         """The tasks whose work cannot be undone once it runs — this cycle's extra contact points.
 

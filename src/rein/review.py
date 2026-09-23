@@ -331,7 +331,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         diff_text = _diff(repo, trusted_base, "HEAD", not_the_product(repo, state))
     except ReviewError:
         return None
-    facts = diff_facts.analyze(diff_text)
+    facts = diff_facts.analyze(diff_text, evidence=plan.artifact_paths if plan is not None else ())
     limits = {**human_review.DEFAULT_BUDGET, **(config.budgets if config is not None else {})}
     unreadable = [
         str(entry.get("path", "")) for entry in (*facts.coverage.unsupported_files, *facts.coverage.generated_files)
@@ -501,7 +501,8 @@ def generate(
         # the whole here was a wall in front of a quantity nobody reads, and its own instruction —
         # split the scope — is not a move that exists at acceptance.
         whole_diff = review_reading.diff_of(repo, trusted_base, head, exclude)
-        facts = diff_facts.analyze(whole_diff)
+        evidence = plan.artifact_paths if plan is not None else ()
+        facts = diff_facts.analyze(whole_diff, evidence=evidence)
         effective = review_reading.effective_risk(facts, plan)
         changed = [f.path for f in facts.files]
 
@@ -519,7 +520,7 @@ def generate(
             plan, changed, mode=config.composition if config is not None else "auto", risk=effective
         )
         measures = review_reading.take_readings(
-            repo, readings, base=trusted_base, head=head, exclude=exclude, limits=limits
+            repo, readings, base=trusted_base, head=head, exclude=exclude, limits=limits, evidence=evidence
         )
         # A composition is a way of reading *this* change only if every finding carried into it
         # lands on a reading that can see the code it names. One that does not is not a finding to
@@ -533,7 +534,13 @@ def generate(
                 "whole instead of composing it"
             )
             measures = review_reading.take_readings(
-                repo, [review_reading.WHOLE_READING], base=trusted_base, head=head, exclude=exclude, limits=limits
+                repo,
+                [review_reading.WHOLE_READING],
+                base=trusted_base,
+                head=head,
+                exclude=exclude,
+                limits=limits,
+                evidence=evidence,
             )
         # **Highest-risk reading first.** Every reading is taken either way and none is priced
         # differently for it — what the order decides is which answers exist when a run does not

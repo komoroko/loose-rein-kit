@@ -865,6 +865,7 @@ def read_facts(
     head: str,
     exclude: Sequence[str],
     limits: Mapping[str, int],
+    evidence: Sequence[str],
 ) -> ReadingFacts:
     """Measure one reading, refuse it if what it would send is over budget, then widen what is left.
 
@@ -876,7 +877,9 @@ def read_facts(
     ladder, let alone a launch.
     """
     diff_text = diff_of(repo, base, head, exclude, include=reading.include)
-    facts = diff_facts.analyze(diff_text)
+    # `evidence` is the frozen plan's artifact paths: an unreadable file one of them covers is
+    # declared evidence, not a coverage gap (`diff_facts.build_coverage`).
+    facts = diff_facts.analyze(diff_text, evidence=evidence)
     # A deletion the detector matched a signal inside is sent whole (`fold_bodies`).
     signalled = frozenset(hit.path for hit in facts.signals)
     folded_plain = fold_bodies(diff_text, facts.files, signalled=signalled)
@@ -911,6 +914,7 @@ def take_readings(
     head: str,
     exclude: Sequence[str],
     limits: Mapping[str, int],
+    evidence: Sequence[str],
 ) -> list[ReadingFacts]:
     """:func:`read_facts` for each reading, minus the slices this cycle did not touch.
 
@@ -924,7 +928,8 @@ def take_readings(
     and both takings have to be the same taking.
     """
     measures = [
-        read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits) for reading in readings
+        read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits, evidence=evidence)
+        for reading in readings
     ]
     return [m for m in measures if m.reading.whole or m.facts.files]
 
@@ -1609,6 +1614,7 @@ def warm(
     head: str,
     exclude: Sequence[str],
     limits: Mapping[str, int],
+    evidence: Sequence[str],
     risk_floor: str,
     host_surface: str,
     config: models.Config | None,
@@ -1632,7 +1638,9 @@ def warm(
     not pay for the diff twice. `host_surface` travels the same way and for the same reason — it is
     a fact about the tree, not about this reading, and the caller already has the tree in hand.
     """
-    measured = read_facts(repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits)
+    measured = read_facts(
+        repo, reading=reading, base=base, head=head, exclude=exclude, limits=limits, evidence=evidence
+    )
     keys = keys_for(
         measured,
         config=config,
@@ -1687,7 +1695,8 @@ def whole_change_risk(
     take them: the key the gate will look under is a function of the floor, and whether the gate
     will compose at all is a function of the effective risk.
     """
-    facts = diff_facts.analyze(diff_of(repo, base, head, exclude))
+    evidence = plan.artifact_paths if plan is not None else ()
+    facts = diff_facts.analyze(diff_of(repo, base, head, exclude), evidence=evidence)
     return facts.risk_floor, effective_risk(facts, plan)
 
 

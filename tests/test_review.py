@@ -1159,7 +1159,9 @@ def test_a_lockfile_nobody_is_sent_does_not_put_a_reading_over_budget(tmp_path: 
     store = store_mod.Store(repo)
     exclude = review.not_the_product(repo, store.read_state())
 
-    measured = review_reading.read_facts(repo, base=seed, head="HEAD", exclude=exclude, limits={"max_diff_bytes": 4096})
+    measured = review_reading.read_facts(
+        repo, base=seed, head="HEAD", exclude=exclude, limits={"max_diff_bytes": 4096}, evidence=()
+    )
 
     assert measured.analyzed_bytes > 4096, "the manifest still reads the whole diff"
     assert "uv.lock" in measured.reviewable.folded
@@ -2813,6 +2815,7 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
         head="HEAD",
         exclude=review.not_the_product(repo, store_mod.Store(repo).read_state()),
         limits={"max_diff_bytes": 524_288},
+        evidence=(),
     )
     assert view.readings == len(taken) == 1, "the board counts what the pipeline will take"
 

@@ -144,6 +144,26 @@ def test_binary_file_is_unsupported_and_insufficient() -> None:
     assert facts.coverage.unsupported_files[0]["reason"] == "binary"
 
 
+def test_a_binary_the_plan_declares_as_evidence_is_named_and_not_a_gap() -> None:
+    """A screenshot an acceptance criterion requires was never code to read. Counting it as unread
+    shut acceptance at high risk with no remedy that exists; a binary nobody declared still does."""
+    diff = (
+        "diff --git a/docs/test/ui-e2e/shot.png b/docs/test/ui-e2e/shot.png\n"
+        "Binary files /dev/null and b/docs/test/ui-e2e/shot.png differ\n"
+        "diff --git a/assets/blob.bin b/assets/blob.bin\n"
+        "Binary files /dev/null and b/assets/blob.bin differ\n"
+    )
+    declared = diff_facts.analyze(diff, evidence=["docs/test/ui-e2e/"]).coverage
+    assert declared.evidence_files == ({"path": "docs/test/ui-e2e/shot.png"},)
+    assert [u["path"] for u in declared.unsupported_files] == ["assets/blob.bin"]
+    assert declared.coverage_status == "insufficient"
+
+    only_evidence = diff_facts.analyze(diff.split("diff --git a/assets")[0], evidence=["docs/test/ui-e2e/"]).coverage
+    assert only_evidence.coverage_status == "sufficient"
+    manifest = only_evidence.to_manifest()
+    assert manifest["evidence_files"] == [{"path": "docs/test/ui-e2e/shot.png"}]
+
+
 def test_a_removed_binary_is_not_an_unread_one() -> None:
     """Deleting a blob leaves no bytes to read, so it is not a coverage gap.
 

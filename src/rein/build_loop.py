@@ -2202,6 +2202,7 @@ class Orchestrator:
                 head=head,
                 exclude=exclude,
                 limits=limits,
+                evidence=self._plan.artifact_paths if self._plan is not None else (),
                 risk_floor=risk_floor,
                 host_surface=review_reading.host_surface_digest(self.repo, head),
                 config=self.config.raw,

@@ -749,3 +749,10 @@ def test_an_artifact_inside_its_task_scope_or_an_unbounded_one_is_accepted() -> 
     for include in (["docs/test/"], []):
         plan = models.Plan(make_plan(tasks=[_artifact_task(["docs/test/shots/ui.png"], include)]))
         assert not [e for e in models.cross_reference_errors(plan) if "T-007/A-1" in e]
+
+
+def test_the_plan_names_every_artifact_path_its_criteria_require() -> None:
+    plan = models.Plan(
+        make_plan(tasks=[_artifact_task(["docs/b.png"], []), {**_artifact_task(["docs/a.md"], []), "id": "T-008"}])
+    )
+    assert plan.artifact_paths == ("docs/a.md", "docs/b.png")
