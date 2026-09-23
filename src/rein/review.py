@@ -234,11 +234,11 @@ class ChangeOutlook:
     three readers of one answer rather than three spellings of it.
     """
 
-    #: The largest single reading — what one launch would be asked to hold, and what `ceiling`
-    #: bounds. For an uncomposed review this is the whole change, which is what it has always been.
+    #: The largest single reading as sent (folded) — what one launch would be asked to hold, and
+    #: what `ceiling` bounds. For an uncomposed review this is the whole change.
     diff_bytes: int
-    #: The whole change, which is what `composition` is a breakdown of and what a reader compares
-    #: the largest reading against. Required, and not defaulted to `diff_bytes`: an outlook that
+    #: The whole change as sent, which is what `composition` is a breakdown of and what a reader
+    #: compares the largest reading against. Required, and not defaulted to `diff_bytes`: an outlook that
     #: does not know how big the change is has nothing to say about what to remove from it.
     total_bytes: int
     ceiling: int
@@ -350,17 +350,21 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
     # makes before it launches anything: a plan scopes every task, and at task 3 of 18 the other
     # fifteen readings have nothing in them to read. Counting them would put "in 18 readings" on
     # the board for a review that is going to take four.
-    sizes = review_reading.bytes_by_reading(diff_text, readings)
+    #
+    # Sized as sent — folded, as `read_facts` checks it — so the board and the refusal cannot
+    # disagree about whether a reading fits.
+    sent, _ = review_reading.fold_bodies(diff_text, facts.files, signalled=frozenset(h.path for h in facts.signals))
+    sizes = review_reading.bytes_by_reading(sent, readings)
     taken = {r.unit: sizes.get(r.unit, 0) for r in readings if r.whole or sizes.get(r.unit)}
     unit, largest = max(taken.items(), key=lambda item: item[1]) if taken else (review_reading.WHOLE, 0)
     return ChangeOutlook(
         diff_bytes=largest,
-        total_bytes=facts.coverage.analyzed_bytes,
+        total_bytes=len(sent.encode("utf-8")),
         ceiling=int(limits["max_diff_bytes"]),
         unreadable=tuple(sorted(p for p in unreadable if p)),
         coverage_status=facts.coverage.coverage_status,
         effective_risk=effective,
-        composition=tuple(bytes_by_kind(diff_text).items()),
+        composition=tuple(bytes_by_kind(sent).items()),
         unit=unit,
         readings=len(taken) or 1,
     )

@@ -534,8 +534,9 @@ def bytes_by_reading(diff_text: str, readings: Sequence[Reading]) -> dict[str, i
     single reading may be *held to* a finding — and would understate a shared path by attributing
     it once.
 
-    Sizes only, so this is the *plain* diff each reading carries; the widening and the folding move
-    it, and both happen after the budget is checked (`read_facts`).
+    Pass the diff as it is sent — folded (`fold_bodies`) — because that is what the budget bounds
+    (`read_facts`). Folding is per file, so folding the whole diff once and attributing it here gives
+    every reading the bytes it would be handed; the widening is sized to fit after the check.
     """
     sections = [
         (path, len(section.encode("utf-8", errors="replace"))) for path, section in _sections(diff_text) if path
@@ -551,8 +552,8 @@ def bytes_by_reading(diff_text: str, readings: Sequence[Reading]) -> dict[str, i
 # -- the change the reviewers are allowed to read -----------------------------
 
 #: Git's own default context width, and the floor of the ladder below: the plain diff is what the
-#: Coverage Manifest and the byte budget are measured on, so no request is ever narrower than the
-#: change itself.
+#: Coverage Manifest is measured on and, folded, what the byte budget is checked against — so no
+#: request is ever narrower than the change itself.
 PLAIN_CONTEXT = 3
 
 #: How much context around each hunk to ask git for, widest first, as `(signalled, everything
@@ -715,17 +716,18 @@ def reviewable_of(
     files: Sequence[diff_facts.DiffFile],
     exclude: Sequence[str],
     *,
-    plain: str,
+    folded_plain: tuple[str, Sequence[str]],
     ceiling: int,
     signalled: Collection[str],
     include: Sequence[str] = (),
 ) -> Reviewable:
-    """The widest context that fits `ceiling`, falling back to the plain diff already in hand.
+    """The widest context that fits `ceiling`, falling back to the folded plain diff already in hand.
 
-    The ceiling is `max_diff_bytes` — the budget this reading was already refused against
+    The ceiling is `max_diff_bytes` — the budget `folded_plain` already passed
     (`refuse_over_budget`), which is what makes the property worth having: **what a reviewer is
     sent cannot exceed what that reading was approved to be**, where before it was the approved
-    diff *plus* an unbounded-by-anyone 240 KB of file bodies.
+    diff *plus* an unbounded-by-anyone 240 KB of file bodies. The fallback is therefore a rung that
+    is known to fit, not a second budget.
 
     Ordered widest-first so the common case costs one rung; a change large enough to need the
     ladder pays a few more `git diff` calls, which is cheap next to the model launch it is sizing.
@@ -745,11 +747,8 @@ def reviewable_of(
         text, folded = fold_bodies(widened, files, signalled=signalled)
         if len(text.encode("utf-8")) <= ceiling:
             return made(text, folded, applied)
-    # Over the ceiling even at git's default width. Refusing here would be a second budget nobody
-    # approved: `refuse_over_budget` has already passed on this diff, and the answer to a reading
-    # too big to read is a narrower scope at the mandate, not a narrower window onto it.
-    text, folded = fold_bodies(plain, files, signalled=signalled)
-    return made(text, folded, (PLAIN_CONTEXT, PLAIN_CONTEXT))
+    # Every widened rung is over the ceiling; git's default width is what the budget checked.
+    return made(*folded_plain, (PLAIN_CONTEXT, PLAIN_CONTEXT))
 
 
 def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str = "") -> None:
@@ -767,6 +766,11 @@ def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str 
     or worse, answers about the part it saw. That is the same shape as `config.repair_rounds`: a
     ceiling on the side that cannot tell it has failed, which is the only side a ceiling protects.
 
+    So `diff_bytes` is what the largest launch of this reading is handed: the folded diff whole,
+    which is the security reviewer's payload (the extractor gets its source half). A lockfile body
+    nobody is sent is no reason to refuse the reading, and refusing on it named a remedy — split
+    the scope — that cannot take a lockfile out of the scope that made it.
+
     And it fires where its remedy exists. Before any launch is paid for, so the sentence naming
     what to do arrives instead of "the adapter exited 1"; and `doctor.check_review_outlook` says it
     earlier still, while the mandate can still be split. Raising it is a statement about the
@@ -783,7 +787,7 @@ def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str 
     subject = f"the reading of {unit}" if unit and unit != WHOLE else "this change"
     raise ReviewError(
         f"no single reviewer launch can read this: `max_diff_bytes` is {ceiling} and {subject}'s "
-        f"diff is {diff_bytes} bytes. This bounds what one model launch is handed, not what a "
+        f"diff as sent is {diff_bytes} bytes. This bounds what one model launch is handed, not what a "
         "person is asked — a launch given more than it can hold does not say so, it answers about "
         "the part it saw. Narrow the task's scope or split it through `/revise` so the change is "
         "read in slices that are each read whole; or, if this adapter's context really did grow, "
@@ -862,26 +866,30 @@ def read_facts(
     exclude: Sequence[str],
     limits: Mapping[str, int],
 ) -> ReadingFacts:
-    """Measure one reading, refuse it if it is over budget, then widen what is left.
+    """Measure one reading, refuse it if what it would send is over budget, then widen what is left.
 
-    The order is the point. The manifest reads the *whole* diff of this reading — folding a file
-    before counting it would be measuring the fold — the budget is checked against that measure,
-    and only then is anything widened. A reading nobody can read is refused before it costs a
-    `git diff` per rung of the ladder, let alone a launch.
+    Two measures, because they answer two questions. The manifest reads the *whole* diff of this
+    reading — it states what was read, and folding a file before counting it would be measuring the
+    fold. The budget bounds what a launch is *handed*, so it is checked against the folded diff: a
+    lockfile body replaced by one line is not bytes any reviewer receives. Only then is anything
+    widened, so a reading nobody can read is refused before it costs a `git diff` per rung of the
+    ladder, let alone a launch.
     """
     diff_text = diff_of(repo, base, head, exclude, include=reading.include)
     facts = diff_facts.analyze(diff_text)
-    refuse_over_budget(facts.coverage.analyzed_bytes, limits, unit=reading.unit)
+    # A deletion the detector matched a signal inside is sent whole (`fold_bodies`).
+    signalled = frozenset(hit.path for hit in facts.signals)
+    folded_plain = fold_bodies(diff_text, facts.files, signalled=signalled)
+    refuse_over_budget(len(folded_plain[0].encode("utf-8")), limits, unit=reading.unit)
     reviewable = reviewable_of(
         repo,
         base,
         head,
         facts.files,
         exclude,
-        plain=diff_text,
+        folded_plain=folded_plain,
         ceiling=limits["max_diff_bytes"],
-        # A deletion the detector matched a signal inside is sent whole (`fold_bodies`).
-        signalled=frozenset(hit.path for hit in facts.signals),
+        signalled=signalled,
         include=reading.include,
     )
     return ReadingFacts(
@@ -1244,29 +1252,6 @@ def compose_coverage(
     if unread:
         manifest["coverage_status"] = "insufficient"
     return manifest
-
-
-def largest_reading_bytes(manifest: Mapping[str, Any]) -> int:
-    """The biggest single reading a manifest records — what one launch was asked to hold.
-
-    The read side of what :func:`compose_coverage` writes, here so that the two places asking it —
-    the budget snapshot recorded with the review (`review.assemble`) and the live recomputation
-    behind the freeze (`human_review._diff_bytes`) — cannot come to two answers about one field.
-
-    `max_diff_bytes` bounds a launch, not a cycle, so this and not `analyzed_bytes` is what it is
-    measured against. A manifest written before composition existed has no `composition` and falls
-    back to the whole change, which is what it was read as then and is still the truth for it:
-    that review was taken in one reading.
-    """
-    if not manifest:
-        return 0
-    composition = manifest.get("composition")
-    readings = composition.get("readings") if isinstance(composition, Mapping) else None
-    if isinstance(readings, list):
-        sizes = [int(r["analyzed_bytes"]) for r in readings if isinstance(r, Mapping) and "analyzed_bytes" in r]
-        if sizes:
-            return max(sizes)
-    return int(manifest.get("analyzed_bytes", 0))
 
 
 # -- which readings a review is taken in --------------------------------------

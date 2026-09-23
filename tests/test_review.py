@@ -472,7 +472,7 @@ def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None
 
     signalled = frozenset(f.path for f in files)
     widest = review._reviewable(
-        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9, signalled=signalled
+        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), folded_plain=("", []), ceiling=10**9, signalled=signalled
     )
     assert widest.context_lines == review.CONTEXT_LADDER[0]
     assert "narrowed_from" not in widest.as_facts()
@@ -484,7 +484,7 @@ def test_the_ladder_narrows_until_it_fits_and_says_so(review_repo: Path) -> None
         "HEAD",
         files,
         (repo_mod.SSOT_DIR,),
-        plain="",
+        folded_plain=("", []),
         ceiling=len(widest.text.encode("utf-8")) - 1,
         signalled=signalled,
     )
@@ -510,7 +510,7 @@ def test_a_reading_with_no_signal_reports_the_width_it_was_actually_sent(review_
     files = diff_facts.analyze(review._diff(repo, base, "HEAD", (repo_mod.SSOT_DIR,))).files
 
     quiet = review._reviewable(
-        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), plain="", ceiling=10**9, signalled=frozenset()
+        repo, base, "HEAD", files, (repo_mod.SSOT_DIR,), folded_plain=("", []), ceiling=10**9, signalled=frozenset()
     )
     narrow = review.CONTEXT_LADDER[0][1]
     assert quiet.context_lines == (narrow, narrow)
@@ -524,9 +524,8 @@ def test_a_reading_with_no_signal_reports_the_width_it_was_actually_sent(review_
     assert hunk.split()[1] == f"-{120 - narrow + 1},{narrow}"
 
 
-def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: Path) -> None:
-    """`review_reading.refuse_over_budget` already passed on this diff; a second, quieter refusal here would
-    leave the operator with a review that cannot be taken and no sentence saying why."""
+def test_a_change_too_big_for_the_narrowest_rung_is_sent_at_the_width_the_budget_checked(review_repo: Path) -> None:
+    """`refuse_over_budget` passed on the folded plain diff, so that is the rung known to fit."""
     repo = repo_mod.Repo(review_repo)
     (review_repo / "src.py").write_text("x = 1\n", encoding="utf-8")
     _git(review_repo, "add", "-A")
@@ -540,12 +539,13 @@ def test_a_change_too_big_for_the_narrowest_rung_is_still_reviewed(review_repo: 
         "HEAD",
         facts.files,
         (repo_mod.SSOT_DIR,),
-        plain="the plain one",
+        folded_plain=("the plain one", ["uv.lock"]),
         ceiling=1,
         signalled=frozenset(h.path for h in facts.signals),
     )
     assert reviewable.context_lines == (review.PLAIN_CONTEXT, review.PLAIN_CONTEXT)
     assert reviewable.text == "the plain one"
+    assert reviewable.folded == ("uv.lock",)
 
 
 @pytest.mark.integration
@@ -1143,6 +1143,27 @@ def test_a_diff_over_the_budget_is_refused_before_a_model_is_launched(tmp_path: 
     assert not defects, defects
     assert events[-1].event == "review_failed"
     assert events[-1].detail.get("stage") == "coverage"
+
+
+def test_a_lockfile_nobody_is_sent_does_not_put_a_reading_over_budget(tmp_path: Path) -> None:
+    """The budget bounds what a launch is handed. A lockfile's body is folded to one line before
+    any launch, so 400 KB of it beside a few lines of code used to refuse the review on bytes no
+    reviewer receives — naming a remedy, split the scope, that cannot take a lockfile out of it."""
+    root = _budget_repo(tmp_path, 4096)
+    seed = _git(root, "rev-parse", "HEAD")
+    (root / "uv.lock").write_text("".join(f'name = "pkg-{i}"\n' for i in range(4000)), encoding="utf-8")
+    (root / "api.py").write_text("def handle():\n    return 1\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "a dependency moved beside a small change")
+    repo = repo_mod.Repo(root)
+    store = store_mod.Store(repo)
+    exclude = review.not_the_product(repo, store.read_state())
+
+    measured = review_reading.read_facts(repo, base=seed, head="HEAD", exclude=exclude, limits={"max_diff_bytes": 4096})
+
+    assert measured.analyzed_bytes > 4096, "the manifest still reads the whole diff"
+    assert "uv.lock" in measured.reviewable.folded
+    assert len(measured.reviewable.text.encode("utf-8")) <= 4096
 
 
 @pytest.mark.integration

@@ -408,8 +408,8 @@ def _coverage_totals(review: models.Review) -> dict[str, object]:
     return {
         "analyzed_files": int(manifest.get("analyzed_files", 0) or 0),
         "analyzed_hunks": int(manifest.get("analyzed_hunks", 0) or 0),
-        # No default: `analyzed_bytes` is required by the schema, and 0 for an unmeasured manifest
-        # is what let a byte budget pass a change it never measured (see human_review._diff_bytes).
+        # No default: `analyzed_bytes` is required by the schema, and 0 would read as a change
+        # that was measured and found empty.
         "analyzed_bytes": int(manifest["analyzed_bytes"]),
         "coverage_status": str(manifest.get("coverage_status", "unknown")),
         "unsupported_files": unsupported,
