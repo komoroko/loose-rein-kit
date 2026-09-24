@@ -4,6 +4,38 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.9.6] - 2026-09-24
+
+### Downstream never runs ahead of upstream, and what a human writes reaches the retry
+
+No document format change: `rein-grounded-v7` as in 0.9.5.
+
+- **A leaf's control-plane record is about its own task, and never finishes one.** The server took
+  the task a request named over the token's, and wrote whatever `status` it named — so an
+  implementer could mark an upstream task `done` over the raw socket and open the DAG below a task
+  nobody built. The subject is now the token's task, the status is derived from the reported
+  outcome on the server, and a status is written only while the task is `in-progress`. An agent
+  with a token always goes through the socket: a serial implementer, running in the canonical
+  checkout, used to get a token-less direct write, and its `rein report` wrote under the empty id
+  and was refused by the schema. **`rein report --task` is removed.**
+- **A change made only of test paths has no negative control to take (#86).** Base plus the test
+  half is then the head tree, so the control compared head against head and blocked the task on a
+  green that could not have been red. Recorded undetermined, the mirror of `no_tests_changed`.
+- **A reset's reason reaches the next attempt (#85).** `--reason` went only to the audit chain. The
+  dossier's `history` now carries each reset beside the failed attempts, read from the chain, so
+  `--fresh` keeps it.
+- **The work branch holds verified joins only.** A red integration gate left the batch's merges on
+  the branch with an instruction no verb carries out, and a reset re-ran each task over a branch
+  that already held its work — refused as `no_implementation`, forever. The join now comes off
+  (`git reset --keep`; kept on `<branch>-join-<stamp>`), each task's work is restored from its leaf
+  branch on the next attempt, and the failure rides in the handoff. A machine fault inside the gate
+  takes the join off the same way.
+- **A leaf that landed on its pull-request branch is recorded.** Left out of the integration gate,
+  it was also left out of the status write, stayed `in-progress`, held back its dependents, and was
+  re-implemented on the next run.
+- **A task is not re-opened under work that stands on it.** `rein task reset` refuses while a
+  transitive dependent is `done`, `awaiting-evidence` or `in-progress`, and names them.
+
 ## [0.9.5] - 2026-09-24
 
 ### Six issues from one recorded cycle, each fixed where it starts
