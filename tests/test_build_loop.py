@@ -2972,6 +2972,23 @@ def test_a_task_that_changed_no_test_is_recorded_rather_than_passed_or_blocked(
     assert loop._current_control["result"] == "no_tests_changed"
 
 
+def test_a_change_made_only_of_test_paths_has_no_control_to_take(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror of `no_tests_changed`. Base plus the whole change is head, so the control would
+    come back green whatever the tests assert — and a measurement-log task (`docs/test/**` plus
+    `tests/**`) was blocked by that green with nothing it could write to change it."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(
+        loop, monkeypatch, changed=["docs/test/measurements/run.md", "tests/measurements/test_run_logs.py"]
+    )
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "undetermined"
+    assert "no contrast" in loop._current_control["detail"]
+
+
 def test_a_control_that_could_not_be_set_up_is_undetermined_and_never_a_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3064,7 +3081,7 @@ def test_the_control_runs_only_the_command_steps_that_actually_passed(
     an agent step judged nothing a re-run could contradict, and a step that never ran claimed
     nothing to negate."""
     loop = orchestrator(tmp_path)
-    ran = _controlled(loop, monkeypatch, changed=["tests/test_x.py"])
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
     passed = (
         build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),
         build_loop.GateStep(name="smoke", kind="command"),
@@ -3130,7 +3147,7 @@ def test_a_broken_negative_control_is_undetermined_and_not_an_abort(
     monkeypatch.setattr(common, "run", fake_git())
     task = dag.Task(id="T-001", title="t", kind="parallel")
     step = build_loop.GateStep(name="test", kind="command", command=("true",), runs_tests=True)
-    monkeypatch.setattr(loop, "_review_scope", lambda t, cwd, base: (["tests/test_x.py"], "git diff"))
+    monkeypatch.setattr(loop, "_review_scope", lambda t, cwd, base: (["src/x.py", "tests/test_x.py"], "git diff"))
     monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
     monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "--- a\n+++ b\n")
 

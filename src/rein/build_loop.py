@@ -2017,7 +2017,7 @@ class Orchestrator:
         do. So `discriminating` is the absence of the failure, not the presence of a good test;
         what asks whether the tests are *any good* is the per-task reviewer, which reads them.
 
-        Three answers are not passes, and each says so rather than being folded into one:
+        Four answers are not passes, and each says so rather than being folded into one:
 
         * **no test path changed** — there is no control to take. Not a failure: a task whose work
           is genuinely covered by tests that already existed is a real thing, and blocking it would
@@ -2030,6 +2030,11 @@ class Orchestrator:
           pass, never a block, and never an abort: a broken experiment is not evidence in either
           direction, and inventing a verdict from one is the thing the rest of this module refuses
           to do.
+        * **every changed path is a test path** — the mirror of the first: nothing to remove where
+          that one had nothing to apply. Base plus the test half *is* the head tree, so the control
+          would compare head against head and come back green whatever the tests assert. Recorded
+          as undetermined, never taken: an experiment with no contrast is the broken kind below,
+          known before it is run.
         * **every step green** — the block. It comes back through the same channel a red step does,
           so it spends that attempt's budget and the implementer is told what is missing.
         """
@@ -2048,6 +2053,11 @@ class Orchestrator:
             self._note_control("no_tests_changed", detail="the change touched no test path")
             print(f"    [control] {task.id}: no test path changed — the DoD's green is not controlled")
             return None, ""
+        if len(tests) == len(changed):
+            return self._control_undetermined(
+                "every path in this change is a test path, so base plus the test half is the head tree "
+                "— there is no contrast to measure"
+            )
         control_base = base if cwd == self.root else self.ws.fork_point(self.ws.target_branch(task.id), cwd)
         if not control_base:
             return self._control_undetermined("the base this change is a change to could not be resolved")

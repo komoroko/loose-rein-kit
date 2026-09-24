@@ -274,8 +274,9 @@ human decides *whether*; the loop does the work.
   once, while a red one says only that the test half is not inert against the old code — it cannot
   tell an assertion that failed from an import that was never there, and does not claim to.
   Whether the tests are any *good* is the reviewer's question, and the reviewer reads them. A task
-  that changed no test file has no control to take — **recorded, never passed**, so "this green
-  rests on tests nobody wrote for it" is on the record instead of being a silence.
+  that changed no test file — or nothing but test files, where base plus the test half *is* the
+  head — has no control to take: **recorded, never passed**, so "this green rests on tests nothing
+  checked" is on the record instead of being a silence.
 - **A task's own bar is `acceptance` in the plan, and the DoD still runs.** The DoD asks whether
   the code is *sound*; a task's acceptance criteria ask whether it did what it was *for* — both,
   and neither chosen by the implementer (a human freezes the list with the mandate). Each criterion says
