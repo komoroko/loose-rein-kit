@@ -194,3 +194,34 @@ def test_the_verb_is_reachable_from_the_dispatcher() -> None:
 
     assert cli.VERBS["task"].spec == "task_cmd"
     assert "task reset" in cli._build_parser(show_all=True).format_help()
+
+
+@pytest.mark.parametrize("downstream", ["done", "awaiting-evidence", "in-progress"])
+def test_a_task_is_not_reopened_under_work_that_stands_on_it(tmp_path: Path, downstream: str) -> None:
+    """T-003 started because T-001 was done. Re-opening T-001 alone left T-003 downstream of an
+    unfinished task, and nothing would re-check it against whatever T-001 became."""
+    plan = make_plan(
+        tasks=[
+            make_task("T-001", claim_ids=["C-001"]),
+            make_task("T-002", claim_ids=["C-001"], blocked_by=["T-001"]),
+            make_task("T-003", claim_ids=["C-001"], blocked_by=["T-002"]),
+        ]
+    )
+    seed_repo(tmp_path, plan=plan, state=make_state(tasks={"T-001": "done", "T-002": "done", "T-003": downstream}))
+    repo = repo_mod.Repo(tmp_path)
+
+    with pytest.raises(ValueError, match=rf"T-002 \(done\), T-003 \({downstream}\)"):
+        task_cmd.reset(repo, "T-001", status="todo", reason="the parser was wrong")
+    assert entry_of(repo)["status"] == "done"
+    assert store_mod.Store(repo).read_events() == []
+
+
+def test_a_parked_dependent_does_not_hold_its_upstream_back(tmp_path: Path) -> None:
+    plan = make_plan(
+        tasks=[make_task("T-001", claim_ids=["C-001"]), make_task("T-002", claim_ids=["C-001"], blocked_by=["T-001"])]
+    )
+    seed_repo(tmp_path, plan=plan, state=make_state(tasks={"T-001": "done", "T-002": "blocked"}))
+    repo = repo_mod.Repo(tmp_path)
+
+    task_cmd.reset(repo, "T-001", status="todo", reason="the parser was wrong")
+    assert entry_of(repo)["status"] == "todo"
