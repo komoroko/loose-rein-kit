@@ -129,7 +129,7 @@ def agent(*, writes: bool = True, reports: str = "", runs: list[list[str]] | Non
         if writes:
             (where / f"{where.name}.py").write_text(f"# {where.name}\n", encoding="utf-8")
         if reports:
-            call_report(where, env, ["--task", where.name, "--outcome", reports, "--summary", "the fake agent said so"])
+            call_report(where, env, ["--outcome", reports, "--summary", "the fake agent said so"])
         return 0, agent_envelope("the agent's closing words")
 
     return _run
@@ -223,7 +223,7 @@ def test_a_report_naming_paths_it_did_not_change_is_a_finding(
             return common.run(cmd, cwd, timeout)
         where = Path(cwd or ".")
         (where / "real.py").write_text("# real\n", encoding="utf-8")
-        call_report(where, env, ["--task", where.name, "--outcome", "implemented", "--touched", "imagined.py"])
+        call_report(where, env, ["--outcome", "implemented", "--touched", "imagined.py"])
         return 0, agent_envelope("")
 
     monkeypatch.setattr(build_loop, "_run", _run)

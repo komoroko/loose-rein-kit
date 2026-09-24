@@ -16,7 +16,7 @@ import json
 import logging
 import subprocess
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1390,10 +1390,12 @@ def test_each_join_send_back_reaches_the_implementer_with_its_own_framing(
         return ""
 
     monkeypatch.setattr(loop, "_launch", capture)
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message, subjects=(): True)
+    leaf = [dag.Task(id="T-001", title="t", kind="parallel")]
 
-    loop._invoke_integration_fixer("T-001", loop._integration_fix_prompt("T-001", "rc=1"))
+    loop._invoke_integration_fixer(leaf, loop._integration_fix_prompt("T-001", "rc=1"))
     loop._invoke_integration_fixer(
-        "T-001",
+        leaf,
         build_prompts.integration_review_fix_prompt(
             "T-001", "- must_fix: x", gate_cmds=["make check"], pathspec=PATHSPEC
         ),
@@ -2570,10 +2572,170 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
         return True, ""
 
     monkeypatch.setattr(loop, "_integration_gate", record_gate)
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+    statuses: dict[str, str] = {}
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: statuses.update({tid: status}))
 
     loop._consume_parallel(tasks)
 
     assert gated == [["T-001", "T-003"]]
+    # Left out of the join, not out of the record: it passed its gate and merged like the others.
+    # It used to stay `in-progress`, which held back every task below it until the next run reset
+    # it to `todo` and implemented it again.
+    assert statuses == {"T-001": "done", "T-002": "done", "T-003": "done"}
+
+
+def _joining(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """A two-leaf batch whose merges succeed; records statuses, diagnostics and the take-off."""
+    _merging_batch(loop, monkeypatch)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "e" * 40)
+    monkeypatch.setattr(loop.ws, "landed", lambda task_id: "f" * 40)
+    seen: dict[str, Any] = {"status": {}, "notes": {}, "taken_off": []}
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: seen["status"].update({tid: status}))
+    monkeypatch.setattr(loop, "_note_diagnostic", lambda tid, patch: seen["notes"].update({tid: patch}))
+
+    def take_off(before_join: str) -> str:
+        seen["taken_off"].append(before_join)
+        return "build/x-join-1"
+
+    monkeypatch.setattr(loop.ws, "take_off_join", take_off)
+    return seen
+
+
+def test_a_red_join_is_taken_off_the_branch_and_its_tasks_carry_the_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It used to stay on the branch with the tasks `blocked` and an instruction — "set these tasks
+    back to done" — no verb carries out; a reset re-ran each over a branch that already held its
+    work, found nothing to change, and was refused. Nothing the gate called red may stay on the
+    branch the next task forks from."""
+    loop = orchestrator(tmp_path)
+    seen = _joining(loop, monkeypatch)
+    monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (False, "check: E501 in a.py"))
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
+
+    with pytest.raises(build_loop.StopLoop):
+        loop._consume_parallel(tasks)
+
+    assert seen["taken_off"] == ["e" * 40]
+    assert seen["status"] == {"T-001": "blocked", "T-002": "blocked"}
+    assert seen["notes"]["T-001"]["failure_summary"] == "check: E501 in a.py"
+    assert seen["notes"]["T-002"]["escalation"]["kind"] == "integration_red"
+
+
+def test_a_join_the_machine_stopped_is_taken_off_and_its_tasks_go_back_to_todo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No verdict, so no `blocked` — and no join left for the next run to "re-play" over."""
+    loop = orchestrator(tmp_path)
+    seen = _joining(loop, monkeypatch)
+
+    def fault(merged: object, before_join: str) -> tuple[bool, str]:
+        raise faults.EnvironmentFault(faults.Fault.ENV_TRANSIENT, where="integration", rc=1, output="oom")
+
+    monkeypatch.setattr(loop, "_integration_gate", fault)
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
+
+    with pytest.raises(faults.EnvironmentFault):
+        loop._consume_parallel(tasks)
+
+    assert seen["taken_off"] == ["e" * 40]
+    assert seen["status"] == {"T-001": "todo", "T-002": "todo"}
+    assert seen["notes"] == {}
+
+
+def test_a_leaf_on_its_slice_is_recorded_when_the_machine_stops_the_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It was never in the join. Leaving through the fault skipped its record: `in-progress`, reset
+    to `todo` by the next run, re-implemented over a slice already holding its work, and refused as
+    `no_implementation` for good."""
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-002": "slice-branch"}
+    seen = _joining(loop, monkeypatch)
+
+    def fault(merged: object, before_join: str) -> tuple[bool, str]:
+        raise faults.EnvironmentFault(faults.Fault.ENV_TRANSIENT, where="integration", rc=1, output="oom")
+
+    monkeypatch.setattr(loop, "_integration_gate", fault)
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
+
+    with pytest.raises(faults.EnvironmentFault):
+        loop._consume_parallel(tasks)
+
+    assert seen["status"] == {"T-001": "todo", "T-002": "done", "T-003": "todo"}
+
+
+def test_a_join_whose_gate_stopped_short_of_green_is_taken_off_like_a_red_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The join's reviewer left must-fix findings: no green, so the join is as unverified as a red
+    one — and leaving through the stop kept it on the branch with its tasks `in-progress`."""
+    loop = orchestrator(tmp_path)
+    seen = _joining(loop, monkeypatch)
+
+    def unresolved(merged: object, before_join: str) -> tuple[bool, str]:
+        raise build_loop.StopLoop("T-001,T-002: the integration reviewer's findings were not resolved")
+
+    monkeypatch.setattr(loop, "_integration_gate", unresolved)
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
+
+    with pytest.raises(build_loop.StopLoop, match="Human intervention"):
+        loop._consume_parallel(tasks)
+
+    assert seen["taken_off"] == ["e" * 40]
+    assert seen["status"] == {"T-001": "blocked", "T-002": "blocked"}
+    assert "not resolved" in seen["notes"]["T-001"]["failure_summary"]
+
+
+def test_a_join_git_would_not_take_off_blocks_its_tasks_and_names_the_reset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`in-progress` would be reset by the next run and re-played over the join still on the branch;
+    `blocked` waits for the human who has to clear what git named. The slice leaf is recorded all
+    the same."""
+    loop = orchestrator(tmp_path)
+    loop.ws.landing = {"T-003": "slice-branch"}
+    seen = _joining(loop, monkeypatch)
+    monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (False, "check: E501 in a.py"))
+
+    def refuse(before_join: str) -> str:
+        raise build_loop.StopLoop("git reset --keep failed (rc=1)\nerror: Entry 'a.py' not uptodate")
+
+    monkeypatch.setattr(loop.ws, "take_off_join", refuse)
+    escalated: list[str] = []
+    monkeypatch.setattr(loop, "_escalate_batch", lambda kind, message, tasks: escalated.append(message))
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
+
+    with pytest.raises(build_loop.StopLoop, match="Human intervention"):
+        loop._consume_parallel(tasks)
+
+    assert seen["status"] == {"T-001": "blocked", "T-002": "blocked", "T-003": "done"}
+    assert seen["notes"]["T-001"]["escalation"]["kind"] == "join_stuck"
+    assert f"git reset --keep {'e' * 40}" in escalated[0]
+
+
+def test_the_integration_fixer_s_change_is_committed_onto_the_join(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate re-ran over the working tree, so a green join could stand on edits HEAD did not
+    have, and a red one could not be taken off over them."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop, "_launch", lambda argv, **kwargs: "")
+    committed: list[tuple[str, list[str]]] = []
+
+    def finalize(cwd: str, message: str, subjects: Sequence[str] = ()) -> bool:
+        committed.append((message, list(subjects)))
+        return len(committed) == 1
+
+    monkeypatch.setattr(loop.ws, "finalize_commit", finalize)
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
+
+    loop._invoke_integration_fixer(tasks, "fix it")
+    with pytest.raises(build_loop.StopLoop, match="could not be committed"):
+        loop._invoke_integration_fixer(tasks, "fix it")
+
+    assert committed[0] == ("T-001,T-002: integration fix", ["T-001", "T-002"])
 
 
 def test_a_leaf_is_diffed_against_its_target_branch_not_the_work_branch(
@@ -2972,6 +3134,23 @@ def test_a_task_that_changed_no_test_is_recorded_rather_than_passed_or_blocked(
     assert loop._current_control["result"] == "no_tests_changed"
 
 
+def test_a_change_made_only_of_test_paths_has_no_control_to_take(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mirror of `no_tests_changed`. Base plus the whole change is head, so the control would
+    come back green whatever the tests assert — and a measurement-log task (`docs/test/**` plus
+    `tests/**`) was blocked by that green with nothing it could write to change it."""
+    loop = orchestrator(tmp_path)
+    ran = _controlled(
+        loop, monkeypatch, changed=["docs/test/measurements/run.md", "tests/measurements/test_run_logs.py"]
+    )
+
+    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert ran == []
+    assert loop._current_control["result"] == "undetermined"
+    assert "no contrast" in loop._current_control["detail"]
+
+
 def test_a_control_that_could_not_be_set_up_is_undetermined_and_never_a_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3064,7 +3243,7 @@ def test_the_control_runs_only_the_command_steps_that_actually_passed(
     an agent step judged nothing a re-run could contradict, and a step that never ran claimed
     nothing to negate."""
     loop = orchestrator(tmp_path)
-    ran = _controlled(loop, monkeypatch, changed=["tests/test_x.py"])
+    ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
     passed = (
         build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),
         build_loop.GateStep(name="smoke", kind="command"),
@@ -3130,7 +3309,7 @@ def test_a_broken_negative_control_is_undetermined_and_not_an_abort(
     monkeypatch.setattr(common, "run", fake_git())
     task = dag.Task(id="T-001", title="t", kind="parallel")
     step = build_loop.GateStep(name="test", kind="command", command=("true",), runs_tests=True)
-    monkeypatch.setattr(loop, "_review_scope", lambda t, cwd, base: (["tests/test_x.py"], "git diff"))
+    monkeypatch.setattr(loop, "_review_scope", lambda t, cwd, base: (["src/x.py", "tests/test_x.py"], "git diff"))
     monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
     monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "--- a\n+++ b\n")
 
@@ -3784,3 +3963,95 @@ def test_a_dry_run_is_never_stopped_by_a_ceiling_it_cannot_add_to(tmp_path: Path
     root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent(DEMO_CYCLE, 6.0))
 
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+
+
+# --- what a human wrote when resetting a task reaches the next attempt -------------
+
+
+def test_a_reset_reason_reaches_the_next_attempt_even_when_fresh(tmp_path: Path) -> None:
+    """`rein start` asks for `--reason <what you repaired>` and the sentence went only to the chain.
+    One recorded task was reset twice with the missing input spelled out, and its third launch asked
+    for that input again. `--fresh` discards the handoff; the note must not go with it."""
+    from rein import task_cmd
+
+    loop = orchestrator(tmp_path)
+    store = store_mod.Store(loop.repo)
+    with store.transaction() as tx:
+        tx.append("task_failed", cycle_id=loop.cycle_id, subject_ids=["T-001"], detail={"step": "test"})
+    build_loop.set_task_status(loop.repo, "T-001", "blocked")
+    task_cmd.reset(loop.repo, "T-001", status="todo", reason="golden labels are in docs/labels.md", fresh=True)
+    with store.transaction() as tx:
+        tx.append("task_failed", cycle_id=loop.cycle_id, subject_ids=["T-002"], detail={"step": "check"})
+
+    history = loop._history_for(_task())
+
+    assert history == [
+        {"attempt": 1, "step": "test"},
+        {"reset": "golden labels are in docs/labels.md", "fresh": True},
+    ]
+
+
+# --- the handoff holds one failure ---------------------------------------------
+
+
+def test_a_new_failure_replaces_the_last_one_whole(tmp_path: Path) -> None:
+    """Merged field by field, a stop before the gate kept the gate log from the round before it, and
+    `rein start` recommended the recovery for a verdict the task was no longer stopped on."""
+    loop = orchestrator(tmp_path)
+    build_loop.set_task_status(loop.repo, "T-001", "in-progress")
+    build_loop.record_escalation(
+        loop.repo, "T-001", kind="report_mismatch", message="named b.py", tree="sha256:" + "0" * 64
+    )
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="test", failure_summary="unit red", retries_left={"test": 1}
+    )
+
+    handoff = build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001")
+    assert {k: handoff.get(k) for k in ("failed_step", "failure_summary", "escalation", "retries_left")} == {
+        "failed_step": "test",
+        "failure_summary": "unit red",
+        "escalation": None,
+        "retries_left": {"test": 1},
+    }
+
+
+def test_a_red_join_after_a_retried_step_reads_as_the_join_and_not_the_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-001's `test` went red once and then green; its batch's join went red. The retry's
+    `failed_step` outlived the green, and the next attempt was told its own `test` step had failed
+    with the integration gate's output."""
+    loop = orchestrator(tmp_path)
+    task = dag.Task(id="T-001", title="t", kind="parallel")
+    build_loop.set_task_status(loop.repo, "T-001", "in-progress")
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="test", failure_summary="unit red", retries_left={"test": 1}
+    )
+    loop._note_diagnostic("T-001", build_loop._FAILURE_RESOLVED)  # the retry went green
+    loop._event("task_failed", ["T-001", "T-002"], {"step": "check", "stage": "integration", "retries_left": 0})
+    monkeypatch.setattr(loop.ws, "take_off_join", lambda before_join: "build/x-join-1")
+    monkeypatch.setattr(loop, "_escalate_batch", lambda *args: None)
+
+    loop._take_off_join([task], "e" * 40, "blocked", "check: E501 in a.py")
+
+    handoff = build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001")
+    assert "failed_step" not in handoff
+    assert handoff["failure_summary"] == "check: E501 in a.py"
+    assert handoff["escalation"]["kind"] == "integration_red"
+    assert loop._history_for(task) == [
+        {"attempt": 1, "step": "test"},
+        {"step": "check", "stage": "integration", "reason": "check: E501 in a.py"},
+    ]
+
+
+def test_the_status_write_that_ends_an_attempt_is_not_another_attempt(tmp_path: Path) -> None:
+    """It restates the failure its round already recorded; counted, every blocked task showed one
+    attempt more than it had."""
+    loop = orchestrator(tmp_path)
+    build_loop.set_task_status(loop.repo, "T-001", "in-progress")
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="test", failure_summary="unit red", retries_left={"test": 0}
+    )
+    build_loop.set_task_status(loop.repo, "T-001", "blocked")
+
+    assert loop._history_for(_task()) == [{"attempt": 1, "step": "test", "reason": "unit red"}]

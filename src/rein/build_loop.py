@@ -505,9 +505,7 @@ def _set_task_status_once(
         # the same reason `completed_commit` is dropped rather than merged.
         merged.pop("evidence", None)
         if handoff:
-            previous = entry.get("handoff")
-            carried = dict(previous) if isinstance(previous, dict) else {}
-            merged["handoff"] = {**carried, **dict(handoff), "updated_at": event_chain.now_iso()}
+            merged["handoff"] = {**_merge_handoff(entry.get("handoff"), handoff), "updated_at": event_chain.now_iso()}
     # `completed_commit` is set unconditionally above rather than merged, so a task leaving `done`
     # loses it: the field says which commit *completed* the task, and a task sent back to todo or
     # needs-revision has none. The event log keeps the earlier one.
@@ -546,6 +544,31 @@ _HANDOFF_STEP_MAX = 64
 _HANDOFF_SUMMARY_MAX = 4000
 _HANDOFF_BRANCH_MAX = 200
 
+#: The handoff fields that describe *one* failure: which step, what it said, why no further
+#: round was spent, and the verdict an attempt stopped on before the gate. They are written as a
+#: unit — a new failure replaces all of them, and a green gate clears all of them. Merged field by
+#: field, a join that went red after its tasks had needed a retry kept the retry's `failed_step`
+#: beside the join's log, and the next attempt was told its own `test` step had failed with the
+#: integration gate's output. `retries_left` is not among them: it is the budget, which spans
+#: failures by design.
+_FAILURE_FIELDS = ("failed_step", "failure_summary", "futile", "escalation")
+
+#: What a green gate carries to the next status write: the failure the handoff described is over.
+_FAILURE_RESOLVED: dict[str, Any] = dict.fromkeys(_FAILURE_FIELDS)
+
+
+def _merge_handoff(previous: object, patch: Mapping[str, Any]) -> dict[str, Any]:
+    """`previous` with `patch` applied; a patch that touches a failure field replaces them all.
+
+    A `None` in the patch removes that field — how `_FAILURE_RESOLVED` clears a failure.
+    """
+    handoff = dict(previous) if isinstance(previous, Mapping) else {}
+    if any(key in patch for key in _FAILURE_FIELDS):
+        for key in _FAILURE_FIELDS:
+            handoff.pop(key, None)
+    handoff.update({key: value for key, value in patch.items() if value is not None})
+    return handoff
+
 
 def read_task_handoff(state: models.State | None, task_id: str) -> dict[str, Any]:
     """The handoff recorded for a task, or an empty mapping when there is none."""
@@ -579,9 +602,7 @@ def _update_task_handoff_once(
     raw = json.loads(json.dumps(state.raw))
     tasks = raw.setdefault("tasks", {})
     entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
-    previous = entry.get("handoff")
-    handoff: dict[str, Any] = dict(previous) if isinstance(previous, dict) else {}
-    handoff.update(patch)
+    handoff = _merge_handoff(entry.get("handoff"), patch)
     handoff["updated_at"] = event_chain.now_iso()
     tasks[task_id] = {**entry, "status": entry.get("status", "todo"), "handoff": handoff}
     raw["updated_at"] = event_chain.now_iso()
@@ -1406,11 +1427,23 @@ class Orchestrator:
         return f"host ({adapter.name} sandboxes itself)" if adapter and adapter.own_sandbox else "host"
 
     def _history_for(self, task: dag.Task) -> list[dict[str, Any]]:
-        """One line per past attempt: which step went red and why, oldest first.
+        """What happened to this task before this launch, oldest first, out of the audit chain.
 
-        The handoff carried the *latest* failure only, so a task on its fourth attempt arrived
-        with no memory of the three before it and could — and did — re-try the same fix. The lines
-        come out of the audit chain, which already records every one of them.
+        Three kinds of line. An **attempt** — which step went red, and on the latest failure why:
+        the handoff carried only the last failure, so a task on its fourth attempt arrived with no
+        memory of the three before it and could — and did — re-try the same fix. A **join** round —
+        a step that went red over the tree this task's batch merged into (`stage: integration`),
+        which is not this task's own attempt and must not read as one. A **reset** — what the human
+        wrote when they put the task back (`rein task reset --reason`). That sentence is addressed
+        to the retry — "what you repaired", in `rein start`'s words — and it was recorded only in
+        the chain, so one recorded task was reset twice with the missing input spelled out and its
+        third launch asked for that input again. It comes from the chain rather than the handoff, so
+        `--fresh` — which discards the handoff because the repair was made outside the tree — keeps
+        exactly the note that says what that repair was.
+
+        A `task_failed` that carries a `status` is the status write that ended the attempt, and it
+        restates the failure its own round already recorded; counted, every blocked task showed one
+        attempt more than it had.
         """
         if self.dry_run or not self.cycle_id:
             return []
@@ -1419,15 +1452,33 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - a damaged chain is doctor's to report, not the loop's
             return []
         seen: list[dict[str, Any]] = []
+        attempts = 0
+        last_failure: dict[str, Any] | None = None
         for event in events:
-            if event.event != "task_failed" or task.id not in event.subject_ids:
+            if task.id not in event.subject_ids:
                 continue
-            step = str(event.detail.get("step", "")) or str(event.detail.get("kind", ""))
-            if step:
-                seen.append({"attempt": len(seen) + 1, "step": step})
+            if event.event == "task_failed" and "status" not in event.detail:
+                step = str(event.detail.get("step", "")) or str(event.detail.get("kind", ""))
+                if not step:
+                    continue
+                if event.detail.get("stage") == "integration":
+                    last_failure = {"step": step, "stage": "integration"}
+                else:
+                    attempts += 1
+                    last_failure = {"attempt": attempts, "step": step}
+                seen.append(last_failure)
+            elif event.event == "decision_declared" and event.detail.get("kind") == "task_reset":
+                seen.append(
+                    {
+                        "reset": str(event.detail.get("reason", "")),
+                        "fresh": event.detail.get("handoff") == "discarded",
+                    }
+                )
+        # The handoff holds one failure, the latest written (`_FAILURE_FIELDS`), and the round that
+        # produced it is in the chain before or with it — so the latest line is the one it explains.
         handoff = self._handoff_for(task)
-        if seen and handoff.get("failure_summary"):
-            seen[-1]["reason"] = str(handoff["failure_summary"])[-600:]
+        if last_failure is not None and handoff.get("failure_summary"):
+            last_failure["reason"] = str(handoff["failure_summary"])[-600:]
         return seen[-dossier.MAX_HISTORY :]
 
     # -- implementer launch and quality gate --
@@ -2017,7 +2068,7 @@ class Orchestrator:
         do. So `discriminating` is the absence of the failure, not the presence of a good test;
         what asks whether the tests are *any good* is the per-task reviewer, which reads them.
 
-        Three answers are not passes, and each says so rather than being folded into one:
+        Four answers are not passes, and each says so rather than being folded into one:
 
         * **no test path changed** — there is no control to take. Not a failure: a task whose work
           is genuinely covered by tests that already existed is a real thing, and blocking it would
@@ -2030,6 +2081,11 @@ class Orchestrator:
           pass, never a block, and never an abort: a broken experiment is not evidence in either
           direction, and inventing a verdict from one is the thing the rest of this module refuses
           to do.
+        * **every changed path is a test path** — the mirror of the first: nothing to remove where
+          that one had nothing to apply. Base plus the test half *is* the head tree, so the control
+          would compare head against head and come back green whatever the tests assert. Recorded
+          as undetermined, never taken: an experiment with no contrast is the broken kind below,
+          known before it is run.
         * **every step green** — the block. It comes back through the same channel a red step does,
           so it spends that attempt's budget and the implementer is told what is missing.
         """
@@ -2048,6 +2104,11 @@ class Orchestrator:
             self._note_control("no_tests_changed", detail="the change touched no test path")
             print(f"    [control] {task.id}: no test path changed — the DoD's green is not controlled")
             return None, ""
+        if len(tests) == len(changed):
+            return self._control_undetermined(
+                "every path in this change is a test path, so base plus the test half is the head tree "
+                "— there is no contrast to measure"
+            )
         control_base = base if cwd == self.root else self.ws.fork_point(self.ws.target_branch(task.id), cwd)
         if not control_base:
             return self._control_undetermined("the base this change is a change to could not be resolved")
@@ -2576,12 +2637,17 @@ class Orchestrator:
         # bearing half: a run killed mid-task and restarted otherwise came back with a full
         # allowance every time, so a task that can never pass could burn retries forever.
         handoff = self._handoff_for(task)
-        failure_log = str(handoff.get("failure_summary", ""))
+        # The failure fields describe one failure (`_FAILURE_FIELDS`): a gate step's log, or the
+        # verdict an attempt stopped on before the gate — whichever came last is the one recorded.
+        recorded = handoff.get("escalation")
+        escalation: Mapping[str, Any] = recorded if isinstance(recorded, Mapping) else {}
+        failure_log = str(handoff.get("failure_summary") or escalation.get("message") or "")
         inherited = handoff.get("retries_left")
         if isinstance(inherited, dict):
             budgets = {name: min(left, inherited.get(name, left)) for name, left in budgets.items()}
         if failure_log:
-            print(f"    [handoff] {task.id}: resuming after a failed '{handoff.get('failed_step', '?')}' step")
+            stopped = handoff.get("failed_step") or escalation.get("kind") or "?"
+            print(f"    [handoff] {task.id}: resuming after '{stopped}'")
         # Retry-session continuity: the implementer resumes its own session across its retries. A
         # step's final retry is forced fresh — a resumed session re-reads its own failed reasoning,
         # and the last attempt deserves an unanchored mind working from the compact failure summary
@@ -2630,6 +2696,9 @@ class Orchestrator:
             failed, failure_log = self._run_pipeline(task, cwd, base)
             if failed is None:
                 self._record_task_evidence(task, cwd, base)
+                # Whatever failure the handoff described is over. Left in place, it rode into every
+                # stop that follows a green — a merge conflict, a red join — as that stop's cause.
+                self._note_diagnostic(task.id, _FAILURE_RESOLVED)
                 return True, ""
             futile = self._futile(task, failed, failure_log, after_implementer, seen)
             seen = (failed, digests.of_bytes(failure_log.encode("utf-8")), after_implementer)
@@ -2671,20 +2740,28 @@ class Orchestrator:
             ids, failure_log, gate_cmds=self.config.gate_cmds, pathspec=self.ws.pathspec
         )
 
-    def _invoke_integration_fixer(self, ids: str, prompt: str) -> None:
+    def _invoke_integration_fixer(self, tasks: Sequence[dag.Task], prompt: str) -> None:
         """One implementer launch over the merged tree. The caller says what it is being sent.
 
         The prompt is the caller's because the join has two send-backs and they are not the same
         work: a red command step, and a reviewer's findings about what only the join shows. Both
         used to be framed as "the combined state fails the deterministic gate", which was true of
         one of them (`integration_fix_prompt`, `integration_review_fix_prompt`).
+
+        What it changed is committed onto the join before anything reads the tree again. The fixer
+        is told to commit and nothing checked: the gate re-ran over the working tree, so a green
+        join could stand on edits HEAD did not have — the next leaf forked without them — and a red
+        one could not be taken off, `reset --keep` refusing over the fixer's uncommitted paths.
         """
+        ids = ",".join(t.id for t in tasks)
         self._launch(
             adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
             cwd=self.root,
             where=f"{ids}: the integration fixer",
             role="implementer",
         )
+        if not self.ws.finalize_commit(self.root, f"{ids}: integration fix", subjects=[t.id for t in tasks]):
+            raise StopLoop(f"{ids}: the integration fixer's change could not be committed; the tree is kept as it is")
 
     def _integration_gate(self, tasks: list[dag.Task], before_join: str) -> tuple[bool, str]:
         """Re-verify the merged/integrated state of the work branch after a multi-leaf join.
@@ -2740,7 +2817,7 @@ class Orchestrator:
             if left <= 0:
                 return False, failure_log
             budgets[failed] = left - 1
-            self._invoke_integration_fixer(ids, self._integration_fix_prompt(ids, failure_log))
+            self._invoke_integration_fixer(tasks, self._integration_fix_prompt(ids, failure_log))
 
     def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task], before_join: str) -> None:
         """Read the tree the merge produced, which no per-task reviewer ever saw.
@@ -2811,7 +2888,7 @@ class Orchestrator:
                 )
             print(f"    [review] {ids}: {len(outstanding)} must-fix finding(s) about the join → back to an implementer")
             self._invoke_integration_fixer(
-                ids,
+                tasks,
                 build_prompts.integration_review_fix_prompt(
                     ids,
                     dossier.render_findings(outstanding),
@@ -3610,56 +3687,67 @@ class Orchestrator:
                 f"    [merge] {', '.join(t.id for t in elsewhere)} landed on their pull-request branches; "
                 "`rein pr-stack --restack` joins them into the work branch"
             )
-        merged = [t for t in merged if not self.ws.landing.get(t.id)]
-        if merged and (len(merged) >= 2 or self._steps_at("integration") != self._steps_at("task")):
-            # An EnvironmentFault here propagates with the merged tasks still `in-progress`, and
-            # that is the honest state: they merged, but nothing has verified the combined tree.
-            # The next run resets them to `todo` and re-plays them, which re-runs the integration
-            # gate. Duplicated work, never a skipped verification — marking them `done` would be
-            # the other way round, and nothing would ever come back to check.
-            ok, log = self._integration_gate(merged, before_join)
-        else:
-            ok, log = True, ""
-        ids = ",".join(t.id for t in merged)
-        if ok:
-            # Every leaf recorded first, in one pass. `landed` was captured per leaf as each one
-            # merged: `_landed` reads the branch tip, so asking it here would name the last merge
-            # for every member of the batch.
-            for task in merged:
-                self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
-            # Then the readings, which can raise — a repair that reaches outside its scope stops
-            # the run. Interleaved with the pass above, that would leave the leaves after it
-            # unrecorded, and they passed their gate and merged exactly like the rest.
-            for task in merged:
-                # Asked before the repair moves the branch: is this leaf's own merge still the tip?
-                at_tip = bool(landed.get(task.id)) and landed[task.id] == self._landed(task.id)
-                if self._repair_warm_findings(task, self._warm_reading(task)):
-                    # A repair lands on top of the branch, and only the leaf that merged last has
-                    # its own work directly under that tip. Moving an earlier leaf's
-                    # `completed_commit` up there would put it above a *later* leaf's merge, and
-                    # `pr_stack.derive` cuts slices by walking first-parent order — so that later
-                    # leaf's pull request would swallow this one's commits, and nothing would say
-                    # so: parallel leaves have no `blockedBy` between them, so
-                    # `_landing_order_problems` sees a topological order that is still fine. The
-                    # merge commit stays recorded; the repair rides above it, on the slice branch
-                    # it was committed to. The write still happens either way — the evidence
-                    # beside the status was just re-pointed at the repaired tree.
-                    self._set_status(
-                        task.id,
-                        self._completion_status(task),
-                        commit=self._landed(task.id) if at_tip else landed.get(task.id, ""),
-                    )
-        else:
-            for task in merged:
-                self._set_status(task.id, "blocked")
-            self._escalate_batch(
-                "integration_red",
-                f"{ids}: merged into work, but the integrated state fails the quality gate within the "
-                f"limit. Fix the work branch, then set these tasks back to done.\n{log}",
-                merged,
-            )
-            blocked_any = True
-        if merged:
+        joined = [t for t in merged if not self.ws.landing.get(t.id)]
+        if joined and (len(joined) >= 2 or self._steps_at("integration") != self._steps_at("task")):
+            ok, log = True, ""  # a fault reaches no verdict; it is handled where it is caught
+            try:
+                ok, log = self._integration_gate(joined, before_join)
+            except StopLoop as stopped:
+                # Findings the join's reviewer left unresolved, a fixer's change git would not
+                # commit: whatever stopped it, the gate did not go green, and the join it leaves on
+                # the branch is exactly as unverified as a red one.
+                ok, log = False, str(stopped)
+            except EnvironmentFault as raised:
+                # No verdict about the join — but the join is on the branch, unverified, and the
+                # next run must not build on it. Nor can it "re-play" these tasks over it: a leaf
+                # forked from a branch that already holds its own work produces no change, and a
+                # green over no change is refused. Taken off, the work is back on each leaf branch
+                # and the next attempt restores it from there.
+                #
+                # Raised at the end like a leaf's fault, never from here: the leaves that landed on
+                # a slice branch were never in this join, and leaving through here skipped their
+                # record — `in-progress`, reset to `todo` by the next run, re-implemented over a
+                # slice that already held their work, refused as `no_implementation` for good.
+                if not self._take_off_join(joined, before_join, "todo", ""):
+                    blocked_any = True
+                if fault is None:
+                    fault = raised
+                else:  # a leaf's fault is the one raised; this one is still said
+                    logger.error(raised.summary())
+                joined = []
+            if not ok:
+                self._take_off_join(joined, before_join, "blocked", log)
+                blocked_any = True
+                joined = []
+        # Every leaf recorded first, in one pass — the ones that landed on a slice branch as much as
+        # the ones the join verified: they passed their gate and merged exactly like the rest.
+        # `landed` was captured per leaf as each one merged: `_landed` reads the branch tip, so
+        # asking it here would name the last merge for every member of the batch.
+        recorded = [t for t in merged if t.id in {j.id for j in [*joined, *elsewhere]}]
+        for task in recorded:
+            self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
+        # Then the readings, which can raise — a repair that reaches outside its scope stops the
+        # run. Interleaved with the pass above, that would leave the leaves after it unrecorded.
+        for task in recorded:
+            # Asked before the repair moves the branch: is this leaf's own merge still the tip?
+            at_tip = bool(landed.get(task.id)) and landed[task.id] == self._landed(task.id)
+            if self._repair_warm_findings(task, self._warm_reading(task)):
+                # A repair lands on top of the branch, and only the leaf that merged last has
+                # its own work directly under that tip. Moving an earlier leaf's
+                # `completed_commit` up there would put it above a *later* leaf's merge, and
+                # `pr_stack.derive` cuts slices by walking first-parent order — so that later
+                # leaf's pull request would swallow this one's commits, and nothing would say
+                # so: parallel leaves have no `blockedBy` between them, so
+                # `_landing_order_problems` sees a topological order that is still fine. The
+                # merge commit stays recorded; the repair rides above it, on the slice branch
+                # it was committed to. The write still happens either way — the evidence
+                # beside the status was just re-pointed at the repaired tree.
+                self._set_status(
+                    task.id,
+                    self._completion_status(task),
+                    commit=self._landed(task.id) if at_tip else landed.get(task.id, ""),
+                )
+        if recorded:
             self._warn_on_review_outlook()
         if blocked_any:
             # A real verdict outranks a machine fault when both happened: re-running clears the
@@ -3670,6 +3758,71 @@ class Orchestrator:
             raise StopLoop("A blocked task occurred. Human intervention needed.", code=common.EXIT_HUMAN_NEEDED)
         if fault is not None:
             raise fault
+
+    def _take_off_join(self, joined: Sequence[dag.Task], before_join: str, status: str, log: str) -> bool:
+        """Take a join nothing verified off the work branch, and send its tasks back.
+
+        It used to stay: the tasks went `blocked` with their merges on the branch, told to "fix the
+        work branch, then set these tasks back to done" — which no verb does. Resetting them instead
+        re-ran each as a leaf forked from a branch that already held its work, so the implementer
+        had nothing to change, the empty diff was refused as `no_implementation`, and the task could
+        not come back. And everything the loop ran next stood on a tree the gate had just called red.
+
+        The work branch holds verified work only; that is what every later fork, diff and gate
+        assumes. So the join comes off (`take_off_join` keeps it on a branch), each task's work is
+        where it was before the merge — its leaf branch — and the next attempt resumes it from there
+        with the join's failure in its handoff. `status` is `blocked` on a red verdict, and `todo`
+        when a machine fault left none.
+
+        False when git would not move the branch: the tasks are then `blocked` whatever `status`
+        said, and the escalation names the reset a human has to make.
+        """
+        ids = ",".join(t.id for t in joined)
+        try:
+            kept = self.ws.take_off_join(before_join)
+        except StopLoop as refused:
+            # Git would not move the branch — a local change in the canonical checkout on a path
+            # the join touched. The join stays, unverified, and the one thing that must not follow
+            # is the next run resetting these tasks from `in-progress` and re-playing each over a
+            # branch that already holds its work. `blocked` is never reset by a run; a human is.
+            message = (
+                f"{ids}: the join was not verified and could not be taken off {self.branch}: {refused}\n"
+                f"Nothing may build on it. Clear what git names, run `git reset --keep {before_join}` on "
+                f"{self.branch}, then reset each task — its work is on its leaf branch."
+            )
+            for task in joined:
+                self._note_diagnostic(
+                    task.id,
+                    {
+                        "failure_summary": (log or message)[-_HANDOFF_SUMMARY_MAX:],
+                        "escalation": {"kind": "join_stuck", "message": message[-_HANDOFF_SUMMARY_MAX:]},
+                    },
+                )
+                self._set_status(task.id, "blocked")
+            self._escalate_batch("join_stuck", f"{message}\n{log}" if log else message, joined)
+            return False
+        where = f" (kept on {kept})" if kept else ""
+        if log:
+            message = (
+                f"{ids}: each passed its own gate, and the tree they joined into did not pass the "
+                f"integration gate. The join was taken off {self.branch}{where}; each task's work is on "
+                "its leaf branch, and its next attempt resumes it with this failure in hand."
+            )
+            for task in joined:
+                self._note_diagnostic(
+                    task.id,
+                    {
+                        "failure_summary": log[-_HANDOFF_SUMMARY_MAX:],
+                        "escalation": {"kind": "integration_red", "message": message[:_HANDOFF_SUMMARY_MAX]},
+                    },
+                )
+        for task in joined:
+            self._set_status(task.id, status)
+        if log:
+            self._escalate_batch("integration_red", f"{message}\n{log}", joined)
+        else:
+            print(f"    [join] {ids}: the join was taken off {self.branch}{where} — nothing verified it")
+        return True
 
     def _warn_on_review_outlook(self) -> None:
         """Say it at task 9 of 17, not at acceptance, when the change outgrows what a review can read.

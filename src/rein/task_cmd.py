@@ -29,6 +29,11 @@ What it deliberately does **not** do:
     gone, so there is nothing left for it to bound, and the record says so.
   - It does not close the escalation. An escalation is concluded by a signed disposition in the
     review, never by a status somebody flipped (`rein events` is read-only by design).
+  - It does not re-open a task under work that stands on it. A dependent that is `done`,
+    `awaiting-evidence` or `in-progress` was started because this task was `done`; putting this
+    one back on the frontier would leave it downstream of a task the DAG now says is unfinished,
+    and nothing would ever re-check it against whatever this one becomes. The refusal names them,
+    deepest first — the order they can be reset in.
   - It does not open anything. Gate approval has its own verb, its own TTY requirement, and its
     own receipt; nothing here touches `gates.*`.
 """
@@ -42,7 +47,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from rein import common, event_chain, models
+from rein import common, dag, event_chain, models
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -84,6 +89,8 @@ def _reset_once(repo: repo_mod.Repo, task_id: str, status: str, reason: str, fre
         raise ValueError("no .rein/state.yaml — run `rein init` first")
     seen = store_mod.read_digest(state)
 
+    _refuse_under_started_work(store, state, task_id)
+
     raw = json.loads(json.dumps(state.raw))
     tasks = raw.setdefault("tasks", {})
     entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
@@ -116,6 +123,28 @@ def _reset_once(repo: repo_mod.Repo, task_id: str, status: str, reason: str, fre
         tx.write("state", raw, expect_digest=seen)
         tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
     return ResetResult(previous=previous, handoff={} if fresh else handoff, dropped_base=dropped)
+
+
+#: A dependent in one of these was started on this task's current work and has not been parked.
+_STARTED = frozenset({"done", "awaiting-evidence", "in-progress"})
+
+
+def _refuse_under_started_work(store: store_mod.Store, state: models.State, task_id: str) -> None:
+    """Raise when a transitive dependent of `task_id` has work standing on it."""
+    plan = store.read_plan()
+    if plan is None:
+        return
+    graph = dag.join(plan, state)
+    started = {tid for tid in graph.dependents_closure([task_id]) if graph.get(tid).status in _STARTED}
+    if started:
+        # Deepest first: each of them is refused in turn while anything below it is still started.
+        ahead = [tid for layer in reversed(graph.layers()) for tid in layer if tid in started]
+        listed = ", ".join(f"{tid} ({graph.get(tid).status})" for tid in ahead)
+        raise ValueError(
+            f"{task_id} has dependents already started on its current work: {listed}. Re-opening it "
+            "would leave them downstream of an unfinished task, never re-checked against what it "
+            f"becomes. Reset them first, in that order (`rein task reset <id> --reason ...`), then {task_id}."
+        )
 
 
 def _head_descends_from(repo: repo_mod.Repo, commit: str) -> bool:
@@ -154,7 +183,8 @@ def main(argv: list[str] | None = None) -> int:
     reset_parser.add_argument(
         "--reason",
         required=True,
-        help="why this task should be tried again — recorded in the audit chain beside the change",
+        help="what changed since it stopped, addressed to the next attempt — recorded in the audit chain "
+        "and handed to every later launch of this task in its dossier's history, --fresh included",
     )
     reset_parser.add_argument(
         "--status",

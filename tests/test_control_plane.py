@@ -29,7 +29,9 @@ CENTRAL_ONLY = sorted(models.CENTRAL_ONLY_CAPABILITIES)
 
 @pytest.fixture
 def repo(tmp_path: Path) -> repo_mod.Repo:
-    seed_repo(tmp_path, plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]), state=make_state())
+    """T-001 is mid-attempt: a report or an escalation belongs to the attempt that is running."""
+    plan = make_plan(tasks=[make_task("T-001", claim_ids=["C-001"]), make_task("T-002", claim_ids=["C-001"])])
+    seed_repo(tmp_path, plan=plan, state=make_state(tasks={"T-001": "in-progress"}))
     return repo_mod.Repo(tmp_path)
 
 
@@ -228,7 +230,7 @@ def test_one_token_serves_a_leaf_s_whole_task(server: control_plane.ControlServe
     token = leaf_token(server)
     ask(server, "decision.declare", token, statement="first")
     ask(server, "knowledge_gap.create", token, statement="second")
-    ask(server, "task.status", token, task="T-001", status="done")
+    ask(server, "task.status", token, outcome="implemented")
 
 
 def test_a_request_without_a_nonce_is_refused(server: control_plane.ControlServer) -> None:
@@ -277,7 +279,7 @@ def test_a_low_risk_decision_is_recorded_and_the_task_keeps_going(
     result = ask(server, "decision.declare", leaf_token(server), statement="name the variable x", risk="low")
     assert result["escalated"] is False
     state = store_mod.Store(repo).read_state()
-    assert state is not None and state.task_status.get("T-001") in (None, "todo")
+    assert state is not None and state.task_status["T-001"] == "in-progress"
 
 
 @pytest.mark.parametrize("risk", ["medium", "high", "critical"])
@@ -292,6 +294,29 @@ def test_a_decision_at_or_above_the_floor_parks_the_task(
 
     state = store_mod.Store(repo).read_state()
     assert state is not None and state.task_status["T-001"] == "needs-revision"
+
+
+@pytest.mark.parametrize("current", ["in-progress", "done"])
+def test_a_person_s_decision_is_recorded_and_parks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str
+) -> None:
+    """No token, canonical checkout: the human an escalation would reach. Parking by name moved
+    whatever task they named — a `done` one re-opened under its dependents."""
+    seed_repo(
+        tmp_path,
+        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
+        state=make_state(tasks={"T-001": current}),
+    )
+    repo = repo_mod.Repo(tmp_path)
+    monkeypatch.delenv(control_plane.SOCKET_ENV, raising=False)
+    monkeypatch.delenv(control_plane.TOKEN_ENV, raising=False)
+
+    result = control_plane.route(repo, "decision.declare", {"task": "T-001", "statement": "timeout 30", "risk": "high"})
+
+    assert result["escalated"] is False
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and state.task_status["T-001"] == current
+    assert [e.event for e in store_mod.Store(repo).read_events()] == ["decision_declared"]
 
 
 def test_the_escalation_floor_is_medium() -> None:
@@ -384,12 +409,10 @@ def test_the_cli_records_from_the_canonical_checkout(repo: repo_mod.Repo, capsys
 
 
 def test_the_cli_exits_2_when_the_record_parks_the_task(
-    repo: repo_mod.Repo, capsys: pytest.CaptureFixture[str]
+    repo: repo_mod.Repo, attempt: control_plane.ControlServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Exit 2 is the signal an autonomous loop needs: this task is not yours to finish."""
-    rc = control_plane.main(
-        ["add", "--task", "T-001", "--statement", "timeout 30", "--risk", "high", "--repo", str(repo.root)]
-    )
+    rc = control_plane.main(["add", "--statement", "timeout 30", "--risk", "high", "--repo", str(repo.root)])
     assert rc == 2
     assert "Stop work on it" in capsys.readouterr().out
 
@@ -410,25 +433,20 @@ def test_the_cli_offers_no_verb_that_edits_or_removes_a_record() -> None:
 # --- `rein report`: how an implementer ends its attempt --------------------------
 
 
-def test_report_records_the_outcome_and_the_agents_own_words(repo: repo_mod.Repo) -> None:
+@pytest.fixture
+def attempt(server: control_plane.ControlServer, monkeypatch: pytest.MonkeyPatch) -> control_plane.ControlServer:
+    """The environment the loop gives a launch: the socket and a token scoped to T-001."""
+    monkeypatch.setenv(control_plane.SOCKET_ENV, str(server.socket_path))
+    monkeypatch.setenv(control_plane.TOKEN_ENV, leaf_token(server))
+    return server
+
+
+def test_report_records_the_outcome_and_the_agents_own_words(
+    repo: repo_mod.Repo, attempt: control_plane.ControlServer
+) -> None:
     """The channel that did not exist. The loop had one bit — the process exited — to read."""
-    assert (
-        control_plane.report_main(
-            [
-                "--task",
-                "T-001",
-                "--outcome",
-                "implemented",
-                "--summary",
-                "wrote the handler",
-                "--touched",
-                "src/api/handler.py",
-                "--repo",
-                str(repo.root),
-            ]
-        )
-        == 0
-    )
+    argv = ["--outcome", "implemented", "--summary", "wrote the handler", "--touched", "src/api/handler.py"]
+    assert control_plane.report_main([*argv, "--repo", str(repo.root)]) == 0
 
     raw = store_mod.Store(repo).read_raw("state")
     assert raw is not None
@@ -440,23 +458,10 @@ def test_report_records_the_outcome_and_the_agents_own_words(repo: repo_mod.Repo
     assert raw["tasks"]["T-001"]["status"] == "in-progress"
 
 
-def test_report_can_only_narrow_what_happens_next(repo: repo_mod.Repo) -> None:
+def test_report_can_only_narrow_what_happens_next(repo: repo_mod.Repo, attempt: control_plane.ControlServer) -> None:
     """An agent may park its own task. Nothing it can say finishes one."""
-    assert (
-        control_plane.report_main(
-            [
-                "--task",
-                "T-001",
-                "--outcome",
-                "blocked",
-                "--summary",
-                "bwrap: Permission denied",
-                "--repo",
-                str(repo.root),
-            ]
-        )
-        == 2
-    )
+    argv = ["--outcome", "blocked", "--summary", "bwrap: Permission denied", "--repo", str(repo.root)]
+    assert control_plane.report_main(argv) == 2
 
     raw = store_mod.Store(repo).read_raw("state")
     assert raw is not None
@@ -465,10 +470,77 @@ def test_report_can_only_narrow_what_happens_next(repo: repo_mod.Repo) -> None:
     assert "done" not in control_plane._OUTCOME_STATUS.values()
 
 
-def test_a_stop_without_a_reason_is_refused(repo: repo_mod.Repo) -> None:
+def test_a_serial_attempt_reports_through_its_token_in_the_canonical_checkout(
+    repo: repo_mod.Repo, attempt: control_plane.ControlServer
+) -> None:
+    """A serial implementer runs in the canonical checkout. Routing by checkout gave it a direct,
+    token-less write with no task of its own, so its report went under the empty id and the schema
+    refused it. The token decides the route, and the token names the task."""
+    assert repo.is_canonical_checkout
+    assert control_plane.report_main(["--outcome", "needs-revision", "--summary", "C-001 contradicts ADR-2"]) == 2
+    assert [e.actor for e in store_mod.Store(repo).read_events()] == ["leaf:T-001"]
+
+
+def test_a_stop_without_a_reason_is_refused(repo: repo_mod.Repo, attempt: control_plane.ControlServer) -> None:
     """The verb exists to end unexplained stops, so it may not be used to make one."""
-    assert control_plane.report_main(["--task", "T-001", "--outcome", "blocked", "--repo", str(repo.root)]) == 1
+    assert control_plane.report_main(["--outcome", "blocked", "--repo", str(repo.root)]) == 1
     assert store_mod.Store(repo).read_events() == []
+
+
+def test_a_report_with_no_attempt_behind_it_is_refused(repo: repo_mod.Repo) -> None:
+    """No token and no task: whatever this is, it is not an attempt ending."""
+    assert control_plane.report_main(["--outcome", "implemented", "--repo", str(repo.root)]) == 1
+    assert store_mod.Store(repo).read_events() == []
+
+
+# --- a token's authority is its own task's, and only narrows it ------------------
+
+
+@pytest.mark.parametrize("capability", ["task.status", "decision.declare", "knowledge_gap.create"])
+def test_a_leaf_cannot_record_against_another_task(
+    server: control_plane.ControlServer, repo: repo_mod.Repo, capability: str
+) -> None:
+    """The server took `args.task` over the token's, so T-001's grant could move T-002."""
+    with pytest.raises(control_plane.ControlPlaneError, match="scoped to T-001, not T-002"):
+        ask(server, capability, leaf_token(server), task="T-002", outcome="blocked", statement="x", risk="high")
+    assert store_mod.Store(repo).read_events() == []
+
+
+def test_a_leaf_may_still_name_its_own_task(server: control_plane.ControlServer) -> None:
+    assert ask(server, "knowledge_gap.create", leaf_token(server), task="T-001", statement="x")["task"] == "T-001"
+
+
+def test_a_status_the_request_names_is_not_the_status_written(
+    server: control_plane.ControlServer, repo: repo_mod.Repo
+) -> None:
+    """The status comes from the outcome, on the server. A raw request naming `done` used to be
+    written as asked — and an upstream task marked `done` opens the DAG below it."""
+    ask(server, "task.status", leaf_token(server), outcome="implemented", status="done")
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and state.task_status["T-001"] == "in-progress"
+    with pytest.raises(control_plane.ControlPlaneError, match="needs an outcome"):
+        ask(server, "task.status", leaf_token(server), status="done")
+
+
+@pytest.mark.parametrize("current", ["todo", "done", "awaiting-evidence", "blocked"])
+def test_a_status_write_needs_a_running_attempt(tmp_path: Path, current: str) -> None:
+    """A token outlives the batch it was minted for. A late report — or a late escalation — must
+    not move a task the loop has since finished, parked, or not started."""
+    seed_repo(
+        tmp_path,
+        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
+        state=make_state(tasks={"T-001": current}),
+    )
+    repo = repo_mod.Repo(tmp_path)
+    with control_plane.serving(repo) as running:
+        for capability, args in (
+            ("task.status", {"outcome": "implemented"}),
+            ("decision.declare", {"statement": "timeout 30", "risk": "high"}),
+        ):
+            with pytest.raises(control_plane.ControlPlaneError, match=f"T-001 is {current}, not in-progress"):
+                ask(running, capability, leaf_token(running), **args)
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and state.task_status.get("T-001", "todo") == current
 
 
 @pytest.mark.integration
