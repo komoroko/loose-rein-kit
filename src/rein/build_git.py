@@ -24,7 +24,7 @@ from rein.common import StopLoop
 class EventSink(Protocol):
     """Where the git layer reports what happened. The orchestrator supplies a Store-backed one."""
 
-    def __call__(self, event: str, subject: str, detail: dict[str, object]) -> None: ...
+    def __call__(self, event: str, subject: str | Sequence[str], detail: dict[str, object]) -> None: ...
 
 
 class SalvageSink(Protocol):
@@ -323,7 +323,8 @@ class GitWorkspace:
 
         `--keep`, not `--hard`: the canonical checkout carries the orchestration state the loop
         writes but never commits, and a reset that could discard a local change is not one to make
-        on a path the merges never touched. Git refuses rather than discarding, and so does this.
+        on a path the merges never touched. Git refuses rather than discarding, and so does this:
+        StopLoop, with the branch where it was and no `-join-` branch left naming it.
         Returns "" in a dry run.
         """
         if self.dry_run:
@@ -332,7 +333,10 @@ class GitWorkspace:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         kept = f"{self.branch}-join-{stamp}"
         self.git(["branch", kept, "HEAD"])
-        self.git(["reset", "--keep", before_join])
+        rc, out = self._run(["git", "reset", "--keep", before_join], cwd=self.root)
+        if rc != 0:
+            self._run(["git", "branch", "-D", kept], cwd=self.root)
+            raise StopLoop(f"git reset --keep {before_join} failed (rc={rc})\n{out[-1000:]}")
         return kept
 
     def _salvage_leftovers(self, task_id: str, branch: str, path: str) -> str:
@@ -595,7 +599,7 @@ class GitWorkspace:
         rc, _ = self._run(["git", "add", "--intent-to-add", "--", *untracked], cwd=cwd)
         return untracked, rc == 0
 
-    def finalize_commit(self, cwd: str, message: str) -> bool:
+    def finalize_commit(self, cwd: str, message: str, subjects: Sequence[str] = ()) -> bool:
         """Commit any outstanding diff in `cwd` (excluding .rein/) — a no-op on a clean tree.
 
         The implementer is instructed to commit, but an uncommitted tree must never be the only
@@ -613,6 +617,8 @@ class GitWorkspace:
         (_gate_violations): everything a task changed is re-evaluated against the gate rules
         before it merges into the work branch (leaf) or is marked done (serial), so a stray
         out-of-scope edit escalates instead of landing silently in HEAD.
+
+        A failure is recorded against `subjects`, or the task the message is prefixed with.
         """
         if self.dry_run:
             return True
@@ -625,10 +631,9 @@ class GitWorkspace:
         if rc == 0:
             rc, out = self._run(["git", "commit", "--no-verify", "-m", message], cwd=cwd)
         if rc != 0:
-            task_id = message.split(":", 1)[0]
             self.on_event(
                 "task_failed",
-                task_id,
+                list(subjects) or message.split(":", 1)[0],
                 {
                     "kind": "finalize_commit",
                     "detail": f"finalize commit failed in {cwd} (rc={rc}); the uncommitted diff exists "

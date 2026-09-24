@@ -2699,20 +2699,28 @@ class Orchestrator:
             ids, failure_log, gate_cmds=self.config.gate_cmds, pathspec=self.ws.pathspec
         )
 
-    def _invoke_integration_fixer(self, ids: str, prompt: str) -> None:
+    def _invoke_integration_fixer(self, tasks: Sequence[dag.Task], prompt: str) -> None:
         """One implementer launch over the merged tree. The caller says what it is being sent.
 
         The prompt is the caller's because the join has two send-backs and they are not the same
         work: a red command step, and a reviewer's findings about what only the join shows. Both
         used to be framed as "the combined state fails the deterministic gate", which was true of
         one of them (`integration_fix_prompt`, `integration_review_fix_prompt`).
+
+        What it changed is committed onto the join before anything reads the tree again. The fixer
+        is told to commit and nothing checked: the gate re-ran over the working tree, so a green
+        join could stand on edits HEAD did not have — the next leaf forked without them — and a red
+        one could not be taken off, `reset --keep` refusing over the fixer's uncommitted paths.
         """
+        ids = ",".join(t.id for t in tasks)
         self._launch(
             adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
             cwd=self.root,
             where=f"{ids}: the integration fixer",
             role="implementer",
         )
+        if not self.ws.finalize_commit(self.root, f"{ids}: integration fix", subjects=[t.id for t in tasks]):
+            raise StopLoop(f"{ids}: the integration fixer's change could not be committed; the tree is kept as it is")
 
     def _integration_gate(self, tasks: list[dag.Task], before_join: str) -> tuple[bool, str]:
         """Re-verify the merged/integrated state of the work branch after a multi-leaf join.
@@ -2768,7 +2776,7 @@ class Orchestrator:
             if left <= 0:
                 return False, failure_log
             budgets[failed] = left - 1
-            self._invoke_integration_fixer(ids, self._integration_fix_prompt(ids, failure_log))
+            self._invoke_integration_fixer(tasks, self._integration_fix_prompt(ids, failure_log))
 
     def _run_integration_agent_step(self, step: GateStep, tasks: Sequence[dag.Task], before_join: str) -> None:
         """Read the tree the merge produced, which no per-task reviewer ever saw.
@@ -2839,7 +2847,7 @@ class Orchestrator:
                 )
             print(f"    [review] {ids}: {len(outstanding)} must-fix finding(s) about the join → back to an implementer")
             self._invoke_integration_fixer(
-                ids,
+                tasks,
                 build_prompts.integration_review_fix_prompt(
                     ids,
                     dossier.render_findings(outstanding),
@@ -3639,22 +3647,37 @@ class Orchestrator:
                 "`rein pr-stack --restack` joins them into the work branch"
             )
         joined = [t for t in merged if not self.ws.landing.get(t.id)]
-        ok, log = True, ""
         if joined and (len(joined) >= 2 or self._steps_at("integration") != self._steps_at("task")):
+            ok, log = True, ""  # a fault reaches no verdict; it is handled where it is caught
             try:
                 ok, log = self._integration_gate(joined, before_join)
-            except EnvironmentFault:
+            except StopLoop as stopped:
+                # Findings the join's reviewer left unresolved, a fixer's change git would not
+                # commit: whatever stopped it, the gate did not go green, and the join it leaves on
+                # the branch is exactly as unverified as a red one.
+                ok, log = False, str(stopped)
+            except EnvironmentFault as raised:
                 # No verdict about the join — but the join is on the branch, unverified, and the
                 # next run must not build on it. Nor can it "re-play" these tasks over it: a leaf
                 # forked from a branch that already holds its own work produces no change, and a
                 # green over no change is refused. Taken off, the work is back on each leaf branch
                 # and the next attempt restores it from there.
-                self._take_off_join(joined, before_join, "todo", "")
-                raise
-        if not ok:
-            self._take_off_join(joined, before_join, "blocked", log)
-            blocked_any = True
-            joined = []
+                #
+                # Raised at the end like a leaf's fault, never from here: the leaves that landed on
+                # a slice branch were never in this join, and leaving through here skipped their
+                # record — `in-progress`, reset to `todo` by the next run, re-implemented over a
+                # slice that already held their work, refused as `no_implementation` for good.
+                if not self._take_off_join(joined, before_join, "todo", ""):
+                    blocked_any = True
+                if fault is None:
+                    fault = raised
+                else:  # a leaf's fault is the one raised; this one is still said
+                    logger.error(raised.summary())
+                joined = []
+            if not ok:
+                self._take_off_join(joined, before_join, "blocked", log)
+                blocked_any = True
+                joined = []
         # Every leaf recorded first, in one pass — the ones that landed on a slice branch as much as
         # the ones the join verified: they passed their gate and merged exactly like the rest.
         # `landed` was captured per leaf as each one merged: `_landed` reads the branch tip, so
@@ -3695,7 +3718,7 @@ class Orchestrator:
         if fault is not None:
             raise fault
 
-    def _take_off_join(self, joined: Sequence[dag.Task], before_join: str, status: str, log: str) -> None:
+    def _take_off_join(self, joined: Sequence[dag.Task], before_join: str, status: str, log: str) -> bool:
         """Take a join nothing verified off the work branch, and send its tasks back.
 
         It used to stay: the tasks went `blocked` with their merges on the branch, told to "fix the
@@ -3709,14 +3732,39 @@ class Orchestrator:
         where it was before the merge — its leaf branch — and the next attempt resumes it from there
         with the join's failure in its handoff. `status` is `blocked` on a red verdict, and `todo`
         when a machine fault left none.
+
+        False when git would not move the branch: the tasks are then `blocked` whatever `status`
+        said, and the escalation names the reset a human has to make.
         """
-        kept = self.ws.take_off_join(before_join)
         ids = ",".join(t.id for t in joined)
+        try:
+            kept = self.ws.take_off_join(before_join)
+        except StopLoop as refused:
+            # Git would not move the branch — a local change in the canonical checkout on a path
+            # the join touched. The join stays, unverified, and the one thing that must not follow
+            # is the next run resetting these tasks from `in-progress` and re-playing each over a
+            # branch that already holds its work. `blocked` is never reset by a run; a human is.
+            message = (
+                f"{ids}: the join was not verified and could not be taken off {self.branch}: {refused}\n"
+                f"Nothing may build on it. Clear what git names, run `git reset --keep {before_join}` on "
+                f"{self.branch}, then reset each task — its work is on its leaf branch."
+            )
+            for task in joined:
+                self._note_diagnostic(
+                    task.id,
+                    {
+                        "failure_summary": (log or message)[-_HANDOFF_SUMMARY_MAX:],
+                        "escalation": {"kind": "join_stuck", "message": message[-_HANDOFF_SUMMARY_MAX:]},
+                    },
+                )
+                self._set_status(task.id, "blocked")
+            self._escalate_batch("join_stuck", f"{message}\n{log}" if log else message, joined)
+            return False
         where = f" (kept on {kept})" if kept else ""
         if log:
             message = (
-                f"{ids}: each passed its own gate, and the tree they joined into fails the integration "
-                f"gate within the limit. The join was taken off {self.branch}{where}; each task's work is on "
+                f"{ids}: each passed its own gate, and the tree they joined into did not pass the "
+                f"integration gate. The join was taken off {self.branch}{where}; each task's work is on "
                 "its leaf branch, and its next attempt resumes it with this failure in hand."
             )
             for task in joined:
@@ -3733,6 +3781,7 @@ class Orchestrator:
             self._escalate_batch("integration_red", f"{message}\n{log}", joined)
         else:
             print(f"    [join] {ids}: the join was taken off {self.branch}{where} — nothing verified it")
+        return True
 
     def _warn_on_review_outlook(self) -> None:
         """Say it at task 9 of 17, not at acceptance, when the change outgrows what a review can read.

@@ -411,3 +411,25 @@ def test_a_join_taken_off_comes_back_as_the_leafs_own_work(
     ws.add_worktree("T-001")
     assert (root / ".worktrees" / "T-001" / "feature.py").read_text(encoding="utf-8") == "the leaf's work\n"
     assert [s for _, _, s in salvaged] == ["pending", "restored"]
+
+
+def test_a_join_git_will_not_take_off_stays_where_it_is_and_says_so(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """A local change on a path the join touched: `--keep` refuses rather than discarding it, and
+    the refusal leaves nothing behind — no moved branch, no `-join-` branch naming a join that is
+    still the tip."""
+    root, ws, _ = workspace
+    before_join = git(root, "rev-parse", "HEAD")
+    branch = ws.add_worktree("T-001")
+    commit(root / ".worktrees" / "T-001", "feature.py", "the leaf's work\n")
+    assert ws.merge_leaf("T-001", branch)
+    joined = git(root, "rev-parse", "HEAD")
+    (root / "feature.py").write_text("an edit nobody committed\n", encoding="utf-8")
+
+    with pytest.raises(common.StopLoop, match="reset --keep"):
+        ws.take_off_join(before_join)
+
+    assert git(root, "rev-parse", "HEAD") == joined
+    assert git(root, "branch", "--list", "build/x-join-*") == ""
+    assert (root / "feature.py").read_text(encoding="utf-8") == "an edit nobody committed\n"

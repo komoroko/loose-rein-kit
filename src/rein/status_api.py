@@ -407,6 +407,14 @@ _BLOCKED_RECOVERY: tuple[tuple[str, str, str], ...] = (
         "the next attempt resumes it with the failure and your reason in hand.",
     ),
     (
+        "join_stuck",
+        "git status",
+        "{task}'s batch joined into the work branch, nothing verified the join, and git would not take "
+        "it off: the canonical checkout has local changes on paths it touched. Clear them, run the "
+        "`git reset --keep <commit>` the escalation names, then `rein task reset {task} --reason ...` — "
+        "its work is on its leaf branch.",
+    ),
+    (
         "report_mismatch",
         "rein task reset {task} --fresh --reason <what you repaired>",
         "{task}'s implementer named paths it did not change. Its account of its own work is wrong, "
