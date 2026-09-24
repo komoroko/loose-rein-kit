@@ -210,10 +210,15 @@ def test_a_task_is_not_reopened_under_work_that_stands_on_it(tmp_path: Path, dow
     seed_repo(tmp_path, plan=plan, state=make_state(tasks={"T-001": "done", "T-002": "done", "T-003": downstream}))
     repo = repo_mod.Repo(tmp_path)
 
-    with pytest.raises(ValueError, match=rf"T-002 \(done\), T-003 \({downstream}\)"):
+    with pytest.raises(ValueError, match=rf"T-003 \({downstream}\), T-002 \(done\)\. .*in that order"):
         task_cmd.reset(repo, "T-001", status="todo", reason="the parser was wrong")
     assert entry_of(repo)["status"] == "done"
     assert store_mod.Store(repo).read_events() == []
+
+    # The order it names is one that goes through.
+    for task_id in ("T-003", "T-002", "T-001"):
+        task_cmd.reset(repo, task_id, status="todo", reason="the parser was wrong")
+    assert entry_of(repo)["status"] == "todo"
 
 
 def test_a_parked_dependent_does_not_hold_its_upstream_back(tmp_path: Path) -> None:

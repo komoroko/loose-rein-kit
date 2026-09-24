@@ -32,8 +32,8 @@ What it deliberately does **not** do:
   - It does not re-open a task under work that stands on it. A dependent that is `done`,
     `awaiting-evidence` or `in-progress` was started because this task was `done`; putting this
     one back on the frontier would leave it downstream of a task the DAG now says is unfinished,
-    and nothing would ever re-check it against whatever this one becomes. The refusal names them:
-    reset them first, or roll the closure back together with `/revise --impacted`.
+    and nothing would ever re-check it against whatever this one becomes. The refusal names them,
+    deepest first — the order they can be reset in.
   - It does not open anything. Gate approval has its own verb, its own TTY requirement, and its
     own receipt; nothing here touches `gates.*`.
 """
@@ -135,13 +135,15 @@ def _refuse_under_started_work(store: store_mod.Store, state: models.State, task
     if plan is None:
         return
     graph = dag.join(plan, state)
-    ahead = sorted(tid for tid in graph.dependents_closure([task_id]) if graph.get(tid).status in _STARTED)
-    if ahead:
+    started = {tid for tid in graph.dependents_closure([task_id]) if graph.get(tid).status in _STARTED}
+    if started:
+        # Deepest first: each of them is refused in turn while anything below it is still started.
+        ahead = [tid for layer in reversed(graph.layers()) for tid in layer if tid in started]
         listed = ", ".join(f"{tid} ({graph.get(tid).status})" for tid in ahead)
         raise ValueError(
             f"{task_id} has dependents already started on its current work: {listed}. Re-opening it "
             "would leave them downstream of an unfinished task, never re-checked against what it "
-            f"becomes. Reset them first, or roll the closure back with `rein revise --impacted {task_id}`."
+            f"becomes. Reset them first, in that order (`rein task reset <id> --reason ...`), then {task_id}."
         )
 
 
