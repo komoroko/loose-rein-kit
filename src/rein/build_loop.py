@@ -505,9 +505,7 @@ def _set_task_status_once(
         # the same reason `completed_commit` is dropped rather than merged.
         merged.pop("evidence", None)
         if handoff:
-            previous = entry.get("handoff")
-            carried = dict(previous) if isinstance(previous, dict) else {}
-            merged["handoff"] = {**carried, **dict(handoff), "updated_at": event_chain.now_iso()}
+            merged["handoff"] = {**_merge_handoff(entry.get("handoff"), handoff), "updated_at": event_chain.now_iso()}
     # `completed_commit` is set unconditionally above rather than merged, so a task leaving `done`
     # loses it: the field says which commit *completed* the task, and a task sent back to todo or
     # needs-revision has none. The event log keeps the earlier one.
@@ -546,6 +544,31 @@ _HANDOFF_STEP_MAX = 64
 _HANDOFF_SUMMARY_MAX = 4000
 _HANDOFF_BRANCH_MAX = 200
 
+#: The handoff fields that describe *one* failure: which step, what it said, why no further
+#: round was spent, and the verdict an attempt stopped on before the gate. They are written as a
+#: unit — a new failure replaces all of them, and a green gate clears all of them. Merged field by
+#: field, a join that went red after its tasks had needed a retry kept the retry's `failed_step`
+#: beside the join's log, and the next attempt was told its own `test` step had failed with the
+#: integration gate's output. `retries_left` is not among them: it is the budget, which spans
+#: failures by design.
+_FAILURE_FIELDS = ("failed_step", "failure_summary", "futile", "escalation")
+
+#: What a green gate carries to the next status write: the failure the handoff described is over.
+_FAILURE_RESOLVED: dict[str, Any] = dict.fromkeys(_FAILURE_FIELDS)
+
+
+def _merge_handoff(previous: object, patch: Mapping[str, Any]) -> dict[str, Any]:
+    """`previous` with `patch` applied; a patch that touches a failure field replaces them all.
+
+    A `None` in the patch removes that field — how `_FAILURE_RESOLVED` clears a failure.
+    """
+    handoff = dict(previous) if isinstance(previous, Mapping) else {}
+    if any(key in patch for key in _FAILURE_FIELDS):
+        for key in _FAILURE_FIELDS:
+            handoff.pop(key, None)
+    handoff.update({key: value for key, value in patch.items() if value is not None})
+    return handoff
+
 
 def read_task_handoff(state: models.State | None, task_id: str) -> dict[str, Any]:
     """The handoff recorded for a task, or an empty mapping when there is none."""
@@ -579,9 +602,7 @@ def _update_task_handoff_once(
     raw = json.loads(json.dumps(state.raw))
     tasks = raw.setdefault("tasks", {})
     entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
-    previous = entry.get("handoff")
-    handoff: dict[str, Any] = dict(previous) if isinstance(previous, dict) else {}
-    handoff.update(patch)
+    handoff = _merge_handoff(entry.get("handoff"), patch)
     handoff["updated_at"] = event_chain.now_iso()
     tasks[task_id] = {**entry, "status": entry.get("status", "todo"), "handoff": handoff}
     raw["updated_at"] = event_chain.now_iso()
@@ -1408,15 +1429,21 @@ class Orchestrator:
     def _history_for(self, task: dag.Task) -> list[dict[str, Any]]:
         """What happened to this task before this launch, oldest first, out of the audit chain.
 
-        Two kinds of line. An **attempt** — which step went red, and on the latest one why: the
-        handoff carried only the last failure, so a task on its fourth attempt arrived with no
-        memory of the three before it and could — and did — re-try the same fix. A **reset** — what
-        the human wrote when they put the task back (`rein task reset --reason`). That sentence is
-        addressed to the retry — "what you repaired", in `rein start`'s words — and it was recorded
-        only in the chain, so one recorded task was reset twice with the missing input spelled out
-        and its third launch asked for that input again. It comes from the chain rather than the
-        handoff, so `--fresh` — which discards the handoff because the repair was made outside the
-        tree — keeps exactly the note that says what that repair was.
+        Three kinds of line. An **attempt** — which step went red, and on the latest failure why:
+        the handoff carried only the last failure, so a task on its fourth attempt arrived with no
+        memory of the three before it and could — and did — re-try the same fix. A **join** round —
+        a step that went red over the tree this task's batch merged into (`stage: integration`),
+        which is not this task's own attempt and must not read as one. A **reset** — what the human
+        wrote when they put the task back (`rein task reset --reason`). That sentence is addressed
+        to the retry — "what you repaired", in `rein start`'s words — and it was recorded only in
+        the chain, so one recorded task was reset twice with the missing input spelled out and its
+        third launch asked for that input again. It comes from the chain rather than the handoff, so
+        `--fresh` — which discards the handoff because the repair was made outside the tree — keeps
+        exactly the note that says what that repair was.
+
+        A `task_failed` that carries a `status` is the status write that ended the attempt, and it
+        restates the failure its own round already recorded; counted, every blocked task showed one
+        attempt more than it had.
         """
         if self.dry_run or not self.cycle_id:
             return []
@@ -1426,16 +1453,20 @@ class Orchestrator:
             return []
         seen: list[dict[str, Any]] = []
         attempts = 0
-        last_attempt: dict[str, Any] | None = None
+        last_failure: dict[str, Any] | None = None
         for event in events:
             if task.id not in event.subject_ids:
                 continue
-            if event.event == "task_failed":
+            if event.event == "task_failed" and "status" not in event.detail:
                 step = str(event.detail.get("step", "")) or str(event.detail.get("kind", ""))
-                if step:
+                if not step:
+                    continue
+                if event.detail.get("stage") == "integration":
+                    last_failure = {"step": step, "stage": "integration"}
+                else:
                     attempts += 1
-                    last_attempt = {"attempt": attempts, "step": step}
-                    seen.append(last_attempt)
+                    last_failure = {"attempt": attempts, "step": step}
+                seen.append(last_failure)
             elif event.event == "decision_declared" and event.detail.get("kind") == "task_reset":
                 seen.append(
                     {
@@ -1443,9 +1474,11 @@ class Orchestrator:
                         "fresh": event.detail.get("handoff") == "discarded",
                     }
                 )
+        # The handoff holds one failure, the latest written (`_FAILURE_FIELDS`), and the round that
+        # produced it is in the chain before or with it — so the latest line is the one it explains.
         handoff = self._handoff_for(task)
-        if last_attempt is not None and handoff.get("failure_summary"):
-            last_attempt["reason"] = str(handoff["failure_summary"])[-600:]
+        if last_failure is not None and handoff.get("failure_summary"):
+            last_failure["reason"] = str(handoff["failure_summary"])[-600:]
         return seen[-dossier.MAX_HISTORY :]
 
     # -- implementer launch and quality gate --
@@ -2604,12 +2637,17 @@ class Orchestrator:
         # bearing half: a run killed mid-task and restarted otherwise came back with a full
         # allowance every time, so a task that can never pass could burn retries forever.
         handoff = self._handoff_for(task)
-        failure_log = str(handoff.get("failure_summary", ""))
+        # The failure fields describe one failure (`_FAILURE_FIELDS`): a gate step's log, or the
+        # verdict an attempt stopped on before the gate — whichever came last is the one recorded.
+        recorded = handoff.get("escalation")
+        escalation: Mapping[str, Any] = recorded if isinstance(recorded, Mapping) else {}
+        failure_log = str(handoff.get("failure_summary") or escalation.get("message") or "")
         inherited = handoff.get("retries_left")
         if isinstance(inherited, dict):
             budgets = {name: min(left, inherited.get(name, left)) for name, left in budgets.items()}
         if failure_log:
-            print(f"    [handoff] {task.id}: resuming after a failed '{handoff.get('failed_step', '?')}' step")
+            stopped = handoff.get("failed_step") or escalation.get("kind") or "?"
+            print(f"    [handoff] {task.id}: resuming after '{stopped}'")
         # Retry-session continuity: the implementer resumes its own session across its retries. A
         # step's final retry is forced fresh — a resumed session re-reads its own failed reasoning,
         # and the last attempt deserves an unanchored mind working from the compact failure summary
@@ -2658,6 +2696,9 @@ class Orchestrator:
             failed, failure_log = self._run_pipeline(task, cwd, base)
             if failed is None:
                 self._record_task_evidence(task, cwd, base)
+                # Whatever failure the handoff described is over. Left in place, it rode into every
+                # stop that follows a green — a merge conflict, a red join — as that stop's cause.
+                self._note_diagnostic(task.id, _FAILURE_RESOLVED)
                 return True, ""
             futile = self._futile(task, failed, failure_log, after_implementer, seen)
             seen = (failed, digests.of_bytes(failure_log.encode("utf-8")), after_implementer)

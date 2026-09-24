@@ -3989,3 +3989,69 @@ def test_a_reset_reason_reaches_the_next_attempt_even_when_fresh(tmp_path: Path)
         {"attempt": 1, "step": "test"},
         {"reset": "golden labels are in docs/labels.md", "fresh": True},
     ]
+
+
+# --- the handoff holds one failure ---------------------------------------------
+
+
+def test_a_new_failure_replaces_the_last_one_whole(tmp_path: Path) -> None:
+    """Merged field by field, a stop before the gate kept the gate log from the round before it, and
+    `rein start` recommended the recovery for a verdict the task was no longer stopped on."""
+    loop = orchestrator(tmp_path)
+    build_loop.set_task_status(loop.repo, "T-001", "in-progress")
+    build_loop.record_escalation(
+        loop.repo, "T-001", kind="report_mismatch", message="named b.py", tree="sha256:" + "0" * 64
+    )
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="test", failure_summary="unit red", retries_left={"test": 1}
+    )
+
+    handoff = build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001")
+    assert {k: handoff.get(k) for k in ("failed_step", "failure_summary", "escalation", "retries_left")} == {
+        "failed_step": "test",
+        "failure_summary": "unit red",
+        "escalation": None,
+        "retries_left": {"test": 1},
+    }
+
+
+def test_a_red_join_after_a_retried_step_reads_as_the_join_and_not_the_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-001's `test` went red once and then green; its batch's join went red. The retry's
+    `failed_step` outlived the green, and the next attempt was told its own `test` step had failed
+    with the integration gate's output."""
+    loop = orchestrator(tmp_path)
+    task = dag.Task(id="T-001", title="t", kind="parallel")
+    build_loop.set_task_status(loop.repo, "T-001", "in-progress")
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="test", failure_summary="unit red", retries_left={"test": 1}
+    )
+    loop._note_diagnostic("T-001", build_loop._FAILURE_RESOLVED)  # the retry went green
+    loop._event("task_failed", ["T-001", "T-002"], {"step": "check", "stage": "integration", "retries_left": 0})
+    monkeypatch.setattr(loop.ws, "take_off_join", lambda before_join: "build/x-join-1")
+    monkeypatch.setattr(loop, "_escalate_batch", lambda *args: None)
+
+    loop._take_off_join([task], "e" * 40, "blocked", "check: E501 in a.py")
+
+    handoff = build_loop.read_task_handoff(store_mod.Store(loop.repo).read_state(), "T-001")
+    assert "failed_step" not in handoff
+    assert handoff["failure_summary"] == "check: E501 in a.py"
+    assert handoff["escalation"]["kind"] == "integration_red"
+    assert loop._history_for(task) == [
+        {"attempt": 1, "step": "test"},
+        {"step": "check", "stage": "integration", "reason": "check: E501 in a.py"},
+    ]
+
+
+def test_the_status_write_that_ends_an_attempt_is_not_another_attempt(tmp_path: Path) -> None:
+    """It restates the failure its round already recorded; counted, every blocked task showed one
+    attempt more than it had."""
+    loop = orchestrator(tmp_path)
+    build_loop.set_task_status(loop.repo, "T-001", "in-progress")
+    build_loop.record_attempt_failure(
+        loop.repo, "T-001", failed_step="test", failure_summary="unit red", retries_left={"test": 0}
+    )
+    build_loop.set_task_status(loop.repo, "T-001", "blocked")
+
+    assert loop._history_for(_task()) == [{"attempt": 1, "step": "test", "reason": "unit red"}]
