@@ -11,7 +11,7 @@ reach it over a Unix domain socket in the shared runtime directory:
 
     canonical checkout ── Store ── control.sock ──[scoped token]── leaf implementer
 
-Three properties make that safe to hand to an LLM agent.
+Four properties make that safe to hand to an LLM agent.
 
 **A leaf cannot mint authority.** The HMAC key lives in a 0600 file the orchestrator creates
 and never mounts into a leaf; the leaf receives only a token the orchestrator signed, scoped
@@ -21,6 +21,12 @@ to one run, one task, a capability list, and an expiry.
 token, and :data:`models.CENTRAL_ONLY_CAPABILITIES` are refused *by the server* whatever the
 token says. That second check is not redundant: it is what still holds if the secret leaks.
 An agent that can approve its own work has not been reviewed by anyone.
+
+**A leaf's records are about its own task, and only ever narrow it.** The subject is the token's
+task, never one the request names; the status is derived from the reported outcome, never taken
+from the request; and a status is written only while the task is `in-progress` — the attempt the
+token was minted for. Nothing a leaf can send marks a task `done`, so nothing it sends can open
+the DAG below a task nobody built.
 
 **A replayed request is caught.** Each *request* carries a nonce, scoped by the token that
 authorizes it; the server records the pair and refuses the second presentation, so a message
@@ -242,9 +248,7 @@ def _decision_event(capability: str, status: str = "") -> str:
     a human is asked about, and `task_started` is not that.
     """
     if capability == "task.status":
-        return {"done": "task_completed", "blocked": "task_failed", "needs-revision": "knowledge_gap"}.get(
-            status, "task_started"
-        )
+        return {"blocked": "task_failed", "needs-revision": "knowledge_gap"}.get(status, "task_started")
     return {
         "decision.declare": "decision_declared",
         "knowledge_gap.create": "knowledge_gap",
@@ -298,6 +302,20 @@ LOCAL_RUN = "local"
 ESCALATION_FLOOR = "medium"
 
 
+def _subject(token: Token, args: Mapping[str, Any]) -> str:
+    """The task a request is about: the one its token was minted for, and no other.
+
+    The server used to take `args.task` over the token's, so a leaf holding T-003's grant could
+    record — and move the status of — any task in the plan, and an upstream task nobody had built
+    could be written past the DAG that was waiting on it. A request may still *name* its task, but
+    only the one it is already scoped to.
+    """
+    named = str(args.get("task") or "")
+    if named and token.task_id and named != token.task_id:
+        raise ControlPlaneError(f"this token is scoped to {token.task_id}, not {named}")
+    return token.task_id or named
+
+
 def apply_request(repo: repo_mod.Repo, token: Token, request: Request) -> dict[str, Any]:
     """Perform one authorized request as a Store transaction. Returns the result payload.
 
@@ -316,7 +334,7 @@ def _apply_request_once(repo: repo_mod.Repo, token: Token, request: Request) -> 
     seen = store_mod.read_digest(state)
 
     args = request.args
-    task_id = str(args.get("task") or token.task_id)
+    task_id = _subject(token, args)
     statement = str(args.get("statement") or "").strip()
     if request.capability in {"decision.declare", "knowledge_gap.create"} and not statement:
         raise ControlPlaneError(f"{request.capability} needs a --statement")
@@ -342,16 +360,32 @@ def _apply_request_once(repo: repo_mod.Repo, token: Token, request: Request) -> 
     status = ""
     writes_state = escalates or request.capability == "task.status"
     if writes_state:
-        status = "needs-revision" if escalates else str(args.get("status") or "in-progress")
-        if status not in models.TASK_STATUS_VALUES:
-            raise ControlPlaneError(f"unknown task status {status!r}")
-        tasks = raw.setdefault("tasks", {})
-        entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
-        updated = {**entry, "status": status}
-        # An implementer's own account of its attempt rides along with the status it set. It is
-        # stored beside the handoff the *next* attempt inherits, not merged into the verdict:
+        # An implementer's own account of its attempt rides along with the status it implies. It
+        # is stored beside the handoff the *next* attempt inherits, not merged into the verdict:
         # `touched` is a claim the loop checks against the real diff, never a substitute for it.
         report = _report_patch(args) if request.capability == "task.status" else None
+        if escalates:
+            status = "needs-revision"
+        elif report is not None:
+            # Derived here, never taken from the request: the outcomes only ever narrow what
+            # happens next, and a status the caller names is how one of them would stop doing so.
+            status = _OUTCOME_STATUS[report["outcome"]]
+        else:
+            raise ControlPlaneError(f"task.status needs an outcome (one of {', '.join(models.AGENT_OUTCOME_ORDER)})")
+        if not task_id:
+            raise ControlPlaneError(
+                "no task to record against: this call carries no capability token (it is not a running "
+                "attempt's) and names no task"
+            )
+        tasks = raw.setdefault("tasks", {})
+        entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+        current = str(entry.get("status", "todo"))
+        if current != "in-progress":
+            raise ControlPlaneError(
+                f"{task_id} is {current}, not in-progress: a report or an escalation belongs to the attempt "
+                "that is running it, and no attempt is"
+            )
+        updated = {**entry, "status": status}
         if report is not None:
             previous = entry.get("handoff")
             handoff = dict(previous) if isinstance(previous, dict) else {}
@@ -369,7 +403,7 @@ def _apply_request_once(repo: repo_mod.Repo, token: Token, request: Request) -> 
             _decision_event(request.capability, status),
             cycle_id=state.cycle_id,
             actor="canonical-checkout" if token.run_id == LOCAL_RUN else f"leaf:{token.task_id}",
-            subject_ids=[task_id],
+            subject_ids=[task_id] if task_id else [],
             detail=detail,
         )
 
@@ -540,32 +574,37 @@ def call(socket_path: str | Path, request: Request) -> dict[str, Any]:
 
 
 def route(repo: repo_mod.Repo, capability: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Perform a mutation the right way for wherever this process is running.
+    """Perform a mutation the right way for whoever is asking.
 
-    In the canonical checkout the Store is right here, so the call is direct. In a leaf
-    worktree it *must* go through the socket: writing to the leaf's own `.rein/` is the bug
-    this module exists to close, so a leaf with no socket is refused rather than quietly falling
-    back to a write that will be deleted with the worktree.
+    **An agent the build launched always goes through the socket**, wherever it runs. The loop
+    hands every launch a token scoped to its task, and that token is the whole of its authority.
+    Deciding by checkout instead gave a serial implementer — which runs in the canonical checkout —
+    a direct write with no token at all: unscoped, able to name any task, and with no task of its
+    own when it named none. Its `rein report` wrote a status under the empty id, the schema refused
+    it, and the one channel an implementer has went dark for every serial task.
+
+    Without a token the caller is a person at the canonical checkout, and the Store is right here.
+    A leaf worktree with no token is refused rather than quietly writing into its own `.rein/`,
+    which is deleted with the worktree.
     """
-    if repo.is_canonical_checkout:
-        token = Token(
-            run_id=LOCAL_RUN,
-            task_id=str(args.get("task") or ""),
-            capabilities=tuple(sorted(LEAF_CAPABILITIES)),
-            expires_at="",
-            nonce="",
-        )
-        return apply_request(repo, token, Request(capability=capability, token="", args=args))
-
     socket_path = os.environ.get(SOCKET_ENV, "")
     raw_token = os.environ.get(TOKEN_ENV, "")
-    if not socket_path or not raw_token:
+    if socket_path and raw_token:
+        return call(socket_path, Request(capability=capability, token=raw_token, args=args))
+    if not repo.is_canonical_checkout:
         raise ControlPlaneError(
             "this is a leaf worktree and no control plane is reachable "
             f"({SOCKET_ENV}/{TOKEN_ENV} are unset). A decision written here would live in the "
             "worktree's own .rein/ and be deleted with it — refusing rather than losing it."
         )
-    return call(socket_path, Request(capability=capability, token=raw_token, args=args))
+    token = Token(
+        run_id=LOCAL_RUN,
+        task_id=str(args.get("task") or ""),
+        capabilities=tuple(sorted(LEAF_CAPABILITIES)),
+        expires_at="",
+        nonce="",
+    )
+    return apply_request(repo, token, Request(capability=capability, token="", args=args))
 
 
 # --- the CLI (`rein decision add` / `rein knowledge-gap add` / `rein report`) ---------
@@ -591,7 +630,6 @@ def report_main(argv: list[str] | None = None) -> int:
         prog="rein report",
         description="report the outcome of one task attempt into the central audit chain",
     )
-    parser.add_argument("--task", default="", help="the task this reports on (default: the token's task)")
     parser.add_argument(
         "--outcome",
         required=True,
@@ -622,8 +660,6 @@ def report_main(argv: list[str] | None = None) -> int:
             repo,
             "task.status",
             {
-                "task": args.task,
-                "status": _OUTCOME_STATUS[args.outcome],
                 "outcome": args.outcome,
                 "summary": args.summary,
                 "touched": list(args.touched),
