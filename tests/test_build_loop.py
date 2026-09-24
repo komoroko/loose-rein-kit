@@ -3801,3 +3801,29 @@ def test_a_dry_run_is_never_stopped_by_a_ceiling_it_cannot_add_to(tmp_path: Path
     root = build_repo(tmp_path, config=_ceiling_config(5.0), events=_spent(DEMO_CYCLE, 6.0))
 
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
+
+
+# --- what a human wrote when resetting a task reaches the next attempt -------------
+
+
+def test_a_reset_reason_reaches_the_next_attempt_even_when_fresh(tmp_path: Path) -> None:
+    """`rein start` asks for `--reason <what you repaired>` and the sentence went only to the chain.
+    One recorded task was reset twice with the missing input spelled out, and its third launch asked
+    for that input again. `--fresh` discards the handoff; the note must not go with it."""
+    from rein import task_cmd
+
+    loop = orchestrator(tmp_path)
+    store = store_mod.Store(loop.repo)
+    with store.transaction() as tx:
+        tx.append("task_failed", cycle_id=loop.cycle_id, subject_ids=["T-001"], detail={"step": "test"})
+    build_loop.set_task_status(loop.repo, "T-001", "blocked")
+    task_cmd.reset(loop.repo, "T-001", status="todo", reason="golden labels are in docs/labels.md", fresh=True)
+    with store.transaction() as tx:
+        tx.append("task_failed", cycle_id=loop.cycle_id, subject_ids=["T-002"], detail={"step": "check"})
+
+    history = loop._history_for(_task())
+
+    assert history == [
+        {"attempt": 1, "step": "test"},
+        {"reset": "golden labels are in docs/labels.md", "fresh": True},
+    ]

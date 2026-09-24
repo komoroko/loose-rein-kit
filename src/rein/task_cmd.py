@@ -154,7 +154,8 @@ def main(argv: list[str] | None = None) -> int:
     reset_parser.add_argument(
         "--reason",
         required=True,
-        help="why this task should be tried again — recorded in the audit chain beside the change",
+        help="what changed since it stopped, addressed to the next attempt — recorded in the audit chain "
+        "and handed to every later launch of this task in its dossier's history, --fresh included",
     )
     reset_parser.add_argument(
         "--status",

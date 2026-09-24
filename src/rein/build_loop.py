@@ -1406,11 +1406,17 @@ class Orchestrator:
         return f"host ({adapter.name} sandboxes itself)" if adapter and adapter.own_sandbox else "host"
 
     def _history_for(self, task: dag.Task) -> list[dict[str, Any]]:
-        """One line per past attempt: which step went red and why, oldest first.
+        """What happened to this task before this launch, oldest first, out of the audit chain.
 
-        The handoff carried the *latest* failure only, so a task on its fourth attempt arrived
-        with no memory of the three before it and could — and did — re-try the same fix. The lines
-        come out of the audit chain, which already records every one of them.
+        Two kinds of line. An **attempt** — which step went red, and on the latest one why: the
+        handoff carried only the last failure, so a task on its fourth attempt arrived with no
+        memory of the three before it and could — and did — re-try the same fix. A **reset** — what
+        the human wrote when they put the task back (`rein task reset --reason`). That sentence is
+        addressed to the retry — "what you repaired", in `rein start`'s words — and it was recorded
+        only in the chain, so one recorded task was reset twice with the missing input spelled out
+        and its third launch asked for that input again. It comes from the chain rather than the
+        handoff, so `--fresh` — which discards the handoff because the repair was made outside the
+        tree — keeps exactly the note that says what that repair was.
         """
         if self.dry_run or not self.cycle_id:
             return []
@@ -1419,15 +1425,27 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - a damaged chain is doctor's to report, not the loop's
             return []
         seen: list[dict[str, Any]] = []
+        attempts = 0
+        last_attempt: dict[str, Any] | None = None
         for event in events:
-            if event.event != "task_failed" or task.id not in event.subject_ids:
+            if task.id not in event.subject_ids:
                 continue
-            step = str(event.detail.get("step", "")) or str(event.detail.get("kind", ""))
-            if step:
-                seen.append({"attempt": len(seen) + 1, "step": step})
+            if event.event == "task_failed":
+                step = str(event.detail.get("step", "")) or str(event.detail.get("kind", ""))
+                if step:
+                    attempts += 1
+                    last_attempt = {"attempt": attempts, "step": step}
+                    seen.append(last_attempt)
+            elif event.event == "decision_declared" and event.detail.get("kind") == "task_reset":
+                seen.append(
+                    {
+                        "reset": str(event.detail.get("reason", "")),
+                        "fresh": event.detail.get("handoff") == "discarded",
+                    }
+                )
         handoff = self._handoff_for(task)
-        if seen and handoff.get("failure_summary"):
-            seen[-1]["reason"] = str(handoff["failure_summary"])[-600:]
+        if last_attempt is not None and handoff.get("failure_summary"):
+            last_attempt["reason"] = str(handoff["failure_summary"])[-600:]
         return seen[-dossier.MAX_HISTORY :]
 
     # -- implementer launch and quality gate --
