@@ -312,6 +312,29 @@ class GitWorkspace:
             candidate = f"{branch}-salvage-{stamp}-{n}"
         return candidate
 
+    def take_off_join(self, before_join: str) -> str:
+        """Move the work branch back to `before_join`, keeping what was above it on a branch.
+
+        A batch's merges, and whatever the integration fixer committed over them, are the only
+        commits above `before_join` — the batch is a barrier, so nothing else landed meanwhile. The
+        join they make is kept, not destroyed: `<branch>-join-<stamp>` names it for a human to read.
+        Each leaf's own work stays on its leaf branch, which no longer counts as merged, so the next
+        attempt at it is restored from there (`_salvage_leftovers`).
+
+        `--keep`, not `--hard`: the canonical checkout carries the orchestration state the loop
+        writes but never commits, and a reset that could discard a local change is not one to make
+        on a path the merges never touched. Git refuses rather than discarding, and so does this.
+        Returns "" in a dry run.
+        """
+        if self.dry_run:
+            print(f"    [dry-run] take the join off {self.branch} back to {before_join[:12]}")
+            return ""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        kept = f"{self.branch}-join-{stamp}"
+        self.git(["branch", kept, "HEAD"])
+        self.git(["reset", "--keep", before_join])
+        return kept
+
     def _salvage_leftovers(self, task_id: str, branch: str, path: str) -> str:
         """Preserve, then clear, a previous run's leftover worktree/branch so `worktree add -b` can re-run.
 

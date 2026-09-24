@@ -400,6 +400,13 @@ _BLOCKED_RECOVERY: tuple[tuple[str, str, str], ...] = (
         "same tree again until something outside it is repaired.",
     ),
     (
+        "integration_red",
+        "rein task reset {task} --reason <what the joined tree needs>",
+        "{task} passed its own gate, and the tree its batch joined into did not. The join was taken off "
+        "the work branch (kept on a `-join-` branch to read); the work is on {task}'s leaf branch, and "
+        "the next attempt resumes it with the failure and your reason in hand.",
+    ),
+    (
         "report_mismatch",
         "rein task reset {task} --fresh --reason <what you repaired>",
         "{task}'s implementer named paths it did not change. Its account of its own work is wrong, "

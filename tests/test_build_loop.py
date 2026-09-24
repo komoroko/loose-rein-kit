@@ -2570,10 +2570,76 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
         return True, ""
 
     monkeypatch.setattr(loop, "_integration_gate", record_gate)
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+    statuses: dict[str, str] = {}
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: statuses.update({tid: status}))
 
     loop._consume_parallel(tasks)
 
     assert gated == [["T-001", "T-003"]]
+    # Left out of the join, not out of the record: it passed its gate and merged like the others.
+    # It used to stay `in-progress`, which held back every task below it until the next run reset
+    # it to `todo` and implemented it again.
+    assert statuses == {"T-001": "done", "T-002": "done", "T-003": "done"}
+
+
+def _joining(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """A two-leaf batch whose merges succeed; records statuses, diagnostics and the take-off."""
+    _merging_batch(loop, monkeypatch)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "e" * 40)
+    monkeypatch.setattr(loop.ws, "landed", lambda task_id: "f" * 40)
+    seen: dict[str, Any] = {"status": {}, "notes": {}, "taken_off": []}
+    monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: seen["status"].update({tid: status}))
+    monkeypatch.setattr(loop, "_note_diagnostic", lambda tid, patch: seen["notes"].update({tid: patch}))
+
+    def take_off(before_join: str) -> str:
+        seen["taken_off"].append(before_join)
+        return "build/x-join-1"
+
+    monkeypatch.setattr(loop.ws, "take_off_join", take_off)
+    return seen
+
+
+def test_a_red_join_is_taken_off_the_branch_and_its_tasks_carry_the_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It used to stay on the branch with the tasks `blocked` and an instruction — "set these tasks
+    back to done" — no verb carries out; a reset re-ran each over a branch that already held its
+    work, found nothing to change, and was refused. Nothing the gate called red may stay on the
+    branch the next task forks from."""
+    loop = orchestrator(tmp_path)
+    seen = _joining(loop, monkeypatch)
+    monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (False, "check: E501 in a.py"))
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
+
+    with pytest.raises(build_loop.StopLoop):
+        loop._consume_parallel(tasks)
+
+    assert seen["taken_off"] == ["e" * 40]
+    assert seen["status"] == {"T-001": "blocked", "T-002": "blocked"}
+    assert seen["notes"]["T-001"]["failure_summary"] == "check: E501 in a.py"
+    assert seen["notes"]["T-002"]["escalation"]["kind"] == "integration_red"
+
+
+def test_a_join_the_machine_stopped_is_taken_off_and_its_tasks_go_back_to_todo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No verdict, so no `blocked` — and no join left for the next run to "re-play" over."""
+    loop = orchestrator(tmp_path)
+    seen = _joining(loop, monkeypatch)
+
+    def fault(merged: object, before_join: str) -> tuple[bool, str]:
+        raise faults.EnvironmentFault(faults.Fault.ENV_TRANSIENT, where="integration", rc=1, output="oom")
+
+    monkeypatch.setattr(loop, "_integration_gate", fault)
+    tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
+
+    with pytest.raises(faults.EnvironmentFault):
+        loop._consume_parallel(tasks)
+
+    assert seen["taken_off"] == ["e" * 40]
+    assert seen["status"] == {"T-001": "todo", "T-002": "todo"}
+    assert seen["notes"] == {}
 
 
 def test_a_leaf_is_diffed_against_its_target_branch_not_the_work_branch(

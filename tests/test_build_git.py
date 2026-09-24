@@ -379,3 +379,35 @@ def test_a_non_ascii_path_comes_back_as_itself_and_not_as_git_quoted_it(
     base = git(root, "rev-parse", "HEAD~1")
 
     assert ws.changed_since(base) == ["src/よそ/もの.py"]
+
+
+def test_a_join_taken_off_comes_back_as_the_leafs_own_work(
+    workspace: tuple[Path, build_git.GitWorkspace, list[tuple[str, str, str]]],
+) -> None:
+    """A red join left on the work branch could not be retried: the leaf forked from a branch that
+    already held its work, changed nothing, and was refused. Taken off, the join is kept on a branch
+    for reading, the orchestration state the loop never commits is untouched, and the next attempt
+    finds its work on its own leaf branch again."""
+    root, ws, salvaged = workspace
+    (root / "state.yaml").write_text("tracked\n", encoding="utf-8")
+    git(root, "add", "state.yaml")
+    git(root, "commit", "-q", "-m", "state")
+    (root / "state.yaml").write_text("written by the loop, never committed\n", encoding="utf-8")
+    before_join = git(root, "rev-parse", "HEAD")
+    branch = ws.add_worktree("T-001")
+    commit(root / ".worktrees" / "T-001", "feature.py", "the leaf's work\n")
+    assert ws.merge_leaf("T-001", branch)
+    (root / "fix.py").write_text("what the integration fixer tried\n", encoding="utf-8")
+    git(root, "add", "fix.py")
+    git(root, "commit", "-q", "-m", "integration fix")
+    joined = git(root, "rev-parse", "HEAD")
+
+    kept = ws.take_off_join(before_join)
+
+    assert git(root, "rev-parse", "HEAD") == before_join
+    assert git(root, "rev-parse", kept) == joined
+    assert kept.startswith("build/x-join-")
+    assert (root / "state.yaml").read_text(encoding="utf-8") == "written by the loop, never committed\n"
+    ws.add_worktree("T-001")
+    assert (root / ".worktrees" / "T-001" / "feature.py").read_text(encoding="utf-8") == "the leaf's work\n"
+    assert [s for _, _, s in salvaged] == ["pending", "restored"]

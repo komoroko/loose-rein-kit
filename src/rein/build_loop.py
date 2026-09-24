@@ -3638,56 +3638,52 @@ class Orchestrator:
                 f"    [merge] {', '.join(t.id for t in elsewhere)} landed on their pull-request branches; "
                 "`rein pr-stack --restack` joins them into the work branch"
             )
-        merged = [t for t in merged if not self.ws.landing.get(t.id)]
-        if merged and (len(merged) >= 2 or self._steps_at("integration") != self._steps_at("task")):
-            # An EnvironmentFault here propagates with the merged tasks still `in-progress`, and
-            # that is the honest state: they merged, but nothing has verified the combined tree.
-            # The next run resets them to `todo` and re-plays them, which re-runs the integration
-            # gate. Duplicated work, never a skipped verification — marking them `done` would be
-            # the other way round, and nothing would ever come back to check.
-            ok, log = self._integration_gate(merged, before_join)
-        else:
-            ok, log = True, ""
-        ids = ",".join(t.id for t in merged)
-        if ok:
-            # Every leaf recorded first, in one pass. `landed` was captured per leaf as each one
-            # merged: `_landed` reads the branch tip, so asking it here would name the last merge
-            # for every member of the batch.
-            for task in merged:
-                self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
-            # Then the readings, which can raise — a repair that reaches outside its scope stops
-            # the run. Interleaved with the pass above, that would leave the leaves after it
-            # unrecorded, and they passed their gate and merged exactly like the rest.
-            for task in merged:
-                # Asked before the repair moves the branch: is this leaf's own merge still the tip?
-                at_tip = bool(landed.get(task.id)) and landed[task.id] == self._landed(task.id)
-                if self._repair_warm_findings(task, self._warm_reading(task)):
-                    # A repair lands on top of the branch, and only the leaf that merged last has
-                    # its own work directly under that tip. Moving an earlier leaf's
-                    # `completed_commit` up there would put it above a *later* leaf's merge, and
-                    # `pr_stack.derive` cuts slices by walking first-parent order — so that later
-                    # leaf's pull request would swallow this one's commits, and nothing would say
-                    # so: parallel leaves have no `blockedBy` between them, so
-                    # `_landing_order_problems` sees a topological order that is still fine. The
-                    # merge commit stays recorded; the repair rides above it, on the slice branch
-                    # it was committed to. The write still happens either way — the evidence
-                    # beside the status was just re-pointed at the repaired tree.
-                    self._set_status(
-                        task.id,
-                        self._completion_status(task),
-                        commit=self._landed(task.id) if at_tip else landed.get(task.id, ""),
-                    )
-        else:
-            for task in merged:
-                self._set_status(task.id, "blocked")
-            self._escalate_batch(
-                "integration_red",
-                f"{ids}: merged into work, but the integrated state fails the quality gate within the "
-                f"limit. Fix the work branch, then set these tasks back to done.\n{log}",
-                merged,
-            )
+        joined = [t for t in merged if not self.ws.landing.get(t.id)]
+        ok, log = True, ""
+        if joined and (len(joined) >= 2 or self._steps_at("integration") != self._steps_at("task")):
+            try:
+                ok, log = self._integration_gate(joined, before_join)
+            except EnvironmentFault:
+                # No verdict about the join — but the join is on the branch, unverified, and the
+                # next run must not build on it. Nor can it "re-play" these tasks over it: a leaf
+                # forked from a branch that already holds its own work produces no change, and a
+                # green over no change is refused. Taken off, the work is back on each leaf branch
+                # and the next attempt restores it from there.
+                self._take_off_join(joined, before_join, "todo", "")
+                raise
+        if not ok:
+            self._take_off_join(joined, before_join, "blocked", log)
             blocked_any = True
-        if merged:
+            joined = []
+        # Every leaf recorded first, in one pass — the ones that landed on a slice branch as much as
+        # the ones the join verified: they passed their gate and merged exactly like the rest.
+        # `landed` was captured per leaf as each one merged: `_landed` reads the branch tip, so
+        # asking it here would name the last merge for every member of the batch.
+        recorded = [t for t in merged if t.id in {j.id for j in [*joined, *elsewhere]}]
+        for task in recorded:
+            self._set_status(task.id, self._completion_status(task), commit=landed.get(task.id, ""))
+        # Then the readings, which can raise — a repair that reaches outside its scope stops the
+        # run. Interleaved with the pass above, that would leave the leaves after it unrecorded.
+        for task in recorded:
+            # Asked before the repair moves the branch: is this leaf's own merge still the tip?
+            at_tip = bool(landed.get(task.id)) and landed[task.id] == self._landed(task.id)
+            if self._repair_warm_findings(task, self._warm_reading(task)):
+                # A repair lands on top of the branch, and only the leaf that merged last has
+                # its own work directly under that tip. Moving an earlier leaf's
+                # `completed_commit` up there would put it above a *later* leaf's merge, and
+                # `pr_stack.derive` cuts slices by walking first-parent order — so that later
+                # leaf's pull request would swallow this one's commits, and nothing would say
+                # so: parallel leaves have no `blockedBy` between them, so
+                # `_landing_order_problems` sees a topological order that is still fine. The
+                # merge commit stays recorded; the repair rides above it, on the slice branch
+                # it was committed to. The write still happens either way — the evidence
+                # beside the status was just re-pointed at the repaired tree.
+                self._set_status(
+                    task.id,
+                    self._completion_status(task),
+                    commit=self._landed(task.id) if at_tip else landed.get(task.id, ""),
+                )
+        if recorded:
             self._warn_on_review_outlook()
         if blocked_any:
             # A real verdict outranks a machine fault when both happened: re-running clears the
@@ -3698,6 +3694,45 @@ class Orchestrator:
             raise StopLoop("A blocked task occurred. Human intervention needed.", code=common.EXIT_HUMAN_NEEDED)
         if fault is not None:
             raise fault
+
+    def _take_off_join(self, joined: Sequence[dag.Task], before_join: str, status: str, log: str) -> None:
+        """Take a join nothing verified off the work branch, and send its tasks back.
+
+        It used to stay: the tasks went `blocked` with their merges on the branch, told to "fix the
+        work branch, then set these tasks back to done" — which no verb does. Resetting them instead
+        re-ran each as a leaf forked from a branch that already held its work, so the implementer
+        had nothing to change, the empty diff was refused as `no_implementation`, and the task could
+        not come back. And everything the loop ran next stood on a tree the gate had just called red.
+
+        The work branch holds verified work only; that is what every later fork, diff and gate
+        assumes. So the join comes off (`take_off_join` keeps it on a branch), each task's work is
+        where it was before the merge — its leaf branch — and the next attempt resumes it from there
+        with the join's failure in its handoff. `status` is `blocked` on a red verdict, and `todo`
+        when a machine fault left none.
+        """
+        kept = self.ws.take_off_join(before_join)
+        ids = ",".join(t.id for t in joined)
+        where = f" (kept on {kept})" if kept else ""
+        if log:
+            message = (
+                f"{ids}: each passed its own gate, and the tree they joined into fails the integration "
+                f"gate within the limit. The join was taken off {self.branch}{where}; each task's work is on "
+                "its leaf branch, and its next attempt resumes it with this failure in hand."
+            )
+            for task in joined:
+                self._note_diagnostic(
+                    task.id,
+                    {
+                        "failure_summary": log[-_HANDOFF_SUMMARY_MAX:],
+                        "escalation": {"kind": "integration_red", "message": message[:_HANDOFF_SUMMARY_MAX]},
+                    },
+                )
+        for task in joined:
+            self._set_status(task.id, status)
+        if log:
+            self._escalate_batch("integration_red", f"{message}\n{log}", joined)
+        else:
+            print(f"    [join] {ids}: the join was taken off {self.branch}{where} — nothing verified it")
 
     def _warn_on_review_outlook(self) -> None:
         """Say it at task 9 of 17, not at acceptance, when the change outgrows what a review can read.
