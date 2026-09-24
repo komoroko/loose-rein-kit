@@ -354,7 +354,16 @@ def _apply_request_once(repo: repo_mod.Repo, token: Token, request: Request) -> 
 
     # A decision at or above the escalation floor is not the implementer's to make: it changes
     # behaviour the plan did not describe. Park the task and let the human reconcile it.
-    escalates = request.capability == "decision.declare" and models.risk_at_least(risk, ESCALATION_FLOOR)
+    #
+    # Only an attempt's decision escalates. A person at the canonical checkout (no token) *is* the
+    # human it would escalate to, and has no attempt to park: parking by name moved whatever task
+    # they named — a `done` one included, re-opened under every dependent standing on it, which is
+    # what `rein task reset` refuses. Their decision is recorded; sending a task back is that verb's.
+    escalates = (
+        request.capability == "decision.declare"
+        and token.run_id != LOCAL_RUN
+        and models.risk_at_least(risk, ESCALATION_FLOOR)
+    )
 
     raw = json.loads(json.dumps(state.raw))
     status = ""

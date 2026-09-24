@@ -296,6 +296,29 @@ def test_a_decision_at_or_above_the_floor_parks_the_task(
     assert state is not None and state.task_status["T-001"] == "needs-revision"
 
 
+@pytest.mark.parametrize("current", ["in-progress", "done"])
+def test_a_person_s_decision_is_recorded_and_parks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current: str
+) -> None:
+    """No token, canonical checkout: the human an escalation would reach. Parking by name moved
+    whatever task they named — a `done` one re-opened under its dependents."""
+    seed_repo(
+        tmp_path,
+        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
+        state=make_state(tasks={"T-001": current}),
+    )
+    repo = repo_mod.Repo(tmp_path)
+    monkeypatch.delenv(control_plane.SOCKET_ENV, raising=False)
+    monkeypatch.delenv(control_plane.TOKEN_ENV, raising=False)
+
+    result = control_plane.route(repo, "decision.declare", {"task": "T-001", "statement": "timeout 30", "risk": "high"})
+
+    assert result["escalated"] is False
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and state.task_status["T-001"] == current
+    assert [e.event for e in store_mod.Store(repo).read_events()] == ["decision_declared"]
+
+
 def test_the_escalation_floor_is_medium() -> None:
     assert control_plane.ESCALATION_FLOOR == "medium"
     assert not models.risk_at_least("low", control_plane.ESCALATION_FLOOR)
@@ -386,12 +409,10 @@ def test_the_cli_records_from_the_canonical_checkout(repo: repo_mod.Repo, capsys
 
 
 def test_the_cli_exits_2_when_the_record_parks_the_task(
-    repo: repo_mod.Repo, capsys: pytest.CaptureFixture[str]
+    repo: repo_mod.Repo, attempt: control_plane.ControlServer, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Exit 2 is the signal an autonomous loop needs: this task is not yours to finish."""
-    rc = control_plane.main(
-        ["add", "--task", "T-001", "--statement", "timeout 30", "--risk", "high", "--repo", str(repo.root)]
-    )
+    rc = control_plane.main(["add", "--statement", "timeout 30", "--risk", "high", "--repo", str(repo.root)])
     assert rc == 2
     assert "Stop work on it" in capsys.readouterr().out
 
