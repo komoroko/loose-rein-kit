@@ -122,6 +122,37 @@ def _plan_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> 
     return blockers
 
 
+def _worktree_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> list[str]:
+    """Paths the criteria name that no task's worktree would ever have. Checked where the plan freezes.
+
+    A task runs in a worktree forked from a commit, so what it can read is what git carries. A path
+    a criterion reads that no task produces and git does not track, or a produced path git ignores
+    (so it can never be committed for the next task to fork from), is a criterion that cannot hold
+    in any worktree — #504 blocked twice on screenshots under an ignored `out/`. Both halves are
+    in the plan and the repository before the freeze, so the question is asked here.
+    """
+    if plan is None or gate != FREEZING_GATE:
+        return []
+    blockers: list[str] = []
+    produced = [(task.id, path) for task in plan.tasks for path in task.produces]
+    for task_id, path in produced:
+        if repo._git_rc("check-ignore", "-q", "--no-index", "--", path)[0] == 0:
+            blockers.append(
+                f"{task_id} produces {path}, which git ignores — it can never be committed, so no task "
+                "that depends on it will find it in its worktree"
+            )
+    for task in plan.tasks:
+        for path in task.reads:
+            if any(not common.outside_scope([path], [theirs], []) for _, theirs in produced):
+                continue
+            if not repo._git("ls-files", "--", path):
+                blockers.append(
+                    f"{task.id} reads {path}, which no task produces and git does not track — a worktree "
+                    "forked from the work branch will never have it"
+                )
+    return blockers
+
+
 def _task_blockers(plan: models.Plan | None, state: models.State | None, gate: str) -> list[str]:
     """Every claim has somewhere to be answered, and — at acceptance — every task is finished.
 
@@ -540,6 +571,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _decision_blockers(plan, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
+    blockers += _worktree_blockers(repo, plan, gate)
     blockers += _review_blockers(repo, review, state, gate)
     return blockers
 
@@ -1090,6 +1122,13 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         asked = f" — {droppable} of them yours to keep or drop" if droppable else ""
         print(f"{len(lens_rows)} review lens(es) this mandate would freeze{asked}:")
         print(render_lenses(lens_rows) + "")
+    undeclared = named["undeclared"]
+    if undeclared:
+        print(
+            f"{len(undeclared)} acceptance criterion(s) name no path they produce or read, so nothing "
+            "derived this plan's scope or edges from them — a contradiction there is found by the build:"
+        )
+        print(render_undeclared(undeclared) + "\n")
     addressed = addressed_requests(repo, gate)
     if addressed:
         # Read before deciding, not after. These are the changes this human asked for last time;
@@ -1117,6 +1156,7 @@ class Naming(TypedDict):
     overrule_cost: str
     lenses: list[dict[str, str]]
     crossing: list[dict[str, str]]
+    undeclared: list[dict[str, str]]
 
 
 def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> Naming:
@@ -1147,7 +1187,7 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
     reader holding the write session: the one who would be doing the approving has it, and nobody
     else gets a file from outside the repository because a page was left open.
     """
-    out: Naming = {"unasked": [], "overrule_cost": OVERRULE_COST, "lenses": [], "crossing": []}
+    out: Naming = {"unasked": [], "overrule_cost": OVERRULE_COST, "lenses": [], "crossing": [], "undeclared": []}
     out["crossing"] = crossing_declarations(repo, gate)
     unasked = _unasked_decisions(repo, gate)
     out["unasked"] = [
@@ -1170,6 +1210,14 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         return out  # a plan that does not parse is `_plan_blockers`' to report, not this screen's
     if plan is None:
         return out
+    # Criteria that name no path contribute nothing to the derived scope and edges
+    # (`models._structure_errors`): each is a place a contradiction can still hide until the build.
+    out["undeclared"] = [
+        {"task_id": task.id, "id": _ac_id(entry), "statement": str(entry.get("statement", ""))}
+        for task in plan.tasks
+        for entry in task.acceptance
+        if not _declares_paths(entry)
+    ]
     known = {lens.id: lens for lens in lens_lib.library()} if include_library else {}
     out["lenses"] = [
         {
@@ -1190,6 +1238,25 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         for entry in plan.lenses
     ]
     return out
+
+
+def _ac_id(entry: Mapping[str, object]) -> str:
+    return str(entry.get("id", "?"))
+
+
+def _declares_paths(entry: Mapping[str, object]) -> bool:
+    """Does this criterion name a path it produces or reads?"""
+    evidence = entry.get("evidence")
+    if not isinstance(evidence, dict):
+        return False
+    named = [evidence.get("produces"), evidence.get("reads")]
+    if evidence.get("kind") == "artifact":
+        named.append(evidence.get("paths"))
+    return any(isinstance(paths, list) and paths for paths in named)
+
+
+def render_undeclared(rows: Sequence[Mapping[str, str]]) -> str:
+    return "\n".join(f"  {row['task_id']}/{row['id']}  {row['statement']}" for row in rows)
 
 
 def crossing_declarations(repo: repo_mod.Repo, gate: str) -> list[dict[str, str]]:

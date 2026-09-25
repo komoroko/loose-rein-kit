@@ -72,6 +72,7 @@ test("every list the naming layer carries reaches this route too", async () => {
         overrule_cost: "Overruling one now costs a task.",
         lenses: [lensRow("proposed")],
         crossing: [{ task_id: "T-001", title: "cut over", name: "the old table", detail: "dropped" }],
+        undeclared: [{ task_id: "T-004", id: "A-2", statement: "it is fast" }],
       },
     },
   });
@@ -79,6 +80,7 @@ test("every list the naming layer carries reaches this route too", async () => {
   await app.click(APPROVE);
 
   const shown = app.text("rvFoot");
+  assert.match(shown, /T-004\/A-2/, "the criteria nothing derived the plan's structure from");
   assert.match(shown, /D-001/, "the decisions the loop settled without asking");
   assert.match(shown, /Overruling one now costs a task/, "what overruling one costs");
   assert.match(shown, /L-CODE-PROPOSED/, "the selection this mandate would freeze");

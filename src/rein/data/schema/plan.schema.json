@@ -405,6 +405,22 @@
               "items": {
                 "$ref": "#/$defs/repoPath"
               }
+            },
+            "produces": {
+              "description": "Paths this criterion's task creates — files, or a directory a package lives under. With an `artifact` criterion's `paths` they are what the task produces, and the plan is checked against them before it can freeze: each has to lie inside the task's own `scope`, no two tasks may produce the same path, and a task that produces or reads anything under another task's path has to depend on that task. Declared rather than parsed out of `statement`, because prose is not something to derive a DAG edge from.",
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/repoPath"
+              }
+            },
+            "reads": {
+              "description": "Paths this criterion reads without producing them: a fixture, another task's output, a screenshot. Each has to be produced by a task this one depends on, or already tracked by git — a path nothing produces and git does not track is one a task's worktree will never have.",
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/repoPath"
+              }
             }
           }
         }
