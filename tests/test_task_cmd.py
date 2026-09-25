@@ -8,7 +8,6 @@ landing in the same transaction.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -69,52 +68,6 @@ def test_starting_over_is_a_separate_decision_and_is_recorded_as_one(tmp_path: P
 
     assert "handoff" not in entry_of(repo)
     assert store_mod.Store(repo).read_events()[-1].detail["handoff"] == "discarded"
-
-
-def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
-
-
-def test_a_serial_base_survives_every_reset_while_its_history_stands(tmp_path: Path) -> None:
-    """The commits a blocked serial attempt made are still on the branch after any reset, so the
-    base that bounds them stays — `--fresh` discards the handoff, not the work the branch holds."""
-    seed_repo(
-        tmp_path,
-        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
-        state=make_state(plan_status="frozen"),
-        git=True,
-    )
-    _git(tmp_path, "-c", "user.email=t@e.x", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "seed")
-    head = _git(tmp_path, "rev-parse", "HEAD")
-    repo = repo_mod.Repo(tmp_path)
-    build_loop.set_task_status(repo, "T-001", "in-progress", base=head)
-    build_loop.set_task_status(repo, "T-001", "in-progress", base="b" * 40)
-    assert entry_of(repo)["base"] == head
-    build_loop.set_task_status(repo, "T-001", "blocked")
-
-    task_cmd.reset(repo, "T-001", status="todo", reason="worth one more look")
-    assert entry_of(repo)["base"] == head
-    result = task_cmd.reset(repo, "T-001", status="todo", reason="repaired the tool", fresh=True)
-    assert entry_of(repo)["base"] == head and result.dropped_base == ""
-
-
-def test_a_reset_drops_a_base_the_branch_no_longer_contains(tmp_path: Path) -> None:
-    """History rewritten under the task: the base names nothing left to bound, and the record says so."""
-    seed_repo(
-        tmp_path,
-        plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
-        state=make_state(plan_status="frozen"),
-        git=True,
-    )
-    _git(tmp_path, "-c", "user.email=t@e.x", "-c", "user.name=T", "commit", "-q", "--allow-empty", "-m", "seed")
-    repo = repo_mod.Repo(tmp_path)
-    build_loop.set_task_status(repo, "T-001", "in-progress", base="0" * 40)
-    build_loop.set_task_status(repo, "T-001", "blocked")
-
-    result = task_cmd.reset(repo, "T-001", status="todo", reason="the branch was rebuilt")
-
-    assert result.dropped_base == "0" * 40 and "base" not in entry_of(repo)
-    assert store_mod.Store(repo).read_events()[-1].detail["dropped_base"] == "0" * 40
 
 
 def test_a_task_cannot_be_declared_done_by_hand(tmp_path: Path) -> None:

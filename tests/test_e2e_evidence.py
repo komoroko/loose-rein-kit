@@ -382,23 +382,6 @@ def test_orchestration_state_is_not_what_makes_a_tree_dirty(
     assert build(repo) == common.EXIT_DONE
 
 
-def test_the_refusal_names_a_task_an_earlier_run_left_in_progress(
-    repo: repo_mod.Repo, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Leftovers from a killed run are somebody's work, and the human is told whose.
-
-    Without this the message reads as "unrelated junk in your tree", and the reader stashes the
-    only copy of the task's implementation.
-    """
-    monkeypatch.setattr(build_loop, "_run", agent(writes=True, reports="implemented"))
-    build_loop.set_task_status(repo, "T-001", "in-progress")
-    (repo.root / "src" / "half_done.py").parent.mkdir(parents=True, exist_ok=True)
-    (repo.root / "src" / "half_done.py").write_text("# half written\n", encoding="utf-8")
-
-    assert build(repo) == common.EXIT_CANNOT_PROCEED
-    assert "T-001 is still 'in-progress'" in caplog.text
-
-
 def test_a_committed_and_unchanged_ticket_builds(repo: repo_mod.Repo, monkeypatch: pytest.MonkeyPatch) -> None:
     digest = write_ticket(repo, "# T-001\n as approved\n")
     git(repo.root, "add", "-A")

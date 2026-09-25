@@ -587,10 +587,10 @@ def route(repo: repo_mod.Repo, capability: str, args: dict[str, Any]) -> dict[st
 
     **An agent the build launched always goes through the socket**, wherever it runs. The loop
     hands every launch a token scoped to its task, and that token is the whole of its authority.
-    Deciding by checkout instead gave a serial implementer — which runs in the canonical checkout —
-    a direct write with no token at all: unscoped, able to name any task, and with no task of its
-    own when it named none. Its `rein report` wrote a status under the empty id, the schema refused
-    it, and the one channel an implementer has went dark for every serial task.
+    Deciding by checkout instead gave an implementer launched in the canonical checkout a direct
+    write with no token at all: unscoped, able to name any task, and with no task of its own when
+    it named none. Its `rein report` wrote a status under the empty id, the schema refused it, and
+    the one channel an implementer has went dark.
 
     Without a token the caller is a person at the canonical checkout, and the Store is right here.
     A leaf worktree with no token is refused rather than quietly writing into its own `.rein/`,

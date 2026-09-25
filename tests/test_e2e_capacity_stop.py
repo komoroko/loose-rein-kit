@@ -154,12 +154,7 @@ def test_a_missing_agent_cli_refuses_rather_than_asking_to_be_re_run(
     assert status_of(repo, "T-002")["status"] == "todo"
 
 
-def test_a_serial_task_interrupted_after_committing_is_judged_on_its_commit_next_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A serial implementer commits straight onto the work branch. When the session dies after that
-    commit, the next run used to re-take HEAD as the task's base — the diff from there was empty,
-    and the task was blocked as `no_implementation` with its work one commit back."""
+def _foundation_repo(tmp_path: Path, tasks: list[dict[str, Any]]) -> repo_mod.Repo:
     root = tmp_path / "product"
     root.mkdir()
     git(root, "init", "-q", "-b", "main")
@@ -168,144 +163,90 @@ def test_a_serial_task_interrupted_after_committing_is_judged_on_its_commit_next
     seed_repo(
         root,
         config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
-        plan=make_plan(tasks=[make_task("T-001", kind="foundation", claim_ids=["C-001"])]),
+        plan=make_plan(tasks=tasks),
         state=make_state(plan_status="frozen"),
     )
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "seed")
     git(root, "checkout", "-q", "-b", WORK_BRANCH)
-    repo = repo_mod.Repo(root)
-    started_on = git(root, "rev-parse", "HEAD")
+    return repo_mod.Repo(root)
 
-    def committing_then_stopping(
-        cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object
-    ) -> tuple[int, str]:
-        if not cmd or cmd[0] != "claude":
-            return common.run(cmd, cwd, timeout)
-        (root / "T-001.py").write_text("# T-001 implementation\n", encoding="utf-8")
-        git(root, "add", "T-001.py")
-        git(root, "commit", "-q", "-m", "T-001: implement")
-        return SESSION_LIMIT
+
+def committing_then_stopping(
+    cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object
+) -> tuple[int, str]:
+    """An implementer that commits its work where it was launched, then loses its session."""
+    if not cmd or cmd[0] != "claude":
+        return common.run(cmd, cwd, timeout)
+    where = Path(cwd or ".")
+    (where / "T-001.py").write_text("# T-001 implementation\n", encoding="utf-8")
+    git(where, "add", "T-001.py")
+    git(where, "commit", "-q", "-m", "T-001: implement")
+    return SESSION_LIMIT
+
+
+def idle(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
+    if not cmd or cmd[0] != "claude":
+        return common.run(cmd, cwd, timeout)
+    return 0, agent_envelope("")
+
+
+def test_a_foundation_task_interrupted_after_committing_is_judged_on_its_commit_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The commit an interrupted attempt made is on the task's own branch, so the next attempt is
+    judged on it rather than on an empty diff — and nothing on the work branch moved meanwhile."""
+    repo = _foundation_repo(tmp_path, [make_task("T-001", kind="foundation", claim_ids=["C-001"])])
+    started_on = git(repo.root, "rev-parse", "HEAD")
 
     monkeypatch.setattr(build_loop, "_run", committing_then_stopping)
     assert build(repo) == common.EXIT_RETRY_LATER
-    stopped = status_of(repo, "T-001")
-    assert stopped["status"] == "todo"
-    assert stopped["base"] == started_on
-    assert git(root, "rev-parse", "HEAD") != started_on
-
-    def idle(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
-        if not cmd or cmd[0] != "claude":
-            return common.run(cmd, cwd, timeout)
-        return 0, agent_envelope("")
+    assert status_of(repo, "T-001")["status"] == "todo"
+    assert git(repo.root, "rev-parse", "HEAD") == started_on
 
     monkeypatch.setattr(build_loop, "_run", idle)
     assert build(repo) == common.EXIT_DONE
-    landed = status_of(repo, "T-001")
-    assert landed["status"] == "done"
-    assert "base" not in landed
+    assert status_of(repo, "T-001")["status"] == "done"
+    assert (repo.root / "T-001.py").exists()
 
 
-def test_a_serial_task_whose_pinned_base_left_history_stops_rather_than_re_pinning(
+def test_a_blocked_foundation_task_does_not_hold_the_work_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "product"
-    root.mkdir()
-    git(root, "init", "-q", "-b", "main")
-    git(root, "config", "user.email", "t@example.com")
-    git(root, "config", "user.name", "t")
-    seed_repo(
-        root,
-        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
-        plan=make_plan(tasks=[make_task("T-001", kind="foundation", claim_ids=["C-001"])]),
-        state={**make_state(plan_status="frozen"), "tasks": {"T-001": {"status": "todo", "base": "0" * 40}}},
+    """Its work is on its own branch, so a task that does not depend on it is free to land."""
+    repo = _foundation_repo(
+        tmp_path,
+        [
+            make_task("T-001", kind="foundation", claim_ids=["C-001"]),
+            make_task("T-002", kind="parallel", claim_ids=["C-001"]),
+        ],
     )
-    git(root, "add", "-A")
-    git(root, "commit", "-q", "-m", "seed")
-    git(root, "checkout", "-q", "-b", WORK_BRANCH)
-    repo = repo_mod.Repo(root)
-    monkeypatch.setattr(build_loop, "_run", implementer_writing(root))
-
-    assert build(repo) == 1
-    assert status_of(repo, "T-001")["base"] == "0" * 40
-
-
-def _serial_then_leaf(tmp_path: Path) -> tuple[repo_mod.Repo, str]:
-    """A foundation task and a leaf that does not depend on it, on a work branch; returns the head."""
-    root = tmp_path / "product"
-    root.mkdir()
-    git(root, "init", "-q", "-b", "main")
-    git(root, "config", "user.email", "t@example.com")
-    git(root, "config", "user.name", "t")
-    seed_repo(
-        root,
-        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
-        plan=make_plan(
-            tasks=[
-                make_task("T-001", kind="foundation", claim_ids=["C-001"]),
-                make_task("T-002", kind="parallel", claim_ids=["C-001"]),
-            ]
-        ),
-        state=make_state(plan_status="frozen"),
-    )
-    git(root, "add", "-A")
-    git(root, "commit", "-q", "-m", "seed")
-    git(root, "checkout", "-q", "-b", WORK_BRANCH)
-    return repo_mod.Repo(root), git(root, "rev-parse", "HEAD")
-
-
-def test_nothing_lands_above_a_blocked_serial_task_s_unlanded_work(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A leaf merged above T-001's commits would stand on work no gate passed, and T-001's next
-    attempt would then be charged with the leaf's change by every check asking what it did."""
-    repo, started_on = _serial_then_leaf(tmp_path)
-    build_loop.set_task_status(repo, "T-001", "in-progress", base=started_on)
-    (repo.root / "partial.py").write_text("# half of T-001\n", encoding="utf-8")
-    git(repo.root, "add", "partial.py")
-    git(repo.root, "commit", "-q", "-m", "T-001: partial")
     build_loop.set_task_status(repo, "T-001", "blocked")
-    held_at = git(repo.root, "rev-parse", "HEAD")
     monkeypatch.setattr(build_loop, "_run", implementer_writing(repo.root))
 
     assert build(repo) == common.EXIT_HUMAN_NEEDED
-    assert status_of(repo, "T-002").get("status", "todo") == "todo"
-    assert git(repo.root, "rev-parse", "HEAD") == held_at
-
-    from rein import task_cmd
-
-    task_cmd.reset(repo, "T-001", status="todo", reason="one more attempt")
-    assert build(repo) == common.EXIT_DONE
-    completed = [e.subject_ids[0] for e in store_mod.Store(repo).read_events() if e.event == "task_completed"]
-    assert completed == ["T-001", "T-002"]
-
-
-def test_a_serial_attempt_that_left_nothing_holds_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stopped before writing anything: no base to keep, so neither a stop for the other tasks nor
-    a stale base to charge their work to this one later."""
-    repo, _ = _serial_then_leaf(tmp_path)
-
-    def stopping(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: object) -> tuple[int, str]:
-        if not cmd or cmd[0] != "claude":
-            return common.run(cmd, cwd, timeout)
-        return SESSION_LIMIT
-
-    monkeypatch.setattr(build_loop, "_run", stopping)
-    assert build(repo) == common.EXIT_RETRY_LATER
-    assert status_of(repo, "T-001")["status"] == "todo"
-    assert "base" not in status_of(repo, "T-001")
-
-
-def test_a_held_base_whose_work_was_reverted_is_released(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo, started_on = _serial_then_leaf(tmp_path)
-    build_loop.set_task_status(repo, "T-001", "in-progress", base=started_on)
-    (repo.root / "partial.py").write_text("# half of T-001\n", encoding="utf-8")
-    git(repo.root, "add", "partial.py")
-    git(repo.root, "commit", "-q", "-m", "T-001: partial")
-    git(repo.root, "revert", "--no-edit", "HEAD")
-    build_loop.set_task_status(repo, "T-001", "blocked")
-    monkeypatch.setattr(build_loop, "_run", implementer_writing(repo.root))
-
-    assert build(repo) == common.EXIT_HUMAN_NEEDED  # T-001 is still blocked; T-002 was free to run
-    assert "base" not in status_of(repo, "T-001")
     assert status_of(repo, "T-002")["status"] == "done"
+    assert status_of(repo, "T-001")["status"] == "blocked"
+
+
+def test_a_record_committed_between_attempts_is_not_the_foundation_task_s_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#88. The rules ask for the orchestration record to be committed at each gate — a rollback,
+    the design and tasks deltas, the approval. A foundation task stopped between two of its
+    attempts used to be charged with that record: its change was `base..HEAD`, `.rein/` included,
+    and the merge-stage guard blocked the task for good. No reset could clear it, because the
+    record commits are history other tasks' receipts stand on."""
+    repo = _foundation_repo(tmp_path, [make_task("T-001", kind="foundation", claim_ids=["C-001"])])
+    monkeypatch.setattr(build_loop, "_run", committing_then_stopping)
+    assert build(repo) == common.EXIT_RETRY_LATER
+
+    # The orchestration record, committed on the work branch the way the gate rules ask.
+    git(repo.root, "add", "-A", ".rein")
+    git(repo.root, "commit", "-q", "-m", "chore: record")
+
+    monkeypatch.setattr(build_loop, "_run", idle)
+    assert build(repo) == common.EXIT_DONE
+    assert status_of(repo, "T-001")["status"] == "done"
+    assert (repo.root / "T-001.py").exists()
+    assert "gate_violation" not in {str(e.detail.get("kind")) for e in store_mod.Store(repo).read_events()}

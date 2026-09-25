@@ -181,10 +181,6 @@
           "completed_commit": {
             "$ref": "#/$defs/commit"
           },
-          "base": {
-            "description": "The work-branch commit a serially consumed task's work began on, pinned when it first goes in-progress and dropped when it lands. Every attempt is judged on the diff from here, so a commit an interrupted attempt already made stays inside what the next one is checked against.",
-            "$ref": "#/$defs/commit"
-          },
           "note": {
             "type": "string",
             "maxLength": 1000
@@ -197,10 +193,6 @@
               "tree": {
                 "description": "The content fingerprint the verdict was reached on (HEAD + tracked modifications + untracked blobs).",
                 "$ref": "#/$defs/digest"
-              },
-              "base": {
-                "description": "What that tree is a change to.",
-                "$ref": "#/$defs/commit"
               },
               "steps": {
                 "description": "The quality-gate steps established green against that tree, in the order they ran.",
