@@ -682,6 +682,39 @@ def record_escalation(
     update_task_handoff(repo, task_id, patch, event="knowledge_gap", detail=detail)
 
 
+def record_premise(
+    repo: repo_mod.Repo, premise_id: str, *, held: bool, output: str, fallback: bool, park: Sequence[str]
+) -> None:
+    """Record what a premise's probe observed, and park the tasks a falsified one leaves unfinishable.
+
+    One transaction: the observation, the tasks it sends back (only when there is no approved
+    fallback, and only the ones whose criteria rest on it), and the event. A falsified premise
+    with a fallback parks nothing — `dag.join` swaps the criteria and the work goes on.
+    """
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    if state is None:
+        raise StopLoop("no .rein/state.yaml to record a premise in")
+    seen = store_mod.read_digest(state)
+    raw = json.loads(json.dumps(state.raw))
+    raw.setdefault("premises", {})[premise_id] = {
+        "status": "held" if held else "falsified",
+        "observed_at": event_chain.now_iso(),
+        "output": output[-500:],
+    }
+    tasks = raw.setdefault("tasks", {})
+    for task_id in park:
+        entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+        tasks[task_id] = {**entry, "status": "needs-revision"}
+    raw["updated_at"] = event_chain.now_iso()
+    detail: dict[str, Any] = {"kind": "premise_held" if held else "premise_falsified", "premise": premise_id}
+    if not held:
+        detail["fallback"] = fallback
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[premise_id, *park], detail=detail)
+
+
 def record_salvage(repo: repo_mod.Repo, task_id: str, *, branch: str, salvage_state: str) -> None:
     """Note where an interrupted attempt's work went, and whether the next one picked it up."""
     patch = {"salvage_branch": branch[:_HANDOFF_BRANCH_MAX], "salvage_state": salvage_state}
@@ -3449,16 +3482,20 @@ class Orchestrator:
             if unfinished == 0:
                 return self._close_gate4(graph)
 
+            if self._observe_premises(graph):
+                continue  # an observation may have swapped criteria or parked tasks: re-read the graph
             settled, owed = self._settle_person_tasks(graph)
             if settled:
                 continue  # a deliverable landed: its dependents may be on the frontier now
             owed.update(self._unmet_on_frontier(graph))
+            provisional = self._resting_on_the_unobserved(graph)
             runnable = graph
-            if owed:
+            if owed or provisional:
                 # Off the frontier for this run, not off the plan: nothing about them is a verdict,
                 # and the next `rein build` asks again.
+                held_back = set(owed) | provisional
                 runnable = dag.Graph.from_tasks(
-                    [replace(t, status="blocked") if t.id in owed else t for t in graph.tasks]
+                    [replace(t, status="blocked") if t.id in held_back else t for t in graph.tasks]
                 )
             batch = plan_batch(runnable, self.config.max_parallel)
             if batch is None and owed:
@@ -3493,6 +3530,72 @@ class Orchestrator:
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
             self._consume_batch(tasks)
             # Recompute at the top of the loop after each batch (reassemble the chain).
+
+    # -- premises nobody has measured (CR-39) --
+
+    def _unobserved(self) -> set[str]:
+        state = self.store.read_state()
+        observed = state.premises if state is not None else {}
+        return {p.id for p in (self._plan.premises if self._plan else ()) if p.id not in observed}
+
+    def _resting_on_the_unobserved(self, graph: dag.Graph) -> set[str]:
+        """Frontier tasks with a criterion resting on a premise nobody has observed yet.
+
+        Such a criterion is provisional, so a `done` it contributed to would be too: the task waits
+        for the observation, and the probe runs as soon as its observer is done.
+        """
+        unobserved = self._unobserved()
+        return {t.id for t in graph.frontier() if set(t.assumes) & unobserved}
+
+    def _observe_premises(self, graph: dag.Graph) -> bool:
+        """Probe every premise whose observer is done (or that has none) and is not yet observed.
+
+        True when anything was recorded. The probe is run by the loop, not by an implementer, so
+        the observation is not the implementer's account of it. A falsified premise with a fallback
+        the human approved with the mandate is applied, and nothing stops. One without a fallback
+        parks only the tasks whose criteria rest on it and asks a person about those — the rest of
+        the plan, its state and its receipts stand.
+        """
+        if self.dry_run or self._plan is None:
+            return False
+        recorded = False
+        unobserved = self._unobserved()
+        for premise in self._plan.premises:
+            if premise.id not in unobserved:
+                continue
+            if premise.observed_by and not graph.get(premise.observed_by).is_done:
+                continue
+            failure = self._probe(
+                GateStep(
+                    name=f"premise {premise.id}",
+                    kind="command",
+                    command=premise.probe,
+                    executor_profile=premise.executor_profile,
+                )
+            )
+            held = not failure
+            fallback = bool(premise.fallback_criteria)
+            resting = [t.id for t in graph.tasks if premise.id in t.assumes and t.status not in ("done", "in-progress")]
+            park = [] if held or fallback else resting
+            record_premise(self.repo, premise.id, held=held, output=failure, fallback=fallback, park=park)
+            recorded = True
+            if held:
+                print(f"  [premise] {premise.id} holds: {premise.says}")
+            elif fallback:
+                print(
+                    f"  [premise] {premise.id} is false ({failure}) — applying the fallback approved with the mandate"
+                )
+            else:
+                self._escalate(
+                    "premise_falsified",
+                    f"{premise.id} is false: {premise.says}\n  {failure}\nThe plan approved no fallback for it, so "
+                    "the criteria resting on it cannot be met as written. "
+                    f"Parked: {', '.join(park) or 'nothing unfinished'}. Everything else continues. Change what "
+                    f"rests on it with `rein revise --to mandate --impacted {','.join(park)}`; the re-approval "
+                    "shows only what changed.",
+                    task=park or premise.id,
+                )
+        return recorded
 
     # -- what only a person can provide (CR-38) --
 

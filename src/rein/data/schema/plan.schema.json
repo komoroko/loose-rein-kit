@@ -48,6 +48,14 @@
         "$ref": "#/$defs/task"
       }
     },
+    "premises": {
+      "description": "Beliefs about the world outside this repository that some criteria rest on and nobody has measured yet — a CLI flag's behaviour, a service's error format, a dataset's shape. Neither a settled answer nor an `unknown`: the plan believes it and says how it will find out. Each is probed by the loop before any criterion that `assumes` it can count, and a criterion resting on one that has not been observed is provisional. When one is observed false, the `fallback` a human approved here with the mandate is applied without a roll back; one with no fallback returns to a person for the criteria that rest on it alone.",
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/premise"
+      }
+    },
     "decisions": {
       "description": "Every decision the drafting phase met, with who settled it. The list a human reads at the mandate gate is not what they were asked — it is what they were *not* asked: each `local` entry is a default the loop took on its own reading of the reach, and the gate is where that reading is overruled while overruling it is still cheap.",
       "type": "array",
@@ -423,6 +431,14 @@
               }
             }
           }
+        },
+        "assumes": {
+          "description": "Premises (plan `premises`) this criterion rests on. It is provisional until each is observed, and its task does not run before then.",
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/premiseId"
+          }
         }
       }
     },
@@ -613,6 +629,90 @@
           ]
         }
       ]
+    },
+    "premiseId": {
+      "type": "string",
+      "pattern": "^P-[0-9]+$"
+    },
+    "premise": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "says",
+        "probe"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/premiseId"
+        },
+        "says": {
+          "description": "The belief, stated so it could be false.",
+          "$ref": "#/$defs/text"
+        },
+        "probe": {
+          "description": "An argv whose exit status observes it: 0 means the premise holds. Run by the loop, never by an implementer, so the observation is not the implementer's account of it.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "executor_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "observed_by": {
+          "description": "The task whose work makes the probe meaningful — the one that installs the CLI, collects the fixture, stands up the service. The probe runs once it is done; with none, before any task runs.",
+          "$ref": "#/$defs/taskId"
+        },
+        "fallback": {
+          "description": "What the plan does if the premise is false, approved with the mandate: the criteria that replace the ones resting on it, each naming the task and criterion id it replaces. Applied by the loop and recorded as `premise_falsified`; no roll back.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "says",
+            "criteria"
+          ],
+          "properties": {
+            "says": {
+              "$ref": "#/$defs/text"
+            },
+            "criteria": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "task",
+                  "id",
+                  "statement"
+                ],
+                "properties": {
+                  "task": {
+                    "$ref": "#/$defs/taskId"
+                  },
+                  "id": {
+                    "$ref": "#/$defs/acceptanceId"
+                  },
+                  "statement": {
+                    "$ref": "#/$defs/text"
+                  },
+                  "evidence": {
+                    "$ref": "#/$defs/acceptance/properties/evidence"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

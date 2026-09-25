@@ -200,6 +200,12 @@ STOP_CAUSE_CLAIM = (
     "is falsified here"
 )
 
+#: Printed under the falsified-premise counts.
+PREMISE_CLAIM = (
+    "a premise stated with a fallback is a correction that costs no stop; one found false without a "
+    "fallback costs a person — if planners stop stating premises, both stay at zero and the stops move to `plan`"
+)
+
 #: The other half of what a contact point costs. `STOP_COUNT_CLAIM` is how often the work stopped;
 #: this is how long it stayed stopped, which `00-concept.md` names in the same breath and which
 #: nothing measured across every cycle until now.
@@ -403,6 +409,7 @@ def render(
     chain_stops: int | None = None,
     chain_stopped: Sequence[float] = (),
     chain_causes: Mapping[str, int] | None = None,
+    chain_premises: Mapping[str, int] | None = None,
 ) -> str:
     """The figures, each beside the claim it tests.
 
@@ -456,6 +463,15 @@ def render(
             lines.append(f"  {STOP_CAUSE_CLAIM}")
         if stops and chain_stops is not None:
             lines.append(f"  {_STOP_SOURCES}")
+
+    # Falsified premises, split by whether a fallback was approved for them: the figure that tests
+    # whether planners state their premises at all.
+    if chain_premises and any(chain_premises.values()):
+        lines.append(
+            f"{'premises falsified':<30} {chain_premises.get('with_fallback', 0):>5} with a fallback, "
+            f"{chain_premises.get('without_fallback', 0)} without"
+        )
+        lines.append(f"  {PREMISE_CLAIM}")
 
     # The durations of those same chained stops. Printed under their own claim rather than folded
     # into `waited_seconds`: one is how long the work sat, the other is how long the decision sat,

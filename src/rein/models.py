@@ -166,6 +166,9 @@ DECISION_REACH_VALUES = frozenset({"mandate", "local"})
 #: its `artifact` criteria name to be committed, because an agent sent at a person's deliverable
 #: either stops or fabricates it.
 PRODUCED_BY_VALUES = frozenset({"agent", "person"})
+#: What the loop observed of a plan premise. There is no third value: a premise not yet observed has
+#: no entry, which is what "provisional" means for every criterion resting on it.
+PREMISE_STATUS_VALUES = frozenset({"held", "falsified"})
 #: Whether an answer exists yet. `unknown` is recorded rather than filled in with a default, and
 #: never turned into a claim — a claim nothing can make true cannot be judged.
 DECISION_STATUS_VALUES = frozenset({"settled", "unknown"})
@@ -589,6 +592,7 @@ ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     #: Scoped to its task, so a short number is enough — `A-1` of T-004 and `A-1` of T-005 are
     #: different criteria, and nothing ever refers to one from outside its own task.
     "acceptance": re.compile(r"^A-\d+$"),
+    "premise": re.compile(r"^P-\d+$"),
     "statement": re.compile(r"^STMT-\d{3,}$"),
     "actual_statement": re.compile(r"^AST-\d{3,}$"),
     "decision_card": re.compile(r"^DC-\d{3,}$"),
@@ -987,6 +991,34 @@ class Decision(Element):
 
 
 @dataclass(frozen=True)
+class Premise(Element):
+    """A belief about the world some criteria rest on and nobody has measured yet (`plan.premises`)."""
+
+    @property
+    def says(self) -> str:
+        return _str(self.raw, "says")
+
+    @property
+    def probe(self) -> tuple[str, ...]:
+        return _ids(self.raw, "probe")
+
+    @property
+    def executor_profile(self) -> str:
+        return _str(self.raw, "executor_profile")
+
+    @property
+    def observed_by(self) -> str:
+        return _str(self.raw, "observed_by")
+
+    @property
+    def fallback_criteria(self) -> tuple[Mapping[str, Any], ...]:
+        """The criteria that replace the ones resting on this premise if it is false. () = no fallback."""
+        fallback = self.raw.get("fallback")
+        criteria = fallback.get("criteria") if isinstance(fallback, dict) else None
+        return tuple(c for c in criteria if isinstance(c, dict)) if isinstance(criteria, list) else ()
+
+
+@dataclass(frozen=True)
 class LensSelection(Element):
     """One lens the mandate froze into this cycle's review, and what was decided about it.
 
@@ -1009,6 +1041,7 @@ _PLAN_SECTIONS: Mapping[str, type[Element]] = {
     "tasks": Task,
     "decisions": Decision,
     "lenses": LensSelection,
+    "premises": Premise,
 }
 
 
@@ -1134,6 +1167,10 @@ class Plan:
     @property
     def lenses(self) -> tuple[LensSelection, ...]:
         return self._section("lenses")
+
+    @property
+    def premises(self) -> tuple[Premise, ...]:
+        return self._section("premises")
 
     # -- lookup ---------------------------------------------------------------
 
@@ -1400,6 +1437,12 @@ class State:
         if not isinstance(value, dict):
             return {}
         return {k: _str(v, "status", "todo") for k, v in value.items() if isinstance(v, dict)}
+
+    @property
+    def premises(self) -> Mapping[str, Mapping[str, Any]]:
+        """What the loop observed of each plan premise, by id. A premise with no entry is unobserved."""
+        value = self.raw.get("premises")
+        return {str(k): v for k, v in value.items() if isinstance(v, dict)} if isinstance(value, dict) else {}
 
     @property
     def task_after(self) -> Mapping[str, tuple[str, ...]]:
@@ -2230,7 +2273,51 @@ def cross_reference_errors(plan: Plan) -> list[str]:
                 errors.append(f"tasks/{task.id}/requires[{index}]: {path!r} is not a safe repo-relative path")
 
     errors += _structure_errors(plan)
+    errors += _premise_errors(plan)
     errors += _cycle_errors(plan)
+    return errors
+
+
+def _premise_errors(plan: Plan) -> list[str]:
+    """Every premise reference resolves, and a fallback replaces only criteria that rest on it."""
+    errors: list[str] = []
+    premises = {p.id: p for p in plan.premises}
+    tasks = {t.id: t for t in plan.tasks}
+    for premise_id in premises:
+        if not ID_PATTERNS["premise"].match(premise_id):
+            errors.append(f"premises: {premise_id!r} does not match the premise id pattern")
+    for task in plan.tasks:
+        for entry in task.acceptance:
+            for premise_id in _ids(entry, "assumes"):
+                if premise_id not in premises:
+                    errors.append(f"tasks/{task.id}/{_str(entry, 'id')}: assumes unknown premise {premise_id!r}")
+    blocked = {t.id: t.blocked_by for t in plan.tasks}
+    for premise in plan.premises:
+        if premise.observed_by and premise.observed_by not in tasks:
+            errors.append(f"premises/{premise.id}: observed_by unknown task {premise.observed_by!r}")
+        # The observer runs before anything resting on the premise; one that rests on it itself, or
+        # stands on a task that does, waits for its own observation.
+        upstream: set[str] = set()
+        stack = [premise.observed_by] if premise.observed_by in tasks else []
+        while stack:
+            current = stack.pop()
+            if current not in upstream:
+                upstream.add(current)
+                stack.extend(blocked.get(current, ()))
+        for task in plan.tasks:
+            if task.id in upstream and any(premise.id in _ids(e, "assumes") for e in task.acceptance):
+                errors.append(
+                    f"premises/{premise.id}: {task.id} rests on it and {premise.observed_by} observes it after "
+                    f"{task.id} — the observation would wait for itself"
+                )
+        for replacement in premise.fallback_criteria:
+            task_id, ac_id = _str(replacement, "task"), _str(replacement, "id")
+            resting = [e for e in (tasks[task_id].acceptance if task_id in tasks else ()) if _str(e, "id") == ac_id]
+            if not resting or premise.id not in _ids(resting[0], "assumes"):
+                errors.append(
+                    f"premises/{premise.id}: the fallback replaces {task_id}/{ac_id}, which does not assume "
+                    f"{premise.id} — a fallback may only change what rests on the premise it is for"
+                )
     return errors
 
 

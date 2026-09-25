@@ -164,6 +164,21 @@ def stop_causes(events: Sequence[models.Event]) -> dict[str, int]:
     return causes
 
 
+def premise_outcomes(events: Sequence[models.Event]) -> dict[str, int]:
+    """Premises observed false, split by whether the plan had approved a fallback for them.
+
+    The figure the premise rule rests on: a falsified premise with a fallback cost no stop, one
+    without cost a person. If planners do not state their premises, both stay at zero while the
+    stops they would have prevented show up as `plan` instead.
+    """
+    counts = {"with_fallback": 0, "without_fallback": 0}
+    for event in events:
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        if event.event == "decision_declared" and detail.get("kind") == "premise_falsified":
+            counts["with_fallback" if detail.get("fallback") else "without_fallback"] += 1
+    return counts
+
+
 def stop_durations(events: Sequence[models.Event]) -> list[float]:
     """How long each gate stop held the work, in seconds, read off the chain's own order.
 
