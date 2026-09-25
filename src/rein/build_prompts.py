@@ -24,8 +24,8 @@ def _pathspec(pathspec: Sequence[str]) -> str:
     implementer does not. Spelled out twice by hand, those two could drift — and the instruction
     is the copy an agent actually types. Taken as an argument rather than read from
     `repo.SSOT_PATHSPEC` because half of it is configurable: the leaf worktree root
-    (`execution.worktree_dir`) is excluded alongside `.rein/`, and a serial task committing from
-    the repository root would otherwise embed every sibling leaf's worktree in its own commit.
+    (`execution.worktree_dir`) is excluded alongside `.rein/`, and a repair committing from the
+    repository root would otherwise embed every leaf's worktree in its own commit.
     """
     return " ".join(part if part == "." else f"'{part}'" for part in pathspec)
 

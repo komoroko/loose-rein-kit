@@ -61,6 +61,13 @@ class Task:
     #: as against the shared DoD's "is this code sound". Prose in a ticket nothing parsed, until
     #: the plan grew a place to put them.
     acceptance: tuple[Mapping[str, Any], ...] = ()
+    #: `agent` or `person`: whether the loop launches an implementer at this task at all.
+    produced_by: str = "agent"
+    #: What must hold outside the repository before a launch, as the frozen plan declares it.
+    requires: tuple[Mapping[str, Any], ...] = ()
+    #: The plan premises this task's (effective) criteria rest on. It does not run until each one
+    #: has been observed.
+    assumes: tuple[str, ...] = ()
 
     @property
     def is_done(self) -> bool:
@@ -231,6 +238,25 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
     the state did not follow, and scheduling against that mismatch would run unapproved work.
     """
     status_map = state.task_status if state is not None else {}
+    # Order added after the mandate joins the frozen edges here, so every reader of the graph —
+    # the frontier, the layers, the critical path — sees one DAG.
+    after = state.task_after if state is not None else {}
+    # A premise observed false with a fallback swaps the criteria resting on it for the ones a
+    # human approved with the mandate. The plan document is untouched — it is frozen, and its
+    # fallback is part of what was frozen — so this is where the swap becomes the task's bar.
+    falsified = {
+        pid for pid, seen in (state.premises if state is not None else {}).items() if seen.get("status") == "falsified"
+    }
+    replacements = {
+        (str(c.get("task", "")), str(c.get("id", ""))): {k: v for k, v in c.items() if k != "task"}
+        for premise in plan.premises
+        if premise.id in falsified
+        for c in premise.fallback_criteria
+    }
+
+    def effective(task_id: str, acceptance: tuple[Mapping[str, Any], ...]) -> tuple[Mapping[str, Any], ...]:
+        return tuple(replacements.get((task_id, str(e.get("id", ""))), e) for e in acceptance)
+
     attempts_map: dict[str, int] = {}
     if state is not None:
         raw_tasks = state.raw.get("tasks")
@@ -253,7 +279,7 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 id=t.id,
                 title=t.title,
                 kind=t.kind,
-                blocked_by=t.blocked_by,
+                blocked_by=tuple(dict.fromkeys((*t.blocked_by, *after.get(t.id, ())))),
                 status=status_map.get(t.id, "todo"),
                 risk=t.risk,
                 claim_ids=t.claim_ids,
@@ -261,11 +287,24 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 attempts=attempts_map.get(t.id, 0),
                 scope_include=t.scope_include,
                 scope_exclude=t.scope_exclude,
-                acceptance=t.acceptance,
+                acceptance=effective(t.id, t.acceptance),
+                produced_by=t.produced_by,
+                requires=t.requires,
+                assumes=_assumed(effective(t.id, t.acceptance)),
             )
             for t in plan.tasks
         ]
     )
+
+
+def _assumed(acceptance: tuple[Mapping[str, Any], ...]) -> tuple[str, ...]:
+    """The premise ids these criteria rest on, in first-seen order."""
+    found: list[str] = []
+    for entry in acceptance:
+        value = entry.get("assumes")
+        if isinstance(value, list):
+            found += [str(p) for p in value]
+    return tuple(dict.fromkeys(found))
 
 
 def load(repo: repo_mod.Repo) -> Graph:

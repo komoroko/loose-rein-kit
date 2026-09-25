@@ -122,10 +122,10 @@ class GitWorkspace:
         #: four times (`test_the_tree_exclusion_lives_in_exactly_one_place`).
         #:
         #: `.rein/` is orchestration state (see `repo.SSOT_DIR`). The leaf worktree root is the
-        #: other half and had been left out: it holds *other* tasks' work in progress, so a
-        #: serial task running beside a leaf counted that leaf's whole worktree as its own change
-        #: — against its declared scope, into its fingerprint, and, through `git add -A`, into its
-        #: commit as a gitlink. It is configurable (`execution.worktree_dir`), which is why this
+        #: other half and had been left out: it holds *other* tasks' work in progress, so work
+        #: done in the repository root beside a leaf counted that leaf's whole worktree as its own
+        #: change — against its declared scope, into its fingerprint, and, through `git add -A`,
+        #: into its commit as a gitlink. It is configurable (`execution.worktree_dir`), which is why this
         #: is per-instance where `repo.SSOT_PATHSPEC` is a constant.
         self.excluded: tuple[str, ...] = (repo_mod.SSOT_DIR, worktree_dir.rstrip("/") + "/")
         self.pathspec: tuple[str, ...] = repo_mod.pathspec_excluding(self.excluded)
@@ -193,6 +193,20 @@ class GitWorkspace:
         """The commit this task's target branch now points at — what `completed_commit` records."""
         _, out = self._run(["git", "rev-parse", self.target_branch(task_id)], cwd=self.root)
         return out.strip()
+
+    def authored(self, path: str) -> tuple[str, str] | None:
+        """`(commit, "Name <email>")` of the last commit on the work branch that touched `path`.
+
+        None when no commit on the branch holds it — a file that exists only in the working tree
+        is not a deliverable anybody else can build on.
+        """
+        rc, out = self._run(["git", "log", "-1", "--format=%H%x00%an <%ae>", self.branch, "--", path], cwd=self.root)
+        commit, _, author = out.strip().partition("\0")
+        if rc != 0 or not commit:
+            return None
+        if self._run(["git", "cat-file", "-e", f"{self.branch}:{path}"], cwd=self.root)[0] != 0:
+            return None  # deleted by that commit, so not there any more
+        return commit, author
 
     def worktree_path(self, task_id: str) -> str:
         """The leaf worktree path under worktree_dir."""
@@ -529,7 +543,7 @@ class GitWorkspace:
     def diff_from(self, base: str, cwd: str, paths: Sequence[str]) -> str | None:
         """`git diff <base> -- <paths>` taken in `cwd`: the change against `base`, dirty tree included.
 
-        Two dots and not `base..HEAD` on purpose. A serial task's work may still be uncommitted
+        Two dots and not `base..HEAD` on purpose. A task's work may still be uncommitted
         when the gate runs (`finalize_commit` is what puts it on the branch, and it runs later), so
         a diff that stops at HEAD would describe a tree nobody is about to gate. This one describes
         what is actually there.

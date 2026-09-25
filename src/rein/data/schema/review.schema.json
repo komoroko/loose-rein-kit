@@ -1405,6 +1405,27 @@
                       }
                     }
                   }
+                },
+                "ordered_after_mandate": {
+                  "description": "Order added after the mandate froze (`rein task order`): each task and the tasks it was made to wait for beyond the plan's `blocked_by`. Added without a person, because order is inside the delegation; listed here so that is not the same as unseen.",
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "task_id",
+                      "after"
+                    ],
+                    "properties": {
+                      "task_id": {
+                        "$ref": "#/$defs/taskId"
+                      },
+                      "after": {
+                        "$ref": "#/$defs/taskIdList"
+                      }
+                    }
+                  }
                 }
               }
             }

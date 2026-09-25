@@ -79,11 +79,32 @@ function Naming({ naming, gate }) {
   const unasked = (naming || {}).unasked || [];
   const lenses = (naming || {}).lenses || [];
   const crossing = (naming || {}).crossing || [];
-  if (!unasked.length && !lenses.length && !crossing.length) return null;
+  const undeclared = (naming || {}).undeclared || [];
+  const delta = (naming || {}).delta || [];
+  if (!unasked.length && !lenses.length && !crossing.length && !undeclared.length && !delta.length) return null;
   const crossingTasks = [...new Set(crossing.filter((c) => !c.carried_from).map((c) => c.task_id))];
   const proposedCount = lenses.filter((l) => l.status === "proposed").length;
   return (
     <>
+      {delta.length ? (
+        <>
+          {/* On a re-approval, the part of the plan that is new since the last yes. The approval
+              still covers the plan whole — the digests say so — but this is what is being decided. */}
+          <div className="subhead" style={{ marginTop: ".8rem" }}>
+            What changed since you last approved this mandate ({delta.length})
+          </div>
+          <table>
+            <tbody>
+              {delta.map((d) => (
+                <tr key={d.what + ":" + d.id}>
+                  <td><span className="mono">{d.what} {d.id}</span></td>
+                  <td>{d.change}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      ) : null}
       {crossing.length ? (
         <>
           {/* First, and not in a <details>. At the mandate this is how many more times the cycle
@@ -142,6 +163,25 @@ function Naming({ naming, gate }) {
           </div>
           <p className="note">{naming.overrule_cost}</p>
         </>
+      ) : null}
+      {undeclared.length ? (
+        /* Folded: these are not decisions to make, they are where the plan's derived scope and
+           edges have a hole — a contradiction there is found by the build instead of here. */
+        <details style={{ marginTop: ".8rem" }}>
+          <summary>
+            {undeclared.length} acceptance criterion(s) name no path they produce or read
+          </summary>
+          <table>
+            <tbody>
+              {undeclared.map((c) => (
+                <tr key={c.task_id + ":" + c.id}>
+                  <td><span className="mono">{c.task_id}/{c.id}</span></td>
+                  <td>{c.statement}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </details>
       ) : null}
       {lenses.length ? (
         /* Open when any of them is `proposed`. A list that has to be opened before anything can be

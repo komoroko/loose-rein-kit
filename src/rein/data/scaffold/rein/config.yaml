@@ -103,7 +103,7 @@ executor_profiles:
     # image: localhost/rein-python@sha256:<rein oci build prints this>
     # network_profile: none
     # read_only_root: true
-    # mount_repo: read_only
+    # mount_repo: read_write   # the test step writes its JUnit report into the checkout
     # writable_tmp_mb: 512
     # pids_limit: 128
     # memory_mb: 1024
@@ -163,13 +163,17 @@ agents:
 quality_gate:
   - name: test
     kind: command
-    command: [python, -m, pytest, -q, tests/]
+    command: [python, -m, pytest, -q, tests/, --junitxml=.rein/work/junit-test.xml]
     executor_profile: quality
     retries: 2
     required: true
     # The step that runs the tests: the one the negative control re-establishes over the base with
     # only a task's test half applied. A linter's red there is true of any new test file.
     runs_tests: true
+    # The report the command above writes. With it a red is read per failing test: one that passes
+    # on an immediate re-run is flaky, and one already red before the task's change goes to the
+    # task that owns it rather than stopping this one. Keep the two paths the same.
+    junit: .rein/work/junit-test.xml
   - name: check
     kind: command
     command: [python, -m, compileall, -q, .]

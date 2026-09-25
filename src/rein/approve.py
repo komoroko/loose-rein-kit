@@ -62,6 +62,7 @@ from rein import (
     observations,
     review_policy,
     review_reading,
+    strict_yaml,
 )
 from rein import lenses as lens_lib
 from rein import repo as repo_mod
@@ -119,6 +120,37 @@ def _plan_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> 
         )
     if not plan.tasks:
         blockers.append("the plan declares no tasks")
+    return blockers
+
+
+def _worktree_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> list[str]:
+    """Paths the criteria name that no task's worktree would ever have. Checked where the plan freezes.
+
+    A task runs in a worktree forked from a commit, so what it can read is what git carries. A path
+    a criterion reads that no task produces and git does not track, or a produced path git ignores
+    (so it can never be committed for the next task to fork from), is a criterion that cannot hold
+    in any worktree — #504 blocked twice on screenshots under an ignored `out/`. Both halves are
+    in the plan and the repository before the freeze, so the question is asked here.
+    """
+    if plan is None or gate != FREEZING_GATE:
+        return []
+    blockers: list[str] = []
+    produced = [(task.id, path) for task in plan.tasks for path in task.produces]
+    for task_id, path in produced:
+        if repo._git_rc("check-ignore", "-q", "--no-index", "--", path)[0] == 0:
+            blockers.append(
+                f"{task_id} produces {path}, which git ignores — it can never be committed, so no task "
+                "that depends on it will find it in its worktree"
+            )
+    for task in plan.tasks:
+        for path in task.reads:
+            if any(not common.outside_scope([path], [theirs], []) for _, theirs in produced):
+                continue
+            if not repo._git("ls-files", "--", path):
+                blockers.append(
+                    f"{task.id} reads {path}, which no task produces and git does not track — a worktree "
+                    "forked from the work branch will never have it"
+                )
     return blockers
 
 
@@ -540,6 +572,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _decision_blockers(plan, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
+    blockers += _worktree_blockers(repo, plan, gate)
     blockers += _review_blockers(repo, review, state, gate)
     return blockers
 
@@ -849,6 +882,10 @@ def record_approval(
         if subject.get("crossing_digest"):
             # In the chain, not only in the receipt: a later carry is decided from this record.
             detail["crossing_digest"] = subject["crossing_digest"]
+        if gate == FREEZING_GATE and subject.get("plan_digest"):
+            # In the chain for the same reason: a roll back clears the receipt, and the next
+            # mandate approval shows what changed since this one (`mandate_delta`).
+            detail["plan_digest"] = subject["plan_digest"]
         tx.append(
             "gate_approved",
             cycle_id=state.cycle_id,
@@ -1090,6 +1127,18 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         asked = f" — {droppable} of them yours to keep or drop" if droppable else ""
         print(f"{len(lens_rows)} review lens(es) this mandate would freeze{asked}:")
         print(render_lenses(lens_rows) + "")
+    delta = named["delta"]
+    if delta:
+        # First after the digests: on a re-approval this is what the human is actually deciding.
+        print(f"What changed since you last approved this mandate ({len(delta)}):")
+        print(render_delta(delta) + "\n")
+    undeclared = named["undeclared"]
+    if undeclared:
+        print(
+            f"{len(undeclared)} acceptance criterion(s) name no path they produce or read, so nothing "
+            "derived this plan's scope or edges from them — a contradiction there is found by the build:"
+        )
+        print(render_undeclared(undeclared) + "\n")
     addressed = addressed_requests(repo, gate)
     if addressed:
         # Read before deciding, not after. These are the changes this human asked for last time;
@@ -1117,6 +1166,8 @@ class Naming(TypedDict):
     overrule_cost: str
     lenses: list[dict[str, str]]
     crossing: list[dict[str, str]]
+    undeclared: list[dict[str, str]]
+    delta: list[dict[str, str]]
 
 
 def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> Naming:
@@ -1147,7 +1198,14 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
     reader holding the write session: the one who would be doing the approving has it, and nobody
     else gets a file from outside the repository because a page was left open.
     """
-    out: Naming = {"unasked": [], "overrule_cost": OVERRULE_COST, "lenses": [], "crossing": []}
+    out: Naming = {
+        "unasked": [],
+        "overrule_cost": OVERRULE_COST,
+        "lenses": [],
+        "crossing": [],
+        "undeclared": [],
+        "delta": [],
+    }
     out["crossing"] = crossing_declarations(repo, gate)
     unasked = _unasked_decisions(repo, gate)
     out["unasked"] = [
@@ -1170,6 +1228,15 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         return out  # a plan that does not parse is `_plan_blockers`' to report, not this screen's
     if plan is None:
         return out
+    out["delta"] = mandate_delta(repo, plan)
+    # Criteria that name no path contribute nothing to the derived scope and edges
+    # (`models._structure_errors`): each is a place a contradiction can still hide until the build.
+    out["undeclared"] = [
+        {"task_id": task.id, "id": _ac_id(entry), "statement": str(entry.get("statement", ""))}
+        for task in plan.tasks
+        for entry in task.acceptance
+        if not _declares_paths(entry)
+    ]
     known = {lens.id: lens for lens in lens_lib.library()} if include_library else {}
     out["lenses"] = [
         {
@@ -1190,6 +1257,110 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         for entry in plan.lenses
     ]
     return out
+
+
+#: How far back through `.rein/plan.yaml`'s history the last approved plan is looked for.
+_PLAN_HISTORY_DEPTH = 200
+
+
+def mandate_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]]:
+    """What changed in the plan since the mandate was last approved. [] at a first approval.
+
+    A roll back used to put the whole plan back in front of the approver, however little of it
+    moved: a correction to one criterion was presented as the plan it had always been, with the
+    one line that changed somewhere inside it (#93). The approval still covers the plan whole —
+    the digests say so — and this is the part of it that is new since the last yes.
+
+    The last approved plan is found by digest in git's history of `.rein/plan.yaml`, since a roll
+    back clears the receipt that named it and the chain keeps only the digest. When that version
+    was never committed, the delta cannot be shown and the row says so rather than showing none.
+    """
+    events, _ = event_chain.scan(repo.events)
+    approvals = [
+        e
+        for e in events
+        if e.event == "gate_approved" and tuple(e.subject_ids[:1]) == (FREEZING_GATE,) and e.detail.get("plan_digest")
+    ]
+    if not approvals:
+        return []
+    digest = str(approvals[-1].detail["plan_digest"])
+    if digest == plan.digest():
+        return []
+    previous = _plan_with_digest(repo, digest)
+    if previous is None:
+        return [
+            {
+                "what": "plan",
+                "id": digest[:19],
+                "change": "the plan approved last time is not in git's history, so what changed cannot be shown — "
+                "this approval covers the plan whole",
+            }
+        ]
+    return plan_delta(previous, plan)
+
+
+def _plan_with_digest(repo: repo_mod.Repo, digest: str) -> models.Plan | None:
+    listing = repo._git("log", f"-{_PLAN_HISTORY_DEPTH}", "--format=%H", "--", ".rein/plan.yaml")
+    for commit in listing.splitlines():
+        rc, text = repo._git_rc("show", f"{commit}:.rein/plan.yaml")
+        if rc != 0:
+            continue
+        try:
+            candidate = models.Plan.parse(text, cross_reference=False)
+        except (models.DocumentError, strict_yaml.StrictParseError):
+            continue  # a plan an older release wrote may not parse under this schema; keep looking
+        if candidate.digest() == digest:
+            return candidate
+    return None
+
+
+def plan_delta(before: models.Plan, after: models.Plan) -> list[dict[str, str]]:
+    """Claims, tasks and criteria added, removed or changed between two plans, as rows."""
+    rows: list[dict[str, str]] = []
+
+    def compare(what: str, old: Mapping[str, Mapping[str, object]], new: Mapping[str, Mapping[str, object]]) -> None:
+        for key in sorted(old.keys() | new.keys()):
+            if key not in new:
+                rows.append({"what": what, "id": key, "change": "removed"})
+            elif key not in old:
+                rows.append({"what": what, "id": key, "change": "added"})
+            elif old[key] != new[key]:
+                fields = sorted(k for k in old[key].keys() | new[key].keys() if old[key].get(k) != new[key].get(k))
+                rows.append({"what": what, "id": key, "change": "changed: " + ", ".join(fields)})
+
+    compare("claim", {c.id: c.raw for c in before.claims}, {c.id: c.raw for c in after.claims})
+    old_tasks = {t.id: {k: v for k, v in t.raw.items() if k != "acceptance"} for t in before.tasks}
+    new_tasks = {t.id: {k: v for k, v in t.raw.items() if k != "acceptance"} for t in after.tasks}
+    compare("task", old_tasks, new_tasks)
+    old_criteria = {f"{t.id}/{_ac_id(e)}": dict(e) for t in before.tasks for e in t.acceptance}
+    new_criteria = {f"{t.id}/{_ac_id(e)}": dict(e) for t in after.tasks for e in t.acceptance}
+    compare("criterion", old_criteria, new_criteria)
+    if before.scope != after.scope:
+        rows.append({"what": "scope", "id": "", "change": "changed"})
+    return rows
+
+
+def render_delta(rows: Sequence[Mapping[str, str]]) -> str:
+    return "\n".join(f"  {row['what']} {row['id']}: {row['change']}".replace("  : ", "  ") for row in rows)
+
+
+def _ac_id(entry: Mapping[str, object]) -> str:
+    return str(entry.get("id", "?"))
+
+
+def _declares_paths(entry: Mapping[str, object]) -> bool:
+    """Does this criterion name a path it produces or reads?"""
+    evidence = entry.get("evidence")
+    if not isinstance(evidence, dict):
+        return False
+    named = [evidence.get("produces"), evidence.get("reads")]
+    if evidence.get("kind") == "artifact":
+        named.append(evidence.get("paths"))
+    return any(isinstance(paths, list) and paths for paths in named)
+
+
+def render_undeclared(rows: Sequence[Mapping[str, str]]) -> str:
+    return "\n".join(f"  {row['task_id']}/{row['id']}  {row['statement']}" for row in rows)
 
 
 def crossing_declarations(repo: repo_mod.Repo, gate: str) -> list[dict[str, str]]:
@@ -1354,10 +1525,41 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        return approve_locally(repo, args.gate, approval_subject(repo, args.gate))
+        rc = approve_locally(repo, args.gate, approval_subject(repo, args.gate))
     except ApprovalError as exc:
         logger.error(str(exc))
         return 1
+    if rc == 0 and args.gate == "mandate":
+        _print_owed_by_people(repo)
+    return rc
+
+
+def _print_owed_by_people(repo: repo_mod.Repo) -> None:
+    """Name, once and now, everything the frozen plan needs from a person before it can finish.
+
+    The mandate is already approved when this runs; a failure to check is reported as that and
+    changes nothing about the approval — `rein build` asks the same question before any launch.
+    """
+    from rein import adapters, build_loop, faults
+
+    try:
+        owed = build_loop.owed_by_people(repo)
+    except (
+        adapters.LaunchRefused,
+        faults.EnvironmentFault,
+        common.ReinError,
+        OSError,
+        ValueError,
+        dag.DagError,
+        models.DocumentError,
+    ) as exc:
+        logger.error(f"the mandate is approved; what it needs from a person could not be checked: {exc}")
+        return
+    if owed:
+        print(
+            "\nBefore `rein build` can finish, a person has to provide these — all of them, in the order "
+            f"the work will need them:\n{owed}"
+        )
 
 
 if __name__ == "__main__":

@@ -48,6 +48,14 @@
         "$ref": "#/$defs/task"
       }
     },
+    "premises": {
+      "description": "Beliefs about the world outside this repository that some criteria rest on and nobody has measured yet — a CLI flag's behaviour, a service's error format, a dataset's shape. Neither a settled answer nor an `unknown`: the plan believes it and says how it will find out. Each is probed by the loop before any criterion that `assumes` it can count, and a criterion resting on one that has not been observed is provisional. When one is observed false, the `fallback` a human approved here with the mandate is applied without a roll back; one with no fallback returns to a person for the criteria that rest on it alone.",
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/premise"
+      }
+    },
     "decisions": {
       "description": "Every decision the drafting phase met, with who settled it. The list a human reads at the mandate gate is not what they were asked — it is what they were *not* asked: each `local` entry is a default the loop took on its own reading of the reach, and the gate is where that reading is overruled while overruling it is still cheap.",
       "type": "array",
@@ -233,6 +241,13 @@
             "integration"
           ]
         },
+        "produced_by": {
+          "description": "Who produces this task's deliverable. `agent` (the default) is launched as an implementer. `person` is never launched: its deliverable is something only a person can make — labels judged by eye, a recording, a measurement on a device — and sending an implementer at it has two outcomes, a stop or a fabrication. The loop waits for the files its `artifact` criteria name to be committed on the work branch, and dependents reach it through ordinary `blocked_by` edges.",
+          "enum": [
+            "agent",
+            "person"
+          ]
+        },
         "blocked_by": {
           "type": "array",
           "maxItems": 64,
@@ -288,6 +303,14 @@
           "maxItems": 32,
           "items": {
             "$ref": "#/$defs/operatorSurface"
+          }
+        },
+        "requires": {
+          "description": "What must be true outside this repository before an implementer is launched at this task: a browser listening on a debug port, a model installed on the host, a file a person has to put in place. Each one the loop can check — an argv whose exit status says, or a path that has to exist — and it checks them before every launch. A task with an unmet one is not launched and spends no budget; it waits, and the loop names every unmet precondition across the remaining work in one list rather than discovering them one paid launch at a time. Distinct from `operator_surface`, which is what the task will *create* for a person.",
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/precondition"
           }
         }
       }
@@ -390,7 +413,31 @@
               "items": {
                 "$ref": "#/$defs/repoPath"
               }
+            },
+            "produces": {
+              "description": "Paths this criterion's task creates — files, or a directory a package lives under. With an `artifact` criterion's `paths` they are what the task produces, and the plan is checked against them before it can freeze: each has to lie inside the task's own `scope`, no two tasks may produce the same path, and a task that produces or reads anything under another task's path has to depend on that task. Declared rather than parsed out of `statement`, because prose is not something to derive a DAG edge from.",
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/repoPath"
+              }
+            },
+            "reads": {
+              "description": "Paths this criterion reads without producing them: a fixture, another task's output, a screenshot. Each has to be produced by a task this one depends on, or already tracked by git — a path nothing produces and git does not track is one a task's worktree will never have.",
+              "type": "array",
+              "maxItems": 32,
+              "items": {
+                "$ref": "#/$defs/repoPath"
+              }
             }
+          }
+        },
+        "assumes": {
+          "description": "Premises (plan `premises`) this criterion rests on. It is provisional until each is observed, and its task does not run before then.",
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/premiseId"
           }
         }
       }
@@ -534,6 +581,136 @@
             "applied",
             "proposed"
           ]
+        }
+      }
+    },
+    "precondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "says"
+      ],
+      "description": "One precondition: what it is, in a person's words, and how the loop checks it — exactly one of `probe` and `file`.",
+      "properties": {
+        "says": {
+          "description": "What a person has to make true, in their words. This is the line they are shown when it is not.",
+          "$ref": "#/$defs/label"
+        },
+        "probe": {
+          "description": "An argv whose exit status says whether the precondition holds: 0 means it does. Run where the implementer will run — `executors.agent_profile`, or the host when agents run there — unless `executor_profile` names another. Never a shell string, for the reason a gate step is not one. Re-run before every launch and never cached: it is a fact about the world, not about a tree. A probe that cannot be run at all is a machine fault, not an unmet precondition.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "executor_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "file": {
+          "description": "A path in the repository root that has to exist.",
+          "$ref": "#/$defs/repoPath"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "probe"
+          ]
+        },
+        {
+          "required": [
+            "file"
+          ]
+        }
+      ]
+    },
+    "premiseId": {
+      "type": "string",
+      "pattern": "^P-[0-9]+$"
+    },
+    "premise": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "says",
+        "probe"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/premiseId"
+        },
+        "says": {
+          "description": "The belief, stated so it could be false.",
+          "$ref": "#/$defs/text"
+        },
+        "probe": {
+          "description": "An argv whose exit status observes it: 0 means the premise holds. Run by the loop, never by an implementer, where the implementer would run (as a precondition probe is). A probe that cannot be run at all observes nothing: the run stops as a machine fault and nothing is recorded.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "executor_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "observed_by": {
+          "description": "The task whose work makes the probe meaningful — the one that installs the CLI, collects the fixture, stands up the service. The probe runs once it is done; with none, before any task runs.",
+          "$ref": "#/$defs/taskId"
+        },
+        "fallback": {
+          "description": "What the plan does if the premise is false, approved with the mandate: the criteria that replace the ones resting on it, each naming the task and criterion id it replaces. Applied by the loop and recorded as `premise_falsified`; no roll back.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "says",
+            "criteria"
+          ],
+          "properties": {
+            "says": {
+              "$ref": "#/$defs/text"
+            },
+            "criteria": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "task",
+                  "id",
+                  "statement"
+                ],
+                "properties": {
+                  "task": {
+                    "$ref": "#/$defs/taskId"
+                  },
+                  "id": {
+                    "$ref": "#/$defs/acceptanceId"
+                  },
+                  "statement": {
+                    "$ref": "#/$defs/text"
+                  },
+                  "evidence": {
+                    "$ref": "#/$defs/acceptance/properties/evidence"
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

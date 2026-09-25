@@ -277,6 +277,16 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
       </tr>
     );
   }
+  // Order added after the mandate froze. It needed nobody's approval — order is the loop's to
+  // settle — and this is where that stops meaning nobody saw it.
+  for (const o of residuals.ordered_after_mandate || []) {
+    residualRows.push(
+      <tr key={"after:" + o.task_id}>
+        <td>ordered after the mandate</td>
+        <td className="mono">{o.task_id} after {o.after.join(" ")}</td>
+      </tr>
+    );
+  }
 
   return (
     <>

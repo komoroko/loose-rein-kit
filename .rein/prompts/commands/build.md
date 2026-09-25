@@ -14,8 +14,9 @@ loop decomposes, reorders and re-runs as it needs to.
 `rein build` runs all of this **in code** — none of it is yours to re-derive.
 
 1. **Frontier** — todo tasks whose `blockedBy` are all done, ordered foundation/high fan-out first,
-   then the critical path. Foundation tasks run serially on the work branch; independent leaves run
-   in `git worktree` isolation (never subtree) up to `max_parallel` (default 3).
+   then the critical path. Every task runs in `git worktree` isolation (never subtree) on its own
+   branch and lands by a merge: a foundation task alone, independent leaves up to `max_parallel`
+   (default 3) at a time.
 2. **Dossier** — each launch is handed `.rein/work/T-NNN.json`, assembled fresh: the claims the task
    answers and what each asserts, its declared `scope`, the changed paths already split into
    source / tests / mechanical churn, and what earlier attempts tried.
@@ -97,22 +98,15 @@ It refuses to start (exit `2`) when a document it would send an agent to read ha
 the mandate gate froze it — commit it, or roll back with `rein revise --to mandate` if the approval no longer
 covers it.
 
-It also refuses on **any** uncommitted change in the working tree. A serial task runs in the
-repository root and its change is derived as "the commits since the pre-task HEAD, plus the dirty
-tree", so an edit already sitting there is attributed to the first task that runs: it counts
-against that task's declared scope, fills the empty-diff check that exists to catch an implementer
-which wrote nothing, reaches the reviewer as part of the change under review, and `git add -A`
-lands it inside `T-NNN: <title>` — in the history the acceptance record names. A parallel leaf never
-had this problem: `git worktree add` hands it a clean checkout, so everything it finds afterwards
-is its own. The refusal is how a serial task gets the same guarantee. Commit or stash first.
+It also refuses on **any** uncommitted change in the working tree. Every task forks from the last
+commit on the work branch and is merged back into this checkout, so an uncommitted edit is in no
+task's tree, no gate ran over it, and a merge that touches it fails after the task passed. Commit or
+stash first.
 
-A serial task's commits land on the work branch before they have passed anything, so the commit it
-started on is **pinned** when it first starts and held until it lands: `base..HEAD` is its change
-across every attempt and every run. That holds only while nothing else lands above it, so **while an
-unlanded serial task's work is on the branch, it is the only task that runs**. A blocked one stops
-the run: `rein task reset` puts it back on the frontier (`--fresh` or not, the base stays, because
-the commits do), or revert its commits — once nothing of it is left on the branch the loop releases
-the base itself.
+A task's change is what its own branch holds, never "whatever landed on the work branch since it
+started". Committing the orchestration record between two attempts (a rollback, the design and tasks
+deltas, an approval) is therefore never charged to a task that is still unlanded, and a blocked task
+does not hold the work branch: tasks that do not depend on it keep running.
 
 It also refuses **before the first agent launch** on anything about the machine that this run
 cannot finish without: no container runtime while a step needs an OCI sandbox, a pinned image
@@ -126,6 +120,15 @@ so a task that fails it is not sent back to an implementer — it stops after on
 by content in the evidence ledger, and it does not refuse: a cycle whose first task is "fix the
 failing tests" runs its implementer *before* the gate, so the step goes green and none of it
 applies.
+
+A step that runs the tests and declares `junit:` (the JUnit XML report its command writes) is read
+**per failing test** instead of per step. A red is re-run once on the same tree: green the second
+time is a flaky test, recorded against the task that owns it, and it stops nothing. A red that
+holds is run again on the tree the task forked from: a test red there too was red before this
+change, so it goes to the task whose `scope` holds the test — back on the frontier if it is `done`
+and nothing stands on it, to a person otherwise — and the task under test is not charged. Only a
+test this change turned red, or one in the task's own scope, is its failure. Whether the change
+imports the failing test's code is never asked: a behaviour can break a test through no import.
 
 **`rein build` is one command, not an iteration** — it runs the whole algorithm to completion
 and its exit is the signal. Never schedule wake-ups to poll a run in progress; wait for the

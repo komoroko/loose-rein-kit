@@ -402,6 +402,98 @@ def test_check_readme_parity_ignores_prose_make_mentions() -> None:
     assert template_lint.check_readme_parity(_EN + "We make tasks visible.\n", _JA) == []
 
 
+def _ja_translating(en: str, ja: str) -> str:
+    """`ja` with each section marked as translating the matching section of `en` as it stands."""
+    marked = []
+    for e, j in zip(template_lint._readme_sections(en), template_lint._readme_sections(ja), strict=True):
+        heading, _, body = j.partition("\n")
+        marked.append(f"{heading}\n<!-- README.md: {template_lint._translation_digest(e)} -->\n{body}")
+    return "".join(marked)
+
+
+def test_check_readme_translation_is_green_when_every_section_names_the_english_it_translates() -> None:
+    assert template_lint.check_readme_translation(_EN, _ja_translating(_EN, _JA)) == []
+
+
+def test_check_readme_translation_trips_on_an_english_only_prose_edit() -> None:
+    """#96: 45a6361 rewrote README.md's prose alone; the structure held, so parity passed."""
+    ja = _ja_translating(_EN, _JA)
+    edited = _EN.replace("## B\n", "## B\nThe snapshot is taken at approval.\n")
+    assert template_lint.check_readme_parity(edited, ja) == []
+    failures = template_lint.check_readme_translation(edited, ja)
+    assert len(failures) == 1
+    assert "section 2 ('## い')" in failures[0] and "earlier README.md '## B'" in failures[0]
+    assert template_lint._translation_digest(template_lint._readme_sections(edited)[2]) in failures[0]
+
+
+def test_check_readme_translation_lets_the_translation_change_alone() -> None:
+    ja = _ja_translating(_EN, _JA).replace("を参照。", "を読む。")
+    assert template_lint.check_readme_translation(_EN, ja) == []
+
+
+def test_check_readme_translation_ignores_trailing_whitespace_in_the_english() -> None:
+    assert template_lint.check_readme_translation(_EN.replace("## A\n", "## A   \n\n"), _ja_translating(_EN, _JA)) == []
+
+
+def test_check_readme_translation_requires_one_marker_per_section() -> None:
+    failures = template_lint.check_readme_translation(_EN, _JA)
+    assert len(failures) == 3
+    assert all("needs exactly one" in f for f in failures)
+
+
+# --- version ↔ lock.FORMAT ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("version", "format_now", "ok"),
+    [
+        ("0.9.6", "v7", True),  # no release in this change
+        ("0.9.7", "v7", True),  # patch: the format stayed
+        ("0.10.0", "v7", False),  # minor without a format move says `sync --force` falsely
+        ("0.9.7", "v8", False),  # 0.9.5's mistake: a format move as a patch
+        ("0.9.6", "v8", False),  # the format moved and the version did not
+        ("0.10.0", "v8", True),
+        ("1.0.0", "v8", False),
+    ],
+)
+def test_check_version_bump_follows_lock_format(version: str, format_now: str, ok: bool) -> None:
+    failures = template_lint.check_version_bump(version, "0.9.6", format_now, "v7")
+    assert (failures == []) is ok, failures
+
+
+def test_check_version_bump_names_the_expected_version() -> None:
+    assert "minor release, 0.10.0" in template_lint.check_version_bump("0.9.7", "0.9.6", "v8", "v7")[0]
+    assert "patch release, 0.9.7" in template_lint.check_version_bump("0.10.0", "0.9.6", "v7", "v7")[0]
+
+
+def test_check_version_bump_against_tag_refuses_without_a_tag(tmp_path: Path) -> None:
+    """A shallow CI checkout has no tags; passing there would turn the check off where it runs."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    failures = template_lint.check_version_bump_against_tag(tmp_path, "0.9.6")
+    assert failures and "fetch-depth: 0" in failures[0]
+
+
+def test_check_version_bump_against_tag_reads_format_at_the_tag(tmp_path: Path) -> None:
+    import subprocess
+
+    def git(*args: str) -> None:
+        subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args], check=True)
+
+    lock = tmp_path / template_lint.LOCK_MODULE
+    lock.parent.mkdir(parents=True)
+    lock.write_text('FORMAT = "rein-grounded-v6"\n', encoding="utf-8")
+    git("init", "-q")
+    git("add", "-A")
+    git("commit", "-qm", "0.9.4")
+    git("tag", "v0.9.4")
+    lock.write_text('FORMAT = "rein-grounded-v7"\n', encoding="utf-8")
+    failures = template_lint.check_version_bump_against_tag(tmp_path, "0.9.5")
+    assert failures and "minor release, 0.10.0" in failures[0]
+    assert template_lint.check_version_bump_against_tag(tmp_path, "0.10.0") == []
+
+
 # --- version ↔ changelog -----------------------------------------------------------
 
 

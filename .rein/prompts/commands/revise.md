@@ -13,7 +13,11 @@ frozen environment that has to change. That is `--to mandate`, and it re-opens `
 **Also for re-cutting the task DAG** — splitting, merging or re-scoping tasks. It reads like a
 decomposition detail and is not one: `tasks[].acceptance` is in `plan.yaml` with the claims, so a
 new breakdown can carry a softened criterion, and the freeze covers the whole document. What needs
-no roll back is the *order* the loop consumes the DAG in, which is not written down anywhere.
+no roll back is the *order*: a missing dependency edge — one task has to wait for another the plan
+did not say it waits for — is `rein task order <T-NNN> --after <T-MMM> --reason "…"`. It is written
+beside the frozen plan, not into it, so the plan's digest and every approval bound to it stand; the
+chain records it and acceptance lists it. A re-approval after a real roll back shows the approver
+what changed since their last yes, not the plan again.
 
 **Not for any of these**, which need no approval and no roll back:
 - A code defect the grounded review found. `rein build` repairs every blocking finding a task's

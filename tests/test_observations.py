@@ -502,3 +502,13 @@ def test_the_judging_paths_only_ever_record() -> None:
     judging = {"approve", "build_loop", "revise", "change_request"}
 
     assert judging & _modules_reading_the_store() == set()
+
+
+def test_the_chained_count_is_printed_with_its_causes_underneath() -> None:
+    """CR-41: the breakdown sits under the one count it breaks down, largest first, with the claim
+    that says what splitting it is for."""
+    out = observations.render({}, chain_stops=5, chain_causes={"code": 1, "decision": 3, "precondition": 1})
+    lines = out.splitlines()
+    at = lines.index(next(line for line in lines if line.startswith("stops (this repo, chained)")))
+    assert [line.split()[0] for line in lines[at + 1 : at + 4]] == ["decision", "code", "precondition"]
+    assert observations.STOP_CAUSE_CLAIM in out

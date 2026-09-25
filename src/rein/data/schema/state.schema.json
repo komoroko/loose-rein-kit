@@ -181,9 +181,14 @@
           "completed_commit": {
             "$ref": "#/$defs/commit"
           },
-          "base": {
-            "description": "The work-branch commit a serially consumed task's work began on, pinned when it first goes in-progress and dropped when it lands. Every attempt is judged on the diff from here, so a commit an interrupted attempt already made stays inside what the next one is checked against.",
-            "$ref": "#/$defs/commit"
+          "after": {
+            "description": "Tasks this one waits for beyond the frozen plan's `blocked_by`, added after the mandate with `rein task order`. Order is inside the delegation — the mandate authorizes what is built and what it must meet, not the sequence — so adding one needs no roll back; each is recorded in the chain with its reason and listed at acceptance.",
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "pattern": "^T-[0-9]+$"
+            }
           },
           "note": {
             "type": "string",
@@ -197,10 +202,6 @@
               "tree": {
                 "description": "The content fingerprint the verdict was reached on (HEAD + tracked modifications + untracked blobs).",
                 "$ref": "#/$defs/digest"
-              },
-              "base": {
-                "description": "What that tree is a change to.",
-                "$ref": "#/$defs/commit"
               },
               "steps": {
                 "description": "The quality-gate steps established green against that tree, in the order they ran.",
@@ -285,6 +286,35 @@
                     "description": "Why the control could not be taken, for `no_tests_changed` and `undetermined`.",
                     "type": "string",
                     "maxLength": 500
+                  }
+                }
+              },
+              "authored": {
+                "description": "For a task a person produces (`produced_by: person`): each file its `artifact` criteria name, the commit that last touched it on the work branch, and that commit's author. A record of who git says made it, not a proof: it is what lets acceptance see that the deliverable came from a commit rather than from a launch.",
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "commit",
+                    "author"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    "commit": {
+                      "$ref": "#/$defs/commit"
+                    },
+                    "author": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
                   }
                 }
               },
@@ -491,6 +521,39 @@
                 "maxLength": 64
               }
             }
+          }
+        }
+      }
+    },
+    "premises": {
+      "description": "What the loop observed of each plan premise: `held` or `falsified`, when, and the probe's last line. Written once per premise, by the loop.",
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "pattern": "^P-[0-9]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "observed_at"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "held",
+              "falsified"
+            ]
+          },
+          "observed_at": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 64
+          },
+          "output": {
+            "type": "string",
+            "maxLength": 500
           }
         }
       }

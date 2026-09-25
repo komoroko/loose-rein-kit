@@ -193,6 +193,19 @@ DURATION_KINDS = frozenset({"waited_seconds"})
 #: failure selection by reach exists to prevent.
 STOP_COUNT_CLAIM = "selection by reach settles how often work stops — the count of blocking points, never a ceiling"
 
+#: Printed under the chained count's breakdown: what splitting it by cause is for.
+STOP_CAUSE_CLAIM = (
+    "only a `decision` or an `observation` needs a person by construction — every other cause is a "
+    "stop the harness could have derived, probed or routed, so a change that claims to remove one "
+    "is falsified here"
+)
+
+#: Printed under the falsified-premise counts.
+PREMISE_CLAIM = (
+    "a premise stated with a fallback is a correction that costs no stop; one found false without a "
+    "fallback costs a person — if planners stop stating premises, both stay at zero and the stops move to `plan`"
+)
+
 #: The other half of what a contact point costs. `STOP_COUNT_CLAIM` is how often the work stopped;
 #: this is how long it stayed stopped, which `00-concept.md` names in the same breath and which
 #: nothing measured across every cycle until now.
@@ -395,6 +408,8 @@ def render(
     summary: Mapping[str, Mapping[str, float]],
     chain_stops: int | None = None,
     chain_stopped: Sequence[float] = (),
+    chain_causes: Mapping[str, int] | None = None,
+    chain_premises: Mapping[str, int] | None = None,
 ) -> str:
     """The figures, each beside the claim it tests.
 
@@ -404,6 +419,9 @@ def render(
     user-global — and both are printed *beside* the timed figures, never instead of them, because
     neither is the same quantity as the one it sits next to. See `_STOP_SOURCES` and
     `_STOP_TIME_SOURCES`.
+
+    `chain_causes` is the chained count by cause (`events.stop_causes`), largest first: a breakdown
+    of that one figure, which is why it is printed under it and sums to it.
     """
     # An empty store with a chain behind it is the case this figure was added for: a cycle run from
     # the terminal alone records no observation and still stopped for a human every time it did.
@@ -438,9 +456,22 @@ def render(
             lines.append(f"{'stops (timed, every arm)':<30} {stops:>5}")
         if chain_stops is not None:
             lines.append(f"{'stops (this repo, chained)':<30} {chain_stops:>5}")
+            for cause, count in sorted((chain_causes or {}).items(), key=lambda item: (-item[1], item[0])):
+                lines.append(f"{'  ' + cause:<30} {count:>5}")
         lines.append(f"  {STOP_COUNT_CLAIM}")
+        if chain_causes:
+            lines.append(f"  {STOP_CAUSE_CLAIM}")
         if stops and chain_stops is not None:
             lines.append(f"  {_STOP_SOURCES}")
+
+    # Falsified premises, split by whether a fallback was approved for them: the figure that tests
+    # whether planners state their premises at all.
+    if chain_premises and any(chain_premises.values()):
+        lines.append(
+            f"{'premises falsified':<30} {chain_premises.get('with_fallback', 0):>5} with a fallback, "
+            f"{chain_premises.get('without_fallback', 0)} without"
+        )
+        lines.append(f"  {PREMISE_CLAIM}")
 
     # The durations of those same chained stops. Printed under their own claim rather than folded
     # into `waited_seconds`: one is how long the work sat, the other is how long the decision sat,

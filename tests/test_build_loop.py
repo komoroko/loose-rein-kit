@@ -185,13 +185,6 @@ def test_an_unknown_adapter_is_refused_up_front() -> None:
         build_loop.Config.from_models(models.Config(config))
 
 
-def test_worktree_isolation_is_not_optional() -> None:
-    """Parallel leaves writing one tree is how two tasks' changes end up attributed to one
-    review, so there is no knob that turns it off."""
-    config = build_loop.Config.from_models(models.Config(make_config()))
-    assert config.worktree_enabled is True
-
-
 def test_the_integration_gate_is_not_a_knob() -> None:
     """Each leaf was green only in isolation, so a batch that merged two or more has never
     been verified as one tree — there is nothing to opt out of."""
@@ -256,7 +249,7 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
     launched: list[list[str]] = []
     monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
+    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
 
     assert launched, "the agent step never launched anything"
     assert tuple(launched[0][:3]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
@@ -280,7 +273,7 @@ def test_the_reviewer_is_granted_its_findings_file_and_nothing_else(
     launched: list[list[str]] = []
     monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
+    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
 
     assert "write(.rein/work/T-001.findings.json)" in launched[0], "the one file it is there to produce"
     assert "--allow-all-tools" not in launched[0], "the reviewer was launched able to change the code it judges"
@@ -302,7 +295,7 @@ def test_a_reviewer_on_a_read_only_cli_can_still_write_its_findings(
     launched: list[list[str]] = []
     monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
+    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
 
     assert "--sandbox" in launched[0] and "workspace-write" in launched[0]
 
@@ -326,7 +319,7 @@ def test_a_must_fix_finding_goes_to_the_implementer_and_the_reviewer_looks_again
         return 0, agent_output(cmd)
 
     monkeypatch.setattr(build_loop, "_run", fake_run)
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
+    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
 
     adapters = [cmd[0] for cmd in launched]
     assert adapters == ["codex", "claude", "codex"], (
@@ -345,7 +338,7 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
     monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, agent_output(cmd, "I had a good look, honestly")))
 
     with pytest.raises(common.StopLoop, match="wrote no findings file"):
-        orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root), "")
+        orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
 
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
@@ -511,7 +504,7 @@ def test_each_merged_leaf_records_its_own_merge_commit(tmp_path: Path, monkeypat
     _merging_batch(loop, monkeypatch)
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: tip())
 
-    loop._consume_parallel(tasks)
+    loop._consume_batch(tasks)
 
     assert recorded == {"T-001": "a" * 40, "T-002": "b" * 40, "T-003": "c" * 40}
 
@@ -569,7 +562,7 @@ def test_a_repaired_leaf_that_is_not_the_tip_keeps_its_own_merge_commit(
     # T-001 repairs; the fix is the branch tip afterwards, above T-002's merge.
     monkeypatch.setattr(loop, "_repair_warm_findings", lambda task, readout: task.id == "T-001" and tip())
 
-    loop._consume_parallel(tasks)
+    loop._consume_batch(tasks)
 
     assert done == {"T-001": ["a" * 40, "a" * 40], "T-002": ["b" * 40]}
 
@@ -594,7 +587,7 @@ def test_a_repaired_leaf_that_is_still_the_tip_records_the_repair(
     monkeypatch.setattr(loop, "merge_leaf", lambda t, branch: tip())
     monkeypatch.setattr(loop, "_repair_warm_findings", lambda t, readout: tip())
 
-    loop._consume_parallel([task])
+    loop._consume_batch([task])
 
     assert done == {"T-001": ["a" * 40, "c" * 40]}
 
@@ -622,55 +615,6 @@ def test_a_repair_re_points_the_task_evidence_at_the_tree_it_produced(
         {"name": "test", "reused": True},
         {"name": "review", "reused": False},
     ]
-
-
-def test_a_serial_task_records_the_repair_that_landed_on_top_of_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The serial half of the task-boundary repair, which nothing exercised: the unit tests
-    monkeypatch `_repair` and `_warm_reading` both, so the wiring that follows a repair with a
-    second status write was only ever read. On the work branch the repair *is* the tip and there
-    is no later leaf under it, so the new commit is the one recorded.
-    """
-    loop = orchestrator(tmp_path)
-    done: list[str] = []
-    tip = _tip(loop, monkeypatch, "a" * 40, "c" * 40)
-
-    monkeypatch.setattr(loop.ws, "head", lambda cwd="": "0" * 40)
-    monkeypatch.setattr(loop, "_run_task_to_done", lambda task, cwd, base: (True, ""))
-    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
-    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: tip())
-    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
-    monkeypatch.setattr(loop, "_repair_warm_findings", lambda task, readout: tip())
-    monkeypatch.setattr(
-        loop, "_set_status", lambda tid, status, commit="", **_: done.append(commit) if status == "done" else None
-    )
-
-    loop._consume_serial([dag.Task(id="T-001", title="foundation", kind="foundation")])
-
-    assert done == ["a" * 40, "c" * 40]
-
-
-def test_a_serial_task_with_nothing_to_repair_is_recorded_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The other side of it: no repair, no second write, and no reading is treated as a clean one."""
-    loop = orchestrator(tmp_path)
-    done: list[str] = []
-    tip = _tip(loop, monkeypatch, "a" * 40)
-
-    monkeypatch.setattr(loop.ws, "head", lambda cwd="": "0" * 40)
-    monkeypatch.setattr(loop, "_run_task_to_done", lambda task, cwd, base: (True, ""))
-    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
-    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
-    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: tip())
-    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
-    monkeypatch.setattr(
-        loop, "_set_status", lambda tid, status, commit="", **_: done.append(commit) if status == "done" else None
-    )
-
-    loop._consume_serial([dag.Task(id="T-001", title="foundation", kind="foundation")])
-
-    assert done == ["a" * 40]
 
 
 def test_a_repair_is_labelled_by_what_asked_for_it(
@@ -750,7 +694,7 @@ def test_a_leaf_gate_violation_blocks_without_merging(tmp_path: Path, monkeypatc
     monkeypatch.setattr(loop, "_escalate_gate_violation", lambda *a: escalated.append(a))
 
     with pytest.raises(common.StopLoop):
-        loop._consume_parallel([task])
+        loop._consume_batch([task])
 
     raw = store_mod.Store(loop.repo).read_raw("state")
     assert raw is not None and raw["tasks"]["T-002"]["status"] == "blocked"
@@ -1069,16 +1013,16 @@ def test_a_paths_scoped_step_is_skipped_when_the_diff_does_not_touch_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     loop = orchestrator(tmp_path, config=_paths_scoped_config())
-    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (["backend/app.py"], ""))
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd: (["backend/app.py"], ""))
     task = dag.Task(id="T-001", title="t", kind="parallel")
-    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf", base="")] == ["test"]
+    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf")] == ["test"]
 
 
 def test_a_paths_scoped_step_runs_when_the_diff_touches_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     loop = orchestrator(tmp_path, config=_paths_scoped_config())
-    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (["web/app.tsx"], ""))
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd: (["web/app.tsx"], ""))
     task = dag.Task(id="T-001", title="t", kind="parallel")
-    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf", base="")] == ["test", "web"]
+    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf")] == ["test", "web"]
 
 
 def test_paths_scoping_never_activates_without_a_cwd(tmp_path: Path) -> None:
@@ -1095,9 +1039,9 @@ def test_paths_scoping_runs_everything_when_the_diff_is_unresolved(
     """An empty diff (a fresh worktree, dry-run) must not read as an empty scope — that would
     silently skip a step nobody decided to skip."""
     loop = orchestrator(tmp_path, config=_paths_scoped_config())
-    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: ([], ""))
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd: ([], ""))
     task = dag.Task(id="T-001", title="t", kind="parallel")
-    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf", base="")] == ["test", "web"]
+    assert [s.name for s in loop._steps_for(task, cwd="/tmp/leaf")] == ["test", "web"]
 
 
 def test_gate_step_matches_paths_is_fnmatch_style(tmp_path: Path) -> None:
@@ -1116,13 +1060,13 @@ def test_a_gate_violation_is_caught_right_after_the_implementer_spending_no_retr
     loop = orchestrator(tmp_path)
     violations = [("docs/10-requirements.md", "gate 'requirements' is pending")]
     monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: None)
-    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (["docs/10-requirements.md"], ""))
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd: (["docs/10-requirements.md"], ""))
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: violations)
     monkeypatch.setattr(loop, "_run_pipeline", lambda *a, **k: pytest.fail("must not reach the pipeline"))  # noqa: ARG005
 
     task = dag.Task(id="T-001", title="base", kind="foundation")
     with pytest.raises(build_loop.GateViolationFault) as caught:
-        loop._run_task_to_done(task, cwd=str(tmp_path), base="a" * 40)
+        loop._run_task_to_done(task, cwd=str(tmp_path))
     assert caught.value.violations == violations
 
 
@@ -1635,27 +1579,29 @@ def launch_failing(result: tuple[int, str], record: list[list[str]] | None = Non
     return _run
 
 
-def test_a_serial_gate_violation_blocks_before_finalize(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_foundation_gate_violation_blocks_before_merge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A foundation task that edited a gate-guarded path is blocked and stops the run — caught
-    right after its implementer ran, not only at the old finalize-time check."""
+    right after its implementer ran, and never merged."""
     loop = orchestrator(tmp_path)
     violations = [("docs/10-requirements.md", "gate 'requirements' is pending")]
-
-    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "a" * 40)
 
     def _raise(*_a: object, **_k: object) -> tuple[bool, str]:
         raise build_loop.GateViolationFault(violations)
 
+    _merging_batch(loop, monkeypatch)
+    monkeypatch.setattr(loop, "_safe_run_task", loop.__class__._safe_run_task.__get__(loop))
     monkeypatch.setattr(loop, "_run_task_to_done", _raise)
+    monkeypatch.setattr(loop.ws, "cleanup_worktree", lambda task_id: None)
+    monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: pytest.fail("a violation must not merge"))
     escalated: list[tuple[object, ...]] = []
     monkeypatch.setattr(loop, "_escalate_gate_violation", lambda *a: escalated.append(a))
 
     with pytest.raises(common.StopLoop):
-        loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
+        loop._consume_batch([dag.Task(id="T-001", title="base", kind="foundation")])
 
     raw = store_mod.Store(loop.repo).read_raw("state")
     assert raw is not None and raw["tasks"]["T-001"]["status"] == "blocked"
-    assert escalated == [("T-001", "its work-branch changes (caught before finalize)", violations)]
+    assert escalated == [("T-001", "its worktree changes (caught before merge)", violations)]
 
 
 def test_a_launch_the_machine_failed_leaves_the_task_where_it_found_it(
@@ -1670,7 +1616,7 @@ def test_a_launch_the_machine_failed_leaves_the_task_where_it_found_it(
     monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT))
 
     with pytest.raises(build_loop.EnvironmentFault):
-        loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
+        loop._consume_batch([dag.Task(id="T-001", title="base", kind="foundation")])
 
     raw = store_mod.Store(loop.repo).read_raw("state")
     assert raw is not None
@@ -1695,7 +1641,7 @@ def test_a_launch_the_machine_failed_still_says_why(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT))
 
     with pytest.raises(build_loop.EnvironmentFault):
-        loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
+        loop._consume_batch([dag.Task(id="T-001", title="base", kind="foundation")])
 
     raw = store_mod.Store(loop.repo).read_raw("state")
     assert raw is not None
@@ -1713,7 +1659,7 @@ def test_a_launch_failure_writes_no_verdict_into_the_chain(tmp_path: Path, monke
     monkeypatch.setattr(build_loop, "_run", launch_failing(SESSION_LIMIT))
 
     with pytest.raises(build_loop.EnvironmentFault) as caught:
-        loop._consume_serial([dag.Task(id="T-001", title="base", kind="foundation")])
+        loop._consume_batch([dag.Task(id="T-001", title="base", kind="foundation")])
     loop._record_abort(caught.value)
 
     recorded = [e.event for e in store_mod.Store(loop.repo).read_events()]
@@ -1880,7 +1826,7 @@ def test_a_stopped_leaf_keeps_its_worktree_while_its_batchmates_still_merge(
     monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "a" * 40)
 
     with pytest.raises(build_loop.EnvironmentFault):
-        loop._consume_parallel(tasks)
+        loop._consume_batch(tasks)
 
     assert merged == ["T-001"]
     assert ("T-001", "done") in statuses
@@ -1911,7 +1857,7 @@ def test_a_real_verdict_outranks_a_machine_fault_in_the_same_batch(
     monkeypatch.setattr(loop, "_cleanup_worktree", lambda task: None)
 
     with pytest.raises(build_loop.StopLoop) as caught:
-        loop._consume_parallel(tasks)
+        loop._consume_batch(tasks)
     assert caught.value.code == common.EXIT_HUMAN_NEEDED
     recorded = [e.event for e in store_mod.Store(loop.repo).read_events()]
     assert "run_aborted" in recorded
@@ -2139,7 +2085,7 @@ def test_a_launch_counts_what_it_was_told_to_read_not_only_what_was_sent(
     ticket = tmp_path / "docs" / "tasks" / "T-001.md"
     ticket.write_text("x" * 4096, encoding="utf-8")
 
-    loop._write_dossier(task, str(tmp_path), base="", role="implementer")
+    loop._write_dossier(task, str(tmp_path), role="implementer")
     handed = loop.spend_totals()["implementer"]["handed_bytes"]
     # The dossier itself plus the ticket it names — the ticket alone is already larger than any
     # prompt this loop composes, which is the asymmetry the second counter exists to show.
@@ -2576,7 +2522,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     statuses: dict[str, str] = {}
     monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: statuses.update({tid: status}))
 
-    loop._consume_parallel(tasks)
+    loop._consume_batch(tasks)
 
     assert gated == [["T-001", "T-003"]]
     # Left out of the join, not out of the record: it passed its gate and merged like the others.
@@ -2615,7 +2561,7 @@ def test_a_red_join_is_taken_off_the_branch_and_its_tasks_carry_the_failure(
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
 
     with pytest.raises(build_loop.StopLoop):
-        loop._consume_parallel(tasks)
+        loop._consume_batch(tasks)
 
     assert seen["taken_off"] == ["e" * 40]
     assert seen["status"] == {"T-001": "blocked", "T-002": "blocked"}
@@ -2637,7 +2583,7 @@ def test_a_join_the_machine_stopped_is_taken_off_and_its_tasks_go_back_to_todo(
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
 
     with pytest.raises(faults.EnvironmentFault):
-        loop._consume_parallel(tasks)
+        loop._consume_batch(tasks)
 
     assert seen["taken_off"] == ["e" * 40]
     assert seen["status"] == {"T-001": "todo", "T-002": "todo"}
@@ -2661,7 +2607,7 @@ def test_a_leaf_on_its_slice_is_recorded_when_the_machine_stops_the_join(
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
 
     with pytest.raises(faults.EnvironmentFault):
-        loop._consume_parallel(tasks)
+        loop._consume_batch(tasks)
 
     assert seen["status"] == {"T-001": "todo", "T-002": "done", "T-003": "todo"}
 
@@ -2681,7 +2627,7 @@ def test_a_join_whose_gate_stopped_short_of_green_is_taken_off_like_a_red_one(
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
 
     with pytest.raises(build_loop.StopLoop, match="Human intervention"):
-        loop._consume_parallel(tasks)
+        loop._consume_batch(tasks)
 
     assert seen["taken_off"] == ["e" * 40]
     assert seen["status"] == {"T-001": "blocked", "T-002": "blocked"}
@@ -2708,7 +2654,7 @@ def test_a_join_git_would_not_take_off_blocks_its_tasks_and_names_the_reset(
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2, 3)]
 
     with pytest.raises(build_loop.StopLoop, match="Human intervention"):
-        loop._consume_parallel(tasks)
+        loop._consume_batch(tasks)
 
     assert seen["status"] == {"T-001": "blocked", "T-002": "blocked", "T-003": "done"}
     assert seen["notes"]["T-001"]["escalation"]["kind"] == "join_stuck"
@@ -2771,7 +2717,7 @@ def test_the_review_step_is_told_the_scope_it_actually_has(tmp_path: Path, monke
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     task = dag.Task(id="T-002", title="leaf", kind="parallel")
 
-    _, command = loop._review_scope(task, cwd=str(tmp_path / "leaf"), base="")
+    _, command = loop._review_scope(task, cwd=str(tmp_path / "leaf"))
 
     assert command == "git diff build/x-pr-c1-02-T-002...HEAD"
 
@@ -3046,7 +2992,7 @@ def _controlled(
     from rein import build_git as _build_git
 
     ran: list[str] = []
-    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd, base: (changed, ""))
+    monkeypatch.setattr(loop, "_review_scope", lambda task, cwd: (changed, ""))
     monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
     monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "diff --git a/t b/t\n")
     monkeypatch.setattr(build_loop, "_run", lambda cmd, cwd=None, timeout=None: (apply_rc, "does not apply"))
@@ -3083,7 +3029,7 @@ def test_a_dod_that_is_green_without_the_change_does_not_let_the_task_land(
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
 
     # A leaf worktree, so the base is the commit it forked off rather than the caller's.
-    failed, message = loop._negative_control(_task(), str(tmp_path / "wt"), "", _cmd_steps())
+    failed, message = loop._negative_control(_task(), str(tmp_path / "wt"), _cmd_steps())
 
     assert failed == build_loop.NEGATIVE_CONTROL
     assert "green without your change" in message
@@ -3100,9 +3046,9 @@ def test_a_step_that_goes_red_without_the_change_is_what_makes_the_control_a_pas
     loop = orchestrator(tmp_path)
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"], reds={"test": "test_x.py::t FAILED"})
 
-    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert loop._negative_control(_task(), str(tmp_path / "wt"), _cmd_steps()) == (None, "")
     assert ran == ["test"]
-    assert loop._current_control == {"result": "discriminating", "base": "a" * 40, "step": "test"}
+    assert loop._current_control == {"result": "discriminating", "base": "b" * 40, "step": "test"}
 
 
 def test_a_linter_going_red_without_the_change_is_not_taken_as_the_control(
@@ -3114,7 +3060,7 @@ def test_a_linter_going_red_without_the_change_is_not_taken_as_the_control(
     loop = orchestrator(tmp_path)
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"], reds={"check": "F401 unresolved"})
 
-    failed, _ = loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps())
+    failed, _ = loop._negative_control(_task(), str(tmp_path / "wt"), _cmd_steps())
 
     assert failed == build_loop.NEGATIVE_CONTROL
     assert ran == ["test"]
@@ -3129,7 +3075,7 @@ def test_a_task_that_changed_no_test_is_recorded_rather_than_passed_or_blocked(
     loop = orchestrator(tmp_path)
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "README.md"])
 
-    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert loop._negative_control(_task(), str(tmp_path / "wt"), _cmd_steps()) == (None, "")
     assert ran == []
     assert loop._current_control["result"] == "no_tests_changed"
 
@@ -3145,7 +3091,7 @@ def test_a_change_made_only_of_test_paths_has_no_control_to_take(
         loop, monkeypatch, changed=["docs/test/measurements/run.md", "tests/measurements/test_run_logs.py"]
     )
 
-    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert loop._negative_control(_task(), str(tmp_path / "wt"), _cmd_steps()) == (None, "")
     assert ran == []
     assert loop._current_control["result"] == "undetermined"
     assert "no contrast" in loop._current_control["detail"]
@@ -3159,7 +3105,7 @@ def test_a_control_that_could_not_be_set_up_is_undetermined_and_never_a_pass(
     loop = orchestrator(tmp_path)
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"], apply_rc=1)
 
-    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert loop._negative_control(_task(), str(tmp_path / "wt"), _cmd_steps()) == (None, "")
     assert ran == []
     assert loop._current_control["result"] == "undetermined"
     assert "did not apply" in loop._current_control["detail"]
@@ -3175,7 +3121,7 @@ def test_a_dod_with_no_command_step_records_that_it_could_not_be_controlled(
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
     agents_only = (build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),)
 
-    assert loop._negative_control(_task(), str(loop.root), "a" * 40, agents_only) == (None, "")
+    assert loop._negative_control(_task(), str(tmp_path / "wt"), agents_only) == (None, "")
     assert ran == []
     assert loop._current_control["result"] == "undetermined"
     assert "declares `runs_tests`" in loop._current_control["detail"]
@@ -3190,7 +3136,7 @@ def test_a_diff_git_would_not_give_up_is_not_reported_as_an_empty_test_half(
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
     monkeypatch.setattr(loop.ws, "diff_from", lambda *a, **k: None)
 
-    assert loop._negative_control(_task(), str(loop.root), "a" * 40, _cmd_steps()) == (None, "")
+    assert loop._negative_control(_task(), str(tmp_path / "wt"), _cmd_steps()) == (None, "")
     assert ran == []
     assert loop._current_control["result"] == "undetermined"
     assert "could not be read out of git" in loop._current_control["detail"]
@@ -3210,7 +3156,7 @@ def test_a_control_failure_spends_a_send_back_rather_than_ending_the_task(
     launched: list[str] = []
     monkeypatch.setattr(loop, "_invoke_implementer", lambda task, cwd, failure_log, **k: launched.append(failure_log))
     monkeypatch.setattr(
-        loop, "_run_pipeline", lambda task, cwd, base="": (build_loop.NEGATIVE_CONTROL, "green without your change")
+        loop, "_run_pipeline", lambda task, cwd: (build_loop.NEGATIVE_CONTROL, "green without your change")
     )
 
     ok, _ = loop._run_task_to_done(_task(), str(tmp_path))
@@ -3230,7 +3176,7 @@ def test_a_verdict_with_no_send_back_budget_is_a_failure_and_not_a_silent_zero(
     monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
     monkeypatch.setattr(loop, "_check_implementer_output", lambda *a, **k: ("", ""))
     monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: None)
-    monkeypatch.setattr(loop, "_run_pipeline", lambda task, cwd, base="": ("a-verdict-nobody-seeded", "x"))
+    monkeypatch.setattr(loop, "_run_pipeline", lambda task, cwd: ("a-verdict-nobody-seeded", "x"))
 
     with pytest.raises(common.ReinError, match="no retry budget is registered"):
         loop._run_task_to_done(_task(), str(tmp_path))
@@ -3251,7 +3197,7 @@ def test_the_control_runs_only_the_command_steps_that_actually_passed(
         build_loop.GateStep(name="test", kind="command", command=("make", "test"), runs_tests=True),
     )
 
-    loop._negative_control(_task(), str(loop.root), "a" * 40, passed)
+    loop._negative_control(_task(), str(tmp_path / "wt"), passed)
     assert ran == ["test"]
 
 
@@ -3309,7 +3255,7 @@ def test_a_broken_negative_control_is_undetermined_and_not_an_abort(
     monkeypatch.setattr(common, "run", fake_git())
     task = dag.Task(id="T-001", title="t", kind="parallel")
     step = build_loop.GateStep(name="test", kind="command", command=("true",), runs_tests=True)
-    monkeypatch.setattr(loop, "_review_scope", lambda t, cwd, base: (["src/x.py", "tests/test_x.py"], "git diff"))
+    monkeypatch.setattr(loop, "_review_scope", lambda t, cwd: (["src/x.py", "tests/test_x.py"], "git diff"))
     monkeypatch.setattr(loop.ws, "fork_point", lambda ref, cwd: "b" * 40)
     monkeypatch.setattr(loop.ws, "diff_from", lambda base, cwd, paths: "--- a\n+++ b\n")
 
@@ -3317,7 +3263,7 @@ def test_a_broken_negative_control_is_undetermined_and_not_an_abort(
         raise faults.EnvironmentFault(faults.Fault.ENV_PERMANENT, where="control", rc=1, output="no container")
 
     monkeypatch.setattr(build_git, "scratch_worktree", explode)
-    failed, log = loop._negative_control(task, str(tmp_path), "a" * 40, [step])
+    failed, log = loop._negative_control(task, str(tmp_path), [step])
 
     assert (failed, log) == (None, ""), "the task's own green stands; only the experiment failed"
     assert loop._current_control["result"] == "undetermined"
@@ -3774,8 +3720,8 @@ def test_the_build_stops_in_front_of_an_unapproved_irreversible_task(
     exists to prevent. The loop hands back to the human with the command that moves it."""
     loop = _irreversible_repo(tmp_path, approved=False)
     ran: list[str] = []
-    monkeypatch.setattr(loop, "_consume_serial", lambda tasks: ran.extend(t.id for t in tasks))
-    monkeypatch.setattr(loop, "_consume_parallel", lambda tasks: ran.extend(t.id for t in tasks))
+    monkeypatch.setattr(loop, "_consume_batch", lambda tasks: ran.extend(t.id for t in tasks))
+    monkeypatch.setattr(loop, "_consume_batch", lambda tasks: ran.extend(t.id for t in tasks))
 
     assert loop._consume() == common.EXIT_HUMAN_NEEDED
     assert ran == []
@@ -3793,7 +3739,7 @@ def test_the_stop_at_a_contact_point_is_presented_and_not_escalated(
     `events.stops` counts the stop twice — once here and once when `gate_approved` lands.
     """
     loop = _irreversible_repo(tmp_path, approved=False)
-    monkeypatch.setattr(loop, "_consume_serial", lambda tasks: None)
+    monkeypatch.setattr(loop, "_consume_batch", lambda tasks: None)
 
     assert loop._consume() == common.EXIT_HUMAN_NEEDED
     assert [e.event for e in store_mod.Store(loop.repo).read_events() if e.event == "knowledge_gap"] == []
@@ -3837,8 +3783,8 @@ def test_a_contact_point_stops_its_own_task_and_not_the_work_beside_it(
             ran.append(task.id)
             loop._set_status(task.id, "done")
 
-    monkeypatch.setattr(loop, "_consume_serial", finish)
-    monkeypatch.setattr(loop, "_consume_parallel", finish)
+    monkeypatch.setattr(loop, "_consume_batch", finish)
+    monkeypatch.setattr(loop, "_consume_batch", finish)
     monkeypatch.setattr(loop, "_load_baseline", lambda: None)
 
     assert loop._consume() == common.EXIT_HUMAN_NEEDED
@@ -3860,7 +3806,7 @@ def test_an_approved_irreversible_task_runs_like_any_other(tmp_path: Path, monke
         ran.extend(t.id for t in tasks)
         raise common.StopLoop("enough", common.EXIT_DONE)
 
-    monkeypatch.setattr(loop, "_consume_serial", dispatched)
+    monkeypatch.setattr(loop, "_consume_batch", dispatched)
     monkeypatch.setattr(loop, "_load_baseline", lambda: None)
 
     with pytest.raises(common.StopLoop):

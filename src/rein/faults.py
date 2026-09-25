@@ -151,7 +151,7 @@ class Fault(enum.Enum):
         return self is not Fault.CONTENT
 
 
-def _killed_externally(rc: int) -> bool:
+def killed_externally(rc: int) -> bool:
     """Was the process ended by one of :data:`_EXTERNAL_SIGNALS`?
 
     Both spellings count. `subprocess` reports a signal death as a negative returncode, while a
@@ -195,7 +195,7 @@ def classify_step(rc: int, output: str) -> Fault:
     baked into the pinned image — waiting does not help, unlike a launch's capacity limit.
 
     A step killed from outside is ENV_TRANSIENT, and this is the reading that was missing:
-    :func:`_killed_externally` existed for a reported rc=143 in the field and nothing consulted
+    :func:`killed_externally` existed for a reported rc=143 in the field and nothing consulted
     it, so a supervisor's SIGTERM and a closing terminal charged the step's retry budget and were
     recorded as facts about the code.
 
@@ -210,7 +210,7 @@ def classify_step(rc: int, output: str) -> Fault:
         raise ValueError("classify_step is for a failed step (rc != 0)")
     if _unlaunchable(rc, output) or is_network_unreachable(output) or is_sandbox_oom(output):
         return Fault.ENV_PERMANENT
-    if _killed_externally(rc):
+    if killed_externally(rc):
         return Fault.ENV_TRANSIENT
     return Fault.CONTENT
 
@@ -364,7 +364,7 @@ class EnvironmentFault(Exception):
         """One console-ready paragraph: what failed, why, and what the reader should do."""
         reset = reset_hint(self.output)
         network = is_network_unreachable(self.output)
-        killed = _killed_externally(self.rc)
+        killed = killed_externally(self.rc)
         if is_capacity(self.output):
             cause = "agent capacity"
         elif killed:

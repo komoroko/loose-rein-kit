@@ -84,7 +84,9 @@ ongoing repo repeats the lifecycle as **delta cycles**, closed with `rein cycle-
 a relaxed acceptance criterion — goes through `/revise` or the next cycle, never silently. So does
 re-cutting the tasks, because a task's acceptance criteria are in the plan with them: the freeze is
 `plan.yaml` whole.** What needs nobody is the *order* — consuming the DAG, reordering what the
-dependencies allow, re-running what went red.
+dependencies allow, re-running what went red, and adding a dependency edge the plan missed
+(`rein task order T-NNN --after T-MMM --reason "…"`, written beside the frozen plan and listed at
+acceptance).
 
 ## Single Source of Truth (SSOT)
 

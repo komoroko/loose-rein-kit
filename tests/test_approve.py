@@ -996,7 +996,14 @@ def test_the_naming_layer_is_the_mandate_s_alone(tmp_path: Path) -> None:
         plan=make_plan(decisions=[make_decision("D-001")]),
     )
 
-    empty: approve.Naming = {"unasked": [], "overrule_cost": approve.OVERRULE_COST, "lenses": [], "crossing": []}
+    empty: approve.Naming = {
+        "unasked": [],
+        "overrule_cost": approve.OVERRULE_COST,
+        "lenses": [],
+        "crossing": [],
+        "undeclared": [],
+        "delta": [],
+    }
     assert approve.naming(repo, "acceptance") == empty
 
 
@@ -1088,11 +1095,27 @@ def test_every_list_the_naming_layer_carries_reaches_the_terminal(
         tmp_path,
         state=make_state(gates=PENDING_ALL, plan_status="draft"),
         plan=make_plan(
-            tasks=[_crossing_task("T-001")],
+            tasks=[
+                _crossing_task("T-001"),
+                # A criterion naming no path, so the `undeclared` list has a row to carry.
+                make_task(
+                    "T-002", kind="parallel", claim_ids=["C-001"], acceptance=[{"id": "A-1", "statement": "fast"}]
+                ),
+            ],
             decisions=[make_decision("D-001")],
             lenses=[{"id": "L-CODE-CONCURRENCY", "stage": "code", "status": "proposed"}],
         ),
     )
+    # An earlier approval of some other plan, so the `delta` list has a row to carry.
+    from rein import store as store_mod
+
+    with store_mod.Store(repo).transaction() as tx:
+        tx.append(
+            "gate_approved",
+            cycle_id="demo-cycle",
+            subject_ids=["mandate", "GA-MANDATE-0"],
+            detail={"plan_digest": "sha256:" + "0" * 64},
+        )
     monkeypatch.setattr("sys.stdin", _Tty("y\n"))
 
     approve.confirm_locally(repo, "mandate", {"plan": "sha256:0"})

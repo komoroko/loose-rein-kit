@@ -90,6 +90,95 @@ def stops(events: Sequence[models.Event]) -> int:
     return gates + len(open_conditions(events, task_outcomes(events)))
 
 
+#: Why a stop reached a person, keyed by what the path that recorded it wrote down: the gate
+#: events by their name, every other stop by the `kind` its record carries (an escalation's own
+#: vocabulary) or, for a status write, the escalation the handoff held. Nothing here reads prose.
+#:
+#: The causes are the ones a stop can be argued away by: a precondition a probe could have found
+#: before a launch was paid for, a premise nobody had measured, a plan whose structure contradicted
+#: itself, an attribution that charged a task with somebody else's red — and, against those, the
+#: stops that need a person by construction: a decision, or an observation only a person can
+#: make. Counting them apart is what can falsify the claim that a change to one of the others made
+#: the work stop less.
+STOP_CAUSE_BY_EVENT: Mapping[str, str] = {
+    "gate_approved": "decision",
+    "changes_requested": "decision",
+    "expert_requested": "decision",
+    "plan_invalidated": "plan",
+    "review_failed": "machine",
+    "actual_extraction_failed": "machine",
+}
+
+STOP_CAUSE_BY_KIND: Mapping[str, str] = {
+    "awaiting_operator": "precondition",
+    "awaiting_evidence": "observation",
+    "premise_falsified": "premise",
+    "agent_needs_revision": "plan",
+    "scope_violation": "plan",
+    "owned_red": "attribution",
+    "gate_violation": "boundary",
+    "merge_conflict": "integration",
+    "integration_red": "integration",
+    "join_stuck": "integration",
+    "blocked": "code",
+    "agent_blocked": "code",
+    "no_implementation": "code",
+    "report_mismatch": "code",
+    "cost_ceiling": "cost",
+    "no_runnable": "aggregate",
+}
+
+#: The cause of a stop whose record names none this table knows. Counted as itself and never folded
+#: into another cause: a stop moved into a neighbouring column would argue for a change it says
+#: nothing about.
+UNCLASSIFIED = "unclassified"
+
+
+def stop_cause(event: models.Event) -> str:
+    """The cause of one stop, read off the record the path that stopped wrote."""
+    if event.event in STOP_CAUSE_BY_EVENT:
+        return STOP_CAUSE_BY_EVENT[event.event]
+    detail = event.detail if isinstance(event.detail, Mapping) else {}
+    for key in ("kind", "escalation"):
+        named = detail.get(key)
+        if isinstance(named, str) and named in STOP_CAUSE_BY_KIND:
+            return STOP_CAUSE_BY_KIND[named]
+    if event.event == "task_failed" and isinstance(detail.get("step"), str):
+        return "code"  # a quality-gate step went red and its budget ran out
+    return UNCLASSIFIED
+
+
+def stop_causes(events: Sequence[models.Event]) -> dict[str, int]:
+    """The stops :func:`stops` counts, by cause. The values always sum to :func:`stops`.
+
+    A breakdown of the one count, never a second way of counting: the same gate events and the same
+    open conditions, each asked once why it reached a person. Never a ceiling, for the reason
+    `stops` gives.
+    """
+    causes: dict[str, int] = {}
+    stopped = [e for e in events if e.event in GATE_STOP_EVENTS]
+    stopped += [e for e, _ in open_conditions(events, task_outcomes(events))]
+    for event in stopped:
+        cause = stop_cause(event)
+        causes[cause] = causes.get(cause, 0) + 1
+    return causes
+
+
+def premise_outcomes(events: Sequence[models.Event]) -> dict[str, int]:
+    """Premises observed false, split by whether the plan had approved a fallback for them.
+
+    The figure the premise rule rests on: a falsified premise with a fallback cost no stop, one
+    without cost a person. If planners do not state their premises, both stay at zero while the
+    stops they would have prevented show up as `plan` instead.
+    """
+    counts = {"with_fallback": 0, "without_fallback": 0}
+    for event in events:
+        detail = event.detail if isinstance(event.detail, Mapping) else {}
+        if event.event == "decision_declared" and detail.get("kind") == "premise_falsified":
+            counts["with_fallback" if detail.get("fallback") else "without_fallback"] += 1
+    return counts
+
+
 def stop_durations(events: Sequence[models.Event]) -> list[float]:
     """How long each gate stop held the work, in seconds, read off the chain's own order.
 

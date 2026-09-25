@@ -173,6 +173,10 @@
             "description": "This step runs the test suite, so its going red is what a test failing looks like. The negative control re-establishes only these steps over the base with the task's test half applied: a linter or type checker goes red there for every new test file that imports a module the base does not have — a body of `pass` included — so a red from one of them says nothing about whether any test exercises the change. With no step declaring it, the control is recorded as undetermined rather than taken.",
             "type": "boolean"
           },
+          "junit": {
+            "description": "Where this step's command writes a JUnit XML report, relative to the checkout it runs in (for pytest, `--junitxml=` the same path; a path under `.rein/` stays out of every diff). With it, a red is read per failing test rather than per step: a test that passes on an immediate re-run of the same tree is recorded as flaky and does not stop the task, and a test that was already red on the tree the change forked from is routed to the task whose scope holds it instead of being charged to the task under test. Only a `runs_tests` step reads it.",
+            "$ref": "#/$defs/repoPath"
+          },
           "paths": {
             "description": "Glob patterns (fnmatch-style: `*` matches any run of characters, including `/`) restricting this step to tasks whose changed files match at least one. Absent or empty: every task runs it — the default, and the only knob here, frozen with the mandate like the rest of config.yaml, never something a task's own ticket sets.",
             "type": "array",

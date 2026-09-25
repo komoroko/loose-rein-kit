@@ -98,6 +98,7 @@ from rein import (
 from rein import (
     findings as findings_mod,
 )
+from rein import junit as junit_mod
 from rein import (
     repair as repair_mod,
 )
@@ -147,6 +148,10 @@ SEND_BACK_RETRIES = 1
 #: A scope violation is one by construction: its own message says the way forward is a
 #: human re-approving a wider scope.
 _PLAN_DEFECT_KINDS = frozenset({"agent_needs_revision", "scope_violation"})
+
+#: How many failing test ids a record carries. The report can hold thousands; the record is an
+#: index into it, not a copy.
+_NODES_SHOWN = 50
 
 StopLoop = common.StopLoop
 EnvironmentFault = faults.EnvironmentFault
@@ -266,6 +271,9 @@ class GateStep:
     stage: str = "both"
     #: This step runs the tests — the only kind of step the negative control re-establishes.
     runs_tests: bool = False
+    #: Where the step writes a JUnit XML report, relative to its checkout ("": it does not). What
+    #: lets a red be read per failing test instead of per step (`Orchestrator._attribute_red`).
+    junit: str = ""
 
     @property
     def runnable(self) -> bool:
@@ -287,7 +295,6 @@ class Config:
 
     raw: models.Config
     max_parallel: int
-    worktree_enabled: bool
     worktree_dir: str
     branch_pattern: str
     steps: tuple[GateStep, ...]
@@ -329,6 +336,7 @@ class Config:
                 paths=step.paths,
                 stage=step.stage,
                 runs_tests=step.runs_tests,
+                junit=step.junit,
             )
             for step in config.quality_gate
         )
@@ -336,9 +344,6 @@ class Config:
         return cls(
             raw=config,
             max_parallel=max(1, config.max_parallel),
-            # Not optional: parallel leaves writing one tree is how two tasks' changes end up
-            # attributed to one review.
-            worktree_enabled=True,
             worktree_dir=config.worktree_dir,
             # `-` (not `/`) between branch and task: git forbids a branch that is a path-prefix of
             # another ref ("work" + "work/T-001" cannot coexist), so a slash pattern always fails.
@@ -359,6 +364,26 @@ class Config:
         if config is None:
             raise ValueError(f"no {repo.config} — run `rein init` first")
         return cls.from_models(config)
+
+
+def render_owed(graph: dag.Graph, owed: Mapping[str, Sequence[str]]) -> str:
+    """One block per task: its id and title, then each thing a person owes it."""
+    return "\n".join(
+        f"  {task_id}  {graph.get(task_id).title}\n" + "\n".join(f"      - {line}" for line in lines)
+        for task_id, lines in owed.items()
+    )
+
+
+def owed_by_people(repo: repo_mod.Repo) -> str:
+    """Everything a person owes the plan as it stands, rendered; "" when nothing is owed.
+
+    For `rein approve mandate`, the other moment the whole list is worth asking for: the plan has
+    just frozen, and a person can prepare everything in one sitting before the first launch.
+    """
+    loop = Orchestrator(Config.load(repo), dry_run=False, repo=repo)
+    graph = dag.load(repo)
+    owed = loop.owed_everywhere(graph)
+    return render_owed(graph, owed) if owed else ""
 
 
 # --- the build lock -----------------------------------------------------------
@@ -390,8 +415,6 @@ def set_task_status(
     commit: str = "",
     evidence: Mapping[str, Any] | None = None,
     handoff: Mapping[str, Any] | None = None,
-    base: str = "",
-    release_base: bool = False,
 ) -> None:
     """Write one task's status and the event that explains it, in one transaction.
 
@@ -403,12 +426,6 @@ def set_task_status(
     reached on and the gate steps established green against it. It is written in this same
     transaction rather than a later one, so there is no window in which a task is done and
     nothing says on what.
-
-    `base` is where a serial task's work began (`Orchestrator._serial_base`). Pinned by the
-    first `in-progress` that carries one and kept while that work is on the branch unlanded —
-    `blocked` included, since the attempt's commits stay there — then dropped with
-    `done`/`awaiting-evidence`, when the work it bounds has become the branch, or by
-    `release_base` when nothing of it is left on the branch (`Orchestrator._set_status`).
 
     `handoff` is a diagnostic patch riding along — what the last agent launch said, or the fault
     that stopped it. It travels with a status write rather than getting a write of its own,
@@ -428,8 +445,6 @@ def set_task_status(
             commit=commit,
             evidence=evidence or {},
             handoff=handoff or {},
-            base=base,
-            release_base=release_base,
         )
     )
 
@@ -469,8 +484,6 @@ def _set_task_status_once(
     commit: str,
     evidence: Mapping[str, Any],
     handoff: Mapping[str, Any],
-    base: str,
-    release_base: bool,
 ) -> None:
     store = store_mod.Store(repo)
     state = store.read_state()
@@ -486,12 +499,7 @@ def _set_task_status_once(
     if status == "in-progress":
         attempts += 1
     merged = {**entry, "status": status, "attempts": attempts, "note": note, "completed_commit": landed}
-    if status == "in-progress" and _COMMIT_RE.match(base) and not entry.get("base"):
-        merged["base"] = base
-    if release_base:
-        merged.pop("base", None)
     if status in {"done", "awaiting-evidence"}:
-        merged.pop("base", None)
         # Both mean the same thing about the code — the whole DoD was established against this
         # tree — and differ only in whether an observation nobody here could make is outstanding.
         # So both carry the record, and a promotion from one to the other keeps the one already
@@ -674,6 +682,39 @@ def record_escalation(
     update_task_handoff(repo, task_id, patch, event="knowledge_gap", detail=detail)
 
 
+def record_premise(
+    repo: repo_mod.Repo, premise_id: str, *, held: bool, output: str, fallback: bool, park: Sequence[str]
+) -> None:
+    """Record what a premise's probe observed, and park the tasks a falsified one leaves unfinishable.
+
+    One transaction: the observation, the tasks it sends back (only when there is no approved
+    fallback, and only the ones whose criteria rest on it), and the event. A falsified premise
+    with a fallback parks nothing — `dag.join` swaps the criteria and the work goes on.
+    """
+    store = store_mod.Store(repo)
+    state = store.read_state()
+    if state is None:
+        raise StopLoop("no .rein/state.yaml to record a premise in")
+    seen = store_mod.read_digest(state)
+    raw = json.loads(json.dumps(state.raw))
+    raw.setdefault("premises", {})[premise_id] = {
+        "status": "held" if held else "falsified",
+        "observed_at": event_chain.now_iso(),
+        "output": output[-500:],
+    }
+    tasks = raw.setdefault("tasks", {})
+    for task_id in park:
+        entry = tasks.get(task_id) if isinstance(tasks.get(task_id), dict) else {}
+        tasks[task_id] = {**entry, "status": "needs-revision"}
+    raw["updated_at"] = event_chain.now_iso()
+    detail: dict[str, Any] = {"kind": "premise_held" if held else "premise_falsified", "premise": premise_id}
+    if not held:
+        detail["fallback"] = fallback
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[premise_id, *park], detail=detail)
+
+
 def record_salvage(repo: repo_mod.Repo, task_id: str, *, branch: str, salvage_state: str) -> None:
     """Note where an interrupted attempt's work went, and whether the next one picked it up."""
     patch = {"salvage_branch": branch[:_HANDOFF_BRANCH_MAX], "salvage_state": salvage_state}
@@ -772,7 +813,7 @@ def plan_batch(graph: dag.Graph, max_parallel: int) -> tuple[str, list[dag.Task]
 
 
 class GateViolationFault(Exception):
-    """An attempt edited a gate-guarded path while its prerequisite gate is still pending.
+    """An attempt changed a path the gate guard refuses to let a task land.
 
     Raised as soon as `_run_task_to_done` sees it — right after the implementer runs, inside the
     retry loop — rather than waiting for the finalize/merge-stage check that already existed to
@@ -783,7 +824,7 @@ class GateViolationFault(Exception):
 
     def __init__(self, violations: list[tuple[str, str]]) -> None:
         self.violations = violations
-        super().__init__(f"{len(violations)} gate-guarded path(s) changed while the gate is pending")
+        super().__init__(f"{len(violations)} path(s) the gate guard refuses were changed")
 
 
 @dataclass(frozen=True)
@@ -1071,21 +1112,12 @@ class Orchestrator:
         with self._evidence_lock:
             return self._pending_diagnostics.pop(task_id, {})
 
-    def _set_status(self, task_id: str, status: str, *, commit: str = "", base: str = "") -> None:
-        """Record a status; a serial task that stops short of landing with nothing of its work left
-        on the branch gives up its pinned base in the same write.
-
-        A pinned base is kept because the task's unlanded commits are on the work branch, and
-        while they are nothing else may land on top of them (`_task_holding_branch`). An attempt
-        that stopped having left nothing — no commit, no dirty path — holds nothing, and keeping
-        its base would both stop every other task and, once one landed, charge that task's work
-        to this one's next attempt.
-        """
+    def _set_status(self, task_id: str, status: str, *, commit: str = "") -> None:
+        """Record a status, with the evidence and diagnostics this run holds for the task."""
         if self.dry_run:
             self._sim_status[task_id] = status
             print(f"    [dry-run] {task_id} → {status}")
             return
-        release = status not in {"in-progress", "done", "awaiting-evidence"} and self._left_nothing(task_id)
         set_task_status(
             self.repo,
             task_id,
@@ -1093,77 +1125,7 @@ class Orchestrator:
             commit=commit,
             evidence=self._evidence.get(task_id, {}),
             handoff=self._take_diagnostics(task_id),
-            base=base,
-            release_base=release,
         )
-
-    def _pinned_base(self, task_id: str) -> str:
-        """The commit a serial task's unlanded work began on (`state.tasks.<id>.base`), or "".
-
-        A pinned base that HEAD no longer descends from means the history under the task was
-        rewritten, and nothing about "what this task changed" can be said from it — stopped, not
-        re-pinned, because re-pinning is the silence the pin exists to end.
-        """
-        state = self.store.read_state()
-        entry = state.raw.get("tasks", {}).get(task_id) if state is not None else None
-        pinned = str(entry.get("base", "")) if isinstance(entry, dict) else ""
-        if pinned and not self.ws.is_ancestor(pinned):
-            raise StopLoop(
-                f"{task_id}: its work began on {pinned[:12]}, which HEAD no longer descends from — "
-                "the history under an unfinished task was rewritten, so what it changed cannot be "
-                f"read. Restore that history, or `rein task reset {task_id} --reason ...`, which "
-                "drops a base the branch no longer contains so the task starts over from HEAD.",
-                code=1,
-            )
-        return pinned
-
-    def _serial_base(self, task_id: str) -> str:
-        """The commit a serial task's work began on: pinned by its first attempt, reused by the rest.
-
-        A serial implementer commits straight onto the work branch, so HEAD at the start of a run
-        is not where the task began once an earlier run was interrupted after that commit — a
-        capacity stop is the common way. Re-taking HEAD made the interrupted attempt's work
-        invisible to the next one: an empty diff read as `no_implementation`, and the scope and
-        gate-guard re-checks over "what this task changed" skipped exactly the commit they exist
-        to see. A leaf has the same answer from `fork_point`; a serial task has no branch of its
-        own to ask, so the answer is written down and dropped when the task lands.
-
-        `base..HEAD` is this task's work only because nothing else lands above the base while it
-        is pinned (`_task_holding_branch`).
-        """
-        return self._pinned_base(task_id) or self.ws.head()
-
-    def _left_nothing(self, task_id: str) -> bool:
-        """Is a pinned base holding nothing — no commit since it, no dirty path?
-
-        A base HEAD no longer descends from answers "no" rather than raising: this runs on the way
-        out of a failed attempt, where a rewritten history is the next run's to stop on
-        (`_pinned_base`) and must not replace the fault being recorded.
-        """
-        state = self.store.read_state()
-        entry = state.raw.get("tasks", {}).get(task_id) if state is not None else None
-        pinned = str(entry.get("base", "")) if isinstance(entry, dict) else ""
-        return bool(pinned) and self.ws.is_ancestor(pinned) and not self.ws.changed_since(pinned)
-
-    def _task_holding_branch(self, graph: dag.Graph) -> dag.Task | None:
-        """The unlanded serial task whose work is on the work branch, if there is one.
-
-        A serial task's commits land on the work branch before it has passed anything, and its
-        pinned base is what says which commits are its own. Anything landing above them — another
-        serial task, a merged leaf — would stand on work nothing has verified, and would then be
-        read as part of this task's change by every check that asks what it did: scope, the gate
-        guard, the review, the negative control. So while one is there, it is the only thing that
-        runs, and when it cannot run the loop stops rather than build on it.
-        """
-        for task in graph.tasks:
-            if task.status in {"done", "awaiting-evidence", "in-progress"} or not self._pinned_base(task.id):
-                continue
-            if self._left_nothing(task.id):
-                # Its work was taken off the branch (reverted, reset to the base): nothing is held.
-                self._set_status(task.id, task.status)
-                continue
-            return task
-        return None
 
     # -- launching an agent (the machine's side of the boundary) --
 
@@ -1302,7 +1264,7 @@ class Orchestrator:
 
     # -- the dossier: what the loop already knows, handed over instead of re-derived --
 
-    def _write_dossier(self, task: dag.Task, cwd: str, base: str, role: str) -> str:
+    def _write_dossier(self, task: dag.Task, cwd: str, role: str) -> str:
         """Assemble this task's dossier into `cwd` and return its repo-relative path ("" in a dry run).
 
         Written before every launch rather than once per task: the diff moves between attempts,
@@ -1310,14 +1272,13 @@ class Orchestrator:
         """
         if self.dry_run:
             return ""
-        changed, diff_cmd = self._review_scope(task, cwd, base)
+        changed, diff_cmd = self._review_scope(task, cwd)
         document = dossier.build(
             task,
             plan=self._plan,
             repo_path=self.repo.path,
             changed=changed,
             diff_cmd=diff_cmd,
-            base=base,
             history=self._history_for(task),
             handoff=self._handoff_for(task),
             env={
@@ -1528,7 +1489,6 @@ class Orchestrator:
         failure_log: str,
         session: str = "",
         resume: bool = False,
-        base: str = "",
     ) -> str:
         """One headless implementer launch; `session`/`resume` thread retry-session continuity.
 
@@ -1549,7 +1509,7 @@ class Orchestrator:
         if self.dry_run:
             print(f"    [dry-run] launch implementer (cwd={cwd}) task={task.id}")
             return ""
-        prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, base, "implementer"))
+        prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, "implementer"))
         where = f"{task.id}: implementer"
         try:
             self._launch(
@@ -1638,7 +1598,7 @@ class Orchestrator:
         """
         return tuple(step for step in self._steps_effective if step.stage in {stage, "both"})
 
-    def _steps_for(self, task: dag.Task, cwd: str = "", base: str = "") -> tuple[GateStep, ...]:
+    def _steps_for(self, task: dag.Task, cwd: str = "") -> tuple[GateStep, ...]:
         """The gate steps for one task: this stage's DoD, minus any step whose `paths:` this
         task's diff does not touch.
 
@@ -1652,36 +1612,30 @@ class Orchestrator:
         steps = self._steps_at("task")
         if not cwd:
             return steps
-        changed, _ = self._review_scope(task, cwd, base)
+        changed, _ = self._review_scope(task, cwd)
         return tuple(step for step in steps if step.matches_paths(changed))
 
-    def _review_scope(self, task: dag.Task, cwd: str, base: str) -> tuple[list[str], str]:
+    def _review_scope(self, task: dag.Task, cwd: str) -> tuple[list[str], str]:
         """The changed-path list + exact diff command that scope the review step's read.
 
-        Computed fresh at review time (the tree moves between retries). A leaf worktree's scope
-        is everything since it forked off the work branch; a serial task's is the commits since
-        `base` (the pre-task HEAD) plus the dirty tree. No base on the work branch (dry-run,
-        or a caller without one) degrades to the unscoped prompt.
+        Computed fresh at review time (the tree moves between retries): everything the task's
+        worktree holds since it forked off its target branch. A caller outside a task's worktree
+        (dry-run, the repository root) degrades to the unscoped prompt.
         """
-        if self.dry_run:
+        if self.dry_run or cwd == self.root:
             return [], ""
-        if cwd != self.root:
-            paths = self.ws.branch_changed_paths(task.id, cwd=cwd)
-            return paths, f"git diff {self.ws.target_branch(task.id)}...HEAD"
-        if base:
-            return self.ws.changed_since(base), f"git diff {base[:12]}..HEAD"
-        return [], ""
+        paths = self.ws.branch_changed_paths(task.id, cwd=cwd)
+        return paths, f"git diff {self.ws.target_branch(task.id)}...HEAD"
 
     def _review_prompt(
         self,
         task: dag.Task,
         cwd: str,
-        base: str,
         dossier_path: str = "",
         findings_path: str = "",
         argv: Sequence[str] = (),
     ) -> str:
-        changed, diff_cmd = self._review_scope(task, cwd, base)
+        changed, diff_cmd = self._review_scope(task, cwd)
         return build_prompts.review_prompt(
             task,
             gate_cmds=self.config.gate_cmds,
@@ -1718,7 +1672,7 @@ class Orchestrator:
         """The content digest of the tree at `cwd` ("" when it cannot be computed)."""
         return "" if self.dry_run else self.ws.fingerprint(cwd)
 
-    def _run_agent_step(self, step: GateStep, task: dag.Task, cwd: str, base: str) -> bool:
+    def _run_agent_step(self, step: GateStep, task: dag.Task, cwd: str) -> bool:
         """Run the review agent step headless. Returns True if the tree ended up changing.
 
         **The reviewer reports; it does not repair.** It used to be launched with write access and
@@ -1740,7 +1694,7 @@ class Orchestrator:
         before = self._fingerprint(cwd)
         rounds = max(0, step.retries)
         for attempt in range(rounds + 1):
-            findings = self._collect_findings(step, task, cwd, base, role)
+            findings = self._collect_findings(step, task, cwd, role)
             self._add_review_findings(task.id, findings)
             outstanding = dossier.must_fix(findings)
             if not outstanding:
@@ -1755,20 +1709,20 @@ class Orchestrator:
                     f"{rounds} round(s):\n{dossier.render_findings(outstanding)}"
                 )
             print(f"    [review] {task.id}: {len(outstanding)} must-fix finding(s) → back to the implementer")
-            self._invoke_review_fixer(task, cwd, base, dossier.render_findings(outstanding))
+            self._invoke_review_fixer(task, cwd, dossier.render_findings(outstanding))
         after = self._fingerprint(cwd)
         # An unknown fingerprint on either side reads as "it changed": re-running the passed steps
         # costs time, skipping them over an unread tree costs the verdict.
         return not before or not after or after != before
 
-    def _collect_findings(self, step: GateStep, task: dag.Task, cwd: str, base: str, role: str) -> list[dict[str, Any]]:
+    def _collect_findings(self, step: GateStep, task: dag.Task, cwd: str, role: str) -> list[dict[str, Any]]:
         """One reviewer launch, and its findings — read from the file, never from the chatter."""
-        dossier_path = self._write_dossier(task, cwd, base, role)
+        dossier_path = self._write_dossier(task, cwd, role)
         target = dossier.findings_path(cwd, task.id)
         target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         argv = step.agent_argv or self.config.adapter_argv
         findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
-        prompt = self._review_prompt(task, cwd, base, dossier_path, findings_rel, argv=argv)
+        prompt = self._review_prompt(task, cwd, dossier_path, findings_rel, argv=argv)
         # `REVIEW`, not `WRITE`: the reviewer's `.rein/work/` file is the only thing it needs to
         # produce, and everything else it might touch belongs to somebody else. Naming the file
         # here is what lets an adapter that can scope a write grant exactly that one — and what
@@ -1792,8 +1746,8 @@ class Orchestrator:
         except (dossier.FindingsError, OSError) as exc:
             raise StopLoop(f"{task.id}: the reviewer's findings could not be read — {exc}") from None
 
-    def _invoke_review_fixer(self, task: dag.Task, cwd: str, base: str, findings: str) -> None:
-        dossier_path = self._write_dossier(task, cwd, base, "implementer")
+    def _invoke_review_fixer(self, task: dag.Task, cwd: str, findings: str) -> None:
+        dossier_path = self._write_dossier(task, cwd, "implementer")
         self._launch(
             adapters.command(
                 self.config.adapter_argv,
@@ -1885,6 +1839,11 @@ class Orchestrator:
             if note:
                 self._note_evidence(step, profile, reused=True)
             return ""
+        if step.junit:
+            # Removed before the run, so a report present afterwards is one this run wrote. A suite
+            # that crashed before writing had the previous run's report read as its own — and when
+            # that one listed only reds the change inherited, the crash was routed away as green.
+            (Path(cwd) / step.junit).unlink(missing_ok=True)
         spec = executors.ExecutionSpec(
             command=tuple(step.command),
             profile=profile,
@@ -1998,42 +1957,183 @@ class Orchestrator:
             mounts.append((Path(self.control.socket_path), _SANDBOX_CONTROL_SOCKET, "rw"))
         return tuple(mounts)
 
-    def _run_pipeline(self, task: dag.Task, cwd: str, base: str = "") -> tuple[str | None, str]:
+    def _run_pipeline(self, task: dag.Task, cwd: str) -> tuple[str | None, str]:
         """Run the quality-gate steps (config quality_gate.steps = the DoD) in order.
 
         Returns (failed_step_name, failure_summary), or (None, "") when every step passed.
         An agent step's fixes invalidate the evidence of the cmd steps that already passed,
         so those are re-run whenever it changed the tree (deterministic re-verification).
         """
-        steps = self._steps_for(task, cwd, base)
+        steps = self._steps_for(task, cwd)
         if self.dry_run:
             shown = " → ".join(f"{s.name}({s.kind})" for s in steps)
             print(f"    [dry-run] quality gate: {shown} (cwd={cwd})")
             return None, ""
         passed: list[GateStep] = []
+        forked_from = self.ws.fork_point(self.ws.target_branch(task.id), cwd)
         for step in steps:
             if step.kind == "agent":
-                if self._run_agent_step(step, task, cwd, base):
+                if self._run_agent_step(step, task, cwd):
                     for prev in passed:
-                        failure = self._run_cmd_step(prev, cwd)
+                        failure = self._attribute_red([task], prev, cwd, forked_from, self._run_cmd_step(prev, cwd))
                         if failure:
                             return prev.name, failure
                 continue
             if not step.command:
                 print(f"    [gate] skip {step.name}: no command configured")
                 continue
-            failure = self._run_cmd_step(step, cwd)
+            failure = self._attribute_red([task], step, cwd, forked_from, self._run_cmd_step(step, cwd))
             if failure:
                 return step.name, failure
             passed.append(step)
-        failed, failure = self._negative_control(task, cwd, base, passed)
+        failed, failure = self._negative_control(task, cwd, passed)
         if failed:
             return failed, failure
         return self._run_acceptance(task, cwd)
 
-    def _negative_control(
-        self, task: dag.Task, cwd: str, base: str, passed: Sequence[GateStep]
-    ) -> tuple[str | None, str]:
+    def _attribute_red(self, tasks: Sequence[dag.Task], step: GateStep, cwd: str, base: str, failure: str) -> str:
+        """The part of a red step that `tasks`' change owns. "" when none of it is.
+
+        A red was charged to whoever was under test, because that is who was being judged — not to
+        whoever owns the failing test. A flaky test, or one another task put in the suite, then
+        blocked a task that could fix neither, and every such stop reached a person whose only
+        move was to read who owned it (#90). With the step's JUnit report the loop reads it
+        instead, and decides with two experiments and no judgement:
+
+          * **Re-run on the same tree, in the same image.** Green the second time is a flaky test:
+            recorded against its owner, and the step passes.
+          * **Run it on the tree the change forked from.** A test red there too was red before this
+            change, whoever owns it; only a test this change turned red is this change's failure.
+            When every failing test was red already, the red is routed to the task whose scope
+            holds it and the step passes here.
+
+        Deliberately not asked: whether the change *imports* the failing test's code. A behaviour
+        can break a test through no import at all, and handing that red to its owner would be a
+        green this change never earned. The comparison with the forked-from tree has no such gap.
+
+        Without a report nothing below the step is known, and the red stays this change's.
+        """
+        if not failure or not step.junit or not step.runs_tests or not base or self.dry_run:
+            return failure
+        report = Path(cwd) / step.junit
+        first = junit_mod.failing(report)
+        if not first:
+            return f"{failure}\n(no failing test in a readable JUnit report at {step.junit}: charged to the step)"
+        if not self._run_cmd_step(step, cwd):
+            owners = self._owners_of(first, exclude=tasks)
+            self._event(
+                "decision_declared",
+                owners or [t.id for t in tasks],
+                {"kind": "flaky", "step": step.name, "nodes": sorted(first)[:_NODES_SHOWN]},
+            )
+            print(f"    [gate] {step.name}: red, then green on the same tree — flaky: {', '.join(sorted(first))}")
+            return ""
+        now = junit_mod.failing(report)
+        if not now:
+            unread = f"the re-run left no failing test in a readable report at {step.junit}: charged to the step"
+            return f"{failure}\n({unread})"
+        before = self._failing_at(step, base, owner="-".join(t.id for t in tasks))
+        if before is None:
+            return f"{failure}\n(could not read the same step at {base[:12]}: the red is charged to this change)"
+        # A test red before the change is still this change's when this task owns it: the owner is
+        # the one whose attempt is meant to fix it, and routing it anywhere else would pass it on.
+        owned_here = {
+            node for node in now & before if set(self._owners_of(frozenset({node}), exclude=())) & {t.id for t in tasks}
+        }
+        mine = (now - before) | owned_here
+        if mine:
+            inherited = sorted((now & before) - mine)
+            already = f"\n(already red before this change, not counted against it: {', '.join(inherited)})"
+            return f"This change turned these tests red: {', '.join(sorted(mine))}\n{failure}" + (
+                already if inherited else ""
+            )
+        self._route_red(tasks, step, now)
+        return ""
+
+    def _failing_at(self, step: GateStep, base: str, *, owner: str) -> frozenset[str] | None:
+        """The tests `step` fails on the tree at `base`; None when that could not be read.
+
+        The scratch checkout is named for `owner` (the task or join asking) as well as the step:
+        parallel leaves ask this at the same time, and two of them sharing one checkout would each
+        remove the other's tree from under it.
+        """
+        try:
+            with build_git.scratch_worktree(
+                self.repo, self.config.worktree_dir, f"red-{owner}-{step.name}", base, _late_run
+            ) as path:
+                if not self._run_cmd_step(step, path, note=False):
+                    return frozenset()
+                return junit_mod.failing(Path(path) / step.junit)
+        except (EnvironmentFault, StopLoop) as exc:
+            logger.warning(f"[gate] {step.name} could not be run at {base[:12]}: {exc}")
+            return None
+
+    def _owners_of(self, nodes: frozenset[str], *, exclude: Sequence[dag.Task]) -> list[str]:
+        """The tasks whose declared scope holds the files these tests live in, `exclude` aside.
+
+        A task with no `scope.include` is unbounded, which covers every path and so says nothing
+        about ownership; it is never counted as an owner.
+        """
+        if self._plan is None:
+            return []
+        skip = {t.id for t in exclude}
+        paths = {path for node in nodes if (path := junit_mod.node_path(node, self.repo.root))}
+        return sorted(
+            t.id
+            for t in dag.join(self._plan, self.store.read_state()).tasks
+            if t.id not in skip
+            and t.scope_include
+            and any(not common.outside_scope([path], t.scope_include, t.scope_exclude) for path in paths)
+        )
+
+    def _route_red(self, tasks: Sequence[dag.Task], step: GateStep, nodes: frozenset[str]) -> None:
+        """Hand a red that was there before this change to the task that owns it.
+
+        A `done` owner with nothing started on top of it goes back on the frontier with the red in
+        its handoff, and its next attempt fixes its own test. Anything else — an owner other work
+        already stands on, a test in nobody's scope — is a person's call, and is escalated against
+        the owner rather than against the task that happened to be running.
+        """
+        listed = ", ".join(sorted(nodes))
+        by = ", ".join(t.id for t in tasks)
+        owners = self._owners_of(nodes, exclude=tasks)
+        routed = ", ".join(owners) or "nobody"
+        print(f"    [gate] {step.name}: red before {by} changed anything — {listed}; routed to {routed}")
+        graph = self._load_graph()
+        for owner in owners:
+            task = graph.get(owner)
+            started = {
+                tid
+                for tid in graph.dependents_closure([owner])
+                if graph.get(tid).status in {"done", "awaiting-evidence", "in-progress"}
+            }
+            message = (
+                f"{owner}: '{step.name}' fails {listed} on the tree {by} forked from, before {by} changed "
+                f"anything. The test lives in {owner}'s scope."
+            )
+            if task.status == "done" and not started:
+                self._note_diagnostic(owner, {"failure_summary": message[-_HANDOFF_SUMMARY_MAX:]})
+                self._set_status(owner, "todo")
+                self._event(
+                    "decision_declared",
+                    owner,
+                    {"kind": "red_routed", "step": step.name, "nodes": sorted(nodes)[:_NODES_SHOWN], "from": by},
+                )
+            elif task.status in {"done", "awaiting-evidence"}:
+                self._escalate(
+                    "owned_red",
+                    f"{message} Work already stands on {owner} ({', '.join(sorted(started))}), so it is not "
+                    "reopened by itself: decide whether to reset it or repair the test directly.",
+                    task=owner,
+                )
+        if not owners:
+            self._escalate(
+                "owned_red",
+                f"'{step.name}' fails {listed} on the tree {by} forked from, and no task's declared scope "
+                "holds those tests. Nothing was blocked for it; somebody has to own the fix.",
+            )
+
+    def _negative_control(self, task: dag.Task, cwd: str, passed: Sequence[GateStep]) -> tuple[str | None, str]:
         """Ask whether the DoD that just went green would have gone green *without* the change.
 
         The DoD is the only automated evidence a task's `done` rests on, and until this existed
@@ -2098,7 +2198,7 @@ class Orchestrator:
             # leaves the task's `done` resting on nothing this experiment can negate. Saying so is
             # the whole point of the record, and `brief._control` reads it.
             return self._control_undetermined("no quality-gate step that ran for this task declares `runs_tests`")
-        changed, _ = self._review_scope(task, cwd, base)
+        changed, _ = self._review_scope(task, cwd)
         tests = [path for path in changed if diff_facts.classify_path(path) == "test"]
         if not tests:
             self._note_control("no_tests_changed", detail="the change touched no test path")
@@ -2109,7 +2209,7 @@ class Orchestrator:
                 "every path in this change is a test path, so base plus the test half is the head tree "
                 "— there is no contrast to measure"
             )
-        control_base = base if cwd == self.root else self.ws.fork_point(self.ws.target_branch(task.id), cwd)
+        control_base = self.ws.fork_point(self.ws.target_branch(task.id), cwd)
         if not control_base:
             return self._control_undetermined("the base this change is a change to could not be resolved")
         patch = self.ws.diff_from(control_base, cwd, tests)
@@ -2359,7 +2459,7 @@ class Orchestrator:
         True when it repaired, which is the caller's cue to write the status again: the evidence
         beside it has been re-pointed at the repaired tree, and the recorded commit follows the
         repair wherever the repair could land on top of this task's own work — which in a batch of
-        leaves is only the one that merged last (`_consume_parallel` says why).
+        leaves is only the one that merged last (`_consume_batch` says why).
         """
         if readout is None or self.dry_run or self._plan is None:
             return False
@@ -2444,7 +2544,7 @@ class Orchestrator:
         recorded = entry.get("acceptance") if isinstance(entry, dict) else None
         return [item for item in recorded if isinstance(item, dict)] if isinstance(recorded, list) else []
 
-    def _record_task_evidence(self, task: dag.Task, cwd: str, base: str) -> None:
+    def _record_task_evidence(self, task: dag.Task, cwd: str) -> None:
         """Remember what this task's pass was established on, for the `done` that follows.
 
         Written into `state.yaml` beside the status, in the same transaction, so `done` carries
@@ -2468,8 +2568,6 @@ class Orchestrator:
         fingerprint = self._fingerprint(cwd)
         if fingerprint:
             record["tree"] = fingerprint
-        if base and _COMMIT_RE.match(base):
-            record["base"] = base
         with self._evidence_lock:
             self._evidence[task.id] = record
 
@@ -2480,7 +2578,7 @@ class Orchestrator:
         report = self._handoff_for(task).get("report")
         return dict(report) if isinstance(report, dict) else {}
 
-    def _check_implementer_output(self, task: dag.Task, cwd: str, base: str) -> tuple[str, str]:
+    def _check_implementer_output(self, task: dag.Task, cwd: str) -> tuple[str, str]:
         """What the implementer's attempt actually produced. ("", "") when it may go to the gate.
 
         Returns `(kind, message)` for the three ways an attempt ends without the quality gate
@@ -2496,9 +2594,9 @@ class Orchestrator:
           `report_mismatch`    the implementer named paths it did not change. Its account of its
                                own work is wrong, which is a finding whatever the tests say.
 
-        The empty-diff check needs a resolved scope to mean anything: an unresolved one (dry run,
-        a serial task with no base) is read as "not known", never as "nothing" — a fail-open the
-        gate itself already takes for its `paths:` filtering.
+        The empty-diff check needs a resolved scope to mean anything: an unresolved one (a dry
+        run) is read as "not known", never as "nothing" — a fail-open the gate itself already
+        takes for its `paths:` filtering.
         """
         report = self._read_report(task)
         outcome = str(report.get("outcome", ""))
@@ -2506,7 +2604,7 @@ class Orchestrator:
             summary = str(report.get("summary", "")).strip() or "(no summary given)"
             return f"agent_{outcome.replace('-', '_')}", f"{task.id}: the implementer reported {outcome} — {summary}"
 
-        changed, diff_cmd = self._review_scope(task, cwd, base)
+        changed, diff_cmd = self._review_scope(task, cwd)
         if diff_cmd and not changed:
             said = f" It reported: {report.get('summary', '')!r}." if report.get("summary") else ""
             unheard = "" if report else " It never called `rein report`, so it said nothing about why."
@@ -2614,7 +2712,7 @@ class Orchestrator:
             return None
         return kind, str(recorded.get("message", "")), tree
 
-    def _run_task_to_done(self, task: dag.Task, cwd: str, base: str = "") -> tuple[bool, str]:
+    def _run_task_to_done(self, task: dag.Task, cwd: str) -> tuple[bool, str]:
         """Take one task to done via implementer implementation + the quality-gate pipeline.
 
         Each cmd step carries its own send-back budget (step.retries); a failure consumes only
@@ -2626,7 +2724,7 @@ class Orchestrator:
         evidence about this task, and because running a reviewer and a full test suite against an
         attempt that already said "I am blocked" spends a model on a question nobody asked.
         """
-        budgets = {s.name: s.retries for s in self._steps_for(task, cwd, base) if s.kind == "command"}
+        budgets = {s.name: s.retries for s in self._steps_for(task, cwd) if s.kind == "command"}
         # Every other verdict `_run_pipeline` can return. Neither the negative control nor an
         # acceptance criterion is a configured step, and both come back through this channel, so
         # without an entry here each one got the silent zero `.get(name, 0)` produced.
@@ -2676,13 +2774,13 @@ class Orchestrator:
             self._stop_before_the_gate(task, kind, message, tree=tree, futile=futile)
             return False, message
         while True:
-            session = self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume, base=base)
+            session = self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume)
             if not self.dry_run:
-                changed, _ = self._review_scope(task, cwd, base)
+                changed, _ = self._review_scope(task, cwd)
                 violations = self._gate_violations(changed)
                 if violations:
                     raise GateViolationFault(violations)
-                kind, message = self._check_implementer_output(task, cwd, base)
+                kind, message = self._check_implementer_output(task, cwd)
                 if kind:
                     # Not a gate failure, so it spends no step's budget: no step ever ran. The
                     # attempt is over, and the reason — which the loop now actually holds — goes
@@ -2693,9 +2791,9 @@ class Orchestrator:
                     return False, message
             self._local.steps, self._local.acceptance, self._local.negative_control = [], [], {}
             after_implementer = self._fingerprint(cwd)
-            failed, failure_log = self._run_pipeline(task, cwd, base)
+            failed, failure_log = self._run_pipeline(task, cwd)
             if failed is None:
-                self._record_task_evidence(task, cwd, base)
+                self._record_task_evidence(task, cwd)
                 # Whatever failure the handoff described is over. Left in place, it rode into every
                 # stop that follows a green — a merge conflict, a red join — as that stop's cause.
                 self._note_diagnostic(task.id, _FAILURE_RESOLVED)
@@ -2794,7 +2892,9 @@ class Orchestrator:
                     continue
                 if not step.command:
                     continue
-                failure = self._run_cmd_step(step, cwd=self.root)
+                failure = self._attribute_red(
+                    tasks, step, self.root, before_join, self._run_cmd_step(step, cwd=self.root)
+                )
                 if failure:
                     failed, failure_log = step.name, failure
                     break
@@ -2951,18 +3051,17 @@ class Orchestrator:
         listing = "\n".join(f"  {p} — {reason}" for p, reason in violations)
         self._escalate(
             "gate_violation",
-            f"{task_id}: {where} touches gate-guarded paths whose prerequisite gate is pending — "
+            f"{task_id}: {where} touches paths the gate guard refuses, for the reason given beside each — "
             f"the task is blocked for human review (gate rule 3: never land next-phase edits silently).\n{listing}",
             task=task_id,
         )
 
     def _block_for_gate_violation(self, task_id: str, where: str, violations: list[tuple[str, str]]) -> None:
-        """Block `task_id`: it touched a gate-guarded path while a prerequisite gate is pending.
+        """Block `task_id`: it touched a path the gate guard refuses.
 
         Shared by every place that runs this same check — right after an attempt's implementer
-        (`_run_task_to_done`) and the pre-existing finalize/merge-time check — so serial and
-        parallel each have one call site for "early" and one for "final" rather than four
-        separate copies of set-status-and-escalate.
+        (`_run_task_to_done`) and the merge-time check — so there is one call site for "early"
+        and one for "final" rather than separate copies of set-status-and-escalate.
         """
         self._set_status(task_id, "blocked")
         self._escalate_gate_violation(task_id, where, violations)
@@ -3247,29 +3346,13 @@ class Orchestrator:
         return []
 
     def _tree_problems(self) -> list[str]:
-        """Why this run cannot tell its own work from what was already in the tree.
+        """Why this run's merges would meet work nobody committed.
 
-        **A serial task is only isolated from the working tree if the working tree is a commit.**
-        A parallel leaf gets that by construction — `git worktree add` hands it a clean checkout of
-        the branch, so everything it finds there afterwards is its own. A serial task runs in the
-        repository root, where its change is derived as "the commits since the pre-task HEAD, plus
-        the dirty tree" (:meth:`build_git.Workspace.changed_since`). That derivation is exact when
-        the tree starts clean and silently wrong when it does not: an edit that was already sitting
-        there is indistinguishable from one the implementer just made, and every reading built on
-        top of it inherits the confusion —
-
-          * it counts against the task's declared `scope`, so unrelated work in the tree blocks a
-            task that never touched it;
-          * it fills the empty-diff check, so an implementer that wrote *nothing* looks productive
-            — the exact failure `no_implementation` exists to catch, defeated from the other side;
-          * it reaches the reviewer as part of the change under review;
-          * and `finalize_commit`'s `git add -A` lands it inside `T-NNN: <title>`, so the commit the
-            acceptance record names contains work no task claimed. That one does not wash out on the
-            next run — it is in the history.
-
-        So the tree is a precondition, not something to compensate for afterwards. Subtracting a
-        recorded baseline was the alternative and it cannot fix the last item without scoping the
-        finalize commit to a path list, which merely hands the same unowned diff to the next task.
+        Every task forks from the work branch's last commit and lands by a merge into this
+        checkout. An uncommitted change here is in no task's fork, so no gate ever ran over it,
+        and a merge that touches the same path is refused by git after the task has been paid for
+        and passed. Refused before the first launch instead, where committing or stashing costs
+        nothing.
 
         `.rein/` and the leaf worktree root are excluded, as they are everywhere else
         (`build_git.GitWorkspace.excluded`): neither is any task's work.
@@ -3282,25 +3365,12 @@ class Orchestrator:
         shown = ", ".join(dirty[:_DIRTY_PATHS_SHOWN])
         if len(dirty) > _DIRTY_PATHS_SHOWN:
             shown += f", and {len(dirty) - _DIRTY_PATHS_SHOWN} more"
-        lines = [
-            f"{len(dirty)} uncommitted change(s) in the working tree: {shown}. "
-            "A serial task's change is measured against the commit it started from, so anything "
-            f"already uncommitted is attributed to the first task this run touches — it counts "
-            f"against that task's scope and lands inside its commit. Commit them on `{self.branch}` "
-            "or stash them, then run again."
+        return [
+            f"{len(dirty)} uncommitted change(s) in the working tree: {shown}. Every task forks from "
+            f"the last commit on `{self.branch}` and is merged back into this checkout, so these are "
+            "in no task's tree and a merge that touches them fails after the task passed. Commit "
+            f"them on `{self.branch}` or stash them, then run again."
         ]
-        interrupted = sorted(
-            task_id
-            for task_id, status in (self.state.task_status if self.state else {}).items()
-            if status == "in-progress"
-        )
-        if interrupted:
-            lines.append(
-                f"{', '.join(interrupted)} is still 'in-progress' from a run that did not finish. "
-                "If these paths are its work, commit them as `T-NNN: <its title>` so the task keeps "
-                "the commit that completed it."
-            )
-        return lines
 
     def _live_digest(self, path: str) -> str:
         candidate = self.repo.path(path)
@@ -3425,20 +3495,24 @@ class Orchestrator:
             if unfinished == 0:
                 return self._close_gate4(graph)
 
-            held = None if self.dry_run else self._task_holding_branch(graph)
-            if held is not None and held.id not in {t.id for t in graph.order_frontier()}:
-                base = self._pinned_base(held.id)
-                self._escalate(
-                    "no_runnable",
-                    f"{held.id} is {held.status}, and its unlanded work is on the work branch (since "
-                    f"{base[:12]}). Nothing else runs until it lands or is taken off: a task built on "
-                    "top of it would stand on work no gate has passed, and would be read as part of "
-                    f"{held.id}'s change. Put {held.id} back on the frontier (`rein task reset "
-                    f"{held.id} --reason ...`) to continue it, or revert its commits to drop them.",
-                    task=held.id,
+            if self._observe_premises(graph):
+                continue  # an observation may have swapped criteria or parked tasks: re-read the graph
+            settled, owed = self._settle_person_tasks(graph)
+            if settled:
+                continue  # a deliverable landed: its dependents may be on the frontier now
+            owed.update(self._unmet_on_frontier(graph))
+            provisional = self._resting_on_the_unobserved(graph)
+            runnable = graph
+            if owed or provisional:
+                # Off the frontier for this run, not off the plan: nothing about them is a verdict,
+                # and the next `rein build` asks again.
+                held_back = set(owed) | provisional
+                runnable = dag.Graph.from_tasks(
+                    [replace(t, status="blocked") if t.id in held_back else t for t in graph.tasks]
                 )
-                return common.EXIT_HUMAN_NEEDED
-            batch = ("serial", [held]) if held is not None else plan_batch(graph, self.config.max_parallel)
+            batch = plan_batch(runnable, self.config.max_parallel)
+            if batch is None and owed:
+                return self._present_owed(graph, owed)
             if batch is None:
                 # frontier empty & there are unfinished ones = all blocked/needs-revision. To the human.
                 # With the one command that moves it, taken from the same table `rein next` reads:
@@ -3467,11 +3541,286 @@ class Orchestrator:
             # going to ask is exactly the waste this exists to end.
             self._load_baseline()
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
-            if mode == "serial" or not self.config.worktree_enabled:
-                self._consume_serial(tasks)
-            else:
-                self._consume_parallel(tasks)
+            self._consume_batch(tasks)
             # Recompute at the top of the loop after each batch (reassemble the chain).
+
+    # -- premises nobody has measured (CR-39) --
+
+    def _unobserved(self) -> set[str]:
+        state = self.store.read_state()
+        observed = state.premises if state is not None else {}
+        return {p.id for p in (self._plan.premises if self._plan else ()) if p.id not in observed}
+
+    def _resting_on_the_unobserved(self, graph: dag.Graph) -> set[str]:
+        """Frontier tasks with a criterion resting on a premise nobody has observed yet.
+
+        Such a criterion is provisional, so a `done` it contributed to would be too: the task waits
+        for the observation, and the probe runs as soon as its observer is done.
+        """
+        if self.dry_run:
+            return set()  # a dry run observes nothing, so it cannot wait for an observation either
+        unobserved = self._unobserved()
+        return {t.id for t in graph.frontier() if set(t.assumes) & unobserved}
+
+    def _observe_premises(self, graph: dag.Graph) -> bool:
+        """Probe every premise whose observer is done (or that has none) and is not yet observed.
+
+        True when anything was recorded. The probe is run by the loop, not by an implementer, so
+        the observation is not the implementer's account of it. A falsified premise with a fallback
+        the human approved with the mandate is applied, and nothing stops. One without a fallback
+        parks only the tasks whose criteria rest on it and asks a person about those — the rest of
+        the plan, its state and its receipts stand.
+        """
+        if self.dry_run or self._plan is None:
+            return False
+        recorded = False
+        unobserved = self._unobserved()
+        for premise in self._plan.premises:
+            if premise.id not in unobserved:
+                continue
+            if premise.observed_by and not graph.get(premise.observed_by).is_done:
+                continue
+            failure = self._probe(
+                GateStep(
+                    name=f"premise {premise.id}",
+                    kind="command",
+                    command=premise.probe,
+                    executor_profile=premise.executor_profile,
+                )
+            )
+            held = not failure
+            fallback = bool(premise.fallback_criteria)
+            resting = [t.id for t in graph.tasks if premise.id in t.assumes and t.status not in ("done", "in-progress")]
+            park = [] if held or fallback else resting
+            record_premise(self.repo, premise.id, held=held, output=failure, fallback=fallback, park=park)
+            recorded = True
+            if held:
+                print(f"  [premise] {premise.id} holds: {premise.says}")
+            elif fallback:
+                print(
+                    f"  [premise] {premise.id} is false ({failure}) — applying the fallback approved with the mandate"
+                )
+            elif not park:
+                # Nothing unfinished rests on it, so nobody has anything to decide: recorded, not asked.
+                print(f"  [premise] {premise.id} is false ({failure}), and nothing unfinished rests on it")
+            else:
+                self._escalate(
+                    "premise_falsified",
+                    f"{premise.id} is false: {premise.says}\n  {failure}\nThe plan approved no fallback for it, so "
+                    "the criteria resting on it cannot be met as written. "
+                    f"Parked: {', '.join(park)}. Everything else continues. Change what "
+                    f"rests on it with `rein revise --to mandate --impacted {','.join(park)}`; the re-approval "
+                    "shows only what changed.",
+                    task=park,
+                )
+        return recorded
+
+    # -- what only a person can provide (CR-38) --
+
+    def _unmet_preconditions(self, task: dag.Task) -> list[str]:
+        """Each of `task`'s preconditions that does not hold right now, as the line a person reads.
+
+        Asked before every launch and never cached: a browser that was up an hour ago says nothing
+        about now, and a ledger keyed on the tree would carry that hour forward. A dry run asks
+        nothing — it launches nothing either.
+        """
+        if self.dry_run:
+            return []
+        unmet: list[str] = []
+        for index, requirement in enumerate(task.requires):
+            says = str(requirement.get("says", ""))
+            path = str(requirement.get("file", ""))
+            if path:
+                if not self.repo.path(path).exists():
+                    unmet.append(f"{says} ({path} does not exist)")
+                continue
+            step = GateStep(
+                name=f"{task.id}:requires[{index}]",
+                kind="command",
+                command=tuple(str(part) for part in requirement.get("probe", [])),
+                executor_profile=str(requirement.get("executor_profile", "")),
+            )
+            if failure := self._probe(step):
+                unmet.append(f"{says} ({failure})")
+        return unmet
+
+    def _probe(self, step: GateStep) -> str:
+        """Run one probe's argv. "" when it exits 0, what it said when it ran and exited nonzero.
+
+        **Three outcomes, not two.** A probe that ran and exited nonzero is an observation: the
+        precondition does not hold, the premise is false. A probe the machine did not let answer — no
+        container runtime, a timeout, a signal from outside, the sandbox's memory ceiling —
+        observed nothing, and raises :class:`EnvironmentFault` like a gate step that cannot be run
+        does. It
+        used to come back as a nonzero like any other, so a runtime that was down for a minute was
+        recorded as a falsified premise, for good.
+
+        **Where it runs is where the implementer will.** A precondition is asked on the
+        implementer's behalf — "can the work run here" — so without an `executor_profile` of its
+        own the probe runs in `executors.agent_profile`, or on the host when agents do. It used to
+        default to the quality gate's profile, which the recommended sandbox gives no network: a
+        probe for a browser on the host failed there every time, and the task waited forever for a
+        browser that was running.
+
+        Not `_run_cmd_step`: that records a green in the evidence ledger against the tree, and what
+        a probe observes is not a fact about a tree.
+        """
+        profile = self._probe_profile(step)
+        spec = executors.ExecutionSpec(
+            command=tuple(step.command),
+            profile=profile,
+            mounts=self._mounts_for(profile, self.root),
+            workdir=_SANDBOX_WORKDIR if profile.runs_contained else self.root,
+            timeout_sec=self.config.timeout_cmd,
+        )
+        where = f"probe {step.name}"
+        try:
+            result = executors.for_profile(profile).run(spec)
+        except executors.ExecutorError as exc:
+            raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
+        if result.exit_code == 0:
+            return ""
+        if result.timed_out:
+            raise EnvironmentFault(
+                faults.Fault.ENV_TRANSIENT, where=where, rc=result.exit_code, output="did not answer in time"
+            )
+        # Not `faults.classify_step`: that separates the code from the machine, and a probe has no
+        # code side — "could not resolve host" or "command not found" is exactly what a probe of the
+        # network or of an installed tool is there to observe. Only a run the machine ended before
+        # the argv could answer (a signal from outside, the sandbox's memory ceiling) observed nothing.
+        if faults.is_sandbox_oom(result.output):
+            raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=result.exit_code, output=result.output)
+        if faults.killed_externally(result.exit_code):
+            raise EnvironmentFault(faults.Fault.ENV_TRANSIENT, where=where, rc=result.exit_code, output=result.output)
+        tail = result.output.strip().splitlines()[-1:] if result.output.strip() else []
+        return f"`{step.display}` exited {result.exit_code}" + (f": {tail[0][:200]}" if tail else "")
+
+    def _probe_profile(self, step: GateStep) -> models.ExecutorProfile:
+        """The profile a probe runs in: its own, else the agents', else the host (`_probe`)."""
+        config = self.config.raw
+        if step.executor_profile:
+            if named := config.profiles.get(step.executor_profile):
+                return named
+            raise common.ReinError(
+                f"{step.name} names executor_profile {step.executor_profile!r}, which is not in executor_profiles"
+            )
+        return config.agent_profile or models.ExecutorProfile(name="host", raw={"kind": "host"})
+
+    def _unmet_on_frontier(self, graph: dag.Graph) -> dict[str, list[str]]:
+        """The launchable tasks on the frontier whose preconditions do not all hold."""
+        owed: dict[str, list[str]] = {}
+        for task in graph.frontier():
+            if task.produced_by != "person" and (unmet := self._unmet_preconditions(task)):
+                owed[task.id] = unmet
+        return owed
+
+    def _person_owes(self, task: dag.Task) -> list[str]:
+        """What a person-produced task is still waiting for. [] once its deliverable is in and holds.
+
+        The deliverable counts once it is committed on the work branch: a file in somebody's
+        working tree is not something a dependent can fork from. Then its own mechanized criteria
+        are established at the root, where it lives, exactly as a launched task's are in its
+        worktree.
+        """
+        paths = [
+            str(path)
+            for entry in task.acceptance
+            if isinstance(entry.get("evidence"), dict) and str(entry["evidence"].get("kind", "")) == "artifact"
+            for path in entry["evidence"].get("paths", [])
+        ]
+        missing = [path for path in paths if self.ws.authored(path) is None]
+        if missing:
+            return [f"commit {', '.join(missing)} on `{self.branch}`"]
+        self._local.steps, self._local.acceptance, self._local.negative_control = [], [], {}
+        failed, failure = self._run_acceptance(task, self.root)
+        return [f"{failed}: {failure.splitlines()[0]}" if failure else failed] if failed else []
+
+    def _settle_person_tasks(self, graph: dag.Graph) -> tuple[bool, dict[str, list[str]]]:
+        """Finish each person-produced task on the frontier whose deliverable is in; name the rest.
+
+        Returns `(finished any, {task id: what it still owes})`. No implementer is launched at one,
+        ever: the two outcomes of sending an agent at a person's deliverable are a stop and a
+        fabrication, and a reviewer caught the second in the cycle this exists for.
+        """
+        finished = False
+        owed: dict[str, list[str]] = {}
+        for task in graph.frontier():
+            if task.produced_by != "person":
+                continue
+            if self.dry_run:
+                print(f"    [dry-run] {task.id}: a person produces this — not launched")
+                self._set_status(task.id, "done")
+                finished = True
+                continue
+            if waiting := self._person_owes(task):
+                owed[task.id] = waiting
+                continue
+            authored = []
+            for entry in task.acceptance:
+                spec = entry.get("evidence")
+                if isinstance(spec, dict) and str(spec.get("kind", "")) == "artifact":
+                    for path in spec.get("paths", []):
+                        found = self.ws.authored(str(path))
+                        if found is not None:
+                            authored.append({"path": str(path), "commit": found[0], "author": found[1][:300]})
+            record: dict[str, Any] = {"authored": authored, "reported": "none"}
+            if self._current_acceptance:
+                record["acceptance"] = list(self._current_acceptance)
+            if fingerprint := self._fingerprint(self.root):
+                record["tree"] = fingerprint
+            with self._evidence_lock:
+                self._evidence[task.id] = record
+            print(f"  [person] {task.id}: the deliverable is committed — {', '.join(a['path'] for a in authored)}")
+            self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
+            finished = True
+        return finished, owed
+
+    def owed_everywhere(self, graph: dag.Graph, known: Mapping[str, list[str]] | None = None) -> dict[str, list[str]]:
+        """What a person owes across every unfinished task, in the order the work will need it.
+
+        Every task rather than the one the frontier reached first: one launch finding one missing
+        thing, then the next launch the next, is the sequence of stops this replaces. The critical
+        path first, then by depth.
+
+        `known` is what the caller has already found, kept as it was found rather than asked again:
+        a probe answering differently the second time must not empty the list the caller is about
+        to stop on.
+        """
+        known = known or {}
+        depth = {tid: level for level, ids in enumerate(graph.layers()) for tid in ids}
+        critical = set(graph.critical_path())
+        owed: dict[str, list[str]] = {}
+        for task in sorted(graph.tasks, key=lambda t: (t.id not in critical, depth.get(t.id, 0), t.id)):
+            if task.id in known:
+                owed[task.id] = known[task.id]
+                continue
+            if task.is_done or task.status in ("awaiting-evidence", "in-progress"):
+                continue
+            if task.produced_by == "person":
+                if waiting := self._person_owes(task):
+                    owed[task.id] = waiting
+            elif unmet := self._unmet_preconditions(task):
+                owed[task.id] = unmet
+        return owed
+
+    def _present_owed(self, graph: dag.Graph, found: Mapping[str, list[str]]) -> int:
+        """Stop once, when nothing else can run, naming everything a person owes (`owed_everywhere`).
+
+        `found` is what stopped the frontier, and it is never probed again here: the stop names at
+        least those tasks, so it is one a task finishing can close.
+        """
+        owed = self.owed_everywhere(graph, found)
+        blocked = [t.id for t in graph.tasks if t.status in ("blocked", "needs-revision")]
+        message = (
+            f"{len(owed)} task(s) wait on something only a person can provide, and nothing else can run. "
+            "Everything the rest of the plan needs, in the order it will be needed:\n"
+            + render_owed(graph, owed)
+            + "\nProvide them, then run `rein build` again; it checks each one before launching anything."
+            + (f"\nAlso stopped for another reason: {', '.join(blocked)} (`rein next`)." if blocked else "")
+        )
+        print("\n========== waiting on a person ==========\n" + message)
+        self._escalate("awaiting_operator", message, task=list(owed))
+        return common.EXIT_HUMAN_NEEDED
 
     def _present_crossings(self, waiting: Sequence[dag.Task]) -> int:
         """Hand back at an irreversible point: say what it is, and the one command that moves it.
@@ -3518,75 +3867,18 @@ class Orchestrator:
             return False
         return task_id in state.crossing_gates and state.gate_status(task_id) != "approved"
 
-    def _consume_serial(self, tasks: list[dag.Task]) -> None:
-        """Finalize foundation tasks etc. serially on the work branch."""
-        for task in tasks:
-            pre_head = "" if self.dry_run else self._serial_base(task.id)
-            self._set_status(task.id, "in-progress", base=pre_head)
-            print(f"  [serial] {task.id} {task.title}")
-            try:
-                ok, log = self._run_task_to_done(task, cwd=self.root, base=pre_head)
-            except EnvironmentFault:
-                # No verdict was reached, so none is recorded: back to `todo` with its attempts,
-                # retry budgets, handoff and pinned base intact, and the tree left as it stands —
-                # the next run judges it from that same base (`_serial_base`). `blocked` here
-                # would take the task off the frontier, which is precisely what stops a re-run
-                # from ever continuing it.
-                self._set_status(task.id, "todo")
-                raise
-            except GateViolationFault as exc:
-                # Caught right after this attempt's implementer ran, rather than only at the
-                # finalize check below — a task that never gets that far (blocked on a later
-                # content failure) must not carry an undetected violation until `doctor` is run
-                # by hand.
-                self._block_for_gate_violation(
-                    task.id, "its work-branch changes (caught before finalize)", exc.violations
-                )
-                raise StopLoop(
-                    f"{task.id}: changed gate-guarded paths while their gate is pending. Human intervention needed.",
-                    code=1,
-                ) from exc
-            if not ok:
-                status, owed = self._stop_verdict(task.id)
-                self._set_status(task.id, status)
-                if owed:
-                    self._escalate(
-                        "blocked",
-                        f"{task.id}: could not pass the quality gate within the limit; blocked.\n{log}",
-                        task=task.id,
-                    )
-                raise StopLoop(f"{task.id} is {status}. Human intervention needed.", code=1)
-            # A serial task lands directly on the work branch (its own commits plus the finalize
-            # below), where --no-verify and already-in-HEAD commits both escape the commit-stage
-            # guard — so re-check everything the task changed before accepting it as done.
-            if not self.dry_run and pre_head:
-                violations = self._gate_violations(self.ws.changed_since(pre_head))
-                if violations:
-                    self._block_for_gate_violation(task.id, "its work-branch changes", violations)
-                    raise StopLoop(
-                        f"{task.id}: changed gate-guarded paths while their gate is pending "
-                        f"(commits since {pre_head[:12]} stay on the branch for review). "
-                        "Human intervention needed.",
-                        code=1,
-                    )
-            # Finalize the task diff only. The .rein/ orchestration state (tasks.yaml status, etc.)
-            # is not included in the per-task commit (keeping one commit = one task). If the
-            # implementer has not committed, this finalizes the diff (no-op otherwise).
-            if not self.ws.finalize_commit(self.root, f"{task.id}: {task.title}"):
-                # The tree on the work branch keeps the diff, but the task must not be marked done
-                # without its commit (one commit = one task is the record acceptance reviews).
-                self._set_status(task.id, "blocked")
-                raise StopLoop(f"{task.id}: finalize commit failed on the work branch. Human intervention needed.")
-            self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
-            # The task is done and recorded before this runs, and stays that way if it raises: the
-            # work passed the whole DoD and landed, and a repair that cannot be finished is a
-            # human's problem with a task that is *done*, not a reason to un-finish it. A repair
-            # that does land puts another commit on the branch, so the commit is re-recorded.
-            if self._repair_warm_findings(task, self._warm_reading(task)):
-                self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
+    def _consume_batch(self, tasks: list[dag.Task]) -> None:
+        """Implement a batch worktree-isolated up to max_parallel, then merge in ascending id order.
 
-    def _consume_parallel(self, tasks: list[dag.Task]) -> None:
-        """Implement independent leaves worktree-isolated up to max_parallel, then merge in ascending id order.
+        **Every task is isolated, a foundation task included.** A serial batch is one task, and
+        what makes it serial is the order it runs in, not where it runs. It used to run in the
+        repository root and commit straight onto the work branch, and its change was then derived
+        from history: the commits since a base pinned at its first attempt. That is right only
+        while nothing else lands above the base, and the rules require exactly that — the rollback
+        record, the design and tasks deltas and the approval record are all committed on the work
+        branch between two attempts. The task was charged with them, the guard refused `.rein/`
+        at landing, and nothing short of rewriting history could clear it (#88). On its own
+        branch the change is what the branch holds, the same answer every leaf already had.
 
         Worktree creation is done serially on the main thread (avoiding .git index.lock contention);
         only the implementation is parallelized.
@@ -4104,7 +4396,7 @@ class Orchestrator:
         changed = self.ws.changed_since(before, cwd=cwd) if before else []
         if violations := self._gate_violations(changed):
             raise StopLoop(
-                f"{task.id}: the {phase} repair changed gate-guarded paths while their gate is pending:\n"
+                f"{task.id}: the {phase} repair changed paths the gate guard refuses:\n"
                 + "\n".join(f"  - {path}: {why}" for path, why in violations),
                 code=common.EXIT_HUMAN_NEEDED,
             )

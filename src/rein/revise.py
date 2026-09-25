@@ -35,8 +35,8 @@ mechanically; "this one is actually fine" is a deliberate human reclassification
 like the loop's own business until you notice where it is written: `tasks[].acceptance` is in
 `plan.yaml` with the claims, so a re-cut is a shape a softened criterion travels in, and the
 freeze covers the document whole rather than trying to tell an honest re-cut from that. What
-withdraws no authorization is consuming the DAG — the order, the parallelism, the re-runs — which
-is not written down anywhere to be frozen.
+withdraws no authorization is consuming the DAG — the order, the parallelism, the re-runs — and a
+missing edge is added with `rein task order`, beside the frozen plan rather than in it.
 
 **This is for a defect in the specification, and nothing else.** There used to be a
 `--from-review` that derived the impacted tasks from acceptance's blocking findings, which was the
@@ -111,6 +111,7 @@ def plan_revision(repo: repo_mod.Repo, target_gate: str, seeds: list[str]) -> di
     plan = store.read_plan()
 
     resets = gates_to_reset(target_gate, state)
+    unfreezes = target_gate in UNFREEZES_PLAN and state.plan_status == "frozen"
     unknown_seeds = list(seeds)
     marked: list[str] = []
     ripple: list[str] = []
@@ -127,7 +128,14 @@ def plan_revision(repo: repo_mod.Repo, target_gate: str, seeds: list[str]) -> di
         # Withdrawn authorizations that the world will not withdraw with them. Every other line of
         # this plan describes something a roll back undoes; these describe what it cannot.
         "crossed": [g for g in resets if g in state.crossing_gates],
-        "unfreezes_plan": target_gate in UNFREEZES_PLAN and state.plan_status == "frozen",
+        "unfreezes_plan": unfreezes,
+        # Order added beside the frozen plan (`rein task order`) is order *for that plan*. Un-freezing
+        # it hands the edges back to the planner — written into `blocked_by` where they still hold,
+        # or gone with the tasks they joined — rather than leaving them to name tasks a re-cut plan
+        # may no longer have, which no verb could then remove.
+        "returned_order": [f"{tid} after {', '.join(after)}" for tid, after in sorted(state.task_after.items())]
+        if unfreezes
+        else [],
         "invalidates_review": bool(resets),
         "cleared_receipts": [g for g in resets if state.gate_receipt(g) is not None],
         "marked_tasks": marked,
@@ -164,6 +172,13 @@ def render(revision: dict[str, object]) -> str:
             )
     if revision["unfreezes_plan"]:
         lines.append("- plan.status: frozen → draft (plan.yaml and config.yaml become editable)")
+    returned = revision["returned_order"]
+    assert isinstance(returned, list)
+    if returned:
+        lines.append(
+            "- order added after the last freeze returns to the plan — write the edges that still hold "
+            f"into `blocked_by` in /tasks: {'; '.join(returned)}"
+        )
     if revision["invalidates_review"]:
         lines.append(
             "- the human review returns to not_started (its answers were about an implementation of a "
@@ -213,6 +228,9 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
         # from the module that writes them — two copies agreeing was something to remember.
         for key in approve.FROZEN_PLAN_KEYS:
             plan_block.pop(key, None)
+        for entry in raw.get("tasks", {}).values():
+            if isinstance(entry, dict):
+                entry.pop("after", None)
 
     marked = revision["marked_tasks"]
     assert isinstance(marked, list)
@@ -257,7 +275,12 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
             # `gates_reset` apart from the marked tasks, whose ids a crossing gate shares: what a
             # later mandate approval may carry back is read off which gates this withdrew
             # (`approve.carried_crossings`).
-            detail={"target_gate": revision["target_gate"], "gates_reset": list(resets), "reason": reason},
+            detail={
+                "target_gate": revision["target_gate"],
+                "gates_reset": list(resets),
+                "reason": reason,
+                **({"returned_order": revision["returned_order"]} if revision["returned_order"] else {}),
+            },
         )
         if revision["unfreezes_plan"]:
             tx.append("plan_invalidated", cycle_id=state.cycle_id, detail={"reason": reason})

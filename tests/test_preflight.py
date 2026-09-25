@@ -235,3 +235,21 @@ def test_the_remedy_for_a_missing_agent_image_carries_the_argument_it_needs() ->
     problems = preflight.check(_agent_config(), [_step("test")], _ON_PATH, runtime="nonesuch-engine")
     agent = next(p for p in problems if "'agent'" in p.what)
     assert "--build-arg AGENT_CLI=" in agent.remedy
+
+
+# --- a JUnit report the sandbox cannot write ----------------------------------------
+
+
+def test_a_junit_report_a_read_only_sandbox_cannot_write_refuses_to_start() -> None:
+    """Nothing would fail: every red would be charged to the step, and the per-test reading `junit:`
+    was set for would be off without a word."""
+    readonly = {**_PINNED, "mount_repo": "read_only"}
+    steps = [_step("test", runs_tests=True, junit=".rein/work/junit.xml")]
+    problems = preflight.check(_config(quality=readonly), steps, _ON_PATH, runtime="podman")
+    [problem] = [p for p in problems if "JUnit" in p.what]
+    assert "can never be written" in problem.what and "mount_repo: read_write" in problem.remedy
+
+
+def test_a_junit_report_a_writable_checkout_can_hold_is_fine() -> None:
+    steps = [_step("test", runs_tests=True, junit=".rein/work/junit.xml")]
+    assert not [p for p in preflight.check(_config(), steps, _ON_PATH, runtime=None) if "JUnit" in p.what]

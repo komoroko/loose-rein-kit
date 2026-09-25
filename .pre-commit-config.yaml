@@ -1,4 +1,8 @@
-﻿repos:
+﻿# `pre-commit install` installs only the hook types listed here. Without the list it installs the
+# pre-commit type alone, and ruff-format and mypy (stages: [pre-push]) first run in CI (#94).
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
   # Loose Rein gate guard, commit-stage mode: fail when the diff vs HEAD touches a gate-guarded
   # path whose prerequisite gate is not approved (AGENTS.md "Gate rules", mechanism layer).
   # Agent-agnostic: runs in `make check` (every agent's DoD) and on `git commit` once hooks are

@@ -128,7 +128,7 @@ def test_an_ordinary_content_failure_is_not_read_as_network() -> None:
 def test_a_step_something_outside_killed_is_not_the_codes_fault(rc: int, output: str) -> None:
     """A signal is not a verdict. The OOM killer, a supervisor's SIGTERM and a closing terminal
     all used to charge the step's retry budget and be recorded as facts about the code, because
-    `_killed_externally` was written for exactly this and consulted by nobody."""
+    `killed_externally` was written for exactly this and consulted by nobody."""
     assert faults.classify_step(rc, output) is faults.Fault.ENV_TRANSIENT
 
 

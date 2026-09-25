@@ -20,13 +20,6 @@ What it deliberately does **not** do:
     get an unlimited allowance by being reset in a loop. `--fresh` discards it, and says so in
     the record, because "start this one over from nothing" is a different decision and should
     read as one.
-  - It does not move a serial task's pinned `base` on anyone's say-so. The base says which commits
-    on the work branch are this task's unlanded work, and those commits are still there after any
-    reset — so the next attempt is judged on them too, `--fresh` or not, and nothing lands on the
-    branch above them until the task does. Taking the work off is a git operation (revert it, or
-    reset the branch to the base), after which the loop finds nothing held and releases the base
-    itself. The one base a reset drops is one HEAD no longer descends from: the history it named is
-    gone, so there is nothing left for it to bound, and the record says so.
   - It does not close the escalation. An escalation is concluded by a signed disposition in the
     review, never by a status somebody flipped (`rein events` is read-only by design).
   - It does not re-open a task under work that stands on it. A dependent that is `done`,
@@ -43,7 +36,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import subprocess
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,8 +59,6 @@ class ResetResult:
 
     previous: str
     handoff: dict[str, Any]
-    #: The pinned base this reset dropped because HEAD no longer descends from it, or "".
-    dropped_base: str = ""
 
 
 def reset(repo: repo_mod.Repo, task_id: str, *, status: str, reason: str, fresh: bool = False) -> ResetResult:
@@ -101,10 +91,6 @@ def _reset_once(repo: repo_mod.Repo, task_id: str, status: str, reason: str, fre
     updated = {**entry, "status": status}
     if fresh:
         updated.pop("handoff", None)
-    pinned = str(entry.get("base", ""))
-    dropped = pinned if pinned and not _head_descends_from(repo, pinned) else ""
-    if dropped:
-        updated.pop("base", None)
     # `completed_commit` says which commit *completed* the task; a task leaving `done` has none.
     updated.pop("completed_commit", None)
     tasks[task_id] = {k: v for k, v in updated.items() if v != ""}
@@ -117,12 +103,62 @@ def _reset_once(repo: repo_mod.Repo, task_id: str, status: str, reason: str, fre
         "reason": reason[:_REASON_MAX],
         "handoff": "discarded" if fresh else "kept",
     }
-    if dropped:
-        detail["dropped_base"] = dropped
     with store.transaction() as tx:
         tx.write("state", raw, expect_digest=seen)
         tx.append("decision_declared", cycle_id=state.cycle_id, subject_ids=[task_id], detail=detail)
-    return ResetResult(previous=previous, handoff={} if fresh else handoff, dropped_base=dropped)
+    return ResetResult(previous=previous, handoff={} if fresh else handoff)
+
+
+def order(repo: repo_mod.Repo, task_id: str, *, after: str, reason: str) -> None:
+    """Make `task_id` wait for `after`, beyond what the frozen plan declared, and record why.
+
+    **No roll back, by design.** The mandate authorizes what is built and what it must meet; the
+    order it is built in is the loop's to settle (`00-concept.md`, 論点 B), and an edge changes the
+    order and nothing else. So it is written beside the frozen plan in `state.yaml` rather than
+    into it, the plan's digest and every receipt bound to it stand, and the chain records the edge
+    with its reason for acceptance to show. A roll back used to be the only way to add one — a
+    design pass, a tasks pass, an adversarial review and a re-approval, for a one-line fact (#93).
+
+    Refused when it would make a cycle, and when `task_id` has already started or finished: an
+    edge in front of work that has run orders nothing.
+    """
+    store_mod.retry_on_stale(lambda: _order_once(repo, task_id, after, reason))
+
+
+def _order_once(repo: repo_mod.Repo, task_id: str, after: str, reason: str) -> None:
+    store = store_mod.Store(repo)
+    state, plan = store.read_state(), store.read_plan()
+    if state is None or plan is None:
+        raise ValueError("no .rein/state.yaml or .rein/plan.yaml — run `rein init` first")
+    seen = store_mod.read_digest(state)
+    graph = dag.join(plan, state)
+    for tid in (task_id, after):
+        if tid not in {t.id for t in graph.tasks}:
+            raise ValueError(f"{tid} is not a task in .rein/plan.yaml — `rein dag` lists them")
+    if task_id == after:
+        raise ValueError(f"{task_id} cannot wait for itself")
+    status = graph.get(task_id).status
+    if status in _STARTED:
+        raise ValueError(f"{task_id} is {status}: an edge in front of work that has run orders nothing")
+    if after in graph.get(task_id).blocked_by:
+        raise ValueError(f"{task_id} already waits for {after}")
+
+    raw = json.loads(json.dumps(state.raw))
+    entry = raw.setdefault("tasks", {}).setdefault(task_id, {"status": status})
+    entry["after"] = [*entry.get("after", []), after]
+    try:
+        dag.join(plan, models.State(raw))
+    except dag.DagError as exc:
+        raise ValueError(f"{task_id} after {after} would make the graph cyclic: {exc}") from exc
+    raw["updated_at"] = event_chain.now_iso()
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append(
+            "decision_declared",
+            cycle_id=state.cycle_id,
+            subject_ids=[task_id],
+            detail={"kind": "edge_added", "after": after, "reason": reason[:_REASON_MAX]},
+        )
 
 
 #: A dependent in one of these was started on this task's current work and has not been parked.
@@ -145,34 +181,6 @@ def _refuse_under_started_work(store: store_mod.Store, state: models.State, task
             "would leave them downstream of an unfinished task, never re-checked against what it "
             f"becomes. Reset them first, in that order (`rein task reset <id> --reason ...`), then {task_id}."
         )
-
-
-def _head_descends_from(repo: repo_mod.Repo, commit: str) -> bool:
-    """Does HEAD descend from `commit`? Raises when git cannot answer — a guess either way would
-    either keep a base naming vanished history or drop one still bounding work on the branch."""
-    try:
-        proc = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", commit, "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            cwd=repo.root,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError(f"cannot ask git whether HEAD descends from {commit[:12]}: {exc}") from exc
-    if proc.returncode in (0, 1):
-        return proc.returncode == 0
-    # A commit the object store no longer holds (the rewritten history was collected) is one HEAD
-    # does not descend from; anything else is git failing, which is not an answer.
-    gone = subprocess.run(
-        ["git", "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True, text=True, timeout=30, cwd=repo.root
-    )
-    works = subprocess.run(
-        ["git", "rev-parse", "--verify", "HEAD"], capture_output=True, text=True, timeout=30, cwd=repo.root
-    )
-    if gone.returncode != 0 and works.returncode == 0:
-        return False
-    raise ValueError(f"cannot ask git whether HEAD descends from {commit[:12]}: {proc.stderr.strip()}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -198,8 +206,17 @@ def main(argv: list[str] | None = None) -> int:
         help="also discard the handoff, so the next attempt starts with full retry budgets",
     )
     reset_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    order_parser = sub.add_parser(
+        "order", help="make a task wait for another, beyond the frozen plan — order only, no roll back"
+    )
+    order_parser.add_argument("task_id", help="the task that has to wait (T-NNN)")
+    order_parser.add_argument("--after", required=True, help="the task it waits for (T-NNN)")
+    order_parser.add_argument("--reason", required=True, help="why — recorded in the audit chain, shown at acceptance")
+    order_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
     common.configure_logging()
+    if args.action == "order":
+        return _order_main(args)
 
     reason = args.reason.strip()
     if not reason:
@@ -238,12 +255,22 @@ def main(argv: list[str] | None = None) -> int:
                 "for a launch that reaches it again. `--fresh` is how you say you repaired something "
                 "outside the tree."
             )
-    if result.dropped_base:
-        print(
-            f"  pinned base {result.dropped_base[:12]} dropped — HEAD no longer descends from it, so the next "
-            "attempt starts from HEAD"
-        )
     print("  the escalation stays in the log; it is concluded by a disposition in the review, not by this.")
+    return 0
+
+
+def _order_main(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        logger.error("--reason cannot be empty: acceptance shows why the order changed")
+        return 2
+    try:
+        repo = repo_mod.get(args.repo)
+        order(repo, args.task_id.strip(), after=args.after.strip(), reason=reason)
+    except (repo_mod.RepoNotFoundError, OSError, ValueError, models.DocumentError, store_mod.StoreError) as exc:
+        logger.error(str(exc))
+        return 1
+    print(f"{args.task_id} now waits for {args.after} ({reason}) — the plan and its approval stand")
     return 0
 
 

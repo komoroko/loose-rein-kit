@@ -25,6 +25,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from functools import cache
@@ -493,6 +494,57 @@ def check_readme_parity(en: str, ja: str) -> list[str]:
             failures.append(f"README.ja.md: missing {what} mention `{name}` (present in README.md)")
         for name in sorted(only_ja):
             failures.append(f"README.md: missing {what} mention `{name}` (present in README.ja.md)")
+    return failures
+
+
+_README_SECTION_RE = re.compile(r"^## ", re.MULTILINE)
+_TRANSLATES_RE = re.compile(r"<!-- README\.md: ([0-9a-f]+) -->")
+
+
+def _readme_sections(text: str) -> list[str]:
+    """The preamble, then each `##` section — the unit a translation marker is written against."""
+    starts = [0, *(m.start() for m in _README_SECTION_RE.finditer(text))]
+    return [text[a:b] for a, b in zip(starts, [*starts[1:], len(text)], strict=True)]
+
+
+def _translation_digest(section: str) -> str:
+    """What a README.ja.md section declares it translates: README.md's section, whitespace aside."""
+    lines = [line.rstrip() for line in section.strip().splitlines()]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()[:12]
+
+
+def check_readme_translation(en: str, ja: str) -> list[str]:
+    """Each README.ja.md section names the README.md text it translates, and that text is still there.
+
+    `check_readme_parity` compares structure, and a prose change keeps the structure: 45a6361
+    rewrote how README.md described the snapshot, `make check` passed, and README.ja.md went on
+    describing it the old way until a review read both (#96). Whether a translation is right
+    cannot be checked; whether it was made from the English that is there now can. Each Japanese
+    section carries `<!-- README.md: <digest> -->` of the English section it renders, so an
+    English edit fails here until the translation is brought up to date and its marker moved —
+    a typo fix included, because only the person moving the marker knows that it is one.
+    A Japanese-only edit needs nothing: the translation is the side that follows.
+    """
+    en_sections, ja_sections = _readme_sections(en), _readme_sections(ja)
+    if len(en_sections) != len(ja_sections):
+        return []  # check_readme_parity already reports the section count
+    failures: list[str] = []
+    for index, (en_section, ja_section) in enumerate(zip(en_sections, ja_sections, strict=True)):
+        expected = _translation_digest(en_section)
+        heading = ja_section.splitlines()[0] if ja_section else ""
+        markers = _TRANSLATES_RE.findall(ja_section)
+        where = f"README.ja.md section {index} ({heading!r})"
+        if len(markers) != 1:
+            failures.append(
+                f"{where}: needs exactly one `<!-- README.md: {expected} -->` naming the README.md "
+                f"section it translates (found {len(markers)})"
+            )
+        elif markers[0] != expected:
+            source = en_section.splitlines()[0] if en_section else ""
+            failures.append(
+                f"{where}: translates an earlier README.md {source!r} — bring the translation up to "
+                f"date, then set its marker to `<!-- README.md: {expected} -->`"
+            )
     return failures
 
 
@@ -1154,6 +1206,63 @@ def check_rein_lock_version(version: str, lock_text: str) -> list[str]:
     return failures
 
 
+_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+_LOCK_FORMAT_RE = re.compile(r'^FORMAT = "([^"]+)"$', re.MULTILINE)
+LOCK_MODULE = "src/rein/lock.py"
+
+
+def check_version_bump(version: str, tag_version: str, format_now: str, format_at_tag: str) -> list[str]:
+    """The size of a release's bump is `lock.FORMAT`'s to say, not the releaser's.
+
+    What a version number tells a user of `rein` is one fact: whether every repository has to go
+    through `rein sync --force` before any verb runs again. So a release that moves the format is
+    the next minor and one that does not is the next patch — both ways, or the minor number stops
+    saying it. 0.9.0 was first cut as 0.8.2 and a review caught it; 0.9.5 moved the format to
+    `rein-grounded-v7` as a patch and nothing did (#95). A version equal to the tag is a change
+    that does not release, which is fine only while the format stays where the tag left it.
+    """
+    parsed = [_VERSION_RE.match(v) for v in (version, tag_version)]
+    if not all(parsed):
+        return [f"cannot compare pyproject.toml version {version!r} with tag version {tag_version!r} as X.Y.Z"]
+    major, minor, patch = (int(n) for n in parsed[1].groups())  # type: ignore[union-attr]
+    if format_now != format_at_tag:
+        expected = f"{major}.{minor + 1}.0"
+        if version == expected:
+            return []
+        return [
+            f"lock.FORMAT moved since v{tag_version} ({format_at_tag} → {format_now}), so every "
+            f"repository must `rein sync --force`: this is a minor release, {expected}, but "
+            f"pyproject.toml says {version}"
+        ]
+    expected = f"{major}.{minor}.{patch + 1}"
+    if version in (tag_version, expected):
+        return []
+    return [
+        f"lock.FORMAT is {format_now} as at v{tag_version}, so nobody needs `rein sync --force`: "
+        f"this is a patch release, {expected}, but pyproject.toml says {version}"
+    ]
+
+
+def check_version_bump_against_tag(root: Path, version: str) -> list[str]:
+    """Run :func:`check_version_bump` against the nearest `v*` tag this checkout can reach."""
+    from rein import repo as repo_mod
+
+    repo = repo_mod.Repo(root)
+    rc, tag = repo._git_rc("describe", "--tags", "--abbrev=0", "--match", "v*")
+    if rc != 0 or not tag.strip():
+        return [
+            "no `v*` tag is reachable from HEAD, so the size of this release's bump cannot be "
+            "checked — fetch the tags (a CI checkout needs `fetch-depth: 0`)"
+        ]
+    tag = tag.strip()
+    rc, then = repo._git_rc("show", f"{tag}:{LOCK_MODULE}")
+    at_tag = _LOCK_FORMAT_RE.search(then) if rc == 0 else None
+    now = _LOCK_FORMAT_RE.search((root / LOCK_MODULE).read_text(encoding="utf-8"))
+    if at_tag is None or now is None:
+        return [f'cannot read `FORMAT = "..."` from {LOCK_MODULE} at {tag} and at HEAD']
+    return check_version_bump(version, tag.removeprefix("v"), now.group(1), at_tag.group(1))
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -1211,12 +1320,14 @@ def main(argv: list[str] | None = None) -> int:
         failures += check_scaffold_config_parity(root)
         failures += check_ssot_validates(root)
         failures += check_readme_parity(files["README.md"], files["README.ja.md"])
+        failures += check_readme_translation(files["README.md"], files["README.ja.md"])
         version = install.read_version(root)
         failures += check_version_changelog(version, (root / "CHANGELOG.md").read_text(encoding="utf-8"))
         lock = root / "uv.lock"
         if lock.is_file():  # a product repository has no uv.lock of its own to keep in step
             failures += check_version_lock(version, lock.read_text(encoding="utf-8"))
         failures += check_rein_lock_version(version, (root / ".rein" / "rein.lock").read_text(encoding="utf-8"))
+        failures += check_version_bump_against_tag(root, version)
         failures += check_upgrade_command(root)
         failures += check_distribution_name(root)
         failures += check_required_status_covers_every_job(root)

@@ -61,7 +61,8 @@ test:
 	uv run --frozen pytest -vv --cov=src/rein --cov-report=term-missing tests/
 
 # Drift canaries across the hand-maintained template files (wrapper parity, capability-mapping
-# set-equality, vocabulary echoes, README EN↔JA structure, pyproject↔CHANGELOG, data parity).
+# set-equality, vocabulary echoes, README EN↔JA structure and translation markers, pyproject↔CHANGELOG,
+# the version bump against lock.FORMAT at the nearest v* tag, data parity).
 # Lives in scripts/, not the installed package — it is the template repo's own maintenance tool.
 template-lint:
 	uv run --frozen python scripts/template_lint.py

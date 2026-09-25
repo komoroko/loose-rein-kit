@@ -114,7 +114,6 @@ def build(
     repo_path: Any,
     changed: Sequence[str] = (),
     diff_cmd: str = "",
-    base: str = "",
     history: Sequence[Mapping[str, Any]] = (),
     handoff: Mapping[str, Any] | None = None,
     env: Mapping[str, Any] | None = None,
@@ -138,9 +137,8 @@ def build(
         "sources": _sources(task, claims, repo_path),
     }
     diff = classify_paths(changed)
-    if diff or base or diff_cmd:
+    if diff or diff_cmd:
         document["diff"] = {
-            **({"base": base} if base else {}),
             **({"command": diff_cmd} if diff_cmd else {}),
             **diff,
         }
