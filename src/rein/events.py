@@ -115,6 +115,7 @@ STOP_CAUSE_BY_KIND: Mapping[str, str] = {
     "premise_falsified": "premise",
     "agent_needs_revision": "plan",
     "scope_violation": "plan",
+    "owned_red": "attribution",
     "gate_violation": "boundary",
     "merge_conflict": "integration",
     "integration_red": "integration",

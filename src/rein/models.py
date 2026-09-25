@@ -1682,6 +1682,11 @@ class GateStep:
         return self.raw.get("runs_tests") is True
 
     @property
+    def junit(self) -> str:
+        """Where this step writes a JUnit XML report, relative to its checkout ("": it does not)."""
+        return _str(self.raw, "junit")
+
+    @property
     def paths(self) -> tuple[str, ...]:
         """Glob patterns scoping this step to matching changed paths (empty: every task).
 

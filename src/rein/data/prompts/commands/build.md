@@ -121,6 +121,15 @@ by content in the evidence ledger, and it does not refuse: a cycle whose first t
 failing tests" runs its implementer *before* the gate, so the step goes green and none of it
 applies.
 
+A step that runs the tests and declares `junit:` (the JUnit XML report its command writes) is read
+**per failing test** instead of per step. A red is re-run once on the same tree: green the second
+time is a flaky test, recorded against the task that owns it, and it stops nothing. A red that
+holds is run again on the tree the task forked from: a test red there too was red before this
+change, so it goes to the task whose `scope` holds the test — back on the frontier if it is `done`
+and nothing stands on it, to a person otherwise — and the task under test is not charged. Only a
+test this change turned red, or one in the task's own scope, is its failure. Whether the change
+imports the failing test's code is never asked: a behaviour can break a test through no import.
+
 **`rein build` is one command, not an iteration** — it runs the whole algorithm to completion
 and its exit is the signal. Never schedule wake-ups to poll a run in progress; wait for the
 command. The exit code says what to do next, and is meant for an unattended supervisor as much

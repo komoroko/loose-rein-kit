@@ -98,6 +98,7 @@ from rein import (
 from rein import (
     findings as findings_mod,
 )
+from rein import junit as junit_mod
 from rein import (
     repair as repair_mod,
 )
@@ -147,6 +148,10 @@ SEND_BACK_RETRIES = 1
 #: A scope violation is one by construction: its own message says the way forward is a
 #: human re-approving a wider scope.
 _PLAN_DEFECT_KINDS = frozenset({"agent_needs_revision", "scope_violation"})
+
+#: How many failing test ids a record carries. The report can hold thousands; the record is an
+#: index into it, not a copy.
+_NODES_SHOWN = 50
 
 StopLoop = common.StopLoop
 EnvironmentFault = faults.EnvironmentFault
@@ -266,6 +271,9 @@ class GateStep:
     stage: str = "both"
     #: This step runs the tests — the only kind of step the negative control re-establishes.
     runs_tests: bool = False
+    #: Where the step writes a JUnit XML report, relative to its checkout ("": it does not). What
+    #: lets a red be read per failing test instead of per step (`Orchestrator._attribute_red`).
+    junit: str = ""
 
     @property
     def runnable(self) -> bool:
@@ -328,6 +336,7 @@ class Config:
                 paths=step.paths,
                 stage=step.stage,
                 runs_tests=step.runs_tests,
+                junit=step.junit,
             )
             for step in config.quality_gate
         )
@@ -1923,18 +1932,19 @@ class Orchestrator:
             print(f"    [dry-run] quality gate: {shown} (cwd={cwd})")
             return None, ""
         passed: list[GateStep] = []
+        forked_from = self.ws.fork_point(self.ws.target_branch(task.id), cwd)
         for step in steps:
             if step.kind == "agent":
                 if self._run_agent_step(step, task, cwd):
                     for prev in passed:
-                        failure = self._run_cmd_step(prev, cwd)
+                        failure = self._attribute_red([task], prev, cwd, forked_from, self._run_cmd_step(prev, cwd))
                         if failure:
                             return prev.name, failure
                 continue
             if not step.command:
                 print(f"    [gate] skip {step.name}: no command configured")
                 continue
-            failure = self._run_cmd_step(step, cwd)
+            failure = self._attribute_red([task], step, cwd, forked_from, self._run_cmd_step(step, cwd))
             if failure:
                 return step.name, failure
             passed.append(step)
@@ -1942,6 +1952,140 @@ class Orchestrator:
         if failed:
             return failed, failure
         return self._run_acceptance(task, cwd)
+
+    def _attribute_red(self, tasks: Sequence[dag.Task], step: GateStep, cwd: str, base: str, failure: str) -> str:
+        """The part of a red step that `tasks`' change owns. "" when none of it is.
+
+        A red was charged to whoever was under test, because that is who was being judged — not to
+        whoever owns the failing test. A flaky test, or one another task put in the suite, then
+        blocked a task that could fix neither, and every such stop reached a person whose only
+        move was to read who owned it (#90). With the step's JUnit report the loop reads it
+        instead, and decides with two experiments and no judgement:
+
+          * **Re-run on the same tree, in the same image.** Green the second time is a flaky test:
+            recorded against its owner, and the step passes.
+          * **Run it on the tree the change forked from.** A test red there too was red before this
+            change, whoever owns it; only a test this change turned red is this change's failure.
+            When every failing test was red already, the red is routed to the task whose scope
+            holds it and the step passes here.
+
+        Deliberately not asked: whether the change *imports* the failing test's code. A behaviour
+        can break a test through no import at all, and handing that red to its owner would be a
+        green this change never earned. The comparison with the forked-from tree has no such gap.
+
+        Without a report nothing below the step is known, and the red stays this change's.
+        """
+        if not failure or not step.junit or not step.runs_tests or not base or self.dry_run:
+            return failure
+        report = Path(cwd) / step.junit
+        first = junit_mod.failing(report)
+        if not first:
+            return f"{failure}\n(no failing test in a readable JUnit report at {step.junit}: charged to the step)"
+        if not self._run_cmd_step(step, cwd):
+            owners = self._owners_of(first, exclude=tasks)
+            self._event(
+                "decision_declared",
+                owners or [t.id for t in tasks],
+                {"kind": "flaky", "step": step.name, "nodes": sorted(first)[:_NODES_SHOWN]},
+            )
+            print(f"    [gate] {step.name}: red, then green on the same tree — flaky: {', '.join(sorted(first))}")
+            return ""
+        now = junit_mod.failing(report) or first
+        before = self._failing_at(step, base)
+        if before is None:
+            return f"{failure}\n(could not read the same step at {base[:12]}: the red is charged to this change)"
+        # A test red before the change is still this change's when this task owns it: the owner is
+        # the one whose attempt is meant to fix it, and routing it anywhere else would pass it on.
+        owned_here = {
+            node for node in now & before if set(self._owners_of(frozenset({node}), exclude=())) & {t.id for t in tasks}
+        }
+        mine = (now - before) | owned_here
+        if mine:
+            inherited = sorted((now & before) - mine)
+            already = f"\n(already red before this change, not counted against it: {', '.join(inherited)})"
+            return f"This change turned these tests red: {', '.join(sorted(mine))}\n{failure}" + (
+                already if inherited else ""
+            )
+        self._route_red(tasks, step, now)
+        return ""
+
+    def _failing_at(self, step: GateStep, base: str) -> frozenset[str] | None:
+        """The tests `step` fails on the tree at `base`; None when that could not be read."""
+        try:
+            with build_git.scratch_worktree(
+                self.repo, self.config.worktree_dir, f"red-{step.name}", base, _late_run
+            ) as path:
+                if not self._run_cmd_step(step, path, note=False):
+                    return frozenset()
+                return junit_mod.failing(Path(path) / step.junit)
+        except (EnvironmentFault, StopLoop) as exc:
+            logger.warning(f"[gate] {step.name} could not be run at {base[:12]}: {exc}")
+            return None
+
+    def _owners_of(self, nodes: frozenset[str], *, exclude: Sequence[dag.Task]) -> list[str]:
+        """The tasks whose declared scope holds the files these tests live in, `exclude` aside.
+
+        A task with no `scope.include` is unbounded, which covers every path and so says nothing
+        about ownership; it is never counted as an owner.
+        """
+        if self._plan is None:
+            return []
+        skip = {t.id for t in exclude}
+        paths = {path for node in nodes if (path := junit_mod.node_path(node, self.repo.root))}
+        return sorted(
+            t.id
+            for t in dag.join(self._plan, self.store.read_state()).tasks
+            if t.id not in skip
+            and t.scope_include
+            and any(not common.outside_scope([path], t.scope_include, t.scope_exclude) for path in paths)
+        )
+
+    def _route_red(self, tasks: Sequence[dag.Task], step: GateStep, nodes: frozenset[str]) -> None:
+        """Hand a red that was there before this change to the task that owns it.
+
+        A `done` owner with nothing started on top of it goes back on the frontier with the red in
+        its handoff, and its next attempt fixes its own test. Anything else — an owner other work
+        already stands on, a test in nobody's scope — is a person's call, and is escalated against
+        the owner rather than against the task that happened to be running.
+        """
+        listed = ", ".join(sorted(nodes))
+        by = ", ".join(t.id for t in tasks)
+        owners = self._owners_of(nodes, exclude=tasks)
+        routed = ", ".join(owners) or "nobody"
+        print(f"    [gate] {step.name}: red before {by} changed anything — {listed}; routed to {routed}")
+        graph = self._load_graph()
+        for owner in owners:
+            task = graph.get(owner)
+            started = {
+                tid
+                for tid in graph.dependents_closure([owner])
+                if graph.get(tid).status in {"done", "awaiting-evidence", "in-progress"}
+            }
+            message = (
+                f"{owner}: '{step.name}' fails {listed} on the tree {by} forked from, before {by} changed "
+                f"anything. The test lives in {owner}'s scope."
+            )
+            if task.status == "done" and not started:
+                self._note_diagnostic(owner, {"failure_summary": message[-_HANDOFF_SUMMARY_MAX:]})
+                self._set_status(owner, "todo")
+                self._event(
+                    "decision_declared",
+                    owner,
+                    {"kind": "red_routed", "step": step.name, "nodes": sorted(nodes)[:_NODES_SHOWN], "from": by},
+                )
+            elif task.status in {"done", "awaiting-evidence"}:
+                self._escalate(
+                    "owned_red",
+                    f"{message} Work already stands on {owner} ({', '.join(sorted(started))}), so it is not "
+                    "reopened by itself: decide whether to reset it or repair the test directly.",
+                    task=owner,
+                )
+        if not owners:
+            self._escalate(
+                "owned_red",
+                f"'{step.name}' fails {listed} on the tree {by} forked from, and no task's declared scope "
+                "holds those tests. Nothing was blocked for it; somebody has to own the fix.",
+            )
 
     def _negative_control(self, task: dag.Task, cwd: str, passed: Sequence[GateStep]) -> tuple[str | None, str]:
         """Ask whether the DoD that just went green would have gone green *without* the change.
@@ -2702,7 +2846,9 @@ class Orchestrator:
                     continue
                 if not step.command:
                     continue
-                failure = self._run_cmd_step(step, cwd=self.root)
+                failure = self._attribute_red(
+                    tasks, step, self.root, before_join, self._run_cmd_step(step, cwd=self.root)
+                )
                 if failure:
                     failed, failure_log = step.name, failure
                     break
