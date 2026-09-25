@@ -35,8 +35,8 @@ mechanically; "this one is actually fine" is a deliberate human reclassification
 like the loop's own business until you notice where it is written: `tasks[].acceptance` is in
 `plan.yaml` with the claims, so a re-cut is a shape a softened criterion travels in, and the
 freeze covers the document whole rather than trying to tell an honest re-cut from that. What
-withdraws no authorization is consuming the DAG — the order, the parallelism, the re-runs — which
-is not written down anywhere to be frozen.
+withdraws no authorization is consuming the DAG — the order, the parallelism, the re-runs — and a
+missing edge is added with `rein task order`, beside the frozen plan rather than in it.
 
 **This is for a defect in the specification, and nothing else.** There used to be a
 `--from-review` that derived the impacted tasks from acceptance's blocking findings, which was the

@@ -235,6 +235,9 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
     the state did not follow, and scheduling against that mismatch would run unapproved work.
     """
     status_map = state.task_status if state is not None else {}
+    # Order added after the mandate joins the frozen edges here, so every reader of the graph —
+    # the frontier, the layers, the critical path — sees one DAG.
+    after = state.task_after if state is not None else {}
     attempts_map: dict[str, int] = {}
     if state is not None:
         raw_tasks = state.raw.get("tasks")
@@ -257,7 +260,7 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 id=t.id,
                 title=t.title,
                 kind=t.kind,
-                blocked_by=t.blocked_by,
+                blocked_by=tuple(dict.fromkeys((*t.blocked_by, *after.get(t.id, ())))),
                 status=status_map.get(t.id, "todo"),
                 risk=t.risk,
                 claim_ids=t.claim_ids,

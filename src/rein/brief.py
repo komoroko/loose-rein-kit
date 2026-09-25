@@ -451,6 +451,11 @@ def _residuals(state: models.State | None) -> dict[str, Any]:
     accounts = _accounts(tasks)
     if accounts:
         residual["accounts"] = accounts
+    # The one change to the plan made after it froze without a person: order (`rein task order`).
+    # Needing nobody is not the same as nobody seeing it, and this is where it is seen.
+    ordered = [{"task_id": tid, "after": list(after)} for tid, after in sorted(state.task_after.items())]
+    if ordered:
+        residual["ordered_after_mandate"] = ordered[:MAX_TASKS]
     return residual
 
 

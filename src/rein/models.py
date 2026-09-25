@@ -1401,6 +1401,14 @@ class State:
             return {}
         return {k: _str(v, "status", "todo") for k, v in value.items() if isinstance(v, dict)}
 
+    @property
+    def task_after(self) -> Mapping[str, tuple[str, ...]]:
+        """The order added after the mandate (`rein task order`): task id → the tasks it waits for."""
+        value = self.raw.get("tasks")
+        if not isinstance(value, dict):
+            return {}
+        return {k: _ids(v, "after") for k, v in value.items() if isinstance(v, dict) and _ids(v, "after")}
+
     def recorded_acceptance(self, task_id: str) -> tuple[Mapping[str, Any], ...]:
         """The observations `rein evidence record` has written for `task_id`, newest last.
 

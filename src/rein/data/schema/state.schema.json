@@ -181,6 +181,15 @@
           "completed_commit": {
             "$ref": "#/$defs/commit"
           },
+          "after": {
+            "description": "Tasks this one waits for beyond the frozen plan's `blocked_by`, added after the mandate with `rein task order`. Order is inside the delegation — the mandate authorizes what is built and what it must meet, not the sequence — so adding one needs no roll back; each is recorded in the chain with its reason and listed at acceptance.",
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "pattern": "^T-[0-9]+$"
+            }
+          },
           "note": {
             "type": "string",
             "maxLength": 1000
