@@ -195,8 +195,9 @@ STOP_COUNT_CLAIM = "selection by reach settles how often work stops — the coun
 
 #: Printed under the chained count's breakdown: what splitting it by cause is for.
 STOP_CAUSE_CLAIM = (
-    "only a `decision` needed a person by construction — every other cause is a stop the harness "
-    "could have derived, probed or routed, so a change that claims to remove one is falsified here"
+    "only a `decision` or an `observation` needs a person by construction — every other cause is a "
+    "stop the harness could have derived, probed or routed, so a change that claims to remove one "
+    "is falsified here"
 )
 
 #: The other half of what a contact point costs. `STOP_COUNT_CLAIM` is how often the work stopped;

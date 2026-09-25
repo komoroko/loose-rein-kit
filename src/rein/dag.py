@@ -61,6 +61,10 @@ class Task:
     #: as against the shared DoD's "is this code sound". Prose in a ticket nothing parsed, until
     #: the plan grew a place to put them.
     acceptance: tuple[Mapping[str, Any], ...] = ()
+    #: `agent` or `person`: whether the loop launches an implementer at this task at all.
+    produced_by: str = "agent"
+    #: What must hold outside the repository before a launch, as the frozen plan declares it.
+    requires: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def is_done(self) -> bool:
@@ -262,6 +266,8 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 scope_include=t.scope_include,
                 scope_exclude=t.scope_exclude,
                 acceptance=t.acceptance,
+                produced_by=t.produced_by,
+                requires=t.requires,
             )
             for t in plan.tasks
         ]

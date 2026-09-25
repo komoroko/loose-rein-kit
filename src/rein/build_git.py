@@ -194,6 +194,20 @@ class GitWorkspace:
         _, out = self._run(["git", "rev-parse", self.target_branch(task_id)], cwd=self.root)
         return out.strip()
 
+    def authored(self, path: str) -> tuple[str, str] | None:
+        """`(commit, "Name <email>")` of the last commit on the work branch that touched `path`.
+
+        None when no commit on the branch holds it — a file that exists only in the working tree
+        is not a deliverable anybody else can build on.
+        """
+        rc, out = self._run(["git", "log", "-1", "--format=%H%x00%an <%ae>", self.branch, "--", path], cwd=self.root)
+        commit, _, author = out.strip().partition("\0")
+        if rc != 0 or not commit:
+            return None
+        if self._run(["git", "cat-file", "-e", f"{self.branch}:{path}"], cwd=self.root)[0] != 0:
+            return None  # deleted by that commit, so not there any more
+        return commit, author
+
     def worktree_path(self, task_id: str) -> str:
         """The leaf worktree path under worktree_dir."""
         return str(self.repo.path(self.worktree_dir) / task_id)

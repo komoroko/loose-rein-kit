@@ -233,6 +233,13 @@
             "integration"
           ]
         },
+        "produced_by": {
+          "description": "Who produces this task's deliverable. `agent` (the default) is launched as an implementer. `person` is never launched: its deliverable is something only a person can make — labels judged by eye, a recording, a measurement on a device — and sending an implementer at it has two outcomes, a stop or a fabrication. The loop waits for the files its `artifact` criteria name to be committed on the work branch, and dependents reach it through ordinary `blocked_by` edges.",
+          "enum": [
+            "agent",
+            "person"
+          ]
+        },
         "blocked_by": {
           "type": "array",
           "maxItems": 64,
@@ -288,6 +295,14 @@
           "maxItems": 32,
           "items": {
             "$ref": "#/$defs/operatorSurface"
+          }
+        },
+        "requires": {
+          "description": "What must be true outside this repository before an implementer is launched at this task: a browser listening on a debug port, a model installed on the host, a file a person has to put in place. Each one the loop can check — an argv whose exit status says, or a path that has to exist — and it checks them before every launch. A task with an unmet one is not launched and spends no budget; it waits, and the loop names every unmet precondition across the remaining work in one list rather than discovering them one paid launch at a time. Distinct from `operator_surface`, which is what the task will *create* for a person.",
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/precondition"
           }
         }
       }
@@ -536,6 +551,52 @@
           ]
         }
       }
+    },
+    "precondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "says"
+      ],
+      "description": "One precondition: what it is, in a person's words, and how the loop checks it — exactly one of `probe` and `file`.",
+      "properties": {
+        "says": {
+          "description": "What a person has to make true, in their words. This is the line they are shown when it is not.",
+          "$ref": "#/$defs/label"
+        },
+        "probe": {
+          "description": "An argv run in `executor_profile` (the quality-gate profile when absent); exit 0 means the precondition holds. Never a shell string, for the reason a gate step is not one. Re-run before every launch and never cached: it is a fact about the world, not about a tree.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "executor_profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "file": {
+          "description": "A path in the repository root that has to exist.",
+          "$ref": "#/$defs/repoPath"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "probe"
+          ]
+        },
+        {
+          "required": [
+            "file"
+          ]
+        }
+      ]
     }
   }
 }

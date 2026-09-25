@@ -1354,10 +1354,33 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        return approve_locally(repo, args.gate, approval_subject(repo, args.gate))
+        rc = approve_locally(repo, args.gate, approval_subject(repo, args.gate))
     except ApprovalError as exc:
         logger.error(str(exc))
         return 1
+    if rc == 0 and args.gate == "mandate":
+        _print_owed_by_people(repo)
+    return rc
+
+
+def _print_owed_by_people(repo: repo_mod.Repo) -> None:
+    """Name, once and now, everything the frozen plan needs from a person before it can finish.
+
+    The mandate is already approved when this runs; a failure to check is reported as that and
+    changes nothing about the approval — `rein build` asks the same question before any launch.
+    """
+    from rein import build_loop
+
+    try:
+        owed = build_loop.owed_by_people(repo)
+    except (common.ReinError, OSError, ValueError, dag.DagError, models.DocumentError) as exc:
+        logger.error(f"the mandate is approved; what it needs from a person could not be checked: {exc}")
+        return
+    if owed:
+        print(
+            "\nBefore `rein build` can finish, a person has to provide these — all of them, in the order "
+            f"the work will need them:\n{owed}"
+        )
 
 
 if __name__ == "__main__":

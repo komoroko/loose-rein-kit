@@ -162,6 +162,10 @@ PLAN_STATUS_VALUES = frozenset({"draft", "frozen", "invalidated"})
 # the reasoning for the gate screen to show. The criterion is irreversibility, never whether the
 # loop happens to have a default: it has one for nearly everything.
 DECISION_REACH_VALUES = frozenset({"mandate", "local"})
+#: Who makes a task's deliverable. A `person` task is never launched: the loop waits for the files
+#: its `artifact` criteria name to be committed, because an agent sent at a person's deliverable
+#: either stops or fabricates it.
+PRODUCED_BY_VALUES = frozenset({"agent", "person"})
 #: Whether an answer exists yet. `unknown` is recorded rather than filled in with a default, and
 #: never turned into a claim — a claim nothing can make true cannot be judged.
 DECISION_STATUS_VALUES = frozenset({"settled", "unknown"})
@@ -782,6 +786,17 @@ class Task(Element):
     @property
     def kind(self) -> str:
         return _str(self.raw, "kind", "parallel")
+
+    @property
+    def produced_by(self) -> str:
+        """`agent` (launched as an implementer) or `person` (never launched; see the plan schema)."""
+        return _str(self.raw, "produced_by", "agent")
+
+    @property
+    def requires(self) -> tuple[Mapping[str, Any], ...]:
+        """What must hold outside the repository before this task is launched, as frozen."""
+        value = self.raw.get("requires")
+        return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
     @property
     def blocked_by(self) -> tuple[str, ...]:
@@ -2166,6 +2181,18 @@ def cross_reference_errors(plan: Plan) -> list[str]:
             if not is_repo_path(path):
                 errors.append(f"tasks/{task.id}: scope path {path!r} is not a safe repo-relative path")
         errors += _acceptance_errors(task)
+        if task.produced_by == "person" and not any(
+            isinstance(entry.get("evidence"), dict) and _str(entry["evidence"], "kind") == "artifact"
+            for entry in task.acceptance
+        ):
+            errors.append(
+                f"tasks/{task.id}: produced_by 'person' with no `artifact` criterion — the loop waits for "
+                "the files a person commits, and this task names none, so nothing could ever finish it"
+            )
+        for index, requirement in enumerate(task.requires):
+            path = _str(requirement, "file")
+            if path and not is_repo_path(path):
+                errors.append(f"tasks/{task.id}/requires[{index}]: {path!r} is not a safe repo-relative path")
 
     errors += _cycle_errors(plan)
     return errors

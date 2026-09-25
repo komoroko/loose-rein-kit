@@ -357,6 +357,26 @@ class Config:
         return cls.from_models(config)
 
 
+def render_owed(graph: dag.Graph, owed: Mapping[str, Sequence[str]]) -> str:
+    """One block per task: its id and title, then each thing a person owes it."""
+    return "\n".join(
+        f"  {task_id}  {graph.get(task_id).title}\n" + "\n".join(f"      - {line}" for line in lines)
+        for task_id, lines in owed.items()
+    )
+
+
+def owed_by_people(repo: repo_mod.Repo) -> str:
+    """Everything a person owes the plan as it stands, rendered; "" when nothing is owed.
+
+    For `rein approve mandate`, the other moment the whole list is worth asking for: the plan has
+    just frozen, and a person can prepare everything in one sitting before the first launch.
+    """
+    loop = Orchestrator(Config.load(repo), dry_run=False, repo=repo)
+    graph = dag.load(repo)
+    owed = loop.owed_everywhere(graph)
+    return render_owed(graph, owed) if owed else ""
+
+
 # --- the build lock -----------------------------------------------------------
 #
 # One lock per repository, in the shared runtime directory rather than inside the working tree:
@@ -3283,7 +3303,20 @@ class Orchestrator:
             if unfinished == 0:
                 return self._close_gate4(graph)
 
-            batch = plan_batch(graph, self.config.max_parallel)
+            settled, owed = self._settle_person_tasks(graph)
+            if settled:
+                continue  # a deliverable landed: its dependents may be on the frontier now
+            owed.update(self._unmet_on_frontier(graph))
+            runnable = graph
+            if owed:
+                # Off the frontier for this run, not off the plan: nothing about them is a verdict,
+                # and the next `rein build` asks again.
+                runnable = dag.Graph.from_tasks(
+                    [replace(t, status="blocked") if t.id in owed else t for t in graph.tasks]
+                )
+            batch = plan_batch(runnable, self.config.max_parallel)
+            if batch is None and owed:
+                return self._present_owed(graph)
             if batch is None:
                 # frontier empty & there are unfinished ones = all blocked/needs-revision. To the human.
                 # With the one command that moves it, taken from the same table `rein next` reads:
@@ -3314,6 +3347,163 @@ class Orchestrator:
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
             self._consume_batch(tasks)
             # Recompute at the top of the loop after each batch (reassemble the chain).
+
+    # -- what only a person can provide (CR-38) --
+
+    def _unmet_preconditions(self, task: dag.Task) -> list[str]:
+        """Each of `task`'s preconditions that does not hold right now, as the line a person reads.
+
+        Asked before every launch and never cached: a browser that was up an hour ago says nothing
+        about now, and a ledger keyed on the tree would carry that hour forward. A dry run asks
+        nothing — it launches nothing either.
+        """
+        if self.dry_run:
+            return []
+        unmet: list[str] = []
+        for index, requirement in enumerate(task.requires):
+            says = str(requirement.get("says", ""))
+            path = str(requirement.get("file", ""))
+            if path:
+                if not self.repo.path(path).exists():
+                    unmet.append(f"{says} ({path} does not exist)")
+                continue
+            step = GateStep(
+                name=f"{task.id}:requires[{index}]",
+                kind="command",
+                command=tuple(str(part) for part in requirement.get("probe", [])),
+                executor_profile=str(requirement.get("executor_profile", "")),
+            )
+            if failure := self._probe(step):
+                unmet.append(f"{says} ({failure})")
+        return unmet
+
+    def _probe(self, step: GateStep) -> str:
+        """Run one precondition's argv at the repository root. "" when it exits 0.
+
+        Not `_run_cmd_step`: that records a green in the evidence ledger against the tree, and a
+        precondition is a fact about the world. A probe that cannot be run at all is reported as
+        the reason the precondition could not be confirmed — it is not held either way.
+        """
+        profile = self._profile_for(step)
+        spec = executors.ExecutionSpec(
+            command=tuple(step.command),
+            profile=profile,
+            mounts=self._mounts_for(profile, self.root),
+            workdir=_SANDBOX_WORKDIR if profile.is_sandboxed else self.root,
+            timeout_sec=self.config.timeout_cmd,
+        )
+        try:
+            result = executors.for_profile(profile).run(spec)
+        except executors.ExecutorError as exc:
+            return f"`{step.display}` could not be run: {exc}"
+        if result.exit_code == 0:
+            return ""
+        tail = result.output.strip().splitlines()[-1:] if result.output.strip() else []
+        return f"`{step.display}` exited {result.exit_code}" + (f": {tail[0][:200]}" if tail else "")
+
+    def _unmet_on_frontier(self, graph: dag.Graph) -> dict[str, list[str]]:
+        """The launchable tasks on the frontier whose preconditions do not all hold."""
+        owed: dict[str, list[str]] = {}
+        for task in graph.frontier():
+            if task.produced_by != "person" and (unmet := self._unmet_preconditions(task)):
+                owed[task.id] = unmet
+        return owed
+
+    def _person_owes(self, task: dag.Task) -> list[str]:
+        """What a person-produced task is still waiting for. [] once its deliverable is in and holds.
+
+        The deliverable counts once it is committed on the work branch: a file in somebody's
+        working tree is not something a dependent can fork from. Then its own mechanized criteria
+        are established at the root, where it lives, exactly as a launched task's are in its
+        worktree.
+        """
+        paths = [
+            str(path)
+            for entry in task.acceptance
+            if isinstance(entry.get("evidence"), dict) and str(entry["evidence"].get("kind", "")) == "artifact"
+            for path in entry["evidence"].get("paths", [])
+        ]
+        missing = [path for path in paths if self.ws.authored(path) is None]
+        if missing:
+            return [f"commit {', '.join(missing)} on `{self.branch}`"]
+        self._local.steps, self._local.acceptance, self._local.negative_control = [], [], {}
+        failed, failure = self._run_acceptance(task, self.root)
+        return [f"{failed}: {failure.splitlines()[0]}" if failure else failed] if failed else []
+
+    def _settle_person_tasks(self, graph: dag.Graph) -> tuple[bool, dict[str, list[str]]]:
+        """Finish each person-produced task on the frontier whose deliverable is in; name the rest.
+
+        Returns `(finished any, {task id: what it still owes})`. No implementer is launched at one,
+        ever: the two outcomes of sending an agent at a person's deliverable are a stop and a
+        fabrication, and a reviewer caught the second in the cycle this exists for.
+        """
+        finished = False
+        owed: dict[str, list[str]] = {}
+        for task in graph.frontier():
+            if task.produced_by != "person":
+                continue
+            if self.dry_run:
+                print(f"    [dry-run] {task.id}: a person produces this — not launched")
+                self._set_status(task.id, "done")
+                finished = True
+                continue
+            if waiting := self._person_owes(task):
+                owed[task.id] = waiting
+                continue
+            authored = []
+            for entry in task.acceptance:
+                spec = entry.get("evidence")
+                if isinstance(spec, dict) and str(spec.get("kind", "")) == "artifact":
+                    for path in spec.get("paths", []):
+                        found = self.ws.authored(str(path))
+                        if found is not None:
+                            authored.append({"path": str(path), "commit": found[0], "author": found[1][:300]})
+            record: dict[str, Any] = {"authored": authored, "reported": "none"}
+            if self._current_acceptance:
+                record["acceptance"] = list(self._current_acceptance)
+            if fingerprint := self._fingerprint(self.root):
+                record["tree"] = fingerprint
+            with self._evidence_lock:
+                self._evidence[task.id] = record
+            print(f"  [person] {task.id}: the deliverable is committed — {', '.join(a['path'] for a in authored)}")
+            self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
+            finished = True
+        return finished, owed
+
+    def owed_everywhere(self, graph: dag.Graph) -> dict[str, list[str]]:
+        """What a person owes across every unfinished task, in the order the work will need it.
+
+        Every task rather than the one the frontier reached first: one launch finding one missing
+        thing, then the next launch the next, is the sequence of stops this replaces. The critical
+        path first, then by depth.
+        """
+        depth = {tid: level for level, ids in enumerate(graph.layers()) for tid in ids}
+        critical = set(graph.critical_path())
+        owed: dict[str, list[str]] = {}
+        for task in sorted(graph.tasks, key=lambda t: (t.id not in critical, depth.get(t.id, 0), t.id)):
+            if task.is_done or task.status in ("awaiting-evidence", "in-progress"):
+                continue
+            if task.produced_by == "person":
+                if waiting := self._person_owes(task):
+                    owed[task.id] = waiting
+            elif unmet := self._unmet_preconditions(task):
+                owed[task.id] = unmet
+        return owed
+
+    def _present_owed(self, graph: dag.Graph) -> int:
+        """Stop once, when nothing else can run, naming everything a person owes (`owed_everywhere`)."""
+        owed = self.owed_everywhere(graph)
+        blocked = [t.id for t in graph.tasks if t.status in ("blocked", "needs-revision")]
+        message = (
+            f"{len(owed)} task(s) wait on something only a person can provide, and nothing else can run. "
+            "Everything the rest of the plan needs, in the order it will be needed:\n"
+            + render_owed(graph, owed)
+            + "\nProvide them, then run `rein build` again; it checks each one before launching anything."
+            + (f"\nAlso stopped for another reason: {', '.join(blocked)} (`rein next`)." if blocked else "")
+        )
+        print("\n========== waiting on a person ==========\n" + message)
+        self._escalate("awaiting_operator", message, task=list(owed))
+        return common.EXIT_HUMAN_NEEDED
 
     def _present_crossings(self, waiting: Sequence[dag.Task]) -> int:
         """Hand back at an irreversible point: say what it is, and the one command that moves it.

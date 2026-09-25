@@ -97,8 +97,9 @@ def stops(events: Sequence[models.Event]) -> int:
 #: The causes are the ones a stop can be argued away by: a precondition a probe could have found
 #: before a launch was paid for, a premise nobody had measured, a plan whose structure contradicted
 #: itself, an attribution that charged a task with somebody else's red — and, against those, the
-#: stops that are a person's decision by construction. Counting them apart is what can falsify the
-#: claim that a change to one of the others made the work stop less.
+#: stops that need a person by construction: a decision, or an observation only a person can
+#: make. Counting them apart is what can falsify the claim that a change to one of the others made
+#: the work stop less.
 STOP_CAUSE_BY_EVENT: Mapping[str, str] = {
     "gate_approved": "decision",
     "changes_requested": "decision",
@@ -110,6 +111,7 @@ STOP_CAUSE_BY_EVENT: Mapping[str, str] = {
 
 STOP_CAUSE_BY_KIND: Mapping[str, str] = {
     "awaiting_operator": "precondition",
+    "awaiting_evidence": "observation",
     "premise_falsified": "premise",
     "agent_needs_revision": "plan",
     "scope_violation": "plan",

@@ -280,6 +280,35 @@
                   }
                 }
               },
+              "authored": {
+                "description": "For a task a person produces (`produced_by: person`): each file its `artifact` criteria name, the commit that last touched it on the work branch, and that commit's author. A record of who git says made it, not a proof: it is what lets acceptance see that the deliverable came from a commit rather than from a launch.",
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "path",
+                    "commit",
+                    "author"
+                  ],
+                  "properties": {
+                    "path": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    },
+                    "commit": {
+                      "$ref": "#/$defs/commit"
+                    },
+                    "author": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  }
+                }
+              },
               "reported": {
                 "description": "What the implementer said about its own work, before anything was checked. Kept beside the verified facts rather than instead of them.",
                 "enum": [
