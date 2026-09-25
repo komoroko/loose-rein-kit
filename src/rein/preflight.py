@@ -61,6 +61,34 @@ def _required_without_command(steps: Sequence[models.GateStep]) -> list[Problem]
     return problems
 
 
+def _unwritable_reports(config: models.Config, steps: Sequence[models.GateStep]) -> list[Problem]:
+    """A step that declares a JUnit report in a profile that cannot write one.
+
+    The report is written into the checkout, so a sandbox that mounts it read-only — or not at all —
+    can never produce it. Nothing would fail: every red would simply be charged to the step, and
+    the per-test reading the `junit:` key was set for would be off without a word.
+    """
+    problems = []
+    for step in steps:
+        if step.kind != "command" or not step.junit:
+            continue
+        named = config.profiles.get(step.executor_profile) if step.executor_profile else None
+        profile = named or config.quality_gate_profile
+        if profile is None or not profile.is_sandboxed:
+            continue
+        mode = str(profile.raw.get("mount_repo", "read_write"))
+        if mode != "read_write":
+            problems.append(
+                Problem(
+                    f"quality-gate step {step.name!r} writes its JUnit report to {step.junit}, and profile "
+                    f"{profile.name!r} mounts the repository {mode.replace('_', '-')} — the report can never "
+                    "be written, so no red would be read per test",
+                    f"set `mount_repo: read_write` on {profile.name!r}, or drop `junit:` from {step.name!r}",
+                )
+            )
+    return problems
+
+
 def _profiles_used(config: models.Config, steps: Sequence[models.GateStep]) -> dict[str, models.ExecutorProfile]:
     """Every executor profile this run can actually reach, by name.
 
@@ -197,6 +225,7 @@ def check(
     """
     return [
         *_required_without_command(steps),
+        *_unwritable_reports(config, steps),
         *_sandbox_problems(_profiles_used(config, steps), runtime=runtime),
         *_cli_problems(argv_by_role),
     ]

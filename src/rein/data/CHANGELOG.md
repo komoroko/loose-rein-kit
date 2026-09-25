@@ -59,6 +59,24 @@ without loosening what a green means.
 - **`rein observe` splits the stop count by cause**, and counts falsified premises with and
   without a fallback — the figures that can falsify every change above.
 
+**"Could not observe" is never a negative observation.** An adversarial review of this release
+found the same mistake three ways before it shipped, each fixed where it starts:
+
+- A JUnit report is removed before every run of its step, so the only report ever read is the one
+  that run wrote. A suite that crashed before writing had the previous run's report read as its
+  own, and when that listed only inherited reds the crash was routed away as green.
+- A probe the machine did not let answer (no runtime, a timeout, a signal, the sandbox's memory
+  ceiling) stops the run as a machine fault and records nothing; whatever a probe that ran says —
+  "command not found" and "could not resolve host" included — is an observation. It used to count as unmet — and for a premise, as falsified
+  for good. A probe runs where the implementer will, `executors.agent_profile` or the host, not in
+  the gate's sandbox, where a browser the implementer can reach is not visible.
+- A mandate roll back hands edges added with `rein task order` back to the planner (`rein revise`
+  lists them), instead of leaving them to name tasks a re-cut plan may drop, which bricked the DAG.
+- The "waiting on a person" stop is raised from the list that stopped the frontier, not from a
+  second probe that could answer differently and leave a stop no task could close.
+- `rein build` refuses a step whose `junit:` report its sandbox cannot write, and the shipped
+  sandbox example now mounts the checkout read-write.
+
 ### The development checks run where they are skipped
 
 - `make setup` installs the pre-push hook too (`default_install_hook_types`), so ruff-format and

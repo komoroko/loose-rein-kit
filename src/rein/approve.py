@@ -1540,12 +1540,13 @@ def _print_owed_by_people(repo: repo_mod.Repo) -> None:
     The mandate is already approved when this runs; a failure to check is reported as that and
     changes nothing about the approval — `rein build` asks the same question before any launch.
     """
-    from rein import adapters, build_loop
+    from rein import adapters, build_loop, faults
 
     try:
         owed = build_loop.owed_by_people(repo)
     except (
         adapters.LaunchRefused,
+        faults.EnvironmentFault,
         common.ReinError,
         OSError,
         ValueError,

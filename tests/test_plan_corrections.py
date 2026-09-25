@@ -143,3 +143,24 @@ def test_a_first_approval_has_no_delta(tmp_path: Path) -> None:
     repo = _repo(tmp_path, _tasks())
     assert approve.naming(repo, "mandate")["delta"] == []
     assert models.Plan(make_plan(tasks=_tasks())).digest()
+
+
+def test_a_mandate_roll_back_hands_the_added_order_back_to_the_planner(tmp_path: Path) -> None:
+    """An edge added beside a frozen plan named tasks of that plan. Left in place across a re-cut that
+    drops one of them, it made the graph unreadable, and no verb could remove it."""
+    repo = _repo(tmp_path, _tasks())
+    task_cmd.order(repo, "T-002", after="T-001", reason="order")
+    revision = revise.plan_revision(repo, "mandate", [])
+    assert revision["returned_order"] == ["T-002 after T-001"]
+    assert "T-002 after T-001" in revise.render(revision)
+    revise.apply(repo, revision, "re-cut")
+
+    raw = store_mod.Store(repo).read_raw("state")
+    assert raw is not None and "after" not in raw["tasks"]["T-002"]
+    assert store_mod.Store(repo).read_events()[-2].detail["returned_order"] == ["T-002 after T-001"]
+    (tmp_path / ".rein" / "plan.yaml").write_bytes(
+        store_mod.dump_yaml(make_plan(tasks=[make_task("T-002", claim_ids=["C-001"])]))
+    )
+    raw["tasks"].pop("T-001", None)
+    (tmp_path / ".rein" / "state.yaml").write_bytes(store_mod.dump_yaml(raw))
+    assert [t.id for t in dag.load(repo).tasks] == ["T-002"]

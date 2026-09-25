@@ -597,7 +597,7 @@
           "$ref": "#/$defs/label"
         },
         "probe": {
-          "description": "An argv run in `executor_profile` (the quality-gate profile when absent); exit 0 means the precondition holds. Never a shell string, for the reason a gate step is not one. Re-run before every launch and never cached: it is a fact about the world, not about a tree.",
+          "description": "An argv whose exit status says whether the precondition holds: 0 means it does. Run where the implementer will run — `executors.agent_profile`, or the host when agents run there — unless `executor_profile` names another. Never a shell string, for the reason a gate step is not one. Re-run before every launch and never cached: it is a fact about the world, not about a tree. A probe that cannot be run at all is a machine fault, not an unmet precondition.",
           "type": "array",
           "minItems": 1,
           "maxItems": 32,
@@ -651,7 +651,7 @@
           "$ref": "#/$defs/text"
         },
         "probe": {
-          "description": "An argv whose exit status observes it: 0 means the premise holds. Run by the loop, never by an implementer, so the observation is not the implementer's account of it.",
+          "description": "An argv whose exit status observes it: 0 means the premise holds. Run by the loop, never by an implementer, where the implementer would run (as a precondition probe is). A probe that cannot be run at all observes nothing: the run stops as a machine fault and nothing is recorded.",
           "type": "array",
           "minItems": 1,
           "maxItems": 32,

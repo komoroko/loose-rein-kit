@@ -195,3 +195,61 @@ def test_the_same_list_is_what_approving_the_mandate_prints(tmp_path: Path, caps
     out = capsys.readouterr().out
     assert out.index("T-018") < out.index("T-019"), "in the order the work will need them"
     assert f"commit {LABELS}" in out and "debug port" in out
+
+
+def test_a_probe_that_could_not_run_is_a_machine_fault_not_an_unmet_precondition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rein import executors
+
+    repo = seeded(tmp_path, [browser_task(["true"])])
+    launched: list[str] = []
+    monkeypatch.setattr(build_loop, "_run", counting_implementer(launched))
+
+    def refuse(_profile: object) -> object:
+        raise executors.ExecutorError("no container runtime")
+
+    monkeypatch.setattr(executors, "for_profile", refuse)
+    assert build(repo) == common.EXIT_CANNOT_PROCEED
+    assert launched == []
+    assert not [e for e in store_mod.Store(repo).read_events() if e.detail.get("kind") == "awaiting_operator"]
+
+
+def test_a_probe_runs_where_the_implementer_will_and_not_in_the_gate_s_sandbox(tmp_path: Path) -> None:
+    """The recommended gate sandbox has no network; a browser the implementer can reach is not visible
+    from there, and a probe run there waited forever for a browser that was running."""
+    repo = seeded(tmp_path, [browser_task(["true"])])
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
+    step = build_loop.GateStep(name="T-019:requires[0]", kind="command", command=("true",))
+    assert loop._probe_profile(step).kind == "host"
+    assert loop._probe_profile(step).name != loop.config.raw.quality_gate_profile.name  # type: ignore[union-attr]
+
+
+def test_the_stop_names_what_stopped_the_frontier_even_if_a_probe_changes_its_mind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asked twice, a flaky probe could answer "fine" the second time and leave a stop with no task to
+    close it. What stopped the frontier is carried, not asked again."""
+    from rein import dag
+
+    repo = seeded(tmp_path, [browser_task(["true"])])
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
+    assert loop._present_owed(dag.load(repo), {"T-019": ["a browser (probe failed)"]}) == common.EXIT_HUMAN_NEEDED
+    [asked] = [e for e in store_mod.Store(repo).read_events() if e.detail.get("kind") == "awaiting_operator"]
+    assert list(asked.subject_ids) == ["T-019"]
+
+
+def test_a_probe_that_ran_and_found_the_tool_missing_is_unmet_not_a_machine_fault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "command not found" and "could not resolve host" are what a probe of an installed tool or of
+    the network is there to observe. Classified the way a gate step's output is, they stopped the
+    run as a broken machine instead of asking the person for the tool."""
+    repo = seeded(tmp_path, [browser_task(["sh", "-c", "echo 'curl: (6) Could not resolve host: x'; exit 127"])])
+    launched: list[str] = []
+    monkeypatch.setattr(build_loop, "_run", counting_implementer(launched))
+
+    assert build(repo) == common.EXIT_HUMAN_NEEDED
+    assert launched == []
+    [asked] = [e for e in store_mod.Store(repo).read_events() if e.detail.get("kind") == "awaiting_operator"]
+    assert "exited 127" in asked.detail["message"]

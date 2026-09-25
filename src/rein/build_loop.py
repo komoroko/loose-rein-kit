@@ -1839,6 +1839,11 @@ class Orchestrator:
             if note:
                 self._note_evidence(step, profile, reused=True)
             return ""
+        if step.junit:
+            # Removed before the run, so a report present afterwards is one this run wrote. A suite
+            # that crashed before writing had the previous run's report read as its own — and when
+            # that one listed only reds the change inherited, the crash was routed away as green.
+            (Path(cwd) / step.junit).unlink(missing_ok=True)
         spec = executors.ExecutionSpec(
             command=tuple(step.command),
             profile=profile,
@@ -2023,7 +2028,10 @@ class Orchestrator:
             )
             print(f"    [gate] {step.name}: red, then green on the same tree — flaky: {', '.join(sorted(first))}")
             return ""
-        now = junit_mod.failing(report) or first
+        now = junit_mod.failing(report)
+        if not now:
+            unread = f"the re-run left no failing test in a readable report at {step.junit}: charged to the step"
+            return f"{failure}\n({unread})"
         before = self._failing_at(step, base, owner="-".join(t.id for t in tasks))
         if before is None:
             return f"{failure}\n(could not read the same step at {base[:12]}: the red is charged to this change)"
@@ -3504,7 +3512,7 @@ class Orchestrator:
                 )
             batch = plan_batch(runnable, self.config.max_parallel)
             if batch is None and owed:
-                return self._present_owed(graph)
+                return self._present_owed(graph, owed)
             if batch is None:
                 # frontier empty & there are unfinished ones = all blocked/needs-revision. To the human.
                 # With the one command that moves it, taken from the same table `rein next` reads:
@@ -3637,28 +3645,66 @@ class Orchestrator:
         return unmet
 
     def _probe(self, step: GateStep) -> str:
-        """Run one precondition's argv at the repository root. "" when it exits 0.
+        """Run one probe's argv. "" when it exits 0, what it said when it ran and exited nonzero.
 
-        Not `_run_cmd_step`: that records a green in the evidence ledger against the tree, and a
-        precondition is a fact about the world. A probe that cannot be run at all is reported as
-        the reason the precondition could not be confirmed — it is not held either way.
+        **Three outcomes, not two.** A probe that ran and exited nonzero is an observation: the
+        precondition does not hold, the premise is false. A probe the machine did not let answer — no
+        container runtime, a timeout, a signal from outside, the sandbox's memory ceiling —
+        observed nothing, and raises :class:`EnvironmentFault` like a gate step that cannot be run
+        does. It
+        used to come back as a nonzero like any other, so a runtime that was down for a minute was
+        recorded as a falsified premise, for good.
+
+        **Where it runs is where the implementer will.** A precondition is asked on the
+        implementer's behalf — "can the work run here" — so without an `executor_profile` of its
+        own the probe runs in `executors.agent_profile`, or on the host when agents do. It used to
+        default to the quality gate's profile, which the recommended sandbox gives no network: a
+        probe for a browser on the host failed there every time, and the task waited forever for a
+        browser that was running.
+
+        Not `_run_cmd_step`: that records a green in the evidence ledger against the tree, and what
+        a probe observes is not a fact about a tree.
         """
-        profile = self._profile_for(step)
+        profile = self._probe_profile(step)
         spec = executors.ExecutionSpec(
             command=tuple(step.command),
             profile=profile,
             mounts=self._mounts_for(profile, self.root),
-            workdir=_SANDBOX_WORKDIR if profile.is_sandboxed else self.root,
+            workdir=_SANDBOX_WORKDIR if profile.runs_contained else self.root,
             timeout_sec=self.config.timeout_cmd,
         )
+        where = f"probe {step.name}"
         try:
             result = executors.for_profile(profile).run(spec)
         except executors.ExecutorError as exc:
-            return f"`{step.display}` could not be run: {exc}"
+            raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
         if result.exit_code == 0:
             return ""
+        if result.timed_out:
+            raise EnvironmentFault(
+                faults.Fault.ENV_TRANSIENT, where=where, rc=result.exit_code, output="did not answer in time"
+            )
+        # Not `faults.classify_step`: that separates the code from the machine, and a probe has no
+        # code side — "could not resolve host" or "command not found" is exactly what a probe of the
+        # network or of an installed tool is there to observe. Only a run the machine ended before
+        # the argv could answer (a signal from outside, the sandbox's memory ceiling) observed nothing.
+        if faults.is_sandbox_oom(result.output):
+            raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=result.exit_code, output=result.output)
+        if faults.killed_externally(result.exit_code):
+            raise EnvironmentFault(faults.Fault.ENV_TRANSIENT, where=where, rc=result.exit_code, output=result.output)
         tail = result.output.strip().splitlines()[-1:] if result.output.strip() else []
         return f"`{step.display}` exited {result.exit_code}" + (f": {tail[0][:200]}" if tail else "")
+
+    def _probe_profile(self, step: GateStep) -> models.ExecutorProfile:
+        """The profile a probe runs in: its own, else the agents', else the host (`_probe`)."""
+        config = self.config.raw
+        if step.executor_profile:
+            if named := config.profiles.get(step.executor_profile):
+                return named
+            raise common.ReinError(
+                f"{step.name} names executor_profile {step.executor_profile!r}, which is not in executor_profiles"
+            )
+        return config.agent_profile or models.ExecutorProfile(name="host", raw={"kind": "host"})
 
     def _unmet_on_frontier(self, graph: dag.Graph) -> dict[str, list[str]]:
         """The launchable tasks on the frontier whose preconditions do not all hold."""
@@ -3729,17 +3775,25 @@ class Orchestrator:
             finished = True
         return finished, owed
 
-    def owed_everywhere(self, graph: dag.Graph) -> dict[str, list[str]]:
+    def owed_everywhere(self, graph: dag.Graph, known: Mapping[str, list[str]] | None = None) -> dict[str, list[str]]:
         """What a person owes across every unfinished task, in the order the work will need it.
 
         Every task rather than the one the frontier reached first: one launch finding one missing
         thing, then the next launch the next, is the sequence of stops this replaces. The critical
         path first, then by depth.
+
+        `known` is what the caller has already found, kept as it was found rather than asked again:
+        a probe answering differently the second time must not empty the list the caller is about
+        to stop on.
         """
+        known = known or {}
         depth = {tid: level for level, ids in enumerate(graph.layers()) for tid in ids}
         critical = set(graph.critical_path())
         owed: dict[str, list[str]] = {}
         for task in sorted(graph.tasks, key=lambda t: (t.id not in critical, depth.get(t.id, 0), t.id)):
+            if task.id in known:
+                owed[task.id] = known[task.id]
+                continue
             if task.is_done or task.status in ("awaiting-evidence", "in-progress"):
                 continue
             if task.produced_by == "person":
@@ -3749,9 +3803,13 @@ class Orchestrator:
                 owed[task.id] = unmet
         return owed
 
-    def _present_owed(self, graph: dag.Graph) -> int:
-        """Stop once, when nothing else can run, naming everything a person owes (`owed_everywhere`)."""
-        owed = self.owed_everywhere(graph)
+    def _present_owed(self, graph: dag.Graph, found: Mapping[str, list[str]]) -> int:
+        """Stop once, when nothing else can run, naming everything a person owes (`owed_everywhere`).
+
+        `found` is what stopped the frontier, and it is never probed again here: the stop names at
+        least those tasks, so it is one a task finishing can close.
+        """
+        owed = self.owed_everywhere(graph, found)
         blocked = [t.id for t in graph.tasks if t.status in ("blocked", "needs-revision")]
         message = (
             f"{len(owed)} task(s) wait on something only a person can provide, and nothing else can run. "

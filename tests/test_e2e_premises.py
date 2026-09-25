@@ -207,3 +207,23 @@ def test_a_dry_run_is_not_held_back_by_a_premise_it_cannot_observe(tmp_path: Pat
     repo = seeded(tmp_path, _plan(["false"], fallback=False))
     loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=True, repo=repo)
     assert loop.run() == common.EXIT_DONE
+
+
+def test_a_probe_that_could_not_run_observes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A container runtime that is down says nothing about the CLI, and a falsified premise is recorded
+    for good. The run stops as a machine fault; nothing is recorded and nothing is swapped."""
+    from rein import executors
+
+    repo = seeded(tmp_path, _plan(["true"], fallback=True))
+    build_loop.set_task_status(repo, "T-029", "done")
+
+    def refuse(_profile: object) -> object:
+        raise executors.ExecutorError("no container runtime")
+
+    monkeypatch.setattr(executors, "for_profile", refuse)
+    monkeypatch.setattr(build_loop, "_run", implementer([]))
+
+    assert build(repo) in (common.EXIT_CANNOT_PROCEED, common.EXIT_RETRY_LATER)
+    state = state_of(repo)
+    assert "premises" not in state
+    assert state["tasks"].get("T-026", {}).get("status", "todo") == "todo"

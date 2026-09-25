@@ -103,7 +103,7 @@ executor_profiles:
     # image: localhost/rein-python@sha256:<rein oci build prints this>
     # network_profile: none
     # read_only_root: true
-    # mount_repo: read_only
+    # mount_repo: read_write   # the test step writes its JUnit report into the checkout
     # writable_tmp_mb: 512
     # pids_limit: 128
     # memory_mb: 1024

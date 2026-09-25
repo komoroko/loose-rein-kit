@@ -213,3 +213,36 @@ def test_parallel_leaves_read_the_forked_from_tree_in_checkouts_of_their_own(
     loop._failing_at(step, "HEAD", owner="T-001")
     loop._failing_at(step, "HEAD", owner="T-002")
     assert len(set(names)) == 2 and all(owner in name for owner, name in zip(("T-001", "T-002"), names, strict=True))
+
+
+def test_a_suite_that_crashes_before_writing_its_report_is_not_read_off_the_last_one(tmp_path: Path) -> None:
+    """The report an earlier run left listed only a red the change inherited. The suite then crashed
+    before writing anything, and that old report was read as this run's: the crash was routed to
+    the test's owner and the step passed. A report is only ever the one this run wrote."""
+    repo = seeded(
+        tmp_path,
+        [
+            make_task("T-018", kind="parallel", claim_ids=["C-001"], scope_include=["src/"]),
+            make_task("T-021", kind="parallel", claim_ids=["C-001"], scope_include=["tests/owned/"]),
+        ],
+        {"tests/owned/RED": "tests/owned/test_shots.py::test_screenshots_exist\n"},
+        done=("T-021",),
+    )
+    runner = repo.root / "run_tests.py"
+    runner.write_text("import pathlib, sys\nif pathlib.Path('CRASH').exists(): sys.exit(2)\n" + runner.read_text())
+    git(repo.root, "commit", "-qam", "the runner can crash before it reports")
+    base = git(repo.root, "rev-parse", "HEAD")
+    (repo.root / REPORT).parent.mkdir(parents=True, exist_ok=True)
+    (repo.root / REPORT).write_text(
+        '<testsuites><testsuite name="t"><testcase classname="tests/owned/test_shots.py" '
+        'name="test_screenshots_exist"><failure message="x"/></testcase></testsuite></testsuites>'
+    )
+    (repo.root / "CRASH").write_text("")
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
+    from rein import dag
+
+    step = loop.config.steps[0]
+    failure = loop._run_cmd_step(step, str(repo.root))
+    assert failure
+    assert not (repo.root / REPORT).exists(), "the old report is gone before the run"
+    assert loop._attribute_red([dag.load(repo).get("T-018")], step, str(repo.root), base, failure) != ""
