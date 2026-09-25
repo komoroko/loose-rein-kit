@@ -353,6 +353,76 @@ def test_a_failure_the_loop_recovered_from_by_itself_is_not_a_stop() -> None:
     assert events.stops(recovered) == 0
 
 
+def _detailed(*specs: tuple[str, tuple[str, ...], dict[str, object]]) -> list[models.Event]:
+    built: list[models.Event] = []
+    previous: models.Event | None = None
+    for name, subjects, detail in specs:
+        linked = event_chain.link(previous, event_chain.make(name, "demo-cycle", subject_ids=subjects, detail=detail))
+        built.append(linked)
+        previous = linked
+    return built
+
+
+def test_the_causes_are_a_breakdown_of_the_one_stop_count() -> None:
+    """CR-41: each stop is asked once why it reached a person, and the answers add up to `stops` —
+    a second way of counting would make two figures disagree about one question."""
+    built = _detailed(
+        ("gate_approved", ("mandate",), {}),
+        ("knowledge_gap", ("T-1",), {"kind": "awaiting_operator", "message": "no browser"}),
+        ("task_failed", ("T-2",), {"step": "test", "retries_left": 0}),
+        ("knowledge_gap", ("T-3",), {"kind": "scope_violation", "message": "x"}),
+        ("task_failed", ("T-4",), {"status": "blocked", "escalation": "gate_violation"}),
+        ("knowledge_gap", ("T-5",), {"kind": "something-new", "message": "x"}),
+        ("task_failed", ("T-6",), {"step": "test"}),
+        ("task_completed", ("T-6",), {"status": "done"}),  # recovered by itself: not a stop at all
+    )
+    causes = events.stop_causes(built)
+    assert causes == {
+        "decision": 1,
+        "precondition": 1,
+        "code": 1,
+        "plan": 1,
+        "boundary": 1,
+        events.UNCLASSIFIED: 1,
+    }
+    assert sum(causes.values()) == events.stops(built)
+
+
+def test_a_stop_whose_record_names_no_known_cause_is_not_folded_into_another() -> None:
+    """A stop moved into a neighbouring column would argue for a change it says nothing about."""
+    built = _detailed(("knowledge_gap", ("T-1",), {"message": "the agent declared a gap"}))
+    assert events.stop_causes(built) == {events.UNCLASSIFIED: 1}
+
+
+#: The one module allowed to read the stop count and its causes: the report that prints them.
+STOP_READERS = {"observe_cmd"}
+
+
+def _modules_reading_stops() -> set[str]:
+    """Every module under `src/rein` that names `stops` or `stop_causes`, whatever the import form."""
+    import ast
+
+    names = frozenset({"stops", "stop_causes"})
+    source_root = Path(__file__).resolve().parent.parent / "src" / "rein"
+    found: set[str] = set()
+    for path in sorted(source_root.rglob("*.py")):
+        if path.stem == "events":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and node.attr in names and isinstance(node.value, ast.Name)) or (
+                isinstance(node, ast.ImportFrom) and any(a.name in names for a in node.names)
+            ):
+                found.add(path.stem)
+    return found
+
+
+def test_only_the_report_reads_the_stop_count() -> None:
+    """Never a ceiling: a count something consults to decide is the limit 論点 A rejects. A reader
+    in a gate, a review or a lens selection fails here."""
+    assert _modules_reading_stops() == STOP_READERS
+
+
 def test_a_task_that_never_came_back_is_still_a_stop() -> None:
     """The other half: retirement is the task's own later success, not the passage of time."""
     assert events.stops(_chain(("task_failed", ("T-1",)))) == 1

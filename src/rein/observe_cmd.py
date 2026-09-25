@@ -63,17 +63,18 @@ def main(argv: list[str] | None = None) -> int:
     entries = observations.read()
     summary = observations.summarize(entries, project=project or "")
     scope = f"project {project}" if project else f"{len({e.project for e in entries})} project(s)"
-    stops, stopped = _chain_cost(repo)
+    stops, stopped, causes = _chain_cost(repo)
     print(f"{len(entries)} observation(s), {scope} — {observations.store_path()}\n")
-    print(observations.render(summary, chain_stops=stops, chain_stopped=stopped))
+    print(observations.render(summary, chain_stops=stops, chain_stopped=stopped, chain_causes=causes))
     return 0
 
 
-def _chain_cost(repo: repo_mod.Repo | None) -> tuple[int | None, list[float]]:
-    """What this repository's chain says a cycle cost: how many times it stopped, and for how
-    long each time. `(None, [])` when there is no repository to ask, or its log cannot be read.
+def _chain_cost(repo: repo_mod.Repo | None) -> tuple[int | None, list[float], dict[str, int]]:
+    """What this repository's chain says a cycle cost: how many times it stopped, for how long
+    each time, and why each stop reached a person. `(None, [], {})` when there is no repository to
+    ask, or its log cannot be read.
 
-    One pass for both. They come from the same scan of the same chains, and splitting them into
+    One pass for all three. They come from the same scan of the same chains, and splitting them into
     two functions would walk every archive twice and report each unreadable one twice to the
     person reading a single table.
 
@@ -84,17 +85,21 @@ def _chain_cost(repo: repo_mod.Repo | None) -> tuple[int | None, list[float]]:
     be the one thing these must not be.
     """
     if repo is None:
-        return None, []
+        return None, [], {}
     live, defects = event_chain.scan(repo.events)
     if defects:
         logger.warning(f"{repo.events} has {len(defects)} chain defect(s); no chained stop figures")
-        return None, []
+        return None, [], {}
     sources, unreadable = events_mod.cycle_sources(repo, live)
     for rel in unreadable:
         logger.warning(f"{rel} could not be verified, so its stops are not counted")
     stops = sum(events_mod.stops(source.events) for source in sources)
     stopped = [d for source in sources for d in events_mod.stop_durations(source.events)]
-    return stops, stopped
+    causes: dict[str, int] = {}
+    for source in sources:
+        for cause, count in events_mod.stop_causes(source.events).items():
+            causes[cause] = causes.get(cause, 0) + count
+    return stops, stopped, causes
 
 
 if __name__ == "__main__":
