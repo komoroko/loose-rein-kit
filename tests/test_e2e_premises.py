@@ -184,3 +184,26 @@ def test_an_observer_that_rests_on_its_own_premise_is_refused() -> None:
     plan = _plan(["true"], fallback=False)
     plan["premises"][0]["observed_by"] = "T-026"
     assert any("the observation would wait for itself" in e for e in _errors(plan))
+
+
+def test_a_falsified_premise_nothing_unfinished_rests_on_is_recorded_and_not_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An escalation about a premise rather than a task would never be closed by anything: it has no
+    task to finish. With nothing left resting on it there is nothing to decide, so nobody is asked."""
+    after_observer = make_task("T-030", kind="parallel", blocked_by=["T-029"], claim_ids=["C-001"])
+    repo = seeded(tmp_path, _plan(["false"], fallback=False, extra=[after_observer]))
+    build_loop.set_task_status(repo, "T-026", "done")
+    monkeypatch.setattr(build_loop, "_run", implementer([]))
+
+    assert build(repo) == common.EXIT_DONE
+    chain = store_mod.Store(repo).read_events()
+    assert state_of(repo)["premises"]["P-3"]["status"] == "falsified"
+    assert not [e for e in chain if e.event == "knowledge_gap" and e.detail.get("kind") == "premise_falsified"]
+    assert events.stops(chain) == events.stops([e for e in chain if e.detail.get("kind") != "premise_falsified"])
+
+
+def test_a_dry_run_is_not_held_back_by_a_premise_it_cannot_observe(tmp_path: Path) -> None:
+    repo = seeded(tmp_path, _plan(["false"], fallback=False))
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=True, repo=repo)
+    assert loop.run() == common.EXIT_DONE

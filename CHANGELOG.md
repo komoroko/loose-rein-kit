@@ -4,6 +4,70 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.10.0] - 2026-09-25
+
+**A minor release because the format moves: `rein-grounded-v8`.** Every repository runs
+`rein sync --force` before any verb runs again. `state.yaml` loses `tasks.<id>.base` and
+`evidence.base` and gains `tasks.<id>.after`, `evidence.authored` and `premises`; `plan.yaml`
+gains `premises`, a task's `requires` and `produced_by`, and a criterion's `produces`, `reads` and
+`assumes`; a quality-gate step gains `junit`. A cycle with a foundation task holding a pinned base
+cannot be read by this release: finish it on 0.9.6, or start a fresh one.
+
+**0.9.5 should have been 0.10.0.** It moved the format to `rein-grounded-v7` under a patch number,
+the mistake 0.9.0 had named and a review had caught once. Its number is not changed — a version
+that was installed stays what it was — and `template-lint` now derives the bump from `lock.FORMAT`,
+so the next one fails `make check` instead of shipping.
+
+### Most human stops were facts the harness could have had before the freeze
+
+One recorded cycle (29 tasks, 0.9.3 → 0.9.6) stopped for a person 23 times, and few of those were
+decisions only a person could make (#93). They came from three design choices, each changed here
+without loosening what a green means.
+
+- **A foundation task's change is what its own branch holds (#88).** It ran in the repository root
+  and committed onto the work branch, and its change was `base..HEAD` from a base pinned at its
+  first attempt — so the orchestration record the rules ask to be committed between attempts
+  (rollback, design and tasks deltas, approval) was charged to it, the guard refused `.rein/` at
+  landing, and no reset could clear it. Every task now runs in its own worktree and lands by a
+  merge; a foundation batch is serial in order only. The base pin and everything that defended it
+  are gone, and a blocked foundation task no longer holds the work branch. The gate-violation
+  message names the guard's refusal instead of claiming a pending gate.
+- **A red goes to whoever owns the failing test (#90).** With a step's `junit:` report, a red is
+  re-run once on the same tree (green the second time is flaky: recorded, and it stops nothing),
+  then run on the tree the change forked from: a test red there too was red before the change and
+  is routed to the task whose scope holds it — reopened when it is `done` and nothing stands on it,
+  escalated otherwise — while the task under test is not charged. Only a test the change turned
+  red, or one in its own scope, is its failure. Whether the change imports the test's code is
+  deliberately not asked. The shipped config writes the report from its pytest step.
+- **The scope and the edges are checked against the criteria before the freeze (#89).** Criteria
+  may declare `produces` and `reads`. Each produced path lies in its task's scope, a path has one
+  producer, a task producing or reading under another task's path depends on it, and at the
+  mandate a produced path git ignores or a read path nothing produces and git does not track is
+  refused. The approval panel lists the criteria that name no path.
+- **What only a person can provide is data (#91).** A task's `requires` (`{says, probe | file}`)
+  is checked before every launch; an unmet one launches nothing and spends no budget. A
+  `produced_by: person` task is never launched: the loop waits for its files to be committed and
+  records which commit and author they came from. When nothing else can run, one stop names
+  everything the rest of the plan needs from a person; `rein approve mandate` prints the same list.
+- **A premise nobody measured is observed before anything rests on it (#92).** `premises` on the
+  plan, `assumes` on a criterion. The loop runs each probe once its observer is done; a falsified
+  premise with a fallback the human approved with the mandate is applied with no roll back, one
+  without parks only the tasks resting on it.
+- **A correction is priced by what it changes (#93).** `rein task order T --after U --reason`
+  adds a dependency edge beside the frozen plan: no roll back, recorded, listed at acceptance. A
+  re-approval of the mandate shows what changed since the last one, on both routes.
+- **`rein observe` splits the stop count by cause**, and counts falsified premises with and
+  without a fallback — the figures that can falsify every change above.
+
+### The development checks run where they are skipped
+
+- `make setup` installs the pre-push hook too (`default_install_hook_types`), so ruff-format and
+  mypy no longer first run in CI (#94).
+- Each `README.ja.md` section names the digest of the `README.md` section it translates, and
+  `template-lint` fails when the English moved under it (#96).
+- `template-lint` checks the version bump against `lock.FORMAT` at the nearest `v*` tag (#95);
+  the CI `checks` job fetches tags for it.
+
 ## [0.9.6] - 2026-09-24
 
 ### Downstream never runs ahead of upstream, and what a human writes reaches the retry

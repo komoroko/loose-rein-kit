@@ -188,3 +188,28 @@ def test_the_owner_of_a_red_that_was_already_there_is_charged_with_it(
     assert build(repo) == common.EXIT_HUMAN_NEEDED
     assert status_of(repo, "T-021") == "blocked"
     assert not [e for e in events(repo) if e.detail.get("kind") == "red_routed"]
+
+
+def test_parallel_leaves_read_the_forked_from_tree_in_checkouts_of_their_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two leaves of one batch can ask at the same moment; one shared scratch checkout would be
+    removed by whichever finished first, under the other's test run."""
+    import contextlib
+
+    from rein import build_git
+
+    repo = seeded(tmp_path, [make_task("T-001", kind="parallel", claim_ids=["C-001"])], {})
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
+    names: list[str] = []
+
+    @contextlib.contextmanager
+    def recording(_repo: object, _dir: str, name: str, _base: str, _run: object) -> Any:
+        names.append(name)
+        yield str(repo.root)
+
+    monkeypatch.setattr(build_git, "scratch_worktree", recording)
+    step = loop.config.steps[0]
+    loop._failing_at(step, "HEAD", owner="T-001")
+    loop._failing_at(step, "HEAD", owner="T-002")
+    assert len(set(names)) == 2 and all(owner in name for owner, name in zip(("T-001", "T-002"), names, strict=True))

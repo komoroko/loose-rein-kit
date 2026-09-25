@@ -394,6 +394,14 @@ Most of the situations below surface there.
   `rein task reset T-NNN --reason "…"`. Not by editing `state.yaml`: `rein guard` denies the hand
   edit. The reset keeps the handoff so the retry budget is not silently refilled (`--fresh`
   discards it and says so). If the cause is an upstream defect, use `/revise <phase>` instead.
+- **The build stopped "waiting on a person"** — a task's `requires` probe failed, or a
+  `produced_by: person` task's file is not committed yet. The message lists everything the rest of
+  the plan needs from a person, not only the first thing found; provide it and run `rein build`
+  again, which checks each one before launching anything. `rein approve mandate` prints the same
+  list when the plan freezes.
+- **A task has to wait for another the plan did not say it waits for** — add the edge with
+  `rein task order T-NNN --after T-MMM --reason "…"`. Order is not part of what the mandate
+  approved, so this needs no roll back; the edge is recorded and shown at acceptance.
 - **A task sits at `awaiting-evidence`** — one of its acceptance criteria is marked `external`: a
   staging check, a device, a person. `rein evidence show` lists every external criterion and
   whether it has been observed; the work is merged and the task waits until somebody records what

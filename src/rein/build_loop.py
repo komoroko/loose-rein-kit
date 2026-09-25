@@ -2024,7 +2024,7 @@ class Orchestrator:
             print(f"    [gate] {step.name}: red, then green on the same tree — flaky: {', '.join(sorted(first))}")
             return ""
         now = junit_mod.failing(report) or first
-        before = self._failing_at(step, base)
+        before = self._failing_at(step, base, owner="-".join(t.id for t in tasks))
         if before is None:
             return f"{failure}\n(could not read the same step at {base[:12]}: the red is charged to this change)"
         # A test red before the change is still this change's when this task owns it: the owner is
@@ -2042,11 +2042,16 @@ class Orchestrator:
         self._route_red(tasks, step, now)
         return ""
 
-    def _failing_at(self, step: GateStep, base: str) -> frozenset[str] | None:
-        """The tests `step` fails on the tree at `base`; None when that could not be read."""
+    def _failing_at(self, step: GateStep, base: str, *, owner: str) -> frozenset[str] | None:
+        """The tests `step` fails on the tree at `base`; None when that could not be read.
+
+        The scratch checkout is named for `owner` (the task or join asking) as well as the step:
+        parallel leaves ask this at the same time, and two of them sharing one checkout would each
+        remove the other's tree from under it.
+        """
         try:
             with build_git.scratch_worktree(
-                self.repo, self.config.worktree_dir, f"red-{step.name}", base, _late_run
+                self.repo, self.config.worktree_dir, f"red-{owner}-{step.name}", base, _late_run
             ) as path:
                 if not self._run_cmd_step(step, path, note=False):
                     return frozenset()
@@ -3544,6 +3549,8 @@ class Orchestrator:
         Such a criterion is provisional, so a `done` it contributed to would be too: the task waits
         for the observation, and the probe runs as soon as its observer is done.
         """
+        if self.dry_run:
+            return set()  # a dry run observes nothing, so it cannot wait for an observation either
         unobserved = self._unobserved()
         return {t.id for t in graph.frontier() if set(t.assumes) & unobserved}
 
@@ -3585,15 +3592,18 @@ class Orchestrator:
                 print(
                     f"  [premise] {premise.id} is false ({failure}) — applying the fallback approved with the mandate"
                 )
+            elif not park:
+                # Nothing unfinished rests on it, so nobody has anything to decide: recorded, not asked.
+                print(f"  [premise] {premise.id} is false ({failure}), and nothing unfinished rests on it")
             else:
                 self._escalate(
                     "premise_falsified",
                     f"{premise.id} is false: {premise.says}\n  {failure}\nThe plan approved no fallback for it, so "
                     "the criteria resting on it cannot be met as written. "
-                    f"Parked: {', '.join(park) or 'nothing unfinished'}. Everything else continues. Change what "
+                    f"Parked: {', '.join(park)}. Everything else continues. Change what "
                     f"rests on it with `rein revise --to mandate --impacted {','.join(park)}`; the re-approval "
                     "shows only what changed.",
-                    task=park or premise.id,
+                    task=park,
                 )
         return recorded
 
