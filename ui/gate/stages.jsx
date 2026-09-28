@@ -287,6 +287,17 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
       </tr>
     );
   }
+  // Work taken out of the plan while it was a draft. Not delivered, and said so here.
+  for (const d of residuals.deferred || []) {
+    residualRows.push(
+      <tr key={"deferred:" + d.task_id}>
+        <td>deferred out of this cycle</td>
+        <td>
+          <span className="mono">{d.task_id}</span> ({d.status}) — {d.reason}
+        </td>
+      </tr>
+    );
+  }
 
   return (
     <>

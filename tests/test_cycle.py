@@ -9,6 +9,7 @@ happened.
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -273,3 +274,46 @@ def test_a_bad_slug_is_refused(tmp_path: Path, name: str) -> None:
     # `--name=<value>`: argparse would read a leading-dash value as another option and exit itself,
     # which is the right answer but not the one under test here.
     assert cycle.main([f"--name={name}", "--repo", str(tmp_path)]) == 2
+
+
+# --- abandoning a cycle -------------------------------------------------------
+
+
+def test_abandon_drops_only_the_acceptance_condition(tmp_path: Path) -> None:
+    seed_repo(tmp_path, state=make_state(gates={"acceptance": "pending"}))
+    repo = repo_mod.Repo(tmp_path)
+    assert cycle.readiness(repo, abandon=True) == []
+
+
+def test_abandon_still_refuses_a_damaged_chain(tmp_path: Path) -> None:
+    seed_repo(tmp_path, state=make_state(gates={"acceptance": "pending"}), events=chain("cycle_initialized"))
+    repo = repo_mod.Repo(tmp_path)
+    repo.events.write_text(repo.events.read_text(encoding="utf-8").replace("demo-cycle", "x", 1), encoding="utf-8")
+    assert any("unreadable log" in b for b in cycle.readiness(repo, abandon=True))
+
+
+def test_abandon_requires_a_reason(tmp_path: Path) -> None:
+    seed_repo(tmp_path, state=make_state(gates={"acceptance": "pending"}), docs=True)
+    assert cycle.main(["--name", "gave-up", "--abandon", "--repo", str(tmp_path)]) == 2
+
+
+def test_an_abandoned_archive_says_so_and_why(tmp_path: Path) -> None:
+    seed_repo(
+        tmp_path, state=make_state(gates={"acceptance": "pending"}), docs=True, events=chain("cycle_initialized")
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    reason = "the full run moved to the next cycle"
+    rc = cycle.main(["--name", "gave-up", "--abandon", "--reason", reason, "--repo", str(tmp_path)])
+
+    assert rc == 0
+    marker = next((tmp_path / "docs" / "archive").glob("*-gave-up/ABANDONED.md"))
+    text = marker.read_text(encoding="utf-8")
+    assert "the full run moved to the next cycle" in text
+    assert "acceptance: pending" in text
+    # The closing event is the last entry of the archived chain, and it carries the same fact.
+    archived = next((tmp_path / "docs" / "archive").glob("*-gave-up/rein/events.ndjson"))
+    closing = json.loads(archived.read_text(encoding="utf-8").splitlines()[-1])
+    assert closing["event"] == "cycle_closed"
+    assert closing["detail"]["abandoned"] is True
+    assert closing["detail"]["reason"] == "the full run moved to the next cycle"

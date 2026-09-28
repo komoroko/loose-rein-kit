@@ -164,3 +164,73 @@ def test_a_mandate_roll_back_hands_the_added_order_back_to_the_planner(tmp_path:
     raw["tasks"].pop("T-001", None)
     (tmp_path / ".rein" / "state.yaml").write_bytes(store_mod.dump_yaml(raw))
     assert [t.id for t in dag.load(repo).tasks] == ["T-002"]
+
+
+# --- taking a task out of the cycle (`rein task defer`) ------------------------------
+
+
+def _draft_repo_without(tmp_path: Path, removed: str, statuses: dict[str, object]) -> repo_mod.Repo:
+    """A rolled-back cycle whose human deleted `removed` from the draft plan; its status is still there."""
+    state = make_state(gates={"mandate": "pending"}, plan_status="draft")
+    state["tasks"] = statuses
+    planned = [t for t in _tasks() if t["id"] != removed]
+    seed_repo(tmp_path, plan=make_plan(tasks=planned), state=state)
+    return repo_mod.Repo(tmp_path)
+
+
+def test_a_task_deleted_from_the_draft_plan_leaves_a_state_no_graph_reader_accepts(tmp_path: Path) -> None:
+    """The failure `defer` exists for: nothing could remove the status, and hand-editing is denied."""
+    repo = _draft_repo_without(tmp_path, "T-002", {"T-001": {"status": "done"}, "T-002": {"status": "blocked"}})
+    with pytest.raises(dag.DagError, match="rein task defer"):
+        dag.load(repo)
+
+
+def test_defer_moves_the_status_aside_and_records_why(tmp_path: Path) -> None:
+    repo = _draft_repo_without(tmp_path, "T-002", {"T-001": {"status": "done"}, "T-002": {"status": "blocked"}})
+
+    task_cmd.defer(repo, "T-002", reason="needs a fix upstream; next cycle")
+
+    assert [t.id for t in dag.load(repo).tasks] == ["T-001"]
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and "T-002" not in state.task_status
+    assert state.deferred["T-002"]["status"] == "blocked"
+    assert state.deferred["T-002"]["reason"] == "needs a fix upstream; next cycle"
+    recorded = store_mod.Store(repo).read_events()[-1]
+    assert recorded.event == "decision_declared" and recorded.detail["kind"] == "task_deferred"
+
+
+def test_the_deferred_task_is_shown_at_acceptance(tmp_path: Path) -> None:
+    repo = _draft_repo_without(tmp_path, "T-002", {"T-001": {"status": "done"}, "T-002": {"status": "blocked"}})
+    task_cmd.defer(repo, "T-002", reason="next cycle")
+    residuals = brief.derive(plan=None, state=store_mod.Store(repo).read_state(), config=None)["residuals"]
+    assert residuals["deferred"] == [{"task_id": "T-002", "status": "blocked", "reason": "next cycle"}]
+
+
+def test_defer_drops_an_order_edge_that_named_the_deferred_task(tmp_path: Path) -> None:
+    repo = _draft_repo_without(
+        tmp_path, "T-001", {"T-001": {"status": "blocked"}, "T-002": {"status": "todo", "after": ["T-001"]}}
+    )
+    task_cmd.defer(repo, "T-001", reason="next cycle")
+    assert dag.load(repo).get("T-002").blocked_by == ()
+    assert store_mod.Store(repo).read_events()[-1].detail["edges_dropped"] == ["T-002"]
+
+
+def test_defer_refuses_a_frozen_plan(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, _tasks(), {"T-002": {"status": "blocked"}})
+    with pytest.raises(ValueError, match="frozen"):
+        task_cmd.defer(repo, "T-002", reason="no")
+
+
+def test_defer_refuses_a_task_the_plan_still_declares(tmp_path: Path) -> None:
+    """This verb never edits the plan: the deletion is the human's, and it comes first."""
+    state = make_state(gates={"mandate": "pending"}, plan_status="draft")
+    state["tasks"] = {"T-002": {"status": "blocked"}}
+    seed_repo(tmp_path, plan=make_plan(tasks=_tasks()), state=state)
+    with pytest.raises(ValueError, match="still declared"):
+        task_cmd.defer(repo_mod.Repo(tmp_path), "T-002", reason="no")
+
+
+def test_defer_refuses_a_task_with_no_status(tmp_path: Path) -> None:
+    repo = _draft_repo_without(tmp_path, "T-002", {"T-001": {"status": "done"}})
+    with pytest.raises(ValueError, match="nothing to defer"):
+        task_cmd.defer(repo, "T-002", reason="no")

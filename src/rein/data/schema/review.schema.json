@@ -1426,6 +1426,33 @@
                       }
                     }
                   }
+                },
+                "deferred": {
+                  "description": "Tasks taken out of the plan while it was a draft (`rein task defer`): each with the status it had and why. What this change does not deliver, on the screen that takes it.",
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "task_id",
+                      "status",
+                      "reason"
+                    ],
+                    "properties": {
+                      "task_id": {
+                        "$ref": "#/$defs/taskId"
+                      },
+                      "status": {
+                        "type": "string",
+                        "maxLength": 32
+                      },
+                      "reason": {
+                        "type": "string",
+                        "maxLength": 500
+                      }
+                    }
+                  }
                 }
               }
             }

@@ -17,7 +17,9 @@ design, tasks, and tests describe one change, not the whole product. Closing a c
 Closing is a human decision, like opening a gate; the agent never runs this on its own. It
 refuses to close a cycle whose release gate is not approved, whose audit chain is damaged, or
 whose approved gates carry no receipt: an archive is a record, and a record assembled from an
-inconsistent state is worse than none.
+inconsistent state is worse than none. `--abandon --reason` is the one exception to the first
+condition: a cycle given up on is closed on the record of that decision, and its archive carries
+`ABANDONED.md` so it can never be read as a change somebody took.
 """
 
 from __future__ import annotations
@@ -100,8 +102,13 @@ def snapshot_ssot(repo: repo_mod.Repo) -> bool:
     return took
 
 
-def readiness(repo: repo_mod.Repo) -> list[str]:
-    """Every reason this cycle may not be closed yet (plan §27's final check)."""
+def readiness(repo: repo_mod.Repo, *, abandon: bool = False) -> list[str]:
+    """Every reason this cycle may not be closed yet (plan §27's final check).
+
+    `abandon` drops the one condition an abandoned cycle cannot meet — an approved acceptance —
+    and keeps the rest: an archive assembled from a damaged chain or an untraceable approval is
+    no more a record for being abandoned.
+    """
     store = store_mod.Store(repo)
     blockers: list[str] = []
     try:
@@ -111,7 +118,7 @@ def readiness(repo: repo_mod.Repo) -> list[str]:
     if state is None:
         return ["no .rein/state.yaml — there is no cycle to close"]
 
-    if state.gate_status("acceptance") != "approved":
+    if not abandon and state.gate_status("acceptance") != "approved":
         blockers.append("the acceptance gate is not approved — a cycle closes on a signed decision to take the change")
     events, defects = event_chain.scan(repo.events)
     if defects:
@@ -194,6 +201,26 @@ def _restore(repo: repo_mod.Repo) -> list[str]:
     return restored
 
 
+def _mark_abandoned(repo: repo_mod.Repo, archive: str, previous: models.State, reason: str) -> None:
+    """Write `ABANDONED.md` beside the archived record: why, and where the gates and tasks stood.
+
+    The archive of an abandoned cycle holds the same documents as a finished one, and nothing in
+    them says the change was never taken. This file is what says so to the next reader — the
+    `cycle_closed` event carries the same fact for anything reading the chain.
+    """
+    gates = "\n".join(f"- {gate}: {previous.gate_status(gate)}" for gate in previous.gate_ids)
+    tasks = "\n".join(f"- {tid}: {status}" for tid, status in sorted(previous.task_status.items())) or "- (none)"
+    body = (
+        f"# ABANDONED — cycle `{previous.cycle_id}`\n\n"
+        "Closed with `rein cycle-close --abandon`: the acceptance gate was never approved, so nothing "
+        "in this archive is a change a human took.\n\n"
+        f"## Reason\n\n{reason}\n\n## Gates at close\n\n{gates}\n\n## Tasks at close\n\n{tasks}\n"
+    )
+    path = repo.path(archive) / "ABANDONED.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
 def next_state(previous: models.State, slug: str) -> dict[str, object]:
     """A fresh state document for the next cycle, carrying only the project identity forward.
 
@@ -216,6 +243,12 @@ def next_state(previous: models.State, slug: str) -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="archive the finished delta cycle and reset for the next")
     parser.add_argument("--name", required=True, help="a slug for the archive directory and the next cycle id")
+    parser.add_argument(
+        "--abandon",
+        action="store_true",
+        help="close without an approved acceptance: the archive is marked ABANDONED with the reason",
+    )
+    parser.add_argument("--reason", default="", help="why the cycle is abandoned (required with --abandon)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan; write nothing")
     parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
@@ -235,13 +268,18 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(f"--name {args.name!r} must match {models.CYCLE_ID_RE.pattern} (lowercase, digits, dashes)")
         return 2
 
+    reason = args.reason.strip()
+    if args.abandon and not reason:
+        logger.error("--abandon needs --reason: an abandoned cycle's archive says why, or it says nothing")
+        return 2
+
     today = date.today().isoformat()
     rows = plan_close(repo, slug, today)
     print(f"Archive plan for cycle '{slug}' → {ARCHIVE_DIR}/{today}-{slug}/")
     for action, src, dst in rows:
         print(f"  {action:8} {src}" + (f" → {dst}" if action == "archive" else ""))
 
-    blockers = readiness(repo)
+    blockers = readiness(repo, abandon=args.abandon)
     if blockers:
         logger.error("cannot close this cycle:\n" + "\n".join(f"  - {b}" for b in blockers))
         return 1
@@ -262,10 +300,16 @@ def main(argv: list[str] | None = None) -> int:
             "cycle_closed",
             cycle_id=previous.cycle_id,
             subject_ids=[slug],
-            detail={"archive": f"{ARCHIVE_DIR}/{today}-{slug}", "chain_root": store.chain_root()},
+            detail={
+                "archive": f"{ARCHIVE_DIR}/{today}-{slug}",
+                "chain_root": store.chain_root(),
+                **({"abandoned": True, "reason": reason[:500]} if args.abandon else {}),
+            },
         )
 
     moved = _archive(repo, rows)
+    if args.abandon:
+        _mark_abandoned(repo, f"{ARCHIVE_DIR}/{today}-{slug}", previous, reason)
     restored = _restore(repo)
 
     # Through the Central Store, not `atomic_write`. state.yaml is the document `gate_guard` rule 1

@@ -1452,6 +1452,12 @@ class State:
             return {}
         return {k: _ids(v, "after") for k, v in value.items() if isinstance(v, dict) and _ids(v, "after")}
 
+    @property
+    def deferred(self) -> Mapping[str, Mapping[str, Any]]:
+        """Tasks taken out of this cycle's plan (`rein task defer`): task id → what was recorded."""
+        value = self.raw.get("deferred")
+        return {str(k): v for k, v in value.items() if isinstance(v, dict)} if isinstance(value, dict) else {}
+
     def recorded_acceptance(self, task_id: str) -> tuple[Mapping[str, Any], ...]:
         """The observations `rein evidence record` has written for `task_id`, newest last.
 

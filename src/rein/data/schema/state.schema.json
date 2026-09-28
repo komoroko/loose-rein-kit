@@ -525,6 +525,39 @@
         }
       }
     },
+    "deferred": {
+      "description": "Tasks taken out of this cycle's plan while it was a draft (`rein task defer`), keyed by the id they had. Their status could not stay under `tasks` — a status for a task the plan does not declare is a cross-reference error — and dropping it would erase that the work was started and set aside. Acceptance lists them with the reason, so what this cycle does not deliver is on the screen rather than missing from it.",
+      "type": "object",
+      "maxProperties": 512,
+      "propertyNames": {
+        "pattern": "^T-[0-9]{3,}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "reason",
+          "deferred_at"
+        ],
+        "properties": {
+          "status": {
+            "description": "The status the task had when it was deferred.",
+            "type": "string",
+            "maxLength": 32
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "deferred_at": {
+            "type": "string",
+            "maxLength": 64
+          }
+        }
+      }
+    },
     "premises": {
       "description": "What the loop observed of each plan premise: `held` or `falsified`, when, and the probe's last line. Written once per premise, by the loop.",
       "type": "object",

@@ -270,7 +270,9 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
     if orphans:
         raise DagError(
             f"state.yaml holds status for task(s) the plan does not declare: {', '.join(orphans)} — "
-            "the plan was rewound without the state following. Run `rein revise` to reconcile."
+            "the plan was rewound without the state following. A task taken out of this cycle on "
+            "purpose is recorded with `rein task defer <id> --reason ...`; one removed by mistake goes "
+            "back into plan.yaml."
         )
 
     return Graph.from_tasks(
