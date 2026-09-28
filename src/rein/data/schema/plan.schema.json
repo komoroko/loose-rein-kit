@@ -312,6 +312,33 @@
           "items": {
             "$ref": "#/$defs/precondition"
           }
+        },
+        "environment": {
+          "description": "What this task's work needs from the machine it runs on, declared so the loop supplies it rather than an agent inheriting whatever the operator's shell had. `env` is set for the implementer and for this task's `requires` probes (`$HOME`, `~` and `${NAME}` are expanded from the loop's environment when the task launches; a reference to an unset variable is an unmet precondition, never an empty string). `allow` is the exact command prefixes this task's implementer may run without asking, passed to the agent CLI for this launch only — so a host task that has to run one measurement script does not widen the repository's standing `permissions.allow` for every session after it. A CLI that cannot scope a permission to one launch says so at launch and gets nothing.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "env": {
+              "type": "object",
+              "maxProperties": 32,
+              "propertyNames": {
+                "pattern": "^[A-Z_][A-Z0-9_]{0,63}$"
+              },
+              "additionalProperties": {
+                "type": "string",
+                "maxLength": 1024
+              }
+            },
+            "allow": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            }
+          }
         }
       }
     },

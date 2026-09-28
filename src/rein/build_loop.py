@@ -194,6 +194,29 @@ _SANDBOX_WORKDIR = "/work"
 #: handed every other socket in it.
 _SANDBOX_CONTROL_SOCKET = "/run/rein/control.sock"
 
+#: Names the leaf environment carries from the plan's `environment.env`, so a contained launch
+#: passes exactly those through — they were approved with the mandate, the operator's shell was not.
+DECLARED_ENV = "REIN_DECLARED_ENV"
+
+_ENV_REF = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+
+
+def task_environment(task: dag.Task) -> tuple[dict[str, str], list[str]]:
+    """`task.env` with `~`, `$NAME` and `${NAME}` expanded from this process's environment.
+
+    Returns the expanded variables and the names whose value referred to a variable nothing sets.
+    Those are reported as unmet preconditions, never expanded to an empty string: a `PYTHONPATH`
+    that silently became "" is the failure this block exists to remove, one layer further down.
+    """
+    expanded: dict[str, str] = {}
+    unresolved: list[str] = []
+    for name, value in task.env:
+        if any((a or b) not in os.environ for a, b in _ENV_REF.findall(value)):
+            unresolved.append(name)
+            continue
+        expanded[name] = os.path.expandvars(os.path.expanduser(value))
+    return expanded, unresolved
+
 
 def _worktree_common_git_dir(checkout: Path) -> Path | None:
     """The main repository's `.git` for a linked worktree, or None for an ordinary checkout.
@@ -1365,6 +1388,11 @@ class Orchestrator:
         wiring = {
             name: value for name, value in env.items() if name.startswith("REIN_") and name != control_plane.SOCKET_ENV
         }
+        # The plan's `environment.env` was approved with the mandate, so it is passed whatever the
+        # profile's allowlist says — the allowlist keeps the operator's shell out, not the plan.
+        for name in filter(None, env.get(DECLARED_ENV, "").split(",")):
+            if name in env:
+                wiring[name] = env[name]
         wiring[control_plane.SOCKET_ENV] = _SANDBOX_CONTROL_SOCKET
         return wiring
 
@@ -1511,10 +1539,16 @@ class Orchestrator:
             return ""
         prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, "implementer"))
         where = f"{task.id}: implementer"
+        allowed = self._allow_argv(task)
         try:
             self._launch(
                 adapters.command(
-                    self.config.adapter_argv, prompt, access=adapters.WRITE, session=session, resume=resume
+                    self.config.adapter_argv,
+                    prompt,
+                    access=adapters.WRITE,
+                    extra=allowed,
+                    session=session,
+                    resume=resume,
                 ),
                 cwd=cwd,
                 where=where,
@@ -1537,7 +1571,7 @@ class Orchestrator:
         # A fresh token: the first one was spent on the launch that failed, and the server
         # accepts each nonce once.
         self._launch(
-            adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE),
+            adapters.command(self.config.adapter_argv, prompt, access=adapters.WRITE, extra=allowed),
             cwd=cwd,
             where=where,
             env=self._leaf_env(task),
@@ -1545,6 +1579,24 @@ class Orchestrator:
             role="implementer",
         )
         return getattr(self._local, "session_opened", "")
+
+    def _allow_argv(self, task: dag.Task) -> tuple[str, ...]:
+        """The per-launch permission flags for `task.allow`, or () with a line saying why none.
+
+        Scoped to this one launch on purpose: the other way to let an implementer run its task's
+        measurement script was a standing rule in the repository's `permissions.allow`, which
+        every later session inherits and the security review then has to find.
+        """
+        if not task.allow:
+            return ()
+        record = adapters.adapter_for(self.config.adapter_argv)
+        flags = record.allow_argv(task.allow) if record is not None else ()
+        if not flags:
+            print(
+                f"    [allow] {task.id}: this agent CLI has no per-launch permission setting; "
+                f"{len(task.allow)} declared command prefix(es) not granted"
+            )
+        return flags
 
     def _leaf_env(self, task: dag.Task, role: str = "implementer") -> dict[str, str] | None:
         """The environment an implementer runs with: the control socket, a scoped token, and who it is.
@@ -1573,14 +1625,17 @@ class Orchestrator:
             capabilities=sorted(control_plane.LEAF_CAPABILITIES),
             ttl_sec=int(self.config.timeout_agent or control_plane.DEFAULT_TTL_SEC),
         )
+        declared = task_environment(task)[0] if role == "implementer" else {}
         return {
             **os.environ,
+            **declared,
             control_plane.SOCKET_ENV: str(self.control.socket_path),
             control_plane.TOKEN_ENV: token,
             "REIN_ROLE": role,
             "REIN_TASK_ID": task.id,
             "REIN_RUN_ID": self.run_id,
             "REIN_SANDBOX": self._launch_environment(),
+            **({DECLARED_ENV: ",".join(sorted(declared))} if declared else {}),
         }
 
     @property
@@ -3626,7 +3681,11 @@ class Orchestrator:
         """
         if self.dry_run:
             return []
-        unmet: list[str] = []
+        declared, unresolved = task_environment(task)
+        unmet: list[str] = [
+            f"environment.env {name} refers to a variable this machine does not set — set it, or change the plan"
+            for name in unresolved
+        ]
         for index, requirement in enumerate(task.requires):
             says = str(requirement.get("says", ""))
             path = str(requirement.get("file", ""))
@@ -3640,11 +3699,11 @@ class Orchestrator:
                 command=tuple(str(part) for part in requirement.get("probe", [])),
                 executor_profile=str(requirement.get("executor_profile", "")),
             )
-            if failure := self._probe(step):
+            if failure := self._probe(step, env=declared):
                 unmet.append(f"{says} ({failure})")
         return unmet
 
-    def _probe(self, step: GateStep) -> str:
+    def _probe(self, step: GateStep, env: Mapping[str, str] | None = None) -> str:
         """Run one probe's argv. "" when it exits 0, what it said when it ran and exited nonzero.
 
         **Three outcomes, not two.** A probe that ran and exited nonzero is an observation: the
@@ -3666,10 +3725,16 @@ class Orchestrator:
         a probe observes is not a fact about a tree.
         """
         profile = self._probe_profile(step)
+        # A task's declared environment is what its work runs with, so its probes ask under it too:
+        # a model importable only with the plan's PYTHONPATH is importable, and a probe run without
+        # it would park the task on a precondition that holds.
+        declared = dict(env or {})
         spec = executors.ExecutionSpec(
             command=tuple(step.command),
             profile=profile,
             mounts=self._mounts_for(profile, self.root),
+            env={**os.environ, **declared} if declared and not profile.runs_contained else {},
+            env_always=declared if profile.runs_contained else {},
             workdir=_SANDBOX_WORKDIR if profile.runs_contained else self.root,
             timeout_sec=self.config.timeout_cmd,
         )

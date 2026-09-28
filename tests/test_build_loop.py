@@ -4001,3 +4001,9 @@ def test_the_status_write_that_ends_an_attempt_is_not_another_attempt(tmp_path: 
     build_loop.set_task_status(loop.repo, "T-001", "blocked")
 
     assert loop._history_for(_task()) == [{"attempt": 1, "step": "test", "reason": "unit red"}]
+
+
+def test_a_cli_with_no_per_launch_permission_setting_grants_nothing() -> None:
+    """Saying so beats pretending: the loop prints that the declared prefixes were not granted."""
+    assert adapters.ADAPTER_TABLE["codex"].allow_argv(["uv run x"]) == ()
+    assert adapters.ADAPTER_TABLE["claude"].allow_argv([]) == ()

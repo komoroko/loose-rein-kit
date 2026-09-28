@@ -11,6 +11,7 @@ sent at, and the loop asks once, for everything the rest of the plan will need.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -253,3 +254,93 @@ def test_a_probe_that_ran_and_found_the_tool_missing_is_unmet_not_a_machine_faul
     assert launched == []
     [asked] = [e for e in store_mod.Store(repo).read_events() if e.detail.get("kind") == "awaiting_operator"]
     assert "exited 127" in asked.detail["message"]
+
+
+# --- a task's declared environment (`environment.env` / `environment.allow`) ------------------
+
+
+def recording_implementer(seen: list[tuple[list[str], dict[str, str]]]) -> object:
+    """An implementer that records its command line and environment, then writes one file."""
+
+    def _run(
+        cmd: list[str], cwd: str | None = None, timeout: float | None = None, env: Any = None, **_: object
+    ) -> tuple[int, str]:
+        if not cmd or cmd[0] != "claude":
+            return common.run(cmd, cwd, timeout)
+        seen.append((list(cmd), dict(env or {})))
+        where = Path(cwd or ".")
+        (where / f"{where.name}.py").write_text("# done\n", encoding="utf-8")
+        return 0, agent_envelope("")
+
+    return _run
+
+
+def measuring_task(
+    env: dict[str, str], allow: list[str] | None = None, probe: list[str] | None = None
+) -> dict[str, Any]:
+    task = make_task("T-047", kind="parallel", claim_ids=["C-001"], title="measure on the host")
+    task["environment"] = {"env": env, **({"allow": allow} if allow else {})}
+    if probe:
+        task["requires"] = [{"says": "the model imports", "probe": probe}]
+    return task
+
+
+def test_the_declared_environment_reaches_the_implementer_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The field case: PYTHONPATH lived in the operator's shell, and a launch from a shell without
+    it failed the task's own precondition."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = seeded(tmp_path, [measuring_task({"PYTHONPATH": "$HOME/CosyVoice:${HOME}/extra"})])
+    seen: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(build_loop, "_run", recording_implementer(seen))
+
+    assert build(repo) == common.EXIT_DONE
+    [(_, env)] = seen
+    home = str(tmp_path / "home")
+    assert env["PYTHONPATH"] == f"{home}/CosyVoice:{home}/extra"
+    assert env[build_loop.DECLARED_ENV] == "PYTHONPATH"
+
+
+def test_a_reference_to_an_unset_variable_is_an_unmet_precondition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Never expanded to "": a PYTHONPATH that silently became empty is the failure this removes."""
+    monkeypatch.delenv("REIN_TEST_NOT_SET", raising=False)
+    repo = seeded(tmp_path, [measuring_task({"PYTHONPATH": "$REIN_TEST_NOT_SET/lib"})])
+    seen: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(build_loop, "_run", recording_implementer(seen))
+
+    assert build(repo) == common.EXIT_HUMAN_NEEDED
+    assert seen == []
+    [asked] = [e for e in store_mod.Store(repo).read_events() if e.detail.get("kind") == "awaiting_operator"]
+    assert "PYTHONPATH" in asked.detail["message"]
+
+
+def test_a_probe_asks_under_the_declared_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    probe = ["sh", "-c", 'test "$REIN_TEST_MODEL_DIR" = /models']
+    repo = seeded(tmp_path, [measuring_task({"REIN_TEST_MODEL_DIR": "/models"}, probe=probe)])
+    seen: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(build_loop, "_run", recording_implementer(seen))
+
+    assert build(repo) == common.EXIT_DONE
+    assert len(seen) == 1
+
+
+def test_declared_commands_are_granted_for_that_launch_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The field case widened the repository's standing `permissions.allow` with `Bash(uv run *:*)`
+    so one task could run its measurement script; every later session inherited it."""
+    allow = ["uv run --no-sync python tests/measurements/run.py"]
+    repo = seeded(tmp_path, [measuring_task({}, allow=allow)])
+    seen: list[tuple[list[str], dict[str, str]]] = []
+    monkeypatch.setattr(build_loop, "_run", recording_implementer(seen))
+
+    assert build(repo) == common.EXIT_DONE
+    [(cmd, _)] = seen
+    settings = json.loads(cmd[cmd.index("--settings") + 1])
+    assert settings == {"permissions": {"allow": [f"Bash({allow[0]}:*)"]}}
+    # The settings value sits before the prompt, which stays the last argument.
+    assert cmd.index("--settings") < len(cmd) - 2
+    assert not (repo.root / ".claude" / "settings.json").exists() or "uv run" not in (
+        repo.root / ".claude" / "settings.json"
+    ).read_text(encoding="utf-8")

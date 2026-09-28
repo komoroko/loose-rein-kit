@@ -803,6 +803,19 @@ class Task(Element):
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
     @property
+    def env(self) -> tuple[tuple[str, str], ...]:
+        """The variables this task's work runs with, as frozen (`environment.env`), unexpanded."""
+        block = self.raw.get("environment")
+        value = block.get("env") if isinstance(block, dict) else None
+        return tuple((str(k), str(v)) for k, v in value.items()) if isinstance(value, dict) else ()
+
+    @property
+    def allow(self) -> tuple[str, ...]:
+        """The command prefixes this task's implementer may run without asking (`environment.allow`)."""
+        block = self.raw.get("environment")
+        return _ids(block, "allow") if isinstance(block, dict) else ()
+
+    @property
     def blocked_by(self) -> tuple[str, ...]:
         return _ids(self.raw, "blocked_by")
 

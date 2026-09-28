@@ -68,6 +68,10 @@ class Task:
     #: The plan premises this task's (effective) criteria rest on. It does not run until each one
     #: has been observed.
     assumes: tuple[str, ...] = ()
+    #: The variables this task's work runs with (unexpanded) and the command prefixes its
+    #: implementer may run without asking — the frozen `environment` block.
+    env: tuple[tuple[str, str], ...] = ()
+    allow: tuple[str, ...] = ()
 
     @property
     def is_done(self) -> bool:
@@ -293,6 +297,8 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 produced_by=t.produced_by,
                 requires=t.requires,
                 assumes=_assumed(effective(t.id, t.acceptance)),
+                env=t.env,
+                allow=t.allow,
             )
             for t in plan.tasks
         ]
