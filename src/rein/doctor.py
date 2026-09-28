@@ -27,6 +27,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,7 @@ import rein
 from rein import (
     adapters,
     agent_cli,
+    audit,
     common,
     dag,
     dag_trace,
@@ -866,6 +868,38 @@ def check_adapters(config: models.Config | None, state: models.State | None) -> 
                 )
             )
     return findings
+
+
+def check_audit_command(repo: repo_mod.Repo, config: models.Config | None) -> list[Finding]:
+    """Can the configured dependency audit start at all?
+
+    It runs on the host and nowhere else, so nothing in the quality gate ever exercises it — the
+    first time it ran in the field was the acceptance gate, where `uv run pip-audit` found no
+    pip-audit and the release stopped on a tool that was never installed. A launcher (`uv run`,
+    `npx`, `poetry run`) resolves its tool inside the project environment, so that is where this
+    looks for it; anything else must be on PATH.
+    """
+    block = audit.configured(config)
+    command = [str(part) for part in block.get("command", [])]
+    if not command:
+        return [Finding("INFO", "audit", "no security.dependency_audit.command — acceptance will say so")]
+    tool = command[0]
+    if shutil.which(tool) is None:
+        return [Finding("FAIL", "audit", f"dependency audit command {tool!r} not found on PATH")]
+    if command[:2] == ["uv", "run"] and len(command) > 2:
+        inner = next((part for part in command[2:] if not part.startswith("-")), "")
+        venv_bin = repo.root / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
+        if inner and not (venv_bin / inner).exists() and shutil.which(inner) is None:
+            return [
+                Finding(
+                    "FAIL",
+                    "audit",
+                    f"`{' '.join(command)}` will fail to spawn: {inner} is not in {venv_bin} nor on PATH. "
+                    f"Add it to a dependency group, or install it there, before the mandate — "
+                    "the audit is the one acceptance check nothing else exercises.",
+                )
+            ]
+    return [Finding("PASS", "audit", f"dependency audit command can start: {' '.join(command)}")]
 
 
 def check_binaries() -> list[Finding]:
@@ -1754,6 +1788,7 @@ def run_checks(repo: repo_mod.Repo | None = None) -> list[Finding]:
     assert review is None or isinstance(review, models.Review)
 
     findings += check_integrations(repo, config)
+    findings += check_audit_command(repo, config)
     findings += check_runtime(repo)
     findings += check_sandbox(config, state)
     findings += check_quality_gate(config)

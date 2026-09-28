@@ -170,3 +170,41 @@ def test_a_finding_about_the_dependencies_is_recorded_as_one(monkeypatch: pytest
 
     assert record["passed"] is False
     assert "GHSA-xxxx" in record["summary"]
+
+
+def test_a_launcher_that_could_not_start_the_scanner_records_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`uv run pip-audit` with no pip-audit installed exits 2 with this line. It was recorded as a
+    failed audit — a finding about dependencies nobody had audited — and held acceptance shut."""
+    from rein import executors
+
+    output = "\x1b[1m\x1b[31merror\x1b[39m\x1b[0m: Failed to spawn: `pip-audit`\n  Caused by: No such file or directory"
+    monkeypatch.setattr(executors, "for_profile", _answering(2, output))
+    with pytest.raises(audit.AuditError, match="could not be run"):
+        audit.run(repo_mod.Repo(Path(".")), _audited(["uv", "run", "pip-audit"]))
+
+
+# --- the mandate asks that it has been run, not that it passed -----------------
+
+
+def test_the_mandate_asks_for_an_audit_before_the_freeze() -> None:
+    from rein import approve
+
+    state = models.State({"cycle_id": "c", "gates": {}})
+    blockers = approve._mandate_audit_blockers(state, _audited(["pip-audit"]))
+    assert blockers and "before freezing the plan" in blockers[0]
+
+
+def test_a_failing_audit_does_not_hold_the_mandate_shut() -> None:
+    """Whether this cycle fixes a finding is what the mandate decides; refusing to open until it is
+    fixed would leave no mandate to fix it in."""
+    from rein import approve
+
+    state = models.State({"cycle_id": "c", "gates": {}, "dependency_audit": _record(passed=False)})
+    assert approve._mandate_audit_blockers(state, _audited(["pip-audit"])) == []
+
+
+def test_a_project_with_no_audit_is_left_to_acceptance_at_the_mandate() -> None:
+    from rein import approve
+
+    state = models.State({"cycle_id": "c", "gates": {}})
+    assert approve._mandate_audit_blockers(state, models.Config(make_config())) == []

@@ -163,8 +163,17 @@ def killed_externally(rc: int) -> bool:
     return rc > 128 and (rc - 128) in _EXTERNAL_SIGNALS
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+#: A launcher that ran and could not start the command it wraps — `uv run pip-audit` with no
+#: pip-audit in the environment prints this and exits 2, which read as "the audit found something"
+#: and recorded a failed audit about dependencies nobody had audited.
+_WRAPPED_UNLAUNCHABLE_RE = re.compile(r"^error: Failed to spawn: `[^`]+`", re.MULTILINE)
+
+
 def _unlaunchable(rc: int, output: str) -> bool:
-    return rc == _RC_UNLAUNCHABLE and output.startswith(_UNLAUNCHABLE_PREFIX)
+    if rc == _RC_UNLAUNCHABLE and output.startswith(_UNLAUNCHABLE_PREFIX):
+        return True
+    return bool(_WRAPPED_UNLAUNCHABLE_RE.search(_ANSI_RE.sub("", output)))
 
 
 def classify_launch(rc: int, output: str) -> Fault:
