@@ -344,3 +344,59 @@ def test_declared_commands_are_granted_for_that_launch_only(tmp_path: Path, monk
     assert not (repo.root / ".claude" / "settings.json").exists() or "uv run" not in (
         repo.root / ".claude" / "settings.json"
     ).read_text(encoding="utf-8")
+
+
+# --- the long, deterministic part of a task is run by the loop (`operate`) ---------------------
+
+
+def operating_task(steps: list[dict[str, Any]], env: dict[str, str] | None = None) -> dict[str, Any]:
+    task = make_task("T-047", kind="parallel", claim_ids=["C-001"], title="the full run")
+    task["operate"] = steps
+    if env:
+        task["environment"] = {"env": env}
+    return task
+
+
+def test_operate_runs_after_the_implementer_and_before_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its output lands with the task: the gate sees the file the run wrote, and so does the merge."""
+    step = {"name": "full-run", "command": ["sh", "-c", 'echo "$REIN_TEST_DECK" > measured.txt; echo measured']}
+    repo = seeded(tmp_path, [operating_task([step], env={"REIN_TEST_DECK": "deck-a"})])
+    launched: list[str] = []
+    monkeypatch.setattr(build_loop, "_run", counting_implementer(launched))
+
+    assert build(repo) == common.EXIT_DONE
+    assert launched == ["T-047"]
+    assert git(repo.root, "show", f"{WORK_BRANCH}:measured.txt") == "deck-a"
+    log = repo.root / ".rein" / "work" / "T-047" / "operate" / "01-full-run.log"
+    assert log.read_text(encoding="utf-8").strip() == "measured"
+
+
+def test_a_failing_operate_step_goes_back_to_the_implementer_with_its_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    step = {"name": "full-run", "command": ["sh", "-c", "echo 'RecallRejected: ungrounded_keys=175'; exit 1"]}
+    repo = seeded(tmp_path, [operating_task([step])])
+    launched: list[str] = []
+    monkeypatch.setattr(build_loop, "_run", counting_implementer(launched))
+
+    assert build(repo) != common.EXIT_DONE
+    # Sent back once; the stub changes nothing, so the second identical failure is not paid for again.
+    assert launched == ["T-047", "T-047"]
+    handoff = status_of(repo, "T-047")["handoff"]
+    assert handoff["failed_step"] == "operate:full-run"
+    assert "ungrounded_keys=175" in handoff["failure_summary"]
+
+
+def test_an_operate_step_the_machine_could_not_run_spends_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = seeded(tmp_path, [operating_task([{"name": "full-run", "command": ["rein-no-such-runner"]}])])
+    launched: list[str] = []
+    monkeypatch.setattr(build_loop, "_run", counting_implementer(launched))
+
+    assert build(repo) in (common.EXIT_CANNOT_PROCEED, common.EXIT_RETRY_LATER)
+    assert launched == ["T-047"]
+    assert "failed_step" not in status_of(repo, "T-047").get("handoff", {})
+    assert "task_failed" not in {e.event for e in store_mod.Store(repo).read_events()}

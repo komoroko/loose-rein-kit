@@ -816,6 +816,11 @@ class Task(Element):
         return _ids(block, "allow") if isinstance(block, dict) else ()
 
     @property
+    def operate(self) -> tuple[Mapping[str, Any], ...]:
+        """The long commands the loop runs itself before this task's gate, as frozen."""
+        return _maps(self.raw, "operate")
+
+    @property
     def blocked_by(self) -> tuple[str, ...]:
         return _ids(self.raw, "blocked_by")
 

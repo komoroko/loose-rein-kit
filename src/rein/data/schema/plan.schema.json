@@ -339,6 +339,40 @@
               }
             }
           }
+        },
+        "operate": {
+          "description": "Long deterministic commands the loop runs itself, on the host, after the implementer has landed its tooling and before the quality gate — a full measurement run, a data migration dry run, a generator that takes hours. An agent's turn is the wrong host for them: it ends, and takes the child process with it, and it spends its session waiting. Each step runs in the task's worktree with the task's `environment.env`, its output going to `.rein/work/<task>/operate/`. A step that exits nonzero because of what the implementer wrote sends the task back with the log's tail, on its own retry budget; one the machine could not run stops the build as a machine fault. Irreversible work still waits for its `T-NNN` gate: nothing here runs before the task is launched.",
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "command"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+              },
+              "command": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                }
+              },
+              "timeout_sec": {
+                "description": "Omit for no limit: the point of this block is work that outlasts an agent's patience.",
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
         }
       }
     },

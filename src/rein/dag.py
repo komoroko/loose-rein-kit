@@ -72,6 +72,8 @@ class Task:
     #: implementer may run without asking — the frozen `environment` block.
     env: tuple[tuple[str, str], ...] = ()
     allow: tuple[str, ...] = ()
+    #: The long commands the loop runs on the host before this task's gate (`operate`).
+    operate: tuple[Mapping[str, Any], ...] = ()
 
     @property
     def is_done(self) -> bool:
@@ -299,6 +301,7 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 assumes=_assumed(effective(t.id, t.acceptance)),
                 env=t.env,
                 allow=t.allow,
+                operate=t.operate,
             )
             for t in plan.tasks
         ]

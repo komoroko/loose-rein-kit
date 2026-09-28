@@ -194,6 +194,9 @@ _SANDBOX_WORKDIR = "/work"
 #: handed every other socket in it.
 _SANDBOX_CONTROL_SOCKET = "/run/rein/control.sock"
 
+#: The verdict name a failed `operate` step comes back under, with the step's name after it.
+_OPERATE_PREFIX = "operate:"
+
 #: Names the leaf environment carries from the plan's `environment.env`, so a contained launch
 #: passes exactly those through — they were approved with the mandate, the operator's shell was not.
 DECLARED_ENV = "REIN_DECLARED_ENV"
@@ -798,6 +801,8 @@ _FAILURE_MAX_LINES = common._FAILURE_MAX_LINES
 # The implementation lives in common.run; the `_run` name stays because the tests monkeypatch it
 # here to fake git and agent-CLI results.
 _run = common.run
+#: The host runner for `operate` steps — separate from `_run`, which launches agents.
+_operate_run = common.run
 
 
 def _late_run(cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
@@ -2784,6 +2789,8 @@ class Orchestrator:
         # acceptance criterion is a configured step, and both come back through this channel, so
         # without an entry here each one got the silent zero `.get(name, 0)` produced.
         budgets[NEGATIVE_CONTROL] = SEND_BACK_RETRIES
+        for step in task.operate:
+            budgets[f"{_OPERATE_PREFIX}{step.get('name', '?')}"] = SEND_BACK_RETRIES
         for entry in task.acceptance:
             budgets[f"{_ACCEPTANCE_PREFIX}{entry.get('id', '?')}"] = SEND_BACK_RETRIES
         # What an earlier, interrupted attempt left behind. Restoring the budgets is the load-
@@ -2846,7 +2853,9 @@ class Orchestrator:
                     return False, message
             self._local.steps, self._local.acceptance, self._local.negative_control = [], [], {}
             after_implementer = self._fingerprint(cwd)
-            failed, failure_log = self._run_pipeline(task, cwd)
+            failed, failure_log = self._run_operate(task, cwd)
+            if failed is None:
+                failed, failure_log = self._run_pipeline(task, cwd)
             if failed is None:
                 self._record_task_evidence(task, cwd)
                 # Whatever failure the handoff described is over. Left in place, it rode into every
@@ -2885,6 +2894,51 @@ class Orchestrator:
                 session, resume = ("" if mints_own else str(uuid.uuid4())), False
             else:
                 resume = bool(session)
+
+    def _run_operate(self, task: dag.Task, cwd: str) -> tuple[str | None, str]:
+        """Run `task.operate` on the host, in order, in the task's worktree. (None, "") when all passed.
+
+        This is the loop doing the long, deterministic part of a task itself. It used to be the
+        implementer's, inside one agent turn: the turn ended while a multi-hour run was still going
+        and took the child with it, a session limit parked the run for an hour at a time, and the
+        only lever was prose in a reset reason telling the next agent to keep waiting.
+
+        A step the machine could not run (not installed, killed from outside, no network) raises
+        :class:`EnvironmentFault` and spends nothing — nothing is known about the code. A step that
+        ran and failed is a verdict on what the implementer wrote, and goes back to it as
+        `operate:<name>` with the log's tail, on that step's own budget.
+        """
+        if not task.operate or self.dry_run:
+            if task.operate:
+                print(f"    [dry-run] operate: {' → '.join(str(s.get('name')) for s in task.operate)}")
+            return None, ""
+        declared, _ = task_environment(task)
+        env = {**os.environ, **declared}
+        # Under the main checkout, not the worktree: a worktree is deleted after its merge, and the
+        # log of a run that took hours is the one record of it worth keeping past that.
+        log_dir = self.repo.path(dossier.RELATIVE_PATH) / task.id / "operate"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        for index, step in enumerate(task.operate, start=1):
+            name = str(step.get("name", f"step{index}"))
+            command = [str(part) for part in step.get("command", [])]
+            timeout = step.get("timeout_sec")
+            log = log_dir / f"{index:02d}-{name}.log"
+            print(f"    [operate] {task.id}: {name} — {' '.join(command)} (log: {log})")
+            started = time.monotonic()
+            rc, output = _operate_run(command, cwd, float(timeout) if isinstance(timeout, int) else None, env=env)
+            log.write_text(output, encoding="utf-8")
+            print(f"    [operate] {task.id}: {name} exited {rc} after {int(time.monotonic() - started)}s")
+            if rc == 0:
+                continue
+            where = f"{task.id}: operate {name}"
+            fault = faults.classify_step(rc, output)
+            if fault is not faults.Fault.CONTENT:
+                raise EnvironmentFault(fault, where=where, rc=rc, output=output[-4000:])
+            return f"{_OPERATE_PREFIX}{name}", (
+                f"operate step '{name}' ({' '.join(command)}) exited {rc}. The full log is {log}; its tail:\n"
+                f"{output[-4000:]}"
+            )
+        return None, ""
 
     # -- post-merge integration gate --
 
