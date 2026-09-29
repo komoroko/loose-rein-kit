@@ -78,7 +78,8 @@ test("every list the naming layer carries reaches this route too", async () => {
         lenses: [lensRow("proposed")],
         crossing: [{ task_id: "T-001", title: "cut over", name: "the old table", detail: "dropped" }],
         undeclared: [{ task_id: "T-004", id: "A-2", statement: "it is fast" }],
-        delta: [{ what: "criterion", id: "T-005/A-1", change: "changed: statement" }],
+        delta: [{ what: "criterion", id: "T-005/A-1", change: "changed: statement", before: "under 2s", after: "under 3s" }],
+        documents: [{ id: "docs/20-design.md", change: "changed", diff: "@@ -1 +1 @@\n-the chain\n+a table" }],
       },
     },
   });
@@ -88,6 +89,11 @@ test("every list the naming layer carries reaches this route too", async () => {
   const shown = app.text("rvFoot");
   assert.match(shown, /T-004\/A-2/, "the criteria nothing derived the plan's structure from");
   assert.match(shown, /T-005\/A-1/, "what changed since the last approval");
+  assert.match(shown, /under 2s[\s\S]*under 3s/, "a changed field shows what it was and what it is");
+  assert.ok(app.window.document.querySelector("#rvFoot .was"), "the old value is marked as the old value");
+  assert.match(shown, /docs\/20-design\.md/, "the documents that changed since the last approval");
+  assert.ok(app.window.document.querySelector("#rvFoot .dl.del"), "a removed line is drawn as removed");
+  assert.ok(app.window.document.querySelector("#rvFoot .dl.add"), "an added line is drawn as added");
   assert.match(shown, /D-001/, "the decisions the loop settled without asking");
   assert.match(shown, /Overruling one now costs a task/, "what overruling one costs");
   assert.match(shown, /L-CODE-PROPOSED/, "the selection this mandate would freeze");
@@ -144,6 +150,31 @@ test("the footer sticks inside the block that holds the reading pane, and a pane
   await app.click(APPROVE);
   const children = [...foot.children].map((el) => el.className);
   assert.deepEqual(children, ["confirm", "approvebar"]);
+});
+
+test("a document that changed since the last approval is marked in the list and shows its diff", async () => {
+  const changed = {
+    ...REVIEW,
+    deliverables: [
+      {
+        ...REVIEW.deliverables[0],
+        changed: { change: "changed", diff: "@@ -1 +1 @@\n-The store is the chain.\n+The store is a table." },
+      },
+    ],
+  };
+  const app = await boot({
+    hash: "#gate/mandate",
+    routes: baseRoutes((url) => (url.startsWith("/api/review/") ? changed : undefined)),
+  });
+  await app.open();
+  await app.push("status", AWAITING);
+
+  assert.match(app.text("rvMain"), /docs\/10-requirements\.md Δ/);
+  await app.click(".rv-item");
+  const doc = app.window.document;
+  assert.match(doc.querySelector(".changed").textContent, /Changed since you last approved/);
+  assert.equal(doc.querySelector(".changed .dl.del").textContent, "-The store is the chain.");
+  assert.equal(doc.querySelector(".changed .dl.add").textContent, "+The store is a table.");
 });
 
 test("a status push does not wipe an open panel", async () => {

@@ -40,9 +40,12 @@ TTY requirement below is one of the three mechanisms carrying it.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import logging
+import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -986,6 +989,11 @@ def record_approval(
             # In the chain for the same reason: a roll back clears the receipt, and the next
             # mandate approval shows what changed since this one (`mandate_delta`).
             detail["plan_digest"] = subject["plan_digest"]
+            # And the documents beside it. `state.plan.sources` holds them only until the roll
+            # back that clears it, which is exactly when the next approval needs them
+            # (`document_delta`).
+            if (approved_plan := store.read_plan()) is not None:
+                detail["sources"] = implementation_sources(repo, approved_plan)
         tx.append(
             "gate_approved",
             cycle_id=state.cycle_id,
@@ -1232,6 +1240,10 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # First after the digests: on a re-approval this is what the human is actually deciding.
         print(f"What changed since you last approved this mandate ({len(delta)}):")
         print(render_delta(delta) + "\n")
+    documents = named["documents"]
+    if documents:
+        print(f"Documents changed since you last approved this mandate ({len(documents)}):")
+        print(render_documents(documents) + "\n")
     undeclared = named["undeclared"]
     if undeclared:
         print(
@@ -1268,6 +1280,7 @@ class Naming(TypedDict):
     crossing: list[dict[str, str]]
     undeclared: list[dict[str, str]]
     delta: list[dict[str, str]]
+    documents: list[dict[str, str]]
 
 
 def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> Naming:
@@ -1305,6 +1318,7 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         "crossing": [],
         "undeclared": [],
         "delta": [],
+        "documents": [],
     }
     out["crossing"] = crossing_declarations(repo, gate)
     unasked = _unasked_decisions(repo, gate)
@@ -1329,6 +1343,7 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
     if plan is None:
         return out
     out["delta"] = mandate_delta(repo, plan)
+    out["documents"] = document_delta(repo, plan)
     # Criteria that name no path contribute nothing to the derived scope and edges
     # (`models._structure_errors`): each is a place a contradiction can still hide until the build.
     out["undeclared"] = [
@@ -1375,15 +1390,10 @@ def mandate_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]
     back clears the receipt that named it and the chain keeps only the digest. When that version
     was never committed, the delta cannot be shown and the row says so rather than showing none.
     """
-    events, _ = event_chain.scan(repo.events)
-    approvals = [
-        e
-        for e in events
-        if e.event == "gate_approved" and tuple(e.subject_ids[:1]) == (FREEZING_GATE,) and e.detail.get("plan_digest")
-    ]
-    if not approvals:
+    last = _last_mandate_approval(repo)
+    if last is None:
         return []
-    digest = str(approvals[-1].detail["plan_digest"])
+    digest = str(last.detail["plan_digest"])
     if digest == plan.digest():
         return []
     previous = _plan_with_digest(repo, digest)
@@ -1397,6 +1407,105 @@ def mandate_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]
             }
         ]
     return plan_delta(previous, plan)
+
+
+def _last_mandate_approval(repo: repo_mod.Repo) -> models.Event | None:
+    events, _ = event_chain.scan(repo.events)
+    approvals = [
+        e
+        for e in events
+        if e.event == "gate_approved" and tuple(e.subject_ids[:1]) == (FREEZING_GATE,) and e.detail.get("plan_digest")
+    ]
+    return approvals[-1] if approvals else None
+
+
+#: How much of one document's diff a screen is handed. A rewritten design document is a diff of
+#: the whole file, and past this the reader is better served by their editor than by a pane.
+_DOCUMENT_DIFF_MAX = 64 * 1024
+
+
+def document_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]]:
+    """Each document the build reads that changed since the mandate was last approved, with its diff.
+
+    `plan_delta`'s half for prose. A correction to the plan usually moves a ticket or the design
+    beside it, and the approver was shown neither: the document pane renders the text as it stands,
+    so what was new since the last yes was whatever the reader happened to remember.
+
+    Rows are `{id: path, change, diff}`; `diff` is a unified diff with one line of context, "" when
+    there is nothing to show. The version approved last time is found by the digest the approval
+    recorded (`record_approval`), in git's history of that path.
+    """
+    last = _last_mandate_approval(repo)
+    if last is None:
+        return []
+    recorded = last.detail.get("sources")
+    if not isinstance(recorded, Mapping):
+        return [
+            {
+                "id": "documents",
+                "change": "the last approval recorded no document digests (it predates this release), so what "
+                "changed in the requirements, the design and the tickets cannot be shown",
+                "diff": "",
+            }
+        ]
+    before = {str(k): str(v) for k, v in recorded.items()}
+    now = implementation_sources(repo, plan)
+    rows: list[dict[str, str]] = []
+    for path in sorted(before.keys() | now.keys()):
+        if before.get(path) == now.get(path):
+            continue
+        current = repo.path(path).read_text(encoding="utf-8", errors="replace") if path in now else ""
+        if path not in before:
+            rows.append({"id": path, "change": "added", "diff": _unified("", current, path)})
+            continue
+        previous = _blob_with_digest(repo, path, before[path])
+        if previous is None:
+            rows.append(
+                {
+                    "id": path,
+                    "change": "changed — the version approved last time is not in git's history, so the "
+                    "difference cannot be shown",
+                    "diff": "",
+                }
+            )
+            continue
+        rows.append(
+            {
+                "id": path,
+                "change": "removed" if path not in now else "changed",
+                "diff": _unified(previous, current, path),
+            }
+        )
+    return rows
+
+
+def _unified(before: str, after: str, path: str) -> str:
+    lines = difflib.unified_diff(
+        before.splitlines(), after.splitlines(), f"{path} (approved)", f"{path} (now)", n=1, lineterm=""
+    )
+    text = "\n".join(lines)
+    if len(text) > _DOCUMENT_DIFF_MAX:
+        return text[:_DOCUMENT_DIFF_MAX] + "\n… truncated — read the rest with git diff"
+    return text
+
+
+def _blob_with_digest(repo: repo_mod.Repo, path: str, digest: str) -> str | None:
+    """The text of `path` as it was when its bytes had `digest`, from git's history — or None."""
+    listing = repo._git("log", f"-{_PLAN_HISTORY_DEPTH}", "--format=%H", "--", path)
+    for commit in listing.splitlines():
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo.root), "show", f"{commit}:{path}"],
+                capture_output=True,
+                timeout=repo_mod.GIT_TIMEOUT_SEC,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        # Bytes, not text: a digest over what a text-mode read gives back would not be the digest
+        # the approval recorded over the file on disk for any file whose line endings git rewrote.
+        if proc.returncode == 0 and digests.of_bytes(proc.stdout) == digest:
+            return proc.stdout.decode("utf-8", errors="replace")
+    return None
 
 
 def _plan_with_digest(repo: repo_mod.Repo, digest: str) -> models.Plan | None:
@@ -1425,8 +1534,18 @@ def plan_delta(before: models.Plan, after: models.Plan) -> list[dict[str, str]]:
             elif key not in old:
                 rows.append({"what": what, "id": key, "change": "added"})
             elif old[key] != new[key]:
-                fields = sorted(k for k in old[key].keys() | new[key].keys() if old[key].get(k) != new[key].get(k))
-                rows.append({"what": what, "id": key, "change": "changed: " + ", ".join(fields)})
+                # One row per field, with both values: "changed: command" says where to look and
+                # leaves the reader to remember what it said before (CR-55).
+                for field in sorted(k for k in old[key].keys() | new[key].keys() if old[key].get(k) != new[key].get(k)):
+                    rows.append(
+                        {
+                            "what": what,
+                            "id": key,
+                            "change": f"changed: {field}",
+                            "before": _shown(old[key].get(field)),
+                            "after": _shown(new[key].get(field)),
+                        }
+                    )
 
     compare("claim", {c.id: c.raw for c in before.claims}, {c.id: c.raw for c in after.claims})
     old_tasks = {t.id: {k: v for k, v in t.raw.items() if k != "acceptance"} for t in before.tasks}
@@ -1436,12 +1555,67 @@ def plan_delta(before: models.Plan, after: models.Plan) -> list[dict[str, str]]:
     new_criteria = {f"{t.id}/{_ac_id(e)}": dict(e) for t in after.tasks for e in t.acceptance}
     compare("criterion", old_criteria, new_criteria)
     if before.scope != after.scope:
-        rows.append({"what": "scope", "id": "", "change": "changed"})
+        rows.append(
+            {
+                "what": "scope",
+                "id": "",
+                "change": "changed",
+                "before": _shown(before.raw.get("scope")),
+                "after": _shown(after.raw.get("scope")),
+            }
+        )
     return rows
 
 
+def _shown(value: object) -> str:
+    """One field's value as a person reads it. `(absent)` is not an empty string: a key that was
+    removed and a key set to "" are different edits."""
+    if value is None:
+        return "(absent)"
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
 def render_delta(rows: Sequence[Mapping[str, str]]) -> str:
-    return "\n".join(f"  {row['what']} {row['id']}: {row['change']}".replace("  : ", "  ") for row in rows)
+    lines: list[str] = []
+    for row in rows:
+        lines.append(f"  {row['what']} {row['id']}: {row['change']}".replace("  : ", "  "))
+        if "before" in row:
+            lines.append(_painted(f"      - {row['before']}", _RED))
+            lines.append(_painted(f"      + {row['after']}", _GREEN))
+    return "\n".join(lines)
+
+
+def render_documents(rows: Sequence[Mapping[str, str]]) -> str:
+    """The document half of a re-approval, for the terminal: each path, then its diff in colour."""
+    lines: list[str] = []
+    for row in rows:
+        lines.append(f"  {row['id']}: {row['change']}")
+        for line in row["diff"].splitlines():
+            if line.startswith(("+++", "---")):
+                continue
+            color = (
+                _GREEN
+                if line.startswith("+")
+                else _RED
+                if line.startswith("-")
+                else _CYAN
+                if line.startswith("@@")
+                else ""
+            )
+            lines.append(_painted(f"    {line}", color))
+    return "\n".join(lines)
+
+
+_RED, _GREEN, _CYAN = "\033[31m", "\033[32m", "\033[36m"
+
+
+def _painted(text: str, color: str) -> str:
+    """`text` in `color` when stdout is a terminal that can show it; as it is otherwise."""
+    if not color or not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+    return f"{color}{text}\033[0m"
 
 
 def _ac_id(entry: Mapping[str, object]) -> str:

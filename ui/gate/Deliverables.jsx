@@ -5,7 +5,7 @@
 // do it.
 
 import { Empty, Warn } from "../parts.jsx";
-import Diff from "./diff.jsx";
+import Diff, { Patch } from "./diff.jsx";
 
 export const DIFF_ID = "__diff__";
 
@@ -31,6 +31,7 @@ export function DeliverableList({ review, selected, opened, onSelect }) {
     >
       {isContext ? null : <span className="rv-read">{opened.has(e.id) ? "○" : "·"}</span>}
       {e.label}
+      {e.changed ? <span className="rv-changed" title="changed since you last approved this mandate"> Δ</span> : null}
       {e.exists === false ? " (missing)" : ""}
     </button>
   );
@@ -46,6 +47,7 @@ export function DeliverableList({ review, selected, opened, onSelect }) {
       ) : null}
       <div className="empty" style={{ marginTop: ".6rem" }}>
         ○ opened in this pane — a memory aid, not a record
+        {mainEntries(review).some((e) => e.changed) ? <><br />Δ changed since you last approved this mandate</> : null}
       </div>
     </>
   );
@@ -70,6 +72,18 @@ function SelfAssessment({ sa }) {
   );
 }
 
+// On a re-approval, what is new in this document since the last yes — above the text, because the
+// text as it stands is the one reading that hides it.
+function Changed({ changed }) {
+  if (!changed) return null;
+  return (
+    <div className="changed">
+      <div className="subhead">Changed since you last approved this mandate</div>
+      {changed.diff ? <Patch text={changed.diff} /> : <p className="note">{changed.change}</p>}
+    </div>
+  );
+}
+
 export function DeliverableBody({ review, selected }) {
   if (selected === DIFF_ID) return <Diff diff={review.diff} meta={review.review_meta} />;
   const entry = mainEntries(review).concat(review.context || []).find((x) => x.id === selected);
@@ -79,6 +93,7 @@ export function DeliverableBody({ review, selected }) {
   }
   return (
     <>
+      <Changed changed={entry.changed} />
       <SelfAssessment sa={entry.self_assessment} />
       {entry.truncated ? <Warn>Truncated at 300KB — open the file for the rest.</Warn> : null}
       {/* mdlite output: escaped at the source, in the server's renderer. */}

@@ -26,9 +26,10 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from rein import event_chain, human_review, mdlite, models, review_reading, status_api, strict_yaml
+from rein import approve, event_chain, human_review, mdlite, models, review_reading, status_api, strict_yaml
 from rein import events as events_mod
 from rein import repo as repo_mod
+from rein import store as store_mod
 
 _MAX_DELIVERABLE = 300_000  # bytes of one deliverable the pane will render
 _MAX_PATCH = 200_000  # bytes of unified diff for acceptance
@@ -307,6 +308,27 @@ def _gate_statuses(root: Path) -> dict[str, str]:
     return {gate: state.gate_status(gate) for gate in state.gate_ids}
 
 
+def _mark_changed_documents(root: Path, entries: list[dict[str, object]]) -> None:
+    """Give each deliverable that changed since the mandate was last approved its diff (`changed`).
+
+    The pane renders a document as it stands, and on a re-approval that is the one reading that
+    hides what is new: the reader has to remember the version they said yes to. `approve.document_delta`
+    is what the terminal and the approval panel show too, so the three cannot disagree about it.
+    A plan that does not read is the readiness check's to report; the pane then marks nothing.
+    """
+    try:
+        plan = store_mod.Store(repo_mod.Repo(root)).read_plan()
+    except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError):
+        return
+    if plan is None:
+        return
+    rows = {row["id"]: row for row in approve.document_delta(repo_mod.Repo(root), plan)}
+    for entry in entries:
+        row = rows.get(str(entry.get("label", "")))
+        if row is not None:
+            entry["changed"] = {"change": row["change"], "diff": row["diff"]}
+
+
 def collect_review(root: str | Path, gate: str) -> dict[str, object]:
     """Everything the review pane shows for `gate`. Raises ReviewError only for an unknown gate."""
     root = Path(root)
@@ -337,6 +359,8 @@ def collect_review(root: str | Path, gate: str) -> dict[str, object]:
         "open_escalations": None,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
+    if gate == approve.FREEZING_GATE:
+        _mark_changed_documents(root, result["deliverables"])  # type: ignore[arg-type]
     if gate == "acceptance":
         # The change itself, and whether the review still speaks for it. Both belong to the one
         # decision that takes the change — they were split across gates ④ and ⑤, which asked the

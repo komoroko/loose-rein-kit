@@ -121,8 +121,80 @@ def test_a_re_approval_is_shown_what_changed_since_the_last_one(tmp_path: Path) 
     assert approve.naming(repo, "mandate")["delta"] == [
         {"what": "task", "id": "T-002", "change": "removed"},
         {"what": "task", "id": "T-003", "change": "added"},
-        {"what": "criterion", "id": "T-001/A-1", "change": "changed: statement"},
+        {
+            "what": "criterion",
+            "id": "T-001/A-1",
+            "change": "changed: statement",
+            "before": "under 2s",
+            "after": "under 3s",
+        },
     ]
+
+
+def _approved_with_documents(tmp_path: Path, design: str) -> repo_mod.Repo:
+    """A mandate approved through `record_approval` over a committed design document."""
+    seed_repo(
+        tmp_path,
+        plan=make_plan(tasks=_tasks()),
+        state=make_state(gates={"mandate": "pending"}, plan_status="draft"),
+        git=True,
+    )
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    (tmp_path / "docs" / "20-design.md").write_text(design, encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-q", "-m", "the mandate as approved")
+    repo = repo_mod.Repo(tmp_path)
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    return repo
+
+
+def test_a_re_approval_is_shown_the_documents_that_changed_line_by_line(tmp_path: Path) -> None:
+    """The plan's delta named fields; the prose beside it was rendered as it stands, so what was new
+    since the last yes in the design was whatever the reader remembered (CR-55)."""
+    design = "# Design\n\nThe store is the chain.\n\nRetries are bounded.\n"
+    repo = _approved_with_documents(tmp_path, design)
+    [approved] = [e for e in store_mod.Store(repo).read_events() if e.event == "gate_approved"]
+    assert "docs/20-design.md" in approved.detail["sources"]
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "the store changes")
+    (tmp_path / "docs" / "20-design.md").write_text(design.replace("the chain", "a table"), encoding="utf-8")
+
+    [row] = approve.naming(repo, "mandate")["documents"]
+    assert (row["id"], row["change"]) == ("docs/20-design.md", "changed")
+    changed = [line for line in row["diff"].splitlines() if line[:1] in "+-" and line[:3] not in ("+++", "---")]
+    assert changed == ["-The store is the chain.", "+The store is a table."]
+    printed = approve.render_documents([row])
+    assert "-The store is the chain." in printed and "+The store is a table." in printed
+
+
+def test_a_document_version_git_never_saw_is_said_so(tmp_path: Path) -> None:
+    repo = _approved_with_documents(tmp_path, "# Design\n\nv1\n")
+    (tmp_path / "docs" / "20-design.md").write_text("# Design\n\nv2, never committed\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-qam", "v2")
+    raw = [e for e in store_mod.Store(repo).read_events() if e.event == "gate_approved"][-1]
+    assert raw.detail["sources"]["docs/20-design.md"]
+    # The approved bytes are in history; bytes that never were cannot be diffed against.
+    with store_mod.Store(repo).transaction() as tx:
+        tx.append(
+            "gate_approved",
+            cycle_id="demo-cycle",
+            subject_ids=["mandate", "GA-MANDATE-2"],
+            detail={"plan_digest": raw.detail["plan_digest"], "sources": {"docs/20-design.md": "sha256:" + "e" * 64}},
+        )
+    [row] = approve.naming(repo, "mandate")["documents"]
+    assert "not in git's history" in row["change"] and row["diff"] == ""
+
+
+def test_an_approval_that_recorded_no_documents_says_what_it_cannot_show(tmp_path: Path) -> None:
+    repo = _repo(tmp_path, _tasks())
+    with store_mod.Store(repo).transaction() as tx:
+        tx.append(
+            "gate_approved",
+            cycle_id="demo-cycle",
+            subject_ids=["mandate", "GA-MANDATE-1"],
+            detail={"plan_digest": "sha256:" + "f" * 64},
+        )
+    [row] = approve.naming(repo, "mandate")["documents"]
+    assert "recorded no document digests" in row["change"]
 
 
 def test_a_last_approved_plan_git_never_saw_is_said_so(tmp_path: Path) -> None:
@@ -142,6 +214,7 @@ def test_a_last_approved_plan_git_never_saw_is_said_so(tmp_path: Path) -> None:
 def test_a_first_approval_has_no_delta(tmp_path: Path) -> None:
     repo = _repo(tmp_path, _tasks())
     assert approve.naming(repo, "mandate")["delta"] == []
+    assert approve.naming(repo, "mandate")["documents"] == []
     assert models.Plan(make_plan(tasks=_tasks())).digest()
 
 

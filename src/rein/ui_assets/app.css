@@ -442,6 +442,12 @@ tr.ev-closed td { color: var(--ink-3); }
 .rv-read { display: inline-block; width: 1.1rem; color: var(--ink-3); }
 .rv-item.active .rv-read, .rv-item .rv-read.settled { color: var(--ok); }
 .rv-item .rv-read.open { color: var(--brass); }
+/* changed since the last approval: the one mark on the list that says "read this again" */
+.rv-changed { color: var(--brass); font-weight: 700; }
+.changed { margin-bottom: 1rem; }
+/* a field's value before and after, in the approval panel: struck and plain, not only coloured */
+.confirm .was { color: var(--blk-bd); text-decoration: line-through; }
+.confirm .now { color: var(--done-bd); }
 .rv-body { min-width: 0; }
 @media (min-width: 981px) { .rv-body { border-left: 1px solid var(--rule); padding-left: 1.4rem; } }
 

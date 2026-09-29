@@ -1003,6 +1003,7 @@ def test_the_naming_layer_is_the_mandate_s_alone(tmp_path: Path) -> None:
         "crossing": [],
         "undeclared": [],
         "delta": [],
+        "documents": [],
     }
     assert approve.naming(repo, "acceptance") == empty
 
