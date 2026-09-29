@@ -770,6 +770,11 @@ def carried_crossings(
     return carried
 
 
+#: The events that say something about a gate. Every other event kind is about a task, a lens or
+#: a run, whatever its subject ids look like.
+_GATE_EVENTS = frozenset({"gate_approved", "gate_carried", "gate_revised"})
+
+
 def _withdrawn_approval(events: Sequence[models.Event], gate: str) -> tuple[str, str] | None:
     """`(approval id, crossing digest)` of the approval a roll back withdrew from `gate` as a side
     effect and no mandate approval has answered since — or None.
@@ -780,9 +785,16 @@ def _withdrawn_approval(events: Sequence[models.Event], gate: str) -> tuple[str,
     and the event before it concerning `gate` must be the confirmation it withdrew. Another
     `gate_revised` there means the gate was already pending when rolled back, so there was
     nothing to withdraw.
+
+    **Only gate events are read.** A crossing gate is named for its task, so `task_started` and
+    every other event about that task carries the same first subject id; read as the gate's
+    history, any of them between the confirmation and the roll back — or after it — ended the walk,
+    and no carry was ever made in a cycle that ran the task.
     """
     revised = False
     for event in reversed(events):
+        if event.event not in _GATE_EVENTS:
+            continue
         if event.event == "gate_approved" and event.subject_ids[:1] == (FREEZING_GATE,) and not revised:
             return None
         if event.event == "gate_revised":

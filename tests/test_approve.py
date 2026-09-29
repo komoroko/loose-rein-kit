@@ -1426,6 +1426,33 @@ def test_a_mandate_revision_that_left_a_crossing_alone_carries_it_back(tmp_path:
     assert (_state_of(repo).gate_receipt("T-001") or {})["carried_from"] == confirmed["T-001"]
 
 
+def test_a_carry_is_not_broken_by_the_task_s_own_events(tmp_path: Path) -> None:
+    """A crossing gate is named for its task, so the task's own events share its first subject id.
+
+    The recorded cycle ran T-047 between its approval and every roll back, and again after: four
+    mandate re-approvals over an unchanged `crossing_digest`, four crossings asked for again, and
+    not one `gate_carried` in the chain. The carry had read `task_started` as the gate's history.
+    """
+    from rein import revise
+
+    repo = _cycle_with_approved_crossings(tmp_path)
+    confirmed = (_state_of(repo).gate_receipt("T-001") or {})["approval_id"]
+
+    def task_events() -> None:
+        with store_mod.Store(repo).transaction() as tx:
+            for event in ("task_started", "decision_declared", "task_failed"):
+                tx.append(event, cycle_id="demo-cycle", subject_ids=["T-001"])
+
+    task_events()
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "one more scope path for T-003")
+    task_events()
+
+    named = {row["task_id"]: row["carried_from"] for row in approve.naming(repo, "mandate")["crossing"]}
+    assert named["T-001"] == confirmed
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    assert _state_of(repo).gate_status("T-001") == "approved"
+
+
 def test_a_carry_is_read_off_the_chain_not_off_state(tmp_path: Path) -> None:
     """Anything able to write `state.yaml` could mint a receipt there. A crossing no human confirmed
     is not carried, whatever the state file says it held."""
