@@ -279,7 +279,7 @@
       "additionalProperties": false,
       "properties": {
         "composition": {
-          "description": "How acceptance takes its reading. `auto` composes it from the plan's task scopes — one reading per task plus the seam between them — so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
+          "description": "How acceptance takes its reading. `auto` composes it from the plan's dependency chains and task scopes — one reading per chain (task by task where a chain's diff will not fit `max_diff_bytes`) plus the seam between them — so one launch reads one chain's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
           "enum": [
             "auto",
             "whole"
@@ -290,7 +290,7 @@
           "additionalProperties": false,
           "properties": {
             "max_diff_bytes": {
-              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one task's scope, so a large cycle passes and a task too broad to read in one launch is refused by name, at the mandate, while splitting it is still possible.",
+              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one dependency chain's scopes, split task by task when the chain will not fit, so a large cycle passes and a task too broad to read in one launch is refused by name, at the mandate, while splitting it is still possible.",
               "type": "integer",
               "minimum": 4096,
               "maximum": 8388608

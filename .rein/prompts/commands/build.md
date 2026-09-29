@@ -330,14 +330,17 @@ is the point; never fold them into the implementer's session.
    The reading runs a deterministic Coverage Manifest, a **blind**
    actual-behaviour extraction (never given the plan), the structured security review, and the
    Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
-   **The change is read in *readings*, not in one sitting**: one per task the plan scopes, plus the
-   seam over what two scopes share and what none covers, each launched on its own so one launch
-   holds one task's slice. Most of them are already answered — `rein build` takes each task's
-   reading as it lands — so a regeneration after a review fix re-reads only the task whose code
-   moved. **A blocking security finding that reading turns up is repaired at the task boundary**,
-   by an implementer, in the scope that owns the code it anchored to — once per task, with whatever
-   still stands left to the repair rounds above. The reading was already taken and already paid
-   for; what changes is that the finding is answered before later tasks are built on top of it.
+   **The change is read in *readings*, not in one sitting**: one per dependency chain the plan
+   scopes — a line of tasks each built on the one before and on nothing else, read as the one
+   change it is, and task by task only when the chain's diff will not fit `max_diff_bytes` — plus
+   the seam over what two readings share and what none covers, each launched on its own. Most of
+   them are already answered — `rein build` takes a reading as the last of its tasks lands — so a
+   regeneration after a review fix re-reads only the reading whose code moved. **A blocking
+   security finding that reading turns up is repaired at the reading's boundary**, by an
+   implementer, in the scope that owns the code it anchored to — once per reading, with whatever
+   still stands left to the repair rounds above. For a chain that is after its later tasks were
+   built on the code, which is the price of reading the chain once; the repair path is the one
+   built for exactly that.
    `coverage.composition` records every reading by name and `unread_paths` names any changed
    path none of them covered, which makes the manifest `insufficient`; a composed reading is
    refused outright at critical risk. The readings are taken **highest-risk first**, by the

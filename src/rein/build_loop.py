@@ -117,6 +117,8 @@ _GATE4_WORKTREE = "_gate4"
 #: What the integration reviewer's findings file is named after. Not a task id — the subject is the
 #: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
 _INTEGRATION_SUBJECT = "integration"
+#: The statuses a task's work is on the work branch in: what a reading waits for all of its tasks to reach.
+_LANDED_STATUSES = frozenset({"done", "awaiting-evidence"})
 #: The findings file a batch's reviewer writes, at the repository root (`_read_batch`).
 _BATCH_REVIEW_SUBJECT = "review"
 
@@ -2498,14 +2500,16 @@ class Orchestrator:
     def _note_acceptance(self, ac_id: str, kind: str, *, reused: bool) -> None:
         self._current_acceptance.append({"id": ac_id, "kind": kind, "reused": reused})
 
-    def _warm_reading(self, task: dag.Task) -> review_reading.ReadOut | None:
-        """Take acceptance's reading of this task now, while its diff is one task wide.
+    def _warm_reading(self, task: dag.Task) -> list[review_reading.ReadOut]:
+        """Take acceptance's readings that this task's landing completes, now rather than at the gate.
 
-        The gate reads the change in the readings the plan's task scopes describe
-        (`review_reading.plan_readings`), and it asks each one the same question this does — same
-        measure, same key. Answering it here means the gate finds it answered: the peak of one
-        launch stays the size of one task, and a review regenerated after a fix re-reads only the
-        task whose code moved.
+        The gate reads the change in the readings `review_reading.plan_readings` derives — one per
+        dependency chain, split task by task where one launch cannot hold a chain — and it asks each
+        one the same question this does: same measure, same key. Answering it here means the gate
+        finds it answered, and a review regenerated after a fix re-reads only the reading whose code
+        moved. A reading is taken once **every** task in it has landed: a chain's reading is warmed
+        when its last task lands, not once per task, because the gate would never look a partial
+        chain up.
 
         **A warm-up never fails a build.** It is an optimization over a cache the gate does not
         depend on: if it does not happen, `rein review generate` takes the reading itself, at the
@@ -2513,26 +2517,25 @@ class Orchestrator:
         answer stops the warming for the rest of the run — retrying it once per task would spend a
         session limit on it — and says so once, rather than stopping the build.
 
-        Skipped for a task with no declared scope: an undeclared scope means *unbounded*, so its
-        reading would be the whole change, which is neither one task wide nor what the gate will
-        ask for.
+        Skipped for a task with no declared scope: an undeclared scope means *unbounded*, so it is in
+        no reading but the whole change's, which is not what the gate will ask for.
 
         **And skipped once the change is `critical`**, because the gate will not compose there:
         `review_reading.plan_readings` reads a critical change whole whatever the configuration
-        says, so every per-task reading warmed after that point is one nothing will ever look up.
-        The risk is a property of the whole change and it only ever rises, so this stops the
-        warming for the rest of the run the same way an unanswerable adapter does.
+        says, so every reading warmed after that point is one nothing will ever look up. The risk is
+        a property of the whole change and it only ever rises, so this stops the warming for the
+        rest of the run the same way an unanswerable adapter does.
 
-        **The `ReadOut` is the point of the return type.** This launched a security reviewer over
-        the task's slice and then threw its answer away: the finding was paid for here and first
-        read at acceptance, several tasks later, by which time the code it names has been built on.
-        `_repair_warm_findings` reads it. `None` means no reading was taken — a skip, or an
-        adapter that would not answer — which is not the same as a reading that found nothing.
+        **The `ReadOut`s are the point of the return type.** This launched a security reviewer and
+        then threw its answer away: the finding was paid for here and first read at acceptance,
+        by which time the code it names has been built on. `_repair_warm_findings` reads them. An
+        empty list means no reading was taken — a skip, a chain still landing, or an adapter that
+        would not answer — which is not the same as a reading that found nothing.
         """
         if self.dry_run or self._warming_off or self.config.raw.composition == review_reading.WHOLE:
-            return None
+            return []
         if not task.scope_include:
-            return None
+            return []
         try:
             # The same base the gate will resolve, not the plan's field: they differ whenever the
             # plan names a commit this checkout does not have, and a warm-up taken against a
@@ -2540,35 +2543,46 @@ class Orchestrator:
             base = review_reading.resolve_base(self.repo, self._plan, None)
             head = self.repo._git_rc("rev-parse", "HEAD")[1].strip()
             if not base or not head:
-                return None
+                return []
             exclude = review_reading.not_the_product(self.repo, self.state)
             limits = {**human_review.DEFAULT_BUDGET, **self.config.raw.budgets}
-            # One analysis of one whole diff answers both: the floor the gate will key on, and
-            # whether the gate will take per-task readings at all.
-            risk_floor, effective = review_reading.whole_change_risk(
-                self.repo, self._plan, base=base, head=head, exclude=exclude
+            # One analysis of one whole diff answers all three: the floor the gate will key on,
+            # whether the gate will compose at all, and which readings it will take.
+            readings, risk_floor, effective = review_reading.change_readings(
+                self.repo,
+                self._plan,
+                base=base,
+                head=head,
+                exclude=exclude,
+                mode=self.config.raw.composition,
+                ceiling=int(limits["max_diff_bytes"]),
             )
             if models.risk_at_least(effective, "critical"):
                 self._warming_off = True
                 print(
                     f"    [review] {task.id}: the change is {effective} — acceptance reads it whole, "
-                    "so no per-task reading is warmed from here on"
+                    "so no reading is warmed from here on"
                 )
-                return None
-            return review_reading.warm(
-                self.repo,
-                review_transport.StagedReviewers(self.repo, config=self.config.raw),
-                reading=review_reading.Reading(unit=task.id, include=tuple(task.scope_include)),
-                base=base,
-                head=head,
-                exclude=exclude,
-                limits=limits,
-                evidence=self._plan.artifact_paths if self._plan is not None else (),
-                risk_floor=risk_floor,
-                host_surface=review_reading.host_surface_digest(self.repo, head),
-                config=self.config.raw,
-                cache=review_cache.StageCache(self.repo.root),
-            )
+                return []
+            landed = {t.id for t in self._load_graph().tasks if t.status in _LANDED_STATUSES}
+            due = [r for r in readings if task.id in r.members and set(r.members) <= landed]
+            return [
+                review_reading.warm(
+                    self.repo,
+                    review_transport.StagedReviewers(self.repo, config=self.config.raw),
+                    reading=reading,
+                    base=base,
+                    head=head,
+                    exclude=exclude,
+                    limits=limits,
+                    evidence=self._plan.artifact_paths if self._plan is not None else (),
+                    risk_floor=risk_floor,
+                    host_surface=review_reading.host_surface_digest(self.repo, head),
+                    config=self.config.raw,
+                    cache=review_cache.StageCache(self.repo.root),
+                )
+                for reading in due
+            ]
         except (
             review_policy.ReviewPolicyError,
             review_transport.TransportError,
@@ -2577,61 +2591,73 @@ class Orchestrator:
         ) as exc:
             self._warming_off = True
             print(f"    [review] {task.id}: the acceptance reading was not taken here ({exc}); the gate will take it")
-            return None
+            return []
 
-    def _repair_warm_findings(self, task: dag.Task, readout: review_reading.ReadOut | None) -> bool:
-        """Hand this task the blocking security findings its own reading just produced.
+    def _repair_warm_findings(self, task: dag.Task, readouts: Sequence[review_reading.ReadOut]) -> bool:
+        """Hand each task in these readings the blocking security findings about its own code.
 
-        **The reading was already taken and already paid for** (`_warm_reading`); until now its
-        answer was written to the stage cache and read by nobody. So a security finding about
-        code this task wrote was first seen at acceptance — after every later task had been built on
-        top of it, and after the implementer that wrote it was long gone. Reading it here costs
-        nothing that was not already spent, and the judge is still a different one: the finding
-        comes from the security reviewer's own launch, validated by
+        **The readings were already taken and already paid for** (`_warm_reading`); until now their
+        answers were written to the stage cache and read by nobody. So a security finding about
+        code a task wrote was first seen at acceptance — after every later task had been built on
+        top of it. Reading it here costs nothing that was not already spent, and the judge is still
+        a different one: the finding comes from the security reviewer's own launch, validated by
         `security_review.run_security_review`, and the fixer is an implementer.
 
-        **Only findings this task's declared scope owns.** Attribution is `findings.owner_of_path`
-        — the same function acceptance routes by — so nothing is guessed: a finding anchored in
-        another task's territory, or in none, travels to acceptance where a human can see the whole
+        **Only findings a task of the reading owns.** Attribution is `findings.owner_of_path` — the
+        same function acceptance routes by — so nothing is guessed: a finding anchored in another
+        reading's territory, or in none, travels to acceptance where a human can see the whole
         picture. It would be refused here anyway, by the scope check every repair goes through
-        (`_accept_repair`).
+        (`_accept_repair`). A chain's reading can own findings about any of its tasks, and the
+        earlier ones have had later ones built on them by now: that is the price of reading a chain
+        once, and `_repair` is the path built for code others were built on.
 
         **One round, and no new knob for it.** The failure this has to survive is a false
-        positive, where repairing converges on nothing; a single round at the task boundary is
+        positive, where repairing converges on nothing; a single round at the reading's boundary is
         cheap and bounded, and whatever still stands is exactly what `review_policy.repair_rounds`
         is for. Whether the finding closed is not this launch's account of itself either: the
         re-warm below reads the slice again from cold, and acceptance reads it once more after that.
 
-        True when it repaired, which is the caller's cue to write the status again: the evidence
-        beside it has been re-pointed at the repaired tree, and the recorded commit follows the
-        repair wherever the repair could land on top of this task's own work — which in a batch of
-        leaves is only the one that merged last (`_consume_batch` says why).
+        True when it repaired, which is the caller's cue to write `task`'s status again: the
+        evidence beside it has been re-pointed at the repaired tree, and the recorded commit follows
+        the repair wherever the repair could land on top of this task's own work — which in a batch
+        of leaves is only the one that merged last (`_consume_batch` says why).
         """
-        if readout is None or self.dry_run or self._plan is None:
+        if not readouts or self.dry_run or self._plan is None:
             return False
-        owned: list[findings_mod.Attribution] = []
-        for finding in readout.security.findings:
-            if finding.get("blocking") is not True:
-                continue
-            paths = [
-                str(anchor.get("path", ""))
-                for anchor in (finding.get("code_anchors") or [])
-                if isinstance(anchor, Mapping) and anchor.get("path")
-            ]
-            hit = next((p for p in paths if findings_mod.owner_of_path(self._plan, p) == task.id), "")
-            if hit:
-                owned.append(findings_mod.Attribution(str(finding.get("id", "SEC-?")), "security", task.id, hit))
+        owned: dict[str, list[findings_mod.Attribution]] = {}
+        for readout in readouts:
+            members = set(readout.reading.members)
+            for finding in readout.security.findings:
+                if finding.get("blocking") is not True:
+                    continue
+                paths = [
+                    str(anchor.get("path", ""))
+                    for anchor in (finding.get("code_anchors") or [])
+                    if isinstance(anchor, Mapping) and anchor.get("path")
+                ]
+                hit = next(
+                    ((p, o) for p in paths if (o := findings_mod.owner_of_path(self._plan, p)) in members),
+                    None,
+                )
+                if hit is not None:
+                    path, owner = hit
+                    owned.setdefault(owner, []).append(
+                        findings_mod.Attribution(str(finding.get("id", "SEC-?")), "security", owner, path)
+                    )
         if not owned:
             return False
-        print(
-            f"    [review] {task.id}: the security review of this task found {len(owned)} blocking "
-            "finding(s) in its own scope — repairing them here rather than at acceptance"
-        )
-        self._repair(task, repair_mod.Repair(task.id, tuple(owned)), where="review")
-        # The repair moved this slice's content, so the answer just cached for it is about a tree
-        # that no longer exists and the gate would re-read it regardless. Reading it again here is
-        # what decides whether the finding closed — from cold, by a reader with no memory of
-        # having raised it — and it leaves the gate's cache warm rather than stale.
+        graph = self._load_graph()
+        for owner, attributions in owned.items():
+            owner_task = next((t for t in graph.tasks if t.id == owner), task)
+            print(
+                f"    [review] {owner}: the security review of its reading found {len(attributions)} blocking "
+                "finding(s) in its own scope — repairing them here rather than at acceptance"
+            )
+            self._repair(owner_task, repair_mod.Repair(owner, tuple(attributions)), where="review")
+        # The repair moved the readings' content, so the answers just cached are about a tree that
+        # no longer exists and the gate would re-read them regardless. Reading them again here is
+        # what decides whether the findings closed — from cold, by a reader with no memory of having
+        # raised them — and it leaves the gate's cache warm rather than stale.
         self._warm_reading(task)
         return True
 

@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from rein import common, models
 from rein import repo as repo_mod
@@ -32,6 +32,45 @@ logger = logging.getLogger(__name__)
 KIND_VALUES = models.TASK_KIND_VALUES
 STATUS_ORDER = models.TASK_STATUS_ORDER
 STATUS_VALUES = models.TASK_STATUS_VALUES
+
+
+class Linked(Protocol):
+    """Anything with an id and the ids it waits for: a plan's task and a graph's task both are."""
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def blocked_by(self) -> tuple[str, ...]: ...
+
+
+def chains(tasks: Sequence[Linked]) -> list[tuple[str, ...]]:
+    """The tasks cut into maximal dependency chains, each in order, heads in the order given.
+
+    Two tasks are one link when the downstream one has exactly that one upstream and the upstream
+    has exactly that one downstream. Nothing branches off a chain and nothing joins it, so the
+    change a chain makes is one line of work: each task after the first was built on the one before
+    and on nothing else. A task that is no link at either end is a chain of one. Acceptance reads
+    the change one chain at a time (`review_reading.plan_readings`).
+    """
+    dependents: dict[str, list[str]] = {task.id: [] for task in tasks}
+    for task in tasks:
+        for upstream in task.blocked_by:
+            dependents.setdefault(upstream, []).append(task.id)
+    following: dict[str, str] = {}
+    for task in tasks:
+        if len(task.blocked_by) == 1 and dependents.get(task.blocked_by[0]) == [task.id]:
+            following[task.blocked_by[0]] = task.id
+    continues = set(following.values())
+    found: list[tuple[str, ...]] = []
+    for task in tasks:
+        if task.id in continues:
+            continue
+        chain = [task.id]
+        while chain[-1] in following:
+            chain.append(following[chain[-1]])
+        found.append(tuple(chain))
+    return found
 
 
 class DagError(ValueError):

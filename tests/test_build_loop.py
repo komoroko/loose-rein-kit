@@ -541,7 +541,7 @@ def _merging_batch(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (True, ""))
-    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: [])
 
 
 def _tip(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch, *commits: str) -> Callable[[], bool]:
@@ -2560,7 +2560,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
         return True, ""
 
     monkeypatch.setattr(loop, "_integration_gate", record_gate)
-    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: [])
     statuses: dict[str, str] = {}
     monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: statuses.update({tid: status}))
 
@@ -2931,7 +2931,7 @@ def test_a_warm_up_that_cannot_be_taken_does_not_fail_the_build(
 def _read_out(unit: str, *findings: dict[str, object]) -> review_reading.ReadOut:
     """What a warm-up hands back: one reading's two stages. Only the security half matters here."""
     return review_reading.ReadOut(
-        reading=review_reading.Reading(unit=unit, include=("alpha/",)),
+        reading=review_reading.Reading(unit=unit, include=("alpha/",), members=(unit,)),
         extraction=actual_extraction.ExtractionResult(actual_statements=(), coverage={}, actual_digest=""),
         security=security_review.SecurityResult(findings=tuple(findings)),
     )
@@ -2960,7 +2960,7 @@ def _warm_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_l
     monkeypatch.setattr(
         loop, "_repair", lambda task, item, *, where: repaired.extend(f"{a.finding_id}@{where}" for a in item.items)
     )
-    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)  # the re-read after the repair
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: [])  # the re-read after the repair
     return loop, repaired
 
 
@@ -2973,7 +2973,7 @@ def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
     """
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-001", "alpha/mod.py")))
+    assert loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-001", "alpha/mod.py"))])
     assert repaired == ["SEC-001@review"]
 
 
@@ -2983,7 +2983,7 @@ def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, m
     with the whole picture in front of them."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-001", "beta/mod.py")))
+    assert not loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-001", "beta/mod.py"))])
     assert repaired == []
 
 
@@ -2994,18 +2994,73 @@ def test_a_non_blocking_finding_is_not_repaired_at_the_task_boundary(
     implementer launch on one would make the floor mean nothing."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-1", "alpha/mod.py", blocking=False)))
+    assert not loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-1", "alpha/mod.py", blocking=False))])
     assert repaired == []
+
+
+def test_a_chain_s_reading_repairs_whichever_of_its_tasks_owns_the_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chain is read when its last task lands, so a finding can be about an earlier one."""
+    loop = orchestrator(
+        tmp_path,
+        plan=make_plan(
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], blocked_by=["T-001"], scope_include=["beta/"]),
+            ]
+        ),
+    )
+    repaired: list[str] = []
+    monkeypatch.setattr(
+        loop, "_repair", lambda task, item, *, where: repaired.extend(f"{task.id}:{a.finding_id}" for a in item.items)
+    )
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: [])
+    readout = review_reading.ReadOut(
+        reading=review_reading.Reading(unit="T-001+T-002", include=("alpha/", "beta/"), members=("T-001", "T-002")),
+        extraction=actual_extraction.ExtractionResult(actual_statements=(), coverage={}, actual_digest=""),
+        security=security_review.SecurityResult(findings=(_sec("SEC-001", "alpha/mod.py"),)),
+    )
+    last = next(t for t in loop._load_graph().tasks if t.id == "T-002")
+    assert loop._repair_warm_findings(last, [readout])
+    assert repaired == ["T-001:SEC-001"]
+
+
+def test_a_chain_is_warmed_once_when_its_last_task_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Warming each task's slice as it landed read a chain once per task; the gate never asks for those."""
+    plan = make_plan(
+        tasks=[
+            make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+            make_task("T-002", claim_ids=["C-001"], blocked_by=["T-001"], scope_include=["beta/"]),
+        ]
+    )
+    loop = orchestrator(
+        tmp_path, plan=plan, state={**make_state(plan_status="frozen"), "tasks": {"T-001": {"status": "done"}}}
+    )
+    chain = review_reading.Reading(unit="T-001+T-002", include=("alpha/", "beta/"), members=("T-001", "T-002"))
+    monkeypatch.setattr(review_reading, "resolve_base", lambda *a: "b" * 40)
+    monkeypatch.setattr(repo_mod.Repo, "_git_rc", lambda self, *a: (0, "c" * 40))
+    monkeypatch.setattr(review_reading, "change_readings", lambda *a, **k: ([chain], "low", "low"))
+    monkeypatch.setattr(review_reading, "host_surface_digest", lambda *a: "")
+    warmed: list[str] = []
+    monkeypatch.setattr(review_reading, "warm", lambda *a, reading, **k: warmed.append(reading.unit) or "readout")
+
+    first = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    assert loop._warm_reading(first) == [], "T-002 has not landed: the chain is not a reading yet"
+    loop._set_status("T-002", "done")
+    last = next(t for t in loop._load_graph().tasks if t.id == "T-002")
+    assert loop._warm_reading(last) == ["readout"]
+    assert warmed == ["T-001+T-002"]
 
 
 def test_a_warm_up_that_was_never_taken_is_not_a_reading_that_found_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`None` is a skip or an adapter that would not answer. Treating it as an empty finding list
-    would report "clean" about a slice nobody read."""
+    """No readout is a skip or an adapter that would not answer. Treating it as an empty finding
+    list would report "clean" about a slice nobody read."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(task, None)
+    assert not loop._repair_warm_findings(task, [])
     assert repaired == []
 
 

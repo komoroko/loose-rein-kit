@@ -28,6 +28,7 @@ from rein import (
     actual_extraction,
     adapters,
     common,
+    dag,
     diff_facts,
     digests,
     models,
@@ -813,6 +814,9 @@ class Reading:
 
     unit: str = WHOLE
     include: tuple[str, ...] = ()
+    #: The tasks whose scopes this reading is the union of, in plan order: one for a task's own
+    #: reading, several for a dependency chain's, none for the whole change and the seam.
+    members: tuple[str, ...] = ()
 
     @property
     def whole(self) -> bool:
@@ -844,7 +848,7 @@ class ReadingFacts:
 
     # There is deliberately no `risk_floor` here. A reading has one — `facts.risk_floor` is right
     # there — and it is never the number to use: the floor is a property of the whole change, so a
-    # slice holding no signal must not be where it drops (`whole_change_risk`). Offering it
+    # slice holding no signal must not be where it drops (`change_readings`). Offering it
     # on this class is how the only caller came to pass it.
     #
     # `facts.risk_floor` has exactly one legitimate use, and it is the one that cannot lower
@@ -1273,8 +1277,10 @@ def plan_readings(
     *,
     mode: str = "auto",
     risk: str = "low",
+    sent: str = "",
+    ceiling: int = 0,
 ) -> list[Reading]:
-    """The readings acceptance takes, derived from the frozen plan's task scopes.
+    """The readings acceptance takes, derived from the frozen plan's dependency chains and task scopes.
 
     `[WHOLE_READING]` — one reading of everything — whenever composition has nothing to compose
     along: the operator asked for `whole`, there is no plan, or no task declares a scope. An
@@ -1294,18 +1300,28 @@ def plan_readings(
     `coverage_blocks` as what it should always have been: a backstop over a document, not the
     place the policy is enforced.
 
-    Otherwise one reading per scoped task, in plan order, plus :data:`SEAM`.
+    Otherwise **one reading per dependency chain** (`dag.chains`), in plan order, plus :data:`SEAM`.
+    A chain's reading is the union of its tasks' scopes. Reading each task of a chain on its own
+    cost an extractor and a security reviewer per task, for a line of work where each task was
+    built on the one before and on nothing else; one launch reads it as the one change it is.
 
-    **A task's reading is its declared scope, never the paths that happened to change.** The scope
-    was frozen by the mandate and does not move, so the reading taken while that task landed is still
-    the answer to the same question after every later task has landed — which is the whole reason a
-    composed review costs less to regenerate than a whole one.
+    **Unless one launch cannot hold it.** `sent` is the change as a reviewer is handed it (folded,
+    `fold_bodies`) and `ceiling` is `max_diff_bytes`: a chain whose reading would be over it is read
+    task by task instead. The split is a function of the diff alone, so the warm-up during a build
+    and the gate at acceptance, given the same diff, take the same readings. Without `sent` nothing
+    is split, which is what a caller that only needs the shape — not the sizes — is asking for.
+
+    **A reading's slice is its declared scopes, never the paths that happened to change.** The
+    scopes were frozen by the mandate and do not move, so the reading taken while a chain landed is
+    still the answer to the same question after every later task has landed — which is the whole
+    reason a composed review costs less to regenerate than a whole one.
 
     **The seam is not an afterthought, it is what makes composing honest.** A changed path two
-    scopes both cover was read twice in isolation and never as one file; a changed path no scope
+    readings both cover was read twice in isolation and never as one file; a changed path no scope
     covers was never anybody's to read. Both are the seam, listed by path because that is the only
-    way to say "these files and no others" as a pathspec. Whatever the seam still does not reach is
-    named in `coverage.composition.unread_paths` and prices the manifest `insufficient`.
+    way to say "these files and no others" as a pathspec. A path two tasks of one chain share is
+    not: the chain's reading holds it once. Whatever the seam still does not reach is named in
+    `coverage.composition.unread_paths` and prices the manifest `insufficient`.
 
     A task's `scope.exclude` is deliberately not subtracted. It bounds what the *implementer* was
     allowed to change; a reading is about what is in the tree, and a path excluded from one task's
@@ -1313,15 +1329,31 @@ def plan_readings(
     """
     if mode == WHOLE or plan is None or models.risk_at_least(risk, "critical"):
         return [WHOLE_READING]
-    scoped = [task for task in plan.tasks if task.scope_include]
+    scoped = {task.id: task for task in plan.tasks if task.scope_include}
     if not scoped:
         return [WHOLE_READING]
+    readings: list[Reading] = []
+    for chain in dag.chains(plan.tasks):
+        parts = [
+            Reading(unit=task_id, include=tuple(scoped[task_id].scope_include), members=(task_id,))
+            for task_id in chain
+            if task_id in scoped
+        ]
+        if len(parts) <= 1:
+            readings.extend(parts)
+            continue
+        joined = Reading(
+            unit="+".join(part.unit for part in parts),
+            include=tuple(dict.fromkeys(path for part in parts for path in part.include)),
+            members=tuple(part.unit for part in parts),
+        )
+        too_big = bool(sent and ceiling) and bytes_by_reading(sent, [joined])[joined.unit] > ceiling
+        readings.extend(parts if too_big else [joined])
     seam = [
         path
         for path in dict.fromkeys(p for p in changed_paths if p)
-        if len([task for task in scoped if common.longest_cover(path, task.scope_include)]) != 1
+        if len([r for r in readings if common.longest_cover(path, r.include)]) != 1
     ]
-    readings = [Reading(unit=task.id, include=tuple(task.scope_include)) for task in scoped]
     if not seam:
         # No path is shared and none is unowned, so there is no seam to read. Appending an empty
         # one would be worse than useless: an empty `include` is the pathspec for *everything*, so
@@ -1329,6 +1361,32 @@ def plan_readings(
         # change — the one launch this composition exists to avoid.
         return readings
     return [*readings, Reading(unit=SEAM, include=tuple(sorted(seam)))]
+
+
+def change_readings(
+    repo: repo_mod.Repo,
+    plan: models.Plan | None,
+    *,
+    base: str,
+    head: str,
+    exclude: Sequence[str],
+    mode: str,
+    ceiling: int,
+) -> tuple[list[Reading], str, str]:
+    """`(the readings the gate would take, the risk floor, the effective risk)` for the change at `head`.
+
+    All three come out of one analysis of one diff. The floor and the effective risk are
+    properties of the whole change and never of a slice of it (`extraction_request`); the readings
+    depend on the effective risk (a critical change is read whole) and on the sizes (a chain too big
+    for one launch is split), so asking for them separately would pay for the diff three times.
+    """
+    evidence = plan.artifact_paths if plan is not None else ()
+    diff_text = diff_of(repo, base, head, exclude)
+    facts = diff_facts.analyze(diff_text, evidence=evidence)
+    effective = effective_risk(facts, plan)
+    sent, _ = fold_bodies(diff_text, facts.files, signalled=frozenset(hit.path for hit in facts.signals))
+    readings = plan_readings(plan, [f.path for f in facts.files], mode=mode, risk=effective, sent=sent, ceiling=ceiling)
+    return readings, facts.risk_floor, effective
 
 
 def _prior_owner(paths: Sequence[str], slices: Sequence[Reading], seam: Reading | None) -> str | None:
@@ -1622,8 +1680,8 @@ def warm(
 ) -> ReadOut:
     """Take one reading now, so acceptance finds it already answered.
 
-    Called when a task lands, where the reading is one task wide and the tree that produced it is
-    the one in front of the caller. It answers the *same question* the gate will ask — same
+    Called when the last task of a reading lands — a dependency chain's, or one task's — while the
+    tree that produced it is the one in front of the caller. It answers the *same question* the gate will ask — same
     measure, same keys (`keys_for`), same validation — so the gate reuses it rather than reading
     the change again from a session that has a whole cycle to hold.
 
@@ -1631,7 +1689,7 @@ def warm(
     build there is not one yet about this head. A blocking finding the last review recorded is
     handled where it is read, at the gate, which is also the only place that can resolve it.
 
-    `risk_floor` is the one measured over the **whole** change (`whole_change_risk`), not over this
+    `risk_floor` is the one measured over the **whole** change (`change_readings`), not over this
     reading, because that is what the gate will send and a warm-up that asks a different question
     is a warm-up nobody reuses. It is taken by the caller rather than here: the same analysis
     answers whether the gate will compose at all, and a caller that has to ask that first should
@@ -1682,22 +1740,6 @@ def effective_risk(facts: diff_facts.DiffFacts, plan: models.Plan | None) -> str
     task_risk = models.max_risk([t.risk for t in plan.tasks]) if plan is not None else "low"
     inputs = review_policy.risk_inputs_from_facts(facts, claim_risk=claim_risk, task_risk=task_risk)
     return review_policy.effective_risk(inputs)
-
-
-def whole_change_risk(
-    repo: repo_mod.Repo, plan: models.Plan | None, *, base: str, head: str, exclude: Sequence[str]
-) -> tuple[str, str]:
-    """`(the detector's risk floor, the effective risk)` over the **whole** change.
-
-    Both are properties of the change and never of a slice of it (`extraction_request`), and both
-    come out of one analysis of one diff — which is why they are taken together. `review.generate`
-    already has them from the diff it measures the manifest on; `build_loop` does not, and has to
-    take them: the key the gate will look under is a function of the floor, and whether the gate
-    will compose at all is a function of the effective risk.
-    """
-    evidence = plan.artifact_paths if plan is not None else ()
-    facts = diff_facts.analyze(diff_of(repo, base, head, exclude), evidence=evidence)
-    return facts.risk_floor, effective_risk(facts, plan)
 
 
 def _next_free(pattern: str, taken: Collection[str]) -> str:

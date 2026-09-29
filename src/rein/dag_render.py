@@ -8,7 +8,7 @@ re-exports them lazily (PEP 562), so import this module directly only from dag i
 from __future__ import annotations
 
 from rein import models
-from rein.dag import STATUS_ORDER, Graph
+from rein.dag import STATUS_ORDER, Graph, chains
 
 
 def render(graph: Graph) -> str:
@@ -64,7 +64,7 @@ def _how_gate_four_will_read(graph: Graph) -> list[str]:
 
     Said at the mandate because that is where it can still be changed. The acceptance gate reads the change in the
     readings the task scopes describe (`review_reading.plan_readings`), so a plan whose tasks
-    declare their scope is read one task at a time and one whose tasks do not is read in a single
+    declare their scope is read one dependency chain at a time and one whose tasks do not is read in a single
     launch holding the whole cycle — which is the shape that runs into a session limit, and by the
     time the review is being generated the only remedy left is to split the scope and re-approve.
 
@@ -101,7 +101,20 @@ def _how_gate_four_will_read(graph: Graph) -> list[str]:
             "- **one reading of the whole cycle** — no task declares a `scope`, so acceptance has "
             "nothing to read the change along. One launch holds every task's diff at once.",
         ]
-    lines.append(f"- {len(scoped)} task reading(s) plus the seam between them, one launch each")
+    # Chains are cut on the whole plan and the unscoped tasks dropped after, exactly as acceptance
+    # cuts them (`review_reading.plan_readings`); a chain whose tasks declare no scope is no reading.
+    in_scope = {t.id for t in scoped}
+    readings = [chain for chain in chains(graph.tasks) if any(tid in in_scope for tid in chain)]
+    joined = sum(1 for chain in readings if sum(tid in in_scope for tid in chain) > 1)
+    lines.append(
+        f"- {len(readings)} reading(s) plus the seam between them, one launch each"
+        + (
+            f" — {joined} of them a dependency chain read in one launch, task by task only if the "
+            "chain's diff will not fit `review_policy.budgets.max_diff_bytes`"
+            if joined
+            else ""
+        )
+    )
     if unscoped:
         lines.append(
             f"- **{len(unscoped)} task(s) declare no `scope`** ({', '.join(unscoped)}): their work "

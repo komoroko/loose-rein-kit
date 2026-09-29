@@ -410,8 +410,20 @@ def test_the_render_says_how_gate_four_will_read_the_plan() -> None:
         ]
     )
     text = dag.render(scoped)
-    assert "2 task reading(s) plus the seam" in text
+    assert "2 reading(s) plus the seam" in text
+    assert "dependency chain" not in text, "no task here continues another"
     assert "**1 task(s) declare no `scope`** (T-003)" in text
+
+    chained = dag.Graph.from_tasks(
+        [
+            dag.Task(id="T-001", title="a", kind="foundation", scope_include=("alpha/",)),
+            dag.Task(id="T-002", title="b", kind="parallel", blocked_by=("T-001",), scope_include=("beta/",)),
+            dag.Task(id="T-003", title="c", kind="parallel", blocked_by=("T-002",), scope_include=("gamma/",)),
+        ]
+    )
+    text = dag.render(chained)
+    assert "1 reading(s) plus the seam" in text
+    assert "1 of them a dependency chain read in one launch" in text
 
 
 def test_a_critical_task_says_the_gate_will_read_the_change_whole() -> None:
@@ -433,11 +445,11 @@ def test_a_critical_task_says_the_gate_will_read_the_change_whole() -> None:
     assert "T-001" in rendered.split("How acceptance will read this")[1]
 
 
-def test_a_scoped_plan_below_critical_is_read_one_task_at_a_time() -> None:
+def test_a_scoped_plan_below_critical_is_read_one_chain_at_a_time() -> None:
     graph = dag.Graph.from_tasks(
         [
             dag.Task(id="T-001", title="a", kind="foundation", scope_include=("alpha/",)),
             dag.Task(id="T-002", title="b", kind="parallel", blocked_by=("T-001",), scope_include=("beta/",)),
         ]
     )
-    assert "2 task reading(s) plus the seam" in dag.render(graph)
+    assert "1 reading(s) plus the seam" in dag.render(graph)
