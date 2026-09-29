@@ -298,9 +298,7 @@ def test_abandon_requires_a_reason(tmp_path: Path) -> None:
 
 
 def test_an_abandoned_archive_says_so_and_why(tmp_path: Path) -> None:
-    seed_repo(
-        tmp_path, state=make_state(gates={"acceptance": "pending"}), docs=True, events=chain("cycle_initialized")
-    )
+    seed_repo(tmp_path, state=make_state(gates={"acceptance": "pending"}), docs=True, events=chain("cycle_initialized"))
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
     reason = "the full run moved to the next cycle"

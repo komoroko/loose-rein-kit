@@ -1494,9 +1494,7 @@ class State:
         value = self.raw.get("tasks")
         if not isinstance(value, dict):
             return {}
-        return {
-            k: _ids(v, "scope_added") for k, v in value.items() if isinstance(v, dict) and _ids(v, "scope_added")
-        }
+        return {k: _ids(v, "scope_added") for k, v in value.items() if isinstance(v, dict) and _ids(v, "scope_added")}
 
     @property
     def deferred(self) -> Mapping[str, Mapping[str, Any]]:

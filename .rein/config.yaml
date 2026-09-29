@@ -277,6 +277,13 @@ guard:
     - backend/
     - frontend/
     - scripts/
+  # Where a FROZEN task's scope may be widened without rolling the mandate back
+  # (`rein task scope-add T-NNN <path> --reason "..."`). Frozen with this file, so approving the
+  # mandate approves the allowance. Each addition is recorded and listed at acceptance. For the files
+  # a change necessarily drags along — the test that pins a constant the task changed — never for
+  # product code, where widening a task is a change to what was authorized (`/revise`).
+  scope_additions:
+    - tests/
 
 github:
   enabled: false        # off by default: offline-safe. The plan stays the SSOT either way.

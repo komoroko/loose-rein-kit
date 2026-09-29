@@ -4,6 +4,56 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.11.0] - 2026-09-29
+
+**A minor release because the format moves: `rein-grounded-v9`.** Every repository runs
+`rein sync --force` before any verb runs again. Every new key is optional, so a repository's
+documents read as they are. `plan.yaml` tasks gain `environment`, `operate`, `rehearsal` and
+`attempts`; `state.yaml` gains `deferred` and a task's `scope_added`; `config.yaml`'s `guard` gains
+`scope_additions`. Two mandate checks are new, and a plan that met every old one can now be refused:
+an irreversible task without a `rehearsal` and an `attempts` budget, and a configured dependency
+audit that has never been run.
+
+Read off one cycle that went wrong in the same way six times. It re-approved its mandate six times,
+launched implementers 163 times for 22 completions, and waited on a person 93 times at a mean of 83
+minutes. Each change below removes one of those causes.
+
+- **An irreversible task names its rehearsal and its attempt budget.** Its first contact with real
+  data was the irreversible full run. There it found three defects in turn, each the same shape: a
+  prompt and the deterministic check on its output disagreeing, which no stubbed test can show. Each
+  cost a full run and a roll back. `rehearsal` names the reversible tasks that run the same path
+  small first, or `waived` says why none can. `attempts: {max, cost}` is what the approval covers;
+  the build does not launch past it, and the crossing screen shows it.
+- **The loop runs a task's long, deterministic commands itself (`operate`).** The run used to happen
+  inside an implementer's turn. A turn that ended killed the child mid-run, session limits parked it
+  105 times, and the only lever was a reset reason telling the next agent to keep waiting. The steps
+  now run on the host after the implementer reports `implemented` and before the gate. Their logs go
+  under `.rein/work/<task>/operate/`. A content failure goes back to the implementer with the log's
+  tail; a machine failure stops the build and costs no retry.
+- **A host task declares its environment (`environment.env`, `environment.allow`).** Two failures
+  prompted this. A `PYTHONPATH` that lived in one shell failed the task's own precondition from
+  another. A standing `Bash(uv run *:*)` rule was added to the repository's `permissions.allow` so one
+  script could run. Declared variables are expanded at launch for the implementer and the task's
+  probes, and a reference to an unset variable is an unmet precondition, never `""`. The allowed
+  command prefixes go to that one launch as `--settings`, not `--allowedTools`: that flag is
+  variadic and swallows the prompt.
+- **Work set aside is recorded, not worked around.**
+  - `rein task defer` moves the status of a task deleted from the draft plan into `deferred`, and
+    acceptance lists it. Before, no verb could remove that status, and a hand edit is denied.
+  - `rein cycle-close --abandon --reason` closes a cycle without an approved acceptance, and marks
+    its archive with `ABANDONED.md`. The rules already said abandonment went through `cycle-close`,
+    while `cycle-close` refused every unaccepted cycle.
+- **A frozen task's scope grows by a test file without a roll back (`rein task scope-add`).** The
+  addition must lie inside the frozen config's `guard.scope_additions` (the scaffold allows
+  `tests/`). It sits beside the plan like `task order`, is listed at acceptance, and goes back to
+  the planner on a roll back. The case was one test that pinned a constant the task changed, which
+  cost a whole re-approval.
+- **The dependency audit is met at the mandate.** The mandate asks that it has run once, not that it
+  passed: a finding changes the environment the approval freezes, and that is cheapest to decide
+  before the freeze. `rein doctor` checks the audit command can start. A launcher that could not
+  spawn its scanner (`uv run pip-audit` with no pip-audit) is now a machine failure; it had been
+  recorded as a failed audit.
+
 ## [0.10.0] - 2026-09-25
 
 **A minor release because the format moves: `rein-grounded-v8`.** Every repository runs
