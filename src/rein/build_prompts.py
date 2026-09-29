@@ -63,6 +63,8 @@ def implementer_prompt(
     pathspec: Sequence[str],
     handoff: Mapping[str, object] | None = None,
     dossier_path: str = "",
+    continued_from: str = "",
+    continued_worktree: str = "",
 ) -> str:
     # Point the implementer at the design section for this task's requirement rather than the whole
     # design doc: reading only the relevant slice keeps the subagent context lean and avoids
@@ -98,8 +100,23 @@ def implementer_prompt(
         if dossier_path
         else ""
     )
+    # A launch forked from the session that finished the upstream task remembers that task's
+    # worktree: its paths, and the files as they were before the merge. Both are wrong here, and an
+    # edit made through a remembered absolute path lands outside this task's tree, where no gate and
+    # no merge will ever see it.
+    continuation = (
+        f"**This session continues from the one that implemented {continued_from}.** That task is "
+        f"finished: its change is merged into the branch this one forked from, and its worktree "
+        f"(`{continued_worktree}`) no longer exists. Your working directory is this one. A path you "
+        "remember under that worktree is at the same relative path here — edit it here, never "
+        "there — and re-read a file before you change it, because what you remember predates the "
+        "merge. What you learned about the codebase still holds; the task has changed.\n"
+        if continued_from
+        else ""
+    )
     prompt = (
         f'You are the implementer subagent. Your only task is {task.id} "{task.title}".\n'
+        f"{continuation}"
         f"{dossier_ref}"
         f"Then read docs/tasks/{task.id}.md, {design_ref}, and the existing code, and implement "
         f"following the protocol in .rein/prompts/agents/implementer.md.{baseline_ref}\n"

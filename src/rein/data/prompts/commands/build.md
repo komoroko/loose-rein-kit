@@ -215,7 +215,12 @@ The non-deterministic parts are each task's implementation code content and the 
 step's fixes. Both are absorbed deterministically: after an agent step changes code, the
 already-passed cmd steps are re-run; a red cmd step retries until green, else blocked. With
 the claude preset the implementer resumes its own session across its retries (a step's final
-retry is forced fresh); the `review` step, the integration fixer, and the security reviewer
+retry is forced fresh), and a task with exactly one upstream task starts by **forking** the session
+that finished that upstream rather than reading the codebase from cold. The fork leaves the
+upstream's session as it was, so two leaves under one foundation never see each other's
+conclusions. Which session finished which task is a cache outside the working tree
+(`$XDG_CACHE_HOME/rein/<repo>/sessions.json`); a miss is a cold start and nothing else. The
+`review` step, the integration fixer, and the security reviewer
 always run in **fresh contexts, independent of the implementer** — independent verification
 is the point; never fold them into the implementer's session.
 

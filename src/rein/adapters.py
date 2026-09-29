@@ -543,6 +543,7 @@ def command(
     extra: Sequence[str] = (),
     session: str = "",
     resume: bool = False,
+    fork_from: str = "",
 ) -> list[str]:
     """The whole command line for one launch: `argv`, the access it needs, the session, the prompt.
 
@@ -559,11 +560,24 @@ def command(
     `launch_argv` builds every argv as `record.argv + model flags + usage flags`, so that position
     is the length of `record.argv`. Putting the verb anywhere else makes `codex` read `resume` as
     a flag's value or as the prompt.
+
+    **`fork_from` opens `session` as a branch of another session** (`claude --session-id <new>
+    --resume <old> --fork-session`): the new launch starts from everything the old one read, the
+    old one is left as it was, and the new one still has an id the caller chose, so its own retries
+    resume it like any other. Only a CLI that takes a caller-chosen id and can fork can be asked
+    for this, and asking one that cannot is refused rather than launched as something else.
     """
     record = adapter_for(argv)
     head = list(argv)
     stamp: tuple[str, ...] = ()
-    if record is not None and session:
+    if fork_from:
+        if record is None or resume or not session or not (record.forkable and record.session_flags):
+            raise LaunchRefused(
+                f"cannot open a session as a fork of {fork_from} with {argv[0] if argv else '(no CLI)'}: "
+                "that takes a CLI that is told its session id and can fork one"
+            )
+        stamp = (*record.session_flags, session, *record.resume_flags, fork_from, *record.fork_flags)
+    elif record is not None and session:
         if resume and record.resume_argv:
             head[len(record.argv) : len(record.argv)] = record.resume_verb(session)
         elif resume and record.resume_flags:

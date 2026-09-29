@@ -92,6 +92,7 @@ from rein import (
     review_reading,
     review_transport,
     run_record,
+    sessions,
     status_api,
     strict_yaml,
 )
@@ -922,6 +923,10 @@ class Orchestrator:
         # established, outside the working tree. Off in a dry run (nothing is established) and
         # off when the operator says so. A miss only ever costs a re-run.
         self.ledger = evidence.Ledger.for_repo(self.repo, enabled=not dry_run and evidence.cache_enabled_by_env())
+        # Which implementer session finished which task, so the one task downstream of it can
+        # start from there (`_inherited_session`). A cache like the ledger: a miss is a cold start.
+        self.sessions = sessions.Sessions.for_repo(self.repo, enabled=not dry_run)
+        self._sessions_said = False
         #: Set once an acceptance warm-up could not be taken. Retrying it per task would spend a session
         #: limit on an optimization, and the gate takes the reading either way (`_warm_reading`).
         self._warming_off = False
@@ -1475,7 +1480,9 @@ class Orchestrator:
 
     # -- implementer launch and quality gate --
 
-    def _implementer_prompt(self, task: dag.Task, failure_log: str, dossier_path: str = "") -> str:
+    def _implementer_prompt(
+        self, task: dag.Task, failure_log: str, dossier_path: str = "", continued_from: str = ""
+    ) -> str:
         return build_prompts.implementer_prompt(
             task,
             failure_log,
@@ -1484,7 +1491,36 @@ class Orchestrator:
             pathspec=self.ws.pathspec,
             handoff=self._handoff_for(task),
             dossier_path=dossier_path,
+            continued_from=continued_from,
+            continued_worktree=self.ws.worktree_path(continued_from) if continued_from else "",
         )
+
+    def _inherited_session(self, task: dag.Task) -> tuple[str, str]:
+        """`(upstream task, its session)` for a task that can start where its upstream stopped.
+
+        Only a task with **exactly one** upstream: that one's implementer read the codebase this task
+        builds on, and there is no choosing between two. The launch forks that session rather than
+        resuming it, so the upstream's session is unchanged and two leaves under one foundation do
+        not see each other's conclusions — the same property the acceptance reading relies on when
+        it hands one reading to two stages (`review_transport.SharedReading`).
+
+        `("", "")` sends the task in cold, as every task went before: a CLI that is not told its
+        session id or cannot fork, an upstream this cache never saw finish, or a cache that is off.
+        The last is said once, because an unexplained cold start is a cost nobody can see.
+        """
+        adapter = self._implementer_adapter
+        if self.dry_run or len(task.blocked_by) != 1 or adapter is None:
+            return "", ""
+        if not (adapter.forkable and adapter.session_flags):
+            return "", ""
+        if self.sessions.unavailable:
+            if not self._sessions_said:
+                self._sessions_said = True
+                print(f"    [session] every task starts cold this run: {self.sessions.unavailable}")
+            return "", ""
+        upstream = task.blocked_by[0]
+        found = self.sessions.get(self.cycle_id, upstream, adapter.name)
+        return (upstream, found) if found else ("", "")
 
     @property
     def _implementer_adapter(self) -> adapters.Adapter | None:
@@ -1520,8 +1556,13 @@ class Orchestrator:
         failure_log: str,
         session: str = "",
         resume: bool = False,
+        fork: tuple[str, str] = ("", ""),
     ) -> str:
         """One headless implementer launch; `session`/`resume` thread retry-session continuity.
+
+        `fork` is `(upstream task, its session)` when this launch opens `session` as a branch of the
+        session that finished the task's one upstream (`_inherited_session`). A fork that fails is
+        treated like a resume that fails: one fresh launch, told nothing about a session it lacks.
 
         Returns the session this launch is continuing or opened, "" when there is none — which is
         how a CLI that mints its own id gets one back to the caller (`Adapter.session_of`).
@@ -1540,9 +1581,13 @@ class Orchestrator:
         if self.dry_run:
             print(f"    [dry-run] launch implementer (cwd={cwd}) task={task.id}")
             return ""
-        prompt = self._implementer_prompt(task, failure_log, self._write_dossier(task, cwd, "implementer"))
+        upstream, parent = fork
+        dossier_path = self._write_dossier(task, cwd, "implementer")
+        prompt = self._implementer_prompt(task, failure_log, dossier_path, continued_from=upstream)
         where = f"{task.id}: implementer"
         allowed = self._allow_argv(task)
+        if upstream:
+            print(f"    [session] {task.id}: starting from {upstream}'s implementer session")
         try:
             self._launch(
                 adapters.command(
@@ -1552,6 +1597,7 @@ class Orchestrator:
                     extra=allowed,
                     session=session,
                     resume=resume,
+                    fork_from=parent,
                 ),
                 cwd=cwd,
                 where=where,
@@ -1568,9 +1614,11 @@ class Orchestrator:
             # how it stops being carried. It reaches here already — transient, not capacity — which
             # is why `faults.is_context_overflow` stays a predicate for callers that have no
             # session to reset rather than a classification that would take this retry away.
-            if not resume or not fault.retryable or faults.is_capacity(fault.output):
+            if not (resume or parent) or not fault.retryable or faults.is_capacity(fault.output):
                 raise
             print(f"    [resume] {task.id}: resuming session failed (rc={fault.rc}); relaunching fresh")
+            if upstream:
+                prompt = self._implementer_prompt(task, failure_log, dossier_path)
         # A fresh token: the first one was spent on the launch that failed, and the server
         # accepts each nonce once.
         self._launch(
@@ -2818,6 +2866,9 @@ class Orchestrator:
         mints_own = self._implementer_mints_its_own_session
         session = str(uuid.uuid4()) if continuity and not mints_own else ""
         resume = False
+        # The first launch may open that session as a branch of the one that finished this task's
+        # upstream; every later round resumes this task's own session as before.
+        fork = self._inherited_session(task) if session else ("", "")
         # (step, failure digest, tree fingerprint) of the previous round — what `_futile` compares
         # this round against. "" for the fingerprint means "unknown", which never matches.
         seen: tuple[str, str, str] = ("", "", "")
@@ -2834,7 +2885,8 @@ class Orchestrator:
             self._stop_before_the_gate(task, kind, message, tree=tree, futile=futile)
             return False, message
         while True:
-            session = self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume)
+            session = self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume, fork=fork)
+            fork = ("", "")
             if not self.dry_run:
                 changed, _ = self._review_scope(task, cwd)
                 violations = self._gate_violations(changed)
@@ -2872,6 +2924,8 @@ class Orchestrator:
                 failed, failure_log = self._run_pipeline(task, cwd)
             if failed is None:
                 self._record_task_evidence(task, cwd)
+                if session and (adapter := self._implementer_adapter) is not None:
+                    self.sessions.put(self.cycle_id, task.id, adapter.name, session)
                 # Whatever failure the handoff described is over. Left in place, it rode into every
                 # stop that follows a green — a merge conflict, a red join — as that stop's cause.
                 self._note_diagnostic(task.id, _FAILURE_RESOLVED)
