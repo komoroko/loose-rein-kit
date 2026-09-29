@@ -2,8 +2,13 @@
 // replaces every OS dialog, and a status push never wipes an open panel out from under a reader.
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { STATUS, baseRoutes, boot } from "./_harness.mjs";
+
+const ASSETS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../src/rein/ui_assets");
 
 const AWAITING = {
   ...STATUS,
@@ -120,6 +125,25 @@ test("the footer offers the decision, and the panel says what it would bind", as
   assert.match(panel, /sha256:bb/);
   assert.match(panel, /Not opened in this pane yet/);
   assert.equal(app.errors.length, 0, app.errors.join("\n"));
+});
+
+// jsdom lays nothing out, so where the footer stays cannot be watched here; what makes it stay can.
+// A sticky element travels only inside its parent's box. The bar used to be the sticky one, alone in
+// `#rvFoot`, and sat at the foot of every long document — the one place a reader is not.
+test("the footer sticks inside the block that holds the reading pane, and a panel opens above the bar", async () => {
+  const css = fs.readFileSync(path.join(ASSETS, "app.css"), "utf8");
+  const rule = (selector) => (css.match(new RegExp(`(?:^|\\n)${selector}\\s*\\{([^}]*)\\}`)) || [])[1] || "";
+  assert.match(rule("#rvFoot"), /position:\s*sticky/);
+  assert.match(rule("#rvFoot"), /bottom:\s*0/);
+  assert.doesNotMatch(rule("\\.approvebar"), /sticky/, "a sticky inside the sticky footer has no room to move");
+
+  const { app } = await readingRoom();
+  const foot = app.window.document.getElementById("rvFoot");
+  assert.ok(foot.parentElement.querySelector(":scope > #rvMain"), "the footer shares its parent with the pane");
+
+  await app.click(APPROVE);
+  const children = [...foot.children].map((el) => el.className);
+  assert.deepEqual(children, ["confirm", "approvebar"]);
 });
 
 test("a status push does not wipe an open panel", async () => {

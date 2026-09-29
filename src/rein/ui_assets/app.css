@@ -505,9 +505,13 @@ pre.patch {
 .dl.hunk { color: #8ab8ff; }
 .dl.file { color: #dda63f; font-weight: 700; }
 
-/* the approval footer: the page's last word, and it sticks */
+/* the approval footer: the page's last word, and it sticks. Sticky on #rvFoot, whose parent also
+   holds the reading pane, so it has the pane's height to travel in. It used to be on the bar, whose
+   parent held nothing else — a sticky with no room to move, left at the foot of a long document. An
+   open confirmation sits above the bar, inside the same footer, and scrolls on its own. */
+#rvFoot { position: sticky; bottom: 0; z-index: 4; background: var(--paper); }
+#rvFoot .confirm { max-height: 60vh; overflow: auto; }
 .approvebar {
-  position: sticky; bottom: 0; z-index: 4;
   display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
   margin-top: 1.2rem; padding: .7rem 0;
   background: var(--paper); border-top: 1px solid var(--rule-2);

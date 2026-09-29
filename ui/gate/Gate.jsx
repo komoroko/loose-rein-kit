@@ -493,15 +493,8 @@ export default function Gate({ status, gate }) {
         <div id="rvFoot">
           {review && !review.error ? (
             <>
-              <div className="approvebar">
-                <Footer review={review} session={session} isBuild={isBuild} gate={gate}
-                  onApprove={openApproval}
-                  onChanges={() => setPanel({
-                    kind: "changes",
-                    suggested: (mainEntries(review).find((x) => x.id === selected) || {}).path || "",
-                  })}
-                />
-              </div>
+              {/* Above the bar, in the footer that sticks: a panel opened from the bar opens where
+                  the reader already is, not at the foot of the document they were reading. */}
               {panel ? (
                 <Panel
                   panel={panel}
@@ -516,6 +509,15 @@ export default function Gate({ status, gate }) {
                   }}
                 />
               ) : null}
+              <div className="approvebar">
+                <Footer review={review} session={session} isBuild={isBuild} gate={gate}
+                  onApprove={openApproval}
+                  onChanges={() => setPanel({
+                    kind: "changes",
+                    suggested: (mainEntries(review).find((x) => x.id === selected) || {}).path || "",
+                  })}
+                />
+              </div>
             </>
           ) : null}
         </div>
