@@ -33,7 +33,7 @@ loop decomposes, reorders and re-runs as it needs to.
    repaired something outside the tree).
 4. **DoD** — the `quality_gate` pipeline in `.rein/config.yaml` (default `test` → `check` →
    `review` → `smoke`), the single definition for every task; a task has no `test` command of its
-   own. A step already established green against **this exact tree, in this exact image** is reused
+   own. Each leaf runs the **command** steps; the **agent** steps read the batch once, below (5a). A step already established green against **this exact tree, in this exact image** is reused
    rather than re-run (the evidence ledger). Then the **negative control**: the steps that run the tests
    (`runs_tests: true` — never a linter, whose red is true of any new test file) are re-established
    over the base this change is a change to, with **only the task's test half applied**. If every step is still green, no test in the change exercises it and the green that
@@ -59,15 +59,24 @@ loop decomposes, reorders and re-runs as it needs to.
    either — a step already red at the baseline, or one that failed **identically over a tree the
    implementer did not move**, stops the task at once with `futile:` on its record, read from the
    observation, never from the failure's text (the loop parses no build-tool output).
+5a. **Review the batch in one launch** — once every leaf of the batch has finished its
+   deterministic gate, one reviewer reads all the leaves that passed, before anything merges, and
+   answers **per task**. A leaf's `must_fix` findings go back to that leaf's implementer through
+   the send-back above — its own session resumed, the whole deterministic gate established again —
+   and only the leaves sent back are read again, from cold, within the step's `retries`. A leaf
+   still holding a `must_fix`, or one the reviewer wrote no entry for, does not land; the rest of
+   the batch does. Independence needs a launch that is not the implementer's, not a launch per
+   task.
 6. **Land** — gate-check every path the task changed (merge-stage gate guard: a pending-gate path
    escalates as `gate_violation` and blocks the task instead of landing) → merge into work
    sequentially in **ascending-id order** → **when a batch merged 2+ leaves, re-run the cmd steps
    once on the merged work branch**, since each leaf was green only in isolation. A red goes to a
    fixer within the step's `retries` budget, else the batch's tasks block; a single-leaf join skips
-   it. The `agent` steps run over the join too, and there the reviewer is asked about **what only
-   the join can show — cross-task correctness as much as shape**: the suite that just passed here
-   is the union of the leaves' suites, and no test in it was written with this merge in view, so a
-   green over the merged tree says nothing about the interaction.
+   it. A `stage: integration` agent step reads every join, and a `stage: both` one reads it again
+   only when a merge had to resolve a conflict — otherwise the join is exactly the union the
+   batch's reviewer already read. There the reviewer is asked about **what only the join can show —
+   cross-task correctness as much as shape**: the suite that just passed here is the union of the
+   leaves' suites, and no test in it was written with this merge in view.
 7. **Close** — mark the merged tasks `done`, **each carrying the tree its DoD was established on**
    (`evidence` in `state.yaml`) — or **`awaiting-evidence`** when a criterion nobody here can
    establish is still open, which merges the work and parks only the task, and the acceptance gate cannot open
@@ -212,8 +221,9 @@ exited, and only for the exit code it actually returned.
 fastest; a check measures nothing that has changed and costs a context each time.
 
 The non-deterministic parts are each task's implementation code content and the `review` agent
-step's fixes. Both are absorbed deterministically: after an agent step changes code, the
-already-passed cmd steps are re-run; a red cmd step retries until green, else blocked. With
+step's findings. Both are absorbed deterministically: a finding goes back through the same
+send-back a red step takes, and the whole deterministic gate runs again over the fixed tree; a red
+cmd step retries until green, else blocked. With
 the claude preset the implementer resumes its own session across its retries (a step's final
 retry is forced fresh), and a task with exactly one upstream task starts by **forking** the session
 that finished that upstream rather than reading the codebase from cold. The fork leaves the
@@ -236,10 +246,11 @@ is the point; never fold them into the implementer's session.
   the behaviour were wrong, and which assertions would hold for any output at all. The negative
   control below can show that the test half is not *inert*; whether the tests are any *good* is
   asked here and nowhere else. **It reports; it does
-  not repair, and it is launched without write access.** Findings go to
-  `.rein/work/T-NNN.findings.json`; the implementer resolves the `must_fix` ones within the
-  step's own `retries` budget and the reviewer looks again. A review whose findings cannot be read
-  stops the step: an unreadable answer is not an answer that found nothing.
+  not repair, and it is launched without write access.** One launch reads the whole batch (5a),
+  and its findings go to `.rein/work/review.findings.json` with one entry per task; each task's
+  implementer resolves its `must_fix` ones within the step's own `retries` budget and the reviewer
+  looks again at the tasks sent back. A review whose findings cannot be read holds back every task
+  it was reading: an unreadable answer is not an answer that found nothing.
   **The code-stage lenses this cycle's mandate froze reach it too** — `rein lens --select code
   --task <T-NNN>`, read back from `plan.lenses` and narrowed to the task in hand. The selection is
   resolved once against the whole plan, because most conditions count what the plan states rather
@@ -263,8 +274,8 @@ is the point; never fold them into the implementer's session.
   without them asks exactly the same thing (`adapters.Adapter.disciplines`).
   **Declared `stage: integration`, it reads the tree the merge produced instead** — and takes the
   selection unnarrowed (`rein lens --select code`, no `--task`), because the union of every task's
-  scope is exactly what it is reading. The thing no
-  per-task reviewer can see, because each was right to stay inside its own task's scope:
+  scope is exactly what it is reading. The thing the batch's reviewer could not see, because the
+  merged tree did not exist yet:
   duplication between what two tasks added, one responsibility now in two places, an abstraction
   one task introduced that the next worked around. Its `must_fix` findings go to the integration
   fixer within the step's own budget; its `consider` findings are filed against the merged task

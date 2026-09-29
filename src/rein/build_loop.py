@@ -117,6 +117,8 @@ _GATE4_WORKTREE = "_gate4"
 #: What the integration reviewer's findings file is named after. Not a task id — the subject is the
 #: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
 _INTEGRATION_SUBJECT = "integration"
+#: The findings file a batch's reviewer writes, at the repository root (`_read_batch`).
+_BATCH_REVIEW_SUBJECT = "review"
 
 #: What a failed negative control is reported as. Not a step in `quality_gate` — it is a verdict on
 #: what those steps *together* claimed — but it comes back through the same channel a red step
@@ -870,6 +872,11 @@ class LeafOutcome:
     violations: list[tuple[str, str]] | None = None
 
 
+def _landable(outcome: LeafOutcome) -> bool:
+    """A leaf whose gate passed and that nothing else has stopped: the only kind a reviewer reads."""
+    return outcome.ok and outcome.fault is None and not outcome.violations
+
+
 # --- orchestrator body ------------------------------------------------------
 
 
@@ -960,6 +967,8 @@ class Orchestrator:
         # record the mandate froze.
         self._baseline_red: dict[str, str] = {}
         self._baseline_taken = False
+        # Leaves whose merge needed a conflict resolved: their join is read again (`_integration_gate`).
+        self._resolved_on_merge: set[str] = set()
 
     def _stop_verdict(self, task_id: str) -> tuple[str, bool]:
         """(the status this task's failed attempt calls for, whether an escalation is still owed).
@@ -1481,7 +1490,7 @@ class Orchestrator:
     # -- implementer launch and quality gate --
 
     def _implementer_prompt(
-        self, task: dag.Task, failure_log: str, dossier_path: str = "", continued_from: str = ""
+        self, task: dag.Task, failure_log: str, dossier_path: str = "", continued_from: str = "", review: str = ""
     ) -> str:
         return build_prompts.implementer_prompt(
             task,
@@ -1493,6 +1502,7 @@ class Orchestrator:
             dossier_path=dossier_path,
             continued_from=continued_from,
             continued_worktree=self.ws.worktree_path(continued_from) if continued_from else "",
+            review_findings=review,
         )
 
     def _inherited_session(self, task: dag.Task) -> tuple[str, str]:
@@ -1557,6 +1567,7 @@ class Orchestrator:
         session: str = "",
         resume: bool = False,
         fork: tuple[str, str] = ("", ""),
+        review: str = "",
     ) -> str:
         """One headless implementer launch; `session`/`resume` thread retry-session continuity.
 
@@ -1583,7 +1594,7 @@ class Orchestrator:
             return ""
         upstream, parent = fork
         dossier_path = self._write_dossier(task, cwd, "implementer")
-        prompt = self._implementer_prompt(task, failure_log, dossier_path, continued_from=upstream)
+        prompt = self._implementer_prompt(task, failure_log, dossier_path, continued_from=upstream, review=review)
         where = f"{task.id}: implementer"
         allowed = self._allow_argv(task)
         if upstream:
@@ -1618,7 +1629,7 @@ class Orchestrator:
                 raise
             print(f"    [resume] {task.id}: resuming session failed (rc={fault.rc}); relaunching fresh")
             if upstream:
-                prompt = self._implementer_prompt(task, failure_log, dossier_path)
+                prompt = self._implementer_prompt(task, failure_log, dossier_path, review=review)
         # A fresh token: the first one was spent on the launch that failed, and the server
         # accepts each nonce once.
         self._launch(
@@ -1733,30 +1744,6 @@ class Orchestrator:
         paths = self.ws.branch_changed_paths(task.id, cwd=cwd)
         return paths, f"git diff {self.ws.target_branch(task.id)}...HEAD"
 
-    def _review_prompt(
-        self,
-        task: dag.Task,
-        cwd: str,
-        dossier_path: str = "",
-        findings_path: str = "",
-        argv: Sequence[str] = (),
-    ) -> str:
-        changed, diff_cmd = self._review_scope(task, cwd)
-        return build_prompts.review_prompt(
-            task,
-            gate_cmds=self.config.gate_cmds,
-            changed_paths=changed,
-            diff_cmd=diff_cmd,
-            dossier_path=dossier_path,
-            findings_path=findings_path,
-            # Keyed on the argv this step will actually be launched with, not on the default one: a
-            # step may name its own `agent_argv`, and offering a discipline the launched CLI does
-            # not have is the dangling reference this replaced.
-            disciplines=adapters.disciplines_for(argv or self.config.adapter_argv),
-            lenses_applied=self._code_lenses[0],
-            lenses_proposed=self._code_lenses[1],
-        )
-
     def _frozen_code_lenses(self) -> tuple[list[str], list[str]]:
         """`(applied, proposed)` as one line each, for the code-stage reviewers."""
         applied_ids, proposed_ids = lenses.frozen(self._plan, stage="code")
@@ -1778,96 +1765,156 @@ class Orchestrator:
         """The content digest of the tree at `cwd` ("" when it cannot be computed)."""
         return "" if self.dry_run else self.ws.fingerprint(cwd)
 
-    def _run_agent_step(self, step: GateStep, task: dag.Task, cwd: str) -> bool:
-        """Run the review agent step headless. Returns True if the tree ended up changing.
+    def _batch_review_steps(self) -> tuple[GateStep, ...]:
+        """The agent steps a batch is read by before it merges: every one the task stage runs.
 
-        **The reviewer reports; it does not repair.** It used to be launched with write access and
-        told to apply its fixes, which put judging a change and editing it away in one pair of
-        hands — and moved the tree underneath the gate, so every already-passed step had to be
-        re-run behind it. Now it writes findings to a file, the implementer resolves the `must_fix`
-        ones within this step's own retry budget, and the reviewer looks again. The extra launch
-        is the price of the separation; what it buys back is a reviewer that no longer re-runs the
-        test suite the caller runs anyway, and a tree that only one participant moves.
+        An agent step is not part of a task's pipeline any more (`_run_pipeline`). It is asked once
+        per batch, after every leaf has finished its deterministic gate, by one launch that reads
+        all of them (`_review_batch`).
+        """
+        return tuple(step for step in self._steps_at("task") if step.kind == "agent")
 
-        Launched with the adapter of the role the *step* declares — not the implementer's. Those
-        were the same process until this was fixed, so a reviewer configured as a second opinion
-        was the same model that had just written the code.
+    def _review_subject(self, task: dag.Task) -> build_prompts.ReviewSubject:
+        cwd = self.ws.worktree_path(task.id)
+        written = self._write_dossier(task, cwd, "code_reviewer")
+        where = Path(cwd).relative_to(self.root) if Path(cwd).is_relative_to(self.root) else Path(cwd)
+        branch = self.ws.branch_for(task.id)
+        return build_prompts.ReviewSubject(
+            task=task,
+            branch=branch,
+            diff_cmd=f"git diff {self.ws.target_branch(task.id)}...{branch}",
+            dossier_path=str(where / written) if written else "",
+        )
 
-        A reviewer whose findings cannot be read is not a reviewer that found nothing: an
-        unreadable answer stops the step rather than passing it.
+    def _review_batch(self, tasks: Sequence[dag.Task], results: dict[str, LeafOutcome]) -> None:
+        """Read every leaf that passed its deterministic gate in one launch, and act on the answer.
+
+        **One reviewer launch per batch and round, not one per task.** Each leaf used to get a
+        reviewer of its own, and a batch of two or more then got one more over the join, reading
+        the union of what the others had read. Independence needs a launch that is not the
+        implementer's; it does not need one per task. The reader answers per task, because the
+        answer per task is what acts: a leaf's `must_fix` findings go back to *that* leaf's
+        implementer through the same send-back a red step takes (`_run_task_to_done`), which resumes
+        its session and re-establishes the whole deterministic gate over the fixed tree. Only the
+        leaves that were sent back are read again, from cold.
+
+        A leaf still holding `must_fix` findings when the step's `retries` run out does not land;
+        the rest of the batch does. A leaf the reader wrote nothing about was not reviewed, and it
+        does not land either. A leaf whose tree moved while it was being read goes back through the
+        same send-back: what is on its branch is no longer what the gate established.
+
+        Mutates `results`: whatever this decides about a leaf replaces what its pipeline said.
+        """
+        for step in self._batch_review_steps():
+            subjects = [
+                task
+                for task in sorted(tasks, key=lambda t: t.id)
+                if _landable(results[task.id])
+                and step.matches_paths(self.ws.branch_changed_paths(task.id) if not self.dry_run else [])
+            ]
+            rounds = max(0, step.retries)
+            for attempt in range(rounds + 1):
+                if not subjects:
+                    break
+                if self.dry_run:
+                    print(f"    [dry-run] review {', '.join(t.id for t in subjects)} in one launch ({step.name})")
+                    break
+                answered = self._read_batch(step, subjects, results)
+                send_back = {task_id: text for task_id, text in answered.items() if text}
+                if not send_back:
+                    break
+                if attempt == rounds:
+                    for task_id, text in send_back.items():
+                        unresolved = f"the reviewer's findings were not resolved within {rounds} round(s)"
+                        results[task_id] = LeafOutcome(ok=False, log=f"{task_id}: {unresolved}:\n{text}")
+                    break
+                returned = [t for t in subjects if t.id in send_back]
+                print(f"    [review] {', '.join(t.id for t in returned)}: back to the implementer")
+                with ThreadPoolExecutor(max_workers=max(1, self.config.max_parallel)) as pool:
+                    futures = {
+                        t.id: pool.submit(self._safe_run_task, t, self.ws.worktree_path(t.id), send_back[t.id])
+                        for t in returned
+                    }
+                    for task_id, future in futures.items():
+                        results[task_id] = future.result()
+                subjects = [t for t in returned if _landable(results[t.id])]
+
+    def _read_batch(
+        self, step: GateStep, subjects: Sequence[dag.Task], results: dict[str, LeafOutcome]
+    ) -> dict[str, str]:
+        """One reviewer launch over `subjects`: task id → what goes back to its implementer ("" = nothing).
+
+        A leaf the reader cannot be held to an answer about — no entry, an unreadable file — is
+        settled here as not landable, and is absent from the return. So is every subject when the
+        launch never happened: the machine stopping a reviewer is not a verdict about any leaf.
         """
         role = step.agent_role or "code_reviewer"
-        before = self._fingerprint(cwd)
-        rounds = max(0, step.retries)
-        for attempt in range(rounds + 1):
-            findings = self._collect_findings(step, task, cwd, role)
-            self._add_review_findings(task.id, findings)
-            outstanding = dossier.must_fix(findings)
-            if not outstanding:
-                if findings:
-                    print(f"    [review] {task.id}: {len(findings)} finding(s), none blocking")
-                break
-            if attempt == rounds:
-                # The budget is spent and the defects stand. Reporting the step as passed here is
-                # the one thing this must never do, so it raises rather than returns.
-                raise StopLoop(
-                    f"{task.id}: the reviewer's findings were not resolved within "
-                    f"{rounds} round(s):\n{dossier.render_findings(outstanding)}"
-                )
-            print(f"    [review] {task.id}: {len(outstanding)} must-fix finding(s) → back to the implementer")
-            self._invoke_review_fixer(task, cwd, dossier.render_findings(outstanding))
-        after = self._fingerprint(cwd)
-        # An unknown fingerprint on either side reads as "it changed": re-running the passed steps
-        # costs time, skipping them over an unread tree costs the verdict.
-        return not before or not after or after != before
-
-    def _collect_findings(self, step: GateStep, task: dag.Task, cwd: str, role: str) -> list[dict[str, Any]]:
-        """One reviewer launch, and its findings — read from the file, never from the chatter."""
-        dossier_path = self._write_dossier(task, cwd, role)
-        target = dossier.findings_path(cwd, task.id)
-        target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
+        ids = [task.id for task in subjects]
         argv = step.agent_argv or self.config.adapter_argv
+        target = dossier.findings_path(self.root, _BATCH_REVIEW_SUBJECT)
+        target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
-        prompt = self._review_prompt(task, cwd, dossier_path, findings_rel, argv=argv)
-        # `REVIEW`, not `WRITE`: the reviewer's `.rein/work/` file is the only thing it needs to
-        # produce, and everything else it might touch belongs to somebody else. Naming the file
-        # here is what lets an adapter that can scope a write grant exactly that one — and what
-        # made "no flags at all" wrong for every CLI whose tools are deny-by-default, whose
-        # reviewer could not write the findings the loop then refused to proceed without.
-        self._launch(
-            adapters.command(argv, prompt, access=adapters.REVIEW, writable=findings_rel),
-            cwd=cwd,
-            where=f"{task.id}: the '{step.name}' agent step",
-            env=self._leaf_env(task, role),
-            task_id=task.id,
-            role=role,
+        before = {task.id: self._fingerprint(self.ws.worktree_path(task.id)) for task in subjects}
+        prompt = build_prompts.batch_review_prompt(
+            [self._review_subject(task) for task in subjects],
+            gate_cmds=self.config.gate_cmds,
+            findings_path=findings_rel,
+            # Keyed on the argv this step is launched with, not the default one: offering a
+            # discipline the launched CLI does not have is the dangling reference this replaced.
+            disciplines=adapters.disciplines_for(argv),
+            lenses_applied=self._code_lenses[0],
+            lenses_proposed=self._code_lenses[1],
         )
-        if not target.exists():
-            raise StopLoop(
-                f"{task.id}: the reviewer wrote no findings file ({dossier.RELATIVE_PATH}/{target.name}). "
+        try:
+            # `REVIEW`, not `WRITE`: the findings file is the only thing it needs to produce, and
+            # naming it is what lets an adapter that can scope a write grant exactly that one.
+            self._launch(
+                adapters.command(argv, prompt, access=adapters.REVIEW, writable=findings_rel),
+                cwd=self.root,
+                where=f"{', '.join(ids)}: the '{step.name}' agent step",
+                role=role,
+            )
+        except EnvironmentFault as fault:
+            for task_id in ids:
+                results[task_id] = LeafOutcome(ok=False, log=fault.summary(), fault=fault)
+            return {}
+        try:
+            by_task, missing = dossier.parse_batch_findings(target.read_text(encoding="utf-8"), ids)
+        except FileNotFoundError:
+            unreadable = (
+                f"the reviewer wrote no findings file ({findings_rel}). "
                 "A review that produced nothing readable is not a review that found nothing."
             )
-        try:
-            return dossier.parse_findings(target.read_text(encoding="utf-8"))
+            by_task, missing = {}, []
         except (dossier.FindingsError, OSError) as exc:
-            raise StopLoop(f"{task.id}: the reviewer's findings could not be read — {exc}") from None
-
-    def _invoke_review_fixer(self, task: dag.Task, cwd: str, findings: str) -> None:
-        dossier_path = self._write_dossier(task, cwd, "implementer")
-        self._launch(
-            adapters.command(
-                self.config.adapter_argv,
-                build_prompts.review_fix_prompt(
-                    task, findings, gate_cmds=self.config.gate_cmds, dossier_path=dossier_path
-                ),
-                access=adapters.WRITE,
-            ),
-            cwd=cwd,
-            where=f"{task.id}: the review fixer",
-            env=self._leaf_env(task),
-            task_id=task.id,
-            role="implementer",
-        )
+            unreadable = f"the reviewer's findings could not be read — {exc}"
+            by_task, missing = {}, []
+        else:
+            unreadable = ""
+        if unreadable:
+            for task_id in ids:
+                results[task_id] = LeafOutcome(ok=False, log=f"{task_id}: {unreadable}")
+            return {}
+        for task_id in missing:
+            results[task_id] = LeafOutcome(
+                ok=False,
+                log=f"{task_id}: the reviewer wrote no entry for this task, so it was not reviewed and does not land.",
+            )
+        answered: dict[str, str] = {}
+        for task_id, findings in by_task.items():
+            self._add_review_findings(task_id, findings)
+            outstanding = dossier.must_fix(findings)
+            moved = before[task_id] != self._fingerprint(self.ws.worktree_path(task_id)) or not before[task_id]
+            text = dossier.render_findings(outstanding) if outstanding else ""
+            if moved:
+                moved_line = (
+                    "  - the tree changed while it was being reviewed; the gate has to be established over it again"
+                )
+                text = f"{text}\n{moved_line}" if text else moved_line
+            if findings and not outstanding:
+                print(f"    [review] {task_id}: {len(findings)} finding(s), none blocking")
+            answered[task_id] = text
+        return answered
 
     # --- conflict resolution ---------------------------------------------------
     #
@@ -2064,13 +2111,13 @@ class Orchestrator:
         return tuple(mounts)
 
     def _run_pipeline(self, task: dag.Task, cwd: str) -> tuple[str | None, str]:
-        """Run the quality-gate steps (config quality_gate.steps = the DoD) in order.
+        """Run the deterministic quality-gate steps (the DoD's command steps) in order.
 
-        Returns (failed_step_name, failure_summary), or (None, "") when every step passed.
-        An agent step's fixes invalidate the evidence of the cmd steps that already passed,
-        so those are re-run whenever it changed the tree (deterministic re-verification).
+        Returns (failed_step_name, failure_summary), or (None, "") when every step passed. The
+        agent steps are not in here: a batch is read by one reviewer once every leaf has passed
+        this (`_review_batch`), and what it finds comes back through the same send-back.
         """
-        steps = self._steps_for(task, cwd)
+        steps = tuple(step for step in self._steps_for(task, cwd) if step.kind == "command")
         if self.dry_run:
             shown = " → ".join(f"{s.name}({s.kind})" for s in steps)
             print(f"    [dry-run] quality gate: {shown} (cwd={cwd})")
@@ -2078,13 +2125,6 @@ class Orchestrator:
         passed: list[GateStep] = []
         forked_from = self.ws.fork_point(self.ws.target_branch(task.id), cwd)
         for step in steps:
-            if step.kind == "agent":
-                if self._run_agent_step(step, task, cwd):
-                    for prev in passed:
-                        failure = self._attribute_red([task], prev, cwd, forked_from, self._run_cmd_step(prev, cwd))
-                        if failure:
-                            return prev.name, failure
-                continue
             if not step.command:
                 print(f"    [gate] skip {step.name}: no command configured")
                 continue
@@ -2818,8 +2858,13 @@ class Orchestrator:
             return None
         return kind, str(recorded.get("message", "")), tree
 
-    def _run_task_to_done(self, task: dag.Task, cwd: str) -> tuple[bool, str]:
+    def _run_task_to_done(self, task: dag.Task, cwd: str, review: str = "") -> tuple[bool, str]:
         """Take one task to done via implementer implementation + the quality-gate pipeline.
+
+        `review` is a batch reviewer's `must_fix` findings about a change that already passed
+        (`_review_batch`). They arrive through this same send-back: the implementer resumes the
+        session that wrote the change, and the whole deterministic gate is established again over
+        whatever it does about them.
 
         Each cmd step carries its own send-back budget (step.retries); a failure consumes only
         that step's budget. Returns (ok, log); ok=False means some step's budget ran out
@@ -2847,7 +2892,7 @@ class Orchestrator:
         # verdict an attempt stopped on before the gate — whichever came last is the one recorded.
         recorded = handoff.get("escalation")
         escalation: Mapping[str, Any] = recorded if isinstance(recorded, Mapping) else {}
-        failure_log = str(handoff.get("failure_summary") or escalation.get("message") or "")
+        failure_log = "" if review else str(handoff.get("failure_summary") or escalation.get("message") or "")
         inherited = handoff.get("retries_left")
         if isinstance(inherited, dict):
             budgets = {name: min(left, inherited.get(name, left)) for name, left in budgets.items()}
@@ -2868,11 +2913,18 @@ class Orchestrator:
         resume = False
         # The first launch may open that session as a branch of the one that finished this task's
         # upstream; every later round resumes this task's own session as before.
-        fork = self._inherited_session(task) if session else ("", "")
+        fork = self._inherited_session(task) if session and not review else ("", "")
+        if review and continuity and (adapter := self._implementer_adapter) is not None:
+            # The session that wrote the change is the one that knows why it is the way it is.
+            own = self.sessions.get(self.cycle_id, task.id, adapter.name)
+            if own:
+                session, resume = own, True
         # (step, failure digest, tree fingerprint) of the previous round — what `_futile` compares
         # this round against. "" for the fingerprint means "unknown", which never matches.
         seen: tuple[str, str, str] = ("", "", "")
-        answered = self._already_answered(task, cwd)
+        # A review is new input over the tree the last verdict was reached on, so that tree having
+        # been answered already says nothing about this round.
+        answered = None if review else self._already_answered(task, cwd)
         if answered is not None:
             kind, prior, tree = answered
             futile = (
@@ -2885,8 +2937,10 @@ class Orchestrator:
             self._stop_before_the_gate(task, kind, message, tree=tree, futile=futile)
             return False, message
         while True:
-            session = self._invoke_implementer(task, cwd, failure_log, session=session, resume=resume, fork=fork)
-            fork = ("", "")
+            session = self._invoke_implementer(
+                task, cwd, failure_log, session=session, resume=resume, fork=fork, review=review
+            )
+            fork, review = ("", ""), ""
             if not self.dry_run:
                 changed, _ = self._review_scope(task, cwd)
                 violations = self._gate_violations(changed)
@@ -3091,7 +3145,13 @@ class Orchestrator:
         budgets = {s.name: s.retries for s in self.config.steps if s.kind == "command"}
         while True:
             failed, failure_log = None, ""
+            reread = bool(self._resolved_on_merge & {t.id for t in tasks})
             for step in self._steps_at("integration"):
+                if step.kind == "agent" and step.stage == "both" and not reread:
+                    # The batch's reviewer read every leaf before the merge, and a merge that resolved
+                    # no conflict is exactly the union of what it read. Reading it again is the
+                    # second launch over one diff that this step used to cost.
+                    continue
                 if step.kind == "agent":
                     # `stage:` moves *when* a step runs, never whether — and an agent step declared
                     # at the integration stage was being skipped, which made the join the one tree
@@ -3225,7 +3285,7 @@ class Orchestrator:
 
     # -- worktree / merge --
 
-    def _safe_run_task(self, task: dag.Task, cwd: str) -> LeafOutcome:
+    def _safe_run_task(self, task: dag.Task, cwd: str, review: str = "") -> LeafOutcome:
         """Call _run_task_to_done safely from a thread, so one leaf cannot strand the batch.
 
         A `StopLoop` becomes a failed verdict; an `EnvironmentFault` is carried out **as itself**
@@ -3234,7 +3294,7 @@ class Orchestrator:
         for a rate limit.
         """
         try:
-            ok, log = self._run_task_to_done(task, cwd=cwd)
+            ok, log = self._run_task_to_done(task, cwd=cwd, review=review)
             return LeafOutcome(ok=ok, log=log)
         except EnvironmentFault as fault:
             return LeafOutcome(ok=False, log=fault.summary(), fault=fault)
@@ -3335,6 +3395,8 @@ class Orchestrator:
         )
         if resolution.merged:
             print(f"    [merge] {task.id}: conflict resolved ({resolution.kind})")
+            # The merged tree now holds code the batch's reviewer was never shown.
+            self._resolved_on_merge.add(task.id)
             self.ws.git(["worktree", "remove", "--force", self.ws.worktree_path(task.id)])
             return True
         conflict.escalate(self.repo, resolution)
@@ -4174,6 +4236,7 @@ class Orchestrator:
             futures = {pool.submit(self._safe_run_task, t, self.ws.worktree_path(t.id)): t for t in tasks}
             for future, task in futures.items():
                 results[task.id] = future.result()
+        self._review_batch(tasks, results)
 
         blocked_any = False
         merged: list[dag.Task] = []

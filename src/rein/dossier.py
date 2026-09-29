@@ -216,10 +216,37 @@ def parse_findings(raw: str) -> list[dict[str, Any]]:
     then "the reviewer found nothing" and "the reviewer said something nobody could read" would
     reach the run as the same answer.
     """
+    return _findings_of(_document(raw))
+
+
+def parse_batch_findings(raw: str, task_ids: Sequence[str]) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    """A batch reviewer's findings per task, and the tasks it wrote no entry for.
+
+    The entry is per task because the answer is: each task's `must_fix` goes back to that task's
+    implementer and nobody else's. A task with no entry was not reviewed, which the caller must not
+    read as "nothing found" — so it is returned by name rather than as an empty list. An entry for
+    a task this review was not shown is refused: it would be a verdict about a change nobody
+    handed the reader.
+    """
+    document = _document(raw)
+    if not isinstance(document, dict) or not isinstance(document.get("tasks"), dict):
+        raise FindingsError("the reviewer's findings must be an object with a `tasks` mapping")
+    entries = document["tasks"]
+    unknown = sorted(str(key) for key in entries if key not in task_ids)
+    if unknown:
+        raise FindingsError(f"findings for {', '.join(unknown)}, which this review was not shown")
+    by_task = {task_id: _findings_of(entries[task_id]) for task_id in task_ids if task_id in entries}
+    return by_task, [task_id for task_id in task_ids if task_id not in by_task]
+
+
+def _document(raw: str) -> Any:
     try:
-        document = json.loads(raw)
+        return json.loads(raw)
     except ValueError as exc:
         raise FindingsError(f"the reviewer's findings are not valid JSON ({exc})") from None
+
+
+def _findings_of(document: Any) -> list[dict[str, Any]]:
     if not isinstance(document, dict) or not isinstance(document.get("findings"), list):
         raise FindingsError("the reviewer's findings must be an object with a `findings` list")
     entries = document["findings"]

@@ -27,6 +27,7 @@ from rein import (
     adapters,
     build_git,
     build_loop,
+    build_prompts,
     common,
     conflict,
     dag,
@@ -230,26 +231,43 @@ def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
 
 
 def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[str]]) -> object:
-    """A fake reviewer that writes the findings file the step now reads its verdict from."""
+    """A fake batch reviewer that writes T-001's entry into the findings file the step reads."""
 
     def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
         launched.append(cmd)
-        target = dossier.findings_path(cwd or str(root), "T-001")
+        target = dossier.findings_path(cwd or str(root), "review")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"findings": findings}), encoding="utf-8")
+        target.write_text(json.dumps({"tasks": {"T-001": {"findings": findings}}}), encoding="utf-8")
         return 0, agent_output(cmd, "")
 
     return fake_run
 
 
-def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _batch_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewer: str = "codex") -> build_loop.Orchestrator:
+    """An orchestrator whose batch reviewer can be launched without a worktree behind the task."""
     root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
+    orch = build_loop.Orchestrator(_config_with_split_adapters(reviewer), dry_run=False, repo=repo_mod.Repo(root))
     monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
-    launched: list[list[str]] = []
-    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+    monkeypatch.setattr(
+        orch,
+        "_review_subject",
+        lambda task: build_prompts.ReviewSubject(
+            task=task, branch=f"rein/{task.id}", diff_cmd=f"git diff w...rein/{task.id}", dossier_path=""
+        ),
+    )
+    return orch
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
+
+_T1 = dag.Task(id="T-001", title="base", kind="foundation")
+
+
+def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    orch = _batch_reader(tmp_path, monkeypatch)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
+
+    results = {"T-001": build_loop.LeafOutcome(ok=True)}
+    assert orch._read_batch(orch.config.steps[0], [_T1], results) == {"T-001": ""}
 
     assert launched, "the agent step never launched anything"
     assert tuple(launched[0][:3]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
@@ -267,15 +285,13 @@ def test_the_reviewer_is_granted_its_findings_file_and_nothing_else(
     "you do not change the code, you have no write access to it" is a fact here rather than an
     instruction the model is asked to respect. What it must not get is the implementer's grant.
     """
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters("copilot"), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    orch = _batch_reader(tmp_path, monkeypatch, "copilot")
     launched: list[list[str]] = []
-    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
+    orch._read_batch(orch.config.steps[0], [_T1], {"T-001": build_loop.LeafOutcome(ok=True)})
 
-    assert "write(.rein/work/T-001.findings.json)" in launched[0], "the one file it is there to produce"
+    assert "write(.rein/work/review.findings.json)" in launched[0], "the one file it is there to produce"
     assert "--allow-all-tools" not in launched[0], "the reviewer was launched able to change the code it judges"
 
 
@@ -284,61 +300,68 @@ def test_a_reviewer_on_a_read_only_cli_can_still_write_its_findings(
 ) -> None:
     """`codex exec` is read-only unless told otherwise, and the reviewer used to be told nothing.
 
-    So it could not write the findings file — and `_collect_findings` refuses to read a verdict out
-    of the chatter, so the step stopped the loop with "the reviewer wrote no findings file" for a
-    reviewer that had done its job. codex cannot name a writable path, so what it can promise is
-    the workspace; the loop's before/after fingerprint is what still catches a judge that repaired.
+    So it could not write the findings file — and the loop refuses to read a verdict out of the
+    chatter, so the step stopped the loop with "the reviewer wrote no findings file" for a reviewer
+    that had done its job. codex cannot name a writable path, so what it can promise is the
+    workspace; the loop's before/after fingerprint is what still catches a judge that repaired.
     """
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters("codex"), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    orch = _batch_reader(tmp_path, monkeypatch, "codex")
     launched: list[list[str]] = []
-    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
+    orch._read_batch(orch.config.steps[0], [_T1], {"T-001": build_loop.LeafOutcome(ok=True)})
 
     assert "--sandbox" in launched[0] and "workspace-write" in launched[0]
 
 
-def test_a_must_fix_finding_goes_to_the_implementer_and_the_reviewer_looks_again(
+def test_a_must_fix_finding_is_what_goes_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    orch = _batch_reader(tmp_path, monkeypatch)
+    finding = {"severity": "must_fix", "statement": "the guard is gone", "anchor": "src/x.py:4"}
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [finding], []))
+
+    answered = orch._read_batch(orch.config.steps[0], [_T1], {"T-001": build_loop.LeafOutcome(ok=True)})
+
+    assert "the guard is gone" in answered["T-001"]
+
+
+def test_a_tree_that_moved_under_the_reviewer_goes_back_even_with_nothing_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The round the separation buys: somebody other than the reviewer has to act on a finding."""
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
-    launched: list[list[str]] = []
-    rounds = iter([[{"severity": "must_fix", "statement": "the guard is gone", "anchor": "src/x.py:4"}], []])
+    """A reviewer that edits has moved the tree the gate established; the gate has to run again."""
+    orch = _batch_reader(tmp_path, monkeypatch)
+    trees = iter(["sha256:" + "0" * 64, "sha256:" + "1" * 64])
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: next(trees))
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], []))
 
-    def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
-        launched.append(cmd)
-        if cmd[0] == "codex":  # the reviewer's adapter in this config
-            target = dossier.findings_path(cwd or str(root), "T-001")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps({"findings": next(rounds)}), encoding="utf-8")
-        return 0, agent_output(cmd)
+    answered = orch._read_batch(orch.config.steps[0], [_T1], {"T-001": build_loop.LeafOutcome(ok=True)})
 
-    monkeypatch.setattr(build_loop, "_run", fake_run)
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
-
-    adapters = [cmd[0] for cmd in launched]
-    assert adapters == ["codex", "claude", "codex"], (
-        "expected review → implementer fix → review again, got " + " → ".join(adapters)
-    )
-    assert "the guard is gone" in launched[1][-1], "the fixer was not told what the reviewer found"
+    assert "changed while it was being reviewed" in answered["T-001"]
 
 
 def test_an_unreadable_review_is_not_a_review_that_found_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The failure mode a silent pass would hide: a reviewer that said nothing readable."""
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    orch = _batch_reader(tmp_path, monkeypatch)
     monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, agent_output(cmd, "I had a good look, honestly")))
+    results = {"T-001": build_loop.LeafOutcome(ok=True)}
 
-    with pytest.raises(common.StopLoop, match="wrote no findings file"):
-        orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
+    assert orch._read_batch(orch.config.steps[0], [_T1], results) == {}
+    assert not results["T-001"].ok and "wrote no findings file" in results["T-001"].log
+
+
+def test_a_task_the_reviewer_wrote_nothing_about_was_not_reviewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One entry per task: a missing one is not an empty one, and that task does not land."""
+    orch = _batch_reader(tmp_path, monkeypatch)
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], []))
+    t2 = dag.Task(id="T-002", title="leaf", kind="parallel")
+    results = {"T-001": build_loop.LeafOutcome(ok=True), "T-002": build_loop.LeafOutcome(ok=True)}
+
+    assert orch._read_batch(orch.config.steps[0], [_T1, t2], results) == {"T-001": ""}
+    assert results["T-001"].ok
+    assert not results["T-002"].ok and "wrote no entry for this task" in results["T-002"].log
 
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
@@ -1185,11 +1208,29 @@ def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path)
 # red if the behaviour were wrong, so the question has to be in the prompt or it is asked nowhere.
 
 
-def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
-    from rein import build_prompts
+def _subjects(*ids: str) -> list[build_prompts.ReviewSubject]:
+    return [
+        build_prompts.ReviewSubject(
+            task=dag.Task(id=tid, title="base", kind="foundation"),
+            branch=f"rein/{tid}",
+            diff_cmd=f"git diff build/demo...rein/{tid}",
+            dossier_path=f".worktrees/{tid}/.rein/work/{tid}.json",
+        )
+        for tid in ids
+    ]
 
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], dossier_path=".rein/work/T-001.json")
+
+def _batch_prompt(*ids: str, disciplines: dict[str, str] | None = None) -> str:
+    return build_prompts.batch_review_prompt(
+        _subjects(*ids),
+        gate_cmds=["make test"],
+        findings_path=".rein/work/review.findings.json",
+        disciplines=disciplines,
+    )
+
+
+def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
+    prompt = _batch_prompt("T-001")
     assert "would go red" in prompt
     assert "not inert" in prompt
     # And the reason it is here rather than left to the control.
@@ -1198,14 +1239,20 @@ def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
 
 def test_the_reviewer_is_pointed_at_the_criteria_nothing_else_establishes() -> None:
     """`command` and `artifact` criteria are established by the caller; a prose one is judged here."""
-    from rein import build_prompts
-
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    prompt = build_prompts.review_prompt(
-        task, gate_cmds=["make test"], dossier_path=".rein/work/T-001.json", diff_cmd="git diff HEAD~1"
-    )
+    prompt = _batch_prompt("T-001")
     assert "`evidence.kind` is `prose`" in prompt
     assert "already established by the caller" in prompt
+
+
+def test_one_reviewer_is_shown_every_task_of_the_batch_and_answers_each() -> None:
+    """The answer per task is what acts, so the prompt asks for one — and for the meeting of two."""
+    prompt = _batch_prompt("T-002", "T-003")
+    for tid in ("T-002", "T-003"):
+        assert f".worktrees/{tid}/.rein/work/{tid}.json" in prompt
+        assert f"git diff build/demo...rein/{tid}" in prompt
+    assert "Every task above gets an entry" in prompt
+    assert "Then read them as one change" in prompt
+    assert "Then read them as one change" not in _batch_prompt("T-002"), "one task has no join to read"
 
 
 def test_the_integration_reviewer_is_not_asked_the_test_question() -> None:
@@ -1239,11 +1286,7 @@ def test_only_a_host_that_has_them_is_told_to_use_them() -> None:
 
 def test_a_host_without_them_is_never_pointed_at_a_command_that_is_not_there() -> None:
     """The defect this replaced: the prompt named `/code-review` to a CLI that has no such thing."""
-    from rein import build_prompts
-
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    codex = adapters.ADAPTER_TABLE["codex"].disciplines
-    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=codex)
+    prompt = _batch_prompt("T-001", disciplines=dict(adapters.ADAPTER_TABLE["codex"].disciplines))
     assert "/code-review" not in prompt and "/simplify" not in prompt
     # The questions themselves are still asked — that is the floor, and it is what a codex reviewer
     # has always had.
@@ -1252,11 +1295,10 @@ def test_a_host_without_them_is_never_pointed_at_a_command_that_is_not_there() -
 
 def test_a_claude_reviewer_is_pointed_at_both_and_told_what_they_must_not_do() -> None:
     """`/simplify` ends by applying its fixes, and `/code-review ultra` is billed and user-triggered."""
-    from rein import build_prompts
-
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=_claude_disciplines())
+    prompt = _batch_prompt("T-001", disciplines=_claude_disciplines())
     assert "/code-review" in prompt and "/simplify" in prompt
+    # It sits on the work branch, which holds none of the changes it is reading.
+    assert "point them at each task's branch in turn" in prompt
     assert "Run its review phase only" in prompt  # whoever judges does not repair
     # `--fix` is the same collapse by another route: the reviewer's own fix, read by nobody.
     assert "Never `/code-review --fix`" in prompt
@@ -1278,7 +1320,7 @@ def test_the_join_says_to_keep_only_what_the_join_shows() -> None:
         disciplines=_claude_disciplines(),
     )
     assert "Keep what only the join shows" in prompt
-    assert "already reviewed on its own" in prompt
+    assert "already reviewed before the merge" in prompt
 
 
 def test_the_security_discipline_is_offered_in_the_contract_and_never_replaces_it() -> None:

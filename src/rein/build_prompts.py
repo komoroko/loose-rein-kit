@@ -9,6 +9,7 @@ are thin delegates that pass in the few facts a prompt actually needs.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from rein import adapters, dag
 
@@ -65,6 +66,7 @@ def implementer_prompt(
     dossier_path: str = "",
     continued_from: str = "",
     continued_worktree: str = "",
+    review_findings: str = "",
 ) -> str:
     # Point the implementer at the design section for this task's requirement rather than the whole
     # design doc: reading only the relevant slice keeps the subagent context lean and avoids
@@ -136,10 +138,22 @@ def implementer_prompt(
         # failure_log is already a compact summarize_failure() output (salient lines, budget-capped),
         # so it is passed through as-is — no crude tail-slicing that could cut the actionable lines.
         prompt += f"\n\nResolve the previous quality-gate failure:\n{failure_log}"
+    if review_findings:
+        # The change passed the deterministic gate; what comes back is a reader's judgement, which
+        # can be wrong in a way an exit status cannot. Disputing one is a real option for that
+        # reason, and it is what the reviewer reads when it looks again.
+        prompt += (
+            "\n\nYour change passed the gate. An independent reviewer then read it and found the "
+            "following, and each one has to be resolved before the task can land:\n"
+            f"{review_findings}\n"
+            "Fix them with the minimal change — do not widen scope, and do not redo the task. If a "
+            "finding is wrong, say so in your `rein report --summary` rather than silently ignoring it: "
+            "the reviewer looks again afterwards."
+        )
     return prompt
 
 
-def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: bool = False) -> str:
+def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: bool = False, batch: bool = False) -> str:
     """Offer the host's own review disciplines — with what each one must not do here.
 
     The prompts state every question in full whether or not this returns anything, so a host
@@ -154,9 +168,15 @@ def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: boo
     if not correctness and not simplification:
         return ""
     named = " and ".join(f"`{c}`" for c in (correctness, simplification) if c)
+    where = (
+        "They read the branch you name, and yours is the work branch, which holds none of these "
+        "changes yet: point them at each task's branch in turn"
+        if batch
+        else "They read the branch you are on"
+    )
     note = (
         f"\n**Your host carries {named} as disciplines of its own — use them for the reading above.** "
-        "They read the branch you are on, and they were written for this by people who do nothing "
+        f"{where}, and they were written for this by people who do nothing "
         "else; re-deriving the same questions from scratch is the worse of the two readings.\n"
     )
     if simplification:
@@ -175,8 +195,8 @@ def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: boo
     if at_the_join:
         note += (
             "- They read the whole branch, which here is the join plus every task inside it. Keep what "
-            "only the join shows; a finding about one task alone was already reviewed on its own "
-            "branch, and reporting it again spends an implementer round on a settled question.\n"
+            "only the join shows; a finding about one task alone was already reviewed before the merge, "
+            "and reporting it again spends an implementer round on a settled question.\n"
         )
     note += (
         "- Report through neither of them. Whatever they produce, the answer this step reads is the "
@@ -211,108 +231,105 @@ def lens_note(applied: Sequence[str], proposed: Sequence[str]) -> str:
     return note
 
 
-def review_prompt(
-    task: dag.Task,
+@dataclass(frozen=True)
+class ReviewSubject:
+    """One task of a batch as its reviewer is shown it: where the change is and what it was for."""
+
+    task: dag.Task
+    #: The branch the task's change is on, which the host's disciplines can be pointed at.
+    branch: str
+    #: The whole change, as a command run from the repository root.
+    diff_cmd: str
+    #: The task's dossier, relative to the repository root.
+    dossier_path: str
+
+
+def batch_review_prompt(
+    subjects: Sequence[ReviewSubject],
     *,
     gate_cmds: Sequence[str],
-    changed_paths: Sequence[str] = (),
-    diff_cmd: str = "",
-    dossier_path: str = "",
-    findings_path: str = "",
+    findings_path: str,
     disciplines: Mapping[str, str] | None = None,
     lenses_applied: Sequence[str] = (),
     lenses_proposed: Sequence[str] = (),
 ) -> str:
-    # Scope the reviewer's read to the task's actual diff: it runs in a fresh context (independent
-    # verification — deliberately not the implementer's session), and without this hint it must
-    # re-survey the tree cold to even find the changes it is reviewing. The dossier goes further:
-    # it already separates the source from the tests from the 800 lines of lockfile, and says what
-    # the task was supposed to establish, so the reviewer stops re-inferring both from a raw diff.
+    """One reviewer launch for every task of a batch that passed its deterministic gate.
+
+    Each task used to get a reviewer of its own, and a batch of two or more then got one more over
+    the join, reading the union of what the others had read. Independence needs a launch that is
+    not the implementer's; it does not need one per task. So one reader takes the batch before
+    anything merges, answers each task separately — the answer per task is what goes back to that
+    task's implementer — and, where there are several, reads them as the one change they are about
+    to become.
+    """
     cmds = ", ".join(f"`{c}`" for c in gate_cmds)
-    if dossier_path:
-        scope = (
-            f"**Read {dossier_path} first.** It carries the claims this task answers, its acceptance "
-            "criteria and how each one is judged, its declared scope, and its changed paths already "
-            "split into source, tests and mechanical churn — review the source and tests, not the "
-            "churn. Judge the change against the acceptance criteria, starting with the ones whose "
-            "`evidence.kind` is `prose`: a criterion carrying a `command` or an `artifact` was "
-            "already established by the caller, and a prose one is judged by nobody between you and "
-            f"acceptance. The full diff is `{diff_cmd}`.\n"
-            if diff_cmd
-            else f"**Read {dossier_path} first.** It carries the claims this task answers, its acceptance "
-            "criteria, its declared scope, and its changed paths split by kind.\n"
-        )
-    elif changed_paths:
-        listing = "\n".join(f"  {p}" for p in changed_paths)
-        scope = (
-            f"The task's changes are exactly these paths (diff: `{diff_cmd}`):\n{listing}\n"
-            "Review that diff plus the code it interacts with — do not re-survey the whole tree.\n"
-        )
-    elif diff_cmd:
-        scope = f"The task's diff is `{diff_cmd}` — review it plus the code it interacts with.\n"
-    else:
-        scope = ""
+    ids = [subject.task.id for subject in subjects]
+    listing = "".join(
+        f'- **{s.task.id}** "{s.task.title}": dossier `{s.dossier_path}`, branch `{s.branch}`, change `{s.diff_cmd}`.\n'
+        for s in subjects
+    )
+    joint = (
+        "\n**Then read them as one change**, because they are about to be merged into one tree and no "
+        "test in any of them was written with the others in view:\n"
+        "- **Correctness across tasks**: a contract two tasks now read differently, an invariant one "
+        "relies on and another removes, shared state two of them write.\n"
+        "- **Shape**: duplication between what two tasks added, one responsibility now in two places.\n"
+        "A finding about how two tasks meet belongs to the task that has to change for it to hold.\n"
+        if len(subjects) > 1
+        else ""
+    )
     return (
-        f'You are the reviewer for task {task.id} "{task.title}" (the quality gate\'s agent step).\n'
-        f"{scope}"
-        "Review this branch's changes for this task for correctness bugs, then for simplification: "
-        "reuse existing code, needless complexity, and anything the ticket's acceptance criteria do "
-        "not require — speculative generality, unused knobs/hooks (YAGNI). Stay within this task's "
-        "scope; a requirements/design defect is a finding like any other, not something to work "
-        "around.\n"
-        f"{_disciplines_note(disciplines)}"
+        f"You are the reviewer for {', '.join(ids)} (the quality gate's agent step). Each was implemented "
+        "on its own branch, in its own worktree, and has already passed the deterministic gate; none "
+        "is merged yet.\n"
+        f"{listing}"
+        "**Read each task's dossier first.** It carries the claims the task answers, its acceptance "
+        "criteria and how each one is judged, its declared scope, and its changed paths split into "
+        "source, tests and mechanical churn — review the source and tests, not the churn. Judge each "
+        "change against its own acceptance criteria, starting with the ones whose `evidence.kind` is "
+        "`prose`: a criterion carrying a `command` or an `artifact` was already established by the "
+        "caller, and a prose one is judged by nobody between you and acceptance.\n"
+        "\n"
+        "For each task, review its change for correctness bugs, then for simplification: reuse existing "
+        "code, needless complexity, and anything its acceptance criteria do not require — speculative "
+        "generality, unused knobs/hooks (YAGNI). A requirements/design defect is a finding like any "
+        "other, not something to work around.\n"
+        f"{_disciplines_note(disciplines, batch=True)}"
         f"{lens_note(lenses_applied, lenses_proposed)}"
         "\n"
         "**Then read the tests as evidence, not as code that passes.** The caller re-establishes the "
-        "gate's command steps over the base with only this change's test half applied, which can show "
+        "gate's command steps over the base with only a change's test half applied, which can show "
         "that the test half is not inert against the old code — never that the tests are any good, and "
         "this is the only place that judgement is made. For each acceptance criterion, name the test in "
-        "this change that would go red if the behaviour the criterion describes were wrong; a criterion "
-        "with no such test is a finding. So is an assertion that would hold for any output (a bare "
-        "not-null or truthiness check where the criterion names a value, a mock asserted against "
+        "that task's change that would go red if the behaviour the criterion describes were wrong; a "
+        "criterion with no such test is a finding. So is an assertion that would hold for any output (a "
+        "bare not-null or truthiness check where the criterion names a value, a mock asserted against "
         "itself), a test that pins the implementation's internals rather than its behaviour, and an "
         "expected-exception check that never looks at what was raised.\n"
+        f"{joint}"
         "\n"
         "**You do not change the code, and you do not run anything.** You have no write access to it, "
         f"and running {cmds} would only repeat what the caller runs itself and decides by. Judging a "
-        "change and then editing it away is one participant doing both halves of a review; the "
-        "implementer fixes what you find, and you get to look again.\n"
+        "change and then editing it away is one participant doing both halves of a review; each "
+        "task's implementer fixes what you find in it, and you get to look again.\n"
         "\n"
-        f"Write your findings to `{findings_path}` and nothing else:\n"
-        '  {"findings": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}\n'
-        "`must_fix` is a defect the change cannot land with — a bug, a broken contract, a security "
-        "problem. `consider` is everything else worth saying; it stops nothing and is carried to the "
-        "human at acceptance. An empty list is a real answer, and the right one when the change is sound: "
-        "inventing a finding to look thorough costs an implementer round for nothing."
-    )
-
-
-def review_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str], dossier_path: str = "") -> str:
-    """Hand a reviewer's must-fix findings back to the implementer.
-
-    The reviewer used to apply its own fixes, which made the tree move underneath the gate and
-    forced every already-passed step to be re-run — and put judging and repairing in one pair of
-    hands. Separating them costs this one extra launch and buys a review whose findings somebody
-    else had to act on.
-    """
-    reference = f"Your dossier is {dossier_path}.\n" if dossier_path else ""
-    return (
-        f'You are the implementer for task {task.id} "{task.title}". An independent reviewer read your '
-        "change and found the following, and each one has to be resolved before the task can land:\n"
-        f"{findings}\n"
-        f"{reference}"
-        "Fix them with the minimal change — do not widen scope, and do not redo the task. If a finding "
-        "is wrong, say so in your `rein report --summary` rather than silently ignoring it: the reviewer "
-        f"looks again afterwards. Keep {_gate_list(gate_cmds)} green, and commit with the "
-        f'"{task.id}: " prefix.'
+        f"Write your findings to `{findings_path}` and nothing else, one entry per task:\n"
+        '  {"tasks": {"' + ids[0] + '": {"findings": [{"severity": "must_fix", "statement": "…", '
+        '"anchor": "src/x.py:42"}]}}}\n'
+        "**Every task above gets an entry**, an empty `findings` list included: a task with no entry "
+        "has not been reviewed, and it does not land. `must_fix` is a defect the change cannot land "
+        "with — a bug, a broken contract, a security problem — and it goes back to that task's "
+        "implementer. `consider` is everything else worth saying; it stops nothing and is carried to "
+        "the human at acceptance. An empty list is a real answer, and the right one when the change "
+        "is sound: inventing a finding to look thorough costs an implementer round for nothing."
     )
 
 
 def gate_four_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str]) -> str:
     """Hand acceptance's blocking findings about one task back to an implementer.
 
-    Not `review_fix_prompt`: that one is a per-task reviewer looking at a change that has not
-    landed, inside its own worktree, with the task's own send-back budget. This is the *grounded*
+    Not the batch review's send-back (`implementer_prompt`'s `review_findings`): that one is about a
+    change that has not landed, inside its own worktree, with the task's own send-back budget. This is the *grounded*
     review — a blind reading of the merged tree compared against the frozen plan — and its
     findings arrive after everything is `done` and merged. What differs is not the tone: it is
     what a finished fix looks like. The plan is frozen, the task's acceptance criteria are already
@@ -345,7 +362,7 @@ def gate_four_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[s
 def integration_review_fix_prompt(ids: str, findings: str, *, gate_cmds: Sequence[str], pathspec: Sequence[str]) -> str:
     """Hand the integration reviewer's must-fix findings back to an implementer.
 
-    The join's analogue of :func:`review_fix_prompt`, and it did not exist: both of the join's
+    The join's analogue of a batch review's send-back, and it did not exist: both of the join's
     send-backs went through `integration_fix_prompt`, whose first sentence says the combined state
     "fails the deterministic gate" and whose subject is "typically a cross-file lint/format/type
     error". A reviewer's findings are neither. An implementer told it is looking at a lint failure,
@@ -359,7 +376,7 @@ def integration_review_fix_prompt(ids: str, findings: str, *, gate_cmds: Sequenc
     """
     return (
         f"You are the implementer for the merged state of {ids}. An independent reviewer read these "
-        "tasks as one tree — the first time anyone did; each was reviewed on its own branch — and "
+        "tasks as one merged tree — the first time anyone did; they were reviewed before the merge — and "
         "found the following, and each one has to be resolved before this batch can land:\n"
         f"{findings}\n"
         "Fix them with the minimal change. These are findings about the **join**: a contract two "
@@ -453,13 +470,14 @@ def integration_review_prompt(
     lenses_applied: Sequence[str] = (),
     lenses_proposed: Sequence[str] = (),
 ) -> str:
-    """Review the tree the merge produced, which no per-task reviewer ever saw.
+    """Review the tree the merge produced, which the batch's reviewer never saw.
 
-    Each leaf was reviewed in its own worktree, against its own ticket, and the reviewers were
-    right to stay there — a reviewer that wanders outside its task's scope reviews somebody else's
-    work. What none of them could see is the thing the merge makes: two tasks that each added a
-    helper, a responsibility that ended up in two places, an abstraction one task introduced and
-    the next one worked around, a contract two tasks now read differently.
+    A `stage: both` agent step reads a batch before it merges, and the join is only read again when
+    a merge had to resolve a conflict — then the merged tree holds code no reviewer was shown. A
+    `stage: integration` step reads every join. What either is here for is the thing the merge
+    makes: two tasks that each added a helper, a responsibility that ended up in two places, an
+    abstraction one task introduced and the next one worked around, a contract two tasks now read
+    differently.
 
     **This asks about correctness as well as shape, and the argument that it should not was
     wrong.** It used to be the `/simplify` discipline alone, on the reasoning that the command
@@ -475,8 +493,8 @@ def integration_review_prompt(
     cmds = ", ".join(f"`{c}`" for c in gate_cmds)
     return (
         f"You are the reviewer for the merged state of {ids} (the quality gate's integration step).\n"
-        f"Each of these tasks was reviewed on its own branch; this is the first time anyone has read "
-        f"them as one tree. The combined change is `{diff_cmd}`.\n"
+        f"These tasks were reviewed before the merge; this is the first time anyone has read the tree "
+        f"the merge produced. The combined change is `{diff_cmd}`.\n"
         "\n"
         "Review it for what only the join can show, and for both halves of that:\n"
         "- **Correctness across tasks**: a contract two tasks now read differently, an invariant one "
@@ -490,8 +508,8 @@ def integration_review_prompt(
         f"{_disciplines_note(disciplines, at_the_join=True)}"
         f"{lens_note(lenses_applied, lenses_proposed)}"
         "\n"
-        "Do not re-review either task against its own ticket — that already happened, on its own "
-        f"branch. Do not run {cmds}: the caller has just run them over this exact tree and decides by "
+        "Do not re-review either task against its own ticket — that already happened, before the "
+        f"merge. Do not run {cmds}: the caller has just run them over this exact tree and decides by "
         "their exit status, and re-running them tells you only what it already knows.\n"
         "\n"
         "**You do not change the code.** You have no write access to it; an implementer resolves what "
