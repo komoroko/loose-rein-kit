@@ -3066,13 +3066,19 @@ def test_a_chain_is_warmed_once_when_its_last_task_lands(tmp_path: Path, monkeyp
     monkeypatch.setattr(review_reading, "change_readings", lambda *a, **k: ([chain], "low", "low"))
     monkeypatch.setattr(review_reading, "host_surface_digest", lambda *a: "")
     warmed: list[str] = []
-    monkeypatch.setattr(review_reading, "warm", lambda *a, reading, **k: warmed.append(reading.unit) or "readout")
+    readout = _read_out("T-001+T-002")
+
+    def warm(*args: object, reading: review_reading.Reading, **kwargs: object) -> review_reading.ReadOut:
+        warmed.append(reading.unit)
+        return readout
+
+    monkeypatch.setattr(review_reading, "warm", warm)
 
     first = next(t for t in loop._load_graph().tasks if t.id == "T-001")
     assert loop._warm_reading(first) == [], "T-002 has not landed: the chain is not a reading yet"
     loop._set_status("T-002", "done")
     last = next(t for t in loop._load_graph().tasks if t.id == "T-002")
-    assert loop._warm_reading(last) == ["readout"]
+    assert loop._warm_reading(last) == [readout]
     assert warmed == ["T-001+T-002"]
 
 

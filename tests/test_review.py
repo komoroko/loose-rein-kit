@@ -2847,9 +2847,11 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
     view = review.outlook(repo, base=base)
     assert view is not None
     assert view.unit == "T-001"
+    plan = store_mod.Store(repo).read_plan()
+    assert plan is not None
     taken = review_reading.take_readings(
         repo,
-        review_reading.plan_readings(store_mod.Store(repo).read_plan().tasks, ["alpha/mod.py"]),
+        review_reading.plan_readings(plan.tasks, ["alpha/mod.py"]),
         base=base,
         head="HEAD",
         exclude=review.not_the_product(repo, store_mod.Store(repo).read_state()),
