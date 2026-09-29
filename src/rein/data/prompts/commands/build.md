@@ -33,7 +33,14 @@ loop decomposes, reorders and re-runs as it needs to.
    repaired something outside the tree).
 4. **DoD** — the `quality_gate` pipeline in `.rein/config.yaml` (default `test` → `check` →
    `review` → `smoke`), the single definition for every task; a task has no `test` command of its
-   own. Each leaf runs the **command** steps; the **agent** steps read the batch once, below (5a). A step already established green against **this exact tree, in this exact image** is reused
+   own. Each leaf runs the **command** steps; the **agent** steps read the batch once, below (5a).
+   **The attempt is committed before anything reads it** (`finalize_commit`), so the gate, the
+   reviewer and the merge all read one thing — the task's branch — and work an implementer left
+   uncommitted is never tested by one reader and missing for the next.
+   **A task with `operate` is read before its run**, by the same agent steps, on its own: its run is
+   the costly part (hours, real data, or the irreversible act), and a finding answered after it
+   would send the task round the run again. Every start of the run after the first in one attempt
+   is recorded as an attempt of its own, and one past the task's `attempts.max` is not started. A step already established green against **this exact tree, in this exact image** is reused
    rather than re-run (the evidence ledger). Then the **negative control**: the steps that run the tests
    (`runs_tests: true` — never a linter, whose red is true of any new test file) are re-established
    over the base this change is a change to, with **only the task's test half applied**. If every step is still green, no test in the change exercises it and the green that
@@ -247,7 +254,7 @@ is the point; never fold them into the implementer's session.
   control below can show that the test half is not *inert*; whether the tests are any *good* is
   asked here and nowhere else. **It reports; it does
   not repair, and it is launched without write access.** One launch reads the whole batch (5a),
-  and its findings go to `.rein/work/review.findings.json` with one entry per task; each task's
+  and its findings go to `.rein/work/review.<task ids>.findings.json` with one entry per task; each task's
   implementer resolves its `must_fix` ones within the step's own `retries` budget and the reviewer
   looks again at the tasks sent back. A review whose findings cannot be read holds back every task
   it was reading: an unreadable answer is not an answer that found nothing.
@@ -336,11 +343,13 @@ is the point; never fold them into the implementer's session.
    the seam over what two readings share and what none covers, each launched on its own. Most of
    them are already answered — `rein build` takes a reading as the last of its tasks lands — so a
    regeneration after a review fix re-reads only the reading whose code moved. **A blocking
-   security finding that reading turns up is repaired at the reading's boundary**, by an
-   implementer, in the scope that owns the code it anchored to — once per reading, with whatever
-   still stands left to the repair rounds above. For a chain that is after its later tasks were
-   built on the code, which is the price of reading the chain once; the repair path is the one
-   built for exactly that.
+   security finding that reading turns up is repaired at once only when it is about the task whose
+   work is the tip of the branch** — once, with whatever still stands left to the repair rounds
+   above. A repair is committed on top of the branch, and a stack is cut along the tasks'
+   `completed_commit`s, so a fix for any other task (an earlier task of a chain, a leaf another
+   leaf merged on top of) would sit in the wrong pull request; those are repaired at acceptance,
+   on their own slice. The readings are cut from the task graph with the order and scope added
+   after the mandate (`rein task order`, `rein task scope-add`), the same one `rein dag` counts.
    `coverage.composition` records every reading by name and `unread_paths` names any changed
    path none of them covered, which makes the manifest `insufficient`; a composed reading is
    refused outright at critical risk. The readings are taken **highest-risk first**, by the

@@ -40,6 +40,7 @@ from rein import (
     brief,
     common,
     conformance,
+    dag,
     decision_cards,
     diff_facts,
     digests,
@@ -329,6 +330,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
     try:
         trusted_base = _resolve_base(repo, plan, base)
         diff_text = _diff(repo, trusted_base, "HEAD", not_the_product(repo, state))
+        tasks = _effective_tasks(plan, state)
     except ReviewError:
         return None
     facts = diff_facts.analyze(diff_text, evidence=plan.artifact_paths if plan is not None else ())
@@ -345,7 +347,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
     # exactly as the gate will split it.
     sent, _ = review_reading.fold_bodies(diff_text, facts.files, signalled=frozenset(h.path for h in facts.signals))
     readings = review_reading.plan_readings(
-        plan,
+        tasks,
         [f.path for f in facts.files],
         mode=config.composition if config is not None else "auto",
         risk=effective,
@@ -370,6 +372,21 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         unit=unit,
         readings=len(taken) or 1,
     )
+
+
+def _effective_tasks(plan: models.Plan | None, state: models.State | None) -> tuple[dag.Task, ...] | None:
+    """The tasks the readings are cut from: the frozen plan with the order and scope added since.
+
+    The same graph the build schedules by and the guard checks against (`dag.join`). A plan and a
+    state that do not agree on the task set are not something to read around: that is a rewound
+    plan, and a review over it would be charged to tasks nobody can name.
+    """
+    if plan is None:
+        return None
+    try:
+        return dag.join(plan, state).tasks
+    except dag.DagError as exc:
+        raise ReviewError(f"the task graph is inconsistent, so the change cannot be read along it: {exc}") from None
 
 
 def generate(
@@ -523,7 +540,7 @@ def generate(
             whole_diff, facts.files, signalled=frozenset(hit.path for hit in facts.signals)
         )
         readings = review_reading.plan_readings(
-            plan,
+            _effective_tasks(plan, state),
             changed,
             mode=config.composition if config is not None else "auto",
             risk=effective,

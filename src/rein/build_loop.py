@@ -119,8 +119,12 @@ _GATE4_WORKTREE = "_gate4"
 _INTEGRATION_SUBJECT = "integration"
 #: The statuses a task's work is on the work branch in: what a reading waits for all of its tasks to reach.
 _LANDED_STATUSES = frozenset({"done", "awaiting-evidence"})
-#: The findings file a batch's reviewer writes, at the repository root (`_read_batch`).
-_BATCH_REVIEW_SUBJECT = "review"
+#: The findings file a reviewer writes, at the repository root, is named after what it reads
+#: (`_read_batch`): tasks that operate are read from their own threads, several at once.
+_BATCH_REVIEW_SUBJECT = "review.{ids}"
+#: The verdict an agent step reaches about a task that `operate`s, in the task's own send-back
+#: channel: `review:<step name>`.
+_REVIEW_PREFIX = "review:"
 
 #: What a failed negative control is reported as. Not a step in `quality_gate` — it is a verdict on
 #: what those steps *together* claimed — but it comes back through the same channel a red step
@@ -872,6 +876,18 @@ class LeafOutcome:
     log: str = ""
     fault: EnvironmentFault | None = None
     violations: list[tuple[str, str]] | None = None
+
+
+@dataclass(frozen=True)
+class ReviewAnswer:
+    """What one reading said about one task: at most one of the three is set."""
+
+    #: `must_fix` findings (or a tree that moved under the reader) for its implementer.
+    send_back: str = ""
+    #: Why the task cannot land on this reading: no entry for it, or an answer nobody can read.
+    stop: str = ""
+    #: The reader never ran: no verdict about the task at all.
+    fault: EnvironmentFault | None = None
 
 
 def _landable(outcome: LeafOutcome) -> bool:
@@ -1805,6 +1821,9 @@ class Orchestrator:
         does not land either. A leaf whose tree moved while it was being read goes back through the
         same send-back: what is on its branch is no longer what the gate established.
 
+        A task that operates is not here: it was read before its run (`_review_before_operate`),
+        because a finding read after the run costs the run again.
+
         Mutates `results`: whatever this decides about a leaf replaces what its pipeline said.
         """
         for step in self._batch_review_steps():
@@ -1812,6 +1831,7 @@ class Orchestrator:
                 task
                 for task in sorted(tasks, key=lambda t: t.id)
                 if _landable(results[task.id])
+                and not task.operate
                 and step.matches_paths(self.ws.branch_changed_paths(task.id) if not self.dry_run else [])
             ]
             rounds = max(0, step.retries)
@@ -1821,8 +1841,14 @@ class Orchestrator:
                 if self.dry_run:
                     print(f"    [dry-run] review {', '.join(t.id for t in subjects)} in one launch ({step.name})")
                     break
-                answered = self._read_batch(step, subjects, results)
-                send_back = {task_id: text for task_id, text in answered.items() if text}
+                send_back: dict[str, str] = {}
+                for task_id, answer in self._read_batch(step, subjects).items():
+                    if answer.fault is not None:
+                        results[task_id] = LeafOutcome(ok=False, log=answer.fault.summary(), fault=answer.fault)
+                    elif answer.stop:
+                        results[task_id] = LeafOutcome(ok=False, log=answer.stop)
+                    elif answer.send_back:
+                        send_back[task_id] = answer.send_back
                 if not send_back:
                     break
                 if attempt == rounds:
@@ -1841,19 +1867,17 @@ class Orchestrator:
                         results[task_id] = future.result()
                 subjects = [t for t in returned if _landable(results[t.id])]
 
-    def _read_batch(
-        self, step: GateStep, subjects: Sequence[dag.Task], results: dict[str, LeafOutcome]
-    ) -> dict[str, str]:
-        """One reviewer launch over `subjects`: task id → what goes back to its implementer ("" = nothing).
+    def _read_batch(self, step: GateStep, subjects: Sequence[dag.Task]) -> dict[str, ReviewAnswer]:
+        """One reviewer launch over `subjects`, and what it said about each of them.
 
-        A leaf the reader cannot be held to an answer about — no entry, an unreadable file — is
-        settled here as not landable, and is absent from the return. So is every subject when the
-        launch never happened: the machine stopping a reviewer is not a verdict about any leaf.
+        Every subject gets an answer. One the reader cannot be held to — no entry, an unreadable
+        file — is a `stop`. When the launch never happened every subject gets the `fault`: the
+        machine stopping a reviewer is not a verdict about any task.
         """
         role = step.agent_role or "code_reviewer"
         ids = [task.id for task in subjects]
         argv = step.agent_argv or self.config.adapter_argv
-        target = dossier.findings_path(self.root, _BATCH_REVIEW_SUBJECT)
+        target = dossier.findings_path(self.root, _BATCH_REVIEW_SUBJECT.format(ids="+".join(ids)))
         target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
         prompt = build_prompts.batch_review_prompt(
@@ -1879,9 +1903,7 @@ class Orchestrator:
                 role=role,
             )
         except EnvironmentFault as fault:
-            for task_id in ids:
-                results[task_id] = LeafOutcome(ok=False, log=fault.summary(), fault=fault)
-            return {}
+            return {task_id: ReviewAnswer(fault=fault) for task_id in ids}
         try:
             by_task, missing = dossier.parse_batch_findings(target.read_text(encoding="utf-8"), ids)
         except FileNotFoundError:
@@ -1889,22 +1911,16 @@ class Orchestrator:
                 f"the reviewer wrote no findings file ({findings_rel}). "
                 "A review that produced nothing readable is not a review that found nothing."
             )
-            by_task, missing = {}, []
+            return {task_id: ReviewAnswer(stop=f"{task_id}: {unreadable}") for task_id in ids}
         except (dossier.FindingsError, OSError) as exc:
             unreadable = f"the reviewer's findings could not be read — {exc}"
-            by_task, missing = {}, []
-        else:
-            unreadable = ""
-        if unreadable:
-            for task_id in ids:
-                results[task_id] = LeafOutcome(ok=False, log=f"{task_id}: {unreadable}")
-            return {}
-        for task_id in missing:
-            results[task_id] = LeafOutcome(
-                ok=False,
-                log=f"{task_id}: the reviewer wrote no entry for this task, so it was not reviewed and does not land.",
+            return {task_id: ReviewAnswer(stop=f"{task_id}: {unreadable}") for task_id in ids}
+        answers = {
+            task_id: ReviewAnswer(
+                stop=f"{task_id}: the reviewer wrote no entry for this task, so it was not reviewed and does not land."
             )
-        answered: dict[str, str] = {}
+            for task_id in missing
+        }
         for task_id, findings in by_task.items():
             self._add_review_findings(task_id, findings)
             outstanding = dossier.must_fix(findings)
@@ -1917,14 +1933,8 @@ class Orchestrator:
                 text = f"{text}\n{moved_line}" if text else moved_line
             if findings and not outstanding:
                 print(f"    [review] {task_id}: {len(findings)} finding(s), none blocking")
-            answered[task_id] = text
-        return answered
-
-    # --- conflict resolution ---------------------------------------------------
-    #
-    # Two seams the merge paths need and this class already owns: launching an implementer, and
-    # running the deterministic half of the DoD. `conflict` holds the decision they feed; keeping
-    # the plumbing here is what stops that module importing this one.
+            answers[task_id] = ReviewAnswer(send_back=text)
+        return answers
 
     def _graph_task(self, task_id: str) -> dag.Task | None:
         if not task_id or self._plan is None:
@@ -2550,9 +2560,11 @@ class Orchestrator:
             limits = {**human_review.DEFAULT_BUDGET, **self.config.raw.budgets}
             # One analysis of one whole diff answers all three: the floor the gate will key on,
             # whether the gate will compose at all, and which readings it will take.
+            graph = self._load_graph()
             readings, risk_floor, effective = review_reading.change_readings(
                 self.repo,
                 self._plan,
+                graph.tasks,
                 base=base,
                 head=head,
                 exclude=exclude,
@@ -2566,7 +2578,7 @@ class Orchestrator:
                     "so no reading is warmed from here on"
                 )
                 return []
-            landed = {t.id for t in self._load_graph().tasks if t.status in _LANDED_STATUSES}
+            landed = {t.id for t in graph.tasks if t.status in _LANDED_STATUSES}
             due = [r for r in readings if task.id in r.members and set(r.members) <= landed]
             return [
                 review_reading.warm(
@@ -2595,8 +2607,10 @@ class Orchestrator:
             print(f"    [review] {task.id}: the acceptance reading was not taken here ({exc}); the gate will take it")
             return []
 
-    def _repair_warm_findings(self, task: dag.Task, readouts: Sequence[review_reading.ReadOut]) -> bool:
-        """Hand each task in these readings the blocking security findings about its own code.
+    def _repair_warm_findings(
+        self, task: dag.Task, readouts: Sequence[review_reading.ReadOut], *, at_tip: bool
+    ) -> bool:
+        """Hand `task` the blocking security findings its readings found in its own code — at the tip only.
 
         **The readings were already taken and already paid for** (`_warm_reading`); until now their
         answers were written to the stage cache and read by nobody. So a security finding about
@@ -2605,30 +2619,31 @@ class Orchestrator:
         a different one: the finding comes from the security reviewer's own launch, validated by
         `security_review.run_security_review`, and the fixer is an implementer.
 
-        **Only findings a task of the reading owns.** Attribution is `findings.owner_of_path` — the
-        same function acceptance routes by — so nothing is guessed: a finding anchored in another
-        reading's territory, or in none, travels to acceptance where a human can see the whole
-        picture. It would be refused here anyway, by the scope check every repair goes through
-        (`_accept_repair`). A chain's reading can own findings about any of its tasks, and the
-        earlier ones have had later ones built on them by now: that is the price of reading a chain
-        once, and `_repair` is the path built for code others were built on.
+        **Only a finding `task` owns, and only while `task`'s own work is the tip of the branch.** A
+        repair here is committed on top of the work branch, and a pull-request stack is cut along
+        the tasks' `completed_commit`s: whatever sits above a task's commit belongs to the slice of
+        whichever task comes next. So the one task a repair here can be charged to is the one whose
+        work is directly under it — and it is charged by moving that task's `completed_commit` up
+        to the repair. A finding about an earlier task of a chain, or about a leaf another leaf
+        merged on top of, would land in somebody else's pull request; it is left to acceptance
+        instead, where it is read again from the same cache and `_repair` puts it on the slice that
+        introduced the code. Attribution is `findings.owner_of_path` over the effective graph — the
+        same function and the same task set acceptance routes by — so nothing is guessed.
 
         **One round, and no new knob for it.** The failure this has to survive is a false
-        positive, where repairing converges on nothing; a single round at the reading's boundary is
+        positive, where repairing converges on nothing; a single round at the task boundary is
         cheap and bounded, and whatever still stands is exactly what `review_policy.repair_rounds`
         is for. Whether the finding closed is not this launch's account of itself either: the
         re-warm below reads the slice again from cold, and acceptance reads it once more after that.
 
-        True when it repaired, which is the caller's cue to write `task`'s status again: the
-        evidence beside it has been re-pointed at the repaired tree, and the recorded commit follows
-        the repair wherever the repair could land on top of this task's own work — which in a batch
-        of leaves is only the one that merged last (`_consume_batch` says why).
+        True when it repaired, which is the caller's cue to write `task`'s status again with the
+        repaired tip as its commit: the evidence beside it has been re-pointed at the repaired tree.
         """
-        if not readouts or self.dry_run or self._plan is None:
+        if not readouts or not at_tip or self.dry_run:
             return False
-        owned: dict[str, list[findings_mod.Attribution]] = {}
+        tasks = self._load_graph().tasks
+        owned: list[findings_mod.Attribution] = []
         for readout in readouts:
-            members = set(readout.reading.members)
             for finding in readout.security.findings:
                 if finding.get("blocking") is not True:
                     continue
@@ -2637,29 +2652,20 @@ class Orchestrator:
                     for anchor in (finding.get("code_anchors") or [])
                     if isinstance(anchor, Mapping) and anchor.get("path")
                 ]
-                hit = next(
-                    ((p, o) for p in paths if (o := findings_mod.owner_of_path(self._plan, p)) in members),
-                    None,
-                )
-                if hit is not None:
-                    path, owner = hit
-                    owned.setdefault(owner, []).append(
-                        findings_mod.Attribution(str(finding.get("id", "SEC-?")), "security", owner, path)
-                    )
+                hit = next((p for p in paths if findings_mod.owner_of_path(tasks, p) == task.id), "")
+                if hit:
+                    owned.append(findings_mod.Attribution(str(finding.get("id", "SEC-?")), "security", task.id, hit))
         if not owned:
             return False
-        graph = self._load_graph()
-        for owner, attributions in owned.items():
-            owner_task = next((t for t in graph.tasks if t.id == owner), task)
-            print(
-                f"    [review] {owner}: the security review of its reading found {len(attributions)} blocking "
-                "finding(s) in its own scope — repairing them here rather than at acceptance"
-            )
-            self._repair(owner_task, repair_mod.Repair(owner, tuple(attributions)), where="review")
-        # The repair moved the readings' content, so the answers just cached are about a tree that
-        # no longer exists and the gate would re-read them regardless. Reading them again here is
-        # what decides whether the findings closed — from cold, by a reader with no memory of having
-        # raised them — and it leaves the gate's cache warm rather than stale.
+        print(
+            f"    [review] {task.id}: the security review found {len(owned)} blocking finding(s) in its own "
+            "scope — repairing them here rather than at acceptance"
+        )
+        self._repair(task, repair_mod.Repair(task.id, tuple(owned)), where="review")
+        # The repair moved the reading's content, so the answer just cached is about a tree that no
+        # longer exists and the gate would re-read it regardless. Reading it again here is what
+        # decides whether the finding closed — from cold, by a reader with no memory of having
+        # raised it — and it leaves the gate's cache warm rather than stale.
         self._warm_reading(task)
         return True
 
@@ -2910,6 +2916,13 @@ class Orchestrator:
         budgets[NEGATIVE_CONTROL] = SEND_BACK_RETRIES
         for step in task.operate:
             budgets[f"{_OPERATE_PREFIX}{step.get('name', '?')}"] = SEND_BACK_RETRIES
+        if task.operate:
+            # A task that operates is read before its run (`_review_before_operate`), so a reader's
+            # verdict comes back through this channel on the step's own `retries`.
+            for reader in self._batch_review_steps():
+                budgets[f"{_REVIEW_PREFIX}{reader.name}"] = max(0, reader.retries)
+        # How many times this call has started the task's priced run (`_count_priced_run`).
+        operated = 0
         for entry in task.acceptance:
             budgets[f"{_ACCEPTANCE_PREFIX}{entry.get('id', '?')}"] = SEND_BACK_RETRIES
         # What an earlier, interrupted attempt left behind. Restoring the budgets is the load-
@@ -2983,9 +2996,21 @@ class Orchestrator:
                     # "ask the same question a second time".
                     self._stop_before_the_gate(task, kind, message, tree=self._fingerprint(cwd))
                     return False, message
+            # What the implementer produced is committed before anything reads it: the gate, the
+            # reviewer and the merge then read one thing, the branch, and "the change" is never
+            # two different trees depending on who asks (`_commit_attempt`).
+            if not self._commit_attempt(task, cwd):
+                return False, f"{task.id}: its change could not be committed; the worktree is kept as it is"
             self._local.steps, self._local.acceptance, self._local.negative_control = [], [], {}
             after_implementer = self._fingerprint(cwd)
-            failed, failure_log = self._run_operate(task, cwd)
+            failed, failure_log = self._review_before_operate(task) if task.operate else (None, "")
+            if failed is None and task.operate and not self.dry_run:
+                if operated and (spent := self._count_priced_run(task)):
+                    self._stop_before_the_gate(task, "attempt_budget_spent", spent, tree=after_implementer)
+                    return False, spent
+                operated += 1
+            if failed is None:
+                failed, failure_log = self._run_operate(task, cwd)
             if failed is None and task.operate and not self.dry_run:
                 # What an operate step wrote lands with the task (`finalize_commit` adds the whole
                 # tree), and the scope check above read the tree before the step ran. Checked
@@ -3002,6 +3027,11 @@ class Orchestrator:
                     )
                     self._stop_before_the_gate(task, "scope_violation", message, tree=self._fingerprint(cwd))
                     return False, message
+                if not self._commit_attempt(task, cwd):
+                    return (
+                        False,
+                        f"{task.id}: what its operate steps wrote could not be committed; the worktree is kept",
+                    )
             if failed is None:
                 failed, failure_log = self._run_pipeline(task, cwd)
             if failed is None:
@@ -3040,10 +3070,88 @@ class Orchestrator:
                 )
             if left <= 0:
                 return False, failure_log
-            if continuity and budgets[failed] <= 0:  # final retry for this step → fresh session
+            read = failed.startswith(_REVIEW_PREFIX)
+            if read:
+                # A reader's findings, not a red: the next launch is told them as findings to
+                # resolve or dispute, never as a failure to make green — and by the session that
+                # wrote the change, on every round. The fresh final retry below is for a step the
+                # session keeps failing to make green; a finding is new input, which is how the
+                # batch's send-back treats it too.
+                review, failure_log = failure_log, ""
+            if continuity and budgets[failed] <= 0 and not read:  # final retry for this step → fresh session
                 session, resume = ("" if mints_own else str(uuid.uuid4())), False
             else:
                 resume = bool(session)
+
+    def _commit_attempt(self, task: dag.Task, cwd: str) -> bool:
+        """Put everything the attempt left in the worktree on the task's branch. False = could not.
+
+        The implementer is told to commit and sometimes does not, and the loop used to finalize
+        only at the merge. Until then the branch and the worktree disagreed about what the change
+        was: the gate read the worktree, a reviewer handed `git diff <target>...<branch>` read the
+        branch, and a step's `paths:` filter asked the branch too — so work left uncommitted was
+        tested and never read. Committing before the first reader makes the branch the change, for
+        every reader, at every round. A tree that cannot be committed keeps its worktree
+        (`GitWorkspace.cleanup_worktree` will not remove what it could not preserve).
+        """
+        return self.dry_run or self.ws.finalize_commit(cwd, f"{task.id}: {task.title}")
+
+    def _review_before_operate(self, task: dag.Task) -> tuple[str | None, str]:
+        """Read a task that operates **before** its priced run. `(None, "")` when every reader passed.
+
+        `operate` is the long run a task exists for — hours on real data, or the irreversible act
+        itself — and whatever changes the code after it has run makes its output a statement about
+        code that is no longer there, so the run has to happen again. A reader's findings are the
+        change most worth having *before* that run: read afterwards, each `must_fix` bought one
+        more priced run, uncounted by the approval that priced it. So such a task is read here, on
+        its own, by the same agent steps a batch is read by, and it is not read again with its batch
+        (`_review_batch`): the tree that ran is the tree that was read, plus the run's own output,
+        which the gate checks.
+
+        A `must_fix` comes back as the verdict `review:<step>`, on the step's own `retries`, through
+        the send-back a red step takes. An answer nobody can hold to anything stops the task; a
+        reader the machine never ran raises, as every launch does.
+        """
+        if self.dry_run:
+            return None, ""
+        changed = self.ws.branch_changed_paths(task.id)
+        for step in self._batch_review_steps():
+            if not step.matches_paths(changed):
+                continue
+            answer = self._read_batch(step, [task])[task.id]
+            if answer.fault is not None:
+                raise answer.fault
+            if answer.stop:
+                raise StopLoop(answer.stop)
+            if answer.send_back:
+                return f"{_REVIEW_PREFIX}{step.name}", answer.send_back
+        return None, ""
+
+    def _count_priced_run(self, task: dag.Task) -> str:
+        """Count one more start of `task`'s operate run against its approval. "" = it may start.
+
+        `attempts.max` is what the approval priced — how many runs, each costing `attempts.cost` —
+        and it was counted where it is cheapest to count, not where the run happens: once per
+        `in-progress`, while one `in-progress` could start the run again after every red step and
+        every reader's finding. A run the approval did not cover is the thing the budget exists to
+        stop, and for an irreversible task each one is another crossing of the point a human
+        approved once. So every start after the first in one attempt is recorded as an attempt of
+        its own (`task_started`, `attempts` + 1) before it runs, and one past `max` is not started.
+        """
+        current = next((t for t in self._load_graph().tasks if t.id == task.id), task)
+        if current.attempt_max and current.attempts >= current.attempt_max:
+            return (
+                f"{task.id} has used the {current.attempt_max} run(s) its approval covers "
+                f"(each: {current.attempt_cost}); its operate steps are not started again. Raising the "
+                f"budget changes what was approved: `rein revise --to mandate`, then change `attempts.max` "
+                f"for {task.id}."
+            )
+        self._set_status(task.id, "in-progress")
+        print(
+            f"    [operate] {task.id}: run {current.attempts + 1}"
+            + (f" of {current.attempt_max}" if current.attempt_max else "")
+        )
+        return ""
 
     def _run_operate(self, task: dag.Task, cwd: str) -> tuple[str | None, str]:
         """Run `task.operate` in order, in the task's worktree. (None, "") when all passed.
@@ -4385,24 +4493,11 @@ class Orchestrator:
         # Then the readings, which can raise — a repair that reaches outside its scope stops the
         # run. Interleaved with the pass above, that would leave the leaves after it unrecorded.
         for task in recorded:
-            # Asked before the repair moves the branch: is this leaf's own merge still the tip?
+            # Asked before the repair moves the branch: is this leaf's own merge still the tip? Only
+            # then can a repair made on top of it be charged to it (`_repair_warm_findings`).
             at_tip = bool(landed.get(task.id)) and landed[task.id] == self._landed(task.id)
-            if self._repair_warm_findings(task, self._warm_reading(task)):
-                # A repair lands on top of the branch, and only the leaf that merged last has
-                # its own work directly under that tip. Moving an earlier leaf's
-                # `completed_commit` up there would put it above a *later* leaf's merge, and
-                # `pr_stack.derive` cuts slices by walking first-parent order — so that later
-                # leaf's pull request would swallow this one's commits, and nothing would say
-                # so: parallel leaves have no `blockedBy` between them, so
-                # `_landing_order_problems` sees a topological order that is still fine. The
-                # merge commit stays recorded; the repair rides above it, on the slice branch
-                # it was committed to. The write still happens either way — the evidence
-                # beside the status was just re-pointed at the repaired tree.
-                self._set_status(
-                    task.id,
-                    self._completion_status(task),
-                    commit=self._landed(task.id) if at_tip else landed.get(task.id, ""),
-                )
+            if self._repair_warm_findings(task, self._warm_reading(task), at_tip=at_tip):
+                self._set_status(task.id, self._completion_status(task), commit=self._landed(task.id))
         if recorded:
             self._warn_on_review_outlook()
         if blocked_any:
@@ -4583,7 +4678,7 @@ class Orchestrator:
             if not self._generate_review():
                 break
             read = True
-            routing = repair_mod.route(self._plan or models.Plan({}), self.store.read_review())
+            routing = repair_mod.route(graph.tasks, self.store.read_review())
             print(routing.render())
             # The other half of `unknown_at_mandate`. Findings the loop could not sort into code or
             # plan are the ones a human has to judge, and the claim being tested is that admitting

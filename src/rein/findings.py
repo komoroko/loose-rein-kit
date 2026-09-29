@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from rein import common, models
 
@@ -31,6 +32,25 @@ logger = logging.getLogger(__name__)
 #: Claim verdicts that mean the code did not answer the claim. `unverified` and `unknown` are not
 #: here: they say the review could not tell, which is a coverage problem rather than a task's.
 FAILING_VERDICTS = frozenset({"diverged", "missing"})
+
+
+class Owner(Protocol):
+    """A task as attribution reads it: what it answers and where its work belongs.
+
+    Read off the effective graph (`dag.join`), never the frozen plan alone: a path added with
+    `rein task scope-add` belongs to that task for the guard, the dossier and the reviewers, and a
+    finding about it has to be charged to the same task — the one acceptance reads it under
+    (`review_reading.plan_readings`, which reads the same tasks).
+    """
+
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def scope_include(self) -> tuple[str, ...]: ...
+
+    @property
+    def claim_ids(self) -> tuple[str, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -48,7 +68,7 @@ class Attribution:
         return bool(self.task_id)
 
 
-def owner_of_path(plan: models.Plan, path: str) -> str:
+def owner_of_path(tasks: Sequence[Owner], path: str) -> str:
     """The task whose declared scope covers `path` most specifically, or "" when none declares it.
 
     Longest match wins, the same way `common.longest_cover` decides everywhere else. A task that
@@ -57,7 +77,7 @@ def owner_of_path(plan: models.Plan, path: str) -> str:
     it would make the first scope-less task in the plan the owner of the whole repository.
     """
     best, best_len = "", -1
-    for task in plan.tasks:
+    for task in tasks:
         if not task.scope_include:
             continue
         cover = common.longest_cover(path, task.scope_include)
@@ -73,22 +93,22 @@ def _anchor_paths(entry: Mapping[str, object]) -> list[str]:
     return [str(a.get("path", "")) for a in anchors if isinstance(a, dict) and a.get("path")]
 
 
-def _first_owned(plan: models.Plan, paths: Sequence[str]) -> tuple[str, str]:
+def _first_owned(tasks: Sequence[Owner], paths: Sequence[str]) -> tuple[str, str]:
     for path in paths:
-        owner = owner_of_path(plan, path)
+        owner = owner_of_path(tasks, path)
         if owner:
             return owner, path
     return "", paths[0] if paths else ""
 
 
-def attribute(plan: models.Plan, review: models.Review | None) -> list[Attribution]:
+def attribute(tasks: Sequence[Owner], review: models.Review | None) -> list[Attribution]:
     """Every blocking finding of the machine review, with the task that has to answer it."""
     if review is None or not review.is_generated:
         return []
     found: list[Attribution] = []
 
     for finding in review.blocking_security_findings:
-        task_id, basis = _first_owned(plan, _anchor_paths(finding))
+        task_id, basis = _first_owned(tasks, _anchor_paths(finding))
         found.append(Attribution(str(finding.get("id", "SEC-?")), "security", task_id, basis))
 
     statements = {str(s.get("id")): s for s in review.machine.get("actual_extraction", []) if isinstance(s, dict)}
@@ -98,14 +118,14 @@ def attribute(plan: models.Plan, review: models.Review | None) -> list[Attributi
         paths: list[str] = []
         for statement_id in extra.get("actual_statement_ids", []) or []:
             paths += _anchor_paths(statements.get(str(statement_id), {}))
-        task_id, basis = _first_owned(plan, paths)
+        task_id, basis = _first_owned(tasks, paths)
         found.append(Attribution(str(extra.get("id", "EXTRA-?")), "extra_behavior", task_id, basis))
 
     for result in review.claim_results:
         if str(result.get("verdict", "")) not in FAILING_VERDICTS:
             continue
         claim_id = str(result.get("claim_id", ""))
-        owner = next((t.id for t in plan.tasks if claim_id in t.claim_ids), "")
+        owner = next((t.id for t in tasks if claim_id in t.claim_ids), "")
         found.append(Attribution(claim_id, "claim", owner, claim_id))
     return found
 

@@ -22,7 +22,7 @@ import logging
 from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from rein import (
     actual_extraction,
@@ -1271,8 +1271,15 @@ def compose_coverage(
 SEAM = "seam"
 
 
+class ReadTask(dag.Linked, Protocol):
+    """A task as the readings are cut from it: its id, what it waits for, where its work belongs."""
+
+    @property
+    def scope_include(self) -> tuple[str, ...]: ...
+
+
 def plan_readings(
-    plan: models.Plan | None,
+    tasks: Sequence[ReadTask] | None,
     changed_paths: Sequence[str],
     *,
     mode: str = "auto",
@@ -1280,7 +1287,14 @@ def plan_readings(
     sent: str = "",
     ceiling: int = 0,
 ) -> list[Reading]:
-    """The readings acceptance takes, derived from the frozen plan's dependency chains and task scopes.
+    """The readings acceptance takes, derived from the tasks' dependency chains and scopes.
+
+    `tasks` is the **effective** graph (`dag.join`): the frozen plan plus the order and the scope
+    added after the mandate (`rein task order`, `rein task scope-add`). It used to be the plan alone,
+    while the guard, the dossier, the reviewers, `rein dag` and the scheduler all read the graph — so
+    a path added to a task's scope was that task's everywhere except here, where it fell into the
+    seam, and an edge added after the freeze made `rein dag` promise readings the gate did not take.
+    One task set, read by every reader.
 
     `[WHOLE_READING]` — one reading of everything — whenever composition has nothing to compose
     along: the operator asked for `whole`, there is no plan, or no task declares a scope. An
@@ -1312,9 +1326,9 @@ def plan_readings(
     is split, which is what a caller that only needs the shape — not the sizes — is asking for.
 
     **A reading's slice is its declared scopes, never the paths that happened to change.** The
-    scopes were frozen by the mandate and do not move, so the reading taken while a chain landed is
-    still the answer to the same question after every later task has landed — which is the whole
-    reason a composed review costs less to regenerate than a whole one.
+    scopes were frozen by the mandate and move only by a recorded `scope-add`, so the reading taken
+    while a chain landed is still the answer to the same question after every later task has landed
+    — which is the whole reason a composed review costs less to regenerate than a whole one.
 
     **The seam is not an afterthought, it is what makes composing honest.** A changed path two
     readings both cover was read twice in isolation and never as one file; a changed path no scope
@@ -1327,13 +1341,13 @@ def plan_readings(
     allowed to change; a reading is about what is in the tree, and a path excluded from one task's
     scope that changed anyway is exactly what the seam exists to catch.
     """
-    if mode == WHOLE or plan is None or models.risk_at_least(risk, "critical"):
+    if mode == WHOLE or tasks is None or models.risk_at_least(risk, "critical"):
         return [WHOLE_READING]
-    scoped = {task.id: task for task in plan.tasks if task.scope_include}
+    scoped = {task.id: task for task in tasks if task.scope_include}
     if not scoped:
         return [WHOLE_READING]
     readings: list[Reading] = []
-    for chain in dag.chains(plan.tasks):
+    for chain in dag.chains(tasks):
         parts = [
             Reading(unit=task_id, include=tuple(scoped[task_id].scope_include), members=(task_id,))
             for task_id in chain
@@ -1366,6 +1380,7 @@ def plan_readings(
 def change_readings(
     repo: repo_mod.Repo,
     plan: models.Plan | None,
+    tasks: Sequence[ReadTask] | None,
     *,
     base: str,
     head: str,
@@ -1385,7 +1400,9 @@ def change_readings(
     facts = diff_facts.analyze(diff_text, evidence=evidence)
     effective = effective_risk(facts, plan)
     sent, _ = fold_bodies(diff_text, facts.files, signalled=frozenset(hit.path for hit in facts.signals))
-    readings = plan_readings(plan, [f.path for f in facts.files], mode=mode, risk=effective, sent=sent, ceiling=ceiling)
+    readings = plan_readings(
+        tasks, [f.path for f in facts.files], mode=mode, risk=effective, sent=sent, ceiling=ceiling
+    )
     return readings, facts.risk_floor, effective
 
 

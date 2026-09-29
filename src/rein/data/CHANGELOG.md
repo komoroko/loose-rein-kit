@@ -33,15 +33,35 @@ one pull request per task.
   `retries` run out, or one the reviewer wrote no entry for, does not land; the rest of the batch
   does. A `stage: both` agent step reads the join again only when a merge had to resolve a
   conflict; `stage: integration` still reads every join. The cold "review fixer" launch is gone.
+  Each reading writes its own findings file (`.rein/work/review.<task ids>.findings.json`).
+- **An attempt is committed before anything reads it.** The loop finalized a task's commit only at
+  the merge, so a reviewer handed the branch's diff read nothing of work the implementer had left
+  uncommitted, and a step's `paths:` filter asked the branch too, while the gate had tested the
+  worktree. The branch is now the change for every reader.
+- **A task with `operate` is read before its run, and every run counts against `attempts.max`.**
+  Read after the run, each `must_fix` sent the task round the run again. And `attempts` was counted
+  once per `in-progress`, while one `in-progress` could start the run again after every red step:
+  the approval priced runs, and the loop counted something else. Every start of the run after the
+  first in one attempt is now recorded as an attempt (`task_started`, `attempts` + 1) before it
+  starts, and one past `max` is not started — the task stops with `attempt_budget_spent`.
 - **Acceptance reads the change one dependency chain at a time.** A chain is a line of tasks each
   built on the one before and on nothing else (`dag.chains`). Its reading covers the union of its
   scopes, so a path two of its tasks share is read once rather than twice and again in the seam,
   and one extractor and one security reviewer read it instead of one of each per task. A chain
   whose diff will not fit `max_diff_bytes` is read task by task, decided from the diff alone, so
   the build's warm-up and the gate take the same readings. The build warms a chain's reading
-  when its last task lands, and a blocking security finding from it is repaired for whichever of
-  its tasks owns the code — for an earlier task, after later ones were built on it. `rein dag`
-  counts readings the same way.
+  when its last task lands. `rein dag` counts readings the same way.
+- **A repair during the build answers only for the task whose work is the tip.** It is committed on
+  top of the branch, and a stack is cut along the tasks' `completed_commit`s, so a fix for an
+  earlier task of a chain — or for a leaf another leaf merged on top of, which the loop repaired
+  before this release too — landed in the next task's pull request. Those findings now wait for
+  acceptance, which reads them from the same cache and repairs them on their own slice.
+- **Readings and attribution read the task graph, with what was added after the mandate.**
+  `review_reading.plan_readings`, `findings.attribute` and `repair.route` read the frozen plan
+  alone, while the guard, the dossier, the scheduler and `rein dag` read the graph (`dag.join`). A
+  path added with `rein task scope-add` fell into the seam and a finding about it was charged to no
+  task; an edge added with `rein task order` made `rein dag` promise a reading the gate did not
+  take. They take the graph's tasks now.
 
 ## [0.11.0] - 2026-09-29
 

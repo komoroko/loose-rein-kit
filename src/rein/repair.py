@@ -39,7 +39,7 @@ not say.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from rein import findings as findings_mod
@@ -107,7 +107,9 @@ def answered_to_repair(human: Mapping[str, object] | None) -> set[str]:
     }
 
 
-def route(plan: models.Plan, review: models.Review | None, human: Mapping[str, object] | None = None) -> Routing:
+def route(
+    tasks: Sequence[findings_mod.Owner], review: models.Review | None, human: Mapping[str, object] | None = None
+) -> Routing:
     """Split acceptance's blocking findings into what the loop repairs and what a human decides.
 
     A security finding is a **code** repair as soon as a task's scope owns its anchor. Nothing
@@ -122,7 +124,7 @@ def route(plan: models.Plan, review: models.Review | None, human: Mapping[str, o
     by_task: dict[str, list[findings_mod.Attribution]] = {}
     judgement: list[findings_mod.Attribution] = []
     unowned: list[findings_mod.Attribution] = []
-    for attribution in findings_mod.attribute(plan, review):
+    for attribution in findings_mod.attribute(tasks, review):
         if not attribution.owned:
             unowned.append(attribution)
             continue
@@ -131,7 +133,7 @@ def route(plan: models.Plan, review: models.Review | None, human: Mapping[str, o
         else:
             judgement.append(attribution)
 
-    order = [task.id for task in plan.tasks]
+    order = [task.id for task in tasks]
     code = tuple(
         Repair(task_id, tuple(by_task[task_id]))
         for task_id in sorted(by_task, key=lambda tid: order.index(tid) if tid in order else len(order))
