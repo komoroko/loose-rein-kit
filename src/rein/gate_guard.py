@@ -18,7 +18,7 @@ checkpoint rein installs is a change that never goes through `rein build` at all
 
 Four rules, in order of severity:
 
-1. **Machine-written artifacts are never hand-edited.** `state.yaml`, `review.yaml`,
+1. **Machine-written artifacts are never hand-edited.** `state.yaml`, `review.yaml`, `reviews.yaml`,
    `events.ndjson` are written only inside a Central Store transaction.
    A hand edit produces a state change with no matching audit event — the exact invisible
    mutation the chain exists to make impossible.
@@ -77,6 +77,9 @@ _GIT_TIMEOUT_SEC = 30
 MACHINE_WRITTEN: tuple[str, ...] = (
     ".rein/state.yaml",
     ".rein/review.yaml",
+    # Outside the mandate's freeze, so rule 2 never covers it: this is what keeps an agent from
+    # switching off the review of its own work. `rein reviews apply` and the dashboard write it.
+    ".rein/reviews.yaml",
     ".rein/events.ndjson",
     ".rein/rein.lock",
 )

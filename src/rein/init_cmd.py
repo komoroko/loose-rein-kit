@@ -449,6 +449,7 @@ def run_init(
         (".rein/plan.yaml", plan_text.encode()),
         (".rein/review.yaml", data_mod.read_bytes("scaffold/rein/review.yaml")),
         (".rein/config.yaml", config_text.encode()),
+        (".rein/reviews.yaml", data_mod.read_bytes("scaffold/rein/reviews.yaml")),
     ]
     # 2) the docs scaffolds (with the brownfield note on the brief).
     for rel, blob in data_mod.iter_files("scaffold/docs"):

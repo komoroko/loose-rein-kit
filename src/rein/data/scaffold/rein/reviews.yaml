@@ -1,0 +1,27 @@
+# .rein/reviews.yaml — which reviews run. Outside the mandate's freeze: changing one rewinds
+# nothing. Written only by `rein reviews apply <file> --reason ...` at a terminal, or by the
+# dashboard's write session, and every change is recorded in the audit chain. `rein guard` refuses
+# any other edit of this file.
+#
+# The comparison acceptance rests on is not configurable and is not here: it is what a human
+# decides by, not a way of improving the work.
+
+# The fresh-context adversarial review before the mandate, per drafting stage. A stage switched
+# off is named on the mandate's approval screen.
+adversarial:
+  requirements: true
+  design: true
+  tasks: true
+
+# The reviewer steps of the quality gate. Each is one launch per batch of tasks, reading for every
+# review it lists: `correctness`, `simplification`, `security`, or a name under `custom`.
+steps:
+  - name: review
+    reviews: [correctness, simplification]
+    retries: 1
+    stage: both
+
+# Reviews of your own: a name, and a repository file holding the question to read for.
+#   custom:
+#     - name: performance
+#       prompt: docs/reviews/performance.md

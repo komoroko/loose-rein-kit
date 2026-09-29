@@ -247,9 +247,11 @@ is the point; never fold them into the implementer's session.
   all of it). Auto-fixable hooks (ruff/format) resolve on the re-run; manual fixes (mypy, tsc)
   are part of the step. In a project without `make`, substitute that project's commands in the
   config steps.
-- **`review`** asks two disciplines — **correctness** (bugs) and **simplification** (reuse,
-  needless complexity, and what the ticket's acceptance criteria do not require: speculative
-  generality, unused knobs/hooks; YAGNI) — and then reads the **tests as evidence**: for each acceptance criterion, which test in this change would go red if
+- **A reviewer step** (`.rein/reviews.yaml`, not `config.yaml`) asks the reviews it lists —
+  the packaged **correctness** (bugs), **simplification** (reuse, needless complexity, and what the
+  ticket's acceptance criteria do not require: speculative generality, unused knobs/hooks; YAGNI)
+  and **security**, and any custom review the file names with a question of its own — and then
+  reads the **tests as evidence**: for each acceptance criterion, which test in this change would go red if
   the behaviour were wrong, and which assertions would hold for any output at all. The negative
   control below can show that the test half is not *inert*; whether the tests are any *good* is
   asked here and nowhere else. **It reports; it does
@@ -273,8 +275,9 @@ is the point; never fold them into the implementer's session.
   the merged tree and not about one task. **`--stage` and `--task` are what say *where* it was
   applied**: without them the count is still right and `rein lens --grid` cannot place the row, so
   a lens applied to one task reads the same as one applied to the whole cycle.
-  Both disciplines are **named to the host that has them**: under Claude Code the reviewer is
-  pointed at `/code-review` and `/simplify`, which read the branch it is on — with the two rules
+  The disciplines are **named to the host that has them**: under Claude Code the reviewer is
+  pointed at `/code-review`, `/simplify` and `/security-review` — only those for the reviews the
+  step lists, reading the branch it is on — with the two rules
   those commands do not carry themselves, that `/simplify`'s fix-applying phase must not run here
   (whoever judges does not repair) and that findings come back through the findings file and never
   through a printed report. The questions are written out in the prompt regardless, so a host

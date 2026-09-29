@@ -84,7 +84,7 @@ class Finding:
 
 
 def check_layout(repo: repo_mod.Repo) -> list[Finding]:
-    """Are the four SSOT documents present?"""
+    """Are the five SSOT documents present?"""
     missing = [
         name
         for name, path in (
@@ -92,12 +92,20 @@ def check_layout(repo: repo_mod.Repo) -> list[Finding]:
             ("state.yaml", repo.state),
             ("plan.yaml", repo.plan),
             ("review.yaml", repo.review),
+            ("reviews.yaml", repo.reviews),
         )
         if not path.exists()
     ]
     if missing:
-        return [Finding("FAIL", "format", f"missing SSOT document(s): {', '.join(missing)} — run `rein init`")]
-    return [Finding("PASS", "format", "the four SSOT documents are present")]
+        return [
+            Finding(
+                "FAIL",
+                "format",
+                f"missing SSOT document(s): {', '.join(missing)} — run `rein init` "
+                "(`rein sync` seeds a missing reviews.yaml)",
+            )
+        ]
+    return [Finding("PASS", "format", "the five SSOT documents are present")]
 
 
 def check_lock(repo: repo_mod.Repo) -> list[Finding]:
@@ -129,6 +137,10 @@ _DOCUMENT_REPAIR: dict[str, str] = {
         "frozen when the mandate is approved, so it cannot be edited in place: "
         "`rein revise --to mandate` first, then fix it, then re-approve the mandate"
     ),
+    "reviews": (
+        "outside the mandate's freeze and written only by a person: restore it from the last commit, then "
+        "change it with `rein reviews apply <file> --reason ...` at your terminal"
+    ),
     "state": (
         "hand-repair is not the path — restore it from the last commit; `rein events --verify` "
         "says what the chain expects"
@@ -150,6 +162,7 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
         ("state", store.read_state),
         ("plan", store.read_plan),
         ("review", store.read_review),
+        ("reviews", store.read_reviews),
     ):
         try:
             value = reader()
@@ -1529,8 +1542,6 @@ def check_quality_gate(config: models.Config | None) -> list[Finding]:
         return []
     findings: list[Finding] = []
     for step in config.quality_gate:
-        if step.kind != "command":
-            continue
         if tuple(step.command) in models.PLACEHOLDER_COMMANDS:
             findings.append(
                 Finding(
@@ -1550,7 +1561,7 @@ def check_quality_gate(config: models.Config | None) -> list[Finding]:
                     "Fine for a library; for anything with an entry point, set `required: true`.",
                 )
             )
-    if config.quality_gate and not any(s.kind == "command" and s.runs_tests for s in config.quality_gate):
+    if config.quality_gate and not any(s.runs_tests for s in config.quality_gate):
         findings.append(
             Finding(
                 "WARN",

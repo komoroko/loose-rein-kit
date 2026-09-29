@@ -30,7 +30,7 @@ WORK_BRANCH = "build/demo"
 
 #: A host profile and a command that always passes. What is under test is what the loop concludes
 #: from an attempt, so the gate must never be the thing that fails.
-GATE = [{"name": "test", "kind": "command", "command": ["true"], "executor_profile": "quality", "retries": 1}]
+GATE = [{"name": "test", "command": ["true"], "executor_profile": "quality", "retries": 1}]
 
 
 def git(root: Path, *args: str) -> str:

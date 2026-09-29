@@ -237,7 +237,6 @@ EXECUTOR_VALUES = SANDBOX_EXECUTOR_VALUES | {"host"}
 
 # Sandbox knobs (plan §10.2).
 MOUNT_MODE_VALUES = frozenset({"none", "read_only", "read_write"})
-QUALITY_GATE_KIND_VALUES = frozenset({"command", "agent"})
 #: Where a DoD step runs. `both` is what every step has always done and stays the default; the
 #: other two exist so a fast focused suite can guard each task while the whole one runs over the
 #: join, rather than every task re-establishing the whole thing from scratch.
@@ -465,6 +464,13 @@ EVENT_ORDER: tuple[str, ...] = (
     # only record that it happened, and the only way acceptance can be told the evidence in front of
     # it was produced by a different agent than the one the mandate saw.
     "agents_switched",
+    # A human changed which reviews run (`rein reviews apply`, or the dashboard). `reviews.yaml` is
+    # outside the mandate freeze (`Reviews`), so this is the record of the change and its reason.
+    "reviews_changed",
+    # A reviewer step read these tasks, for these reviews. What acceptance shows per task: the
+    # configuration can change mid-cycle, and a task read before the change was read for what was
+    # configured then.
+    "reviews_applied",
     "decision_declared",
     # One lens was pointed at one deliverable, and whether it found anything. Outside
     # `ATTENTION_EVENTS`: it asks nobody to judge anything, it is what makes the library
@@ -1535,6 +1541,108 @@ class State:
         return None
 
 
+#: The reviews a reviewer step can read for without anything else being written down. Each has a
+#: question in `build_prompts` and, on a host that carries one, a discipline of the host's own
+#: (`adapters.Adapter.disciplines`).
+BUILTIN_REVIEWS: tuple[str, ...] = ("correctness", "simplification", "security")
+
+#: The drafting stages the adversarial review runs at, in the order a cycle reaches them.
+ADVERSARIAL_STAGES: tuple[str, ...] = ("requirements", "design", "tasks")
+
+
+@dataclass(frozen=True)
+class ReviewStep:
+    """One reviewer step: a launch per batch (and per join, by `stage`) that reads for `reviews`."""
+
+    raw: Mapping[str, Any]
+
+    @property
+    def name(self) -> str:
+        return _str(self.raw, "name")
+
+    @property
+    def reviews(self) -> tuple[str, ...]:
+        value = self.raw.get("reviews") or []
+        return tuple(str(v) for v in value) if isinstance(value, list) else ()
+
+    @property
+    def retries(self) -> int:
+        value = self.raw.get("retries", 1)
+        return value if isinstance(value, int) else 1
+
+    @property
+    def stage(self) -> str:
+        return _str(self.raw, "stage", "both")
+
+    @property
+    def paths(self) -> tuple[str, ...]:
+        value = self.raw.get("paths") or []
+        return tuple(str(v) for v in value) if isinstance(value, list) else ()
+
+
+@dataclass(frozen=True)
+class Reviews:
+    """``reviews.yaml`` — which reviews run. Outside the mandate's freeze; written only by a human.
+
+    The adversarial review before the mandate and the reviewer steps of the quality gate raise the
+    quality of the work; neither is what the mandate decides or what acceptance decides by. So
+    changing them rewinds nothing, and what keeps an agent from switching a review off to get its
+    own work through is not a freeze but the write path: `rein reviews apply` at a terminal or the
+    dashboard's write session, each change in the audit chain with its reason, and `rein guard`
+    refusing any other edit of the file.
+    """
+
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def parse(cls, text: str, *, what: str = "reviews.yaml") -> Reviews:
+        document = strict_yaml.load_mapping(text, what=what)
+        errors = schema_errors(document, "reviews") or cls(document).problems()
+        if errors:
+            raise DocumentError(what, errors)
+        return cls(document)
+
+    def problems(self) -> list[str]:
+        """What the schema cannot say: every name a step reads for has to be defined somewhere."""
+        errors: list[str] = []
+        custom = [c.get("name") for c in self.custom]
+        for name in custom:
+            if name in BUILTIN_REVIEWS:
+                errors.append(f"custom/{name}: `{name}` is a packaged review — a custom one needs a name of its own")
+        if len(set(custom)) != len(custom):
+            errors.append("custom: two reviews share a name")
+        names = [step.name for step in self.steps]
+        if len(set(names)) != len(names):
+            errors.append("steps: two steps share a name")
+        known = {*BUILTIN_REVIEWS, *(str(n) for n in custom)}
+        for step in self.steps:
+            for review in step.reviews:
+                if review not in known:
+                    errors.append(f"steps/{step.name}: `{review}` is neither a packaged review nor one under `custom`")
+        return errors
+
+    @property
+    def steps(self) -> tuple[ReviewStep, ...]:
+        return tuple(ReviewStep(step) for step in _maps(self.raw, "steps"))
+
+    @property
+    def custom(self) -> tuple[Mapping[str, Any], ...]:
+        return _maps(self.raw, "custom")
+
+    def prompt_of(self, review: str) -> str:
+        """The repository path a custom review's question is read from ("" for a packaged one)."""
+        return next((str(c.get("prompt", "")) for c in self.custom if c.get("name") == review), "")
+
+    def adversarial(self, stage: str) -> bool:
+        value = self.raw.get("adversarial")
+        return bool(value.get(stage)) if isinstance(value, dict) else False
+
+    @property
+    def adversarial_off(self) -> tuple[str, ...]:
+        """The drafting stages whose adversarial review is switched off, in cycle order."""
+        return tuple(stage for stage in ADVERSARIAL_STAGES if not self.adversarial(stage))
+
+
 @dataclass(frozen=True)
 class Review:
     """``review.yaml`` — the machine review and the human review, digested separately (plan §6.6).
@@ -1758,7 +1866,7 @@ class ExecutorProfile:
 
 @dataclass(frozen=True)
 class GateStep:
-    """One quality-gate step — the DoD is exactly this list, in order (plan §19)."""
+    """One quality-gate command step — the DoD is exactly this list, in order (plan §19)."""
 
     raw: Mapping[str, Any]
 
@@ -1767,16 +1875,8 @@ class GateStep:
         return _str(self.raw, "name")
 
     @property
-    def kind(self) -> str:
-        return _str(self.raw, "kind", "command")
-
-    @property
     def command(self) -> tuple[str, ...]:
         return _ids(self.raw, "command")
-
-    @property
-    def agent_role(self) -> str:
-        return _str(self.raw, "agent_role")
 
     @property
     def executor_profile(self) -> str:
@@ -2196,7 +2296,6 @@ class Config:
         reached = {
             resolved.name: resolved
             for step in self.quality_gate
-            if step.kind == "command"
             for resolved in (
                 (named.get(step.executor_profile) if step.executor_profile else None) or self.quality_gate_profile,
             )

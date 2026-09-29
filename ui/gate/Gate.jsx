@@ -83,9 +83,9 @@ function Naming({ naming, gate }) {
   const undeclared = (naming || {}).undeclared || [];
   const delta = (naming || {}).delta || [];
   const documents = (naming || {}).documents || [];
-  if (!unasked.length && !lenses.length && !crossing.length && !undeclared.length && !delta.length && !documents.length) {
-    return null;
-  }
+  const adversarialOff = (naming || {}).adversarial_off || [];
+  const lists = [unasked, lenses, crossing, undeclared, delta, documents, adversarialOff];
+  if (!lists.some((list) => list.length)) return null;
   const crossingTasks = [...new Set(crossing.filter((c) => !c.carried_from).map((c) => c.task_id))];
   const proposedCount = lenses.filter((l) => l.status === "proposed").length;
   return (
@@ -115,6 +115,21 @@ function Naming({ naming, gate }) {
               ))}
             </tbody>
           </table>
+        </>
+      ) : null}
+      {adversarialOff.length ? (
+        <>
+          {/* Switched off by a human in reviews.yaml. Not a blocker; approved knowing it. */}
+          <div className="subhead" style={{ marginTop: ".8rem" }}>
+            {adversarialOff.length} drafting stage(s) went without an adversarial review
+          </div>
+          <ul>
+            {adversarialOff.map((row) => (
+              <li key={row.id}>
+                <span className="mono">{row.id}</span> — {row.change}
+              </li>
+            ))}
+          </ul>
         </>
       ) : null}
       {documents.length ? (

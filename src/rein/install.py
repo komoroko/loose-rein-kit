@@ -660,6 +660,21 @@ def refresh_ungenerated_review(repo: repo_mod.Repo) -> bool:
     return True
 
 
+def seed_reviews(repo: repo_mod.Repo) -> bool:
+    """Write the packaged `reviews.yaml` when the repository has none. True when it was written.
+
+    A repository from before the file existed has no record of which reviews run, and the build
+    refuses to guess one. The packaged file is what `rein init` seeds; what it says is the review a
+    config's `quality_gate` agent step used to ask for. Never over an existing file: that one is a
+    human's, and only `rein reviews apply` changes it.
+    """
+    path = repo.reviews
+    if path.exists():
+        return False
+    path.write_bytes(data_mod.read_bytes("scaffold/rein/reviews.yaml"))
+    return True
+
+
 def _documents_invalid(repo: repo_mod.Repo) -> list[str]:
     """Which SSOT documents this release's schema refuses, worded for the console ([] = none)."""
     from rein import models
@@ -672,6 +687,7 @@ def _documents_invalid(repo: repo_mod.Repo) -> list[str]:
         ("state.yaml", store.read_state),
         ("plan.yaml", store.read_plan),
         ("review.yaml", store.read_review),
+        ("reviews.yaml", store.read_reviews),
     ):
         try:
             reader()
@@ -710,6 +726,8 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
     hashes = _apply_plan(repo, items, desired)
     if refresh_ungenerated_review(repo):
         print("  update        .rein/review.yaml (the scaffold stub — it held no review)")
+    if seed_reviews(repo):
+        print("  seed          .rein/reviews.yaml (which reviews run — `rein reviews show`)")
     _refresh_gitignore(repo, write=True)
     files = {_materialized_key(rel): digest for rel, digest in _record_after(recorded, items, hashes).items()}
     data["prompts"] = {"version": rein.__version__, "files": files}

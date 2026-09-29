@@ -1240,6 +1240,10 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # First after the digests: on a re-approval this is what the human is actually deciding.
         print(f"What changed since you last approved this mandate ({len(delta)}):")
         print(render_delta(delta) + "\n")
+    switched_off = named["adversarial_off"]
+    if switched_off:
+        print(f"{len(switched_off)} drafting stage(s) went without an adversarial review:")
+        print("\n".join(f"  {row['id']}: {row['change']}" for row in switched_off) + "\n")
     documents = named["documents"]
     if documents:
         print(f"Documents changed since you last approved this mandate ({len(documents)}):")
@@ -1281,6 +1285,7 @@ class Naming(TypedDict):
     undeclared: list[dict[str, str]]
     delta: list[dict[str, str]]
     documents: list[dict[str, str]]
+    adversarial_off: list[dict[str, str]]
 
 
 def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> Naming:
@@ -1319,6 +1324,7 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         "undeclared": [],
         "delta": [],
         "documents": [],
+        "adversarial_off": [],
     }
     out["crossing"] = crossing_declarations(repo, gate)
     unasked = _unasked_decisions(repo, gate)
@@ -1344,6 +1350,17 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         return out
     out["delta"] = mandate_delta(repo, plan)
     out["documents"] = document_delta(repo, plan)
+    # A stage whose adversarial review a human switched off (`reviews.yaml`). Not a blocker — it
+    # was theirs to switch — but a mandate drafted without one is approved knowing it.
+    try:
+        reviews = store_mod.Store(repo).read_reviews()
+    except models.DocumentError:
+        reviews = None  # an unreadable reviews.yaml stops `rein build`, which says why
+    if reviews is not None:
+        out["adversarial_off"] = [
+            {"id": stage, "change": "no adversarial review ran here: switched off in .rein/reviews.yaml"}
+            for stage in reviews.adversarial_off
+        ]
     # Criteria that name no path contribute nothing to the derived scope and edges
     # (`models._structure_errors`): each is a place a contradiction can still hide until the build.
     out["undeclared"] = [

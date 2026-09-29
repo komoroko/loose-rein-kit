@@ -287,6 +287,18 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
       </tr>
     );
   }
+  // Which reviews read each task. `reviews.yaml` can change mid-cycle without rewinding anything,
+  // so the screen that takes the change says what each task actually got.
+  for (const r of residuals.reviews_by_task || []) {
+    residualRows.push(
+      <tr key={"reviews:" + r.task_id}>
+        <td>reviewed by</td>
+        <td className="mono">
+          {r.task_id}: {r.readings.join(" · ")}
+        </td>
+      </tr>
+    );
+  }
   // Scope widened after the mandate froze, inside what the config allowed ahead of time.
   for (const w of residuals.scope_added_after_mandate || []) {
     residualRows.push(

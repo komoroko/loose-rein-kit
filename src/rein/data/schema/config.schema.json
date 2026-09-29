@@ -129,7 +129,8 @@
         "additionalProperties": false,
         "required": [
           "name",
-          "kind"
+          "command",
+          "executor_profile"
         ],
         "properties": {
           "name": {
@@ -138,25 +139,15 @@
             "maxLength": 64,
             "pattern": "^[a-z0-9][a-z0-9_-]*$"
           },
-          "kind": {
-            "enum": [
-              "command",
-              "agent"
-            ]
-          },
           "command": {
             "type": "array",
+            "minItems": 1,
             "maxItems": 64,
             "items": {
               "type": "string",
               "minLength": 1,
               "maxLength": 500
             }
-          },
-          "agent_role": {
-            "enum": [
-              "code_reviewer"
-            ]
           },
           "executor_profile": {
             "$ref": "#/$defs/profileName"
@@ -193,49 +184,7 @@
               "both"
             ]
           }
-        },
-        "allOf": [
-          {
-            "if": {
-              "properties": {
-                "kind": {
-                  "const": "command"
-                }
-              },
-              "required": [
-                "kind"
-              ]
-            },
-            "then": {
-              "required": [
-                "command",
-                "executor_profile"
-              ],
-              "properties": {
-                "command": {
-                  "minItems": 1
-                }
-              }
-            }
-          },
-          {
-            "if": {
-              "properties": {
-                "kind": {
-                  "const": "agent"
-                }
-              },
-              "required": [
-                "kind"
-              ]
-            },
-            "then": {
-              "required": [
-                "agent_role"
-              ]
-            }
-          }
-        ]
+        }
       }
     },
     "security": {

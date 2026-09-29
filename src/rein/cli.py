@@ -59,6 +59,7 @@ VERBS: dict[str, Verb] = {
     "install": Verb("install:cmd_install", "add an agent's surfaces (claude / codex / copilot / gemini)"),
     "uninstall": Verb("install:cmd_uninstall", "retract integration surfaces (pristine files only)"),
     "agent": Verb("agent_cli", "point the AI roles at an adapter (--show lists them and their groups)"),
+    "reviews": Verb("reviews_cmd", "which reviews run (show), and changing them at a terminal (apply)"),
     "oci": Verb("oci_cli", "build the sandbox images and pin their digests"),
     "sync": Verb("install:cmd_sync", "rematerialize .rein/prompts|schema|rules from the installed package"),
     "upgrade": Verb("install:cmd_upgrade", "changelog transition + sync + refresh installed integrations"),

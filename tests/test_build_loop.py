@@ -52,11 +52,13 @@ from rein import store as store_mod
 from rein import usage as usage_mod
 from tests._support import (
     DEMO_CYCLE,
+    REVIEW_STEP,
     agent_output,
     fake_git,
     make_config,
     make_plan,
     make_review,
+    make_reviews,
     make_state,
     make_task,
     seed_repo,
@@ -174,7 +176,7 @@ def test_a_batch_never_starts_a_task_whose_upstream_is_unfinished(max_parallel: 
 
 
 def test_config_normalizes_the_quality_gate(tmp_path: Path) -> None:
-    config = build_loop.Config.from_models(models.Config(make_config()))
+    config = build_loop.Config.from_models(models.Config(make_config()), models.Reviews(make_reviews()), questions={})
     assert [s.name for s in config.steps] == ["test", "check"]
     assert config.steps[0].command == ("make", "test")
     assert config.gate_cmds == ["make test", "make check"]
@@ -184,7 +186,7 @@ def test_an_unknown_adapter_is_refused_up_front() -> None:
     config = make_config()
     config["agents"]["implementer"]["adapter"] = "mystery"  # type: ignore[index]
     with pytest.raises(adapters.LaunchRefused, match="does not know how to launch"):
-        build_loop.Config.from_models(models.Config(config))
+        build_loop.Config.from_models(models.Config(config), models.Reviews(make_reviews()), questions={})
 
 
 def test_the_integration_gate_is_not_a_knob() -> None:
@@ -203,28 +205,25 @@ def test_a_step_command_is_an_argv_list_not_a_shell_string() -> None:
 
 # --- an agent step launches the role it declares -------------------------------
 #
-# The config schema requires `agent_role` on an agent step, and nothing read it:
-# the step launched `agents.implementer`'s adapter while calling itself `code_reviewer`. Two
+# An agent step launched `agents.implementer`'s adapter while calling itself `code_reviewer`. Two
 # roles an operator had configured separately were one process — the reviewer asked for a second
 # opinion was the same model that had just written the code. The template's own config sets both
 # roles to `claude`, so nothing observable changed and the defect survived; these tests pin the
 # roles to *different* adapters, which is the only way the difference shows up at all.
 
-_AGENT_GATE = [
-    {"name": "review", "kind": "agent", "agent_role": "code_reviewer", "retries": 1, "required": True},
-]
-
 
 def _config_with_split_adapters(reviewer: str = "codex") -> build_loop.Config:
-    raw = make_config(quality_gate=list(_AGENT_GATE))
+    raw = make_config()
     raw["agents"]["implementer"] = {"adapter": "claude"}
     raw["agents"]["code_reviewer"] = {"adapter": reviewer}
-    return build_loop.Config.from_models(models.Config(raw))
+    return build_loop.Config.from_models(
+        models.Config(raw), models.Reviews(make_reviews(steps=[REVIEW_STEP])), questions={}
+    )
 
 
 def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
     config = _config_with_split_adapters()
-    step = config.steps[0]
+    step = next(s for s in config.steps if s.kind == "agent")
     assert step.agent_role == "code_reviewer"
     assert step.agent_argv == adapters.ADAPTER_TABLE["codex"].launch_argv()
     # The implementer's own adapter is untouched — the two are resolved independently.
@@ -269,12 +268,16 @@ def _batch_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewer: str
 _T1 = dag.Task(id="T-001", title="base", kind="foundation")
 
 
+def _reviewer(orch: build_loop.Orchestrator) -> build_loop.GateStep:
+    return next(step for step in orch.config.steps if step.kind == "agent")
+
+
 def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     orch = _batch_reader(tmp_path, monkeypatch)
     launched: list[list[str]] = []
     monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
 
-    assert orch._read_batch(orch.config.steps[0], [_T1]) == {"T-001": build_loop.ReviewAnswer()}
+    assert orch._read_batch(_reviewer(orch), [_T1]) == {"T-001": build_loop.ReviewAnswer()}
 
     assert launched, "the agent step never launched anything"
     assert tuple(launched[0][:3]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
@@ -296,7 +299,7 @@ def test_the_reviewer_is_granted_its_findings_file_and_nothing_else(
     launched: list[list[str]] = []
     monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
 
-    orch._read_batch(orch.config.steps[0], [_T1])
+    orch._read_batch(_reviewer(orch), [_T1])
 
     assert "write(.rein/work/review.T-001.findings.json)" in launched[0], "the one file it is there to produce"
     assert "--allow-all-tools" not in launched[0], "the reviewer was launched able to change the code it judges"
@@ -316,7 +319,7 @@ def test_a_reviewer_on_a_read_only_cli_can_still_write_its_findings(
     launched: list[list[str]] = []
     monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
 
-    orch._read_batch(orch.config.steps[0], [_T1])
+    orch._read_batch(_reviewer(orch), [_T1])
 
     assert "--sandbox" in launched[0] and "workspace-write" in launched[0]
 
@@ -326,7 +329,7 @@ def test_a_must_fix_finding_is_what_goes_back(tmp_path: Path, monkeypatch: pytes
     finding = {"severity": "must_fix", "statement": "the guard is gone", "anchor": "src/x.py:4"}
     monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [finding], []))
 
-    answered = orch._read_batch(orch.config.steps[0], [_T1])
+    answered = orch._read_batch(_reviewer(orch), [_T1])
 
     assert "the guard is gone" in answered["T-001"].send_back
 
@@ -340,7 +343,7 @@ def test_a_tree_that_moved_under_the_reviewer_goes_back_even_with_nothing_found(
     monkeypatch.setattr(orch, "_fingerprint", lambda cwd: next(trees))
     monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], []))
 
-    answered = orch._read_batch(orch.config.steps[0], [_T1])
+    answered = orch._read_batch(_reviewer(orch), [_T1])
 
     assert "changed while it was being reviewed" in answered["T-001"].send_back
 
@@ -351,7 +354,7 @@ def test_an_unreadable_review_is_not_a_review_that_found_nothing(
     """The failure mode a silent pass would hide: a reviewer that said nothing readable."""
     orch = _batch_reader(tmp_path, monkeypatch)
     monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, agent_output(cmd, "I had a good look, honestly")))
-    [answer] = orch._read_batch(orch.config.steps[0], [_T1]).values()
+    [answer] = orch._read_batch(_reviewer(orch), [_T1]).values()
     assert "wrote no findings file" in answer.stop and not answer.send_back
 
 
@@ -362,7 +365,7 @@ def test_a_task_the_reviewer_wrote_nothing_about_was_not_reviewed(
     orch = _batch_reader(tmp_path, monkeypatch)
     monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], []))
     t2 = dag.Task(id="T-002", title="leaf", kind="parallel")
-    answers = orch._read_batch(orch.config.steps[0], [_T1, t2])
+    answers = orch._read_batch(_reviewer(orch), [_T1, t2])
 
     assert answers["T-001"] == build_loop.ReviewAnswer()
     assert "wrote no entry for this task" in answers["T-002"].stop
@@ -464,10 +467,12 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
 
 def test_an_unlaunchable_role_adapter_stops_the_build_before_it_starts() -> None:
     """Refused up front, not at the first step that needed it — halfway through a task."""
-    raw = make_config(quality_gate=list(_AGENT_GATE))
+    raw = make_config()
     raw["agents"]["code_reviewer"] = {"adapter": "nonesuch"}
     with pytest.raises(adapters.LaunchRefused, match="agents.code_reviewer.adapter"):
-        build_loop.Config.from_models(models.Config(raw))
+        build_loop.Config.from_models(
+            models.Config(raw), models.Reviews(make_reviews(steps=[REVIEW_STEP])), questions={}
+        )
 
 
 # --- task status goes through the Central Store -------------------------------
@@ -827,7 +832,7 @@ def test_a_command_step_with_no_command_cannot_be_expressed() -> None:
     """An empty `run` would have to fail fast at build time. The schema refuses the shape
     outright instead, so the contradictory DoD never reaches the loop — the scaffold ships an
     explicit placeholder command rather than a silent skip."""
-    config = make_config(quality_gate=[{"name": "smoke", "kind": "command", "executor_profile": "quality"}])
+    config = make_config(quality_gate=[{"name": "smoke", "executor_profile": "quality"}])
     assert any("'command' is a required property" in e for e in models.schema_errors(config, "config"))
 
 
@@ -1024,7 +1029,6 @@ def _paths_scoped_config() -> dict[str, object]:
         quality_gate=[
             {
                 "name": "test",
-                "kind": "command",
                 "command": ["make", "test"],
                 "executor_profile": "quality",
                 "retries": 2,
@@ -1032,7 +1036,6 @@ def _paths_scoped_config() -> dict[str, object]:
             },
             {
                 "name": "web",
-                "kind": "command",
                 "command": ["npm", "test"],
                 "executor_profile": "quality",
                 "retries": 2,
@@ -1230,13 +1233,43 @@ def _subjects(*ids: str) -> list[build_prompts.ReviewSubject]:
     ]
 
 
-def _batch_prompt(*ids: str, disciplines: dict[str, str] | None = None) -> str:
+def _batch_prompt(
+    *ids: str,
+    disciplines: dict[str, str] | None = None,
+    reviews: tuple[str, ...] = ("correctness", "simplification"),
+    questions: dict[str, str] | None = None,
+) -> str:
     return build_prompts.batch_review_prompt(
         _subjects(*ids),
         gate_cmds=["make test"],
         findings_path=".rein/work/review.findings.json",
+        reviews=reviews,
+        questions=questions or {},
         disciplines=disciplines,
     )
+
+
+def test_a_review_switched_off_is_neither_asked_nor_pointed_at() -> None:
+    """`reviews.yaml` lists what a step reads for; what it does not list is not in the prompt (CR-50)."""
+    prompt = _batch_prompt("T-001", disciplines=_claude_disciplines(), reviews=("correctness",))
+    assert "**Correctness**" in prompt
+    assert "Simplification" not in prompt and "YAGNI" not in prompt
+    assert "/simplify" not in prompt and "/code-review" in prompt
+
+
+def test_a_custom_review_asks_its_own_question() -> None:
+    question = "Does every new query use an index? Name the query and the index."
+    prompt = _batch_prompt("T-001", reviews=("correctness", "performance"), questions={"performance": question})
+    assert f"**performance**: {question}" in prompt
+    # The findings come back through the same file as every other review's.
+    assert "Write your findings to `.rein/work/review.findings.json`" in prompt
+
+
+def test_a_custom_review_with_no_question_stops_the_build_before_it_starts() -> None:
+    reviews = make_reviews(steps=[{"name": "review", "reviews": ["performance"]}])
+    reviews["custom"] = [{"name": "performance", "prompt": "docs/reviews/performance.md"}]
+    with pytest.raises(ValueError, match="performance"):
+        build_loop.Config.from_models(models.Config(make_config()), models.Reviews(reviews), questions={})
 
 
 def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
@@ -1270,7 +1303,12 @@ def test_the_integration_reviewer_is_not_asked_the_test_question() -> None:
     from rein import build_prompts
 
     prompt = build_prompts.integration_review_prompt(
-        "T-001, T-002", gate_cmds=["make test"], diff_cmd="git diff main", findings_path="/tmp/f.json"
+        "T-001, T-002",
+        gate_cmds=["make test"],
+        diff_cmd="git diff main",
+        findings_path="/tmp/f.json",
+        reviews=("correctness", "simplification"),
+        questions={},
     )
     assert "would go red" not in prompt
 
@@ -1300,7 +1338,7 @@ def test_a_host_without_them_is_never_pointed_at_a_command_that_is_not_there() -
     assert "/code-review" not in prompt and "/simplify" not in prompt
     # The questions themselves are still asked — that is the floor, and it is what a codex reviewer
     # has always had.
-    assert "correctness bugs" in prompt and "YAGNI" in prompt
+    assert "**Correctness**" in prompt and "YAGNI" in prompt
 
 
 def test_a_claude_reviewer_is_pointed_at_both_and_told_what_they_must_not_do() -> None:
@@ -1327,6 +1365,8 @@ def test_the_join_says_to_keep_only_what_the_join_shows() -> None:
         gate_cmds=["make test"],
         diff_cmd="git diff main",
         findings_path="/tmp/f.json",
+        reviews=("correctness", "simplification"),
+        questions={},
         disciplines=_claude_disciplines(),
     )
     assert "Keep what only the join shows" in prompt
@@ -1502,7 +1542,7 @@ def test_a_gate_step_carries_the_executor_profile_the_schema_requires(tmp_path: 
     """The config schema makes `executor_profile` required for a command step; normalization
     dropped it, so "repository code runs in the sandbox, never on the host" was true of the
     the sandbox and of nothing else — `make test` runs agent-authored files."""
-    config = build_loop.Config.from_models(models.Config(make_config()))
+    config = build_loop.Config.from_models(models.Config(make_config()), models.Reviews(make_reviews()), questions={})
     test_step = next(s for s in config.steps if s.name == "test")
     assert test_step.executor_profile == "quality"
 
@@ -2053,22 +2093,22 @@ def _staged_config() -> build_loop.Config:
                 quality_gate=[
                     {
                         "name": "focused",
-                        "kind": "command",
                         "command": ["a"],
                         "executor_profile": "quality",
                         "stage": "task",
                     },
                     {
                         "name": "suite",
-                        "kind": "command",
                         "command": ["b"],
                         "executor_profile": "quality",
                         "stage": "integration",
                     },
-                    {"name": "check", "kind": "command", "command": ["c"], "executor_profile": "quality"},
+                    {"name": "check", "command": ["c"], "executor_profile": "quality"},
                 ]
             )
-        )
+        ),
+        models.Reviews(make_reviews()),
+        questions={},
     )
 
 

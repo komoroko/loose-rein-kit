@@ -738,6 +738,7 @@ def generate(
                 actual_statements=composed.statements,
                 changed_paths=changed,
                 blob_facts=_blob_facts(repo, head),
+                reviews_applied=brief.reviews_by_task(event_chain.scan(repo.events)[0]),
             ),
             residual_findings=brief.residual_findings(state),
         )

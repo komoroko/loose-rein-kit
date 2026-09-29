@@ -46,6 +46,7 @@ BUILD_CMD = ".rein/prompts/commands/build.md"
 RULES_DIR = ".rein/prompts/rules"
 COMMANDS_DIR = ".rein/prompts/commands"
 CONFIG_PATH = ".rein/config.yaml"
+REVIEWS_PATH = ".rein/reviews.yaml"
 CLAUDE_MAPPING = "CLAUDE.md"
 COPILOT_MAPPING = ".github/instructions/rein.instructions.md"
 CODEX_MAPPING = ".codex/rein.md"
@@ -143,9 +144,11 @@ def gate_names() -> list[str]:
     return sorted([*models.GATE_ENDS, _GATE_PLACEHOLDER])
 
 
-def quality_gate_steps(config_text: str) -> list[str]:
-    """The DoD step names from config.yaml — defined once there, echoed by AGENTS.md."""
-    return [step.name for step in models.Config.parse(config_text).quality_gate if step.name]
+def quality_gate_steps(config_text: str, reviews_text: str) -> list[str]:
+    """The DoD step names — the commands from config.yaml, the reviewers from reviews.yaml — each
+    defined once there and echoed by the prose that teaches them."""
+    commands = [step.name for step in models.Config.parse(config_text).quality_gate if step.name]
+    return commands + [step.name for step in models.Reviews.parse(reviews_text).steps]
 
 
 def check_vocabulary(files: dict[str, str]) -> list[str]:
@@ -164,9 +167,9 @@ def check_vocabulary(files: dict[str, str]) -> list[str]:
     failures += _require(files[AGENTS_MD], AGENTS_MD, gate_names(), "gate (models.gate_names)")
     # The DoD step names are defined once (config.yaml) but narrated in several prose homes —
     # every copy must keep echoing them, or a renamed step teaches stale vocabulary somewhere.
-    steps = quality_gate_steps(files[CONFIG_PATH])
+    steps = quality_gate_steps(files[CONFIG_PATH], files[REVIEWS_PATH])
     for path in (AGENTS_MD, BUILD_CMD, "README.md", "README.ja.md"):
-        failures += _require(files[path], path, steps, "quality-gate step (config.yaml)")
+        failures += _require(files[path], path, steps, "quality-gate step (config.yaml, reviews.yaml)")
     return failures
 
 
@@ -867,7 +870,7 @@ def check_ssot_validates(root: Path) -> list[str]:
     and what they say is its business.
     """
     failures = []
-    for name in ("config", "state", "plan", "review"):
+    for name in ("config", "state", "plan", "review", "reviews"):
         path = root / ".rein" / f"{name}.yaml"
         if not path.is_file():
             continue
@@ -1290,7 +1293,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         files = {
             path: (root / path).read_text(encoding="utf-8")
-            for path in (AGENTS_MD, TASKS_CMD, BUILD_CMD, CONFIG_PATH, "README.md", "README.ja.md")
+            for path in (AGENTS_MD, TASKS_CMD, BUILD_CMD, CONFIG_PATH, REVIEWS_PATH, "README.md", "README.ja.md")
         }
         failures = check_vocabulary(files)
         failures += check_wrapper_parity(root)

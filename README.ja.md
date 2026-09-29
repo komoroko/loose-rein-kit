@@ -281,20 +281,26 @@ command: notify-send "rein"
 持っていなければ読み取り専用である。
 
 ## 設定できるもの
-<!-- README.md: 5a52dd541f6d -->
+<!-- README.md: 35059f215962 -->
 
 つまみはすべて `.rein/config.yaml` にあり、その場にコメントが付いている。以下はそのうちプロジェクトが
 普通に触るものである。既存リポジトリでは `rein init` が、認識できた品質ゲートのコマンドだけを埋める。
 
 | キー | 何を決めるか |
 |---|---|
-| `quality_gate` | 単一の DoD 定義: `test`、次に `check`、次に `review` ステップ、次に実行可能な成果物に対する `smoke` 起動(動くようになったら `required: true` にする)。コマンドはプロジェクト自身のもので、各ステップは自分のリトライ予算を持ち、`paths:` で適用範囲を絞れる |
+| `quality_gate` | 単一の DoD 定義: `test`、次に `check`、次に実行可能な成果物に対する `smoke` 起動(動くようになったら `required: true` にする)。コマンドはプロジェクト自身のもので、各ステップは自分のリトライ予算を持ち、`paths:` で適用範囲を絞れる |
 | `execution.max_parallel` | リーフタスクの同時実行数。`git worktree` で隔離され、タスク ID の昇順にマージされる |
 | `execution.agent_timeout_sec` | 既定は `0`(制限なし)。時計は、動いているモデルと詰まっているモデルを区別できないため |
 | `execution.command_timeout_sec` | 1つの command ステップの上限(既定 1800)。所要時間が分かるのは command ステップの側だからである。超えるとステップとそれが起動したものをまとめて kill する |
 | `execution.max_cost_usd` | 既定は未設定。束縛するのはサイクルの*計測された*消費 —— アダプタが報告した値、`rein events --cost` が印字する数字 —— で、到達するとバッチの切れ目でループが止まる。上限に収めるために品質が落ちることはない |
 | `review_policy.repair_rounds` | 実装者が指摘を解消したあと、レビュアーが読み直す回数 |
 | `guard.paths` | pending のゲートが凍結する範囲 |
+
+どのレビューを走らせるかは `config.yaml` には無い。`.rein/reviews.yaml` が、mandate 前の敵対的検証を
+起草の段ごとに、タスクのバッチを読む `review` ステップを、`correctness`・`simplification`・`security`
+または問いをファイルに書いた独自のレビューとして持つ。mandate の凍結の外にあるので変えても何も巻き
+戻らず、変えられるのはあなただけである。端末で `rein reviews apply <file> --reason ...` を実行するか、
+ダッシュボードの Reviews 画面を使う。acceptance が判断の根拠にする comparison はここに無く、外せない。
 
 **無人での実行。** `rein build` の終了コードが信号である: `0` は完了、`1` と `2` は人間を必要とし、
 `3` は一時的 —— 容量制限、シグナル、別の実行がロックを保持している —— で、何も記録せず予算も消費
@@ -426,7 +432,7 @@ Loose Rein はこれらを読んで診断するが、設定はしない。自分
   `rein install claude|copilot|codex|gemini` を実行し、新しいセッションを開く(セットアップの手順5)。
 
 ## リポジトリ構成
-<!-- README.md: 3f87d7a7c42c -->
+<!-- README.md: cabbee7e7dbb -->
 
 `rein init` が書き込むのは**状態だけ**である: SSOT の各文書、docs のスキャフォールド、実体化された
 プロンプトとスキーマ、ロック、`AGENTS.md` に追記されるマーカー付きのポインタブロック、そして作業
@@ -441,6 +447,7 @@ Loose Rein はこれらを読んで診断するが、設定はしない。自分
 | `.rein/review.yaml` | 機械レビューと人間レビュー(別々に digest される) |
 | `.rein/events.ndjson` | ハッシュ連鎖した監査ログ。各起動はプロバイダが課金した量を記録するので、`rein events --cost` がサイクルのトークンの行き先を役割別に答える |
 | `.rein/config.yaml` | 決定論的実行のつまみと、単一の DoD (`quality_gate`) |
+| `.rein/reviews.yaml` | どのレビューを走らせるか。mandate の凍結の外にあり、`rein reviews apply` かダッシュボードだけが変える |
 | `.rein/rein.lock` | 文書フォーマット、ツールのバージョンと取得元、導入ファイルごとの内容ハッシュ |
 | `.rein/prompts/` | 全エージェントが読むフェーズ手順・役割定義・ルールモジュール(パッケージから実体化) |
 | `AGENTS.md`・`CLAUDE.md` | エージェント非依存の運用ルールと、それを読み込む Claude Code 用の能力マッピング |

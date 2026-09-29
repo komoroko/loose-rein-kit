@@ -60,7 +60,7 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -304,6 +304,9 @@ class GateStep:
     #: Where this step runs: `task`, `integration`, or `both`. Never "whether" — every configured
     #: step still runs; this is how often the same confidence gets bought.
     stage: str = "both"
+    #: What an agent step reads for (`reviews.yaml`): packaged review names, and custom ones whose
+    #: question is in `Config.questions`.
+    reviews: tuple[str, ...] = ()
     #: This step runs the tests — the only kind of step the negative control re-establishes.
     runs_tests: bool = False
     #: Where the step writes a JUnit XML report, relative to its checkout ("": it does not). What
@@ -340,6 +343,8 @@ class Config:
     launch_retries: int
     #: Dollars this cycle may spend before the loop stops and hands back. 0.0 = no ceiling.
     max_cost_usd: float = 0.0
+    #: The question each custom review asks, read from the file `reviews.yaml` names for it.
+    questions: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def gate_cmds(self) -> list[str]:
@@ -347,27 +352,25 @@ class Config:
         return [s.display for s in self.steps if s.kind == "command" and s.command]
 
     @classmethod
-    def from_models(cls, config: models.Config) -> Config:
+    def from_models(cls, config: models.Config, reviews: models.Reviews, *, questions: Mapping[str, str]) -> Config:
         """The knobs, with every role the run will launch resolved up front.
 
         Resolving here rather than at the first step that needs it is what makes an unlaunchable
         adapter stop the build before an implementer has been paid for, instead of halfway
-        through a task.
+        through a task. The same goes for a custom review whose question was never written: it
+        stops here, not in the prompt of a reviewer already launched.
+
+        The command steps come from `config.yaml` and are frozen with the mandate; the reviewer
+        steps come from `reviews.yaml`, which is not (`models.Reviews`). Both run as one DoD.
         """
-        steps = tuple(
+        commands = tuple(
             GateStep(
                 name=step.name,
-                kind=step.kind,
+                kind="command",
                 command=step.command,
                 retries=max(0, step.retries),
                 required=step.required,
                 executor_profile=step.executor_profile,
-                agent_role=step.agent_role,
-                # An agent step launches the role it declares. The schema already requires
-                # `agent_role` here; resolving it is what makes the declaration true.
-                agent_argv=(
-                    adapters.launch_argv(config, step.agent_role) if step.kind == "agent" and step.agent_role else ()
-                ),
                 paths=step.paths,
                 stage=step.stage,
                 runs_tests=step.runs_tests,
@@ -375,6 +378,29 @@ class Config:
             )
             for step in config.quality_gate
         )
+        unwritten = sorted(
+            {name for step in reviews.steps for name in step.reviews if name not in models.BUILTIN_REVIEWS}
+            - set(questions)
+        )
+        if unwritten:
+            raise ValueError(
+                f"custom review(s) {', '.join(unwritten)} have no question to ask — see .rein/reviews.yaml"
+            )
+        readers = tuple(
+            GateStep(
+                name=step.name,
+                kind="agent",
+                retries=max(0, step.retries),
+                required=True,
+                agent_role="code_reviewer",
+                agent_argv=adapters.launch_argv(config, "code_reviewer"),
+                paths=step.paths,
+                stage=step.stage,
+                reviews=step.reviews,
+            )
+            for step in reviews.steps
+        )
+        steps = commands + readers
         argv = adapters.launch_argv(config, "implementer")
         return cls(
             raw=config,
@@ -390,6 +416,7 @@ class Config:
             adapter_argv=argv,
             max_cost_usd=config.max_cost_usd,
             launch_retries=max(0, config.launch_retries),
+            questions=dict(questions),
         )
 
     @classmethod
@@ -398,7 +425,29 @@ class Config:
         config = store.read_config()
         if config is None:
             raise ValueError(f"no {repo.config} — run `rein init` first")
-        return cls.from_models(config)
+        reviews = store.read_reviews()
+        if reviews is None:
+            raise ValueError(f"no {repo.reviews} — `rein sync` writes the packaged one")
+        return cls.from_models(config, reviews, questions=review_questions(repo, reviews))
+
+
+def review_questions(repo: repo_mod.Repo, reviews: models.Reviews) -> dict[str, str]:
+    """Each custom review's question, read from the repository file `reviews.yaml` names.
+
+    A named file that is missing is refused rather than skipped: a reviewer told to read for a
+    review with no question would read for nothing and say so in a findings file nobody doubts.
+    """
+    questions: dict[str, str] = {}
+    for entry in reviews.custom:
+        name, prompt = str(entry.get("name", "")), str(entry.get("prompt", ""))
+        try:
+            text = repo.path(prompt).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError(f"custom review {name!r}: cannot read its question from {prompt}: {exc}") from None
+        if not text:
+            raise ValueError(f"custom review {name!r}: {prompt} is empty, so there is no question to ask")
+        questions[name] = text
+    return questions
 
 
 def render_owed(graph: dag.Graph, owed: Mapping[str, Sequence[str]]) -> str:
@@ -1888,6 +1937,8 @@ class Orchestrator:
             [self._review_subject(task) for task in subjects],
             gate_cmds=self.config.gate_cmds,
             findings_path=findings_rel,
+            reviews=step.reviews,
+            questions=self.config.questions,
             # Keyed on the argv this step is launched with, not the default one: offering a
             # discipline the launched CLI does not have is the dangling reference this replaced.
             disciplines=adapters.disciplines_for(argv),
@@ -1925,6 +1976,10 @@ class Orchestrator:
             )
             for task_id in missing
         }
+        if by_task:
+            self._event(
+                "reviews_applied", sorted(by_task), {"step": step.name, "stage": "task", "reviews": list(step.reviews)}
+            )
         for task_id, findings in by_task.items():
             self._add_review_findings(task_id, findings)
             outstanding = dossier.must_fix(findings)
@@ -3397,6 +3452,8 @@ class Orchestrator:
                         gate_cmds=self.config.gate_cmds,
                         diff_cmd=f"git diff {before_join}..HEAD",
                         findings_path=findings_rel,
+                        reviews=step.reviews,
+                        questions=self.config.questions,
                         disciplines=adapters.disciplines_for(step.agent_argv or self.config.adapter_argv),
                         lenses_applied=self._code_lenses[0],
                         lenses_proposed=self._code_lenses[1],
@@ -3418,6 +3475,11 @@ class Orchestrator:
                 findings = dossier.parse_findings(target.read_text(encoding="utf-8"))
             except (dossier.FindingsError, OSError) as exc:
                 raise StopLoop(f"{ids}: the integration reviewer's findings could not be read — {exc}") from None
+            self._event(
+                "reviews_applied",
+                [t.id for t in tasks],
+                {"step": step.name, "stage": "integration", "reviews": list(step.reviews)},
+            )
             outstanding = dossier.must_fix(findings)
             if not outstanding:
                 self._file_integration_findings(findings, tasks)

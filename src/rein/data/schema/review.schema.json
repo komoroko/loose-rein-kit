@@ -1427,6 +1427,32 @@
                     }
                   }
                 },
+                "reviews_by_task": {
+                  "description": "Which reviewer steps read each task, and for which reviews (`reviews_applied` in the chain). `reviews.yaml` is outside the mandate's freeze and may change mid-cycle, so a task is listed with what it actually got.",
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "task_id",
+                      "readings"
+                    ],
+                    "properties": {
+                      "task_id": {
+                        "$ref": "#/$defs/taskId"
+                      },
+                      "readings": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 1024
+                        }
+                      }
+                    }
+                  }
+                },
                 "scope_added_after_mandate": {
                   "description": "Paths added to a frozen task's scope after the mandate (`rein task scope-add`), inside the config's `guard.scope_additions`. Added without a person; listed here so that is not the same as unseen.",
                   "type": "array",

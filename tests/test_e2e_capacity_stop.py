@@ -30,7 +30,7 @@ WORK_BRANCH = "build/demo"
 
 #: A host profile and a command that always passes: what is under test is the orchestration, not
 #: anyone's test runner.
-GATE = [{"name": "test", "kind": "command", "command": ["true"], "executor_profile": "quality", "retries": 2}]
+GATE = [{"name": "test", "command": ["true"], "executor_profile": "quality", "retries": 2}]
 
 
 def git(root: Path, *args: str) -> str:

@@ -29,6 +29,7 @@ from tests._support import (
     make_decision,
     make_plan,
     make_review,
+    make_reviews,
     make_state,
     make_task,
     seed_repo,
@@ -1004,6 +1005,7 @@ def test_the_naming_layer_is_the_mandate_s_alone(tmp_path: Path) -> None:
         "undeclared": [],
         "delta": [],
         "documents": [],
+        "adversarial_off": [],
     }
     assert approve.naming(repo, "acceptance") == empty
 
@@ -1107,7 +1109,8 @@ def test_every_list_the_naming_layer_carries_reaches_the_terminal(
             lenses=[{"id": "L-CODE-CONCURRENCY", "stage": "code", "status": "proposed"}],
         ),
     )
-    # An earlier approval of some other plan, so the `delta` list has a row to carry.
+    # An earlier approval of some other plan, so the `delta` list has a row to carry, and a stage
+    # whose adversarial review is switched off, so `adversarial_off` has one too.
     from rein import store as store_mod
 
     with store_mod.Store(repo).transaction() as tx:
@@ -1117,6 +1120,7 @@ def test_every_list_the_naming_layer_carries_reaches_the_terminal(
             subject_ids=["mandate", "GA-MANDATE-0"],
             detail={"plan_digest": "sha256:" + "0" * 64},
         )
+        tx.write("reviews", {**make_reviews(), "adversarial": {"requirements": True, "design": False, "tasks": True}})
     monkeypatch.setattr("sys.stdin", _Tty("y\n"))
 
     approve.confirm_locally(repo, "mandate", {"plan": "sha256:0"})

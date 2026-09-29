@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 from rein import models, store
-from tests._support import make_config
+from tests._support import REVIEW_STEP, make_config, make_reviews
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,8 +30,7 @@ _spec.loader.exec_module(template_lint)
 _CONFIG = store.dump_yaml(
     make_config(
         quality_gate=[
-            {"name": "test", "kind": "command", "command": ["make", "test"], "executor_profile": "quality"},
-            {"name": "review", "kind": "agent", "agent_role": "code_reviewer"},
+            {"name": "test", "command": ["make", "test"], "executor_profile": "quality"},
         ]
     )
 ).decode()
@@ -44,6 +43,7 @@ _TASKS_CMD = (
     "kind: foundation | parallel | integration. "
     "status: todo in-progress blocked needs-revision awaiting-evidence done.\n"
 )
+_REVIEWS = store.dump_yaml(make_reviews(steps=[REVIEW_STEP])).decode()
 _DOD_PROSE = "the pipeline runs test then review.\n"  # every prose copy of the DoD must echo the step names
 
 
@@ -55,6 +55,7 @@ def _files(**overrides: str) -> dict[str, str]:
         "README.md": _DOD_PROSE,
         "README.ja.md": _DOD_PROSE,
         template_lint.CONFIG_PATH: _CONFIG,
+        template_lint.REVIEWS_PATH: _REVIEWS,
     }
     files.update(overrides)
     return files
@@ -80,7 +81,7 @@ def test_the_always_loaded_rules_have_to_name_the_third_kind_of_gate() -> None:
 
 
 def test_quality_gate_steps_reads_the_dod_names() -> None:
-    assert template_lint.quality_gate_steps(_CONFIG) == ["test", "review"]
+    assert template_lint.quality_gate_steps(_CONFIG, _REVIEWS) == ["test", "review"]
 
 
 def test_check_vocabulary_is_green_when_everything_is_echoed() -> None:
@@ -764,6 +765,7 @@ def test_live_repo_has_no_drift() -> None:
             template_lint.TASKS_CMD,
             template_lint.BUILD_CMD,
             template_lint.CONFIG_PATH,
+            template_lint.REVIEWS_PATH,
             "README.md",
             "README.ja.md",
         )

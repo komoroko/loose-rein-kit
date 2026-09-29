@@ -405,7 +405,7 @@ def _unlock_fd(fd: int) -> None:
 
 # --- the store -------------------------------------------------------------------
 
-_DOCUMENTS = ("plan", "state", "review")
+_DOCUMENTS = ("plan", "state", "review", "reviews")
 
 
 @dataclass
@@ -438,7 +438,12 @@ class Store:
         return self.runtime / "store.journal"
 
     def _document_path(self, name: str) -> Path:
-        return {"plan": self.repo.plan, "state": self.repo.state, "review": self.repo.review}[name]
+        return {
+            "plan": self.repo.plan,
+            "state": self.repo.state,
+            "review": self.repo.review,
+            "reviews": self.repo.reviews,
+        }[name]
 
     # -- reads ---------------------------------------------------------------
 
@@ -540,6 +545,10 @@ class Store:
     def read_review(self) -> models.Review | None:
         return self._read(self._review)
 
+    def read_reviews(self) -> models.Reviews | None:
+        """Which reviews run, or None when the file is absent (`rein sync` seeds it)."""
+        return self._read(self._reviews)
+
     def read_config(self) -> models.Config | None:
         """The validated config, or None when absent. Raises on a config that fails its schema."""
         return self._read(self._config)
@@ -572,6 +581,15 @@ class Store:
         if errors:
             raise models.DocumentError("review.yaml", errors)
         return models.Review(raw)
+
+    def _reviews(self) -> models.Reviews | None:
+        raw = self.read_raw("reviews")
+        if raw is None:
+            return None
+        errors = models.schema_errors(raw, "reviews") or models.Reviews(raw).problems()
+        if errors:
+            raise models.DocumentError("reviews.yaml", errors)
+        return models.Reviews(raw)
 
     def _config(self) -> models.Config | None:
         try:
@@ -818,6 +836,8 @@ class Transaction:
         if name not in _DOCUMENTS:
             raise StoreError(f"unknown document {name!r} (one of {', '.join(_DOCUMENTS)})")
         problems = models.schema_errors(mapping, name)
+        if not problems and name == "reviews":
+            problems = models.Reviews(mapping).problems()
         if problems:
             raise models.DocumentError(f"{name}.yaml (staged write)", problems)
         self._writes[name] = mapping

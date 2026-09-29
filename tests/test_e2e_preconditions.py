@@ -24,7 +24,7 @@ from rein import store as store_mod
 from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
 
 WORK_BRANCH = "build/demo"
-GATE = [{"name": "test", "kind": "command", "command": ["true"], "executor_profile": "quality", "retries": 2}]
+GATE = [{"name": "test", "command": ["true"], "executor_profile": "quality", "retries": 2}]
 LABELS = "docs/test/golden-labels.yaml"
 
 

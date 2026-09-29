@@ -1383,3 +1383,42 @@ def test_an_irreversible_point_can_be_refused_from_the_dashboard(crossing_server
 
     blockers = approve_mod.readiness(repo_mod.Repo(crossing_server.active_root()), "T-001")
     assert any("two steps" in b for b in blockers)
+
+
+# --- which reviews run (CR-51) -----------------------------------------------------
+
+
+def test_the_reviews_screen_reads_the_document_and_what_it_may_offer(server: ui.DashboardServer) -> None:
+    status, body = _request(server, "GET", "/api/reviews")
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["document"]["adversarial"] == {"requirements": True, "design": True, "tasks": True}
+    assert payload["builtin"] == ["correctness", "simplification", "security"]
+    assert "comparison" in payload["acceptance"]
+
+
+def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.DashboardServer, repo: Path) -> None:
+    from rein import repo as repo_mod
+
+    document = {"adversarial": {"requirements": True, "design": False, "tasks": True}, "steps": []}
+    status, body = write(server, "/api/reviews", {"document": document, "reason": "a one-line fix"})
+    assert status == 200, body
+    assert json.loads(body)["changes"] == ["adversarial review at design: OFF"]
+    [changed] = [e for e in store.Store(repo_mod.Repo(repo)).read_events() if e.event == "reviews_changed"]
+    assert changed.actor == "ui-session" and changed.detail["reason"] == "a one-line fix"
+
+
+def test_a_reviews_change_still_needs_the_session(server: ui.DashboardServer) -> None:
+    document = {"adversarial": {"requirements": False, "design": False, "tasks": False}, "steps": []}
+    body: dict[str, object] = {"document": document, "reason": "x"}
+    assert _request(server, "POST", "/api/reviews", body, token=server.token)[0] == 403
+
+
+def test_a_reviews_change_that_asks_for_comparison_off_is_refused(server: ui.DashboardServer) -> None:
+    document = {
+        "adversarial": {"requirements": True, "design": True, "tasks": True},
+        "steps": [],
+        "acceptance": {"comparison": False},
+    }
+    status, body = write(server, "/api/reviews", {"document": document, "reason": "x"})
+    assert status == 400 and "acceptance" in json.loads(body)["error"]

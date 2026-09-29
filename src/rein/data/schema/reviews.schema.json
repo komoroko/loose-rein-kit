@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/komoroko/loose-rein-kit/schema/reviews.schema.json",
+  "title": "Loose Rein reviews.yaml",
+  "description": "Which reviews this repository runs: the adversarial review before the mandate, stage by stage, and the reviewer steps that read each batch of tasks. Outside the mandate's freeze on purpose — which tool raises the quality of the work is inside what the mandate delegates, not part of what it decides — and written only by `rein reviews apply` at a terminal or by the dashboard's write session, each change recorded in the audit chain with its reason. The comparison acceptance rests on is not here and cannot be put here: it is what a human decides by, not a way of improving the work.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adversarial",
+    "steps"
+  ],
+  "properties": {
+    "adversarial": {
+      "description": "Whether the fresh-context adversarial review runs before the mandate, per drafting stage. A stage set to false is named on the mandate's approval screen.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requirements",
+        "design",
+        "tasks"
+      ],
+      "properties": {
+        "requirements": {
+          "type": "boolean"
+        },
+        "design": {
+          "type": "boolean"
+        },
+        "tasks": {
+          "type": "boolean"
+        }
+      }
+    },
+    "steps": {
+      "description": "The reviewer steps of the quality gate. Each is one reviewer launch per batch (and per join, by `stage`), reading for every review it lists. Empty: no reviewer reads the code before acceptance.",
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "reviews"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          },
+          "reviews": {
+            "description": "What this step reads for: `correctness`, `simplification`, `security`, or the name of an entry under `custom`.",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/reviewName"
+            }
+          },
+          "retries": {
+            "description": "How many times a task sent back with this step's `must_fix` findings is read again before it stops.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          },
+          "stage": {
+            "description": "`task` reads each batch before it merges; `integration` reads every join; `both` (the default) reads each batch, and a join whose merge had to resolve a conflict.",
+            "enum": [
+              "task",
+              "integration",
+              "both"
+            ]
+          },
+          "paths": {
+            "description": "Glob patterns restricting this step to tasks whose changed files match at least one. Absent: every task.",
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/$defs/repoPath"
+            }
+          }
+        }
+      }
+    },
+    "custom": {
+      "description": "Reviews beyond the packaged three. `prompt` is a repository file whose text is handed to the reviewer as the question to read for.",
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "prompt"
+        ],
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/reviewName"
+          },
+          "prompt": {
+            "$ref": "#/$defs/repoPath"
+          }
+        }
+      }
+    },
+    "updated_at": {
+      "type": "string",
+      "maxLength": 64
+    }
+  },
+  "$defs": {
+    "reviewName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
+    },
+    "repoPath": {
+      "description": "A repo-relative POSIX path: no absolute form, no `..` segment, no empty segment, no backslash, no control character, no leading `-`.",
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!-)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*//)[^\\\\\\u0000-\\u001f]+$"
+    }
+  }
+}

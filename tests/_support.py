@@ -399,6 +399,20 @@ SANDBOXED_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
+def make_reviews(*, steps: list[dict[str, Any]] | None = None, adversarial: bool = True) -> dict[str, Any]:
+    """A reviews document. No reviewer step by default, as the default `make_config` has none:
+    a test about task consumption has no business launching a reviewer. Tests about reviewing
+    pass `steps` — `[REVIEW_STEP]` is the product's packaged one."""
+    return {
+        "adversarial": dict.fromkeys(models.ADVERSARIAL_STAGES, adversarial),
+        "steps": steps if steps is not None else [],
+    }
+
+
+#: The reviewer step the product ships (`scaffold/rein/reviews.yaml`).
+REVIEW_STEP: dict[str, Any] = {"name": "review", "reviews": ["correctness", "simplification"], "retries": 1}
+
+
 def make_config(
     *,
     project: str = DEMO_PROJECT,
@@ -448,7 +462,6 @@ def make_config(
         or [
             {
                 "name": "test",
-                "kind": "command",
                 "command": ["make", "test"],
                 "executor_profile": "quality",
                 "retries": 2,
@@ -457,7 +470,6 @@ def make_config(
             },
             {
                 "name": "check",
-                "kind": "command",
                 "command": ["make", "check"],
                 "executor_profile": "quality",
                 "retries": 2,
@@ -500,6 +512,7 @@ def seed_repo(
     plan: dict[str, Any] | None | object = _UNSET,
     review: dict[str, Any] | None | object = _UNSET,
     config: dict[str, Any] | None | object = _UNSET,
+    reviews: dict[str, Any] | None | object = _UNSET,
     events: list[models.Event] | None = None,
     settings: str | None = None,
     lock: bool = True,
@@ -521,6 +534,7 @@ def seed_repo(
         "plan": make_plan() if plan is _UNSET else plan,
         "review": make_review() if review is _UNSET else review,
         "config": make_config() if config is _UNSET else config,
+        "reviews": make_reviews() if reviews is _UNSET else reviews,
     }
     # A frozen state must name the digest of the plan sitting beside it. Letting the two drift
     # would make every fixture trip the commit-stage frozen-artifact check for a reason that has

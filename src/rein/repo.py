@@ -164,6 +164,11 @@ class Repo:
     # --- satellites ----------------------------------------------------------
 
     @property
+    def reviews(self) -> Path:
+        """Which reviews run; written only by `rein reviews apply` and the dashboard's write session."""
+        return self.root / ".rein/reviews.yaml"
+
+    @property
     def config(self) -> Path:
         return self.root / ".rein/config.yaml"
 

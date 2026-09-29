@@ -37,7 +37,7 @@ def _config(**profiles: dict[str, Any]) -> models.Config:
 
 
 def _step(name: str, **overrides: Any) -> models.GateStep:
-    return models.GateStep({"name": name, "kind": "command", "command": ["make", name], **overrides})
+    return models.GateStep({"name": name, "command": ["make", name], **overrides})
 
 
 _ON_PATH = {"implementer": ["sh"]}
@@ -68,11 +68,6 @@ def test_required_is_an_explicit_opt_in() -> None:
     it decides whether a run starts, that default would refuse every repository whose config simply
     never mentioned it."""
     steps = [_step("test", command=[])]  # no `required:` key at all
-    assert preflight.check(_config(), steps, _ON_PATH, runtime=None) == []
-
-
-def test_an_agent_step_needs_no_command() -> None:
-    steps = [models.GateStep({"name": "review", "kind": "agent", "agent_role": "code_reviewer", "required": True})]
     assert preflight.check(_config(), steps, _ON_PATH, runtime=None) == []
 
 
