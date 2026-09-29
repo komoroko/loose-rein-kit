@@ -78,7 +78,7 @@ inline and handed nothing; a delegated reviewer uses the list it was given.
 Attack only what `rein dag --validate/--trace` cannot check mechanically (the thread's
 *existence* is already machine-verified — attack its *adequacy*):
 1. **Missing-edge attack**: two tasks where building one without the other in place fails
-   (shared file, shared schema, runtime dependency) yet no `blockedBy` edge exists.
+   (shared file, shared schema, runtime dependency) yet no `blocked_by` edge exists.
 2. **Collision attack**: parallel leaves whose tickets imply touching the same files — the
    merge-conflict predictor; name the file(s).
 3. **Untestable-acceptance attack**: a ticket whose acceptance criteria cannot objectively decide

@@ -13,7 +13,7 @@ loop decomposes, reorders and re-runs as it needs to.
 
 `rein build` runs all of this **in code** — none of it is yours to re-derive.
 
-1. **Frontier** — todo tasks whose `blockedBy` are all done, ordered foundation/high fan-out first,
+1. **Frontier** — todo tasks whose `blocked_by` are all done, ordered foundation/high fan-out first,
    then the critical path. Every task runs in `git worktree` isolation (never subtree) on its own
    branch and lands by a merge: a foundation task alone, independent leaves up to `max_parallel`
    (default 3) at a time.
@@ -88,12 +88,12 @@ loop decomposes, reorders and re-runs as it needs to.
    (`evidence` in `state.yaml`) — or **`awaiting-evidence`** when a criterion nobody here can
    establish is still open, which merges the work and parks only the task, and the acceptance gate cannot open
    while one stands. Then recompute. An empty frontier with unfinished tasks = all
-   blocked/needs-revision → escalate and stop; all done → the acceptance gate below. **Only the human opens
-   `gates.acceptance`.**
+   blocked/needs-revision → escalate and stop; all done → the grounded review below, then `/verify`.
+   **Only the human opens `gates.acceptance`.**
 
 ## Running it — `rein build`
 The installed orchestrator reads `.rein/config.yaml`, `plan.yaml` and `state.yaml`, and launches
-its implementer/reviewer agents headless in the **OCI sandbox** via the adapters set by `rein agent <role> <cli>` (default
+its implementer/reviewer agents headless in the **OCI sandbox** via the adapters set by `rein agent <cli> [--role <role>]` (default
 `claude`), so the requirement is **that CLI installed and authenticated** — any agent (or the
 human in a terminal) may invoke `rein build`. At the
 start it code-checks `gates.mandate == approved` and stops doing nothing if unapproved.
@@ -153,7 +153,7 @@ as a human:
 
 | code | meaning | what to do |
 |---|---|---|
-| `0` | every task is done | go to the acceptance gate |
+| `0` | every task is done | run `/verify` |
 | `1` | a task could not pass the gate, or the frontier is empty with work left | a human reads the escalation |
 | `2` | it refused to start, or the machine failed in a way waiting cannot fix (the mandate gate unapproved, plan not frozen, the agent CLI not on PATH, an unpinned sandbox image) | repair what it names |
 | `3` | the machine failed in a way time fixes — agent capacity exhausted, a signal, another run holding the lock. **No task was marked and no retry budget was spent** | re-run later; it continues from the preserved work |
@@ -304,7 +304,7 @@ is the point; never fold them into the implementer's session.
   Register that command's execution permission in the product's committed permission settings
   (`command-preauthorization`) so the smoke step doesn't re-prompt every loop.
 
-## When all tasks complete (the acceptance gate)
+## When all tasks complete
 
 0. **If this cycle ships as a stack, publish it now — as drafts.** `rein pr-stack` cuts the work
    branch into one pull request per task and prints the `gh pr create --draft` lines; `--push`
@@ -380,40 +380,10 @@ is the point; never fold them into the implementer's session.
    outlives a document the next generation rewrites. Fixing it is the way through, and re-stating
    it is refused only while the code is still there. One that named no anchor is closed by a
    human's `dispute_finding` in the review, never by the reviewer omitting it.
-3. `notify-and-wait`: tell the human the acceptance approval is pending.
-   - **(Only with GitHub integration)** Run `rein issue-sync` to reflect each task's
-     latest status (done → close, etc.) to Issues. Best-effort; do not stop the gate if it
-     fails (auto-skips if `github.enabled: false` / gh/remote absent). It stays outside the
-     deterministic loop — networking does not belong there.
-4. Present the implementation summary as an **`approval-presentation`** and confirm "may we approve
-   this as implementation-complete?". **Open with the review's scope, before any result**: the
-   commit range it is bound to, how large the change is, what the review could **not** read, and
-   whether it fits the review budget. Then the completed tasks, key additions/changes, test results, **the grounded-review
-   results — the three axes and coverage** — and unresolved items. **Do not re-narrate the orient
-   stage in chat**: what was delivered, what moved underneath it, which sandbox and network posture
-   each gate step ran under, what the gate established, and what is still open are all derived into
-   the review itself and read there. Say where it is, not what it says. The human review is
-   completed in `rein ui` — the stage rail walks the reviewer from the scope through the orient
-   brief and the Decision Cards to the freeze button
-   (`.rein/prompts/rules/gate-workflow.md` "The human review before acceptance") — and frozen
-   there or with `rein review complete` before the gate can be requested. Unanswered
-   high/critical Decision Cards block the freeze; say so rather than presenting the gate.
-   - **Smoke-step check**: if the deliverable is runnable (CLI, server, …) and
-     `quality_gate`'s `smoke.run` is still empty, say so explicitly at the gate — the DoD ran
-     without a launch check — and propose the command to fill in plus `required: true` (the loop
-     prints this nudge mechanically at the acceptance gate; with `required: true` set, an empty run refuses
-     to build at all — an unnoticed empty smoke silently defeats its purpose).
-   - **Always present a self-assessment as well** (`.rein/prompts/rules/gate-workflow.md` "Gate self-assessment"),
-     including the outcomes of spots that produced blocked/needs-revision.
-5. **While waiting for approval**, only outcome-independent speculative work
-   (`.rein/prompts/rules/gate-workflow.md` "While a gate is pending"; record it in
-   `docs/speculative-work.md`):
-   concretizing functional test cases in `docs/test/test-plan.md`, a trial run of
-   `make audit`, and other `/verify` prep pulled forward. Do not make changes that could
-   require redoing the implementation.
-6. Once a human approves (acknowledging the `approval-presentation`, or an explicit "approve")
-   — **running the next command (`/verify`) is not itself approval** — ask the human to run
-   `rein approve acceptance` **themselves**, never for them (mechanics: AGENTS.md "Gate rules" 2).
-   Declining is recorded as a change request, not lost — see step 0. Point to "next is `/verify`",
-   and after committing the gate's deliverables, suggest `session-compaction` (pre-compact check:
-   `.rein/prompts/rules/gate-workflow.md` "Context budget").
+3. **(Only with GitHub integration)** Run `rein issue-sync` to reflect each task's latest status
+   (done → close, etc.) to Issues. Best-effort; do not stop if it fails (auto-skips if
+   `github.enabled: false` / gh/remote absent). It stays outside the deterministic loop —
+   networking does not belong there.
+4. Point to "next is `/verify`": it adds the test plan and the dependency audit, and it is the one
+   procedure that presents the acceptance gate. Commit what this phase wrote, and suggest
+   `session-compaction` (pre-compact check: `.rein/prompts/rules/gate-workflow.md` "Context budget").

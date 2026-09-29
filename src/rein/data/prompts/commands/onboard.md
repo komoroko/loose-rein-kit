@@ -44,8 +44,8 @@ the template's machinery: `/req` and `/design` start from the baseline this comm
    still the defaults, and propose `guard.paths` entries for the repo's real code layout
    (e.g. `src/: tasks`) — **propose only**; the human decides when to enable code-path guarding.
 5. Present to the human (no gate — conversational confirmation):
-   - the baseline summary and anything you were unsure about (per AGENTS.md
-     "Gate self-assessment" spirit: assumptions, low-confidence spots);
+   - the baseline summary and anything you were unsure about (per `.rein/prompts/rules/gate-workflow.md`
+     "Gate self-assessment": assumptions, low-confidence spots);
    - the **candidate list of in-flight/unfinished work** — the human picks what becomes the
      first delta cycle's scope;
    - next step: write the chosen change into `docs/00-product-brief.md` and run `/req`. Since the

@@ -8,6 +8,7 @@ loaded from its file path rather than imported as `rein.template_lint`.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -15,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from rein import models, store
+from rein import gate_guard, models, store
 from tests._support import REVIEW_STEP, make_config, make_reviews
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -856,6 +857,108 @@ def test_a_documented_gate_the_vocabulary_does_have_is_not_drift() -> None:
     )
 
     assert template_lint.check_documented_invocations(_REPO_ROOT, {"docs/x.md": text}) == []
+
+
+def test_a_documented_line_with_an_argument_the_verb_does_not_take_is_drift() -> None:
+    """`rein agent <role> <cli>` survived in CLAUDE.md and /build while the verb took one
+    positional and `--role`: a check that only read `--flags` could not see two positionals."""
+    failures = template_lint.check_documented_invocations(_REPO_ROOT, {"docs/x.md": "`rein agent <role> <cli>`"})
+
+    assert failures == ["docs/x.md: `rein agent <role> <cli>` does not parse — unrecognized arguments: <cli>"]
+
+
+def test_documented_shapes_that_parse_are_not_drift() -> None:
+    """Optional brackets, multi-word placeholders, enumerated values, flag alternatives — and a
+    verb named without every argument it requires, which is a mention rather than a command."""
+    text = (
+        "`rein agent <cli> [--role <role>]`, `rein changes address <id> --note <what you changed>`, "
+        "`rein install claude|codex|copilot|gemini`, `rein lens --record <id> --found <yes|no>`, "
+        '`rein dag --validate/--trace`, `rein task order`, `rein task order T-NNN --after T-MMM --reason "…"`'
+    )
+
+    assert template_lint.check_documented_invocations(_REPO_ROOT, {"docs/x.md": text}) == []
+
+
+def test_each_enumerated_value_is_parsed() -> None:
+    failures = template_lint.check_documented_invocations(_REPO_ROOT, {"docs/x.md": "`rein install claude|cursor`"})
+
+    assert len(failures) == 1 and "invalid choice: 'cursor'" in failures[0]
+
+
+def test_a_verb_that_parses_by_hand_is_read_not_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`rein guard` reads its argv (and stdin) itself; calling it to check a line would run it."""
+
+    def ran(argv: list[str] | None = None) -> int:
+        raise AssertionError("the canary ran the hook")
+
+    monkeypatch.setattr(gate_guard, "main", ran)
+    failures = template_lint.check_documented_invocations(
+        _REPO_ROOT, {"docs/x.md": "`rein guard --check-diff` and `rein guard --no-such-flag`"}
+    )
+
+    assert failures == [
+        "docs/x.md: `rein guard --no-such-flag` — gate_guard.py declares no such option, "
+        "so the documented command exits 2"
+    ]
+
+
+def _sectioned_tree(root: Path) -> None:
+    (root / ".rein" / "prompts" / "commands").mkdir(parents=True)
+    (root / "AGENTS.md").write_text("# Rules\n\n## Gate rules (strict)\n\n1. one\n", encoding="utf-8")
+    (root / ".rein" / "prompts" / "commands" / "tasks.md").write_text(
+        "## Steps\n   - **Cutover decomposition (shared infrastructure)**: keep it additive\n", encoding="utf-8"
+    )
+
+
+def test_a_section_reference_resolves_to_a_heading_or_a_bold_label(tmp_path: Path) -> None:
+    _sectioned_tree(tmp_path)
+    text = 'see AGENTS.md "Gate rules" 2 and `tasks.md` "cutover decomposition"'
+
+    assert template_lint.check_section_references(tmp_path, {"docs/x.md": text}) == []
+
+
+def test_a_section_reference_to_a_section_that_moved_is_drift(tmp_path: Path) -> None:
+    """`/onboard` pointed at AGENTS.md "Gate self-assessment" after that section had moved to the
+    rules module."""
+    _sectioned_tree(tmp_path)
+    text = 'per AGENTS.md\n     "Gate self-assessment" and gone.md "Anything"'
+
+    assert template_lint.check_section_references(tmp_path, {"docs/x.md": text}) == [
+        'docs/x.md: points at AGENTS.md "Gate self-assessment", which has no such section',
+        'docs/x.md: points at gone.md "Anything", and gone.md does not exist',
+    ]
+
+
+def test_a_schema_key_spelled_in_camel_case_is_drift(tmp_path: Path) -> None:
+    schema = tmp_path / template_lint.SCHEMA_DIR
+    schema.mkdir(parents=True)
+    (schema / "plan.schema.json").write_text(
+        json.dumps({"properties": {"tasks": {"items": {"properties": {"blocked_by": {}, "claim_ids": {}}}}}}),
+        encoding="utf-8",
+    )
+    texts = {"docs/x.md": "each task's `blockedBy`, its `blocked_by`, and a `camelCase` word nobody declared"}
+
+    assert template_lint.check_schema_key_spelling(tmp_path, texts) == [
+        "docs/x.md: `blockedBy` is not a schema key — the schema spells it `blocked_by`"
+    ]
+
+
+def test_an_end_gate_presented_by_two_procedures_is_drift() -> None:
+    """/build kept asking for `rein approve acceptance` and pointing on to /verify, whose
+    prerequisite check refuses an acceptance that is already approved."""
+    ask = "ask the human to run\n   `rein approve {}` **themselves**"
+    texts = {
+        ".rein/prompts/commands/tasks.md": ask.format("mandate"),
+        ".rein/prompts/commands/build.md": ask.format("acceptance"),
+        ".rein/prompts/commands/verify.md": ask.format("acceptance"),
+        "AGENTS.md": ask.format("mandate"),
+    }
+
+    failures = template_lint.check_gate_presenters(texts)
+
+    assert len(failures) == 1 and failures[0].startswith("gate `acceptance` is presented by 2 procedures")
+    del texts[".rein/prompts/commands/build.md"]
+    assert template_lint.check_gate_presenters(texts) == []
 
 
 def test_every_shipped_scaffold_document_is_classified() -> None:

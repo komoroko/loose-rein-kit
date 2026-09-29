@@ -229,7 +229,7 @@ Reclassify each task the impact analysis (`rein dag
 ## Task dependency graph
 
 Tasks form a **DAG**: kind = **foundation** / **parallel** / **integration**; layers and the
-critical path derive from `blockedBy`. Consumption order, parallelism, merge, and stopping
+critical path derive from `blocked_by`. Consumption order, parallelism, merge, and stopping
 run **in code**, not LLM discretion (detail: build.md, tasks.md). A task's `scope` in the plan
 says where its work belongs, and the loop checks the diff against it — reaching into another
 task's territory blocks the task rather than landing.
@@ -325,9 +325,8 @@ the **host surfaces** `rein install` wrote — the settings, hooks, MCP servers 
 a CLI reads before it reads its prompt. The security reviewer is sent a checkout of the head with
 those in it and told that a pre-authorized command or a hook added there is a finding, while the
 product digest is taken with them excluded so the blind extractor never reads this tool's own
-orchestration text. One digest could not carry both questions, and the one it dropped was the
-security one: a commit that widened `permissions.allow` and touched nothing else moved no key,
-replayed the cached answer, launched no reviewer, and left the review calling itself fresh.
+orchestration text. One digest cannot carry both questions: a commit that only widens `permissions.allow` would
+move no key and replay the cached security answer.
 `.rein/` is in neither subject — committing `review.yaml` is itself a later commit and must not
 invalidate the review it records. A false positive is contradicted by a human with
 `dispute_finding`, and that record lives in `state.yaml` bound to the anchored text — so it

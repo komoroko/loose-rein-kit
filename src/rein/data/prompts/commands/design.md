@@ -40,4 +40,5 @@ Writing the task DAG is **not** speculative work here — it is the rest of the 
 ## Next
 Point to `/tasks`, which is where the mandate is assembled and presented. Commit what this step wrote, and suggest `session-compaction` at the checkpoint (pre-compact check: `.rein/prompts/rules/gate-workflow.md` "Context budget").
 
-Do not finalize technical choices on your own. Always go through the human's decision.
+Do not settle a `reach: mandate` choice yourself — it goes to the human (step 3). A `reach: local` one
+you settle and record, with the reasoning the mandate screen shows.
