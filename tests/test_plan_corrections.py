@@ -293,6 +293,18 @@ def test_a_finished_task_is_not_widened(tmp_path: Path) -> None:
         task_cmd.scope_add(repo, "T-001", path="tests/x.py", reason="r")
 
 
+def test_a_path_the_task_excludes_is_not_added(tmp_path: Path) -> None:
+    """`exclude` wins over `include`: the addition was recorded and listed while the guard went on
+    refusing the path."""
+    config = make_config()
+    config["guard"]["scope_additions"] = ["tests/"]
+    task = make_task("T-001", claim_ids=["C-001"], scope_include=["src/prompts.py"])
+    task["scope"]["exclude"] = ["tests/golden/"]
+    seed_repo(tmp_path, config=config, plan=make_plan(tasks=[task]), state=make_state(plan_status="frozen"))
+    with pytest.raises(ValueError, match="own `scope.exclude`"):
+        task_cmd.scope_add(repo_mod.Repo(tmp_path), "T-001", path="tests/golden/case.json", reason="r")
+
+
 def test_a_roll_back_hands_added_scope_back_to_the_planner(tmp_path: Path) -> None:
     repo = _scoped_repo(tmp_path, ["tests/"])
     task_cmd.scope_add(repo, "T-001", path="tests/x.py", reason="r")

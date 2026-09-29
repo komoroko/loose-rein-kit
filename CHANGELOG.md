@@ -27,14 +27,17 @@ minutes. Each change below removes one of those causes.
 - **The loop runs a task's long, deterministic commands itself (`operate`).** The run used to happen
   inside an implementer's turn. A turn that ended killed the child mid-run, session limits parked it
   105 times, and the only lever was a reset reason telling the next agent to keep waiting. The steps
-  now run on the host after the implementer reports `implemented` and before the gate. Their logs go
-  under `.rein/work/<task>/operate/`. A content failure goes back to the implementer with the log's
-  tail; a machine failure stops the build and costs no retry.
+  now run after the implementer reports `implemented` and before the gate. They run the implementer's
+  code, so they run in `quality_gate_profile` unless a step names another `executor_profile`, and
+  what they write is checked against the task's scope. Their logs go under
+  `.rein/work/<task>/operate/`. A content failure goes back to the implementer with the log's tail; a
+  machine failure stops the build and costs no retry.
 - **A host task declares its environment (`environment.env`, `environment.allow`).** Two failures
   prompted this. A `PYTHONPATH` that lived in one shell failed the task's own precondition from
   another. A standing `Bash(uv run *:*)` rule was added to the repository's `permissions.allow` so one
   script could run. Declared variables are expanded at launch for the implementer and the task's
-  probes, and a reference to an unset variable is an unmet precondition, never `""`. The allowed
+  probes, and a reference to an unset variable is an unmet precondition, never `""`. So is any
+  reference when that work runs contained, where a host path names nothing. The allowed
   command prefixes go to that one launch as `--settings`, not `--allowedTools`: that flag is
   variadic and swallows the prompt.
 - **Work set aside is recorded, not worked around.**
@@ -50,9 +53,12 @@ minutes. Each change below removes one of those causes.
   cost a whole re-approval.
 - **The dependency audit is met at the mandate.** The mandate asks that it has run once, not that it
   passed: a finding changes the environment the approval freezes, and that is cheapest to decide
-  before the freeze. `rein doctor` checks the audit command can start. A launcher that could not
-  spawn its scanner (`uv run pip-audit` with no pip-audit) is now a machine failure; it had been
-  recorded as a failed audit.
+  before the freeze, so the mandate takes a record over the current lockfiles within `max_age_days`,
+  passing or not. `rein doctor` checks that a plain `uv run <tool>` audit command can start. A
+  launcher that could not spawn the scanner (`uv run pip-audit` with no pip-audit) is now a machine
+  failure of the audit; it had been recorded as a failed audit. A gate or `operate` step that prints
+  the same is still the code's failure, since the missing tool is often an entry point the task was to
+  add.
 
 ## [0.10.0] - 2026-09-25
 

@@ -272,6 +272,13 @@ def _scope_add_once(repo: repo_mod.Repo, task_id: str, path: str, reason: str) -
         raise ValueError(f"{task_id} is not a task in .rein/plan.yaml — `rein dag` lists them")
     if graph.get(task_id).status in {"done", "awaiting-evidence"}:
         raise ValueError(f"{task_id} is {graph.get(task_id).status}: its scope was what it landed against")
+    # `exclude` wins over `include`, so an addition under the task's own exclusion would be recorded
+    # and shown at acceptance while the guard went on refusing the path.
+    if excluded := [p for p in graph.get(task_id).scope_exclude if common.path_covered(path, p)]:
+        raise ValueError(
+            f"{path} is under {task_id}'s own `scope.exclude` ({', '.join(excluded)}) — the plan kept it out of "
+            "this task on purpose, and taking that back is a `/revise`"
+        )
     owners = [
         t.id
         for t in graph.tasks

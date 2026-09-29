@@ -165,14 +165,24 @@ def killed_externally(rc: int) -> bool:
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 #: A launcher that ran and could not start the command it wraps — `uv run pip-audit` with no
-#: pip-audit in the environment prints this and exits 2, which read as "the audit found something"
-#: and recorded a failed audit about dependencies nobody had audited.
+#: pip-audit in the environment prints this and exits 2.
 _WRAPPED_UNLAUNCHABLE_RE = re.compile(r"^error: Failed to spawn: `[^`]+`", re.MULTILINE)
 
 
 def _unlaunchable(rc: int, output: str) -> bool:
-    if rc == _RC_UNLAUNCHABLE and output.startswith(_UNLAUNCHABLE_PREFIX):
-        return True
+    return rc == _RC_UNLAUNCHABLE and output.startswith(_UNLAUNCHABLE_PREFIX)
+
+
+def wrapped_unlaunchable(output: str) -> bool:
+    """Did a launcher (`uv run`) say it could not start the tool it wraps?
+
+    **Only for a command whose tool is configured, never one the implementer builds.** For the
+    dependency audit the tool is a scanner the operator named, so its absence is the machine's
+    fault: read as a finding, it recorded a failed audit about dependencies nobody had audited. For
+    a gate or `operate` step the missing thing is as often an entry point the implementer was meant
+    to add, and calling that a machine fault stopped the build instead of handing the task back —
+    which is why this is not part of :func:`classify_step`.
+    """
     return bool(_WRAPPED_UNLAUNCHABLE_RE.search(_ANSI_RE.sub("", output)))
 
 

@@ -371,7 +371,7 @@
           }
         },
         "environment": {
-          "description": "What this task's work needs from the machine it runs on, declared so the loop supplies it rather than an agent inheriting whatever the operator's shell had. `env` is set for the implementer and for this task's `requires` probes (`$HOME`, `~` and `${NAME}` are expanded from the loop's environment when the task launches; a reference to an unset variable is an unmet precondition, never an empty string). `allow` is the exact command prefixes this task's implementer may run without asking, passed to the agent CLI for this launch only — so a host task that has to run one measurement script does not widen the repository's standing `permissions.allow` for every session after it. A CLI that cannot scope a permission to one launch says so at launch and gets nothing.",
+          "description": "What this task's work needs from the machine it runs on, declared so the loop supplies it rather than an agent inheriting whatever the operator's shell had. `env` is set for the implementer and for this task's `requires` probes (`$HOME`, `~` and `${NAME}` are expanded from the loop's environment when the task launches; a reference to an unset variable is an unmet precondition, never an empty string, and so is any reference when the implementer, an `operate` step or a probe of this task runs contained, where a host path names nothing). `allow` is the exact command prefixes this task's implementer may run without asking, passed to the agent CLI for this launch only — so a host task that has to run one measurement script does not widen the repository's standing `permissions.allow` for every session after it. A CLI that cannot scope a permission to one launch says so at launch and gets nothing.",
           "type": "object",
           "additionalProperties": false,
           "properties": {
@@ -398,7 +398,7 @@
           }
         },
         "operate": {
-          "description": "Long deterministic commands the loop runs itself, on the host, after the implementer has landed its tooling and before the quality gate — a full measurement run, a data migration dry run, a generator that takes hours. An agent's turn is the wrong host for them: it ends, and takes the child process with it, and it spends its session waiting. Each step runs in the task's worktree with the task's `environment.env`, its output going to `.rein/work/<task>/operate/`. A step that exits nonzero because of what the implementer wrote sends the task back with the log's tail, on its own retry budget; one the machine could not run stops the build as a machine fault. Irreversible work still waits for its `T-NNN` gate: nothing here runs before the task is launched.",
+          "description": "Long deterministic commands the loop runs itself, after the implementer has landed its tooling and before the quality gate — a full measurement run, a data migration dry run, a generator that takes hours. An agent's turn is the wrong host for them: it ends, and takes the child process with it, and it spends its session waiting. Each step runs the implementer's code, so it runs where a quality-gate step does: in `executors.quality_gate_profile`, unless `executor_profile` names another, which puts that choice on the mandate screen. It runs in the task's worktree with the task's `environment.env`, its output going to `.rein/work/<task>/operate/`, and what it writes is held to the task's scope like the implementer's own change. A step that exits nonzero because of what the implementer wrote sends the task back with the log's tail, on its own retry budget; one the machine could not run stops the build as a machine fault. Irreversible work still waits for its `T-NNN` gate: nothing here runs before the task is launched.",
           "type": "array",
           "maxItems": 16,
           "items": {
@@ -422,6 +422,12 @@
                   "minLength": 1,
                   "maxLength": 512
                 }
+              },
+              "executor_profile": {
+                "description": "The profile this step runs in (a key of config's `executor_profiles`). Omitted: `executors.quality_gate_profile`. A run that needs the network or data outside the worktree names a profile that grants it.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
               },
               "timeout_sec": {
                 "description": "Omit for no limit: the point of this block is work that outlasts an agent's patience.",

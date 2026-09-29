@@ -73,8 +73,11 @@ def max_age_days(config: models.Config | None) -> int:
     return common.as_int(configured(config).get("max_age_days"), DEFAULT_MAX_AGE_DAYS)
 
 
-def staleness(record: object, *, dependencies: str, now: datetime, max_age: int) -> str:
+def staleness(record: object, *, dependencies: str, now: datetime, max_age: int, require_pass: bool = True) -> str:
     """Why this audit does not speak for the release, or "" when it does.
+
+    `require_pass=False` is the mandate's question: whether the record is a current answer at
+    all, whatever the answer was.
 
     Two ways to be stale, and they are different facts. **The dependencies moved**: the audit is a
     statement about a set this release no longer has. **Time moved**: nothing in the repository
@@ -83,7 +86,7 @@ def staleness(record: object, *, dependencies: str, now: datetime, max_age: int)
     """
     if not isinstance(record, dict) or not record.get("ran_at"):
         return "no dependency audit has been run — `rein audit run`"
-    if record.get("passed") is not True:
+    if require_pass and record.get("passed") is not True:
         return "the last dependency audit failed: " + (
             str(record.get("summary", "")).strip()[:400] or "(it recorded no summary)"
         )
@@ -163,7 +166,10 @@ def run(repo: repo_mod.Repo, config: models.Config | None) -> dict[str, Any]:
         )
     spec = executors.ExecutionSpec(command=tuple(command), profile=profile, mounts=(), workdir=str(repo.root))
     result = executors.for_profile(profile).run(spec)
-    if result.exit_code != 0 and faults.classify_step(result.exit_code, result.output) is not faults.Fault.CONTENT:
+    if result.exit_code != 0 and (
+        faults.classify_step(result.exit_code, result.output) is not faults.Fault.CONTENT
+        or faults.wrapped_unlaunchable(result.output)
+    ):
         raise AuditError(
             "the dependency audit could not be run — this is the machine failing, not a finding about the "
             f"dependencies, so nothing has been recorded:\n{result.output[-2000:]}"

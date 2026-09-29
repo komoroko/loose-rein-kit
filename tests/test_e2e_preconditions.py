@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from rein import build_loop, common, models
+from rein import build_loop, common, executors, models
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
@@ -32,7 +32,7 @@ def git(root: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def seeded(tmp_path: Path, tasks: list[dict[str, Any]]) -> repo_mod.Repo:
+def seeded(tmp_path: Path, tasks: list[dict[str, Any]], config: dict[str, Any] | None = None) -> repo_mod.Repo:
     root = tmp_path / "product"
     root.mkdir()
     git(root, "init", "-q", "-b", "main")
@@ -40,7 +40,7 @@ def seeded(tmp_path: Path, tasks: list[dict[str, Any]]) -> repo_mod.Repo:
     git(root, "config", "user.name", "A Person")
     seed_repo(
         root,
-        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
+        config=config or make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
         plan=make_plan(tasks=tasks),
         state=make_state(plan_status="frozen"),
     )
@@ -400,3 +400,81 @@ def test_an_operate_step_the_machine_could_not_run_spends_nothing(
     assert launched == ["T-047"]
     assert "failed_step" not in status_of(repo, "T-047").get("handoff", {})
     assert "task_failed" not in {e.event for e in store_mod.Store(repo).read_events()}
+
+
+def test_operate_runs_where_a_gate_step_does_not_as_a_host_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step runs the implementer's code. It went straight to the host with the operator's
+    environment, past the `quality_gate_profile` every gate step is held to."""
+    steps = [
+        {"name": "build-deck", "command": ["true"]},
+        {"name": "full-run", "command": ["true"], "executor_profile": "measure"},
+    ]
+    profiles = {
+        "quality": {"kind": "host", "containerfile": "python"},
+        "measure": {"kind": "host", "containerfile": "python"},
+    }
+    config = make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0, profiles=profiles)
+    repo = seeded(tmp_path, [operating_task(steps)], config=config)
+    monkeypatch.setattr(build_loop, "_run", counting_implementer([]))
+    ran: list[tuple[str, tuple[str, ...]]] = []
+    dispatch = executors.for_profile
+
+    def recording(profile: models.ExecutorProfile) -> executors.Executor:
+        inner = dispatch(profile)
+
+        class Recording(executors.Executor):
+            def run(self, spec: executors.ExecutionSpec) -> executors.ExecutionResult:
+                ran.append((spec.profile.name, spec.command))
+                return inner.run(spec)
+
+        return Recording()
+
+    monkeypatch.setattr(executors, "for_profile", recording)
+
+    assert build(repo) == common.EXIT_DONE
+    assert ("quality", ("true",)) in ran[:2] and ("measure", ("true",)) in ran[:2]
+
+
+def test_what_an_operate_step_writes_outside_the_scope_stops_before_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scope check read the tree before the step ran, and `finalize_commit` adds the whole tree:
+    a run's output landed wherever the step put it."""
+    task = operating_task([{"name": "full-run", "command": ["sh", "-c", "mkdir -p data && echo x > data/out.txt"]}])
+    task["scope"] = {"include": ["T-047.py"]}
+    repo = seeded(tmp_path, [task])
+    monkeypatch.setattr(build_loop, "_run", counting_implementer([]))
+
+    assert build(repo) != common.EXIT_DONE
+    [stop] = [e for e in store_mod.Store(repo).read_events() if e.detail.get("kind") == "scope_violation"]
+    assert "data/out.txt" in stop.detail["message"]
+    assert "operate" in stop.detail["message"]
+
+
+def test_a_host_reference_in_the_environment_of_a_contained_task_is_unmet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`$HOME/x` expanded here names a directory of the host; inside the sandbox it names nothing,
+    and the work failed as if the code were wrong."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    profiles = {
+        "quality": {"kind": "host", "containerfile": "python"},
+        "agentbox": {
+            "kind": "oci-agent",
+            "image": "localhost/rein-agent@sha256:" + "b" * 64,
+            "network_profile": "egress",
+        },
+    }
+    config = make_config(
+        branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0, profiles=profiles, agent_profile="agentbox"
+    )
+    task = measuring_task({"PYTHONPATH": "$HOME/CosyVoice", "MODEL": "tiny"})
+    repo = seeded(tmp_path, [task], config=config)
+    loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
+    graph_task = loop._load_graph().get("T-047")
+
+    [unmet] = loop._unmet_preconditions(graph_task)
+    assert "PYTHONPATH" in unmet and "agentbox" in unmet
+    assert "MODEL" not in unmet

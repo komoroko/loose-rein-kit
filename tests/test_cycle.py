@@ -315,3 +315,12 @@ def test_an_abandoned_archive_says_so_and_why(tmp_path: Path) -> None:
     assert closing["event"] == "cycle_closed"
     assert closing["detail"]["abandoned"] is True
     assert closing["detail"]["reason"] == "the full run moved to the next cycle"
+
+
+def test_an_accepted_cycle_is_not_closed_as_abandoned(tmp_path: Path) -> None:
+    """Its archive said "the acceptance gate was never approved" above `acceptance: approved`."""
+    finished_repo(tmp_path)
+    repo = repo_mod.Repo(tmp_path)
+    assert any("closed without `--abandon`" in b for b in cycle.readiness(repo, abandon=True))
+    assert cycle.main(["--name", "gave-up", "--abandon", "--reason", "x", "--repo", str(tmp_path)]) == 1
+    assert not list((tmp_path / "docs" / "archive").glob("*/ABANDONED.md"))

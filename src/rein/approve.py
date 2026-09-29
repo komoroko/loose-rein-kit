@@ -275,7 +275,7 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
     to ask" is not "there is nothing wrong".
     """
     if gate == FREEZING_GATE:
-        return _mandate_audit_blockers(state, config)
+        return _mandate_audit_blockers(repo, state, config)
     if gate != "acceptance":
         return []
     if not audit.configured(config):
@@ -294,8 +294,8 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
     return [reason] if reason else []
 
 
-def _mandate_audit_blockers(state: models.State, config: models.Config | None) -> list[str]:
-    """The mandate asks that the audit has been run once — not that it passed.
+def _mandate_audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Config | None) -> list[str]:
+    """The mandate asks for a current audit — not a passing one.
 
     A finding there is a change to the environment the mandate is about to freeze (`repair.route`
     puts a dependency bump in a human's hands), so the cheapest moment to learn of it is before
@@ -304,20 +304,29 @@ def _mandate_audit_blockers(state: models.State, config: models.Config | None) -
     that meant downgrading the framework the last task had just been measured against — three
     roll backs for three facts one run would have shown on day one.
 
+    **Current, by acceptance's own measure.** A record taken over other manifests, or older than
+    `max_age_days`, answers a question this plan does not ask; "has one ever been run" let a
+    months-old record from before a roll back stand in for it.
+
     Not a pass requirement: whether this cycle fixes a finding is what the human decides on this
     screen, and a gate that refused to open until it was fixed would leave no mandate to fix it
     in. Projects that declare no audit are left to acceptance, which says so.
     """
     if not audit.configured(config):
         return []
-    record = state.raw.get("dependency_audit")
-    if not isinstance(record, dict):
-        return [
-            "no dependency audit has been run — run `rein audit run` before freezing the plan. "
-            "A finding is a change to the environment this approval freezes, and deciding it now "
-            "costs a line in the plan; at acceptance it costs a roll back."
-        ]
-    return []
+    reason = audit.staleness(
+        state.raw.get("dependency_audit"),
+        dependencies=audit.dependency_digest(repo),
+        now=datetime.now(timezone.utc),
+        max_age=audit.max_age_days(config),
+        require_pass=False,
+    )
+    if not reason:
+        return []
+    return [
+        f"{reason} — before freezing the plan. A finding is a change to the environment this approval "
+        "freezes, and deciding it now costs a line in the plan; at acceptance it costs a roll back."
+    ]
 
 
 #: How many out-of-mandate paths one blocker names before it says how many more there are. A cut

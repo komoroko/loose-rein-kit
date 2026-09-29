@@ -195,10 +195,12 @@ this tool** — a ceiling on it is the same mistake as a budget for questions.
 The first contact with real inputs must not be the one that cannot be undone: `rehearsal` names the
 reversible tasks it waits for that run the same path small (or `waived`, with the reason), and
 `attempts: {max, cost}` is how many launches the approval covers and what each spends. The long,
-deterministic part of such a task — a full run, hours of it — is `operate`: the loop runs it on the
-host after the implementer lands the tooling, because an agent's turn ends and takes the run with it.
-What the work needs from the machine is the task's `environment` (variables, and command prefixes
-granted to that launch only), never the operator's shell or a standing `permissions.allow`.
+deterministic part of such a task — a full run, hours of it — is `operate`: the loop runs it after
+the implementer lands the tooling, because an agent's turn ends and takes the run with it. It runs
+where a quality-gate step runs unless the step names another profile, and what it writes is held to
+the task's scope. What the work needs from the machine is the task's `environment` (variables, and
+command prefixes granted to that launch only), never the operator's shell or a standing
+`permissions.allow`.
 
 They are a fan, not a line: each crossing stands on the mandate alone and acceptance stands on all
 of them, and two crossings carry no order against each other, because ordering them would be

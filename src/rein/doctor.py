@@ -875,9 +875,14 @@ def check_audit_command(repo: repo_mod.Repo, config: models.Config | None) -> li
 
     It runs on the host and nowhere else, so nothing in the quality gate ever exercises it — the
     first time it ran in the field was the acceptance gate, where `uv run pip-audit` found no
-    pip-audit and the release stopped on a tool that was never installed. A launcher (`uv run`,
-    `npx`, `poetry run`) resolves its tool inside the project environment, so that is where this
-    looks for it; anything else must be on PATH.
+    pip-audit and the release stopped on a tool that was never installed. `uv run <tool>` resolves
+    the tool inside the project environment, so that is where this looks for it; anything else must
+    be on PATH.
+
+    **Only the plain `uv run <tool>` form is judged.** With an option in front, which word is the
+    tool depends on uv's grammar (`--group dev` takes a value, `--frozen` does not, `--with` brings
+    the tool from somewhere else), and a guess at it failed `uv run --group dev pip-audit` for a
+    missing `dev`. That form is reported as unchecked instead.
     """
     block = audit.configured(config)
     command = [str(part) for part in block.get("command", [])]
@@ -887,9 +892,18 @@ def check_audit_command(repo: repo_mod.Repo, config: models.Config | None) -> li
     if shutil.which(tool) is None:
         return [Finding("FAIL", "audit", f"dependency audit command {tool!r} not found on PATH")]
     if command[:2] == ["uv", "run"] and len(command) > 2:
-        inner = next((part for part in command[2:] if not part.startswith("-")), "")
+        inner = command[2]
+        if inner.startswith("-"):
+            return [
+                Finding(
+                    "INFO",
+                    "audit",
+                    f"`{' '.join(command)}`: which tool `uv run` starts behind its options is uv's to "
+                    "resolve — not checked here; `rein audit run` is the check",
+                )
+            ]
         venv_bin = repo.root / ".venv" / ("Scripts" if sys.platform == "win32" else "bin")
-        if inner and not (venv_bin / inner).exists() and shutil.which(inner) is None:
+        if not (venv_bin / inner).exists() and shutil.which(inner) is None:
             return [
                 Finding(
                     "FAIL",

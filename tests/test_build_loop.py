@@ -4034,3 +4034,66 @@ def test_an_irreversible_task_is_not_launched_past_its_approved_attempts(
     [gap] = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "knowledge_gap"]
     assert gap.detail["kind"] == "attempt_budget_spent"
     assert "7% of the weekly quota" in gap.detail["message"]
+
+
+def test_a_spent_task_does_not_stop_the_independent_work_beside_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`max_parallel: 1` cut a batch of the spent task alone, and the run stopped with T-002 startable.
+    Held back before the cut, it is named once, when nothing else is left."""
+    spent = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        kind="parallel",
+        operator_surface=[
+            {"kind": "dependency", "name": "the quota", "paths": ["x"], "reversible": False, "adr": "ADR-001"}
+        ],
+    )
+    spent["attempts"] = {"max": 1, "cost": "one full run"}
+    beside = make_task("T-002", claim_ids=["C-001"], kind="parallel")
+    state = make_state(
+        plan_status="frozen", gates={"mandate": "approved", "T-001": "approved", "acceptance": "pending"}
+    )
+    state["tasks"] = {"T-001": {"status": "todo", "attempts": 1}}
+    loop = orchestrator(
+        tmp_path, plan=make_plan(tasks=[spent, beside]), state=state, config=make_config(max_parallel=1)
+    )
+    ran: list[str] = []
+
+    def finish(tasks: list[dag.Task]) -> None:
+        for task in tasks:
+            ran.append(task.id)
+            loop._set_status(task.id, "done")
+
+    monkeypatch.setattr(loop, "_consume_batch", finish)
+    monkeypatch.setattr(loop, "_load_baseline", lambda: None)
+
+    assert loop._consume() == common.EXIT_HUMAN_NEEDED
+    assert ran == ["T-002"]
+    gaps = [e for e in store_mod.Store(loop.repo).read_events() if e.detail.get("kind") == "attempt_budget_spent"]
+    assert len(gaps) == 1
+
+
+def test_a_spent_task_is_named_when_the_run_stops_at_a_crossing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run can end at a crossing presentation instead of an empty frontier; the spent task
+    beside it was then never named at all."""
+    surface = [{"kind": "dependency", "name": "the quota", "paths": ["x"], "reversible": False, "adr": "ADR-001"}]
+    spent = make_task("T-001", claim_ids=["C-001"], kind="parallel", operator_surface=surface)
+    spent["attempts"] = {"max": 1, "cost": "one full run"}
+    spent["rehearsal"] = {"waived": "no smaller form"}
+    crossing = make_task("T-002", claim_ids=["C-001"], kind="parallel", operator_surface=surface)
+    crossing["attempts"] = {"max": 2, "cost": "one full run"}
+    crossing["rehearsal"] = {"waived": "no smaller form"}
+    state = make_state(
+        plan_status="frozen",
+        gates={"mandate": "approved", "T-001": "approved", "T-002": "pending", "acceptance": "pending"},
+    )
+    state["tasks"] = {"T-001": {"status": "todo", "attempts": 1}}
+    loop = orchestrator(tmp_path, plan=make_plan(tasks=[spent, crossing]), state=state)
+    monkeypatch.setattr(loop, "_consume_batch", lambda tasks: pytest.fail(f"launched {[t.id for t in tasks]}"))
+
+    assert loop._consume() == common.EXIT_HUMAN_NEEDED
+    gaps = [e for e in store_mod.Store(loop.repo).read_events() if e.detail.get("kind") == "attempt_budget_spent"]
+    assert [tuple(g.subject_ids) for g in gaps] == [("T-001",)]

@@ -1685,3 +1685,14 @@ def test_an_audit_whose_scanner_is_in_the_project_environment_passes(tmp_path: P
 def test_an_audit_command_missing_from_path_fails_doctor(tmp_path: Path) -> None:
     findings = doctor.check_audit_command(repo_mod.Repo(tmp_path), _audit_config(["rein-no-such-audit"]))
     assert [f.level for f in findings] == ["FAIL"]
+
+
+def test_an_option_in_front_of_the_tool_is_not_read_as_the_tool(tmp_path: Path) -> None:
+    """`--group dev` takes a value; a guess at uv's grammar failed doctor for a missing `dev`."""
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not on PATH here")
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "pip-audit").write_text("#!/bin/sh\n", encoding="utf-8")
+    config = _audit_config(["uv", "run", "--group", "dev", "pip-audit"])
+    assert [f.level for f in doctor.check_audit_command(repo_mod.Repo(tmp_path), config)] == ["INFO"]

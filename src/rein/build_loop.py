@@ -801,8 +801,6 @@ _FAILURE_MAX_LINES = common._FAILURE_MAX_LINES
 # The implementation lives in common.run; the `_run` name stays because the tests monkeypatch it
 # here to fake git and agent-CLI results.
 _run = common.run
-#: The host runner for `operate` steps — separate from `_run`, which launches agents.
-_operate_run = common.run
 
 
 def _late_run(cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
@@ -2854,6 +2852,22 @@ class Orchestrator:
             self._local.steps, self._local.acceptance, self._local.negative_control = [], [], {}
             after_implementer = self._fingerprint(cwd)
             failed, failure_log = self._run_operate(task, cwd)
+            if failed is None and task.operate and not self.dry_run:
+                # What an operate step wrote lands with the task (`finalize_commit` adds the whole
+                # tree), and the scope check above read the tree before the step ran. Checked
+                # again here, or a run's output lands anywhere the step chose to put it.
+                changed, _ = self._review_scope(task, cwd)
+                if violations := self._gate_violations(changed):
+                    raise GateViolationFault(violations)
+                if outside := dossier.scope_violations(task, changed):
+                    message = (
+                        f"{task.id}: its operate steps wrote {', '.join(outside)}, which its declared scope "
+                        f"does not cover (include={list(task.scope_include)}, exclude={list(task.scope_exclude)}). "
+                        "Either the steps write to the wrong place, or the plan drew the task's scope without "
+                        "the run's output — the second is `rein revise --to mandate`, widening `scope.include`."
+                    )
+                    self._stop_before_the_gate(task, "scope_violation", message, tree=self._fingerprint(cwd))
+                    return False, message
             if failed is None:
                 failed, failure_log = self._run_pipeline(task, cwd)
             if failed is None:
@@ -2896,12 +2910,18 @@ class Orchestrator:
                 resume = bool(session)
 
     def _run_operate(self, task: dag.Task, cwd: str) -> tuple[str | None, str]:
-        """Run `task.operate` on the host, in order, in the task's worktree. (None, "") when all passed.
+        """Run `task.operate` in order, in the task's worktree. (None, "") when all passed.
 
         This is the loop doing the long, deterministic part of a task itself. It used to be the
         implementer's, inside one agent turn: the turn ended while a multi-hour run was still going
         and took the child with it, a session limit parked the run for an hour at a time, and the
         only lever was prose in a reset reason telling the next agent to keep waiting.
+
+        **Where a gate step runs, not on the host.** What a step runs is code the implementer just
+        wrote, which is what `quality_gate_profile` exists to keep away from the operator's
+        credentials. Running it as a host process handed every task with an `operate` block the one
+        boundary the gate is configured to hold. A step that needs more names a profile that grants
+        it (`executor_profile`), and that name is frozen with the plan the human approved.
 
         A step the machine could not run (not installed, killed from outside, no network) raises
         :class:`EnvironmentFault` and spends nothing — nothing is known about the code. A step that
@@ -2913,7 +2933,6 @@ class Orchestrator:
                 print(f"    [dry-run] operate: {' → '.join(str(s.get('name')) for s in task.operate)}")
             return None, ""
         declared, _ = task_environment(task)
-        env = {**os.environ, **declared}
         # Under the main checkout, not the worktree: a worktree is deleted after its merge, and the
         # log of a run that took hours is the one record of it worth keeping past that.
         log_dir = self.repo.path(dossier.RELATIVE_PATH) / task.id / "operate"
@@ -2922,15 +2941,30 @@ class Orchestrator:
             name = str(step.get("name", f"step{index}"))
             command = [str(part) for part in step.get("command", [])]
             timeout = step.get("timeout_sec")
+            profile = self._operate_profile(task, step)
             log = log_dir / f"{index:02d}-{name}.log"
-            print(f"    [operate] {task.id}: {name} — {' '.join(command)} (log: {log})")
+            where = f"{task.id}: operate {name}"
+            print(f"    [operate] {task.id}: {name} — {' '.join(command)} in {profile.name!r} (log: {log})")
+            spec = executors.ExecutionSpec(
+                command=tuple(command),
+                profile=profile,
+                mounts=self._mounts_for(profile, cwd),
+                env={**os.environ, **declared} if not profile.runs_contained else {},
+                env_always=declared if profile.runs_contained else {},
+                workdir=_SANDBOX_WORKDIR if profile.runs_contained else cwd,
+                timeout_sec=float(timeout) if isinstance(timeout, int) else None,
+            )
             started = time.monotonic()
-            rc, output = _operate_run(command, cwd, float(timeout) if isinstance(timeout, int) else None, env=env)
+            try:
+                with common.Heartbeat(where):
+                    result = executors.for_profile(profile).run(spec)
+            except executors.ExecutorError as exc:
+                raise EnvironmentFault(faults.Fault.ENV_PERMANENT, where=where, rc=1, output=str(exc)) from exc
+            rc, output = result.exit_code, result.output
             log.write_text(output, encoding="utf-8")
             print(f"    [operate] {task.id}: {name} exited {rc} after {int(time.monotonic() - started)}s")
             if rc == 0:
                 continue
-            where = f"{task.id}: operate {name}"
             fault = faults.classify_step(rc, output)
             if fault is not faults.Fault.CONTENT:
                 raise EnvironmentFault(fault, where=where, rc=rc, output=output[-4000:])
@@ -2939,6 +2973,18 @@ class Orchestrator:
                 f"{output[-4000:]}"
             )
         return None, ""
+
+    def _operate_profile(self, task: dag.Task, step: Mapping[str, Any]) -> models.ExecutorProfile:
+        """The profile an `operate` step runs in: its own if it names one, else the quality gate's."""
+        named = str(step.get("executor_profile", ""))
+        if not named:
+            return self._profile_for(GateStep(name=f"{task.id} operate", kind="command"))
+        if profile := self.config.raw.profiles.get(named):
+            return profile
+        raise common.ReinError(
+            f"{task.id}'s operate step {step.get('name')!r} names executor_profile {named!r}, "
+            "which is not in executor_profiles"
+        )
 
     # -- post-merge integration gate --
 
@@ -3611,15 +3657,24 @@ class Orchestrator:
                 continue  # a deliverable landed: its dependents may be on the frontier now
             owed.update(self._unmet_on_frontier(graph))
             provisional = self._resting_on_the_unobserved(graph)
+            # The approval priced a number of launches; one more is a spend nobody approved. Held
+            # back like the rest rather than dropped from a batch already cut: a batch of one (a
+            # foundation, or `max_parallel: 1`) would otherwise stop the run with independent work
+            # still startable, and a larger one would name the same task again on every pass.
+            spent = [t for t in graph.frontier() if t.attempt_max and t.attempts >= t.attempt_max]
             runnable = graph
-            if owed or provisional:
+            if owed or provisional or spent:
                 # Off the frontier for this run, not off the plan: nothing about them is a verdict,
                 # and the next `rein build` asks again.
-                held_back = set(owed) | provisional
+                held_back = set(owed) | provisional | {t.id for t in spent}
                 runnable = dag.Graph.from_tasks(
                     [replace(t, status="blocked") if t.id in held_back else t for t in graph.tasks]
                 )
             batch = plan_batch(runnable, self.config.max_parallel)
+            if batch is None and spent:
+                self._report_spent(spent)
+                if not owed:
+                    return common.EXIT_HUMAN_NEEDED
             if batch is None and owed:
                 return self._present_owed(graph, owed)
             if batch is None:
@@ -3637,20 +3692,6 @@ class Orchestrator:
                 return common.EXIT_HUMAN_NEEDED
 
             mode, tasks = batch
-            spent = [t for t in tasks if t.attempt_max and t.attempts >= t.attempt_max]
-            if spent:
-                # The approval priced a number of launches; one more is a spend nobody approved.
-                for task in spent:
-                    self._escalate(
-                        "attempt_budget_spent",
-                        f"{task.id} has used the {task.attempt_max} launch(es) its approval covers "
-                        f"(each: {task.attempt_cost}). Not launched again. Raising the budget changes what "
-                        f"was approved: `rein revise --to mandate`, then change `attempts.max` for {task.id}.",
-                        task=task.id,
-                    )
-                tasks = [t for t in tasks if t not in spent]
-                if not tasks:
-                    return common.EXIT_HUMAN_NEEDED
             waiting = [t for t in tasks if self._awaits_crossing(t.id)]
             if waiting:
                 # Everything else in the batch first: a contact point stops the work that has to
@@ -3658,6 +3699,7 @@ class Orchestrator:
                 # is left, which is also what makes it happen once per run.
                 tasks = [t for t in tasks if t.id not in {w.id for w in waiting}]
                 if not tasks:
+                    self._report_spent(spent)
                     return self._present_crossings(waiting)
             # Here rather than at the top of the run: a `rein build` that finds every task done goes
             # straight to acceptance, and a full gate run at the root to answer a question no task is
@@ -3666,6 +3708,18 @@ class Orchestrator:
             print(f"[batch] mode={mode} tasks={[t.id for t in tasks]}")
             self._consume_batch(tasks)
             # Recompute at the top of the loop after each batch (reassemble the chain).
+
+    def _report_spent(self, spent: Sequence[dag.Task]) -> None:
+        """Name each task whose approved launches are used up. Called on the way out of a run —
+        when nothing else is left to start, the same moment a crossing is presented — so once."""
+        for task in spent:
+            self._escalate(
+                "attempt_budget_spent",
+                f"{task.id} has used the {task.attempt_max} launch(es) its approval covers "
+                f"(each: {task.attempt_cost}). Not launched again. Raising the budget changes what "
+                f"was approved: `rein revise --to mandate`, then change `attempts.max` for {task.id}.",
+                task=task.id,
+            )
 
     # -- premises nobody has measured (CR-39) --
 
@@ -3754,22 +3808,52 @@ class Orchestrator:
             f"environment.env {name} refers to a variable this machine does not set — set it, or change the plan"
             for name in unresolved
         ]
-        for index, requirement in enumerate(task.requires):
-            says = str(requirement.get("says", ""))
-            path = str(requirement.get("file", ""))
-            if path:
-                if not self.repo.path(path).exists():
-                    unmet.append(f"{says} ({path} does not exist)")
-                continue
-            step = GateStep(
+        probes = [
+            GateStep(
                 name=f"{task.id}:requires[{index}]",
                 kind="command",
                 command=tuple(str(part) for part in requirement.get("probe", [])),
                 executor_profile=str(requirement.get("executor_profile", "")),
             )
-            if failure := self._probe(step, env=declared):
+            for index, requirement in enumerate(task.requires)
+            if not requirement.get("file")
+        ]
+        # Expanded here, on this machine, and handed as-is to whatever runs contained: `$HOME/x` there
+        # names a directory of the host that the sandbox does not have, and the work fails as if the
+        # code were wrong. A literal value means the same thing in both places.
+        if task.env and (contained := self._contained_env_users(task, probes)):
+            unmet += [
+                f"environment.env {name} expands from this machine's environment ({value!r}), but "
+                f"{', '.join(contained)} run(s) contained, where that value names nothing — declare a "
+                "literal value, or change the plan"
+                for name, value in task.env
+                if name not in unresolved and (_ENV_REF.search(value) or value.startswith("~"))
+            ]
+        pending = iter(probes)
+        for requirement in task.requires:
+            says, path = str(requirement.get("says", "")), str(requirement.get("file", ""))
+            if path:
+                if not self.repo.path(path).exists():
+                    unmet.append(f"{says} ({path} does not exist)")
+                continue
+            if failure := self._probe(next(pending), env=declared):
                 unmet.append(f"{says} ({failure})")
         return unmet
+
+    def _contained_env_users(self, task: dag.Task, probes: Sequence[GateStep]) -> list[str]:
+        """What receives `task`'s declared environment inside a sandbox: its implementer, its
+        `operate` steps, its probes — each named with its profile."""
+        users: list[str] = []
+        agent = self.config.raw.agent_profile
+        if agent is not None and agent.runs_contained:
+            users.append(f"the implementer ({agent.name})")
+        for step in task.operate:
+            if (profile := self._operate_profile(task, step)).runs_contained:
+                users.append(f"operate {step.get('name')} ({profile.name})")
+        for probe in probes:
+            if (profile := self._probe_profile(probe)).runs_contained:
+                users.append(f"{probe.name} ({profile.name})")
+        return users
 
     def _probe(self, step: GateStep, env: Mapping[str, str] | None = None) -> str:
         """Run one probe's argv. "" when it exits 0, what it said when it ran and exited nonzero.

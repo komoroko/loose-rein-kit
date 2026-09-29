@@ -107,7 +107,9 @@ def readiness(repo: repo_mod.Repo, *, abandon: bool = False) -> list[str]:
 
     `abandon` drops the one condition an abandoned cycle cannot meet — an approved acceptance —
     and keeps the rest: an archive assembled from a damaged chain or an untraceable approval is
-    no more a record for being abandoned.
+    no more a record for being abandoned. It turns that condition around instead: a cycle whose
+    acceptance *was* approved is a change somebody took, and an archive marked ABANDONED would say
+    the opposite of its own gates.
     """
     store = store_mod.Store(repo)
     blockers: list[str] = []
@@ -118,7 +120,9 @@ def readiness(repo: repo_mod.Repo, *, abandon: bool = False) -> list[str]:
     if state is None:
         return ["no .rein/state.yaml — there is no cycle to close"]
 
-    if not abandon and state.gate_status("acceptance") != "approved":
+    if abandon and state.gate_status("acceptance") == "approved":
+        blockers.append("the acceptance gate is approved — this change was taken, so it is closed without `--abandon`")
+    elif not abandon and state.gate_status("acceptance") != "approved":
         blockers.append("the acceptance gate is not approved — a cycle closes on a signed decision to take the change")
     events, defects = event_chain.scan(repo.events)
     if defects:
