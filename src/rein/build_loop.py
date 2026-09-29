@@ -1856,7 +1856,6 @@ class Orchestrator:
         target = dossier.findings_path(self.root, _BATCH_REVIEW_SUBJECT)
         target.unlink(missing_ok=True)  # a stale file from the previous round is not this answer
         findings_rel = f"{dossier.RELATIVE_PATH}/{target.name}"
-        before = {task.id: self._fingerprint(self.ws.worktree_path(task.id)) for task in subjects}
         prompt = build_prompts.batch_review_prompt(
             [self._review_subject(task) for task in subjects],
             gate_cmds=self.config.gate_cmds,
@@ -1867,6 +1866,9 @@ class Orchestrator:
             lenses_applied=self._code_lenses[0],
             lenses_proposed=self._code_lenses[1],
         )
+        # Taken after the dossiers are written, so what the loop itself put in a worktree is never
+        # mistaken for the reviewer having moved it.
+        before = {task.id: self._fingerprint(self.ws.worktree_path(task.id)) for task in subjects}
         try:
             # `REVIEW`, not `WRITE`: the findings file is the only thing it needs to produce, and
             # naming it is what lets an adapter that can scope a write grant exactly that one.
