@@ -55,6 +55,12 @@ seeded `reviews.yaml` already says.
 - **The approval bar stays in view.** It was sticky inside a parent that held nothing else, so it
   sat at the foot of every long document. The footer is the sticky element now, and an opened
   confirmation renders above the bar.
+- **The prompts are checked against the code they describe.** `template-lint` parses every
+  `rein …` line a document tells an agent to run with that verb's real parser, resolves every
+  `<file> "Section"` pointer, reports a camelCase spelling of a schema key, and requires each end
+  gate to be presented by one procedure. What it found is fixed: `blockedBy` is `blocked_by`,
+  `rein agent <cli> [--role <role>]` is the order the verb takes, several section pointers had
+  moved, and `/build` no longer presents the acceptance gate `/verify` presents.
 
 ## [0.11.1] - 2026-09-29
 
