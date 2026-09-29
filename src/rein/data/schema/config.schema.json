@@ -358,6 +358,16 @@
           "items": {
             "$ref": "#/$defs/repoPath"
           }
+        },
+        "scope_additions": {
+          "description": "Paths a frozen task's scope may be widened to without rolling the mandate back (`rein task scope-add`), each covering what is beneath it. Frozen with the rest of this file, so the human approving the mandate approves the allowance too. Every addition is recorded with its reason and listed at acceptance. Meant for the files a change necessarily drags along — the tests that pin a constant the task changes — and never for product code: widening what a task may change there is what `/revise` is for.",
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
         }
       }
     },

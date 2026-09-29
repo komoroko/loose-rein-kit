@@ -1427,6 +1427,32 @@
                     }
                   }
                 },
+                "scope_added_after_mandate": {
+                  "description": "Paths added to a frozen task's scope after the mandate (`rein task scope-add`), inside the config's `guard.scope_additions`. Added without a person; listed here so that is not the same as unseen.",
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "task_id",
+                      "paths"
+                    ],
+                    "properties": {
+                      "task_id": {
+                        "$ref": "#/$defs/taskId"
+                      },
+                      "paths": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": {
+                          "type": "string",
+                          "maxLength": 512
+                        }
+                      }
+                    }
+                  }
+                },
                 "deferred": {
                   "description": "Tasks taken out of the plan while it was a draft (`rein task defer`): each with the status it had and why. What this change does not deliver, on the screen that takes it.",
                   "type": "array",

@@ -250,6 +250,9 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
     # Order added after the mandate joins the frozen edges here, so every reader of the graph —
     # the frontier, the layers, the critical path — sees one DAG.
     after = state.task_after if state is not None else {}
+    # Scope added after the mandate (`rein task scope-add`) joins the frozen scope here for the same
+    # reason: the guard, the dossier and the reviewers all read the one the graph carries.
+    scope_added = state.task_scope_added if state is not None else {}
     # A premise observed false with a fallback swaps the criteria resting on it for the ones a
     # human approved with the mandate. The plan document is untouched — it is frozen, and its
     # fallback is part of what was frozen — so this is where the swap becomes the task's bar.
@@ -296,7 +299,7 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 claim_ids=t.claim_ids,
                 domains=t.domains,
                 attempts=attempts_map.get(t.id, 0),
-                scope_include=t.scope_include,
+                scope_include=tuple(dict.fromkeys((*t.scope_include, *scope_added.get(t.id, ())))),
                 scope_exclude=t.scope_exclude,
                 acceptance=effective(t.id, t.acceptance),
                 produced_by=t.produced_by,

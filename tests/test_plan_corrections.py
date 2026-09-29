@@ -16,7 +16,7 @@ import pytest
 from rein import approve, brief, dag, models, revise, task_cmd
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import make_plan, make_state, make_task, seed_repo
+from tests._support import make_config, make_plan, make_state, make_task, seed_repo
 
 
 def _repo(tmp_path: Path, planned: list[dict[str, object]], statuses: dict[str, object] | None = None) -> repo_mod.Repo:
@@ -234,3 +234,70 @@ def test_defer_refuses_a_task_with_no_status(tmp_path: Path) -> None:
     repo = _draft_repo_without(tmp_path, "T-002", {"T-001": {"status": "done"}})
     with pytest.raises(ValueError, match="nothing to defer"):
         task_cmd.defer(repo, "T-002", reason="no")
+
+
+# --- widening a frozen task's scope where the config allowed it ahead of time -----------------
+
+
+def _scoped_repo(tmp_path: Path, allowed: list[str] | None, statuses: dict[str, object] | None = None) -> repo_mod.Repo:
+    config = make_config()
+    if allowed is not None:
+        config["guard"]["scope_additions"] = allowed
+    tasks = [
+        make_task("T-001", claim_ids=["C-001"], scope_include=["src/prompts.py", "tests/test_prompts.py"]),
+        make_task("T-002", kind="parallel", claim_ids=["C-001"], scope_include=["tests/test_cli.py"]),
+    ]
+    state = make_state(plan_status="frozen")
+    if statuses:
+        state["tasks"] = statuses
+    seed_repo(tmp_path, config=config, plan=make_plan(tasks=tasks), state=state)
+    return repo_mod.Repo(tmp_path)
+
+
+def test_a_test_the_change_drags_along_is_added_without_a_roll_back(tmp_path: Path) -> None:
+    """The field case: a task changed a constant and a test elsewhere pinned the old value."""
+    repo = _scoped_repo(tmp_path, ["tests/"])
+    plan_before = (repo.root / ".rein" / "plan.yaml").read_bytes()
+
+    task_cmd.scope_add(repo, "T-001", path="tests/ports/test_protocols.py", reason="asserts the old model id")
+
+    assert (repo.root / ".rein" / "plan.yaml").read_bytes() == plan_before
+    assert "tests/ports/test_protocols.py" in dag.load(repo).get("T-001").scope_include
+    recorded = store_mod.Store(repo).read_events()[-1]
+    assert recorded.detail["kind"] == "scope_added" and recorded.detail["reason"] == "asserts the old model id"
+    residuals = brief.derive(plan=None, state=store_mod.Store(repo).read_state(), config=None)["residuals"]
+    assert residuals["scope_added_after_mandate"] == [{"task_id": "T-001", "paths": ["tests/ports/test_protocols.py"]}]
+
+
+def test_nothing_is_added_where_the_config_allows_nothing(tmp_path: Path) -> None:
+    repo = _scoped_repo(tmp_path, None)
+    with pytest.raises(ValueError, match="none configured"):
+        task_cmd.scope_add(repo, "T-001", path="tests/x.py", reason="r")
+
+
+def test_product_code_outside_the_allowance_still_needs_a_roll_back(tmp_path: Path) -> None:
+    repo = _scoped_repo(tmp_path, ["tests/"])
+    with pytest.raises(ValueError, match="rein revise --to mandate"):
+        task_cmd.scope_add(repo, "T-001", path="src/other.py", reason="r")
+
+
+def test_another_tasks_path_is_that_tasks_work(tmp_path: Path) -> None:
+    repo = _scoped_repo(tmp_path, ["tests/"])
+    with pytest.raises(ValueError, match="scope of T-002"):
+        task_cmd.scope_add(repo, "T-001", path="tests/test_cli.py", reason="r")
+
+
+def test_a_finished_task_is_not_widened(tmp_path: Path) -> None:
+    repo = _scoped_repo(tmp_path, ["tests/"], {"T-001": {"status": "done"}})
+    with pytest.raises(ValueError, match="landed against"):
+        task_cmd.scope_add(repo, "T-001", path="tests/x.py", reason="r")
+
+
+def test_a_roll_back_hands_added_scope_back_to_the_planner(tmp_path: Path) -> None:
+    repo = _scoped_repo(tmp_path, ["tests/"])
+    task_cmd.scope_add(repo, "T-001", path="tests/x.py", reason="r")
+    revision = revise.plan_revision(repo, "mandate", [])
+    assert revision["returned_scope"] == ["T-001: tests/x.py"]
+    revise.apply(repo, revision, "re-cut")
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and state.task_scope_added == {}

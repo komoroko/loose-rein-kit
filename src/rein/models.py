@@ -1489,6 +1489,16 @@ class State:
         return {k: _ids(v, "after") for k, v in value.items() if isinstance(v, dict) and _ids(v, "after")}
 
     @property
+    def task_scope_added(self) -> Mapping[str, tuple[str, ...]]:
+        """Paths added to a frozen task's scope (`rein task scope-add`): task id → the paths."""
+        value = self.raw.get("tasks")
+        if not isinstance(value, dict):
+            return {}
+        return {
+            k: _ids(v, "scope_added") for k, v in value.items() if isinstance(v, dict) and _ids(v, "scope_added")
+        }
+
+    @property
     def deferred(self) -> Mapping[str, Mapping[str, Any]]:
         """Tasks taken out of this cycle's plan (`rein task defer`): task id → what was recorded."""
         value = self.raw.get("deferred")
@@ -2080,6 +2090,12 @@ class Config:
         if not isinstance(entries, list):
             return ()
         return tuple(p for p in entries if isinstance(p, str) and p)
+
+    @property
+    def scope_additions(self) -> tuple[str, ...]:
+        """Where a frozen task's scope may be widened without a roll back (`guard.scope_additions`)."""
+        guard = self.raw.get("guard")
+        return _ids(guard, "scope_additions") if isinstance(guard, dict) else ()
 
     @property
     def budgets(self) -> dict[str, int]:
