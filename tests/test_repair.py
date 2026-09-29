@@ -48,7 +48,7 @@ def test_a_security_finding_a_task_scope_owns_is_the_loops_to_repair() -> None:
     """Nothing about it is a question. The reviewer read the code and named the lines; the plan
     says whose they are; and the repair changes no claim, no criterion and no requirement."""
     routing = repair.route(
-        _plan_with_scopes(),
+        _plan_with_scopes().tasks,
         _review(security_findings=[_finding("SEC-001", "src/api/client.py")]),
     )
     assert [r.task_id for r in routing.code] == ["T-001"]
@@ -60,7 +60,7 @@ def test_findings_are_grouped_by_task_in_plan_order() -> None:
     """One launch answers everything about one scope — an implementer asked the same question
     twice about the same files is two launches for one reading."""
     routing = repair.route(
-        _plan_with_scopes(),
+        _plan_with_scopes().tasks,
         _review(
             security_findings=[
                 _finding("SEC-002", "src/ui/page.tsx"),
@@ -77,7 +77,7 @@ def test_a_finding_no_declared_scope_owns_is_never_guessed_at() -> None:
     """ "No task covers this path" means the plan does not say, and picking the nearest task would
     be inventing the answer the attribution exists to derive."""
     routing = repair.route(
-        _plan_with_scopes(),
+        _plan_with_scopes().tasks,
         _review(security_findings=[_finding("SEC-001", "vendor/thing.py")]),
     )
     assert routing.code == ()
@@ -93,12 +93,12 @@ def test_a_diverged_claim_is_a_judgement_until_a_human_makes_it_a_repair() -> No
     human saying the code is the mistaken half, which hands the subject back to the loop.
     """
     review = _review(claims=[{"claim_id": "C-001", "verdict": "diverged", "risk": "high"}])
-    routing = repair.route(_plan_with_scopes(), review)
+    routing = repair.route(_plan_with_scopes().tasks, review)
     assert routing.code == ()
     assert [a.finding_id for a in routing.judgement] == ["C-001"]
 
     answered = repair.route(
-        _plan_with_scopes(),
+        _plan_with_scopes().tasks,
         review,
         human={"dispositions": [{"subject_id": "C-001", "action": "revise_implementation"}]},
     )
@@ -112,7 +112,7 @@ def test_any_other_card_answer_keeps_the_subject_with_the_human() -> None:
     review = _review(claims=[{"claim_id": "C-001", "verdict": "missing", "risk": "high"}])
     for action in ("revise_design", "revise_requirement", "reduce_scope", "dispute_finding"):
         routing = repair.route(
-            _plan_with_scopes(),
+            _plan_with_scopes().tasks,
             review,
             human={"dispositions": [{"subject_id": "C-001", "action": action}]},
         )
@@ -122,5 +122,5 @@ def test_any_other_card_answer_keeps_the_subject_with_the_human() -> None:
 
 def test_an_ungenerated_review_routes_nothing() -> None:
     """ "It did not say" must never read as "it found nothing"."""
-    assert repair.route(_plan_with_scopes(), None) == repair.Routing()
-    assert repair.route(_plan_with_scopes(), models.Review(make_review())) == repair.Routing()
+    assert repair.route(_plan_with_scopes().tasks, None) == repair.Routing()
+    assert repair.route(_plan_with_scopes().tasks, models.Review(make_review())) == repair.Routing()

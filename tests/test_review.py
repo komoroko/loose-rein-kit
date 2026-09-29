@@ -2779,6 +2779,45 @@ def test_the_outlook_says_what_gate_4_would_be_asked_to_read(review_repo: Path) 
     assert "change under review:" in view.line() and "coverage insufficient" in view.line()
 
 
+def test_the_readings_are_cut_from_the_graph_with_what_was_added_after_the_mandate(tmp_path: Path) -> None:
+    """`rein task order` and `rein task scope-add` change the graph every other reader uses. The
+    readings read the frozen plan alone: an ordered pair stayed two readings while `rein dag` said
+    one, and a path added to a task's scope was nobody's here, so it went to the seam and a
+    finding about it was charged to no task."""
+    from rein import dag, findings
+
+    state = make_state(project="rv")
+    state["tasks"] = {"T-002": {"status": "todo", "after": ["T-001"], "scope_added": ["shared/x.py"]}}
+    seed_repo(
+        tmp_path,
+        state=state,
+        plan=make_plan(
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], scope_include=["beta/"]),
+            ]
+        ),
+        config=make_config(),
+    )
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    base = _git(tmp_path, "rev-parse", "HEAD")
+    for path in ("alpha/mod.py", "beta/mod.py", "shared/x.py"):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text("X = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "both and the added path")
+
+    repo = repo_mod.Repo(tmp_path)
+    view = review.outlook(repo, base=base)
+    assert view is not None
+    assert (view.readings, view.unit) == (1, "T-001+T-002"), "one chain, and no seam: the added path is T-002's"
+    graph = dag.load(repo)
+    assert "1 reading(s) plus the seam" in dag.render(graph), "`rein dag` promises what the gate takes"
+    assert findings.owner_of_path(graph.tasks, "shared/x.py") == "T-002"
+
+
 def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -> None:
     """A plan scopes every task; a cycle in progress has touched some of them. `take_readings`
     drops the empty slices before it launches anything, so a board that counted all of them would
@@ -2808,9 +2847,11 @@ def test_the_outlook_counts_only_the_readings_gate_4_will_take(tmp_path: Path) -
     view = review.outlook(repo, base=base)
     assert view is not None
     assert view.unit == "T-001"
+    plan = store_mod.Store(repo).read_plan()
+    assert plan is not None
     taken = review_reading.take_readings(
         repo,
-        review_reading.plan_readings(store_mod.Store(repo).read_plan(), ["alpha/mod.py"]),
+        review_reading.plan_readings(plan.tasks, ["alpha/mod.py"]),
         base=base,
         head="HEAD",
         exclude=review.not_the_product(repo, store_mod.Store(repo).read_state()),

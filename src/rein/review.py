@@ -40,6 +40,7 @@ from rein import (
     brief,
     common,
     conformance,
+    dag,
     decision_cards,
     diff_facts,
     digests,
@@ -329,6 +330,7 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
     try:
         trusted_base = _resolve_base(repo, plan, base)
         diff_text = _diff(repo, trusted_base, "HEAD", not_the_product(repo, state))
+        tasks = _effective_tasks(plan, state)
     except ReviewError:
         return None
     facts = diff_facts.analyze(diff_text, evidence=plan.artifact_paths if plan is not None else ())
@@ -340,20 +342,22 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
     # The same readings acceptance will take, decided by the same function on the same inputs — a board
     # that showed a different split from the one the pipeline runs would be reporting on a review
     # nobody is going to generate.
+    # Sized as sent — folded, as `read_facts` checks it — so the board and the refusal cannot
+    # disagree about whether a reading fits, and a chain too big for one launch is split here
+    # exactly as the gate will split it.
+    sent, _ = review_reading.fold_bodies(diff_text, facts.files, signalled=frozenset(h.path for h in facts.signals))
     readings = review_reading.plan_readings(
-        plan,
+        tasks,
         [f.path for f in facts.files],
         mode=config.composition if config is not None else "auto",
         risk=effective,
+        sent=sent,
+        ceiling=int(limits["max_diff_bytes"]),
     )
     # Minus the slices this cycle has not touched, which is the same subtraction `take_readings`
     # makes before it launches anything: a plan scopes every task, and at task 3 of 18 the other
     # fifteen readings have nothing in them to read. Counting them would put "in 18 readings" on
     # the board for a review that is going to take four.
-    #
-    # Sized as sent — folded, as `read_facts` checks it — so the board and the refusal cannot
-    # disagree about whether a reading fits.
-    sent, _ = review_reading.fold_bodies(diff_text, facts.files, signalled=frozenset(h.path for h in facts.signals))
     sizes = review_reading.bytes_by_reading(sent, readings)
     taken = {r.unit: sizes.get(r.unit, 0) for r in readings if r.whole or sizes.get(r.unit)}
     unit, largest = max(taken.items(), key=lambda item: item[1]) if taken else (review_reading.WHOLE, 0)
@@ -368,6 +372,21 @@ def outlook(repo: repo_mod.Repo, *, base: str | None = None) -> ChangeOutlook | 
         unit=unit,
         readings=len(taken) or 1,
     )
+
+
+def _effective_tasks(plan: models.Plan | None, state: models.State | None) -> tuple[dag.Task, ...] | None:
+    """The tasks the readings are cut from: the frozen plan with the order and scope added since.
+
+    The same graph the build schedules by and the guard checks against (`dag.join`). A plan and a
+    state that do not agree on the task set are not something to read around: that is a rewound
+    plan, and a review over it would be charged to tasks nobody can name.
+    """
+    if plan is None:
+        return None
+    try:
+        return dag.join(plan, state).tasks
+    except dag.DagError as exc:
+        raise ReviewError(f"the task graph is inconsistent, so the change cannot be read along it: {exc}") from None
 
 
 def generate(
@@ -512,12 +531,21 @@ def generate(
         # because it decides how the change may be read at all: see the re-take below.
         prior_blocking = _prior_blocking(repo, existing, trusted_base, state)
 
-        # How the change is read: one reading of everything, or one per task the plan scopes plus
-        # the seam between them. Each is measured and widened on its own, so one launch holds one
-        # task's slice rather than a whole cycle, and a slice nobody read is named rather than
-        # counted as read (`compose_coverage`).
+        # How the change is read: one reading of everything, or one per dependency chain the plan
+        # scopes (task by task where a chain is too big for one launch) plus the seam between them.
+        # Each is measured and widened on its own, so one launch holds one chain's slice rather than
+        # a whole cycle, and a slice nobody read is named rather than counted as read
+        # (`compose_coverage`).
+        sent, _ = review_reading.fold_bodies(
+            whole_diff, facts.files, signalled=frozenset(hit.path for hit in facts.signals)
+        )
         readings = review_reading.plan_readings(
-            plan, changed, mode=config.composition if config is not None else "auto", risk=effective
+            _effective_tasks(plan, state),
+            changed,
+            mode=config.composition if config is not None else "auto",
+            risk=effective,
+            sent=sent,
+            ceiling=int(limits["max_diff_bytes"]),
         )
         measures = review_reading.take_readings(
             repo, readings, base=trusted_base, head=head, exclude=exclude, limits=limits, evidence=evidence

@@ -929,6 +929,7 @@ def collect_status(
     tasks_block: dict[str, object] | None = None
     counts: dict[str, int] | None = None
     trace_block: dict[str, object] | None = None
+    graph: dag.Graph | None = None
     if plan is not None:
         try:
             graph = dag.join(plan, state)
@@ -947,8 +948,9 @@ def collect_status(
     attention = events_mod.open_conditions(events, task_status)
 
     # The acceptance gate's blocking findings, split by who can act on each. Empty when there is no plan or no
-    # generated review, which `repair.route` answers for itself.
-    routing = repair.route(plan, review) if plan is not None else repair.Routing()
+    # generated review, which `repair.route` answers for itself — and when the graph is inconsistent,
+    # which the warning above already says: there is then no task set to charge a finding to.
+    routing = repair.route(graph.tasks, review) if graph is not None else repair.Routing()
 
     template_mode = config.template_mode if config else False
     uninitialized = is_uninitialized(config, state)

@@ -538,12 +538,15 @@ def test_a_slice_holding_no_signal_is_not_where_the_risk_floor_drops(tmp_path: P
     repo = repo_mod.Repo(root)
     review.generate(repo, _reviewers(reviewer))
 
-    whole, _effective = review_reading.whole_change_risk(
+    _readings, whole, _effective = review_reading.change_readings(
         repo,
+        None,
         None,
         base=review_reading.resolve_base(repo, None, None),
         head=repo._git_rc("rev-parse", "HEAD")[1].strip(),
         exclude=review_reading.not_the_product(repo, None),
+        mode="auto",
+        ceiling=0,
     )
     assert whole == "high", "the change as a whole crosses a security boundary"
     assert floors == [whole] * 3, floors
@@ -592,10 +595,12 @@ def test_a_critical_change_is_read_whole_whatever_the_configuration_says() -> No
     because the mode lives inside the mandate's frozen digest and `rein review generate` has no override.
     """
     plan, changed = _scoped_plan(), ["alpha/mod.py", "alpha/shared.py"]
-    assert [r.unit for r in review_reading.plan_readings(plan, changed)] != [review_reading.WHOLE]
-    assert [r.unit for r in review_reading.plan_readings(plan, changed, risk="critical")] == [review_reading.WHOLE]
+    assert [r.unit for r in review_reading.plan_readings(plan.tasks, changed)] != [review_reading.WHOLE]
+    assert [r.unit for r in review_reading.plan_readings(plan.tasks, changed, risk="critical")] == [
+        review_reading.WHOLE
+    ]
     # And only there: the limit is about what composition cannot rule out, not about caution.
-    assert [r.unit for r in review_reading.plan_readings(plan, changed, risk="high")] != [review_reading.WHOLE]
+    assert [r.unit for r in review_reading.plan_readings(plan.tasks, changed, risk="high")] != [review_reading.WHOLE]
 
 
 def test_a_carried_finding_is_answered_by_exactly_one_reading() -> None:
@@ -604,7 +609,7 @@ def test_a_carried_finding_is_answered_by_exactly_one_reading() -> None:
     same carried finding, all three were required to re-state it, and `merge` keeps the id of
     anything a reading carried: one review carrying `SEC-001` three times.
     """
-    readings = review_reading.plan_readings(_scoped_plan(), ["alpha/mod.py", "alpha/shared.py", "loose.py"])
+    readings = review_reading.plan_readings(_scoped_plan().tasks, ["alpha/mod.py", "alpha/shared.py", "loose.py"])
     assert review_reading.SEAM in {r.unit for r in readings}
     prior: list[Mapping[str, Any]] = [
         {"id": "SEC-001", "code_anchors": [{"path": "alpha/shared.py", "line": 1}]},
@@ -685,7 +690,7 @@ def test_a_carried_finding_no_reading_can_see_stops_the_composition() -> None:
     reading came first is the wrong repair; the change is not one these slices cover, so
     `review.generate` reads it whole.
     """
-    readings = review_reading.plan_readings(_scoped_plan(), ["alpha/mod.py"])
+    readings = review_reading.plan_readings(_scoped_plan().tasks, ["alpha/mod.py"])
     assert review_reading.SEAM not in {r.unit for r in readings}, "nothing shared, nothing unowned"
     unreachable: list[Mapping[str, Any]] = [{"id": "SEC-009", "code_anchors": [{"path": "beta/caller.py"}]}]
     assert review_reading.unowned_priors(readings, unreachable) == ["SEC-009"]
@@ -705,12 +710,12 @@ def test_the_reading_shown_a_finding_is_the_task_it_is_filed_against() -> None:
     from rein import findings as findings_mod
 
     plan = _scoped_plan()
-    readings = review_reading.plan_readings(plan, ["alpha/mod.py", "alpha/shared.py", "loose.py"])
+    readings = review_reading.plan_readings(plan.tasks, ["alpha/mod.py", "alpha/shared.py", "loose.py"])
     finding: Mapping[str, Any] = {
         "id": "SEC-004",
         "code_anchors": [{"path": "alpha/mod.py"}, {"path": "alpha/shared.py"}],
     }
-    filed = findings_mod.owner_of_path(plan, "alpha/mod.py")
+    filed = findings_mod.owner_of_path(plan.tasks, "alpha/mod.py")
     shown = next(unit for unit, carried in review_reading.priors_by_reading(readings, [finding]).items() if carried)
     assert shown == filed == "T-001", "the first anchor that has an owner, on both sides"
 
@@ -809,3 +814,72 @@ def test_only_the_cache_can_say_whether_a_stage_ran_for_this_reading(tmp_path: P
         )
     assert seen == [False, False, True], seen
     assert ran == {"actual_extraction"}, "the name is in `ran` from the first launch onwards"
+
+
+# --- readings along dependency chains (CR-45) ----------------------------------
+
+
+def _chain_plan() -> models.Plan:
+    """T-001 → T-002 → T-003 is one line of work; T-004 hangs off T-001 too, so T-001 branches."""
+    from tests._support import make_claim, make_plan, make_task
+
+    return models.Plan(
+        make_plan(
+            claims=[make_claim()],
+            tasks=[
+                make_task("T-010", claim_ids=["C-001"], scope_include=["base/"]),
+                make_task("T-001", claim_ids=["C-001"], blocked_by=["T-010"], scope_include=["alpha/"]),
+                make_task(
+                    "T-002", claim_ids=["C-001"], blocked_by=["T-001"], scope_include=["alpha/shared.py", "beta/"]
+                ),
+                make_task("T-003", claim_ids=["C-001"], blocked_by=["T-002"], scope_include=["gamma/"]),
+                make_task("T-004", claim_ids=["C-001"], blocked_by=["T-010"], scope_include=["delta/"]),
+            ],
+        )
+    )
+
+
+def test_a_chain_is_a_line_nothing_branches_off_and_nothing_joins() -> None:
+    from rein import dag
+
+    assert dag.chains(_chain_plan().tasks) == [("T-010",), ("T-001", "T-002", "T-003"), ("T-004",)]
+
+
+def test_a_chain_is_read_in_one_launch_and_its_shared_path_is_not_a_seam() -> None:
+    """Three tasks built one on the next used to be three readings, each an extractor and a
+    security reviewer; `alpha/shared.py`, which two of them cover, was read twice and again in the
+    seam."""
+    changed = ["base/a.py", "alpha/mod.py", "alpha/shared.py", "beta/b.py", "gamma/c.py", "delta/d.py"]
+    readings = review_reading.plan_readings(_chain_plan().tasks, changed)
+    assert [r.unit for r in readings] == ["T-010", "T-001+T-002+T-003", "T-004"]
+    chain = readings[1]
+    assert chain.members == ("T-001", "T-002", "T-003")
+    assert chain.include == ("alpha/", "alpha/shared.py", "beta/", "gamma/")
+
+
+def test_a_chain_one_launch_cannot_hold_is_read_task_by_task() -> None:
+    """The split is a function of the diff alone, so the warm-up and the gate take the same readings."""
+    changed = ["alpha/mod.py", "alpha/shared.py", "gamma/c.py"]
+    sent = "".join(
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-{'x' * 300}\n+{'y' * 300}\n"
+        for path in changed
+    )
+    fits = review_reading.plan_readings(_chain_plan().tasks, changed, sent=sent, ceiling=10_000)
+    assert "T-001+T-002+T-003" in [r.unit for r in fits]
+    split = review_reading.plan_readings(_chain_plan().tasks, changed, sent=sent, ceiling=1_000)
+    assert [r.unit for r in split] == ["T-010", "T-001", "T-002", "T-003", "T-004", review_reading.SEAM]
+    assert split[-1].include == ("alpha/shared.py",), "split apart, two readings cover it again"
+
+
+def test_the_chain_reading_shown_a_finding_holds_the_task_it_is_filed_against() -> None:
+    """A reading's unit is no longer a task id, so the invariant is membership: the reading that must
+    re-state a carried finding is the one holding the task the finding is filed against."""
+    from rein import findings as findings_mod
+
+    plan = _chain_plan()
+    readings = review_reading.plan_readings(plan.tasks, ["alpha/mod.py", "beta/b.py", "delta/d.py"])
+    for path in ("alpha/mod.py", "alpha/shared.py", "beta/b.py", "delta/d.py"):
+        finding: Mapping[str, Any] = {"id": "SEC-001", "code_anchors": [{"path": path}]}
+        shown = next(unit for unit, carried in review_reading.priors_by_reading(readings, [finding]).items() if carried)
+        filed = findings_mod.owner_of_path(plan.tasks, path)
+        assert filed in next(r.members for r in readings if r.unit == shown), (path, shown, filed)

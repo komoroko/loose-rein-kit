@@ -46,8 +46,8 @@ def review_with(
 def test_the_longest_declared_scope_wins() -> None:
     plan = plan_with_scopes(t_1=["src/"], t_2=["src/api/"])
 
-    assert findings.owner_of_path(plan, "src/api/routes.py") == "T-2"
-    assert findings.owner_of_path(plan, "src/other.py") == "T-1"
+    assert findings.owner_of_path(plan.tasks, "src/api/routes.py") == "T-2"
+    assert findings.owner_of_path(plan.tasks, "src/other.py") == "T-1"
 
 
 def test_a_task_with_no_declared_scope_owns_nothing() -> None:
@@ -58,8 +58,8 @@ def test_a_task_with_no_declared_scope_owns_nothing() -> None:
     """
     plan = plan_with_scopes(t_1=None, t_2=["src/api/"])
 
-    assert findings.owner_of_path(plan, "docs/readme.md") == ""
-    assert findings.owner_of_path(plan, "src/api/routes.py") == "T-2"
+    assert findings.owner_of_path(plan.tasks, "docs/readme.md") == ""
+    assert findings.owner_of_path(plan.tasks, "src/api/routes.py") == "T-2"
 
 
 # --- the three kinds ----------------------------------------------------------
@@ -80,7 +80,7 @@ def test_a_security_finding_is_attributed_by_its_own_anchor() -> None:
         ]
     )
 
-    result = findings.attribute(plan, review)
+    result = findings.attribute(plan.tasks, review)
 
     assert [(a.finding_id, a.kind, a.task_id) for a in result] == [("SEC-001", "security", "T-1")]
     assert result[0].basis == "src/auth/check.py"
@@ -101,7 +101,7 @@ def test_a_non_blocking_security_finding_is_left_alone() -> None:
         ]
     )
 
-    assert findings.attribute(plan, review) == []
+    assert findings.attribute(plan.tasks, review) == []
 
 
 def test_an_extra_behavior_is_attributed_through_the_statement_it_came_from() -> None:
@@ -129,7 +129,7 @@ def test_an_extra_behavior_is_attributed_through_the_statement_it_came_from() ->
         ],
     )
 
-    result = findings.attribute(plan, review)
+    result = findings.attribute(plan.tasks, review)
 
     assert [(a.finding_id, a.task_id) for a in result] == [("EXTRA-001", "T-2")]
 
@@ -149,7 +149,7 @@ def test_a_failing_claim_is_attributed_by_the_plan_not_by_a_path() -> None:
         ]
     )
 
-    result = findings.attribute(plan, review)
+    result = findings.attribute(plan.tasks, review)
 
     assert [(a.finding_id, a.kind, a.task_id) for a in result] == [("C-002", "claim", "T-2")]
 
@@ -169,7 +169,7 @@ def test_a_claim_the_review_could_not_tell_about_is_not_a_task_s_problem() -> No
         ]
     )
 
-    assert findings.attribute(plan, review) == []
+    assert findings.attribute(plan.tasks, review) == []
 
 
 # --- nothing is guessed at ----------------------------------------------------
@@ -190,7 +190,7 @@ def test_a_finding_no_scope_covers_is_reported_not_assigned() -> None:
         ]
     )
 
-    result = findings.attribute(plan, review)
+    result = findings.attribute(plan.tasks, review)
 
     assert findings.unowned(result) == result
     assert findings.seeds(result) == []
@@ -214,14 +214,14 @@ def test_seeds_are_deduplicated_and_ordered() -> None:
         ]
     )
 
-    assert findings.seeds(findings.attribute(plan, review)) == ["T-1", "T-2"]
+    assert findings.seeds(findings.attribute(plan.tasks, review)) == ["T-1", "T-2"]
 
 
 def test_a_review_that_was_never_generated_yields_nothing() -> None:
     plan = plan_with_scopes(t_1=["src/"])
 
-    assert findings.attribute(plan, None) == []
-    assert findings.attribute(plan, models.Review(make_review())) == []
+    assert findings.attribute(plan.tasks, None) == []
+    assert findings.attribute(plan.tasks, models.Review(make_review())) == []
 
 
 def test_render_says_so_when_there_is_nothing_blocking() -> None:

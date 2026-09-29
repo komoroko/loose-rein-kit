@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -27,6 +28,7 @@ from rein import (
     adapters,
     build_git,
     build_loop,
+    build_prompts,
     common,
     conflict,
     dag,
@@ -230,26 +232,49 @@ def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
 
 
 def reviewing(root: Path, findings: list[dict[str, str]], launched: list[list[str]]) -> object:
-    """A fake reviewer that writes the findings file the step now reads its verdict from."""
+    """A fake batch reviewer that writes T-001's entry into the findings file the step reads."""
 
     def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
         launched.append(cmd)
-        target = dossier.findings_path(cwd or str(root), "T-001")
+        target = Path(cwd or str(root)) / _findings_file(cmd[-1])
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps({"findings": findings}), encoding="utf-8")
+        target.write_text(json.dumps({"tasks": {"T-001": {"findings": findings}}}), encoding="utf-8")
         return 0, agent_output(cmd, "")
 
     return fake_run
 
 
-def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
-    launched: list[list[str]] = []
-    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+def _findings_file(prompt: str) -> str:
+    """The findings file a reviewer's prompt names — where the loop will read its answer from."""
+    match = re.search(r"Write your findings to `([^`]+)`", prompt)
+    assert match, "the reviewer was not told where to write"
+    return match.group(1)
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
+
+def _batch_reader(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewer: str = "codex") -> build_loop.Orchestrator:
+    """An orchestrator whose batch reviewer can be launched without a worktree behind the task."""
+    root = build_repo(tmp_path)
+    orch = build_loop.Orchestrator(_config_with_split_adapters(reviewer), dry_run=False, repo=repo_mod.Repo(root))
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    monkeypatch.setattr(
+        orch,
+        "_review_subject",
+        lambda task: build_prompts.ReviewSubject(
+            task=task, branch=f"rein/{task.id}", diff_cmd=f"git diff w...rein/{task.id}", dossier_path=""
+        ),
+    )
+    return orch
+
+
+_T1 = dag.Task(id="T-001", title="base", kind="foundation")
+
+
+def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    orch = _batch_reader(tmp_path, monkeypatch)
+    launched: list[list[str]] = []
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
+
+    assert orch._read_batch(orch.config.steps[0], [_T1]) == {"T-001": build_loop.ReviewAnswer()}
 
     assert launched, "the agent step never launched anything"
     assert tuple(launched[0][:3]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
@@ -267,15 +292,13 @@ def test_the_reviewer_is_granted_its_findings_file_and_nothing_else(
     "you do not change the code, you have no write access to it" is a fact here rather than an
     instruction the model is asked to respect. What it must not get is the implementer's grant.
     """
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters("copilot"), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    orch = _batch_reader(tmp_path, monkeypatch, "copilot")
     launched: list[list[str]] = []
-    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
+    orch._read_batch(orch.config.steps[0], [_T1])
 
-    assert "write(.rein/work/T-001.findings.json)" in launched[0], "the one file it is there to produce"
+    assert "write(.rein/work/review.T-001.findings.json)" in launched[0], "the one file it is there to produce"
     assert "--allow-all-tools" not in launched[0], "the reviewer was launched able to change the code it judges"
 
 
@@ -284,61 +307,65 @@ def test_a_reviewer_on_a_read_only_cli_can_still_write_its_findings(
 ) -> None:
     """`codex exec` is read-only unless told otherwise, and the reviewer used to be told nothing.
 
-    So it could not write the findings file — and `_collect_findings` refuses to read a verdict out
-    of the chatter, so the step stopped the loop with "the reviewer wrote no findings file" for a
-    reviewer that had done its job. codex cannot name a writable path, so what it can promise is
-    the workspace; the loop's before/after fingerprint is what still catches a judge that repaired.
+    So it could not write the findings file — and the loop refuses to read a verdict out of the
+    chatter, so the step stopped the loop with "the reviewer wrote no findings file" for a reviewer
+    that had done its job. codex cannot name a writable path, so what it can promise is the
+    workspace; the loop's before/after fingerprint is what still catches a judge that repaired.
     """
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters("codex"), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    orch = _batch_reader(tmp_path, monkeypatch, "codex")
     launched: list[list[str]] = []
-    monkeypatch.setattr(build_loop, "_run", reviewing(root, [], launched))
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], launched))
 
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
+    orch._read_batch(orch.config.steps[0], [_T1])
 
     assert "--sandbox" in launched[0] and "workspace-write" in launched[0]
 
 
-def test_a_must_fix_finding_goes_to_the_implementer_and_the_reviewer_looks_again(
+def test_a_must_fix_finding_is_what_goes_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    orch = _batch_reader(tmp_path, monkeypatch)
+    finding = {"severity": "must_fix", "statement": "the guard is gone", "anchor": "src/x.py:4"}
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [finding], []))
+
+    answered = orch._read_batch(orch.config.steps[0], [_T1])
+
+    assert "the guard is gone" in answered["T-001"].send_back
+
+
+def test_a_tree_that_moved_under_the_reviewer_goes_back_even_with_nothing_found(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The round the separation buys: somebody other than the reviewer has to act on a finding."""
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
-    launched: list[list[str]] = []
-    rounds = iter([[{"severity": "must_fix", "statement": "the guard is gone", "anchor": "src/x.py:4"}], []])
+    """A reviewer that edits has moved the tree the gate established; the gate has to run again."""
+    orch = _batch_reader(tmp_path, monkeypatch)
+    trees = iter(["sha256:" + "0" * 64, "sha256:" + "1" * 64])
+    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: next(trees))
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], []))
 
-    def fake_run(cmd: list[str], cwd: str | None = None, **kwargs: object) -> tuple[int, str]:
-        launched.append(cmd)
-        if cmd[0] == "codex":  # the reviewer's adapter in this config
-            target = dossier.findings_path(cwd or str(root), "T-001")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps({"findings": next(rounds)}), encoding="utf-8")
-        return 0, agent_output(cmd)
+    answered = orch._read_batch(orch.config.steps[0], [_T1])
 
-    monkeypatch.setattr(build_loop, "_run", fake_run)
-    orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
-
-    adapters = [cmd[0] for cmd in launched]
-    assert adapters == ["codex", "claude", "codex"], (
-        "expected review → implementer fix → review again, got " + " → ".join(adapters)
-    )
-    assert "the guard is gone" in launched[1][-1], "the fixer was not told what the reviewer found"
+    assert "changed while it was being reviewed" in answered["T-001"].send_back
 
 
 def test_an_unreadable_review_is_not_a_review_that_found_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The failure mode a silent pass would hide: a reviewer that said nothing readable."""
-    root = build_repo(tmp_path)
-    orch = build_loop.Orchestrator(_config_with_split_adapters(), dry_run=False, repo=repo_mod.Repo(root))
-    monkeypatch.setattr(orch, "_fingerprint", lambda cwd: "sha256:" + "0" * 64)
+    orch = _batch_reader(tmp_path, monkeypatch)
     monkeypatch.setattr(build_loop, "_run", lambda cmd, **kwargs: (0, agent_output(cmd, "I had a good look, honestly")))
+    [answer] = orch._read_batch(orch.config.steps[0], [_T1]).values()
+    assert "wrote no findings file" in answer.stop and not answer.send_back
 
-    with pytest.raises(common.StopLoop, match="wrote no findings file"):
-        orch._run_agent_step(orch.config.steps[0], dag.Task(id="T-001", title="base", kind="foundation"), str(root))
+
+def test_a_task_the_reviewer_wrote_nothing_about_was_not_reviewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One entry per task: a missing one is not an empty one, and that task does not land."""
+    orch = _batch_reader(tmp_path, monkeypatch)
+    monkeypatch.setattr(build_loop, "_run", reviewing(Path(orch.root), [], []))
+    t2 = dag.Task(id="T-002", title="leaf", kind="parallel")
+    answers = orch._read_batch(orch.config.steps[0], [_T1, t2])
+
+    assert answers["T-001"] == build_loop.ReviewAnswer()
+    assert "wrote no entry for this task" in answers["T-002"].stop
 
 
 def test_a_claude_launch_gains_no_sandbox_flags() -> None:
@@ -518,7 +545,7 @@ def _merging_batch(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (True, ""))
-    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: [])
 
 
 def _tip(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch, *commits: str) -> Callable[[], bool]:
@@ -535,17 +562,17 @@ def _tip(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch, *commit
     return advance
 
 
-def test_a_repaired_leaf_that_is_not_the_tip_keeps_its_own_merge_commit(
+def test_a_leaf_that_is_not_the_tip_is_not_repaired_at_the_task_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A repair lands on top of the branch, and in a batch of two the first leaf's work is not what
     sits under that tip — the second leaf's merge is.
 
-    `pr_stack.derive` cuts slices by walking first-parent order, so moving T-001's
-    `completed_commit` above T-002's merge makes T-002's pull request the one holding T-001's
-    commits. Nothing catches it: parallel leaves have no `blockedBy` between them, so
-    `_landing_order_problems` sees a topological order that is perfectly fine. The repair rides
-    above the recorded merge instead, on the slice branch it was committed to.
+    `pr_stack.derive` cuts slices by walking first-parent order, so a repair committed above T-002's
+    merge belongs to T-002's pull request whether or not T-001's `completed_commit` is moved: moved,
+    T-002's slice swallows T-001's commits; left, T-002's slice holds T-001's fix. Either way the fix
+    is in the wrong pull request. So T-001's findings are not repaired here at all; acceptance reads
+    them again from the same cache and repairs them on T-001's own slice.
     """
     loop = orchestrator(tmp_path)
     tasks = [dag.Task(id=f"T-00{n}", title=f"leaf {n}", kind="parallel") for n in (1, 2)]
@@ -559,12 +586,18 @@ def test_a_repaired_leaf_that_is_not_the_tip_keeps_its_own_merge_commit(
     _merging_batch(loop, monkeypatch)
     monkeypatch.setattr(loop, "_set_status", record)
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: tip())
-    # T-001 repairs; the fix is the branch tip afterwards, above T-002's merge.
-    monkeypatch.setattr(loop, "_repair_warm_findings", lambda task, readout: task.id == "T-001" and tip())
+    asked: dict[str, bool] = {}
+
+    def repair(task: dag.Task, readouts: object, *, at_tip: bool) -> bool:
+        asked[task.id] = at_tip
+        return False
+
+    monkeypatch.setattr(loop, "_repair_warm_findings", repair)
 
     loop._consume_batch(tasks)
 
-    assert done == {"T-001": ["a" * 40, "a" * 40], "T-002": ["b" * 40]}
+    assert asked == {"T-001": False, "T-002": True}, "only the leaf whose merge is the tip may be repaired"
+    assert done == {"T-001": ["a" * 40], "T-002": ["b" * 40]}
 
 
 def test_a_repaired_leaf_that_is_still_the_tip_records_the_repair(
@@ -585,7 +618,7 @@ def test_a_repaired_leaf_that_is_still_the_tip_records_the_repair(
     _merging_batch(loop, monkeypatch)
     monkeypatch.setattr(loop, "_set_status", record)
     monkeypatch.setattr(loop, "merge_leaf", lambda t, branch: tip())
-    monkeypatch.setattr(loop, "_repair_warm_findings", lambda t, readout: tip())
+    monkeypatch.setattr(loop, "_repair_warm_findings", lambda t, readouts, *, at_tip: at_tip and tip())
 
     loop._consume_batch([task])
 
@@ -1185,11 +1218,29 @@ def test_the_implementer_is_told_where_the_previous_attempt_went(tmp_path: Path)
 # red if the behaviour were wrong, so the question has to be in the prompt or it is asked nowhere.
 
 
-def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
-    from rein import build_prompts
+def _subjects(*ids: str) -> list[build_prompts.ReviewSubject]:
+    return [
+        build_prompts.ReviewSubject(
+            task=dag.Task(id=tid, title="base", kind="foundation"),
+            branch=f"rein/{tid}",
+            diff_cmd=f"git diff build/demo...rein/{tid}",
+            dossier_path=f".worktrees/{tid}/.rein/work/{tid}.json",
+        )
+        for tid in ids
+    ]
 
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], dossier_path=".rein/work/T-001.json")
+
+def _batch_prompt(*ids: str, disciplines: dict[str, str] | None = None) -> str:
+    return build_prompts.batch_review_prompt(
+        _subjects(*ids),
+        gate_cmds=["make test"],
+        findings_path=".rein/work/review.findings.json",
+        disciplines=disciplines,
+    )
+
+
+def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
+    prompt = _batch_prompt("T-001")
     assert "would go red" in prompt
     assert "not inert" in prompt
     # And the reason it is here rather than left to the control.
@@ -1198,14 +1249,20 @@ def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
 
 def test_the_reviewer_is_pointed_at_the_criteria_nothing_else_establishes() -> None:
     """`command` and `artifact` criteria are established by the caller; a prose one is judged here."""
-    from rein import build_prompts
-
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    prompt = build_prompts.review_prompt(
-        task, gate_cmds=["make test"], dossier_path=".rein/work/T-001.json", diff_cmd="git diff HEAD~1"
-    )
+    prompt = _batch_prompt("T-001")
     assert "`evidence.kind` is `prose`" in prompt
     assert "already established by the caller" in prompt
+
+
+def test_one_reviewer_is_shown_every_task_of_the_batch_and_answers_each() -> None:
+    """The answer per task is what acts, so the prompt asks for one — and for the meeting of two."""
+    prompt = _batch_prompt("T-002", "T-003")
+    for tid in ("T-002", "T-003"):
+        assert f".worktrees/{tid}/.rein/work/{tid}.json" in prompt
+        assert f"git diff build/demo...rein/{tid}" in prompt
+    assert "Every task above gets an entry" in prompt
+    assert "Then read them as one change" in prompt
+    assert "Then read them as one change" not in _batch_prompt("T-002"), "one task has no join to read"
 
 
 def test_the_integration_reviewer_is_not_asked_the_test_question() -> None:
@@ -1239,11 +1296,7 @@ def test_only_a_host_that_has_them_is_told_to_use_them() -> None:
 
 def test_a_host_without_them_is_never_pointed_at_a_command_that_is_not_there() -> None:
     """The defect this replaced: the prompt named `/code-review` to a CLI that has no such thing."""
-    from rein import build_prompts
-
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    codex = adapters.ADAPTER_TABLE["codex"].disciplines
-    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=codex)
+    prompt = _batch_prompt("T-001", disciplines=dict(adapters.ADAPTER_TABLE["codex"].disciplines))
     assert "/code-review" not in prompt and "/simplify" not in prompt
     # The questions themselves are still asked — that is the floor, and it is what a codex reviewer
     # has always had.
@@ -1252,11 +1305,10 @@ def test_a_host_without_them_is_never_pointed_at_a_command_that_is_not_there() -
 
 def test_a_claude_reviewer_is_pointed_at_both_and_told_what_they_must_not_do() -> None:
     """`/simplify` ends by applying its fixes, and `/code-review ultra` is billed and user-triggered."""
-    from rein import build_prompts
-
-    task = dag.Task(id="T-001", title="base", kind="foundation")
-    prompt = build_prompts.review_prompt(task, gate_cmds=["make test"], disciplines=_claude_disciplines())
+    prompt = _batch_prompt("T-001", disciplines=_claude_disciplines())
     assert "/code-review" in prompt and "/simplify" in prompt
+    # It sits on the work branch, which holds none of the changes it is reading.
+    assert "point them at each task's branch in turn" in prompt
     assert "Run its review phase only" in prompt  # whoever judges does not repair
     # `--fix` is the same collapse by another route: the reviewer's own fix, read by nobody.
     assert "Never `/code-review --fix`" in prompt
@@ -1278,7 +1330,7 @@ def test_the_join_says_to_keep_only_what_the_join_shows() -> None:
         disciplines=_claude_disciplines(),
     )
     assert "Keep what only the join shows" in prompt
-    assert "already reviewed on its own" in prompt
+    assert "already reviewed before the merge" in prompt
 
 
 def test_the_security_discipline_is_offered_in_the_contract_and_never_replaces_it() -> None:
@@ -2518,7 +2570,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
         return True, ""
 
     monkeypatch.setattr(loop, "_integration_gate", record_gate)
-    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: [])
     statuses: dict[str, str] = {}
     monkeypatch.setattr(loop, "_set_status", lambda tid, status, commit="", **_: statuses.update({tid: status}))
 
@@ -2889,7 +2941,7 @@ def test_a_warm_up_that_cannot_be_taken_does_not_fail_the_build(
 def _read_out(unit: str, *findings: dict[str, object]) -> review_reading.ReadOut:
     """What a warm-up hands back: one reading's two stages. Only the security half matters here."""
     return review_reading.ReadOut(
-        reading=review_reading.Reading(unit=unit, include=("alpha/",)),
+        reading=review_reading.Reading(unit=unit, include=("alpha/",), members=(unit,)),
         extraction=actual_extraction.ExtractionResult(actual_statements=(), coverage={}, actual_digest=""),
         security=security_review.SecurityResult(findings=tuple(findings)),
     )
@@ -2918,7 +2970,7 @@ def _warm_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build_l
     monkeypatch.setattr(
         loop, "_repair", lambda task, item, *, where: repaired.extend(f"{a.finding_id}@{where}" for a in item.items)
     )
-    monkeypatch.setattr(loop, "_warm_reading", lambda task: None)  # the re-read after the repair
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: [])  # the re-read after the repair
     return loop, repaired
 
 
@@ -2931,7 +2983,7 @@ def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
     """
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-001", "alpha/mod.py")))
+    assert loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-001", "alpha/mod.py"))], at_tip=True)
     assert repaired == ["SEC-001@review"]
 
 
@@ -2941,7 +2993,7 @@ def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, m
     with the whole picture in front of them."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-001", "beta/mod.py")))
+    assert not loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-001", "beta/mod.py"))], at_tip=True)
     assert repaired == []
 
 
@@ -2952,18 +3004,92 @@ def test_a_non_blocking_finding_is_not_repaired_at_the_task_boundary(
     implementer launch on one would make the floor mean nothing."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(task, _read_out("T-001", _sec("SEC-1", "alpha/mod.py", blocking=False)))
+    assert not loop._repair_warm_findings(
+        task, [_read_out("T-001", _sec("SEC-1", "alpha/mod.py", blocking=False))], at_tip=True
+    )
     assert repaired == []
+
+
+def test_a_chain_s_reading_repairs_only_the_task_at_the_tip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chain is read when its last task lands, so a finding can be about an earlier one — whose
+    work is now under the last one's. Repaired here it would land in the last task's pull request,
+    so it is left to acceptance, which repairs it on its own slice."""
+    loop = orchestrator(
+        tmp_path,
+        plan=make_plan(
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], blocked_by=["T-001"], scope_include=["beta/"]),
+            ]
+        ),
+    )
+    repaired: list[str] = []
+    monkeypatch.setattr(
+        loop, "_repair", lambda task, item, *, where: repaired.extend(f"{task.id}:{a.finding_id}" for a in item.items)
+    )
+    monkeypatch.setattr(loop, "_warm_reading", lambda task: [])
+    readout = review_reading.ReadOut(
+        reading=review_reading.Reading(unit="T-001+T-002", include=("alpha/", "beta/"), members=("T-001", "T-002")),
+        extraction=actual_extraction.ExtractionResult(actual_statements=(), coverage={}, actual_digest=""),
+        security=security_review.SecurityResult(
+            findings=(_sec("SEC-001", "alpha/mod.py"), _sec("SEC-002", "beta/mod.py"))
+        ),
+    )
+    last = next(t for t in loop._load_graph().tasks if t.id == "T-002")
+    assert loop._repair_warm_findings(last, [readout], at_tip=True)
+    assert repaired == ["T-002:SEC-002"], "SEC-001 is T-001's, and T-001's work is not the tip"
+
+
+def test_a_task_that_is_not_the_tip_is_not_repaired_even_for_its_own_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop, repaired = _warm_loop(tmp_path, monkeypatch)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    assert not loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-001", "alpha/mod.py"))], at_tip=False)
+    assert repaired == []
+
+
+def test_a_chain_is_warmed_once_when_its_last_task_lands(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Warming each task's slice as it landed read a chain once per task; the gate never asks for those."""
+    plan = make_plan(
+        tasks=[
+            make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+            make_task("T-002", claim_ids=["C-001"], blocked_by=["T-001"], scope_include=["beta/"]),
+        ]
+    )
+    loop = orchestrator(
+        tmp_path, plan=plan, state={**make_state(plan_status="frozen"), "tasks": {"T-001": {"status": "done"}}}
+    )
+    chain = review_reading.Reading(unit="T-001+T-002", include=("alpha/", "beta/"), members=("T-001", "T-002"))
+    monkeypatch.setattr(review_reading, "resolve_base", lambda *a: "b" * 40)
+    monkeypatch.setattr(repo_mod.Repo, "_git_rc", lambda self, *a: (0, "c" * 40))
+    monkeypatch.setattr(review_reading, "change_readings", lambda *a, **k: ([chain], "low", "low"))
+    monkeypatch.setattr(review_reading, "host_surface_digest", lambda *a: "")
+    warmed: list[str] = []
+    readout = _read_out("T-001+T-002")
+
+    def warm(*args: object, reading: review_reading.Reading, **kwargs: object) -> review_reading.ReadOut:
+        warmed.append(reading.unit)
+        return readout
+
+    monkeypatch.setattr(review_reading, "warm", warm)
+
+    first = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    assert loop._warm_reading(first) == [], "T-002 has not landed: the chain is not a reading yet"
+    loop._set_status("T-002", "done")
+    last = next(t for t in loop._load_graph().tasks if t.id == "T-002")
+    assert loop._warm_reading(last) == [readout]
+    assert warmed == ["T-001+T-002"]
 
 
 def test_a_warm_up_that_was_never_taken_is_not_a_reading_that_found_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`None` is a skip or an adapter that would not answer. Treating it as an empty finding list
-    would report "clean" about a slice nobody read."""
+    """No readout is a skip or an adapter that would not answer. Treating it as an empty finding
+    list would report "clean" about a slice nobody read."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(task, None)
+    assert not loop._repair_warm_findings(task, [], at_tip=True)
     assert repaired == []
 
 
@@ -3155,6 +3281,7 @@ def test_a_control_failure_spends_a_send_back_rather_than_ending_the_task(
     monkeypatch.setattr(loop, "_check_implementer_output", lambda *a, **k: ("", ""))
     launched: list[str] = []
     monkeypatch.setattr(loop, "_invoke_implementer", lambda task, cwd, failure_log, **k: launched.append(failure_log))
+    monkeypatch.setattr(loop, "_commit_attempt", lambda task, cwd: True)
     monkeypatch.setattr(
         loop, "_run_pipeline", lambda task, cwd: (build_loop.NEGATIVE_CONTROL, "green without your change")
     )
@@ -3176,6 +3303,7 @@ def test_a_verdict_with_no_send_back_budget_is_a_failure_and_not_a_silent_zero(
     monkeypatch.setattr(loop, "_fingerprint", lambda cwd: "sha256:" + "a" * 64)
     monkeypatch.setattr(loop, "_check_implementer_output", lambda *a, **k: ("", ""))
     monkeypatch.setattr(loop, "_invoke_implementer", lambda *a, **k: None)
+    monkeypatch.setattr(loop, "_commit_attempt", lambda task, cwd: True)
     monkeypatch.setattr(loop, "_run_pipeline", lambda task, cwd: ("a-verdict-nobody-seeded", "x"))
 
     with pytest.raises(common.ReinError, match="no retry budget is registered"):
@@ -3411,12 +3539,14 @@ def test_a_finding_that_survives_the_rounds_reaches_the_human(
     """The failure this is bounded for is a false positive: repairing something that was never
     true converges on nothing, and an unbounded loop would spend a session limit finding out."""
     loop = _scoped_repo(tmp_path, rounds=2)
+    # Read before `seed_repo` below, which writes a default plan beside the review it seeds.
+    graph = loop._load_graph()
     seed_repo(tmp_path, review=make_review(generated=True, security_findings=[_blocking()]))
     attempts: list[str] = []
     monkeypatch.setattr(loop, "_generate_review", lambda: True)
     monkeypatch.setattr(loop, "_repair", lambda graph, item: attempts.append(item.task_id))
 
-    assert loop._close_gate4(loop._load_graph()) == common.EXIT_DONE
+    assert loop._close_gate4(graph) == common.EXIT_DONE
     assert attempts == ["T-001", "T-001"], "two rounds, and then it stops"
     out = capsys.readouterr().out
     assert "repair round(s) are spent" in out

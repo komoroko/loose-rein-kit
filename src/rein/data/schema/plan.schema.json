@@ -344,7 +344,7 @@
           ]
         },
         "attempts": {
-          "description": "Required of a task that declares an irreversible `operator_surface`: how many launches the approval covers, and what one costs in the terms that matter here (quota, money, data moved). The loop does not launch it again past `max`; raising it is a change to what was approved. Where one failure anywhere stops the whole run, say so in `cost` with the numbers — a run that needs n checks each passing with probability p passes with p^n.",
+          "description": "Required of a task that declares an irreversible `operator_surface`: how many runs the approval covers, and what one costs in the terms that matter here (quota, money, data moved). A run is one start of the task's `operate` steps when it has them — every start counts, including the ones a red step or a reviewer's finding sends it round for — and one implementation attempt when it does not. The loop does not start one past `max`; raising it is a change to what was approved. Where one failure anywhere stops the whole run, say so in `cost` with the numbers — a run that needs n checks each passing with probability p passes with p^n.",
           "type": "object",
           "additionalProperties": false,
           "required": [

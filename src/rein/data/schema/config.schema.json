@@ -186,7 +186,7 @@
             }
           },
           "stage": {
-            "description": "Where in the run this step belongs. `task` runs it per task only; `integration` runs it only on the merged work branch; `both` (the default) does what every step has always done. This is what lets a fast focused suite guard each task while the whole suite runs once over the join — the same total confidence, an order of magnitude less of it re-established per attempt. Frozen with the mandate, so it is an operator's decision about the DoD's shape and never a task's opt-out: every step still runs, the question is only how often.",
+            "description": "Where in the run this step belongs. `task` runs it per task only; `integration` runs it only on the merged work branch; `both` (the default) does both. An agent step at `task` or `both` reads a batch's leaves once, in one launch, before they merge; at `both` it reads the join again only when a merge had to resolve a conflict, since otherwise the join is the union it already read. This is what lets a fast focused suite guard each task while the whole suite runs once over the join — the same total confidence, an order of magnitude less of it re-established per attempt. Frozen with the mandate, so it is an operator's decision about the DoD's shape and never a task's opt-out: every step still runs, the question is only how often.",
             "enum": [
               "task",
               "integration",
@@ -279,7 +279,7 @@
       "additionalProperties": false,
       "properties": {
         "composition": {
-          "description": "How acceptance takes its reading. `auto` composes it from the plan's task scopes — one reading per task plus the seam between them — so one launch reads one task's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
+          "description": "How acceptance takes its reading. `auto` composes it from the plan's dependency chains and task scopes — one reading per chain (task by task where a chain's diff will not fit `max_diff_bytes`) plus the seam between them — so one launch reads one chain's slice rather than a whole cycle. `whole` never composes. At critical risk the policy reads the change whole whatever this says.",
           "enum": [
             "auto",
             "whole"
@@ -290,7 +290,7 @@
           "additionalProperties": false,
           "properties": {
             "max_diff_bytes": {
-              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one task's scope, so a large cycle passes and a task too broad to read in one launch is refused by name, at the mandate, while splitting it is still possible.",
+              "description": "The most a single reading may be, in bytes — what one reviewer launch is asked to hold, not what one cycle ships. Under `composition: auto` a reading is one dependency chain's scopes, split task by task when the chain will not fit, so a large cycle passes and a task too broad to read in one launch is refused by name, at the mandate, while splitting it is still possible.",
               "type": "integer",
               "minimum": 4096,
               "maximum": 8388608

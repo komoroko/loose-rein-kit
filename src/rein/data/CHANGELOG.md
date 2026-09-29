@@ -4,6 +4,65 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.11.1] - 2026-09-29
+
+**A patch release: the format stays `rein-grounded-v9`, and no repository needs `rein sync
+--force`.** No document changes shape. What changes is how many agent launches a cycle makes
+and how cold each one starts: a task was the unit of every launch, and only two of the five
+things a task is for — where a red or a finding is charged, and what a person reads as one pull
+request — need to be that fine. Nothing is judged less: every reviewer is still a launch that
+is not the implementer's, every finding is still charged to one task, and the stack still has
+one pull request per task.
+
+- **A task with one upstream starts from the session that finished it.** Its first implementer
+  launch forks that session (`claude --session-id <new> --resume <old> --fork-session`) rather
+  than reading the ticket, the design slice and the code from cold. A fork leaves the upstream's
+  session as it was, so leaves under one foundation never see each other's conclusions. The
+  session a task finished with is a cache beside the evidence ledger
+  (`$XDG_CACHE_HOME/rein/<repo>/sessions.json`), per cycle; a miss is a cold start, said once
+  when the cache is off. The forked launch is told that its working directory changed and that
+  the upstream's worktree is gone. A CLI that cannot take a caller-chosen id or cannot fork is
+  never asked to.
+- **One reviewer reads a batch before it merges.** Each leaf got a code reviewer of its own and a
+  batch of two or more got one more over the join, which read the union of the same diffs: four
+  launches for three sound leaves, now one. The agent steps leave the per-task pipeline; once
+  every leaf has passed its command steps, one launch reads them all and writes one entry per
+  task (`.rein/work/review.findings.json`). A task's `must_fix` findings go back through the same
+  send-back a red step takes — its implementer's session resumed, the deterministic gate run
+  again — and only the tasks sent back are read again. A task still holding one when the step's
+  `retries` run out, or one the reviewer wrote no entry for, does not land; the rest of the batch
+  does. A `stage: both` agent step reads the join again only when a merge had to resolve a
+  conflict; `stage: integration` still reads every join. The cold "review fixer" launch is gone.
+  Each reading writes its own findings file (`.rein/work/review.<task ids>.findings.json`).
+- **An attempt is committed before anything reads it.** The loop finalized a task's commit only at
+  the merge, so a reviewer handed the branch's diff read nothing of work the implementer had left
+  uncommitted, and a step's `paths:` filter asked the branch too, while the gate had tested the
+  worktree. The branch is now the change for every reader.
+- **A task with `operate` is read before its run, and every run counts against `attempts.max`.**
+  Read after the run, each `must_fix` sent the task round the run again. And `attempts` was counted
+  once per `in-progress`, while one `in-progress` could start the run again after every red step:
+  the approval priced runs, and the loop counted something else. Every start of the run after the
+  first in one attempt is now recorded as an attempt (`task_started`, `attempts` + 1) before it
+  starts, and one past `max` is not started — the task stops with `attempt_budget_spent`.
+- **Acceptance reads the change one dependency chain at a time.** A chain is a line of tasks each
+  built on the one before and on nothing else (`dag.chains`). Its reading covers the union of its
+  scopes, so a path two of its tasks share is read once rather than twice and again in the seam,
+  and one extractor and one security reviewer read it instead of one of each per task. A chain
+  whose diff will not fit `max_diff_bytes` is read task by task, decided from the diff alone, so
+  the build's warm-up and the gate take the same readings. The build warms a chain's reading
+  when its last task lands. `rein dag` counts readings the same way.
+- **A repair during the build answers only for the task whose work is the tip.** It is committed on
+  top of the branch, and a stack is cut along the tasks' `completed_commit`s, so a fix for an
+  earlier task of a chain — or for a leaf another leaf merged on top of, which the loop repaired
+  before this release too — landed in the next task's pull request. Those findings now wait for
+  acceptance, which reads them from the same cache and repairs them on their own slice.
+- **Readings and attribution read the task graph, with what was added after the mandate.**
+  `review_reading.plan_readings`, `findings.attribute` and `repair.route` read the frozen plan
+  alone, while the guard, the dossier, the scheduler and `rein dag` read the graph (`dag.join`). A
+  path added with `rein task scope-add` fell into the seam and a finding about it was charged to no
+  task; an edge added with `rein task order` made `rein dag` promise a reading the gate did not
+  take. They take the graph's tasks now.
+
 ## [0.11.0] - 2026-09-29
 
 **A minor release because the format moves: `rein-grounded-v9`.** Every repository runs
