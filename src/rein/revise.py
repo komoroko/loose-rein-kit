@@ -136,6 +136,11 @@ def plan_revision(repo: repo_mod.Repo, target_gate: str, seeds: list[str]) -> di
         "returned_order": [f"{tid} after {', '.join(after)}" for tid, after in sorted(state.task_after.items())]
         if unfreezes
         else [],
+        # Scope added beside the frozen plan (`rein task scope-add`) goes back the same way: into the
+        # task's `scope.include` where it still holds.
+        "returned_scope": [f"{tid}: {', '.join(paths)}" for tid, paths in sorted(state.task_scope_added.items())]
+        if unfreezes
+        else [],
         "invalidates_review": bool(resets),
         "cleared_receipts": [g for g in resets if state.gate_receipt(g) is not None],
         "marked_tasks": marked,
@@ -178,6 +183,13 @@ def render(revision: dict[str, object]) -> str:
         lines.append(
             "- order added after the last freeze returns to the plan — write the edges that still hold "
             f"into `blocked_by` in /tasks: {'; '.join(returned)}"
+        )
+    widened = revision["returned_scope"]
+    assert isinstance(widened, list)
+    if widened:
+        lines.append(
+            "- scope added after the last freeze returns to the plan — write the paths that still hold "
+            f"into the tasks' `scope.include` in /tasks: {'; '.join(widened)}"
         )
     if revision["invalidates_review"]:
         lines.append(
@@ -231,6 +243,7 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
         for entry in raw.get("tasks", {}).values():
             if isinstance(entry, dict):
                 entry.pop("after", None)
+                entry.pop("scope_added", None)
 
     marked = revision["marked_tasks"]
     assert isinstance(marked, list)
@@ -280,6 +293,7 @@ def apply(repo: repo_mod.Repo, revision: dict[str, object], reason: str) -> None
                 "gates_reset": list(resets),
                 "reason": reason,
                 **({"returned_order": revision["returned_order"]} if revision["returned_order"] else {}),
+                **({"returned_scope": revision["returned_scope"]} if revision["returned_scope"] else {}),
             },
         )
         if revision["unfreezes_plan"]:

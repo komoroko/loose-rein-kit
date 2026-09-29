@@ -123,6 +123,56 @@ def _plan_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> 
     return blockers
 
 
+def _irreversible_blockers(plan: models.Plan | None, gate: str) -> list[str]:
+    """What the mandate asks of every task that declares a point that cannot be undone.
+
+    **A rehearsal.** A reversible task this one depends on, whose criteria run the same path on
+    smaller real input — or a stated reason there can be none. The cycle this exists for met real
+    data for the first time at its irreversible task and found three defects there, each costing a
+    full run and a roll back, all of which a ten-question run would have shown.
+
+    **An attempt budget.** How many launches the approval covers and what one costs. The approval
+    was otherwise open-ended: every retry spent more of a resource the approver had priced once.
+    """
+    if gate != FREEZING_GATE or plan is None:
+        return []
+    blockers: list[str] = []
+    by_id = {t.id: t for t in plan.tasks}
+    for task in plan.tasks:
+        if not task.irreversible_surfaces:
+            continue
+        rehearsal = task.rehearsal
+        if not rehearsal:
+            blockers.append(
+                f"{task.id} is irreversible and names no `rehearsal` — list the reversible task(s) that run the "
+                "same path on small real input first, or `waived` with the reason none can"
+            )
+        for rid in rehearsal.get("tasks", []) if isinstance(rehearsal.get("tasks"), list) else []:
+            if rid not in _ancestors(by_id, task.id):
+                blockers.append(f"{task.id}'s rehearsal {rid} is not something {task.id} waits for (`blocked_by`)")
+            elif by_id[rid].irreversible_surfaces:
+                blockers.append(f"{task.id}'s rehearsal {rid} is itself irreversible — a rehearsal has to be undoable")
+        if task.attempt_max <= 0:
+            blockers.append(
+                f"{task.id} is irreversible and declares no `attempts` — how many launches this approval covers "
+                "(`max`) and what one costs (`cost`)"
+            )
+    return blockers
+
+
+def _ancestors(by_id: Mapping[str, models.Task], task_id: str) -> set[str]:
+    """Every task `task_id` waits for, directly or through others."""
+    seen: set[str] = set()
+    stack = list(by_id[task_id].blocked_by) if task_id in by_id else []
+    while stack:
+        current = stack.pop()
+        if current in seen or current not in by_id:
+            continue
+        seen.add(current)
+        stack.extend(by_id[current].blocked_by)
+    return seen
+
+
 def _worktree_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> list[str]:
     """Paths the criteria name that no task's worktree would ever have. Checked where the plan freezes.
 
@@ -224,6 +274,8 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
     A project that declares no audit command is told so rather than waved through: "we have no way
     to ask" is not "there is nothing wrong".
     """
+    if gate == FREEZING_GATE:
+        return _mandate_audit_blockers(repo, state, config)
     if gate != "acceptance":
         return []
     if not audit.configured(config):
@@ -240,6 +292,41 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
         max_age=audit.max_age_days(config),
     )
     return [reason] if reason else []
+
+
+def _mandate_audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Config | None) -> list[str]:
+    """The mandate asks for a current audit — not a passing one.
+
+    A finding there is a change to the environment the mandate is about to freeze (`repair.route`
+    puts a dependency bump in a human's hands), so the cheapest moment to learn of it is before
+    the freeze, when answering it is a line in the plan. Left to acceptance, it arrived after every
+    task had landed: a tool that was never installed, a flag the index could not satisfy, and a fix
+    that meant downgrading the framework the last task had just been measured against — three
+    roll backs for three facts one run would have shown on day one.
+
+    **Current, by acceptance's own measure.** A record taken over other manifests, or older than
+    `max_age_days`, answers a question this plan does not ask; "has one ever been run" let a
+    months-old record from before a roll back stand in for it.
+
+    Not a pass requirement: whether this cycle fixes a finding is what the human decides on this
+    screen, and a gate that refused to open until it was fixed would leave no mandate to fix it
+    in. Projects that declare no audit are left to acceptance, which says so.
+    """
+    if not audit.configured(config):
+        return []
+    reason = audit.staleness(
+        state.raw.get("dependency_audit"),
+        dependencies=audit.dependency_digest(repo),
+        now=datetime.now(timezone.utc),
+        max_age=audit.max_age_days(config),
+        require_pass=False,
+    )
+    if not reason:
+        return []
+    return [
+        f"{reason} — before freezing the plan. A finding is a change to the environment this approval "
+        "freezes, and deciding it now costs a line in the plan; at acceptance it costs a roll back."
+    ]
 
 
 #: How many out-of-mandate paths one blocker names before it says how many more there are. A cut
@@ -572,6 +659,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _decision_blockers(plan, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
+    blockers += _irreversible_blockers(plan, gate)
     blockers += _worktree_blockers(repo, plan, gate)
     blockers += _review_blockers(repo, review, state, gate)
     return blockers

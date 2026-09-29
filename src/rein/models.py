@@ -803,6 +803,24 @@ class Task(Element):
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
     @property
+    def env(self) -> tuple[tuple[str, str], ...]:
+        """The variables this task's work runs with, as frozen (`environment.env`), unexpanded."""
+        block = self.raw.get("environment")
+        value = block.get("env") if isinstance(block, dict) else None
+        return tuple((str(k), str(v)) for k, v in value.items()) if isinstance(value, dict) else ()
+
+    @property
+    def allow(self) -> tuple[str, ...]:
+        """The command prefixes this task's implementer may run without asking (`environment.allow`)."""
+        block = self.raw.get("environment")
+        return _ids(block, "allow") if isinstance(block, dict) else ()
+
+    @property
+    def operate(self) -> tuple[Mapping[str, Any], ...]:
+        """The long commands the loop runs itself before this task's gate, as frozen."""
+        return _maps(self.raw, "operate")
+
+    @property
     def blocked_by(self) -> tuple[str, ...]:
         return _ids(self.raw, "blocked_by")
 
@@ -878,6 +896,24 @@ class Task(Element):
         """
         value = self.raw.get("operator_surface")
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
+
+    @property
+    def rehearsal(self) -> Mapping[str, Any]:
+        """The reversible run that goes first (`tasks`, `says`) or why there is none (`waived`)."""
+        value = self.raw.get("rehearsal")
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def attempt_max(self) -> int:
+        """How many launches the approval of this irreversible task covers. 0 when undeclared."""
+        value = self.raw.get("attempts")
+        count = value.get("max") if isinstance(value, dict) else None
+        return count if isinstance(count, int) else 0
+
+    @property
+    def attempt_cost(self) -> str:
+        value = self.raw.get("attempts")
+        return _str(value, "cost") if isinstance(value, dict) else ""
 
     @property
     def irreversible_surfaces(self) -> tuple[Mapping[str, Any], ...]:
@@ -1451,6 +1487,20 @@ class State:
         if not isinstance(value, dict):
             return {}
         return {k: _ids(v, "after") for k, v in value.items() if isinstance(v, dict) and _ids(v, "after")}
+
+    @property
+    def task_scope_added(self) -> Mapping[str, tuple[str, ...]]:
+        """Paths added to a frozen task's scope (`rein task scope-add`): task id → the paths."""
+        value = self.raw.get("tasks")
+        if not isinstance(value, dict):
+            return {}
+        return {k: _ids(v, "scope_added") for k, v in value.items() if isinstance(v, dict) and _ids(v, "scope_added")}
+
+    @property
+    def deferred(self) -> Mapping[str, Mapping[str, Any]]:
+        """Tasks taken out of this cycle's plan (`rein task defer`): task id → what was recorded."""
+        value = self.raw.get("deferred")
+        return {str(k): v for k, v in value.items() if isinstance(v, dict)} if isinstance(value, dict) else {}
 
     def recorded_acceptance(self, task_id: str) -> tuple[Mapping[str, Any], ...]:
         """The observations `rein evidence record` has written for `task_id`, newest last.
@@ -2038,6 +2088,12 @@ class Config:
         if not isinstance(entries, list):
             return ()
         return tuple(p for p in entries if isinstance(p, str) and p)
+
+    @property
+    def scope_additions(self) -> tuple[str, ...]:
+        """Where a frozen task's scope may be widened without a roll back (`guard.scope_additions`)."""
+        guard = self.raw.get("guard")
+        return _ids(guard, "scope_additions") if isinstance(guard, dict) else ()
 
     @property
     def budgets(self) -> dict[str, int]:

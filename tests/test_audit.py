@@ -170,3 +170,59 @@ def test_a_finding_about_the_dependencies_is_recorded_as_one(monkeypatch: pytest
 
     assert record["passed"] is False
     assert "GHSA-xxxx" in record["summary"]
+
+
+def test_a_launcher_that_could_not_start_the_scanner_records_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`uv run pip-audit` with no pip-audit installed exits 2 with this line. It was recorded as a
+    failed audit — a finding about dependencies nobody had audited — and held acceptance shut."""
+    from rein import executors
+
+    output = "\x1b[1m\x1b[31merror\x1b[39m\x1b[0m: Failed to spawn: `pip-audit`\n  Caused by: No such file or directory"
+    monkeypatch.setattr(executors, "for_profile", _answering(2, output))
+    with pytest.raises(audit.AuditError, match="could not be run"):
+        audit.run(repo_mod.Repo(Path(".")), _audited(["uv", "run", "pip-audit"]))
+
+
+# --- the mandate asks for a current audit, not a passing one -----------------------
+
+
+def _mandate_blockers(monkeypatch: pytest.MonkeyPatch, record: object, config: models.Config) -> list[str]:
+    from rein import approve
+
+    monkeypatch.setattr(audit, "dependency_digest", lambda repo: "sha256:" + "b" * 64)
+    raw: dict[str, Any] = {"cycle_id": "c", "gates": {}}
+    if record is not None:
+        raw["dependency_audit"] = record
+    return approve._mandate_audit_blockers(repo_mod.Repo(Path(".")), models.State(raw), config)
+
+
+def _fresh(**over: Any) -> dict[str, Any]:
+    return _record(ran_at=datetime.now(timezone.utc).isoformat(timespec="seconds"), **over)
+
+
+def test_the_mandate_asks_for_an_audit_before_the_freeze(monkeypatch: pytest.MonkeyPatch) -> None:
+    blockers = _mandate_blockers(monkeypatch, None, _audited(["pip-audit"]))
+    assert blockers and "before freezing the plan" in blockers[0]
+
+
+def test_a_failing_audit_does_not_hold_the_mandate_shut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whether this cycle fixes a finding is what the mandate decides; refusing to open until it is
+    fixed would leave no mandate to fix it in."""
+    assert _mandate_blockers(monkeypatch, _fresh(passed=False), _audited(["pip-audit"])) == []
+
+
+def test_an_audit_of_other_dependencies_does_not_satisfy_the_mandate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ "Has one ever been run" let a record from before a roll back, over another lockfile, stand in."""
+    record = _fresh(dependencies="sha256:" + "c" * 64)
+    blockers = _mandate_blockers(monkeypatch, record, _audited(["pip-audit"]))
+    assert blockers and "different set of manifests" in blockers[0]
+
+
+def test_an_expired_audit_does_not_satisfy_the_mandate(monkeypatch: pytest.MonkeyPatch) -> None:
+    record = _record(ran_at="2020-01-01T00:00:00+00:00")
+    blockers = _mandate_blockers(monkeypatch, record, _audited(["pip-audit"]))
+    assert blockers and "days old" in blockers[0]
+
+
+def test_a_project_with_no_audit_is_left_to_acceptance_at_the_mandate(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _mandate_blockers(monkeypatch, None, models.Config(make_config())) == []

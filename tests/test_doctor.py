@@ -1651,3 +1651,48 @@ def test_a_self_sandboxing_adapter_inside_our_own_box_is_named(monkeypatch: pyte
     results = doctor.check_nested_sandbox(models.Config(config))
     assert [f.level for f in results] == ["WARN"]
     assert "agent_profile" in results[0].message
+
+
+# --- the dependency audit can start ------------------------------------------------
+
+
+def _audit_config(command: list[str]) -> models.Config:
+    raw = make_config()
+    raw["security"] = {"dependency_audit": {"command": command}}
+    return models.Config(raw)
+
+
+def test_an_audit_whose_scanner_is_not_installed_fails_doctor(tmp_path: Path) -> None:
+    """The field case: `uv run pip-audit` in a project whose environment has no pip-audit."""
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    findings = doctor.check_audit_command(repo_mod.Repo(tmp_path), _audit_config(["uv", "run", "rein-no-such-scanner"]))
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not on PATH here")
+    assert [f.level for f in findings] == ["FAIL"]
+    assert "will fail to spawn" in findings[0].message
+
+
+def test_an_audit_whose_scanner_is_in_the_project_environment_passes(tmp_path: Path) -> None:
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not on PATH here")
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "rein-fake-scanner").write_text("#!/bin/sh\n", encoding="utf-8")
+    findings = doctor.check_audit_command(repo_mod.Repo(tmp_path), _audit_config(["uv", "run", "rein-fake-scanner"]))
+    assert [f.level for f in findings] == ["PASS"]
+
+
+def test_an_audit_command_missing_from_path_fails_doctor(tmp_path: Path) -> None:
+    findings = doctor.check_audit_command(repo_mod.Repo(tmp_path), _audit_config(["rein-no-such-audit"]))
+    assert [f.level for f in findings] == ["FAIL"]
+
+
+def test_an_option_in_front_of_the_tool_is_not_read_as_the_tool(tmp_path: Path) -> None:
+    """`--group dev` takes a value; a guess at uv's grammar failed doctor for a missing `dev`."""
+    if shutil.which("uv") is None:
+        pytest.skip("uv is not on PATH here")
+    bin_dir = tmp_path / ".venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "pip-audit").write_text("#!/bin/sh\n", encoding="utf-8")
+    config = _audit_config(["uv", "run", "--group", "dev", "pip-audit"])
+    assert [f.level for f in doctor.check_audit_command(repo_mod.Repo(tmp_path), config)] == ["INFO"]

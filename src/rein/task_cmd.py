@@ -161,6 +161,148 @@ def _order_once(repo: repo_mod.Repo, task_id: str, after: str, reason: str) -> N
         )
 
 
+def defer(repo: repo_mod.Repo, task_id: str, *, reason: str) -> None:
+    """Record that `task_id` was taken out of this cycle, and move its status out of `tasks`.
+
+    The plan edit is the human's, made while the plan is a draft (`rein revise --to mandate` rolls
+    it back): they delete the task from `plan.yaml`. What was missing was the state's half.
+    `state.yaml` is written only in a transaction and never by hand, so a status left under `tasks`
+    for a task the plan no longer declares could not be removed at all, and every graph reader
+    refused the repository. Dropping it silently would be no better: acceptance would then show a
+    cycle that never mentioned the work it set aside.
+
+    So the status moves to `deferred` with the reason, and the chain records it. Acceptance lists
+    it (`brief`), and the next cycle's `/req` reads it from the archive. Refused while the plan is
+    frozen (the plan is not the human's to edit then), while the task is still declared (delete it
+    from the plan first — this verb never edits the plan), and when no status for it exists.
+    """
+    store_mod.retry_on_stale(lambda: _defer_once(repo, task_id, reason))
+
+
+def _defer_once(repo: repo_mod.Repo, task_id: str, reason: str) -> None:
+    store = store_mod.Store(repo)
+    state, plan = store.read_state(), store.read_plan()
+    if state is None or plan is None:
+        raise ValueError("no .rein/state.yaml or .rein/plan.yaml — run `rein init` first")
+    if state.plan_status == "frozen":
+        raise ValueError(
+            "the plan is frozen: taking a task out of it changes what the mandate authorized. "
+            "Roll back first (`rein revise --to mandate --reason ...`), delete the task from "
+            "plan.yaml, then defer it."
+        )
+    if task_id in {t.id for t in plan.tasks}:
+        raise ValueError(f"{task_id} is still declared in plan.yaml — delete it from the plan first")
+    seen = store_mod.read_digest(state)
+    raw = json.loads(json.dumps(state.raw))
+    tasks = raw.get("tasks") if isinstance(raw.get("tasks"), dict) else {}
+    entry = tasks.pop(task_id, None)
+    if not isinstance(entry, dict):
+        raise ValueError(f"state.yaml has no status for {task_id}: there is nothing to defer")
+    # An order edge pointing at the deferred task would name a task the graph no longer has.
+    dropped_edges = []
+    for tid, body in tasks.items():
+        after = body.get("after") if isinstance(body, dict) else None
+        if isinstance(after, list) and task_id in after:
+            body["after"] = [a for a in after if a != task_id]
+            if not body["after"]:
+                body.pop("after")
+            dropped_edges.append(tid)
+    record: dict[str, Any] = {
+        "status": str(entry.get("status", "todo")),
+        "reason": reason[:_REASON_MAX],
+        "deferred_at": event_chain.now_iso(),
+    }
+    raw.setdefault("deferred", {})[task_id] = record
+    raw["updated_at"] = event_chain.now_iso()
+    try:
+        dag.join(plan, models.State(raw))
+    except dag.DagError as exc:
+        raise ValueError(f"deferring {task_id} leaves the graph inconsistent: {exc}") from exc
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append(
+            "decision_declared",
+            cycle_id=state.cycle_id,
+            subject_ids=[task_id],
+            detail={
+                "kind": "task_deferred",
+                "from": record["status"],
+                "reason": record["reason"],
+                "edges_dropped": dropped_edges,
+            },
+        )
+
+
+def scope_add(repo: repo_mod.Repo, task_id: str, *, path: str, reason: str) -> None:
+    """Widen a frozen task's scope by one path the frozen config allows, and record why.
+
+    **No roll back, for the reason `order` needs none.** The field case: a task changed a constant,
+    and a test in another directory asserted the old value. The work was right and its scope was one
+    file short, and the only way to add the file was a roll back, a re-cut and a re-approval of the
+    whole mandate — for a line the human had already decided. `guard.scope_additions` is where the
+    human decides that ahead of time, frozen with the config, so the allowance is itself approved;
+    outside it this refuses and `/revise` is still the way.
+
+    Refused, too, when the path is outside the mandate's own scope, when another task's scope
+    already covers it (it is that task's work), and when the task is finished.
+    """
+    store_mod.retry_on_stale(lambda: _scope_add_once(repo, task_id, path, reason))
+
+
+def _scope_add_once(repo: repo_mod.Repo, task_id: str, path: str, reason: str) -> None:
+    store = store_mod.Store(repo)
+    state, plan, config = store.read_state(), store.read_plan(), store.read_config()
+    if state is None or plan is None:
+        raise ValueError("no .rein/state.yaml or .rein/plan.yaml — run `rein init` first")
+    if state.plan_status != "frozen":
+        raise ValueError("the plan is a draft: add the path to the task's `scope.include` in plan.yaml instead")
+    if not models.is_repo_path(path):
+        raise ValueError(f"{path!r} is not a safe repo-relative path")
+    allowed = config.scope_additions if config is not None else ()
+    if not allowed or common.outside_scope([path], allowed, ()):
+        raise ValueError(
+            f"{path} is outside `guard.scope_additions` ({', '.join(allowed) or 'none configured'}) — "
+            "widening a task there changes what the mandate authorized: `rein revise --to mandate`"
+        )
+    include, exclude = plan.scope
+    if common.outside_scope([path], include, exclude):
+        raise ValueError(f"{path} is outside the mandate's own scope — that is a `/revise`, not an addition")
+    graph = dag.join(plan, state)
+    if task_id not in {t.id for t in graph.tasks}:
+        raise ValueError(f"{task_id} is not a task in .rein/plan.yaml — `rein dag` lists them")
+    if graph.get(task_id).status in {"done", "awaiting-evidence"}:
+        raise ValueError(f"{task_id} is {graph.get(task_id).status}: its scope was what it landed against")
+    # `exclude` wins over `include`, so an addition under the task's own exclusion would be recorded
+    # and shown at acceptance while the guard went on refusing the path.
+    if excluded := [p for p in graph.get(task_id).scope_exclude if common.path_covered(path, p)]:
+        raise ValueError(
+            f"{path} is under {task_id}'s own `scope.exclude` ({', '.join(excluded)}) — the plan kept it out of "
+            "this task on purpose, and taking that back is a `/revise`"
+        )
+    owners = [
+        t.id
+        for t in graph.tasks
+        if t.id != task_id and t.scope_include and not common.outside_scope([path], t.scope_include, t.scope_exclude)
+    ]
+    if owners:
+        raise ValueError(f"{path} is already in the scope of {', '.join(owners)} — it is that task's work")
+    seen = store_mod.read_digest(state)
+    raw = json.loads(json.dumps(state.raw))
+    entry = raw.setdefault("tasks", {}).setdefault(task_id, {"status": graph.get(task_id).status})
+    if path in entry.get("scope_added", []):
+        raise ValueError(f"{task_id}'s scope already has {path}")
+    entry["scope_added"] = [*entry.get("scope_added", []), path]
+    raw["updated_at"] = event_chain.now_iso()
+    with store.transaction() as tx:
+        tx.write("state", raw, expect_digest=seen)
+        tx.append(
+            "decision_declared",
+            cycle_id=state.cycle_id,
+            subject_ids=[task_id],
+            detail={"kind": "scope_added", "path": path, "reason": reason[:_REASON_MAX]},
+        )
+
+
 #: A dependent in one of these was started on this task's current work and has not been parked.
 _STARTED = frozenset({"done", "awaiting-evidence", "in-progress"})
 
@@ -213,10 +355,27 @@ def main(argv: list[str] | None = None) -> int:
     order_parser.add_argument("--after", required=True, help="the task it waits for (T-NNN)")
     order_parser.add_argument("--reason", required=True, help="why — recorded in the audit chain, shown at acceptance")
     order_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    scope_parser = sub.add_parser(
+        "scope-add", help="widen a frozen task's scope by a path guard.scope_additions allows — no roll back"
+    )
+    scope_parser.add_argument("task_id", help="the task (T-NNN)")
+    scope_parser.add_argument("path", help="the repo-relative path to add")
+    scope_parser.add_argument("--reason", required=True, help="why — recorded in the audit chain, shown at acceptance")
+    scope_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
+    defer_parser = sub.add_parser(
+        "defer", help="record that a task deleted from the draft plan was taken out of this cycle"
+    )
+    defer_parser.add_argument("task_id", help="the task deleted from plan.yaml (T-NNN)")
+    defer_parser.add_argument("--reason", required=True, help="why — recorded in the audit chain, shown at acceptance")
+    defer_parser.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     args = parser.parse_args(argv)
     common.configure_logging()
     if args.action == "order":
         return _order_main(args)
+    if args.action == "defer":
+        return _defer_main(args)
+    if args.action == "scope-add":
+        return _scope_add_main(args)
 
     reason = args.reason.strip()
     if not reason:
@@ -271,6 +430,36 @@ def _order_main(args: argparse.Namespace) -> int:
         logger.error(str(exc))
         return 1
     print(f"{args.task_id} now waits for {args.after} ({reason}) — the plan and its approval stand")
+    return 0
+
+
+def _scope_add_main(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        logger.error("--reason cannot be empty: acceptance shows why the scope grew")
+        return 2
+    try:
+        repo = repo_mod.get(args.repo)
+        scope_add(repo, args.task_id.strip(), path=args.path.strip(), reason=reason)
+    except (repo_mod.RepoNotFoundError, OSError, ValueError, models.DocumentError, store_mod.StoreError) as exc:
+        logger.error(str(exc))
+        return 1
+    print(f"{args.task_id} may now change {args.path} ({reason}) — the plan and its approval stand")
+    return 0
+
+
+def _defer_main(args: argparse.Namespace) -> int:
+    reason = args.reason.strip()
+    if not reason:
+        logger.error("--reason cannot be empty: acceptance shows why the work was set aside")
+        return 2
+    try:
+        repo = repo_mod.get(args.repo)
+        defer(repo, args.task_id.strip(), reason=reason)
+    except (repo_mod.RepoNotFoundError, OSError, ValueError, models.DocumentError, store_mod.StoreError) as exc:
+        logger.error(str(exc))
+        return 1
+    print(f"{args.task_id} deferred ({reason}) — acceptance lists it; the next cycle reads it from the archive")
     return 0
 
 

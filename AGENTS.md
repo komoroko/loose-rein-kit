@@ -86,7 +86,10 @@ re-cutting the tasks, because a task's acceptance criteria are in the plan with 
 `plan.yaml` whole.** What needs nobody is the *order* — consuming the DAG, reordering what the
 dependencies allow, re-running what went red, and adding a dependency edge the plan missed
 (`rein task order T-NNN --after T-MMM --reason "…"`, written beside the frozen plan and listed at
-acceptance).
+acceptance). So does a test file a task's change drags along, inside what the frozen config allowed
+ahead of time (`rein task scope-add T-NNN <path> --reason "…"`, `guard.scope_additions`). Work set
+aside is recorded, never worked around: a task deleted from the draft plan is `rein task defer`, and
+a cycle given up on is `rein cycle-close --abandon --reason "…"`.
 
 ## Single Source of Truth (SSOT)
 
@@ -187,6 +190,17 @@ appear when the mandate is approved, out of the plan that approval freezes, and 
 in front of each such task and hands back with `rein approve T-NNN`: afterwards there is nothing
 left to approve. **How many times a human is asked is a property of the change, never a constant of
 this tool** — a ceiling on it is the same mistake as a budget for questions.
+
+**An irreversible task names its rehearsal and its attempt budget, or the mandate does not open.**
+The first contact with real inputs must not be the one that cannot be undone: `rehearsal` names the
+reversible tasks it waits for that run the same path small (or `waived`, with the reason), and
+`attempts: {max, cost}` is how many launches the approval covers and what each spends. The long,
+deterministic part of such a task — a full run, hours of it — is `operate`: the loop runs it after
+the implementer lands the tooling, because an agent's turn ends and takes the run with it. It runs
+where a quality-gate step runs unless the step names another profile, and what it writes is held to
+the task's scope. What the work needs from the machine is the task's `environment` (variables, and
+command prefixes granted to that launch only), never the operator's shell or a standing
+`permissions.allow`.
 
 They are a fan, not a line: each crossing stands on the mandate alone and acceptance stands on all
 of them, and two crossings carry no order against each other, because ordering them would be

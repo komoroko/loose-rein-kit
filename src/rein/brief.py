@@ -456,6 +456,17 @@ def _residuals(state: models.State | None) -> dict[str, Any]:
     ordered = [{"task_id": tid, "after": list(after)} for tid, after in sorted(state.task_after.items())]
     if ordered:
         residual["ordered_after_mandate"] = ordered[:MAX_TASKS]
+    widened = [{"task_id": tid, "paths": list(paths)} for tid, paths in sorted(state.task_scope_added.items())]
+    if widened:
+        residual["scope_added_after_mandate"] = widened[:MAX_TASKS]
+    # Work taken out of the plan while it was a draft (`rein task defer`). What the change does not
+    # deliver belongs on the screen that takes it, not only in the chain.
+    deferred = [
+        {"task_id": tid, "status": str(entry.get("status", "")), "reason": str(entry.get("reason", ""))}
+        for tid, entry in sorted(state.deferred.items())
+    ]
+    if deferred:
+        residual["deferred"] = deferred[:MAX_TASKS]
     return residual
 
 

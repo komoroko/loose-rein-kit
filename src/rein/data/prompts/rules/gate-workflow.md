@@ -153,8 +153,8 @@ baseline — `/req`/`/design` read it first; traceability R-N / NFR-N covers the
 addition defers to the next cycle or reopens the mandate via `/revise`. An emergency hotfix is a
 *minimal* delta cycle (gates in order, one-paragraph deliverables); if even that is too slow
 the human fixes outside the loop — log the escalation, fold it into `docs/05-current-state.md`
-at the next `/verify`. Abandonment is `rein cycle-close --name abandoned-<slug>`
-(archives partials, resets gates/phase).
+at the next `/verify`. Abandonment is `rein cycle-close --name <slug> --abandon --reason "…"`
+(archives partials with an `ABANDONED.md` saying why, resets gates/phase). Taking one task out of the cycle instead is `rein task defer`.
 
 ## Enforcement detail (the gate rules' mechanism layer)
 

@@ -162,3 +162,12 @@ def test_the_dossier_keeps_more_than_the_last_failure(tmp_path: Path) -> None:
 
     assert len(document["history"]) == dossier.MAX_HISTORY
     assert document["history"][-1]["attempt"] == history[-1]["attempt"]
+
+
+def test_the_implementer_is_told_what_the_loop_will_run_and_not_to_run_it() -> None:
+    """A run started inside an agent's turn dies with the turn: the field's orphaned full run."""
+    steps = ({"name": "full-run", "command": ["uv", "run", "python", "tools/run.py"]},)
+    document = dossier.build(task(operate=steps), plan=None, repo_path=lambda rel: Path(rel))
+    assert document["operate"]["steps"] == [{"name": "full-run", "command": ["uv", "run", "python", "tools/run.py"]}]
+    assert "do not run them" in document["operate"]["note"]
+    assert "operate" not in dossier.build(task(), plan=None, repo_path=lambda rel: Path(rel))

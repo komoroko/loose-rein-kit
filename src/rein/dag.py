@@ -68,6 +68,15 @@ class Task:
     #: The plan premises this task's (effective) criteria rest on. It does not run until each one
     #: has been observed.
     assumes: tuple[str, ...] = ()
+    #: The variables this task's work runs with (unexpanded) and the command prefixes its
+    #: implementer may run without asking — the frozen `environment` block.
+    env: tuple[tuple[str, str], ...] = ()
+    allow: tuple[str, ...] = ()
+    #: The long commands the loop runs on the host before this task's gate (`operate`).
+    operate: tuple[Mapping[str, Any], ...] = ()
+    #: How many launches an irreversible task's approval covers (0: undeclared), and what one costs.
+    attempt_max: int = 0
+    attempt_cost: str = ""
 
     @property
     def is_done(self) -> bool:
@@ -241,6 +250,9 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
     # Order added after the mandate joins the frozen edges here, so every reader of the graph —
     # the frontier, the layers, the critical path — sees one DAG.
     after = state.task_after if state is not None else {}
+    # Scope added after the mandate (`rein task scope-add`) joins the frozen scope here for the same
+    # reason: the guard, the dossier and the reviewers all read the one the graph carries.
+    scope_added = state.task_scope_added if state is not None else {}
     # A premise observed false with a fallback swaps the criteria resting on it for the ones a
     # human approved with the mandate. The plan document is untouched — it is frozen, and its
     # fallback is part of what was frozen — so this is where the swap becomes the task's bar.
@@ -270,7 +282,9 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
     if orphans:
         raise DagError(
             f"state.yaml holds status for task(s) the plan does not declare: {', '.join(orphans)} — "
-            "the plan was rewound without the state following. Run `rein revise` to reconcile."
+            "the plan was rewound without the state following. A task taken out of this cycle on "
+            "purpose is recorded with `rein task defer <id> --reason ...`; one removed by mistake goes "
+            "back into plan.yaml."
         )
 
     return Graph.from_tasks(
@@ -285,12 +299,17 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 claim_ids=t.claim_ids,
                 domains=t.domains,
                 attempts=attempts_map.get(t.id, 0),
-                scope_include=t.scope_include,
+                scope_include=tuple(dict.fromkeys((*t.scope_include, *scope_added.get(t.id, ())))),
                 scope_exclude=t.scope_exclude,
                 acceptance=effective(t.id, t.acceptance),
                 produced_by=t.produced_by,
                 requires=t.requires,
                 assumes=_assumed(effective(t.id, t.acceptance)),
+                env=t.env,
+                allow=t.allow,
+                operate=t.operate,
+                attempt_max=t.attempt_max,
+                attempt_cost=t.attempt_cost,
             )
             for t in plan.tasks
         ]

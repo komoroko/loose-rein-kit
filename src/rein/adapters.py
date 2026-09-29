@@ -18,6 +18,7 @@ that name.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
@@ -157,6 +158,13 @@ class Adapter:
     #: the review transport needs it too, and there the payload arrives on stdin with no prompt
     #: argument at all.
     prompt_flags: tuple[str, ...] = ()
+    #: The permission rule that pre-authorizes one command prefix for **this launch only** (a
+    #: task's `environment.allow`), with `{prefix}` standing for it; the rules travel in one
+    #: `--settings` JSON value. Empty for a CLI that has no per-launch permission setting: such a
+    #: task's implementer gets nothing extra, and the loop says so rather than pretending — the
+    #: alternative this removed was widening the repository's standing `permissions.allow` for
+    #: every later session.
+    allow_rule: str = ""
     #: Whether this CLI reads its prompt from **stdin** when the command line names none. True only
     #: where that is established, and it is established for two: `claude -p`, which is what acceptance's
     #: transport has always used, and `codex exec`, whose prompt is an optional positional that
@@ -267,6 +275,13 @@ class Adapter:
             flags = (*flags, *(part.format(path=writable) for part in self.scoped_write))
         return flags
 
+    def allow_argv(self, prefixes: Sequence[str]) -> tuple[str, ...]:
+        """The flags pre-authorizing each of `prefixes` for one launch. () when this CLI cannot."""
+        if not self.allow_rule or not prefixes:
+            return ()
+        rules = [self.allow_rule.format(prefix=prefix) for prefix in prefixes]
+        return ("--settings", json.dumps({"permissions": {"allow": rules}}))
+
     def prompt_argv(self, prompt: str) -> tuple[str, ...]:
         """The tail of a command line: whatever introduces the prompt, then the prompt.
 
@@ -315,6 +330,10 @@ ADAPTER_TABLE: dict[str, Adapter] = {
         # this reviewer off the code is the prompt and the loop's before/after fingerprint, not
         # the launcher — stated here rather than left to be inferred from three blank tuples.
         grants={},
+        # Carried as `--settings <json>`, which layers settings onto this invocation only. Not
+        # `--allowedTools`: that flag is variadic and would take the prompt positional after it as
+        # one more tool. Verified against `claude --help`.
+        allow_rule="Bash({prefix}:*)",
         # Claude Code carries all three as commands of its own, and a headless `-p` launch reaches
         # them. `/code-review` has levels and `ultra` is billed and user-triggered — the prompts
         # forbid it rather than naming a level, because a level is an operator's choice and this

@@ -341,3 +341,11 @@ def test_a_kill_from_anywhere_else_is_still_worth_retrying() -> None:
     only the executor knows the run had a `--memory` ceiling, which is why it says so."""
     assert faults.classify_step(137, "Killed") is faults.Fault.ENV_TRANSIENT
     assert not faults.is_sandbox_oom("Killed")
+
+
+def test_a_launcher_that_could_not_start_a_built_entry_point_is_the_codes_failure() -> None:
+    """`uv run measure-run` whose entry point the implementer never added says "Failed to spawn".
+    That went to the machine and stopped the build, instead of back to the implementer."""
+    output = "error: Failed to spawn: `measure-run`\n  Caused by: No such file or directory (os error 2)\n"
+    assert faults.classify_step(2, output) is faults.Fault.CONTENT
+    assert faults.wrapped_unlaunchable(output)

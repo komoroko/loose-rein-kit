@@ -136,6 +136,14 @@ def build(
         "acceptance": _acceptance(task),
         "sources": _sources(task, claims, repo_path),
     }
+    if task.operate:
+        # The loop runs these itself after this launch ends and before the gate. Named here so the
+        # implementer builds what they call and does not start them: a run begun inside an agent's
+        # turn dies when the turn does.
+        document["operate"] = {
+            "note": "the loop runs these after you report `implemented`; build what they need, do not run them",
+            "steps": [{"name": str(s.get("name", "")), "command": list(s.get("command", []))} for s in task.operate],
+        }
     diff = classify_paths(changed)
     if diff or diff_cmd:
         document["diff"] = {

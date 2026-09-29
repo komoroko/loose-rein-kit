@@ -287,6 +287,28 @@ export function OrientStage({ data, review, asBuilt, onAsBuilt }) {
       </tr>
     );
   }
+  // Scope widened after the mandate froze, inside what the config allowed ahead of time.
+  for (const w of residuals.scope_added_after_mandate || []) {
+    residualRows.push(
+      <tr key={"scope:" + w.task_id}>
+        <td>scope added after the mandate</td>
+        <td className="mono">
+          {w.task_id}: {w.paths.join(" ")}
+        </td>
+      </tr>
+    );
+  }
+  // Work taken out of the plan while it was a draft. Not delivered, and said so here.
+  for (const d of residuals.deferred || []) {
+    residualRows.push(
+      <tr key={"deferred:" + d.task_id}>
+        <td>deferred out of this cycle</td>
+        <td>
+          <span className="mono">{d.task_id}</span> ({d.status}) — {d.reason}
+        </td>
+      </tr>
+    );
+  }
 
   return (
     <>
