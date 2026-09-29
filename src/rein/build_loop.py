@@ -691,6 +691,7 @@ def record_escalation(
     message: str,
     tree: str,
     futile: str = "",
+    paths: Sequence[str] = (),
 ) -> None:
     """Record an attempt that ended *before* the quality gate — the event and the inheritance, together.
 
@@ -709,6 +710,9 @@ def record_escalation(
     }
     if tree:
         escalation["tree"] = tree
+    if paths:
+        # A scope violation's paths decide what moves the task next (`status_api.scope_additions_for`).
+        escalation["paths"] = list(paths)
     patch: dict[str, Any] = {"escalation": escalation}
     detail: dict[str, Any] = {"kind": kind, "message": message}
     if futile:
@@ -2802,9 +2806,8 @@ class Orchestrator:
                 f"(include={list(task.scope_include)}, exclude={list(task.scope_exclude)}). "
                 "The plan says where this task's work belongs; landing it elsewhere is a scope change, "
                 "and a scope change to an approved plan is a human's decision. Either the change "
-                "belongs to another task, or the plan drew this one's scope too small — the second "
-                "is answered with `rein revise --to mandate`, widening `scope.include`, and a "
-                "re-approval, never by editing the frozen plan in place.",
+                "belongs to another task, or the plan drew this one's scope too small."
+                + self._scope_way_out(task.id, outside),
             )
 
         claimed = {str(p) for p in report.get("touched", []) if isinstance(p, str)}
@@ -2853,7 +2856,31 @@ class Orchestrator:
             )
         return ""
 
-    def _stop_before_the_gate(self, task: dag.Task, kind: str, message: str, *, tree: str, futile: str = "") -> None:
+    def _scope_way_out(self, task_id: str, outside: Sequence[str]) -> str:
+        """The sentence that ends a scope violation: how the task gets past it.
+
+        A path `guard.scope_additions` already allows is one the human decided ahead of time may be
+        added without re-deciding the mandate, and `rein task scope-add` is that addition. This
+        sentence used to name the roll back for every path, and a field cycle took one — a
+        re-approval of the whole mandate — for a test file one task's scope was short of.
+        """
+        commands = status_api.scope_additions_for(
+            self.store.read_state(), self.store.read_plan(), self.store.read_config(), task_id, outside
+        )
+        if commands:
+            return (
+                " Every path is inside `guard.scope_additions`, so no roll back is needed: "
+                + "; ".join(f"`{c}`" for c in commands)
+                + f", then `rein task reset {task_id} --reason ...`."
+            )
+        return (
+            " The second is answered with `rein revise --to mandate`, widening `scope.include`, and a "
+            "re-approval, never by editing the frozen plan in place."
+        )
+
+    def _stop_before_the_gate(
+        self, task: dag.Task, kind: str, message: str, *, tree: str, futile: str = "", paths: Sequence[str] = ()
+    ) -> None:
         """Record an attempt that ended before the quality gate, and the status that ending calls for.
 
         `_escalate`'s counterpart for this one path, and it replaces it rather than joining it: the
@@ -2863,7 +2890,7 @@ class Orchestrator:
         """
         logger.warning(f"[escalation] {message}")
         if not self.dry_run and self.cycle_id:
-            record_escalation(self.repo, task.id, kind=kind, message=message, tree=tree, futile=futile)
+            record_escalation(self.repo, task.id, kind=kind, message=message, tree=tree, futile=futile, paths=paths)
         self._stops[task.id] = "needs-revision" if kind in _PLAN_DEFECT_KINDS else "blocked"
 
     def _already_answered(self, task: dag.Task, cwd: str) -> tuple[str, str, str] | None:
@@ -2890,6 +2917,14 @@ class Orchestrator:
         kind, tree = str(recorded.get("kind", "")), str(recorded.get("tree", ""))
         if not kind or not tree or tree != self._fingerprint(cwd):
             return None
+        if kind == "scope_violation":
+            # The verdict was about the scope as much as the tree. A scope widened since (`rein task
+            # scope-add`) is new input over the same tree, and replaying the old answer would refuse
+            # the very addition that answered it.
+            current = next((t for t in self._load_graph().tasks if t.id == task.id), task)
+            paths = [str(p) for p in recorded.get("paths", []) if isinstance(p, str)]
+            if paths and not dossier.scope_violations(current, paths):
+                return None
         return kind, str(recorded.get("message", "")), tree
 
     def _run_task_to_done(self, task: dag.Task, cwd: str, review: str = "") -> tuple[bool, str]:
@@ -2994,7 +3029,8 @@ class Orchestrator:
                     # to the human rather than being reconstructed from an unchanged tree. The
                     # tree goes with it, so the next `rein build` can tell "try again" from
                     # "ask the same question a second time".
-                    self._stop_before_the_gate(task, kind, message, tree=self._fingerprint(cwd))
+                    outside = dossier.scope_violations(task, changed) if kind == "scope_violation" else []
+                    self._stop_before_the_gate(task, kind, message, tree=self._fingerprint(cwd), paths=outside)
                     return False, message
             # What the implementer produced is committed before anything reads it: the gate, the
             # reviewer and the merge then read one thing, the branch, and "the change" is never
@@ -3023,9 +3059,11 @@ class Orchestrator:
                         f"{task.id}: its operate steps wrote {', '.join(outside)}, which its declared scope "
                         f"does not cover (include={list(task.scope_include)}, exclude={list(task.scope_exclude)}). "
                         "Either the steps write to the wrong place, or the plan drew the task's scope without "
-                        "the run's output — the second is `rein revise --to mandate`, widening `scope.include`."
+                        "the run's output." + self._scope_way_out(task.id, outside)
                     )
-                    self._stop_before_the_gate(task, "scope_violation", message, tree=self._fingerprint(cwd))
+                    self._stop_before_the_gate(
+                        task, "scope_violation", message, tree=self._fingerprint(cwd), paths=outside
+                    )
                     return False, message
                 if not self._commit_attempt(task, cwd):
                     return (

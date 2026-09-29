@@ -46,6 +46,7 @@ from rein import (
     repair,
     run_progress,
     strict_yaml,
+    task_cmd,
 )
 from rein import events as events_mod
 from rein import lock as lock_mod
@@ -141,6 +142,7 @@ def next_action(
     decidable_findings: int = 0,
     baseline: str = "",
     blocked: Recommendation | None = None,
+    scoped: Recommendation | None = None,
 ) -> Recommendation:
     """The deterministic decision table (first match wins).
 
@@ -195,7 +197,10 @@ def next_action(
     # names a command; after the chain and the gate ladder, which are about the repository itself.
     if blocked is not None and counts is not None and counts.get("blocked", 0) > 0:
         return blocked
-    # 4. needs-revision tasks park everything until the /tasks reconcile reclassifies them.
+    # 4. needs-revision tasks park everything until the /tasks reconcile reclassifies them — unless
+    # what sent one back is a path the config already lets it take without a roll back.
+    if scoped is not None and counts is not None and counts.get("needs-revision", 0) > 0:
+        return scoped
     if counts is not None and counts.get("needs-revision", 0) > 0:
         return Recommendation(
             command="/tasks",
@@ -379,13 +384,6 @@ def _stage_reason(stage: str, plan_missing: bool, gate: str) -> str:
 #: verdict at all. None of it was read by anything that recommends.
 _BLOCKED_RECOVERY: tuple[tuple[str, str, str], ...] = (
     (
-        "scope_violation",
-        "rein revise --to mandate --impacted {task} --reason <what the scope has to cover>",
-        "{task} tried to change code its declared scope does not cover. Either the work belongs to "
-        "another task, or the plan drew this one's scope too small — the second is a scope change to "
-        "an approved plan, which is yours to make.",
-    ),
-    (
         "agent_blocked",
         "rein task reset {task} --fresh --reason <what you repaired>",
         "{task}'s implementer reported that it could not do this, and said why. Read that, repair "
@@ -421,6 +419,61 @@ _BLOCKED_RECOVERY: tuple[tuple[str, str, str], ...] = (
         "which is a finding whatever the tests said.",
     ),
 )
+
+
+def scope_additions_for(
+    state: models.State | None,
+    plan: models.Plan | None,
+    config: models.Config | None,
+    task_id: str,
+    paths: Sequence[str],
+) -> list[str]:
+    """The `rein task scope-add` commands that take `paths` into `task_id`'s scope with no roll back.
+
+    [] when any one of them needs the roll back after all: a violation half answered by an addition
+    is a task that stops again on the other half, so the way out is offered whole or not at all.
+    """
+    if not paths or state is None or plan is None:
+        return []
+    if any(task_cmd.scope_add_refusal(state, plan, config, task_id, path) for path in paths):
+        return []
+    return [f"rein task scope-add {task_id} {path} --reason <why it is {task_id}'s work>" for path in paths]
+
+
+def scope_recovery(
+    state: models.State | None, plan: models.Plan | None, config: models.Config | None
+) -> Recommendation | None:
+    """The addition that moves the first task a scope violation sent back, or None.
+
+    A scope violation marks the task `needs-revision`, and that row of the table answers "reconcile
+    and re-approve the mandate" — right for a scope the mandate has to change, and one approval too
+    many for a path `guard.scope_additions` already allows. The violation's paths are kept on the
+    escalation (`build_loop.record_escalation`) so this can tell the two apart.
+    """
+    if state is None:
+        return None
+    tasks = state.raw.get("tasks")
+    if not isinstance(tasks, dict):
+        return None
+    for task_id in sorted(tasks):
+        entry = tasks[task_id]
+        if not isinstance(entry, dict) or entry.get("status") != "needs-revision":
+            continue
+        escalation = _mapping(_mapping(entry, "handoff"), "escalation")
+        if escalation.get("kind") != "scope_violation":
+            continue
+        paths = [str(p) for p in escalation.get("paths", []) if isinstance(p, str)]
+        commands = scope_additions_for(state, plan, config, task_id, paths)
+        if commands:
+            return Recommendation(
+                command=commands[0],
+                kind="fix",
+                reason=f"{task_id} changed {', '.join(paths)}, outside its scope and inside `guard.scope_additions`: "
+                "an addition decided ahead of time, not a change to the mandate. Add each path, then put the "
+                "task back on the frontier — no roll back and no re-approval.",
+                also=(*commands[1:], f"rein task reset {task_id} --reason <what was added>"),
+            )
+    return None
 
 
 def _mapping(entry: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -993,6 +1046,7 @@ def collect_status(
         decidable_findings=len(routing.judgement) + len(routing.unowned),
         baseline=_baseline_state(state),
         blocked=blocked_recovery(state),
+        scoped=scope_recovery(state, plan, config),
     )
     # A /-command only exists inside an agent whose surface was installed; recommending one in a
     # repo with no integration would send the user to a command their agent has never heard of.
