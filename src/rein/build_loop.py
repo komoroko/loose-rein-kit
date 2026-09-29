@@ -3637,6 +3637,20 @@ class Orchestrator:
                 return common.EXIT_HUMAN_NEEDED
 
             mode, tasks = batch
+            spent = [t for t in tasks if t.attempt_max and t.attempts >= t.attempt_max]
+            if spent:
+                # The approval priced a number of launches; one more is a spend nobody approved.
+                for task in spent:
+                    self._escalate(
+                        "attempt_budget_spent",
+                        f"{task.id} has used the {task.attempt_max} launch(es) its approval covers "
+                        f"(each: {task.attempt_cost}). Not launched again. Raising the budget changes what "
+                        f"was approved: `rein revise --to mandate`, then change `attempts.max` for {task.id}.",
+                        task=task.id,
+                    )
+                tasks = [t for t in tasks if t not in spent]
+                if not tasks:
+                    return common.EXIT_HUMAN_NEEDED
             waiting = [t for t in tasks if self._awaits_crossing(t.id)]
             if waiting:
                 # Everything else in the batch first: a contact point stops the work that has to
@@ -3957,6 +3971,8 @@ class Orchestrator:
         print("\n========== an irreversible point ==========")
         for task in waiting:
             print(f"  {task.id}  {task.title}")
+            if task.attempt_max:
+                print(f"      covers {task.attempt_max} launch(es), {task.attempts} used — each: {task.attempt_cost}")
         print(
             "\nThe plan froze this work as something that cannot be taken back, so it is its own\n"
             "contact point and the loop stops in front of it. Running it first would make the\n"

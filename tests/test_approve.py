@@ -1829,3 +1829,45 @@ def test_the_mandate_gate_is_not_asked_this_question(tmp_path: Path) -> None:
     repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
 
     assert not [b for b in approve.readiness(repo, "mandate", already_approved_blocks=False) if "scope" in b]
+
+
+# --- what the mandate asks of an irreversible task: a rehearsal and an attempt budget -------------
+
+
+def _irreversible_plan(**over: object) -> models.Plan:
+    rehearsal = make_task("T-001", claim_ids=["C-001"])
+    crossing = _crossing_task("T-002")
+    crossing["blocked_by"] = ["T-001"]
+    crossing.update(over)
+    return models.Plan(make_plan(tasks=[rehearsal, crossing]))
+
+
+def test_an_irreversible_task_with_a_rehearsal_and_a_budget_is_ready() -> None:
+    plan = _irreversible_plan(
+        rehearsal={"tasks": ["T-001"], "says": "ten real questions through every stage"},
+        attempts={"max": 2, "cost": "about 7% of the weekly quota per run"},
+    )
+    assert approve._irreversible_blockers(plan, "mandate") == []
+
+
+def test_an_irreversible_task_with_neither_is_not() -> None:
+    """The field case: the first contact with real data was the irreversible run itself."""
+    blockers = approve._irreversible_blockers(_irreversible_plan(), "mandate")
+    assert any("names no `rehearsal`" in b for b in blockers)
+    assert any("declares no `attempts`" in b for b in blockers)
+
+
+def test_a_rehearsal_must_come_first_and_be_undoable() -> None:
+    lone = _irreversible_plan(rehearsal={"tasks": ["T-003"], "says": "x"}, attempts={"max": 1, "cost": "x"})
+    assert any("is not something T-002 waits for" in b for b in approve._irreversible_blockers(lone, "mandate"))
+
+    first = _crossing_task("T-001")
+    crossing = _crossing_task("T-002")
+    crossing.update(blocked_by=["T-001"], rehearsal={"tasks": ["T-001"], "says": "x"}, attempts={"max": 1, "cost": "x"})
+    plan = models.Plan(make_plan(tasks=[first, crossing]))
+    assert any("itself irreversible" in b for b in approve._irreversible_blockers(plan, "mandate"))
+
+
+def test_a_waived_rehearsal_is_accepted_with_its_reason() -> None:
+    plan = _irreversible_plan(rehearsal={"waived": "a publish has no smaller form"}, attempts={"max": 1, "cost": "x"})
+    assert approve._irreversible_blockers(plan, "mandate") == []

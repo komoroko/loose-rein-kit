@@ -4007,3 +4007,30 @@ def test_a_cli_with_no_per_launch_permission_setting_grants_nothing() -> None:
     """Saying so beats pretending: the loop prints that the declared prefixes were not granted."""
     assert adapters.ADAPTER_TABLE["codex"].allow_argv(["uv run x"]) == ()
     assert adapters.ADAPTER_TABLE["claude"].allow_argv([]) == ()
+
+
+def test_an_irreversible_task_is_not_launched_past_its_approved_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each launch spends what the approver priced once; one past the budget is a spend nobody approved."""
+    task = make_task(
+        "T-001",
+        claim_ids=["C-001"],
+        operator_surface=[
+            {"kind": "dependency", "name": "the quota", "paths": ["x"], "reversible": False, "adr": "ADR-001"}
+        ],
+    )
+    task["attempts"] = {"max": 2, "cost": "7% of the weekly quota"}
+    state = make_state(
+        plan_status="frozen", gates={"mandate": "approved", "T-001": "approved", "acceptance": "pending"}
+    )
+    state["tasks"] = {"T-001": {"status": "todo", "attempts": 2}}
+    loop = orchestrator(tmp_path, plan=make_plan(tasks=[task]), state=state)
+    ran: list[str] = []
+    monkeypatch.setattr(loop, "_consume_batch", lambda tasks: ran.extend(t.id for t in tasks))
+
+    assert loop._consume() == common.EXIT_HUMAN_NEEDED
+    assert ran == []
+    [gap] = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "knowledge_gap"]
+    assert gap.detail["kind"] == "attempt_budget_spent"
+    assert "7% of the weekly quota" in gap.detail["message"]

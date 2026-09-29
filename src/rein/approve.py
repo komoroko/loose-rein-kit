@@ -123,6 +123,56 @@ def _plan_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> 
     return blockers
 
 
+def _irreversible_blockers(plan: models.Plan | None, gate: str) -> list[str]:
+    """What the mandate asks of every task that declares a point that cannot be undone.
+
+    **A rehearsal.** A reversible task this one depends on, whose criteria run the same path on
+    smaller real input — or a stated reason there can be none. The cycle this exists for met real
+    data for the first time at its irreversible task and found three defects there, each costing a
+    full run and a roll back, all of which a ten-question run would have shown.
+
+    **An attempt budget.** How many launches the approval covers and what one costs. The approval
+    was otherwise open-ended: every retry spent more of a resource the approver had priced once.
+    """
+    if gate != FREEZING_GATE or plan is None:
+        return []
+    blockers: list[str] = []
+    by_id = {t.id: t for t in plan.tasks}
+    for task in plan.tasks:
+        if not task.irreversible_surfaces:
+            continue
+        rehearsal = task.rehearsal
+        if not rehearsal:
+            blockers.append(
+                f"{task.id} is irreversible and names no `rehearsal` — list the reversible task(s) that run the "
+                "same path on small real input first, or `waived` with the reason none can"
+            )
+        for rid in rehearsal.get("tasks", []) if isinstance(rehearsal.get("tasks"), list) else []:
+            if rid not in _ancestors(by_id, task.id):
+                blockers.append(f"{task.id}'s rehearsal {rid} is not something {task.id} waits for (`blocked_by`)")
+            elif by_id[rid].irreversible_surfaces:
+                blockers.append(f"{task.id}'s rehearsal {rid} is itself irreversible — a rehearsal has to be undoable")
+        if task.attempt_max <= 0:
+            blockers.append(
+                f"{task.id} is irreversible and declares no `attempts` — how many launches this approval covers "
+                "(`max`) and what one costs (`cost`)"
+            )
+    return blockers
+
+
+def _ancestors(by_id: Mapping[str, models.Task], task_id: str) -> set[str]:
+    """Every task `task_id` waits for, directly or through others."""
+    seen: set[str] = set()
+    stack = list(by_id[task_id].blocked_by) if task_id in by_id else []
+    while stack:
+        current = stack.pop()
+        if current in seen or current not in by_id:
+            continue
+        seen.add(current)
+        stack.extend(by_id[current].blocked_by)
+    return seen
+
+
 def _worktree_blockers(repo: repo_mod.Repo, plan: models.Plan | None, gate: str) -> list[str]:
     """Paths the criteria name that no task's worktree would ever have. Checked where the plan freezes.
 
@@ -600,6 +650,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _decision_blockers(plan, gate)
     blockers += _plan_blockers(repo, plan, gate)
     blockers += _task_blockers(plan, state, gate)
+    blockers += _irreversible_blockers(plan, gate)
     blockers += _worktree_blockers(repo, plan, gate)
     blockers += _review_blockers(repo, review, state, gate)
     return blockers

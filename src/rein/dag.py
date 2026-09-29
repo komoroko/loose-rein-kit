@@ -74,6 +74,9 @@ class Task:
     allow: tuple[str, ...] = ()
     #: The long commands the loop runs on the host before this task's gate (`operate`).
     operate: tuple[Mapping[str, Any], ...] = ()
+    #: How many launches an irreversible task's approval covers (0: undeclared), and what one costs.
+    attempt_max: int = 0
+    attempt_cost: str = ""
 
     @property
     def is_done(self) -> bool:
@@ -302,6 +305,8 @@ def join(plan: models.Plan, state: models.State | None) -> Graph:
                 env=t.env,
                 allow=t.allow,
                 operate=t.operate,
+                attempt_max=t.attempt_max,
+                attempt_cost=t.attempt_cost,
             )
             for t in plan.tasks
         ]

@@ -898,6 +898,24 @@ class Task(Element):
         return tuple(item for item in value if isinstance(item, dict)) if isinstance(value, list) else ()
 
     @property
+    def rehearsal(self) -> Mapping[str, Any]:
+        """The reversible run that goes first (`tasks`, `says`) or why there is none (`waived`)."""
+        value = self.raw.get("rehearsal")
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def attempt_max(self) -> int:
+        """How many launches the approval of this irreversible task covers. 0 when undeclared."""
+        value = self.raw.get("attempts")
+        count = value.get("max") if isinstance(value, dict) else None
+        return count if isinstance(count, int) else 0
+
+    @property
+    def attempt_cost(self) -> str:
+        value = self.raw.get("attempts")
+        return _str(value, "cost") if isinstance(value, dict) else ""
+
+    @property
     def irreversible_surfaces(self) -> tuple[Mapping[str, Any], ...]:
         """The declarations on this task that say they cannot be undone.
 

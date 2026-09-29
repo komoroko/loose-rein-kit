@@ -125,6 +125,7 @@ STOP_CAUSE_BY_KIND: Mapping[str, str] = {
     "no_implementation": "code",
     "report_mismatch": "code",
     "cost_ceiling": "cost",
+    "attempt_budget_spent": "cost",
     "no_runnable": "aggregate",
 }
 
