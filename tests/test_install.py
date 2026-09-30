@@ -12,7 +12,7 @@ import pytest
 from rein import gate_guard, init_cmd, install, models, store
 from rein import lock as lock_mod
 from rein import repo as repo_mod
-from tests._support import make_config
+from tests._support import chain, make_config, make_plan, make_state, seed_repo
 
 # --- pure settings logic (semantics preserved from adopt.py) ---------------------------
 
@@ -561,3 +561,32 @@ def test_a_generated_review_is_never_rewritten_by_sync(repo: repo_mod.Repo) -> N
     review_path.write_text(original.replace("not_generated", "generated"), encoding="utf-8")
     assert install.refresh_ungenerated_review(repo) is False
     assert "generated" in review_path.read_text(encoding="utf-8")
+
+
+def test_a_forced_sync_seeds_reviews_in_a_repository_from_before_they_existed(tmp_path: Path) -> None:
+    """The upgrade path every repository on 0.11 or older takes, and the one that could not complete.
+
+    The seed of `reviews.yaml` is a Central Store transaction, and every transaction refuses while the
+    lock on disk is in a format this release does not read — which is exactly the lock `--force` is
+    there to rewrite, and only rewrote at the end. So the one command that crosses the bump raised
+    `BehindError` out of itself, leaving the prompts materialized and the lock as it was.
+    """
+    seed_repo(
+        tmp_path,
+        config=make_config(),
+        plan=make_plan(),
+        state=make_state(gates={"mandate": "pending"}, plan_status="draft"),
+        reviews=None,  # a repository from before the file existed: no file, and no record of one
+        events=chain("cycle_initialized"),
+    )
+    repo = repo_mod.Repo(tmp_path)
+    lock_mod.write(repo.lock, lock_mod.new("0.10.0", ""))
+    body = repo.lock.read_text(encoding="utf-8").replace(f"format: {lock_mod.FORMAT}", "format: rein-grounded-v8")
+    repo.lock.write_text(body, encoding="utf-8")
+    assert not repo.reviews.exists()
+
+    assert install.sync(repo, force=True) == 0
+
+    assert repo.reviews.exists()
+    after = lock_mod.read(repo.lock)
+    assert after is not None and after["format"] == lock_mod.FORMAT

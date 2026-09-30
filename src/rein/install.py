@@ -747,7 +747,6 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
     hashes = _apply_plan(repo, items, desired)
     if refresh_ungenerated_review(repo):
         print("  update        .rein/review.yaml (the scaffold stub — it held no review)")
-    unseeded = _seed_reviews(repo)
     _refresh_gitignore(repo, write=True)
     files = {_materialized_key(rel): digest for rel, digest in _record_after(recorded, items, hashes).items()}
     data["prompts"] = {"version": rein.__version__, "files": files}
@@ -758,9 +757,13 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
     # version, and `rein upgrade` then reported "already current", printed no changelog, and named
     # none of the renames that had just broken the repo. Refused instead, with the transition
     # printed: the version this repo is on is worth more than a tidy lock.
-    invalid = _documents_invalid(repo)
-    if unseeded:
-        invalid = [unseeded, *(p for p in invalid if not p.startswith("reviews.yaml:"))]
+    #
+    # `reviews.yaml` is left out of this check and seeded after the lock is written, not before: the
+    # seed is a Central Store transaction, and every transaction refuses while the lock on disk is in
+    # a format this release does not read — the very lock `--force` is here to rewrite. Seeding
+    # first made the one command that crosses a format bump raise out of itself for every repository
+    # from before the file existed. The four SSOT documents still decide whether the lock advances.
+    invalid = [p for p in _documents_invalid(repo) if not p.startswith("reviews.yaml:")]
     if invalid:
         for problem in invalid:
             logger.error(f"sync: {problem}")
@@ -779,6 +782,13 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
 
     data["tool_version"] = rein.__version__
     lock_mod.write(repo.lock, data)
+    unseeded = _seed_reviews(repo)
+    unreadable = [p for p in _documents_invalid(repo) if p.startswith("reviews.yaml:")]
+    if unseeded or unreadable:
+        for problem in [unseeded] if unseeded else unreadable:
+            logger.error(f"sync: {problem}")
+        logger.error("sync: the lock is current; repair reviews.yaml (`rein doctor` names how), then run `rein sync`.")
+        return 1
     skipped = sum(1 for i in items if i.op == "skip-modified")
     written = sum(1 for i in items if i.op in ("install", "update"))
     print(f"sync: {written} written, {skipped} kept (locally modified), {len(items) - written - skipped} unchanged.")

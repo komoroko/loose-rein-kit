@@ -4,6 +4,20 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.12.1] - 2026-09-30
+
+**A patch release: the format stays `rein-grounded-v10`.** It fixes the upgrade to 0.12.0 itself.
+On a repository written by 0.11 or older, `rein sync --force` raised `BehindError` out of itself
+and stopped halfway: the prompts were materialized, the lock was left as it was, and no verb could
+run.
+
+- **`sync --force` seeds `reviews.yaml` after it advances the lock, not before.** The seed is a
+  Central Store transaction. Every transaction refuses while the lock on disk is in a format this
+  release does not read, and that is exactly the lock `--force` exists to rewrite, which it did
+  only at the end. Every repository from before `reviews.yaml` existed took this path, so every one
+  of them failed. The four SSOT documents still decide whether the lock advances. A `reviews.yaml`
+  that cannot be seeded or read is reported after the lock is current, with the repair.
+
 ## [0.12.0] - 2026-09-30
 
 **A minor release: the format moves to `rein-grounded-v10`, and every repository needs `rein sync
