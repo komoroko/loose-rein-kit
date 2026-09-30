@@ -119,9 +119,9 @@ function Naming({ naming, gate }) {
       ) : null}
       {adversarialOff.length ? (
         <>
-          {/* Switched off by a human in reviews.yaml. Not a blocker; approved knowing it. */}
+          {/* Switched off by a human in reviews.yaml at some point of this round, read off the chain. Not a blocker; approved knowing it. */}
           <div className="subhead" style={{ marginTop: ".8rem" }}>
-            {adversarialOff.length} drafting stage(s) went without an adversarial review
+            {adversarialOff.length} drafting stage(s) had the adversarial review switched off during this round
           </div>
           <ul>
             {adversarialOff.map((row) => (

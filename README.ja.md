@@ -281,7 +281,7 @@ command: notify-send "rein"
 持っていなければ読み取り専用である。
 
 ## 設定できるもの
-<!-- README.md: 35059f215962 -->
+<!-- README.md: 09116b30775a -->
 
 つまみはすべて `.rein/config.yaml` にあり、その場にコメントが付いている。以下はそのうちプロジェクトが
 普通に触るものである。既存リポジトリでは `rein init` が、認識できた品質ゲートのコマンドだけを埋める。
@@ -298,9 +298,11 @@ command: notify-send "rein"
 
 どのレビューを走らせるかは `config.yaml` には無い。`.rein/reviews.yaml` が、mandate 前の敵対的検証を
 起草の段ごとに、タスクのバッチを読む `review` ステップを、`correctness`・`simplification`・`security`
-または問いをファイルに書いた独自のレビューとして持つ。mandate の凍結の外にあるので変えても何も巻き
-戻らず、変えられるのはあなただけである。端末で `rein reviews apply <file> --reason ...` を実行するか、
-ダッシュボードの Reviews 画面を使う。acceptance が判断の根拠にする comparison はここに無く、外せない。
+または問いをこのファイルに書いた独自のレビューとして持つ。mandate の凍結の外にあるので変えても何も
+巻き戻らず、変えられるのはあなただけである。端末で `rein reviews apply <file> --reason ...` を実行
+するか、ダッシュボードの Reviews 画面を使う。変更は書いた文書ごと記録され、記録と食い違うファイルでは
+何も動かない。`rein reviews restore` が記録された版を書き戻す。acceptance が判断の根拠にする
+comparison はここに無く、外せない。
 
 **無人での実行。** `rein build` の終了コードが信号である: `0` は完了、`1` と `2` は人間を必要とし、
 `3` は一時的 —— 容量制限、シグナル、別の実行がロックを保持している —— で、何も記録せず予算も消費

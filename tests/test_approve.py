@@ -24,6 +24,7 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import (
     chain,
+    events_since_seed,
     make_claim,
     make_config,
     make_decision,
@@ -122,7 +123,7 @@ def test_recording_pins_the_event_that_opened_the_gate(tmp_path: Path, monkeypat
     approve.main(["mandate", "--repo", str(tmp_path)])
 
     store = store_mod.Store(repo)
-    events = store.read_events()
+    events = events_since_seed(repo.root)
     # Two events, because approving the mandate is also what freezes the plan it authorizes.
     assert [e.event for e in events] == ["gate_approved", "plan_frozen"]
     assert events[0].actor == "local-confirmation"
@@ -638,7 +639,7 @@ def test_the_freeze_is_recorded_in_the_audit_chain(tmp_path: Path) -> None:
     repo = _tasks_gate_repo(tmp_path)
     approval_id = approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
 
-    events = store_mod.Store(repo).read_events()
+    events = events_since_seed(repo.root)
     assert [e.event for e in events] == ["gate_approved", "plan_frozen"]
     frozen = events[1]
     assert approval_id in frozen.subject_ids
@@ -662,6 +663,7 @@ def test_a_plan_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path)
         state=None,
         review=None,
         config=None,
+        reviews=None,
     )
     with pytest.raises(approve.ApprovalError, match="plan.yaml changed while the confirmation"):
         approve.record_approval(repo, "mandate", subject)
@@ -670,7 +672,7 @@ def test_a_plan_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path)
 def test_a_config_that_moved_while_the_prompt_waited_is_not_frozen(tmp_path: Path) -> None:
     repo = _tasks_gate_repo(tmp_path)
     subject = approve.approval_subject(repo, "mandate")
-    seed_repo(tmp_path, config=make_config(max_parallel=7), state=None, plan=None, review=None)
+    seed_repo(tmp_path, config=make_config(max_parallel=7), state=None, plan=None, review=None, reviews=None)
     with pytest.raises(approve.ApprovalError, match="config.yaml changed while the confirmation"):
         approve.record_approval(repo, "mandate", subject)
 
@@ -1120,7 +1122,17 @@ def test_every_list_the_naming_layer_carries_reaches_the_terminal(
             subject_ids=["mandate", "GA-MANDATE-0"],
             detail={"plan_digest": "sha256:" + "0" * 64},
         )
-        tx.write("reviews", {**make_reviews(), "adversarial": {"requirements": True, "design": False, "tasks": True}})
+    from rein import reviews_cmd
+
+    record = reviews_cmd.recorded(repo)
+    assert record is not None
+    reviews_cmd.apply(
+        repo,
+        {**make_reviews(), "adversarial": {"requirements": True, "design": False, "tasks": True}},
+        "a one-line fix",
+        actor="test",
+        expect=record.digest,
+    )
     monkeypatch.setattr("sys.stdin", _Tty("y\n"))
 
     approve.confirm_locally(repo, "mandate", {"plan": "sha256:0"})
@@ -1134,6 +1146,37 @@ def test_every_list_the_naming_layer_carries_reaches_the_terminal(
         for row in rows:
             token = row.get("task_id") or row.get("id") or ""
             assert token and token in printed, f"`naming` carries {key} and the terminal never prints it"
+
+
+def test_nothing_on_the_approval_screen_reaches_the_terminal_raw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Most of the screen is text an agent wrote. Printed raw, `ESC[1A ESC[2K` in a design document
+    erased the line above it, so the approver read something other than what was approved (CR-55
+    printed documents to the terminal for the first time; the plan's values and decisions before it)."""
+    repo = repo_at(tmp_path, state=make_state(gates=PENDING_ALL, plan_status="draft"))
+    hidden = "harmless\x1b[1A\x1b[2K\r\u202e"
+    real = approve.naming
+
+    def naming(*args: Any, **kwargs: Any) -> approve.Naming:
+        named = real(*args, **kwargs)
+        named["documents"] = [{"id": "docs/20-design.md", "change": "changed", "diff": f"@@ -1 +1 @@\n-old\n+{hidden}"}]
+        named["delta"] = [{"what": "task", "id": "T-001", "change": "changed: title", "before": "a", "after": hidden}]
+        named["unasked"] = [{"id": "D-001", "subject": hidden, "answer": hidden, "rationale": hidden}]
+        return named
+
+    monkeypatch.setattr(approve, "naming", naming)
+    monkeypatch.setattr("sys.stdin", _Tty("y\n"))
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    approve.confirm_locally(repo, "mandate", {"plan": "sha256:0"})
+
+    printed = capsys.readouterr().out
+    # The colours are the screen's own and the only sequences left on it.
+    assert "\x1b" not in re.sub(r"\x1b\[(?:3[126]|0)m", "", printed)
+    assert "\r" not in printed and "\u202e" not in printed
+    assert printed.count("\\u001b[2K") == 5
 
 
 def test_every_list_the_naming_layer_carries_reaches_the_dashboard() -> None:

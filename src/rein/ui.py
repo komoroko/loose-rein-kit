@@ -87,6 +87,7 @@ from rein import (
     approve,
     change_request,
     common,
+    digests,
     event_chain,
     human_review,
     lens_cmd,
@@ -780,16 +781,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, {"ok": True, "gate": gate, "approval_id": approval_id})
 
     def _send_reviews(self) -> None:
-        """Which reviews run, and what the screen may offer: the packaged names and the fixed stages."""
+        """Which reviews run, the digest an edit of it is made against, and what the screen may offer."""
+        repo = repo_mod.Repo(self.server.active_root())
         try:
-            reviews = store_mod.Store(repo_mod.Repo(self.server.active_root())).read_reviews()
-        except (models.DocumentError, store_mod.StoreError, OSError) as exc:
+            reviews = reviews_cmd.require_bound(repo)
+        except (reviews_cmd.ReviewsError, models.DocumentError, store_mod.StoreError, OSError) as exc:
             self._send_json(HTTPStatus.OK, {"error": str(exc)})
             return
+        document = reviews.normalized()
         self._send_json(
             HTTPStatus.OK,
             {
-                "document": dict(reviews.raw) if reviews is not None else None,
+                "document": document,
+                # What `apply` is handed back as `expect`: a change is made against this version.
+                "digest": digests.of(document),
                 "builtin": list(models.BUILTIN_REVIEWS),
                 "adversarial_stages": list(models.ADVERSARIAL_STAGES),
                 # Shown, never offered: acceptance is decided by these, not improved by them.
@@ -802,21 +807,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         The write session is the human channel here, as it is for an approval: `rein reviews apply`
         asks a terminal for the same thing, and both land in one function and one chain event.
+        Applied against the version the screen was served (`expect`), never over a later one.
         """
-        document = body.get("document")
+        document, expect = body.get("document"), body.get("expect")
         if not isinstance(document, dict):
             raise UiActionError(HTTPStatus.BAD_REQUEST, "`document` must be the whole reviews document")
+        if not isinstance(expect, str):
+            raise UiActionError(HTTPStatus.BAD_REQUEST, "`expect` must be the digest the screen was served")
         try:
             changes = reviews_cmd.apply(
                 repo_mod.Repo(self.server.active_root()),
                 document,
                 str(body.get("reason") or ""),
                 actor="ui-session",
+                expect=expect,
             )
-        except store_mod.BehindError as exc:
+        except (store_mod.BehindError, store_mod.StaleWriteError) as exc:
             raise UiActionError(HTTPStatus.CONFLICT, str(exc)) from None
-        except store_mod.StaleWriteError as exc:
-            raise UiActionError(HTTPStatus.CONFLICT, f"reviews.yaml moved while it was on screen: {exc}") from None
         except (reviews_cmd.ReviewsError, models.DocumentError, store_mod.StoreError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
         self._send_json(HTTPStatus.OK, {"ok": True, "changes": changes})

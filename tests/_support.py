@@ -554,6 +554,20 @@ def seed_repo(
 
     if events:
         event_chain.append_lines(loop / "events.ndjson", events)
+    reviews_doc = documents["reviews"]
+    if isinstance(reviews_doc, dict):
+        # The record every reader checks the file against (`reviews_cmd.binding_problem`), as
+        # `rein init` writes it: a fixture's reviews.yaml is one a person chose.
+        state_doc = documents["state"]
+        cycle_id = str(state_doc.get("cycle_id", DEMO_CYCLE)) if isinstance(state_doc, dict) else DEMO_CYCLE
+        bound = event_chain.make(
+            "reviews_changed",
+            cycle_id,
+            actor="test-fixture",
+            detail={"reason": "fixture", "changes": [], "document": reviews_doc, "digest": digests.of(reviews_doc)},
+        )
+        path = loop / "events.ndjson"
+        event_chain.append_lines(path, [event_chain.link(event_chain.tail_event(path), bound)])
     if lock:
         lock_mod.write(loop / "rein.lock", lock_mod.new("0.1.0", ""))
     if settings is not None:
@@ -568,6 +582,11 @@ def seed_repo(
     if git:
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     return root
+
+
+def events_since_seed(root: Path) -> list[models.Event]:
+    """The chain minus the record of reviews.yaml `seed_repo` wrote: what the code under test appended."""
+    return [e for e in event_chain.load(root / ".rein" / "events.ndjson") if e.actor != "test-fixture"]
 
 
 def _validate(name: str, document: dict[str, Any]) -> None:

@@ -54,6 +54,7 @@ from tests._support import (
     DEMO_CYCLE,
     REVIEW_STEP,
     agent_output,
+    events_since_seed,
     fake_git,
     make_config,
     make_plan,
@@ -176,7 +177,7 @@ def test_a_batch_never_starts_a_task_whose_upstream_is_unfinished(max_parallel: 
 
 
 def test_config_normalizes_the_quality_gate(tmp_path: Path) -> None:
-    config = build_loop.Config.from_models(models.Config(make_config()), models.Reviews(make_reviews()), questions={})
+    config = build_loop.Config.from_models(models.Config(make_config()), models.Reviews(make_reviews()))
     assert [s.name for s in config.steps] == ["test", "check"]
     assert config.steps[0].command == ("make", "test")
     assert config.gate_cmds == ["make test", "make check"]
@@ -186,7 +187,7 @@ def test_an_unknown_adapter_is_refused_up_front() -> None:
     config = make_config()
     config["agents"]["implementer"]["adapter"] = "mystery"  # type: ignore[index]
     with pytest.raises(adapters.LaunchRefused, match="does not know how to launch"):
-        build_loop.Config.from_models(models.Config(config), models.Reviews(make_reviews()), questions={})
+        build_loop.Config.from_models(models.Config(config), models.Reviews(make_reviews()))
 
 
 def test_the_integration_gate_is_not_a_knob() -> None:
@@ -216,9 +217,7 @@ def _config_with_split_adapters(reviewer: str = "codex") -> build_loop.Config:
     raw = make_config()
     raw["agents"]["implementer"] = {"adapter": "claude"}
     raw["agents"]["code_reviewer"] = {"adapter": reviewer}
-    return build_loop.Config.from_models(
-        models.Config(raw), models.Reviews(make_reviews(steps=[REVIEW_STEP])), questions={}
-    )
+    return build_loop.Config.from_models(models.Config(raw), models.Reviews(make_reviews(steps=[REVIEW_STEP])))
 
 
 def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
@@ -470,9 +469,7 @@ def test_an_unlaunchable_role_adapter_stops_the_build_before_it_starts() -> None
     raw = make_config()
     raw["agents"]["code_reviewer"] = {"adapter": "nonesuch"}
     with pytest.raises(adapters.LaunchRefused, match="agents.code_reviewer.adapter"):
-        build_loop.Config.from_models(
-            models.Config(raw), models.Reviews(make_reviews(steps=[REVIEW_STEP])), questions={}
-        )
+        build_loop.Config.from_models(models.Config(raw), models.Reviews(make_reviews(steps=[REVIEW_STEP])))
 
 
 # --- task status goes through the Central Store -------------------------------
@@ -486,7 +483,7 @@ def test_a_status_change_lands_with_the_event_that_explains_it(tmp_path: Path) -
     store = store_mod.Store(repo)
     state = store.read_state()
     assert state is not None and state.task_status["T-001"] == "done"
-    assert [e.event for e in store.read_events()] == ["task_completed"]
+    assert [e.event for e in events_since_seed(repo.root)] == ["task_completed"]
 
 
 def test_the_commit_that_completed_a_task_is_recorded_once(tmp_path: Path) -> None:
@@ -498,7 +495,7 @@ def test_the_commit_that_completed_a_task_is_recorded_once(tmp_path: Path) -> No
 
     raw = store_mod.Store(repo).read_raw("state")
     assert raw is not None and raw["tasks"]["T-001"]["completed_commit"] == "a" * 40
-    events = store_mod.Store(repo).read_events()
+    events = events_since_seed(repo.root)
     assert [e.event for e in events] == ["task_completed"]
     assert events[0].detail["commit"] == "a" * 40
 
@@ -861,7 +858,7 @@ def test_a_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert build_loop.main(["--dry-run", "--repo", str(root)]) == 0
 
     assert store.document_digest("state") == before
-    assert store.read_events() == []
+    assert events_since_seed(repo.root) == []
     assert not store.build_lock.exists()
 
 
@@ -1148,7 +1145,7 @@ def test_a_failed_attempt_leaves_the_next_one_something_to_go_on(tmp_path: Path)
     assert handoff["failed_step"] == "check"
     assert handoff["failure_summary"] == "E  ruff: unused import"
     assert handoff["retries_left"] == {"check": 1}
-    assert [e.event for e in store_mod.Store(loop.repo).read_events()] == ["task_failed"]
+    assert [e.event for e in events_since_seed(loop.repo.root)] == ["task_failed"]
 
 
 def test_a_restarted_attempt_does_not_get_its_retry_budget_back(tmp_path: Path) -> None:
@@ -1263,13 +1260,6 @@ def test_a_custom_review_asks_its_own_question() -> None:
     assert f"**performance**: {question}" in prompt
     # The findings come back through the same file as every other review's.
     assert "Write your findings to `.rein/work/review.findings.json`" in prompt
-
-
-def test_a_custom_review_with_no_question_stops_the_build_before_it_starts() -> None:
-    reviews = make_reviews(steps=[{"name": "review", "reviews": ["performance"]}])
-    reviews["custom"] = [{"name": "performance", "prompt": "docs/reviews/performance.md"}]
-    with pytest.raises(ValueError, match="performance"):
-        build_loop.Config.from_models(models.Config(make_config()), models.Reviews(reviews), questions={})
 
 
 def test_the_reviewer_is_asked_whether_a_test_would_go_red() -> None:
@@ -1446,7 +1436,7 @@ def test_each_join_send_back_reaches_the_implementer_with_its_own_framing(
 def test_the_loop_records_what_it_did(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     loop = orchestrator(tmp_path)
     loop._event("task_started", "T-001", {"why": "test"})
-    events = store_mod.Store(loop.repo).read_events()
+    events = events_since_seed(loop.repo.root)
     assert [e.event for e in events] == ["task_started"]
     assert events[0].subject_ids == ("T-001",)
 
@@ -1456,14 +1446,14 @@ def test_a_dry_run_records_nothing(tmp_path: Path) -> None:
     repo = repo_mod.Repo(root)
     loop = build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=True, repo=repo)
     loop._event("task_started", "T-001", {})
-    assert store_mod.Store(repo).read_events() == []
+    assert events_since_seed(repo.root) == []
 
 
 def test_an_escalation_is_recorded_and_announced(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     loop = orchestrator(tmp_path)
     loop._escalate("blocked", "everything is on fire", task="T-001")
     assert "everything is on fire" in capsys.readouterr().err
-    events = store_mod.Store(loop.repo).read_events()
+    events = events_since_seed(loop.repo.root)
     assert [e.event for e in events] == ["knowledge_gap"]
     assert events[0].detail["kind"] == "blocked"
 
@@ -1477,7 +1467,7 @@ def test_every_escalation_kind_reaches_the_chain(tmp_path: Path, kind: str) -> N
     """
     loop = orchestrator(tmp_path)
     loop._escalate(kind, f"{kind} happened", task="T-001")
-    events = store_mod.Store(loop.repo).read_events()
+    events = events_since_seed(loop.repo.root)
     assert [e.event for e in events] == ["knowledge_gap"]
     assert events[0].event in events_mod.ATTENTION_EVENTS  # `rein events --summary` lists it as open
     assert events[0].detail["kind"] == kind
@@ -1488,7 +1478,7 @@ def test_a_batch_escalation_records_one_subject_per_task(tmp_path: Path) -> None
     loop = orchestrator(tmp_path)
     tasks = [dag.Task(f"T-{n:03d}", f"task {n}", "parallel") for n in range(1, 13)]
     loop._escalate_batch("integration_red", "the merged tree is red", tasks)
-    events = store_mod.Store(loop.repo).read_events()
+    events = events_since_seed(loop.repo.root)
     assert events[0].subject_ids == tuple(t.id for t in tasks)
 
 
@@ -1542,7 +1532,7 @@ def test_a_gate_step_carries_the_executor_profile_the_schema_requires(tmp_path: 
     """The config schema makes `executor_profile` required for a command step; normalization
     dropped it, so "repository code runs in the sandbox, never on the host" was true of the
     the sandbox and of nothing else — `make test` runs agent-authored files."""
-    config = build_loop.Config.from_models(models.Config(make_config()), models.Reviews(make_reviews()), questions={})
+    config = build_loop.Config.from_models(models.Config(make_config()), models.Reviews(make_reviews()))
     test_step = next(s for s in config.steps if s.name == "test")
     assert test_step.executor_profile == "quality"
 
@@ -2108,7 +2098,6 @@ def _staged_config() -> build_loop.Config:
             )
         ),
         models.Reviews(make_reviews()),
-        questions={},
     )
 
 

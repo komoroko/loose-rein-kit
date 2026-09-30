@@ -467,6 +467,10 @@ EVENT_ORDER: tuple[str, ...] = (
     # A human changed which reviews run (`rein reviews apply`, or the dashboard). `reviews.yaml` is
     # outside the mandate freeze (`Reviews`), so this is the record of the change and its reason.
     "reviews_changed",
+    # `reviews.yaml` was written back to what the last `reviews_changed` recorded, after something
+    # outside rein had changed it (`rein reviews restore`). Changes no configuration; says one was
+    # tampered with.
+    "reviews_restored",
     # A reviewer step read these tasks, for these reviews. What acceptance shows per task: the
     # configuration can change mid-cycle, and a task read before the change was read for what was
     # configured then.
@@ -1588,8 +1592,9 @@ class Reviews:
     quality of the work; neither is what the mandate decides or what acceptance decides by. So
     changing them rewinds nothing, and what keeps an agent from switching a review off to get its
     own work through is not a freeze but the write path: `rein reviews apply` at a terminal or the
-    dashboard's write session, each change in the audit chain with its reason, and `rein guard`
-    refusing any other edit of the file.
+    dashboard's write session, each change in the audit chain with its reason and the whole
+    document it wrote. The path alone is not the guarantee — a shell write never meets the edit
+    hook — so every reader checks the file against that record (`reviews_cmd.binding_problem`).
     """
 
     raw: Mapping[str, Any]
@@ -1629,9 +1634,40 @@ class Reviews:
     def custom(self) -> tuple[Mapping[str, Any], ...]:
         return _maps(self.raw, "custom")
 
-    def prompt_of(self, review: str) -> str:
-        """The repository path a custom review's question is read from ("" for a packaged one)."""
-        return next((str(c.get("prompt", "")) for c in self.custom if c.get("name") == review), "")
+    @property
+    def questions(self) -> dict[str, str]:
+        """Each custom review's question, by name."""
+        return {str(c.get("name")): str(c.get("question", "")).strip() for c in self.custom}
+
+    def normalized(self) -> dict[str, Any]:
+        """The document with every default written out and nothing without meaning left in.
+
+        Two documents that run the same reviews are equal here and only here: a step's `retries`
+        left to its default and written as 1 is one configuration, and the order of `custom`
+        (looked up by name) is not part of it. The order of the steps and of each step's reviews
+        is — the steps run in it, and a reviewer is asked in it. This is the form that is written
+        and recorded, so "what changed" is a comparison of two of these and nothing else.
+        """
+        steps: list[dict[str, Any]] = []
+        for step in self.steps:
+            entry: dict[str, Any] = {
+                "name": step.name,
+                "reviews": list(step.reviews),
+                "retries": step.retries,
+                "stage": step.stage,
+            }
+            if step.paths:
+                entry["paths"] = list(step.paths)
+            steps.append(entry)
+        document: dict[str, Any] = {
+            "adversarial": {stage: self.adversarial(stage) for stage in ADVERSARIAL_STAGES},
+            "steps": steps,
+        }
+        if self.custom:
+            document["custom"] = [
+                {"name": name, "question": question} for name, question in sorted(self.questions.items())
+            ]
+        return document
 
     def adversarial(self, stage: str) -> bool:
         value = self.raw.get("adversarial")

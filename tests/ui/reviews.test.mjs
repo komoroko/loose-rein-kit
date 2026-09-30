@@ -8,11 +8,11 @@ import { baseRoutes, boot } from "./_harness.mjs";
 const DOCUMENT = {
   adversarial: { requirements: true, design: true, tasks: true },
   steps: [{ name: "review", reviews: ["correctness", "simplification"], retries: 1, stage: "both" }],
-  updated_at: "2026-09-30T10:00:00",
 };
 
 const PAYLOAD = {
   document: DOCUMENT,
+  digest: "sha256:served",
   builtin: ["correctness", "simplification", "security"],
   adversarial_stages: ["requirements", "design", "tasks"],
   acceptance: ["actual extraction", "comparison", "security review"],
@@ -52,13 +52,33 @@ test("a review taken off a step's card is applied as the whole document, with th
   assert.equal(posts.length, 1);
   assert.deepEqual(posts[0].document.steps[0].reviews, ["correctness"]);
   assert.equal(posts[0].reason, "the team runs its own linter");
+  // Made against the version the screen was served, so a change that landed meanwhile is refused.
+  assert.equal(posts[0].expect, "sha256:served");
+});
+
+test("asking a step's reviews in another order is a change the screen sends", async () => {
+  const { app, posts } = await reviewsScreen();
+  await app.click('.chip[data-review="simplification"] button[title="ask earlier"]');
+  await app.type('input[aria-label="reason"]', "simplify first");
+  await app.click({ text: "Apply" });
+  assert.deepEqual(posts[0].document.steps[0].reviews, ["simplification", "correctness"]);
+});
+
+test("a custom review carries its question in the document", async () => {
+  const { app, posts } = await reviewsScreen();
+  await app.type('input[aria-label="custom review name"]', "performance");
+  await app.type('textarea[aria-label="custom review question"]', "Does every query use an index?");
+  await app.click("#view-reviews .block > .rcard-row > button");
+  await app.type('input[aria-label="reason"]', "slow pages");
+  await app.click({ text: "Apply" });
+  assert.deepEqual(posts[0].document.custom, [{ name: "performance", question: "Does every query use an index?" }]);
 });
 
 test("switching a stage's adversarial review off says what the mandate screen will show", async () => {
   const { app, posts } = await reviewsScreen();
   const doc = app.window.document;
   await app.click('.lane[data-lane="design"] input[type="checkbox"]');
-  assert.match(doc.querySelector('.lane[data-lane="design"]').textContent, /went without one/);
+  assert.match(doc.querySelector('.lane[data-lane="design"]').textContent, /names this stage, with when and why/);
   await app.type('input[aria-label="reason"]', "a one-line fix");
   await app.click({ text: "Apply" });
   assert.equal(posts[0].document.adversarial.design, false);

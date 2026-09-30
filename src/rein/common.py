@@ -493,6 +493,22 @@ EXIT_CANNOT_PROCEED = 2
 EXIT_RETRY_LATER = 3
 
 
+#: What a terminal acts on rather than shows: C0 and C1 controls other than newline and tab (ESC
+#: starts a sequence that can move the cursor, erase a line or hide text; CR overwrites one), and the
+#: bidirectional overrides and isolates, which reorder what is displayed without changing the bytes.
+_TERMINAL_ACTIVE = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def terminal_text(text: str) -> str:
+    """`text` with everything a terminal would act on written out as a visible escape.
+
+    For text a human decides on at a terminal whose author is not that human — a deliverable an
+    agent drafted, a value in a plan, a reviewer's question. Printed raw, one escape sequence can
+    erase the line above it, so the screen shows something other than what is being approved.
+    """
+    return _TERMINAL_ACTIVE.sub(lambda m: f"\\u{ord(m.group()):04x}", text)
+
+
 class ReinError(Exception):
     """An operation failed for a reason already worded for a human — `cli.main` prints it.
 

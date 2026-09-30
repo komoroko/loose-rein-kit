@@ -296,10 +296,12 @@ from your tooling, and nothing else.
 
 Which reviews run is not in `config.yaml`. `.rein/reviews.yaml` holds the adversarial review before
 the mandate, per drafting stage, and the `review` step that reads each batch of tasks — for
-`correctness`, `simplification`, `security`, or a review of your own with its question in a file.
-It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone to change:
-`rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews screen. The
-comparison acceptance is decided by is not in it and cannot be switched off.
+`correctness`, `simplification`, `security`, or a review of your own with its question written in
+the file. It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone
+to change: `rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews
+screen. Each change is recorded with the document it wrote, and nothing runs on a file that differs
+from that record; `rein reviews restore` writes it back. The comparison acceptance is decided by is
+not in it and cannot be switched off.
 
 **Running unattended.** `rein build`'s exit code is the signal: `0` done, `1` or `2` need a human,
 and `3` is transient — capacity, a signal, another run holding the lock — and safe to retry with

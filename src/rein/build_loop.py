@@ -91,6 +91,7 @@ from rein import (
     review_policy,
     review_reading,
     review_transport,
+    reviews_cmd,
     run_record,
     sessions,
     status_api,
@@ -343,7 +344,7 @@ class Config:
     launch_retries: int
     #: Dollars this cycle may spend before the loop stops and hands back. 0.0 = no ceiling.
     max_cost_usd: float = 0.0
-    #: The question each custom review asks, read from the file `reviews.yaml` names for it.
+    #: The question each custom review asks (`reviews.yaml`).
     questions: Mapping[str, str] = field(default_factory=dict)
 
     @property
@@ -352,13 +353,12 @@ class Config:
         return [s.display for s in self.steps if s.kind == "command" and s.command]
 
     @classmethod
-    def from_models(cls, config: models.Config, reviews: models.Reviews, *, questions: Mapping[str, str]) -> Config:
+    def from_models(cls, config: models.Config, reviews: models.Reviews) -> Config:
         """The knobs, with every role the run will launch resolved up front.
 
         Resolving here rather than at the first step that needs it is what makes an unlaunchable
         adapter stop the build before an implementer has been paid for, instead of halfway
-        through a task. The same goes for a custom review whose question was never written: it
-        stops here, not in the prompt of a reviewer already launched.
+        through a task.
 
         The command steps come from `config.yaml` and are frozen with the mandate; the reviewer
         steps come from `reviews.yaml`, which is not (`models.Reviews`). Both run as one DoD.
@@ -378,14 +378,6 @@ class Config:
             )
             for step in config.quality_gate
         )
-        unwritten = sorted(
-            {name for step in reviews.steps for name in step.reviews if name not in models.BUILTIN_REVIEWS}
-            - set(questions)
-        )
-        if unwritten:
-            raise ValueError(
-                f"custom review(s) {', '.join(unwritten)} have no question to ask — see .rein/reviews.yaml"
-            )
         readers = tuple(
             GateStep(
                 name=step.name,
@@ -416,7 +408,7 @@ class Config:
             adapter_argv=argv,
             max_cost_usd=config.max_cost_usd,
             launch_retries=max(0, config.launch_retries),
-            questions=dict(questions),
+            questions=reviews.questions,
         )
 
     @classmethod
@@ -425,29 +417,13 @@ class Config:
         config = store.read_config()
         if config is None:
             raise ValueError(f"no {repo.config} — run `rein init` first")
-        reviews = store.read_reviews()
-        if reviews is None:
-            raise ValueError(f"no {repo.reviews} — `rein sync` writes the packaged one")
-        return cls.from_models(config, reviews, questions=review_questions(repo, reviews))
-
-
-def review_questions(repo: repo_mod.Repo, reviews: models.Reviews) -> dict[str, str]:
-    """Each custom review's question, read from the repository file `reviews.yaml` names.
-
-    A named file that is missing is refused rather than skipped: a reviewer told to read for a
-    review with no question would read for nothing and say so in a findings file nobody doubts.
-    """
-    questions: dict[str, str] = {}
-    for entry in reviews.custom:
-        name, prompt = str(entry.get("name", "")), str(entry.get("prompt", ""))
+        # The file as it sits on disk only when it is what the chain records: a reviewer step
+        # removed by a shell write would otherwise be a build that reads nobody's work.
         try:
-            text = repo.path(prompt).read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise ValueError(f"custom review {name!r}: cannot read its question from {prompt}: {exc}") from None
-        if not text:
-            raise ValueError(f"custom review {name!r}: {prompt} is empty, so there is no question to ask")
-        questions[name] = text
-    return questions
+            reviews = reviews_cmd.require_bound(repo)
+        except reviews_cmd.ReviewsError as exc:
+            raise ValueError(str(exc)) from None
+        return cls.from_models(config, reviews)
 
 
 def render_owed(graph: dag.Graph, owed: Mapping[str, Sequence[str]]) -> str:

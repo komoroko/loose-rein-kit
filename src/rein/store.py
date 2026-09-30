@@ -898,6 +898,20 @@ class Transaction:
                     "Re-read it and re-apply the change."
                 )
 
+        if "reviews" in self._writes:
+            # Every reader checks reviews.yaml against the document the chain last recorded for it
+            # (`reviews_cmd.binding_problem`), so a write that recorded none would read as tampering.
+            # Held here rather than at each writer: a writer that forgot would pass its own tests.
+            written = digests.of(self._writes["reviews"])
+            if not any(
+                e.event in ("reviews_changed", "reviews_restored") and e.detail.get("digest") == written
+                for e in self._events
+            ):
+                raise StoreError(
+                    "a write of reviews.yaml must append the event that records it "
+                    "(`reviews_changed` or `reviews_restored` carrying the digest of what was written)"
+                )
+
         tx_id = self.tx_id
         events = [self._with_tx(e, tx_id) for e in self._events]
         # Everything that can refuse this transaction — a damaged chain, an event the log cannot

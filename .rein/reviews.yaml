@@ -1,7 +1,8 @@
 # .rein/reviews.yaml — which reviews run. Outside the mandate's freeze: changing one rewinds
 # nothing. Written only by `rein reviews apply <file> --reason ...` at a terminal, or by the
-# dashboard's write session, and every change is recorded in the audit chain. `rein guard` refuses
-# any other edit of this file.
+# dashboard's write session, and every change is recorded in the audit chain with the document it
+# wrote. Nothing runs on a file that differs from that record: `rein reviews restore` writes the
+# recorded one back.
 #
 # The comparison acceptance rests on is not configurable and is not here: it is what a human
 # decides by, not a way of improving the work.
@@ -21,7 +22,7 @@ steps:
     retries: 1
     stage: both
 
-# Reviews of your own: a name, and a repository file holding the question to read for.
+# Reviews of your own: a name, and the question the reviewer reads for.
 #   custom:
 #     - name: performance
-#       prompt: docs/reviews/performance.md
+#       question: Does every new query use an index, and is every loop over a table bounded?

@@ -211,7 +211,7 @@ def test_the_table_is_total_over_the_lifecycle() -> None:
 
 
 def test_status_reports_gates_evidence_and_the_chain(tmp_path: Path) -> None:
-    seed_repo(tmp_path, events=chain("cycle_initialized"))
+    seed_repo(tmp_path, events=chain("cycle_initialized"), reviews=None)
     status = status_api.collect_status(repo_mod.Repo(tmp_path))
 
     assert status["project"] == "demo"

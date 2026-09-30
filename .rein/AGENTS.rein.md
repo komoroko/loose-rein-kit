@@ -155,8 +155,10 @@ Four documents, distinct roles — do not conflate them:
 - **`.rein/reviews.yaml`** — which reviews run: the adversarial review before the mandate, per
   stage, and the reviewer steps that read each batch. Outside the mandate's freeze, and **a human's
   to change, never yours**: `rein reviews apply` at their terminal or the dashboard writes it, with
-  the reason in the chain. Read it with `rein reviews show`; never edit it, and never run `apply`
-  for them — switching off the review of your own work is the thing this file is kept from you for.
+  the reason and the whole document in the chain, and nothing runs on a file that differs from that
+  record. Read it with `rein reviews show`; never edit it, and never run `apply` for them —
+  switching off the review of your own work is the thing this file is kept from you for. When it
+  has been changed without a record, `rein reviews restore` puts back what the chain records.
 - **`.rein/events.ndjson`** — the hash-chained audit log. Every state change records why;
   a deleted, reordered, or re-hashed line breaks the chain a gate receipt pins.
 

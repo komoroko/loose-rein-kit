@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/komoroko/loose-rein-kit/schema/reviews.schema.json",
   "title": "Loose Rein reviews.yaml",
-  "description": "Which reviews this repository runs: the adversarial review before the mandate, stage by stage, and the reviewer steps that read each batch of tasks. Outside the mandate's freeze on purpose — which tool raises the quality of the work is inside what the mandate delegates, not part of what it decides — and written only by `rein reviews apply` at a terminal or by the dashboard's write session, each change recorded in the audit chain with its reason. The comparison acceptance rests on is not here and cannot be put here: it is what a human decides by, not a way of improving the work.",
+  "description": "Which reviews this repository runs: the adversarial review before the mandate, stage by stage, and the reviewer steps that read each batch of tasks. Outside the mandate's freeze on purpose — which tool raises the quality of the work is inside what the mandate delegates, not part of what it decides — and written only by `rein reviews apply` at a terminal or by the dashboard's write session, each change recorded in the audit chain with the whole document it wrote, which is what the file on disk is checked against. The comparison acceptance rests on is not here and cannot be put here: it is what a human decides by, not a way of improving the work.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -85,7 +85,7 @@
       }
     },
     "custom": {
-      "description": "Reviews beyond the packaged three. `prompt` is a repository file whose text is handed to the reviewer as the question to read for.",
+      "description": "Reviews beyond the packaged three: a name, and the question the reviewer reads for. The question is held here rather than in a file of its own so that what a review asks is written by the same person, through the same path, and bound by the same record as whether it runs.",
       "type": "array",
       "maxItems": 16,
       "items": {
@@ -93,21 +93,20 @@
         "additionalProperties": false,
         "required": [
           "name",
-          "prompt"
+          "question"
         ],
         "properties": {
           "name": {
             "$ref": "#/$defs/reviewName"
           },
-          "prompt": {
-            "$ref": "#/$defs/repoPath"
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
           }
         }
       }
-    },
-    "updated_at": {
-      "type": "string",
-      "maxLength": 64
     }
   },
   "$defs": {

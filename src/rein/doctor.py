@@ -51,6 +51,7 @@ from rein import (
     notify,
     policy_check,
     review_reading,
+    reviews_cmd,
     strict_yaml,
     upstream,
 )
@@ -102,7 +103,8 @@ def check_layout(repo: repo_mod.Repo) -> list[Finding]:
                 "FAIL",
                 "format",
                 f"missing SSOT document(s): {', '.join(missing)} — run `rein init` "
-                "(`rein sync` seeds a missing reviews.yaml)",
+                "(a missing reviews.yaml: `rein reviews restore` when the audit chain records one, "
+                "`rein sync` when it never has)",
             )
         ]
     return [Finding("PASS", "format", "the five SSOT documents are present")]
@@ -138,8 +140,9 @@ _DOCUMENT_REPAIR: dict[str, str] = {
         "`rein revise --to mandate` first, then fix it, then re-approve the mandate"
     ),
     "reviews": (
-        "outside the mandate's freeze and written only by a person: restore it from the last commit, then "
-        "change it with `rein reviews apply <file> --reason ...` at your terminal"
+        "outside the mandate's freeze and written only by a person: `rein reviews restore` writes back the "
+        "version the audit chain records, and a change goes through `rein reviews apply <file> --reason ...` "
+        "at your terminal"
     ),
     "state": (
         "hand-repair is not the path — restore it from the last commit; `rein events --verify` "
@@ -181,6 +184,15 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
             continue
         loaded[name] = value
         findings.append(Finding("PASS", "format", f"{name}.yaml valid (schema + cross-references)"))
+    if "reviews" in loaded:
+        # Valid is not enough for this one: it has to be the version a person applied, which only
+        # the chain can say (`reviews_cmd.binding_problem`).
+        try:
+            problem = reviews_cmd.binding_problem(repo)
+        except reviews_cmd.ReviewsError as exc:
+            problem = str(exc)
+        if problem:
+            findings.append(Finding("FAIL", "format", f"reviews.yaml: {problem}"))
     return findings, loaded
 
 

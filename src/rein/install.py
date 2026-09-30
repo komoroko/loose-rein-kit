@@ -660,21 +660,6 @@ def refresh_ungenerated_review(repo: repo_mod.Repo) -> bool:
     return True
 
 
-def seed_reviews(repo: repo_mod.Repo) -> bool:
-    """Write the packaged `reviews.yaml` when the repository has none. True when it was written.
-
-    A repository from before the file existed has no record of which reviews run, and the build
-    refuses to guess one. The packaged file is what `rein init` seeds; what it says is the review a
-    config's `quality_gate` agent step used to ask for. Never over an existing file: that one is a
-    human's, and only `rein reviews apply` changes it.
-    """
-    path = repo.reviews
-    if path.exists():
-        return False
-    path.write_bytes(data_mod.read_bytes("scaffold/rein/reviews.yaml"))
-    return True
-
-
 def _documents_invalid(repo: repo_mod.Repo) -> list[str]:
     """Which SSOT documents this release's schema refuses, worded for the console ([] = none)."""
     from rein import models
@@ -693,7 +678,43 @@ def _documents_invalid(repo: repo_mod.Repo) -> list[str]:
             reader()
         except (models.DocumentError, strict_yaml.StrictParseError, OSError) as exc:
             problems.append(f"{name}: {exc}")
+    if (
+        repo.state.exists()
+        and not any(p.startswith("reviews.yaml:") for p in problems)
+        and (problem := _reviews_problem(repo))
+    ):
+        problems.append(f"reviews.yaml: {problem}")
     return problems
+
+
+def _seed_reviews(repo: repo_mod.Repo) -> str:
+    """Seed and record the packaged reviews.yaml where the chain has never recorded one.
+
+    Returns why it could not be seeded ("" when it was, or did not need to be). A repository
+    from before the file existed has no record of which reviews run, and the build refuses to
+    guess one; what the packaged file says is the review a config's `quality_gate` agent step used
+    to ask for. Never over an existing record — that one is a person's (`reviews_cmd.seed`).
+    """
+    from rein import models, reviews_cmd
+    from rein import store as store_mod
+
+    if not repo.state.exists():
+        return ""  # nothing initialized to record it under: `rein init` seeds it with the rest
+    try:
+        if reviews_cmd.seed(repo, actor="rein sync"):
+            print("  seed          .rein/reviews.yaml (which reviews run — `rein reviews show`)")
+    except (models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError, reviews_cmd.ReviewsError) as exc:
+        return f"reviews.yaml: not seeded — {exc}"
+    return ""
+
+
+def _reviews_problem(repo: repo_mod.Repo) -> str:
+    from rein import reviews_cmd
+
+    try:
+        return reviews_cmd.binding_problem(repo)
+    except reviews_cmd.ReviewsError as exc:
+        return str(exc)
 
 
 def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> int:
@@ -726,8 +747,7 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
     hashes = _apply_plan(repo, items, desired)
     if refresh_ungenerated_review(repo):
         print("  update        .rein/review.yaml (the scaffold stub — it held no review)")
-    if seed_reviews(repo):
-        print("  seed          .rein/reviews.yaml (which reviews run — `rein reviews show`)")
+    unseeded = _seed_reviews(repo)
     _refresh_gitignore(repo, write=True)
     files = {_materialized_key(rel): digest for rel, digest in _record_after(recorded, items, hashes).items()}
     data["prompts"] = {"version": rein.__version__, "files": files}
@@ -739,6 +759,8 @@ def sync(repo: repo_mod.Repo, *, check: bool = False, force: bool = False) -> in
     # none of the renames that had just broken the repo. Refused instead, with the transition
     # printed: the version this repo is on is worth more than a tidy lock.
     invalid = _documents_invalid(repo)
+    if unseeded:
+        invalid = [unseeded, *(p for p in invalid if not p.startswith("reviews.yaml:"))]
     if invalid:
         for problem in invalid:
             logger.error(f"sync: {problem}")

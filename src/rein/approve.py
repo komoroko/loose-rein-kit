@@ -65,6 +65,7 @@ from rein import (
     observations,
     review_policy,
     review_reading,
+    reviews_cmd,
     strict_yaml,
 )
 from rein import lenses as lens_lib
@@ -1191,13 +1192,23 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
     command line establishes nothing, since someone who would reflexively press `y` would as
     reflexively type `tasks`. What is load-bearing is the pause with the digests above it, the
     TTY, and **the default being no** — a stray Enter must never approve anything.
+
+    Most of what this screen shows was written by somebody other than the person approving — the
+    plan, the deliverables, a decision's text — so none of it reaches the terminal raw: `say` and
+    `_painted` are the only two ways out, and both make the text inert first. One escape sequence
+    in a design document could otherwise erase the line above it, and the screen would show
+    something other than what is approved.
     """
+
+    def say(text: str) -> None:
+        print(common.terminal_text(text))
+
     if not common.stdin_is_terminal():
         raise ApprovalError(
             f"gate '{gate}' needs a confirmation typed at a terminal, and stdin is not one. "
             "Run this in your shell — there is deliberately no flag that skips it."
         )
-    print(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
+    say(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
     # One source for both routes. This function used to call `crossing_declarations` and
     # `_unasked_decisions` itself and never learned about the third list, which is how the lens
     # selection came to exist on one screen only: two screens assembling the same panel from
@@ -1210,21 +1221,21 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # later gate can reconsider.
         if gate == FREEZING_GATE:
             tasks = sorted({row["task_id"] for row in crossing if not row["carried_from"]})
-            print(
+            say(
                 f"{len(tasks)} further stop(s) this mandate creates — one before each task that "
                 "declares work it cannot take back and was not already approved as it stands:"
             )
         else:
-            print("This approval lets the loop do something it cannot undo:")
-        print(render_crossing(crossing) + "\n")
+            say("This approval lets the loop do something it cannot undo:")
+        say(render_crossing(crossing) + "\n")
     unasked = named["unasked"]
     if unasked:
         # The one thing on this screen that is not a digest. Everything else says what was decided
         # with this human; this says what was decided without them, which is the part an approval
         # silently ratifies unless it is put in front of somebody.
-        print(f"{len(unasked)} decision(s) the loop settled without asking you:")
-        print(render_unasked(unasked) + "")
-        print(f"  {named['overrule_cost']}\n")
+        say(f"{len(unasked)} decision(s) the loop settled without asking you:")
+        say(render_unasked(unasked) + "")
+        say(f"  {named['overrule_cost']}\n")
     lens_rows = named["lenses"]
     if lens_rows:
         # Not folded away. `proposed` is the half a human is being *asked* about, and a list that
@@ -1233,35 +1244,35 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # disclosure rather than through an empty `when:`.
         droppable = sum(1 for row in lens_rows if row["status"] == lens_lib.SELECTION_PROPOSED)
         asked = f" — {droppable} of them yours to keep or drop" if droppable else ""
-        print(f"{len(lens_rows)} review lens(es) this mandate would freeze{asked}:")
-        print(render_lenses(lens_rows) + "")
+        say(f"{len(lens_rows)} review lens(es) this mandate would freeze{asked}:")
+        say(render_lenses(lens_rows) + "")
     delta = named["delta"]
     if delta:
         # First after the digests: on a re-approval this is what the human is actually deciding.
-        print(f"What changed since you last approved this mandate ({len(delta)}):")
+        say(f"What changed since you last approved this mandate ({len(delta)}):")
         print(render_delta(delta) + "\n")
     switched_off = named["adversarial_off"]
     if switched_off:
-        print(f"{len(switched_off)} drafting stage(s) went without an adversarial review:")
-        print("\n".join(f"  {row['id']}: {row['change']}" for row in switched_off) + "\n")
+        say(f"{len(switched_off)} drafting stage(s) had the adversarial review switched off during this round:")
+        say("\n".join(f"  {row['id']}: {row['change']}" for row in switched_off) + "\n")
     documents = named["documents"]
     if documents:
-        print(f"Documents changed since you last approved this mandate ({len(documents)}):")
+        say(f"Documents changed since you last approved this mandate ({len(documents)}):")
         print(render_documents(documents) + "\n")
     undeclared = named["undeclared"]
     if undeclared:
-        print(
+        say(
             f"{len(undeclared)} acceptance criterion(s) name no path they produce or read, so nothing "
             "derived this plan's scope or edges from them — a contradiction there is found by the build:"
         )
-        print(render_undeclared(undeclared) + "\n")
+        say(render_undeclared(undeclared) + "\n")
     addressed = addressed_requests(repo, gate)
     if addressed:
         # Read before deciding, not after. These are the changes this human asked for last time;
         # the notes are the agent's claim that they were made, and approving closes them.
-        print(f"{len(addressed)} change request(s) you raised were addressed:")
-        print(change_request.render(addressed) + "\n")
-    print(AUTHORITY_NOTE)
+        say(f"{len(addressed)} change request(s) you raised were addressed:")
+        say(change_request.render(addressed) + "\n")
+    say(AUTHORITY_NOTE)
     if not common.ask_yes_no(f"Approve gate '{gate}'?"):
         raise ApprovalError(
             f"nothing was approved. If the deliverable needs work, record it against the gate so it "
@@ -1350,17 +1361,18 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         return out
     out["delta"] = mandate_delta(repo, plan)
     out["documents"] = document_delta(repo, plan)
-    # A stage whose adversarial review a human switched off (`reviews.yaml`). Not a blocker — it
-    # was theirs to switch — but a mandate drafted without one is approved knowing it.
-    try:
-        reviews = store_mod.Store(repo).read_reviews()
-    except models.DocumentError:
-        reviews = None  # an unreadable reviews.yaml stops `rein build`, which says why
-    if reviews is not None:
-        out["adversarial_off"] = [
-            {"id": stage, "change": "no adversarial review ran here: switched off in .rein/reviews.yaml"}
-            for stage in reviews.adversarial_off
-        ]
+    # A stage whose adversarial review was switched off at any point of this drafting round. Not a
+    # blocker — it was a person's to switch — but a mandate drafted without one is approved knowing
+    # it. Read off the chain, not off reviews.yaml: the file says what is set now, and a review
+    # switched off while the requirements were drafted and back on before this screen is exactly
+    # the case the screen exists for.
+    events, _ = event_chain.scan(repo.events)
+    approved = [
+        index
+        for index, event in enumerate(events)
+        if event.event == "gate_approved" and tuple(event.subject_ids[:1]) == (FREEZING_GATE,)
+    ]
+    out["adversarial_off"] = reviews_cmd.adversarial_switched_off(events, since=approved[-1] + 1 if approved else 0)
     # Criteria that name no path contribute nothing to the derived scope and edges
     # (`models._structure_errors`): each is a place a contradiction can still hide until the build.
     out["undeclared"] = [
@@ -1595,9 +1607,10 @@ def _shown(value: object) -> str:
 
 
 def render_delta(rows: Sequence[Mapping[str, str]]) -> str:
+    """The plan half of a re-approval, terminal-ready: every line already passed `_painted`."""
     lines: list[str] = []
     for row in rows:
-        lines.append(f"  {row['what']} {row['id']}: {row['change']}".replace("  : ", "  "))
+        lines.append(_painted(f"  {row['what']} {row['id']}: {row['change']}".replace("  : ", "  "), ""))
         if "before" in row:
             lines.append(_painted(f"      - {row['before']}", _RED))
             lines.append(_painted(f"      + {row['after']}", _GREEN))
@@ -1605,10 +1618,10 @@ def render_delta(rows: Sequence[Mapping[str, str]]) -> str:
 
 
 def render_documents(rows: Sequence[Mapping[str, str]]) -> str:
-    """The document half of a re-approval, for the terminal: each path, then its diff in colour."""
+    """The document half of a re-approval, terminal-ready: each path, then its diff in colour."""
     lines: list[str] = []
     for row in rows:
-        lines.append(f"  {row['id']}: {row['change']}")
+        lines.append(_painted(f"  {row['id']}: {row['change']}", ""))
         for line in row["diff"].splitlines():
             if line.startswith(("+++", "---")):
                 continue
@@ -1629,7 +1642,13 @@ _RED, _GREEN, _CYAN = "\033[31m", "\033[32m", "\033[36m"
 
 
 def _painted(text: str, color: str) -> str:
-    """`text` in `color` when stdout is a terminal that can show it; as it is otherwise."""
+    """`text`, made safe for a terminal, in `color` when stdout is one that can show it.
+
+    The only place an escape sequence enters what `confirm_locally` prints, so the text is made
+    inert first (`common.terminal_text`): what is painted here is somebody else's words, and the
+    colour is the one sequence on the line that is ours.
+    """
+    text = common.terminal_text(text)
     if not color or not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
         return text
     return f"{color}{text}\033[0m"

@@ -7,7 +7,8 @@
 //
 // The screen edits a draft of the whole document and applies it in one write, with a reason: the
 // same function `rein reviews apply` calls, and the same `reviews_changed` event in the chain.
-// Nothing here rewinds a gate. `reviews.yaml` is outside the mandate's freeze.
+// Nothing here rewinds a gate. `reviews.yaml` is outside the mandate's freeze. The write is made
+// against the digest the screen was served: a change that landed meanwhile is refused, not undone.
 
 import { useEffect, useState } from "react";
 
@@ -132,7 +133,7 @@ export default function ReviewsView() {
   const [loaded, setLoaded] = useState(null);
   const [draft, setDraft] = useState(null);
   const [reason, setReason] = useState("");
-  const [custom, setCustom] = useState({ name: "", prompt: "" });
+  const [custom, setCustom] = useState({ name: "", question: "" });
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
@@ -153,8 +154,7 @@ export default function ReviewsView() {
 
   const customs = draft.custom || [];
   const known = [...loaded.builtin, ...customs.map((c) => c.name)];
-  const body = (doc) => JSON.stringify({ ...doc, updated_at: undefined });
-  const dirty = body(loaded.document) !== body(draft);
+  const dirty = JSON.stringify(loaded.document) !== JSON.stringify(draft);
   const setSteps = (steps) => setDraft({ ...draft, steps });
   const setCustoms = (list) => {
     const next = { ...draft, custom: list };
@@ -163,9 +163,11 @@ export default function ReviewsView() {
   };
 
   const apply = async () => {
-    const { status, data } = await postJson("/api/reviews", { document: draft, reason });
+    const { status, data } = await postJson("/api/reviews", { document: draft, reason, expect: loaded.digest });
     if (status !== 200 || data.error) {
       toast(data.error || "not applied", "err");
+      // Changed by somebody else meanwhile: show what it is now rather than keep a draft of the past.
+      if (status === 409) setReload((n) => n + 1);
       return;
     }
     toast(data.changes.length ? data.changes.join(" · ") : "nothing changed", "ok");
@@ -195,7 +197,7 @@ export default function ReviewsView() {
                 />{" "}
                 adversarial review
                 {draft.adversarial[stage] ? null : (
-                  <div className="note">off — the mandate screen will say this stage went without one</div>
+                  <div className="note">off — the mandate screen names this stage, with when and why</div>
                 )}
               </label>
             </section>
@@ -238,13 +240,13 @@ export default function ReviewsView() {
         </div>
 
         <h3>Custom reviews</h3>
-        <p className="note">A name, and a repository file holding the question the reviewer reads for.</p>
+        <p className="note">A name, and the question the reviewer reads for. It is kept in reviews.yaml itself.</p>
         <table>
           <tbody>
             {customs.map((c) => (
               <tr key={c.name}>
                 <td className="mono">{c.name}</td>
-                <td className="mono">{c.prompt}</td>
+                <td>{c.question}</td>
                 <td>
                   <button
                     className="icon"
@@ -267,17 +269,18 @@ export default function ReviewsView() {
               value={custom.name}
               onChange={(e) => setCustom({ ...custom, name: e.target.value })}
             />
-            <input
-              placeholder="docs/reviews/performance.md"
-              aria-label="custom review question file"
-              value={custom.prompt}
-              onChange={(e) => setCustom({ ...custom, prompt: e.target.value })}
+            <textarea
+              className="grow"
+              placeholder="Does every new query use an index?"
+              aria-label="custom review question"
+              value={custom.question}
+              onChange={(e) => setCustom({ ...custom, question: e.target.value })}
             />
             <button
-              disabled={!custom.name || !custom.prompt || known.includes(custom.name)}
+              disabled={!custom.name || !custom.question.trim() || known.includes(custom.name)}
               onClick={() => {
-                setCustoms([...customs, { name: custom.name, prompt: custom.prompt }]);
-                setCustom({ name: "", prompt: "" });
+                setCustoms([...customs, { name: custom.name, question: custom.question.trim() }]);
+                setCustom({ name: "", question: "" });
               }}
             >
               Add
