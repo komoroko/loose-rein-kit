@@ -581,6 +581,10 @@ def seed_repo(
             dest.write_text(body, encoding="utf-8")
     if git:
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        # A commit needs an identity, and CI's runner has none of its own: without this, a test that
+        # commits passes on a developer's machine and fails there.
+        for key, value in (("user.email", "t@e.x"), ("user.name", "T")):
+            subprocess.run(["git", "config", key, value], cwd=root, check=True)
     return root
 
 
