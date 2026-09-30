@@ -249,33 +249,37 @@ def scope_add(repo: repo_mod.Repo, task_id: str, *, path: str, reason: str) -> N
     store_mod.retry_on_stale(lambda: _scope_add_once(repo, task_id, path, reason))
 
 
-def _scope_add_once(repo: repo_mod.Repo, task_id: str, path: str, reason: str) -> None:
-    store = store_mod.Store(repo)
-    state, plan, config = store.read_state(), store.read_plan(), store.read_config()
-    if state is None or plan is None:
-        raise ValueError("no .rein/state.yaml or .rein/plan.yaml — run `rein init` first")
+def scope_add_refusal(
+    state: models.State, plan: models.Plan, config: models.Config | None, task_id: str, path: str
+) -> str:
+    """Why `rein task scope-add task_id path` would be refused, or "" when it would be taken.
+
+    One function because two readers ask it: the verb itself, and whatever tells a person how to
+    get past a scope violation. The second used to answer "roll back the mandate" for every path,
+    including the ones this verb exists to add without one.
+    """
     if state.plan_status != "frozen":
-        raise ValueError("the plan is a draft: add the path to the task's `scope.include` in plan.yaml instead")
+        return "the plan is a draft: add the path to the task's `scope.include` in plan.yaml instead"
     if not models.is_repo_path(path):
-        raise ValueError(f"{path!r} is not a safe repo-relative path")
+        return f"{path!r} is not a safe repo-relative path"
     allowed = config.scope_additions if config is not None else ()
     if not allowed or common.outside_scope([path], allowed, ()):
-        raise ValueError(
+        return (
             f"{path} is outside `guard.scope_additions` ({', '.join(allowed) or 'none configured'}) — "
             "widening a task there changes what the mandate authorized: `rein revise --to mandate`"
         )
     include, exclude = plan.scope
     if common.outside_scope([path], include, exclude):
-        raise ValueError(f"{path} is outside the mandate's own scope — that is a `/revise`, not an addition")
+        return f"{path} is outside the mandate's own scope — that is a `/revise`, not an addition"
     graph = dag.join(plan, state)
     if task_id not in {t.id for t in graph.tasks}:
-        raise ValueError(f"{task_id} is not a task in .rein/plan.yaml — `rein dag` lists them")
+        return f"{task_id} is not a task in .rein/plan.yaml — `rein dag` lists them"
     if graph.get(task_id).status in {"done", "awaiting-evidence"}:
-        raise ValueError(f"{task_id} is {graph.get(task_id).status}: its scope was what it landed against")
+        return f"{task_id} is {graph.get(task_id).status}: its scope was what it landed against"
     # `exclude` wins over `include`, so an addition under the task's own exclusion would be recorded
     # and shown at acceptance while the guard went on refusing the path.
     if excluded := [p for p in graph.get(task_id).scope_exclude if common.path_covered(path, p)]:
-        raise ValueError(
+        return (
             f"{path} is under {task_id}'s own `scope.exclude` ({', '.join(excluded)}) — the plan kept it out of "
             "this task on purpose, and taking that back is a `/revise`"
         )
@@ -285,7 +289,18 @@ def _scope_add_once(repo: repo_mod.Repo, task_id: str, path: str, reason: str) -
         if t.id != task_id and t.scope_include and not common.outside_scope([path], t.scope_include, t.scope_exclude)
     ]
     if owners:
-        raise ValueError(f"{path} is already in the scope of {', '.join(owners)} — it is that task's work")
+        return f"{path} is already in the scope of {', '.join(owners)} — it is that task's work"
+    return ""
+
+
+def _scope_add_once(repo: repo_mod.Repo, task_id: str, path: str, reason: str) -> None:
+    store = store_mod.Store(repo)
+    state, plan, config = store.read_state(), store.read_plan(), store.read_config()
+    if state is None or plan is None:
+        raise ValueError("no .rein/state.yaml or .rein/plan.yaml — run `rein init` first")
+    if refusal := scope_add_refusal(state, plan, config, task_id, path):
+        raise ValueError(refusal)
+    graph = dag.join(plan, state)
     seen = store_mod.read_digest(state)
     raw = json.loads(json.dumps(state.raw))
     entry = raw.setdefault("tasks", {}).setdefault(task_id, {"status": graph.get(task_id).status})

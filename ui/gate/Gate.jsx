@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 import { READ_ONLY, getJson, postJson, record, toast } from "../api.js";
 import { Empty, ReviewRun, Warn } from "../parts.jsx";
 import { DeliverableBody, DeliverableList, mainEntries } from "./Deliverables.jsx";
+import { Patch } from "./diff.jsx";
 import { StageBody, StageList } from "./stages.jsx";
 
 // Opened documents are a client-side memory aid that outlives a visit to the room, so they live
@@ -81,7 +82,10 @@ function Naming({ naming, gate }) {
   const crossing = (naming || {}).crossing || [];
   const undeclared = (naming || {}).undeclared || [];
   const delta = (naming || {}).delta || [];
-  if (!unasked.length && !lenses.length && !crossing.length && !undeclared.length && !delta.length) return null;
+  const documents = (naming || {}).documents || [];
+  const adversarialOff = (naming || {}).adversarial_off || [];
+  const lists = [unasked, lenses, crossing, undeclared, delta, documents, adversarialOff];
+  if (!lists.some((list) => list.length)) return null;
   const crossingTasks = [...new Set(crossing.filter((c) => !c.carried_from).map((c) => c.task_id))];
   const proposedCount = lenses.filter((l) => l.status === "proposed").length;
   return (
@@ -96,13 +100,49 @@ function Naming({ naming, gate }) {
           <table>
             <tbody>
               {delta.map((d) => (
-                <tr key={d.what + ":" + d.id}>
+                <tr key={d.what + ":" + d.id + ":" + d.change}>
                   <td><span className="mono">{d.what} {d.id}</span></td>
-                  <td>{d.change}</td>
+                  <td>
+                    <div>{d.change}</div>
+                    {"before" in d ? (
+                      <>
+                        <div className="was">{d.before}</div>
+                        <div className="now">{d.after}</div>
+                      </>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </>
+      ) : null}
+      {adversarialOff.length ? (
+        <>
+          {/* Switched off by a human in reviews.yaml at some point of this round, read off the chain. Not a blocker; approved knowing it. */}
+          <div className="subhead" style={{ marginTop: ".8rem" }}>
+            {adversarialOff.length} drafting stage(s) had the adversarial review switched off during this round
+          </div>
+          <ul>
+            {adversarialOff.map((row) => (
+              <li key={row.id}>
+                <span className="mono">{row.id}</span> — {row.change}
+              </li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {documents.length ? (
+        <>
+          <div className="subhead" style={{ marginTop: ".8rem" }}>
+            Documents changed since you last approved this mandate ({documents.length})
+          </div>
+          {documents.map((d) => (
+            <div key={d.id}>
+              <div><span className="mono">{d.id}</span> {d.change}</div>
+              {d.diff ? <Patch text={d.diff} /> : null}
+            </div>
+          ))}
         </>
       ) : null}
       {crossing.length ? (
@@ -493,15 +533,8 @@ export default function Gate({ status, gate }) {
         <div id="rvFoot">
           {review && !review.error ? (
             <>
-              <div className="approvebar">
-                <Footer review={review} session={session} isBuild={isBuild} gate={gate}
-                  onApprove={openApproval}
-                  onChanges={() => setPanel({
-                    kind: "changes",
-                    suggested: (mainEntries(review).find((x) => x.id === selected) || {}).path || "",
-                  })}
-                />
-              </div>
+              {/* Above the bar, in the footer that sticks: a panel opened from the bar opens where
+                  the reader already is, not at the foot of the document they were reading. */}
               {panel ? (
                 <Panel
                   panel={panel}
@@ -516,6 +549,15 @@ export default function Gate({ status, gate }) {
                   }}
                 />
               ) : null}
+              <div className="approvebar">
+                <Footer review={review} session={session} isBuild={isBuild} gate={gate}
+                  onApprove={openApproval}
+                  onChanges={() => setPanel({
+                    kind: "changes",
+                    suggested: (mainEntries(review).find((x) => x.id === selected) || {}).path || "",
+                  })}
+                />
+              </div>
             </>
           ) : null}
         </div>

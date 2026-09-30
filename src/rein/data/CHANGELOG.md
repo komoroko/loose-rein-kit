@@ -4,6 +4,74 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.12.0] - 2026-09-30
+
+**A minor release: the format moves to `rein-grounded-v10`, and every repository needs `rein sync
+--force`.** Two documents change shape. `config.yaml`'s `quality_gate` holds command steps only —
+`kind` and `agent_role` are gone — and which reviews run moves to a new `.rein/reviews.yaml`, which
+`rein sync` seeds with the packaged reviewer when a repository has none. **Before you sync, delete
+the `review` step (`kind: agent`) and every `kind: command` line from `quality_gate`**: the new
+schema refuses both, and nothing converts them for you. The scaffold's `review` step is what the
+seeded `reviews.yaml` already says. **In a repository whose mandate is approved, that edit moves
+what the mandate froze**: `config.yaml` no longer matches its receipt, so the commit-stage guard,
+`rein doctor` and every later approval refuse it until the mandate is rolled back (`rein revise --to
+mandate`, after the sync) and approved again. Upgrading after `rein cycle-close` costs none of that.
+
+- **Which reviews run is a person's to change, and changing it rewinds nothing.** The reviewer step
+  was part of `config.yaml`, frozen with the mandate: dropping `/simplify` or adding a review of
+  your own took a roll back and a re-approval of a plan nothing had changed. `reviews.yaml` holds
+  the adversarial review before the mandate, per drafting stage, and the reviewer steps, each
+  reading for a list — `correctness`, `simplification`, `security`, or a custom review whose
+  question is written in the file. It is outside the freeze. What the freeze guaranteed is kept
+  another way. `rein guard` refuses an editor's write of the file (rule 1, as for `state.yaml`), and
+  its two writers are a person's — `rein reviews apply <file> --reason ...`, which insists on a
+  terminal and a `[y/N]` as `rein approve` does, and the dashboard's write session. Each change is a
+  `reviews_changed` event carrying its reason and the whole document it wrote, and nothing runs on a
+  file that differs from the last one: the build, the commit-stage guard, `rein doctor` and
+  `rein cycle-close` refuse it, and `rein reviews restore` writes the recorded one back. A change is
+  applied against the version its author read, so one that landed meanwhile is refused rather than
+  undone. A reviewer step reads for exactly the reviews it lists,
+  and is pointed at the host's own disciplines (`/code-review`, `/simplify`, `/security-review`)
+  for those only. `rein reviews show` prints the current set.
+- **Acceptance says what each task was read for.** A change mid-cycle does not re-read the tasks
+  already read, so every reading is a `reviews_applied` event, and the acceptance brief lists the
+  readings per task (`residuals.reviews_by_task`).
+- **The mandate screen names a drafting stage whose adversarial review was switched off** at any
+  point of the round, with when, by whom and why — read off the chain, so a review switched back on
+  before the approval is still named. On the terminal and on the dashboard. The comparison acceptance is decided by is not configurable:
+  `reviews.yaml` has no key for it, and the schema refuses one.
+- **The dashboard has a Reviews screen**: a lane per stage the cycle passes through, the reviewer
+  steps as cards whose reviews can be added, removed and reordered, custom reviews, and one Apply
+  with a reason. The acceptance lane shows what acceptance is decided by and offers nothing to
+  remove.
+- **A crossing approval is carried again** (#80 never did it in a cycle that ran the task). The
+  carry matched events by their first subject id, and a crossing gate is named for its task, so the
+  task's own `task_started` ended the walk. It reads gate events only now. A recorded cycle
+  re-approved one irreversible task four times over an unchanged `crossing_digest`.
+- **A scope violation inside `guard.scope_additions` names the addition, not a roll back.** The stop
+  and `rein next` both answered every violation with `rein revise --to mandate`. The violating
+  paths are kept on the escalation as data; when every one passes `rein task scope-add`'s own
+  refusal check, the stop and the `needs-revision` row name `scope-add` and a reset, and the
+  recorded verdict is not replayed over a scope widened since.
+- **A mandate re-approval shows what changed, value by value and line by line.** The delta named
+  the fields that moved and not what they held, and the requirements, the design and the tickets
+  were rendered as they stand. A changed field now shows its value before and after; the mandate's
+  `gate_approved` records the digest of every document it froze, and each approved version is found
+  in git's history and diffed — coloured on the terminal, a patch in the approval panel, and a mark
+  in the document list with the diff above the text. An approval from before this release, and a
+  version git never saw, say what cannot be shown. Text the approver did not write reaches the
+  terminal inert: control characters and bidirectional overrides are written out, so an escape
+  sequence in a deliverable cannot redraw the screen it is approved on.
+- **The approval bar stays in view.** It was sticky inside a parent that held nothing else, so it
+  sat at the foot of every long document. The footer is the sticky element now, and an opened
+  confirmation renders above the bar.
+- **The prompts are checked against the code they describe.** `template-lint` parses every
+  `rein …` line a document tells an agent to run with that verb's real parser, resolves every
+  `<file> "Section"` pointer, reports a camelCase spelling of a schema key, and requires each end
+  gate to be presented by one procedure. What it found is fixed: `blockedBy` is `blocked_by`,
+  `rein agent <cli> [--role <role>]` is the order the verb takes, several section pointers had
+  moved, and `/build` no longer presents the acceptance gate `/verify` presents.
+
 ## [0.11.1] - 2026-09-29
 
 **A patch release: the format stays `rein-grounded-v9`, and no repository needs `rein sync

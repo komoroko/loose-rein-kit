@@ -160,7 +160,12 @@ def test_a_task_is_not_reopened_under_work_that_stands_on_it(tmp_path: Path, dow
             make_task("T-003", claim_ids=["C-001"], blocked_by=["T-002"]),
         ]
     )
-    seed_repo(tmp_path, plan=plan, state=make_state(tasks={"T-001": "done", "T-002": "done", "T-003": downstream}))
+    seed_repo(
+        tmp_path,
+        plan=plan,
+        state=make_state(tasks={"T-001": "done", "T-002": "done", "T-003": downstream}),
+        reviews=None,
+    )
     repo = repo_mod.Repo(tmp_path)
 
     with pytest.raises(ValueError, match=rf"T-003 \({downstream}\), T-002 \(done\)\. .*in that order"):

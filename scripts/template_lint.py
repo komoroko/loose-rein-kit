@@ -25,9 +25,16 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
+import contextlib
 import hashlib
+import importlib
+import io
+import json
 import logging
 import re
+import shlex
+from collections.abc import Callable, Iterator
 from functools import cache
 from itertools import zip_longest
 from pathlib import Path
@@ -46,6 +53,7 @@ BUILD_CMD = ".rein/prompts/commands/build.md"
 RULES_DIR = ".rein/prompts/rules"
 COMMANDS_DIR = ".rein/prompts/commands"
 CONFIG_PATH = ".rein/config.yaml"
+REVIEWS_PATH = ".rein/reviews.yaml"
 CLAUDE_MAPPING = "CLAUDE.md"
 COPILOT_MAPPING = ".github/instructions/rein.instructions.md"
 CODEX_MAPPING = ".codex/rein.md"
@@ -83,9 +91,27 @@ _MAKE_MENTION_RE = re.compile(r"`make (?:-f \S+ )?([a-z][a-z0-9_-]*)")
 _REIN_MENTION_RE = re.compile(r"`rein ([a-z][a-z0-9-]*)")
 _SCRIPT_MENTION_RE = re.compile(r"src/rein/(\w+\.py)")
 # A whole backticked `rein …` command line, for check_documented_invocations. Placeholders
-# (`<gate>`, `[--check]`, `T-NNN`) ride along; only the `--flags` inside are checked.
+# (`<gate>`, `[--check]`, `T-NNN`) ride along and are expanded before the line is parsed.
 _REIN_INVOCATION_RE = re.compile(r"`rein ([^`\n]+)`")
 _FLAG_RE = re.compile(r"(?<![\w-])(--[a-z][a-z0-9-]*)")
+# What argparse says about a line that names a verb without spelling out all of its arguments.
+# A document mentions `rein task order` as often as it writes the whole command, so an argument
+# the line leaves out is not drift; an argument the line *has* and the verb does not take is.
+_PARTIAL_MENTION_ERRORS = (
+    "the following arguments are required",
+    "expected one argument",
+    "expected at least one argument",
+)
+# A pointer into another document's section: `AGENTS.md "Gate rules"`,
+# `.rein/prompts/rules/gate-workflow.md` "Context budget"`, `build.md, "When the run …"`.
+_SECTION_REF_RE = re.compile(r'`?((?:[\w.-]+/)*[\w.-]+\.md)`?,?\s+"([^"\n]+)"')
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+_BOLD_LABEL_RE = re.compile(r"^\s*(?:[-*]|\d+[a-z]?\.)?\s*\*\*(.+?)\*\*", re.MULTILINE)
+# A backticked identifier in camelCase — the spelling a snake_case schema key drifts into.
+_CAMEL_TOKEN_RE = re.compile(r"`([a-z]+(?:[A-Z][a-z0-9]*)+)`")
+# The sentence a procedure presents a gate with. Each end gate has exactly one procedure that says it.
+_GATE_PRESENTER_RE = re.compile(r"ask the human to run\s+`rein approve ([\w-]+)`")
+SCHEMA_DIR = "src/rein/data/schema"
 # A capability token is the backticked kebab word opening a mapping-table row.
 _CAPABILITY_ROW_RE = re.compile(r"^\|\s*`([a-z][a-z-]+)`\s*\|", re.MULTILINE)
 # The spelling a document uses for "a gate named after a task", which no single cycle's state can
@@ -143,9 +169,11 @@ def gate_names() -> list[str]:
     return sorted([*models.GATE_ENDS, _GATE_PLACEHOLDER])
 
 
-def quality_gate_steps(config_text: str) -> list[str]:
-    """The DoD step names from config.yaml — defined once there, echoed by AGENTS.md."""
-    return [step.name for step in models.Config.parse(config_text).quality_gate if step.name]
+def quality_gate_steps(config_text: str, reviews_text: str) -> list[str]:
+    """The DoD step names — the commands from config.yaml, the reviewers from reviews.yaml — each
+    defined once there and echoed by the prose that teaches them."""
+    commands = [step.name for step in models.Config.parse(config_text).quality_gate if step.name]
+    return commands + [step.name for step in models.Reviews.parse(reviews_text).steps]
 
 
 def check_vocabulary(files: dict[str, str]) -> list[str]:
@@ -164,9 +192,9 @@ def check_vocabulary(files: dict[str, str]) -> list[str]:
     failures += _require(files[AGENTS_MD], AGENTS_MD, gate_names(), "gate (models.gate_names)")
     # The DoD step names are defined once (config.yaml) but narrated in several prose homes —
     # every copy must keep echoing them, or a renamed step teaches stale vocabulary somewhere.
-    steps = quality_gate_steps(files[CONFIG_PATH])
+    steps = quality_gate_steps(files[CONFIG_PATH], files[REVIEWS_PATH])
     for path in (AGENTS_MD, BUILD_CMD, "README.md", "README.ja.md"):
-        failures += _require(files[path], path, steps, "quality-gate step (config.yaml)")
+        failures += _require(files[path], path, steps, "quality-gate step (config.yaml, reviews.yaml)")
     return failures
 
 
@@ -604,26 +632,138 @@ def check_quoted_gate_names(texts: dict[str, str]) -> list[str]:
     return failures
 
 
+class _Parsed(BaseException):
+    """Raised in place of running a verb, the moment argparse has accepted its argv.
+
+    A `BaseException`, so an entry's own `except Exception` cannot catch it and carry on running.
+    """
+
+
+@contextlib.contextmanager
+def _parse_only() -> Iterator[None]:
+    """Make every `ArgumentParser.parse_args` stop the program right after it succeeds.
+
+    A verb's entry function builds its parser and parses before it does anything else, so running
+    it under this reaches exactly argparse's verdict on the line and never the command itself.
+    """
+    original = argparse.ArgumentParser.parse_args
+
+    def parse_then_stop(self: argparse.ArgumentParser, args: object = None, namespace: object = None) -> None:
+        original(self, args, namespace)  # type: ignore[call-overload]
+        raise _Parsed
+
+    argparse.ArgumentParser.parse_args = parse_then_stop  # type: ignore[assignment,method-assign]
+    try:
+        yield
+    finally:
+        argparse.ArgumentParser.parse_args = original  # type: ignore[method-assign]
+
+
+def _reaches_argparse(entry: Callable[..., object]) -> bool:
+    """Does `entry` hand its argv to argparse — itself, or through a helper in its own module?
+
+    `gate_guard` reads its argv by hand on purpose (a hook that dies in argparse prints no decision,
+    and every host reads no decision as allow). Calling an entry that parses nothing would run it.
+    """
+
+    def parses(function: object) -> bool:
+        code = getattr(function, "__code__", None)
+        return code is not None and "parse_args" in code.co_names
+
+    if parses(entry):
+        return True
+    module = importlib.import_module(entry.__module__)
+    names = getattr(getattr(entry, "__code__", None), "co_names", ())
+    return any(parses(getattr(module, name, None)) for name in names)
+
+
+def _argv_variants(words: list[str]) -> Iterator[tuple[list[str], dict[str, str]]]:
+    """The concrete argv lines a documented command stands for, and the stand-ins it needed.
+
+    `[--role <role>]` is written as optional and parsed as present. `<a|b>`, `a|b` and
+    `--validate/--trace` enumerate concrete values, so each one is parsed. `<name>`, `…` and `...`
+    name no value: a unique stand-in takes their place, and argparse rejecting a stand-in's *value*
+    says nothing about the document.
+    """
+    base: list[str] = []
+    stand_ins: dict[str, str] = {}
+    alternatives: list[tuple[int, list[str]]] = []
+    for word in words:
+        word = word.strip("[]")
+        if not word:
+            continue
+        inner = word[1:-1] if word.startswith("<") and word.endswith(">") else None
+        flags = word.split("/")
+        if len(flags) > 1 and all(f.startswith("--") for f in flags):
+            alternatives.append((len(base), flags))
+            base.append(flags[0])
+        elif (inner if inner is not None else word).count("|") and (inner is not None or "<" not in word):
+            choices = [c for c in (inner if inner is not None else word).split("|") if c]
+            alternatives.append((len(base), choices))
+            base.append(choices[0])
+        elif inner is not None or word in ("…", "...") or "<" in word:
+            stand_in = f"STANDIN{len(stand_ins)}"
+            stand_ins[stand_in] = word
+            base.append(stand_in)
+        else:
+            base.append(word)
+    yield base, stand_ins
+    for position, choices in alternatives:
+        for choice in choices[1:]:
+            yield [*base[:position], choice, *base[position + 1 :]], stand_ins
+
+
+def _parse_failure(entry: Callable[..., object], argv: list[str], stand_ins: dict[str, str]) -> str:
+    """argparse's complaint about `argv`, or "" when it accepts the line or only finds it incomplete."""
+    stderr = io.StringIO()
+    try:
+        with _parse_only(), contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+            entry(argv)
+    except _Parsed:
+        return ""
+    except SystemExit:
+        message = stderr.getvalue().strip().splitlines()[-1:] or [""]
+        error = message[0].partition("error: ")[2] or message[0]
+        if any(partial in error for partial in _PARTIAL_MENTION_ERRORS):
+            return ""
+        # A stand-in has no value to validate, so a verdict on its value says nothing. Being one
+        # argument too many is not about its value.
+        if not error.startswith("unrecognized arguments") and any(s in error for s in stand_ins):
+            return ""
+        for stand_in, placeholder in stand_ins.items():
+            error = error.replace(stand_in, placeholder)
+        return error
+    raise AssertionError(f"{entry.__module__}.{entry.__name__} returned without parsing — it ran")
+
+
 def check_documented_invocations(root: Path, texts: dict[str, str]) -> list[str]:
-    """Every ``rein …`` command line a document tells an agent to run must actually parse.
+    """Every ``rein …`` command line a document tells an agent to run must parse with the real verb.
 
     The procedures are executed literally by an agent that cannot see the argparse definitions,
-    so a flag that was renamed in code and not in the procedure does not read as a typo — it
-    reads as a broken repository the agent then tries to repair. (Two shipped procedures once
-    told the agent to run `rein dag --trace --require-design`, a flag that never existed;
-    `--test-plan` was the same. Both survived every other canary in this file.)
+    so an argument that was renamed or reshaped in code and not in the procedure does not read as a
+    typo — it reads as a broken repository the agent then tries to repair. Checking only the
+    `--flags` a line carries let `rein agent <role> <cli>` survive: both words are positionals, and
+    the verb takes one. So the line is handed to the verb's own parser, stopped the moment argparse
+    has answered (`_parse_only`); a line that names a verb without all of its arguments is a
+    mention, and only an argument the verb does not take is drift.
 
-    Static on purpose: it reads the option strings out of each verb's module rather than
-    importing and running it, so a canary can never execute a command it is only checking.
+    A verb that parses its argv by hand (`_reaches_argparse`) is never called: its flags are read
+    out of its module's source instead.
     """
     from rein import cli
 
     known_verbs = set(cli.VERBS) | {"help"}
-    sources: dict[str, str] = {}
     failures: list[str] = []
     for path, text in sorted(texts.items()):
         for match in _REIN_INVOCATION_RE.finditer(text):
-            words = match.group(1).split()
+            line = match.group(1)
+            # `<what you changed>` is one placeholder, however many words it takes to name it.
+            joined = re.sub(r"<[^<>]*>", lambda m: m.group(0).replace(" ", "\x00"), line)
+            try:
+                words = shlex.split(joined)
+            except ValueError:  # an unbalanced quote in prose; the words are still the words
+                words = joined.split()
+            words = [w.replace("\x00", " ") for w in words]
             if words[:1] == ["--repo"]:  # the global flag may precede the verb
                 words = words[2:]
             verb = next((w for w in words if not w.startswith("-")), "")
@@ -633,21 +773,118 @@ def check_documented_invocations(root: Path, texts: dict[str, str]) -> list[str]
                 failures.append(f"{path}: `rein {verb}` is not a verb — see cli.VERBS")
                 continue
             failures += _gate_argument_failures(path, verb, words)
-            entry = cli.VERBS.get(verb)
-            # `help` is not a module: cli.py answers it (and `--all`) before dispatch.
-            module = entry.spec.partition(":")[0] if entry else "cli"
-            if module not in sources:
-                module_path = root / "src" / "rein" / f"{module}.py"
-                sources[module] = module_path.read_text(encoding="utf-8") if module_path.is_file() else ""
-            for flag in _FLAG_RE.findall(match.group(1)):
-                if flag == "--repo":  # accepted by every verb, via cli.main
-                    continue
-                if not _declares_flag(sources[module], flag):
-                    failures.append(
-                        f"{path}: `rein {verb} {flag}` — {module}.py declares no such option, so the "
-                        "documented command exits 2"
-                    )
+            if verb == "help":  # cli.py answers it (and `--all`) before dispatch
+                continue
+            module_name, _, function = cli.VERBS[verb].spec.partition(":")
+            module = importlib.import_module(f"rein.{module_name}")
+            entry = getattr(module, function or "main")
+            if not _reaches_argparse(entry):
+                source = (root / "src" / "rein" / f"{module_name}.py").read_text(encoding="utf-8")
+                failures += [
+                    f"{path}: `rein {verb} {flag}` — {module_name}.py declares no such option, so the "
+                    "documented command exits 2"
+                    for flag in _FLAG_RE.findall(line)
+                    if flag != "--repo" and not _declares_flag(source, flag)
+                ]
+                continue
+            argv = words[words.index(verb) + 1 :]
+            for variant, stand_ins in _argv_variants(argv):
+                error = _parse_failure(entry, variant, stand_ins)
+                if error:
+                    failures.append(f"{path}: `rein {line}` does not parse — {error}")
+                    break
     return failures
+
+
+def _resolve_document(root: Path, name: str) -> Path | None:
+    """The file a section reference points at: a repo path, or a bare procedure name."""
+    direct = root / name
+    if direct.is_file():
+        return direct
+    if "/" in name:
+        return None
+    found = sorted((root / ".rein" / "prompts").rglob(name))
+    return found[0] if len(found) == 1 else None
+
+
+def check_section_references(root: Path, texts: dict[str, str]) -> list[str]:
+    """Every `<file> "Section"` pointer resolves to a heading or bold label in that file.
+
+    The rules are split across AGENTS.md, the rules module and the procedures, and they point at
+    each other by section name. A section that moved leaves the pointer sending an agent to read
+    something that is not there — `/onboard` sent it to AGENTS.md for the gate self-assessment
+    long after that section had moved to the rules module, and nothing noticed.
+    """
+    failures: list[str] = []
+    for path, text in sorted(texts.items()):
+        for name, section in dict.fromkeys(_SECTION_REF_RE.findall(text)):
+            target = _resolve_document(root, name)
+            if target is None:
+                failures.append(f'{path}: points at {name} "{section}", and {name} does not exist')
+                continue
+            body = target.read_text(encoding="utf-8")
+            labels = [m.replace("**", "") for m in _HEADING_RE.findall(body)] + _BOLD_LABEL_RE.findall(body)
+            if not any(label.casefold().startswith(section.casefold()) for label in labels):
+                failures.append(f'{path}: points at {name} "{section}", which has no such section')
+    return failures
+
+
+def schema_keys(root: Path) -> set[str]:
+    """Every property name any packaged schema declares."""
+    keys: set[str] = set()
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "properties" and isinstance(value, dict):
+                    keys.update(value)
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    for schema in sorted((root / SCHEMA_DIR).glob("*.schema.json")):
+        walk(json.loads(schema.read_text(encoding="utf-8")))
+    return keys
+
+
+def check_schema_key_spelling(root: Path, texts: dict[str, str]) -> list[str]:
+    """A document never spells a snake_case schema key in camelCase.
+
+    An agent writes plan.yaml with the key the procedure names, and the schema is
+    `additionalProperties: false`: `blockedBy` survived in AGENTS.md and three procedures beside a
+    schema that only has `blocked_by`, one line away from a sentence that said "snake_case".
+    """
+    keys = schema_keys(root)
+    camel = {re.sub(r"_([a-z0-9])", lambda m: m.group(1).upper(), key): key for key in keys if "_" in key}
+    failures: list[str] = []
+    for path, text in sorted(texts.items()):
+        for token in dict.fromkeys(_CAMEL_TOKEN_RE.findall(text)):
+            if token in camel and token not in keys:
+                failures.append(f"{path}: `{token}` is not a schema key — the schema spells it `{camel[token]}`")
+    return failures
+
+
+def check_gate_presenters(texts: dict[str, str]) -> list[str]:
+    """Each end gate is presented by exactly one procedure.
+
+    Presenting a gate ends with asking the human to run `rein approve <gate>`. When two procedures
+    both do it, one of them sends the agent on to the other, whose prerequisite check refuses a gate
+    that is already approved: `/build` kept presenting acceptance and pointing to `/verify` after the
+    two-gate redesign had made `/verify` the procedure that presents it.
+    """
+    presenters: dict[str, list[str]] = {gate: [] for gate in models.GATE_ENDS}
+    for path, text in sorted(texts.items()):
+        if not path.startswith(COMMANDS_DIR + "/"):
+            continue
+        for gate in dict.fromkeys(_GATE_PRESENTER_RE.findall(text)):
+            presenters.setdefault(gate, []).append(path)
+    return [
+        f"gate `{gate}` is presented by {len(paths)} procedures ({', '.join(paths) or 'none'}) — exactly one "
+        "may ask the human to run `rein approve " + gate + "`"
+        for gate, paths in sorted(presenters.items())
+        if len(paths) != 1
+    ]
 
 
 def check_guard_defaults(config_text: str) -> list[str]:
@@ -867,7 +1104,7 @@ def check_ssot_validates(root: Path) -> list[str]:
     and what they say is its business.
     """
     failures = []
-    for name in ("config", "state", "plan", "review"):
+    for name in ("config", "state", "plan", "review", "reviews"):
         path = root / ".rein" / f"{name}.yaml"
         if not path.is_file():
             continue
@@ -1290,7 +1527,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         files = {
             path: (root / path).read_text(encoding="utf-8")
-            for path in (AGENTS_MD, TASKS_CMD, BUILD_CMD, CONFIG_PATH, "README.md", "README.ja.md")
+            for path in (AGENTS_MD, TASKS_CMD, BUILD_CMD, CONFIG_PATH, REVIEWS_PATH, "README.md", "README.ja.md")
         }
         failures = check_vocabulary(files)
         failures += check_wrapper_parity(root)
@@ -1305,8 +1542,13 @@ def main(argv: list[str] | None = None) -> int:
         failures += check_neutral_vocabulary(texts)
         failures += check_banned_absence(texts)
         failures += check_rules_wiring(root, texts)
-        failures += check_documented_invocations(root, {**texts, **files})
-        failures += check_quoted_gate_names({**texts, **files})
+        mappings = {path: (root / path).read_text(encoding="utf-8") for path in CAPABILITY_MAPPINGS}
+        documents = {**texts, **files, **mappings}
+        failures += check_documented_invocations(root, documents)
+        failures += check_section_references(root, documents)
+        failures += check_schema_key_spelling(root, documents)
+        failures += check_gate_presenters(texts)
+        failures += check_quoted_gate_names(documents)
         failures += check_data_parity(root)
         failures += check_guard_defaults(files[CONFIG_PATH])
         gitignore = root / GITIGNORE_PATH

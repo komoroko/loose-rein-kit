@@ -21,7 +21,7 @@ capability vocabulary onto Claude Code's mechanisms.
 Claude Code also carries the **mechanism layer** of the gates: the PreToolUse hook in
 `.claude/settings.json` runs `rein guard` on every Write/Edit (AGENTS.md "Gate rules").
 
-The implementation phase is `rein build` (headless, via the adapters `rein agent <role> <cli>`
+The implementation phase is `rein build` (headless, via the adapters `rein agent <cli> [--role <role>]`
 sets) — one command whose completion is the signal, so never schedule wake-ups to poll it.
 
 **Bash caps how long one foreground command may run and a real build outlasts that cap**: run

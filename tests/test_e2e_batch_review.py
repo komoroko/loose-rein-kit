@@ -20,18 +20,25 @@ import pytest
 from rein import build_loop, common
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import (
+    REVIEW_STEP,
+    agent_envelope,
+    make_config,
+    make_plan,
+    make_reviews,
+    make_state,
+    make_task,
+    seed_repo,
+)
 
 WORK_BRANCH = "build/demo"
 GATE = [
     {
         "name": "test",
-        "kind": "command",
         "command": [sys.executable, "-c", "pass"],
         "executor_profile": "quality",
         "retries": 1,
     },
-    {"name": "review", "kind": "agent", "agent_role": "code_reviewer", "retries": 1, "required": True},
 ]
 LEAVES = ("T-002", "T-003", "T-004")
 
@@ -53,6 +60,7 @@ def seeded(tmp_path: Path) -> repo_mod.Repo:
     seed_repo(
         root,
         config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
+        reviews=make_reviews(steps=[REVIEW_STEP]),
         plan=make_plan(tasks=tasks),
         state={**make_state(plan_status="frozen"), "tasks": {"T-001": {"status": "done"}}},
     )
@@ -126,6 +134,10 @@ def test_three_sound_leaves_are_read_by_one_reviewer_launch(tmp_path: Path, monk
 
     assert agents.reviews == [list(LEAVES)], f"expected one reading of the whole batch, got {agents.reviews}"
     assert all(status_of(repo, tid) == "done" for tid in LEAVES)
+    # What each task was read for is in the chain, for acceptance to list (CR-50).
+    [applied] = [e for e in store_mod.Store(repo).read_events() if e.event == "reviews_applied"]
+    assert list(applied.subject_ids) == list(LEAVES)
+    assert applied.detail == {"step": "review", "stage": "task", "reviews": ["correctness", "simplification"]}
 
 
 def test_a_must_fix_goes_back_to_the_session_that_wrote_it_and_only_that_task_is_read_again(
@@ -195,13 +207,11 @@ def _operating(tmp_path: Path, *, attempts: dict[str, Any] | None, gate_red_once
         f"import pathlib, sys; p = pathlib.Path({str(reds)!r}); n = len(p.read_text()) if p.exists() else 0; "
         "p.write_text('x' * (n + 1)); sys.exit(1 if n == 0 else 0)"
     )
-    gate = [
-        {**GATE[0], "command": [sys.executable, "-c", red_once if gate_red_once else "pass"]},
-        GATE[1],
-    ]
+    gate = [{**GATE[0], "command": [sys.executable, "-c", red_once if gate_red_once else "pass"]}]
     seed_repo(
         root,
         config=make_config(branch=WORK_BRANCH, quality_gate=gate, launch_retries=0),
+        reviews=make_reviews(steps=[REVIEW_STEP]),
         plan=make_plan(tasks=[task]),
         state=make_state(plan_status="frozen"),
     )
@@ -344,6 +354,7 @@ def test_two_tasks_that_operate_are_read_at_once_without_reading_each_other_s_an
     seed_repo(
         root,
         config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
+        reviews=make_reviews(steps=[REVIEW_STEP]),
         plan=make_plan(tasks=tasks),
         state=make_state(plan_status="frozen"),
     )

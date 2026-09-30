@@ -17,7 +17,7 @@ from tests._support import chain, seed_repo
 
 
 def _seed(tmp_path: Path, *names: str) -> Path:
-    seed_repo(tmp_path, events=chain(*names) if names else None)
+    seed_repo(tmp_path, events=chain(*names) if names else None, reviews=None)
     return tmp_path
 
 

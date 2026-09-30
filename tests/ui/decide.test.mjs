@@ -2,8 +2,13 @@
 // replaces every OS dialog, and a status push never wipes an open panel out from under a reader.
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { STATUS, baseRoutes, boot } from "./_harness.mjs";
+
+const ASSETS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../src/rein/ui_assets");
 
 const AWAITING = {
   ...STATUS,
@@ -73,7 +78,8 @@ test("every list the naming layer carries reaches this route too", async () => {
         lenses: [lensRow("proposed")],
         crossing: [{ task_id: "T-001", title: "cut over", name: "the old table", detail: "dropped" }],
         undeclared: [{ task_id: "T-004", id: "A-2", statement: "it is fast" }],
-        delta: [{ what: "criterion", id: "T-005/A-1", change: "changed: statement" }],
+        delta: [{ what: "criterion", id: "T-005/A-1", change: "changed: statement", before: "under 2s", after: "under 3s" }],
+        documents: [{ id: "docs/20-design.md", change: "changed", diff: "@@ -1 +1 @@\n-the chain\n+a table" }],
       },
     },
   });
@@ -83,6 +89,11 @@ test("every list the naming layer carries reaches this route too", async () => {
   const shown = app.text("rvFoot");
   assert.match(shown, /T-004\/A-2/, "the criteria nothing derived the plan's structure from");
   assert.match(shown, /T-005\/A-1/, "what changed since the last approval");
+  assert.match(shown, /under 2s[\s\S]*under 3s/, "a changed field shows what it was and what it is");
+  assert.ok(app.window.document.querySelector("#rvFoot .was"), "the old value is marked as the old value");
+  assert.match(shown, /docs\/20-design\.md/, "the documents that changed since the last approval");
+  assert.ok(app.window.document.querySelector("#rvFoot .dl.del"), "a removed line is drawn as removed");
+  assert.ok(app.window.document.querySelector("#rvFoot .dl.add"), "an added line is drawn as added");
   assert.match(shown, /D-001/, "the decisions the loop settled without asking");
   assert.match(shown, /Overruling one now costs a task/, "what overruling one costs");
   assert.match(shown, /L-CODE-PROPOSED/, "the selection this mandate would freeze");
@@ -120,6 +131,50 @@ test("the footer offers the decision, and the panel says what it would bind", as
   assert.match(panel, /sha256:bb/);
   assert.match(panel, /Not opened in this pane yet/);
   assert.equal(app.errors.length, 0, app.errors.join("\n"));
+});
+
+// jsdom lays nothing out, so where the footer stays cannot be watched here; what makes it stay can.
+// A sticky element travels only inside its parent's box. The bar used to be the sticky one, alone in
+// `#rvFoot`, and sat at the foot of every long document — the one place a reader is not.
+test("the footer sticks inside the block that holds the reading pane, and a panel opens above the bar", async () => {
+  const css = fs.readFileSync(path.join(ASSETS, "app.css"), "utf8");
+  const rule = (selector) => (css.match(new RegExp(`(?:^|\\n)${selector}\\s*\\{([^}]*)\\}`)) || [])[1] || "";
+  assert.match(rule("#rvFoot"), /position:\s*sticky/);
+  assert.match(rule("#rvFoot"), /bottom:\s*0/);
+  assert.doesNotMatch(rule("\\.approvebar"), /sticky/, "a sticky inside the sticky footer has no room to move");
+
+  const { app } = await readingRoom();
+  const foot = app.window.document.getElementById("rvFoot");
+  assert.ok(foot.parentElement.querySelector(":scope > #rvMain"), "the footer shares its parent with the pane");
+
+  await app.click(APPROVE);
+  const children = [...foot.children].map((el) => el.className);
+  assert.deepEqual(children, ["confirm", "approvebar"]);
+});
+
+test("a document that changed since the last approval is marked in the list and shows its diff", async () => {
+  const changed = {
+    ...REVIEW,
+    deliverables: [
+      {
+        ...REVIEW.deliverables[0],
+        changed: { change: "changed", diff: "@@ -1 +1 @@\n-The store is the chain.\n+The store is a table." },
+      },
+    ],
+  };
+  const app = await boot({
+    hash: "#gate/mandate",
+    routes: baseRoutes((url) => (url.startsWith("/api/review/") ? changed : undefined)),
+  });
+  await app.open();
+  await app.push("status", AWAITING);
+
+  assert.match(app.text("rvMain"), /docs\/10-requirements\.md Δ/);
+  await app.click(".rv-item");
+  const doc = app.window.document;
+  assert.match(doc.querySelector(".changed").textContent, /Changed since you last approved/);
+  assert.equal(doc.querySelector(".changed .dl.del").textContent, "-The store is the chain.");
+  assert.equal(doc.querySelector(".changed .dl.add").textContent, "+The store is a table.");
 });
 
 test("a status push does not wipe an open panel", async () => {

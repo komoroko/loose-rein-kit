@@ -743,12 +743,16 @@ def test_open_mode_targets_vscode_over_external_browser() -> None:
 
 
 def _seed_events(repo: Path, count: int) -> None:
-    """A chained log: `count - 1` completed tasks, then one event awaiting a human decision."""
+    """The log is exactly this chain: `count - 1` completed tasks, then one event awaiting a human
+    decision (none at all for 0). It replaces the fixture's own record of reviews.yaml, which these
+    tests do not read."""
     from rein import event_chain
 
     ui._events_cache = None
-    names = ["task_completed"] * (count - 1) + ["task_failed"]
-    event_chain.append_lines(repo / ".rein" / "events.ndjson", chain(*names))
+    names = ["task_completed"] * (count - 1) + ["task_failed"] if count else []
+    log = repo / ".rein" / "events.ndjson"
+    log.write_text("", encoding="utf-8")
+    event_chain.append_lines(log, chain(*names))
 
 
 def test_get_events_returns_tail_newest_first_with_open_flag(server: ui.DashboardServer, repo: Path) -> None:
@@ -765,6 +769,7 @@ def test_get_events_returns_tail_newest_first_with_open_flag(server: ui.Dashboar
 
 
 def test_get_events_defaults_and_rejects_bad_limit(server: ui.DashboardServer, repo: Path) -> None:
+    _seed_events(repo, count=0)
     empty = json.loads(_request(server, "GET", "/api/events")[1])
     assert empty["events"] == [] and empty["total"] == 0
     assert _request(server, "GET", "/api/events?limit=abc")[0] == 400
@@ -1383,3 +1388,62 @@ def test_an_irreversible_point_can_be_refused_from_the_dashboard(crossing_server
 
     blockers = approve_mod.readiness(repo_mod.Repo(crossing_server.active_root()), "T-001")
     assert any("two steps" in b for b in blockers)
+
+
+# --- which reviews run (CR-51) -----------------------------------------------------
+
+
+def test_the_reviews_screen_reads_the_document_and_what_it_may_offer(server: ui.DashboardServer) -> None:
+    status, body = _request(server, "GET", "/api/reviews")
+    payload = json.loads(body)
+    assert status == 200
+    assert payload["document"]["adversarial"] == {"requirements": True, "design": True, "tasks": True}
+    assert payload["builtin"] == ["correctness", "simplification", "security"]
+    assert "comparison" in payload["acceptance"]
+
+
+def _served_digest(server: ui.DashboardServer) -> str:
+    status, body = _request(server, "GET", "/api/reviews")
+    assert status == 200, body
+    return str(json.loads(body)["digest"])
+
+
+def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.DashboardServer, repo: Path) -> None:
+    from rein import repo as repo_mod
+
+    document = {"adversarial": {"requirements": True, "design": False, "tasks": True}, "steps": []}
+    body: dict[str, object] = {"document": document, "reason": "a one-line fix", "expect": _served_digest(server)}
+    status, raw = write(server, "/api/reviews", body)
+    assert status == 200, raw
+    assert json.loads(raw)["changes"] == ["adversarial review at design: OFF"]
+    changed = [e for e in store.Store(repo_mod.Repo(repo)).read_events() if e.event == "reviews_changed"][-1]
+    assert changed.actor == "ui-session" and changed.detail["reason"] == "a one-line fix"
+
+
+def test_a_reviews_change_made_on_a_stale_screen_is_a_conflict(server: ui.DashboardServer) -> None:
+    """Two screens, or a screen and a terminal: the second write used to undo the first in silence."""
+    served = _served_digest(server)
+    first = {"adversarial": {"requirements": True, "design": False, "tasks": True}, "steps": []}
+    assert write(server, "/api/reviews", {"document": first, "reason": "one", "expect": served})[0] == 200
+    second = {"adversarial": {"requirements": False, "design": True, "tasks": True}, "steps": []}
+    status, raw = write(server, "/api/reviews", {"document": second, "reason": "two", "expect": served})
+    assert status == 409, raw
+    assert json.loads(_request(server, "GET", "/api/reviews")[1])["document"]["adversarial"]["design"] is False
+
+
+def test_a_reviews_change_still_needs_the_session(server: ui.DashboardServer) -> None:
+    document = {"adversarial": {"requirements": False, "design": False, "tasks": False}, "steps": []}
+    body: dict[str, object] = {"document": document, "reason": "x"}
+    assert _request(server, "POST", "/api/reviews", body, token=server.token)[0] == 403
+
+
+def test_a_reviews_change_that_asks_for_comparison_off_is_refused(server: ui.DashboardServer) -> None:
+    document = {
+        "adversarial": {"requirements": True, "design": True, "tasks": True},
+        "steps": [],
+        "acceptance": {"comparison": False},
+    }
+    status, body = write(
+        server, "/api/reviews", {"document": document, "reason": "x", "expect": _served_digest(server)}
+    )
+    assert status == 400 and "acceptance" in json.loads(body)["error"]

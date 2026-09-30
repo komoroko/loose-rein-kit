@@ -37,6 +37,7 @@ def repo_at(tmp_path: Path) -> repo_mod.Repo:
         # Sandboxed, so the board's sandbox row (which rightly precedes the phase rows) does not
         # mask what these tests are about.
         config=make_config(profiles=SANDBOXED_PROFILES),
+        reviews=None,
     )
     return repo_mod.Repo(tmp_path)
 

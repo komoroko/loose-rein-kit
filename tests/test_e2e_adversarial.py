@@ -190,7 +190,7 @@ def _git(root: Path, *args: str) -> str:
 
 @pytest.fixture
 def git_repo(tmp_path: Path) -> repo_mod.Repo:
-    seed_repo(tmp_path, state=make_state(project="p"), config=make_config())
+    seed_repo(tmp_path, state=make_state(project="p"), config=make_config(), reviews=None)
     _git(tmp_path, "init", "-q", "-b", "main")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-qm", "seed")

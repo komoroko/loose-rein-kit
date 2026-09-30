@@ -32,7 +32,7 @@ executors:
 # ---------------------------------------------------------------------------
 # SANDBOXES.
 #
-# **What this isolates, exactly.** The quality gate's `kind: command` steps and the acceptance
+# **What this isolates, exactly.** The quality gate's command steps and the acceptance
 # criteria that go through the same runner — the places this tool *executes* repository-derived
 # code. That is the rule: a test file is code an agent wrote, and running it on the host runs it
 # with your credentials. A fresh repository ships `kind: host`, which is NOT policy-compliant;
@@ -151,6 +151,9 @@ agents:
 # The single definition of the DoD. `command` is an argv array — no shell, so a pipe or a
 # redirect has to live in a script a reviewer can read.
 #
+# Commands only. The reviewer that reads each batch of tasks is not here: which reviews run is
+# `.rein/reviews.yaml`, outside the mandate's freeze and changed with `rein reviews apply`.
+#
 # The two defaults below are what the PACKAGED `python` image can actually run: it carries python,
 # uv and pytest, nothing else, and the runner gives it no network. They used to be `make test` and
 # `make check`, which was a default that could not work anywhere — `rein init` writes no makefile,
@@ -162,7 +165,6 @@ agents:
 # image with `dockerfile:` (see `executor_profiles` above) and put the real commands here.
 quality_gate:
   - name: test
-    kind: command
     command: [python, -m, pytest, -q, tests/, --junitxml=.rein/work/junit-test.xml]
     executor_profile: quality
     retries: 2
@@ -175,21 +177,14 @@ quality_gate:
     # task that owns it rather than stopping this one. Keep the two paths the same.
     junit: .rein/work/junit-test.xml
   - name: check
-    kind: command
     command: [python, -m, compileall, -q, .]
     executor_profile: quality
     retries: 2
-    required: true
-  - name: review
-    kind: agent
-    agent_role: code_reviewer
-    retries: 1
     required: true
   # A minimal real-launch check. Replace `command` as soon as any entry point launches —
   # tests stay green while the launch path is broken — then set `required: true`.
   # (Quoted: unquoted `true` in YAML is the boolean, not the /bin/true command.)
   - name: smoke
-    kind: command
     command: ["true"]
     executor_profile: quality
     retries: 1

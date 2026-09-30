@@ -513,3 +513,28 @@ def test_an_approved_gate_is_not_open_for_a_decision(make_repo: MakeRepo) -> Non
 
     assert _review(root, "T-001")["is_awaiting"] is False
     assert _review(root, "T-001")["status"] == "approved"
+
+
+def test_a_document_changed_since_the_last_mandate_approval_carries_its_diff(tmp_path: Path) -> None:
+    """The pane renders a document as it stands; on a re-approval that hides what is new (CR-55)."""
+    from rein import approve, revise
+    from rein import repo as repo_mod
+    from tests._support import make_plan, seed_repo
+
+    seed_repo(tmp_path, plan=make_plan(), state=make_state(gates={"mandate": "pending"}, plan_status="draft"), git=True)
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    (tmp_path / "docs" / "20-design.md").write_text("# Design\n\nThe store is the chain.\n", encoding="utf-8")
+    (tmp_path / "docs" / "10-requirements.md").write_text("# Requirements\n\nR-1.\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "approved"], cwd=tmp_path, check=True)
+    repo = repo_mod.Repo(tmp_path)
+    approve.record_approval(repo, "mandate", approve.approval_subject(repo, "mandate"))
+    revise.apply(repo, revise.plan_revision(repo, "mandate", []), "the store changes")
+    (tmp_path / "docs" / "20-design.md").write_text("# Design\n\nThe store is a table.\n", encoding="utf-8")
+
+    payload = _review(tmp_path, "mandate")
+
+    changed = _one(payload, "docs/20-design.md")["changed"]
+    assert changed["change"] == "changed"
+    assert "-The store is the chain." in changed["diff"] and "+The store is a table." in changed["diff"]
+    assert "changed" not in _one(payload, "docs/10-requirements.md")

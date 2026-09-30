@@ -30,7 +30,7 @@ WORK_BRANCH = "build/demo"
 
 #: A host profile and a command that always passes. What is under test is what the loop concludes
 #: from an attempt, so the gate must never be the thing that fails.
-GATE = [{"name": "test", "kind": "command", "command": ["true"], "executor_profile": "quality", "retries": 1}]
+GATE = [{"name": "test", "command": ["true"], "executor_profile": "quality", "retries": 1}]
 
 
 def git(root: Path, *args: str) -> str:
@@ -417,6 +417,51 @@ def test_a_change_outside_the_tasks_declared_scope_blocks_it(
     # and offering an implementer retry for something no implementer can decide.
     assert status_of(repo, "T-001")["status"] == "needs-revision"
     assert ("knowledge_gap", "scope_violation") in events_of(repo)
+
+
+def test_a_path_the_config_allows_is_added_rather_than_rolled_back(
+    repo: repo_mod.Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`guard.scope_additions` is the human deciding ahead of time which paths a task may take in
+    without re-deciding the mandate. The stop still named only the roll back, and a field cycle
+    re-approved its whole mandate for one test file a task's scope was short of."""
+    from rein import status_api, task_cmd
+
+    scope_the_plan(repo, "T-001", include=["src/"])
+    config_path = repo.path(".rein/config.yaml")
+    config = strict_yaml.load_mapping(config_path.read_text(encoding="utf-8"), what="config.yaml")
+    config["guard"]["scope_additions"] = ["T-001.py"]
+    config_path.write_text(store_mod.dump_yaml(config).decode("utf-8"), encoding="utf-8")
+    git(repo.root, "commit", "-qam", "scope and allowance")
+    monkeypatch.setattr(build_loop, "_run", agent(writes=True, reports="implemented"))
+
+    assert build(repo) == common.EXIT_HUMAN_NEEDED
+    escalation = status_of(repo, "T-001")["handoff"]["escalation"]  # type: ignore[index]
+    assert escalation["paths"] == ["T-001.py"]
+    assert "rein task scope-add T-001 T-001.py" in escalation["message"]
+    assert "rein revise --to mandate" not in escalation["message"]
+    store = store_mod.Store(repo)
+    recommended = status_api.scope_recovery(store.read_state(), store.read_plan(), store.read_config())
+    assert recommended is not None and recommended.command.startswith("rein task scope-add T-001 T-001.py")
+
+    # The addition answers the verdict: the same tree is no longer the same question.
+    task_cmd.scope_add(repo, "T-001", path="T-001.py", reason="the module lives at the root")
+    task_cmd.reset(repo, "T-001", status="todo", reason="scope added")
+    assert build(repo) == common.EXIT_DONE
+
+
+def test_a_path_outside_the_allowance_still_names_the_roll_back(
+    repo: repo_mod.Repo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from rein import status_api
+
+    scope_the_plan(repo, "T-001", include=["src/"])
+    monkeypatch.setattr(build_loop, "_run", agent(writes=True, reports="implemented"))
+
+    assert build(repo) == common.EXIT_HUMAN_NEEDED
+    assert "rein revise --to mandate" in status_of(repo, "T-001")["handoff"]["escalation"]["message"]  # type: ignore[index]
+    store = store_mod.Store(repo)
+    assert status_api.scope_recovery(store.read_state(), store.read_plan(), store.read_config()) is None
 
 
 def test_the_agent_is_told_what_it_is_rather_than_left_to_infer_it(

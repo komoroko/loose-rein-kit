@@ -18,7 +18,7 @@ from rein import repo as repo_mod
 #: The documents a repository owns, and whose shape `lock.FORMAT` is the name of. `event` is not
 #: among them: events are appended by this tool and never read out of an older repository's file
 #: into a newer release's model, so their shape is not what a lock has to agree about.
-_PINNED_DOCUMENTS: tuple[str, ...] = ("plan", "state", "review", "config")
+_PINNED_DOCUMENTS: tuple[str, ...] = ("plan", "state", "review", "config", "reviews")
 
 #: Keys that explain a schema rather than constrain a document. Stripped before the pin is taken.
 _PROSE_KEYS = frozenset({"description", "title", "$comment", "examples"})
@@ -46,8 +46,8 @@ _PROSE_KEYS = frozenset({"description", "title", "$comment", "examples"})
 #: the earlier shape. A digest moving under a version somebody has installed is the failure this
 #: pin exists to catch, and it is not this.
 _FORMAT_PIN: tuple[str, str] = (
-    "rein-grounded-v9",
-    "sha256:2c3fdb18596af08c1c0303e8b8f8a105a738f3925311dfca88e30286c8b8b30f",
+    "rein-grounded-v10",
+    "sha256:e8c4b783c6016a233691e8e42fcd5d7fc6422656a372124ae1a21f222d023f49",
 )
 
 

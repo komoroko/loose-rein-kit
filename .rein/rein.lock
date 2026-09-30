@@ -1,29 +1,29 @@
 # .rein/rein.lock — machine-written by `rein init|sync|install|uninstall|upgrade`.
 # Records the document format, the tool version/source, and a hash per installed file so
 # upgrades never overwrite local edits. Do not edit by hand.
-format: rein-grounded-v9
-tool_version: 0.11.1
+format: rein-grounded-v10
+tool_version: 0.12.0
 source: git+https://github.com/komoroko/loose-rein-kit.git
 prompts:
-  version: 0.11.1
+  version: 0.12.0
   files:
-    AGENTS.rein.md: sha256:59ca44b72b37f78eeb016907b76967f44067814311b997fb89dc564b9940ef20
-    prompts/agents/adversarial-reviewer.md: sha256:f9efecb651e7d72d7ee991457c1f3644f618487df15d9ddd9f6dd5a4c2d3f349
+    AGENTS.rein.md: sha256:3ee26c4531987356323ec137c28ad7d8be9f0b357cadaa3d55fa31655a978974
+    prompts/agents/adversarial-reviewer.md: sha256:013018e63aced7c12eb680d5d44c9bb585ee2fa928eb92ebbcddd1f508d67e0e
     prompts/agents/architect.md: sha256:2f5d25fbbb939eab00a26db15241c1418283f7c627fb3c639ede199f4a4bdf8f
     prompts/agents/implementer.md: sha256:310bc58074601ba7a855cf93242e1da395926479b5a274ff0fc5a818a2cd58ef
     prompts/agents/requirements-analyst.md: sha256:0c928038ded17cc8224febce1ba72c555b8fb182d0c35254e03df3fa63241f8d
-    prompts/commands/build.md: sha256:619872a6d93c5b079f221705645ef9e041dafeb7c8d6d799ef017bc2ab6c1501
-    prompts/commands/design.md: sha256:4e7c8bdeb5ba9756278d4c7e965b1efa0f63667bf1c5fbb932f400cb05476f84
-    prompts/commands/onboard.md: sha256:8f7fb990edecf93c16c9812ef123ff9653d69ebe3cdb568b58256e774fadd339
-    prompts/commands/req.md: sha256:b812919787119a3b11d1644a71fedacd75c3523abf4a3ac9c4baeba5fb83f650
-    prompts/commands/revise.md: sha256:f04e19bba1c246fded62ca059790ac2163ced7e9d8372f506b0a7a1afbea12bf
+    prompts/commands/build.md: sha256:85264b53748ab7190e27975d57e1a7a202423db44f86741ef1e5adb121e650c5
+    prompts/commands/design.md: sha256:ee3d5c18ca7aa77829f7274529e9afb51b30caa0adc90d8184fdb8e024ca929a
+    prompts/commands/onboard.md: sha256:a424f9ea371691d31db64f892ec64b4060dcfe6dd8ddbbb98503926b727a5bd4
+    prompts/commands/req.md: sha256:7bd209bc6cfefd8cf846f8d42fe1742623b1e9274a0617f8662a00748aca777e
+    prompts/commands/revise.md: sha256:3f4f9c8a2124e01998195edbd9d6ab1398ac06db42dd6e32347a441a570fe646
     prompts/commands/status.md: sha256:6f31d2c1b46f62b0e511300838251dc6a35fb33c3d1b03dfbed1543e76f4de2d
-    prompts/commands/tasks.md: sha256:13259a98d3608cd5326793686a28948f1cf08ea12cecdad1cc8dced86fe74f2b
-    prompts/commands/verify.md: sha256:c64d82b267e0e988ee98dfd6cc5a3063f7195ff7a08a55e2b4c43ac2d26d258d
+    prompts/commands/tasks.md: sha256:22fe1c19cca65993731e1fde3af552427fcf2b06d6c63a5b13c40b33dfbf9854
+    prompts/commands/verify.md: sha256:be6c6d9d0aa2e343d9dbb41698d8eb7f11e550ea683687b8f71f4213ed6982e0
     prompts/rules/gate-workflow.md: sha256:da22dfe27ecfb6d9be9a04ec2a22c127d77b34b66dc1d5d1d276caa1b4673464
 integrations:
   claude:
-    version: 0.11.1
+    version: 0.12.0
     installed_at: '2026-08-04'
     files:
       .claude/agents/adversarial-reviewer.md: sha256:a4fd4c68f39502bad42327168e79fbb43402d7ddff17788237ffb0d32eab4d8f
@@ -43,7 +43,7 @@ integrations:
       permissions_allow: []
       hooks: {}
   codex:
-    version: 0.11.1
+    version: 0.12.0
     installed_at: '2026-08-04'
     files:
       .agents/skills/build/SKILL.md: sha256:1faced739cd80c70a96c30fdf3fa7bb4992ccaffdcad2a2e16277c09f0859c5e
@@ -61,7 +61,7 @@ integrations:
       .codex/hooks.json: sha256:7b64f50c947287ac882d04f0816a79df4d8c7c6b3060137cfb9014d274af0909
       .codex/rein.md: sha256:1d75d677e7b6039c1d9852e45c4d56b06f9011df5be4063e782d320c34e54f96
   copilot:
-    version: 0.11.1
+    version: 0.12.0
     installed_at: '2026-08-04'
     files:
       .github/agents/adversarial-reviewer.agent.md: sha256:7007cdf39b9475bbb9875091056f792d14b0c9d87bf4e9f451f84d3d53029199
@@ -79,7 +79,7 @@ integrations:
       .github/prompts/tasks.prompt.md: sha256:090fcd0790776db37ce0839676a580c1592a97f5c352b9eb60507e9be2a6500e
       .github/prompts/verify.prompt.md: sha256:715158e2e17ebe65f6969fef87a7d7b326a90f04f9d4a2452302df56801157fd
   gemini:
-    version: 0.11.1
+    version: 0.12.0
     installed_at: '2026-09-03'
     files:
       .gemini/commands/build.toml: sha256:77d029397582376f3f8bba02f3acd3064bfda91cf1a63e2221765e64705be7b8
@@ -109,4 +109,4 @@ integrations:
             command: rein guard
 seeded: {}
 created_at: '2026-07-24'
-updated_at: '2026-09-29'
+updated_at: '2026-09-30'

@@ -113,13 +113,9 @@ def _execution_boundary(config: models.Config | None) -> list[dict[str, Any]]:
         profile = profiles.get(step.executor_profile)
         row: dict[str, Any] = {
             "step": step.name,
-            "kind": step.kind,
             "profile": step.executor_profile,
+            "command": list(step.command),
         }
-        if step.command:
-            row["command"] = list(step.command)
-        if step.agent_role:
-            row["agent_role"] = step.agent_role
         if profile is not None:
             row["sandbox"] = profile.kind
             if profile.image:
@@ -323,7 +319,7 @@ def _operations(config: models.Config | None) -> dict[str, Any]:
     if config is None:
         return {}
     for step in config.quality_gate:
-        if step.kind != "command" or step.name != LAUNCH_STEP:
+        if step.name != LAUNCH_STEP:
             continue
         return {
             "command": list(step.command),
@@ -431,7 +427,28 @@ def _control(state: models.State | None) -> dict[str, Any]:
     return section
 
 
-def _residuals(state: models.State | None) -> dict[str, Any]:
+def reviews_by_task(events: Sequence[models.Event]) -> dict[str, list[str]]:
+    """Task id → each reading it got, as `<step> (<stage>): <review>, <review>`, in chain order.
+
+    Read off `reviews_applied` rather than off `reviews.yaml`: the configuration is outside the
+    mandate's freeze and may change mid-cycle, and a task read before the change was read for what
+    was configured then. The file says what the next reading will be; only the chain says what each
+    task actually got.
+    """
+    readings: dict[str, list[str]] = {}
+    for event in events:
+        if event.event != "reviews_applied":
+            continue
+        reviews = event.detail.get("reviews")
+        names = ", ".join(str(r) for r in reviews) if isinstance(reviews, list) else ""
+        line = f"{event.detail.get('step', '?')} ({event.detail.get('stage', '?')}): {names}"
+        for task_id in event.subject_ids:
+            if line not in readings.setdefault(task_id, []):
+                readings[task_id].append(line)
+    return readings
+
+
+def _residuals(state: models.State | None, reviews_applied: Mapping[str, Sequence[str]]) -> dict[str, Any]:
     """What is still open — the part of acceptance that is easiest to approve past without noticing."""
     if state is None:
         return {}
@@ -467,6 +484,11 @@ def _residuals(state: models.State | None) -> dict[str, Any]:
     ]
     if deferred:
         residual["deferred"] = deferred[:MAX_TASKS]
+    # Which reviews read each task. The configuration can change mid-cycle without rewinding
+    # anything (`models.Reviews`), so the screen that takes the change says what each task got.
+    read = [{"task_id": tid, "readings": list(lines)} for tid, lines in sorted(reviews_applied.items())]
+    if read:
+        residual["reviews_by_task"] = read[:MAX_TASKS]
     return residual
 
 
@@ -515,6 +537,7 @@ def derive(
     actual_statements: Sequence[Mapping[str, Any]] = (),
     changed_paths: Sequence[str] = (),
     blob_facts: BlobFacts | None = None,
+    reviews_applied: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Assemble the orientation brief. Pure: every argument is already-read SSOT.
 
@@ -565,7 +588,7 @@ def derive(
     if control:
         sections["control"] = control
 
-    residuals = _residuals(state)
+    residuals = _residuals(state, reviews_applied or {})
     if residuals:
         sections["residuals"] = residuals
 

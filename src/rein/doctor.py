@@ -51,6 +51,7 @@ from rein import (
     notify,
     policy_check,
     review_reading,
+    reviews_cmd,
     strict_yaml,
     upstream,
 )
@@ -84,7 +85,7 @@ class Finding:
 
 
 def check_layout(repo: repo_mod.Repo) -> list[Finding]:
-    """Are the four SSOT documents present?"""
+    """Are the five SSOT documents present?"""
     missing = [
         name
         for name, path in (
@@ -92,12 +93,21 @@ def check_layout(repo: repo_mod.Repo) -> list[Finding]:
             ("state.yaml", repo.state),
             ("plan.yaml", repo.plan),
             ("review.yaml", repo.review),
+            ("reviews.yaml", repo.reviews),
         )
         if not path.exists()
     ]
     if missing:
-        return [Finding("FAIL", "format", f"missing SSOT document(s): {', '.join(missing)} — run `rein init`")]
-    return [Finding("PASS", "format", "the four SSOT documents are present")]
+        return [
+            Finding(
+                "FAIL",
+                "format",
+                f"missing SSOT document(s): {', '.join(missing)} — run `rein init` "
+                "(a missing reviews.yaml: `rein reviews restore` when the audit chain records one, "
+                "`rein sync` when it never has)",
+            )
+        ]
+    return [Finding("PASS", "format", "the five SSOT documents are present")]
 
 
 def check_lock(repo: repo_mod.Repo) -> list[Finding]:
@@ -129,6 +139,11 @@ _DOCUMENT_REPAIR: dict[str, str] = {
         "frozen when the mandate is approved, so it cannot be edited in place: "
         "`rein revise --to mandate` first, then fix it, then re-approve the mandate"
     ),
+    "reviews": (
+        "outside the mandate's freeze and written only by a person: `rein reviews restore` writes back the "
+        "version the audit chain records, and a change goes through `rein reviews apply <file> --reason ...` "
+        "at your terminal"
+    ),
     "state": (
         "hand-repair is not the path — restore it from the last commit; `rein events --verify` "
         "says what the chain expects"
@@ -150,6 +165,7 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
         ("state", store.read_state),
         ("plan", store.read_plan),
         ("review", store.read_review),
+        ("reviews", store.read_reviews),
     ):
         try:
             value = reader()
@@ -168,6 +184,15 @@ def check_documents(repo: repo_mod.Repo) -> tuple[list[Finding], dict[str, objec
             continue
         loaded[name] = value
         findings.append(Finding("PASS", "format", f"{name}.yaml valid (schema + cross-references)"))
+    if "reviews" in loaded:
+        # Valid is not enough for this one: it has to be the version a person applied, which only
+        # the chain can say (`reviews_cmd.binding_problem`).
+        try:
+            problem = reviews_cmd.binding_problem(repo)
+        except reviews_cmd.ReviewsError as exc:
+            problem = str(exc)
+        if problem:
+            findings.append(Finding("FAIL", "format", f"reviews.yaml: {problem}"))
     return findings, loaded
 
 
@@ -1529,8 +1554,6 @@ def check_quality_gate(config: models.Config | None) -> list[Finding]:
         return []
     findings: list[Finding] = []
     for step in config.quality_gate:
-        if step.kind != "command":
-            continue
         if tuple(step.command) in models.PLACEHOLDER_COMMANDS:
             findings.append(
                 Finding(
@@ -1550,7 +1573,7 @@ def check_quality_gate(config: models.Config | None) -> list[Finding]:
                     "Fine for a library; for anything with an entry point, set `required: true`.",
                 )
             )
-    if config.quality_gate and not any(s.kind == "command" and s.runs_tests for s in config.quality_gate):
+    if config.quality_gate and not any(s.runs_tests for s in config.quality_gate):
         findings.append(
             Finding(
                 "WARN",

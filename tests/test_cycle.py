@@ -16,10 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from rein import cycle, models, strict_yaml
+from rein import cycle, models, reviews_cmd, strict_yaml
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import chain, make_state, seed_repo
+from tests._support import chain, make_reviews, make_state, seed_repo
 
 ALL_APPROVED = dict.fromkeys(models.GATE_ENDS, "approved")
 
@@ -221,9 +221,20 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
     archived_log = (archive / "rein" / "events.ndjson").read_text(encoding="utf-8")
     assert "cycle_closed" in archived_log
     assert [e.event for e in store_mod.Store(repo).read_events()] == ["cycle_initialized"]
+    # reviews.yaml persists, and the new chain opens holding the record it is checked against.
+    assert reviews_cmd.binding_problem(repo) == ""
 
     # The fresh scaffolds are back for the next cycle.
     assert (tmp_path / "docs" / "10-requirements.md").exists()
+
+
+def test_a_reviews_yaml_the_chain_does_not_record_blocks_the_close(tmp_path: Path) -> None:
+    """Carried into the next chain as it stands, an unrecorded change would come out recorded."""
+    repo = finished_repo(tmp_path)
+    repo.reviews.write_bytes(store_mod.dump_yaml({**make_reviews(), "steps": []}) + b"# edited\n")
+    assert cycle.readiness(repo) == []
+    repo.reviews.write_bytes(store_mod.dump_yaml(make_reviews(adversarial=False)))
+    assert any("not what the audit chain records" in b for b in cycle.readiness(repo))
 
 
 @pytest.mark.integration

@@ -51,7 +51,7 @@ def _required_without_command(steps: Sequence[models.GateStep]) -> list[Problem]
     """
     problems = []
     for step in steps:
-        if step.kind == "command" and step.required and not step.command:
+        if step.required and not step.command:
             problems.append(
                 Problem(
                     f"quality-gate step {step.name!r} is required but has no `command:` to run",
@@ -70,7 +70,7 @@ def _unwritable_reports(config: models.Config, steps: Sequence[models.GateStep])
     """
     problems = []
     for step in steps:
-        if step.kind != "command" or not step.junit:
+        if not step.junit:
             continue
         named = config.profiles.get(step.executor_profile) if step.executor_profile else None
         profile = named or config.quality_gate_profile
@@ -101,8 +101,6 @@ def _profiles_used(config: models.Config, steps: Sequence[models.GateStep]) -> d
     used: dict[str, models.ExecutorProfile] = {}
     profiles = config.profiles
     for step in steps:
-        if step.kind != "command":
-            continue
         named = profiles.get(step.executor_profile) if step.executor_profile else None
         resolved = named or config.quality_gate_profile
         if resolved is not None:

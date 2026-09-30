@@ -46,7 +46,6 @@ sys.exit(1 if red else 0)
 GATE = [
     {
         "name": "test",
-        "kind": "command",
         "command": [sys.executable, "run_tests.py"],
         "executor_profile": "quality",
         "retries": 1,

@@ -40,9 +40,12 @@ TTY requirement below is one of the three mechanisms carrying it.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import logging
+import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -62,6 +65,7 @@ from rein import (
     observations,
     review_policy,
     review_reading,
+    reviews_cmd,
     strict_yaml,
 )
 from rein import lenses as lens_lib
@@ -770,6 +774,11 @@ def carried_crossings(
     return carried
 
 
+#: The events that say something about a gate. Every other event kind is about a task, a lens or
+#: a run, whatever its subject ids look like.
+_GATE_EVENTS = frozenset({"gate_approved", "gate_carried", "gate_revised"})
+
+
 def _withdrawn_approval(events: Sequence[models.Event], gate: str) -> tuple[str, str] | None:
     """`(approval id, crossing digest)` of the approval a roll back withdrew from `gate` as a side
     effect and no mandate approval has answered since — or None.
@@ -780,9 +789,16 @@ def _withdrawn_approval(events: Sequence[models.Event], gate: str) -> tuple[str,
     and the event before it concerning `gate` must be the confirmation it withdrew. Another
     `gate_revised` there means the gate was already pending when rolled back, so there was
     nothing to withdraw.
+
+    **Only gate events are read.** A crossing gate is named for its task, so `task_started` and
+    every other event about that task carries the same first subject id; read as the gate's
+    history, any of them between the confirmation and the roll back — or after it — ended the walk,
+    and no carry was ever made in a cycle that ran the task.
     """
     revised = False
     for event in reversed(events):
+        if event.event not in _GATE_EVENTS:
+            continue
         if event.event == "gate_approved" and event.subject_ids[:1] == (FREEZING_GATE,) and not revised:
             return None
         if event.event == "gate_revised":
@@ -974,6 +990,11 @@ def record_approval(
             # In the chain for the same reason: a roll back clears the receipt, and the next
             # mandate approval shows what changed since this one (`mandate_delta`).
             detail["plan_digest"] = subject["plan_digest"]
+            # And the documents beside it. `state.plan.sources` holds them only until the roll
+            # back that clears it, which is exactly when the next approval needs them
+            # (`document_delta`).
+            if (approved_plan := store.read_plan()) is not None:
+                detail["sources"] = implementation_sources(repo, approved_plan)
         tx.append(
             "gate_approved",
             cycle_id=state.cycle_id,
@@ -1171,13 +1192,23 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
     command line establishes nothing, since someone who would reflexively press `y` would as
     reflexively type `tasks`. What is load-bearing is the pause with the digests above it, the
     TTY, and **the default being no** — a stray Enter must never approve anything.
+
+    Most of what this screen shows was written by somebody other than the person approving — the
+    plan, the deliverables, a decision's text — so none of it reaches the terminal raw: `say` and
+    `_painted` are the only two ways out, and both make the text inert first. One escape sequence
+    in a design document could otherwise erase the line above it, and the screen would show
+    something other than what is approved.
     """
+
+    def say(text: str) -> None:
+        print(common.terminal_text(text))
+
     if not common.stdin_is_terminal():
         raise ApprovalError(
             f"gate '{gate}' needs a confirmation typed at a terminal, and stdin is not one. "
             "Run this in your shell — there is deliberately no flag that skips it."
         )
-    print(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
+    say(f"gate '{gate}' is ready. This approval will cover:\n{render_subject(subject)}\n")
     # One source for both routes. This function used to call `crossing_declarations` and
     # `_unasked_decisions` itself and never learned about the third list, which is how the lens
     # selection came to exist on one screen only: two screens assembling the same panel from
@@ -1190,21 +1221,21 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # later gate can reconsider.
         if gate == FREEZING_GATE:
             tasks = sorted({row["task_id"] for row in crossing if not row["carried_from"]})
-            print(
+            say(
                 f"{len(tasks)} further stop(s) this mandate creates — one before each task that "
                 "declares work it cannot take back and was not already approved as it stands:"
             )
         else:
-            print("This approval lets the loop do something it cannot undo:")
-        print(render_crossing(crossing) + "\n")
+            say("This approval lets the loop do something it cannot undo:")
+        say(render_crossing(crossing) + "\n")
     unasked = named["unasked"]
     if unasked:
         # The one thing on this screen that is not a digest. Everything else says what was decided
         # with this human; this says what was decided without them, which is the part an approval
         # silently ratifies unless it is put in front of somebody.
-        print(f"{len(unasked)} decision(s) the loop settled without asking you:")
-        print(render_unasked(unasked) + "")
-        print(f"  {named['overrule_cost']}\n")
+        say(f"{len(unasked)} decision(s) the loop settled without asking you:")
+        say(render_unasked(unasked) + "")
+        say(f"  {named['overrule_cost']}\n")
     lens_rows = named["lenses"]
     if lens_rows:
         # Not folded away. `proposed` is the half a human is being *asked* about, and a list that
@@ -1213,27 +1244,35 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # disclosure rather than through an empty `when:`.
         droppable = sum(1 for row in lens_rows if row["status"] == lens_lib.SELECTION_PROPOSED)
         asked = f" — {droppable} of them yours to keep or drop" if droppable else ""
-        print(f"{len(lens_rows)} review lens(es) this mandate would freeze{asked}:")
-        print(render_lenses(lens_rows) + "")
+        say(f"{len(lens_rows)} review lens(es) this mandate would freeze{asked}:")
+        say(render_lenses(lens_rows) + "")
     delta = named["delta"]
     if delta:
         # First after the digests: on a re-approval this is what the human is actually deciding.
-        print(f"What changed since you last approved this mandate ({len(delta)}):")
+        say(f"What changed since you last approved this mandate ({len(delta)}):")
         print(render_delta(delta) + "\n")
+    switched_off = named["adversarial_off"]
+    if switched_off:
+        say(f"{len(switched_off)} drafting stage(s) had the adversarial review switched off during this round:")
+        say("\n".join(f"  {row['id']}: {row['change']}" for row in switched_off) + "\n")
+    documents = named["documents"]
+    if documents:
+        say(f"Documents changed since you last approved this mandate ({len(documents)}):")
+        print(render_documents(documents) + "\n")
     undeclared = named["undeclared"]
     if undeclared:
-        print(
+        say(
             f"{len(undeclared)} acceptance criterion(s) name no path they produce or read, so nothing "
             "derived this plan's scope or edges from them — a contradiction there is found by the build:"
         )
-        print(render_undeclared(undeclared) + "\n")
+        say(render_undeclared(undeclared) + "\n")
     addressed = addressed_requests(repo, gate)
     if addressed:
         # Read before deciding, not after. These are the changes this human asked for last time;
         # the notes are the agent's claim that they were made, and approving closes them.
-        print(f"{len(addressed)} change request(s) you raised were addressed:")
-        print(change_request.render(addressed) + "\n")
-    print(AUTHORITY_NOTE)
+        say(f"{len(addressed)} change request(s) you raised were addressed:")
+        say(change_request.render(addressed) + "\n")
+    say(AUTHORITY_NOTE)
     if not common.ask_yes_no(f"Approve gate '{gate}'?"):
         raise ApprovalError(
             f"nothing was approved. If the deliverable needs work, record it against the gate so it "
@@ -1256,6 +1295,8 @@ class Naming(TypedDict):
     crossing: list[dict[str, str]]
     undeclared: list[dict[str, str]]
     delta: list[dict[str, str]]
+    documents: list[dict[str, str]]
+    adversarial_off: list[dict[str, str]]
 
 
 def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> Naming:
@@ -1293,6 +1334,8 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         "crossing": [],
         "undeclared": [],
         "delta": [],
+        "documents": [],
+        "adversarial_off": [],
     }
     out["crossing"] = crossing_declarations(repo, gate)
     unasked = _unasked_decisions(repo, gate)
@@ -1317,6 +1360,19 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
     if plan is None:
         return out
     out["delta"] = mandate_delta(repo, plan)
+    out["documents"] = document_delta(repo, plan)
+    # A stage whose adversarial review was switched off at any point of this drafting round. Not a
+    # blocker — it was a person's to switch — but a mandate drafted without one is approved knowing
+    # it. Read off the chain, not off reviews.yaml: the file says what is set now, and a review
+    # switched off while the requirements were drafted and back on before this screen is exactly
+    # the case the screen exists for.
+    events, _ = event_chain.scan(repo.events)
+    approved = [
+        index
+        for index, event in enumerate(events)
+        if event.event == "gate_approved" and tuple(event.subject_ids[:1]) == (FREEZING_GATE,)
+    ]
+    out["adversarial_off"] = reviews_cmd.adversarial_switched_off(events, since=approved[-1] + 1 if approved else 0)
     # Criteria that name no path contribute nothing to the derived scope and edges
     # (`models._structure_errors`): each is a place a contradiction can still hide until the build.
     out["undeclared"] = [
@@ -1363,15 +1419,10 @@ def mandate_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]
     back clears the receipt that named it and the chain keeps only the digest. When that version
     was never committed, the delta cannot be shown and the row says so rather than showing none.
     """
-    events, _ = event_chain.scan(repo.events)
-    approvals = [
-        e
-        for e in events
-        if e.event == "gate_approved" and tuple(e.subject_ids[:1]) == (FREEZING_GATE,) and e.detail.get("plan_digest")
-    ]
-    if not approvals:
+    last = _last_mandate_approval(repo)
+    if last is None:
         return []
-    digest = str(approvals[-1].detail["plan_digest"])
+    digest = str(last.detail["plan_digest"])
     if digest == plan.digest():
         return []
     previous = _plan_with_digest(repo, digest)
@@ -1385,6 +1436,105 @@ def mandate_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]
             }
         ]
     return plan_delta(previous, plan)
+
+
+def _last_mandate_approval(repo: repo_mod.Repo) -> models.Event | None:
+    events, _ = event_chain.scan(repo.events)
+    approvals = [
+        e
+        for e in events
+        if e.event == "gate_approved" and tuple(e.subject_ids[:1]) == (FREEZING_GATE,) and e.detail.get("plan_digest")
+    ]
+    return approvals[-1] if approvals else None
+
+
+#: How much of one document's diff a screen is handed. A rewritten design document is a diff of
+#: the whole file, and past this the reader is better served by their editor than by a pane.
+_DOCUMENT_DIFF_MAX = 64 * 1024
+
+
+def document_delta(repo: repo_mod.Repo, plan: models.Plan) -> list[dict[str, str]]:
+    """Each document the build reads that changed since the mandate was last approved, with its diff.
+
+    `plan_delta`'s half for prose. A correction to the plan usually moves a ticket or the design
+    beside it, and the approver was shown neither: the document pane renders the text as it stands,
+    so what was new since the last yes was whatever the reader happened to remember.
+
+    Rows are `{id: path, change, diff}`; `diff` is a unified diff with one line of context, "" when
+    there is nothing to show. The version approved last time is found by the digest the approval
+    recorded (`record_approval`), in git's history of that path.
+    """
+    last = _last_mandate_approval(repo)
+    if last is None:
+        return []
+    recorded = last.detail.get("sources")
+    if not isinstance(recorded, Mapping):
+        return [
+            {
+                "id": "documents",
+                "change": "the last approval recorded no document digests (it predates this release), so what "
+                "changed in the requirements, the design and the tickets cannot be shown",
+                "diff": "",
+            }
+        ]
+    before = {str(k): str(v) for k, v in recorded.items()}
+    now = implementation_sources(repo, plan)
+    rows: list[dict[str, str]] = []
+    for path in sorted(before.keys() | now.keys()):
+        if before.get(path) == now.get(path):
+            continue
+        current = repo.path(path).read_text(encoding="utf-8", errors="replace") if path in now else ""
+        if path not in before:
+            rows.append({"id": path, "change": "added", "diff": _unified("", current, path)})
+            continue
+        previous = _blob_with_digest(repo, path, before[path])
+        if previous is None:
+            rows.append(
+                {
+                    "id": path,
+                    "change": "changed — the version approved last time is not in git's history, so the "
+                    "difference cannot be shown",
+                    "diff": "",
+                }
+            )
+            continue
+        rows.append(
+            {
+                "id": path,
+                "change": "removed" if path not in now else "changed",
+                "diff": _unified(previous, current, path),
+            }
+        )
+    return rows
+
+
+def _unified(before: str, after: str, path: str) -> str:
+    lines = difflib.unified_diff(
+        before.splitlines(), after.splitlines(), f"{path} (approved)", f"{path} (now)", n=1, lineterm=""
+    )
+    text = "\n".join(lines)
+    if len(text) > _DOCUMENT_DIFF_MAX:
+        return text[:_DOCUMENT_DIFF_MAX] + "\n… truncated — read the rest with git diff"
+    return text
+
+
+def _blob_with_digest(repo: repo_mod.Repo, path: str, digest: str) -> str | None:
+    """The text of `path` as it was when its bytes had `digest`, from git's history — or None."""
+    listing = repo._git("log", f"-{_PLAN_HISTORY_DEPTH}", "--format=%H", "--", path)
+    for commit in listing.splitlines():
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo.root), "show", f"{commit}:{path}"],
+                capture_output=True,
+                timeout=repo_mod.GIT_TIMEOUT_SEC,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        # Bytes, not text: a digest over what a text-mode read gives back would not be the digest
+        # the approval recorded over the file on disk for any file whose line endings git rewrote.
+        if proc.returncode == 0 and digests.of_bytes(proc.stdout) == digest:
+            return proc.stdout.decode("utf-8", errors="replace")
+    return None
 
 
 def _plan_with_digest(repo: repo_mod.Repo, digest: str) -> models.Plan | None:
@@ -1413,8 +1563,18 @@ def plan_delta(before: models.Plan, after: models.Plan) -> list[dict[str, str]]:
             elif key not in old:
                 rows.append({"what": what, "id": key, "change": "added"})
             elif old[key] != new[key]:
-                fields = sorted(k for k in old[key].keys() | new[key].keys() if old[key].get(k) != new[key].get(k))
-                rows.append({"what": what, "id": key, "change": "changed: " + ", ".join(fields)})
+                # One row per field, with both values: "changed: command" says where to look and
+                # leaves the reader to remember what it said before (CR-55).
+                for field in sorted(k for k in old[key].keys() | new[key].keys() if old[key].get(k) != new[key].get(k)):
+                    rows.append(
+                        {
+                            "what": what,
+                            "id": key,
+                            "change": f"changed: {field}",
+                            "before": _shown(old[key].get(field)),
+                            "after": _shown(new[key].get(field)),
+                        }
+                    )
 
     compare("claim", {c.id: c.raw for c in before.claims}, {c.id: c.raw for c in after.claims})
     old_tasks = {t.id: {k: v for k, v in t.raw.items() if k != "acceptance"} for t in before.tasks}
@@ -1424,12 +1584,74 @@ def plan_delta(before: models.Plan, after: models.Plan) -> list[dict[str, str]]:
     new_criteria = {f"{t.id}/{_ac_id(e)}": dict(e) for t in after.tasks for e in t.acceptance}
     compare("criterion", old_criteria, new_criteria)
     if before.scope != after.scope:
-        rows.append({"what": "scope", "id": "", "change": "changed"})
+        rows.append(
+            {
+                "what": "scope",
+                "id": "",
+                "change": "changed",
+                "before": _shown(before.raw.get("scope")),
+                "after": _shown(after.raw.get("scope")),
+            }
+        )
     return rows
 
 
+def _shown(value: object) -> str:
+    """One field's value as a person reads it. `(absent)` is not an empty string: a key that was
+    removed and a key set to "" are different edits."""
+    if value is None:
+        return "(absent)"
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
 def render_delta(rows: Sequence[Mapping[str, str]]) -> str:
-    return "\n".join(f"  {row['what']} {row['id']}: {row['change']}".replace("  : ", "  ") for row in rows)
+    """The plan half of a re-approval, terminal-ready: every line already passed `_painted`."""
+    lines: list[str] = []
+    for row in rows:
+        lines.append(_painted(f"  {row['what']} {row['id']}: {row['change']}".replace("  : ", "  "), ""))
+        if "before" in row:
+            lines.append(_painted(f"      - {row['before']}", _RED))
+            lines.append(_painted(f"      + {row['after']}", _GREEN))
+    return "\n".join(lines)
+
+
+def render_documents(rows: Sequence[Mapping[str, str]]) -> str:
+    """The document half of a re-approval, terminal-ready: each path, then its diff in colour."""
+    lines: list[str] = []
+    for row in rows:
+        lines.append(_painted(f"  {row['id']}: {row['change']}", ""))
+        for line in row["diff"].splitlines():
+            if line.startswith(("+++", "---")):
+                continue
+            color = (
+                _GREEN
+                if line.startswith("+")
+                else _RED
+                if line.startswith("-")
+                else _CYAN
+                if line.startswith("@@")
+                else ""
+            )
+            lines.append(_painted(f"    {line}", color))
+    return "\n".join(lines)
+
+
+_RED, _GREEN, _CYAN = "\033[31m", "\033[32m", "\033[36m"
+
+
+def _painted(text: str, color: str) -> str:
+    """`text`, made safe for a terminal, in `color` when stdout is one that can show it.
+
+    The only place an escape sequence enters what `confirm_locally` prints, so the text is made
+    inert first (`common.terminal_text`): what is painted here is somebody else's words, and the
+    colour is the one sequence on the line that is ours.
+    """
+    text = common.terminal_text(text)
+    if not color or not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+    return f"{color}{text}\033[0m"
 
 
 def _ac_id(entry: Mapping[str, object]) -> str:

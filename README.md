@@ -286,13 +286,22 @@ from your tooling, and nothing else.
 
 | Key | What it decides |
 |---|---|
-| `quality_gate` | the single definition of done: `test`, then `check`, then a `review` step, then a `smoke` launch for runnable deliverables (set that one `required: true` once yours runs). The commands are your project's own; each step has its own retry budget, and a step can scope itself to `paths:` |
+| `quality_gate` | the single definition of done: `test`, then `check`, then a `smoke` launch for runnable deliverables (set that one `required: true` once yours runs). The commands are your project's own; each step has its own retry budget, and a step can scope itself to `paths:` |
 | `execution.max_parallel` | how many leaf tasks run at once, isolated in `git worktree`s and merged in ascending task order |
 | `execution.agent_timeout_sec` | `0` — no limit — by default: a clock cannot tell a model that is working from one that is stuck |
 | `execution.command_timeout_sec` | the ceiling on one command step, which *does* have a knowable runtime (1800 by default). A hang past it kills the step and everything it started |
 | `execution.max_cost_usd` | unset by default. Bounds the cycle's *measured* spend — what the adapters reported, the figure `rein events --cost` prints — and stops the loop between batches. Nothing degrades to stay under it |
 | `review_policy.repair_rounds` | how many times the reviewer re-reads after an implementer resolves its findings |
 | `guard.paths` | what a pending gate freezes |
+
+Which reviews run is not in `config.yaml`. `.rein/reviews.yaml` holds the adversarial review before
+the mandate, per drafting stage, and the `review` step that reads each batch of tasks — for
+`correctness`, `simplification`, `security`, or a review of your own with its question written in
+the file. It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone
+to change: `rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews
+screen. Each change is recorded with the document it wrote, and nothing runs on a file that differs
+from that record; `rein reviews restore` writes it back. The comparison acceptance is decided by is
+not in it and cannot be switched off.
 
 **Running unattended.** `rein build`'s exit code is the signal: `0` done, `1` or `2` need a human,
 and `3` is transient — capacity, a signal, another run holding the lock — and safe to retry with
@@ -437,6 +446,7 @@ never overwritten. The orchestration code lives in the installed package, not in
 | `.rein/review.yaml` | the machine review and the human review, digested separately |
 | `.rein/events.ndjson` | the hash-chained audit log. Every launch records what the provider billed, so `rein events --cost` answers where a cycle's tokens went, by role |
 | `.rein/config.yaml` | the deterministic-execution knobs and the single DoD (`quality_gate`) |
+| `.rein/reviews.yaml` | which reviews run — outside the mandate's freeze, changed only by `rein reviews apply` or the dashboard |
 | `.rein/rein.lock` | the document format, the tool version and source, and a content hash per installed file |
 | `.rein/prompts/` | The phase procedures, role definitions and rules modules every agent reads — materialized from the package |
 | `AGENTS.md`, `CLAUDE.md` | the agent-neutral operating rules, and the Claude Code capability mapping that imports them |

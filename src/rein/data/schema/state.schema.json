@@ -378,6 +378,16 @@
                   },
                   "tree": {
                     "$ref": "#/$defs/digest"
+                  },
+                  "paths": {
+                    "description": "For a scope violation, the paths the attempt changed outside the task's scope. Kept as data rather than left in `message`, because what moves the task next depends on them: when every one is inside `guard.scope_additions`, `rein task scope-add` widens the scope without a roll back.",
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 512
+                    }
                   }
                 }
               },

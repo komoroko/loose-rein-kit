@@ -31,7 +31,7 @@ CENTRAL_ONLY = sorted(models.CENTRAL_ONLY_CAPABILITIES)
 def repo(tmp_path: Path) -> repo_mod.Repo:
     """T-001 is mid-attempt: a report or an escalation belongs to the attempt that is running."""
     plan = make_plan(tasks=[make_task("T-001", claim_ids=["C-001"]), make_task("T-002", claim_ids=["C-001"])])
-    seed_repo(tmp_path, plan=plan, state=make_state(tasks={"T-001": "in-progress"}))
+    seed_repo(tmp_path, plan=plan, state=make_state(tasks={"T-001": "in-progress"}), reviews=None)
     return repo_mod.Repo(tmp_path)
 
 
@@ -63,7 +63,9 @@ def test_a_leaf_s_decision_survives_the_worktree(tmp_path: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=canonical, check=True)
     for name, value in (("user.email", "t@e.x"), ("user.name", "T")):
         subprocess.run(["git", "config", name, value], cwd=canonical, check=True)
-    seed_repo(canonical, plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]), state=make_state())
+    seed_repo(
+        canonical, plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]), state=make_state(), reviews=None
+    )
     subprocess.run(["git", "add", "-A"], cwd=canonical, check=True)
     subprocess.run(["git", "commit", "-qm", "base"], cwd=canonical, check=True)
 
@@ -94,7 +96,7 @@ def test_a_leaf_s_decision_survives_the_worktree(tmp_path: Path) -> None:
 def test_a_leaf_with_no_control_plane_refuses_rather_than_losing_the_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    seed_repo(tmp_path)
+    seed_repo(tmp_path, reviews=None)
     leaf = repo_mod.Repo(tmp_path)
     leaf._cache["git_common_dir"] = tmp_path / "elsewhere" / ".git"  # pretend to be a worktree
     monkeypatch.delenv(control_plane.SOCKET_ENV, raising=False)
@@ -306,6 +308,7 @@ def test_a_person_s_decision_is_recorded_and_parks_nothing(
         tmp_path,
         plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
         state=make_state(tasks={"T-001": current}),
+        reviews=None,
     )
     repo = repo_mod.Repo(tmp_path)
     monkeypatch.delenv(control_plane.SOCKET_ENV, raising=False)
@@ -530,6 +533,7 @@ def test_a_status_write_needs_a_running_attempt(tmp_path: Path, current: str) ->
         tmp_path,
         plan=make_plan(tasks=[make_task("T-001", claim_ids=["C-001"])]),
         state=make_state(tasks={"T-001": current}),
+        reviews=None,
     )
     repo = repo_mod.Repo(tmp_path)
     with control_plane.serving(repo) as running:

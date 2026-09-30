@@ -87,12 +87,14 @@ from rein import (
     approve,
     change_request,
     common,
+    digests,
     event_chain,
     human_review,
     lens_cmd,
     models,
     notify,
     review_api,
+    reviews_cmd,
     run_progress,
     security_review,
     status_api,
@@ -472,6 +474,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, {"projects": reg.entries(), "active": reg.active})
         elif self.path == "/api/lenses":
             self._send_lens_grid()
+        elif self.path == "/api/reviews":
+            self._send_reviews()
         elif self.path == "/api/events" or self.path.startswith("/api/events?"):
             self._send_events()
         elif self.path.startswith("/api/gate/") and self.path.endswith("/readiness"):
@@ -730,6 +734,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._request_changes(self._post_body())
             elif self.path == "/api/project/select":
                 self._select_project(self._post_body())
+            elif self.path == "/api/reviews":
+                self._apply_reviews(self._post_body())
             elif self.path.startswith("/api/review/"):
                 self._review_post(self.path[len("/api/review/") :], self._post_body())
             else:
@@ -773,6 +779,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
         logger.warning(f"gate '{gate}' opened from the dashboard ({approval_id})")
         self._send_json(HTTPStatus.OK, {"ok": True, "gate": gate, "approval_id": approval_id})
+
+    def _send_reviews(self) -> None:
+        """Which reviews run, the digest an edit of it is made against, and what the screen may offer."""
+        repo = repo_mod.Repo(self.server.active_root())
+        try:
+            reviews = reviews_cmd.require_bound(repo)
+        except (reviews_cmd.ReviewsError, models.DocumentError, store_mod.StoreError, OSError) as exc:
+            self._send_json(HTTPStatus.OK, {"error": str(exc)})
+            return
+        document = reviews.normalized()
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "document": document,
+                # What `apply` is handed back as `expect`: a change is made against this version.
+                "digest": digests.of(document),
+                "builtin": list(models.BUILTIN_REVIEWS),
+                "adversarial_stages": list(models.ADVERSARIAL_STAGES),
+                # Shown, never offered: acceptance is decided by these, not improved by them.
+                "acceptance": ["actual extraction", "comparison", "security review"],
+            },
+        )
+
+    def _apply_reviews(self, body: dict[str, object]) -> None:
+        """Replace reviews.yaml with the document the human assembled on the screen.
+
+        The write session is the human channel here, as it is for an approval: `rein reviews apply`
+        asks a terminal for the same thing, and both land in one function and one chain event.
+        Applied against the version the screen was served (`expect`), never over a later one.
+        """
+        document, expect = body.get("document"), body.get("expect")
+        if not isinstance(document, dict):
+            raise UiActionError(HTTPStatus.BAD_REQUEST, "`document` must be the whole reviews document")
+        if not isinstance(expect, str):
+            raise UiActionError(HTTPStatus.BAD_REQUEST, "`expect` must be the digest the screen was served")
+        try:
+            changes = reviews_cmd.apply(
+                repo_mod.Repo(self.server.active_root()),
+                document,
+                str(body.get("reason") or ""),
+                actor="ui-session",
+                expect=expect,
+            )
+        except (store_mod.BehindError, store_mod.StaleWriteError) as exc:
+            raise UiActionError(HTTPStatus.CONFLICT, str(exc)) from None
+        except (reviews_cmd.ReviewsError, models.DocumentError, store_mod.StoreError) as exc:
+            raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
+        self._send_json(HTTPStatus.OK, {"ok": True, "changes": changes})
 
     def _request_changes(self, body: dict[str, object]) -> None:
         """Record "not yet, change this" from the pane the human is already reading in.

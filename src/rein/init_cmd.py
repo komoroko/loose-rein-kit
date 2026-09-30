@@ -39,7 +39,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import rein
-from rein import common, cycle, upstream
+from rein import common, cycle, reviews_cmd, upstream
 from rein import data as data_mod
 from rein import install as install_mod
 from rein import lock as lock_mod
@@ -465,6 +465,11 @@ def run_init(
     (root / "docs" / "notes").mkdir(parents=True, exist_ok=True)
 
     repo = repo_mod.Repo(root)
+    # Written through the store, not with the files above: it has to be recorded in the chain,
+    # which is what every reader checks it against (`reviews_cmd.binding_problem`).
+    wrote = reviews_cmd.seed(repo, actor="rein init")
+    left = "" if wrote else "  (already exists — left untouched)"
+    print(f"  {'seed' if wrote else 'skip':<13} .rein/reviews.yaml{left}")
     # 3) the materialized artifacts (prompts/schema/rules) + the lock skeleton they update.
     lock_data = lock_mod.read(repo.lock) or lock_mod.new(rein.__version__, source)
     # Top-level `source` is the field `lock.new` writes and `upstream.origin` reads. An earlier

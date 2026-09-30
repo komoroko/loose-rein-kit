@@ -399,6 +399,20 @@ SANDBOXED_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
+def make_reviews(*, steps: list[dict[str, Any]] | None = None, adversarial: bool = True) -> dict[str, Any]:
+    """A reviews document. No reviewer step by default, as the default `make_config` has none:
+    a test about task consumption has no business launching a reviewer. Tests about reviewing
+    pass `steps` — `[REVIEW_STEP]` is the product's packaged one."""
+    return {
+        "adversarial": dict.fromkeys(models.ADVERSARIAL_STAGES, adversarial),
+        "steps": steps if steps is not None else [],
+    }
+
+
+#: The reviewer step the product ships (`scaffold/rein/reviews.yaml`).
+REVIEW_STEP: dict[str, Any] = {"name": "review", "reviews": ["correctness", "simplification"], "retries": 1}
+
+
 def make_config(
     *,
     project: str = DEMO_PROJECT,
@@ -448,7 +462,6 @@ def make_config(
         or [
             {
                 "name": "test",
-                "kind": "command",
                 "command": ["make", "test"],
                 "executor_profile": "quality",
                 "retries": 2,
@@ -457,7 +470,6 @@ def make_config(
             },
             {
                 "name": "check",
-                "kind": "command",
                 "command": ["make", "check"],
                 "executor_profile": "quality",
                 "retries": 2,
@@ -500,6 +512,7 @@ def seed_repo(
     plan: dict[str, Any] | None | object = _UNSET,
     review: dict[str, Any] | None | object = _UNSET,
     config: dict[str, Any] | None | object = _UNSET,
+    reviews: dict[str, Any] | None | object = _UNSET,
     events: list[models.Event] | None = None,
     settings: str | None = None,
     lock: bool = True,
@@ -521,6 +534,7 @@ def seed_repo(
         "plan": make_plan() if plan is _UNSET else plan,
         "review": make_review() if review is _UNSET else review,
         "config": make_config() if config is _UNSET else config,
+        "reviews": make_reviews() if reviews is _UNSET else reviews,
     }
     # A frozen state must name the digest of the plan sitting beside it. Letting the two drift
     # would make every fixture trip the commit-stage frozen-artifact check for a reason that has
@@ -540,6 +554,20 @@ def seed_repo(
 
     if events:
         event_chain.append_lines(loop / "events.ndjson", events)
+    reviews_doc = documents["reviews"]
+    if isinstance(reviews_doc, dict):
+        # The record every reader checks the file against (`reviews_cmd.binding_problem`), as
+        # `rein init` writes it: a fixture's reviews.yaml is one a person chose.
+        state_doc = documents["state"]
+        cycle_id = str(state_doc.get("cycle_id", DEMO_CYCLE)) if isinstance(state_doc, dict) else DEMO_CYCLE
+        bound = event_chain.make(
+            "reviews_changed",
+            cycle_id,
+            actor="test-fixture",
+            detail={"reason": "fixture", "changes": [], "document": reviews_doc, "digest": digests.of(reviews_doc)},
+        )
+        path = loop / "events.ndjson"
+        event_chain.append_lines(path, [event_chain.link(event_chain.tail_event(path), bound)])
     if lock:
         lock_mod.write(loop / "rein.lock", lock_mod.new("0.1.0", ""))
     if settings is not None:
@@ -553,7 +581,16 @@ def seed_repo(
             dest.write_text(body, encoding="utf-8")
     if git:
         subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        # A commit needs an identity, and CI's runner has none of its own: without this, a test that
+        # commits passes on a developer's machine and fails there.
+        for key, value in (("user.email", "t@e.x"), ("user.name", "T")):
+            subprocess.run(["git", "config", key, value], cwd=root, check=True)
     return root
+
+
+def events_since_seed(root: Path) -> list[models.Event]:
+    """The chain minus the record of reviews.yaml `seed_repo` wrote: what the code under test appended."""
+    return [e for e in event_chain.load(root / ".rein" / "events.ndjson") if e.actor != "test-fixture"]
 
 
 def _validate(name: str, document: dict[str, Any]) -> None:

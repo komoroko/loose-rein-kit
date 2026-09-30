@@ -211,7 +211,7 @@ def test_the_table_is_total_over_the_lifecycle() -> None:
 
 
 def test_status_reports_gates_evidence_and_the_chain(tmp_path: Path) -> None:
-    seed_repo(tmp_path, events=chain("cycle_initialized"))
+    seed_repo(tmp_path, events=chain("cycle_initialized"), reviews=None)
     status = status_api.collect_status(repo_mod.Repo(tmp_path))
 
     assert status["project"] == "demo"
@@ -796,11 +796,13 @@ def _blocked(handoff: dict[str, object]) -> models.State:
     return models.State({**make_state(), "tasks": {"T-001": {"status": "blocked", "handoff": handoff}}})
 
 
-def test_a_scope_violation_is_the_plans_to_widen_not_a_retry() -> None:
-    """The task did what it was asked and the plan drew its boundary too small. Resetting it buys
-    the same refusal; widening an approved scope is a human's decision."""
-    rec = status_api.blocked_recovery(_blocked({"escalation": {"kind": "scope_violation"}}))
-    assert rec is not None and rec.command.startswith("rein revise --to mandate --impacted T-001")
+def test_an_addition_the_config_allows_comes_before_the_reconcile() -> None:
+    """A scope violation leaves the task `needs-revision`, whose row says reconcile and re-approve.
+    When the violation is a path the config already allows, that is one approval too many."""
+    added = status_api.Recommendation(command="rein task scope-add T-001 tests/x.py --reason r", kind="fix", reason="")
+    counts = {"needs-revision": 1}
+    assert status_api.next_action(**_tasks_phase(counts=counts, scoped=added)) is added  # type: ignore[arg-type]
+    assert status_api.next_action(**_tasks_phase(counts=counts)).command == "/tasks"  # type: ignore[arg-type]
 
 
 def test_an_attempt_that_produced_nothing_needs_a_fresh_reset() -> None:

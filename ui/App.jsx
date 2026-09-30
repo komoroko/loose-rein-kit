@@ -13,6 +13,7 @@ import { useNotifier } from "./notify.js";
 import Now from "./Now.jsx";
 import Board from "./Board.jsx";
 import LensView from "./LensView.jsx";
+import ReviewsView from "./ReviewsView.jsx";
 import RecordView from "./RecordView.jsx";
 import ConsoleView from "./ConsoleView.jsx";
 import Gate from "./gate/Gate.jsx";
@@ -75,6 +76,7 @@ function Spine({ status, route }) {
       {item("board", "Board")}
       {item("record", "Record")}
       {item("lenses", "Lenses")}
+      {item("reviews", "Reviews")}
       {item("console", "Console")}
     </nav>
   );
@@ -199,6 +201,7 @@ export default function App() {
           {route.view === "board" && <Board status={status} />}
           {route.view === "record" && <RecordView recordSeq={recordSeq} />}
           {route.view === "lenses" && <LensView recordSeq={recordSeq} />}
+          {route.view === "reviews" && <ReviewsView />}
           {route.view === "console" && <ConsoleView status={status} />}
         </main>
       </div>

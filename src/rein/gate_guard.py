@@ -18,7 +18,7 @@ checkpoint rein installs is a change that never goes through `rein build` at all
 
 Four rules, in order of severity:
 
-1. **Machine-written artifacts are never hand-edited.** `state.yaml`, `review.yaml`,
+1. **Machine-written artifacts are never hand-edited.** `state.yaml`, `review.yaml`, `reviews.yaml`,
    `events.ndjson` are written only inside a Central Store transaction.
    A hand edit produces a state change with no matching audit event — the exact invisible
    mutation the chain exists to make impossible.
@@ -77,6 +77,9 @@ _GIT_TIMEOUT_SEC = 30
 MACHINE_WRITTEN: tuple[str, ...] = (
     ".rein/state.yaml",
     ".rein/review.yaml",
+    # Outside the mandate's freeze, so rule 2 never covers it: this is what keeps an agent from
+    # switching off the review of its own work. `rein reviews apply` and the dashboard write it.
+    ".rein/reviews.yaml",
     ".rein/events.ndjson",
     ".rein/rein.lock",
 )
@@ -648,6 +651,27 @@ def _changed_paths(repo: repo_mod.Repo) -> list[str] | None:
     return paths
 
 
+def _reviews_failures(repo: repo_mod.Repo) -> list[str]:
+    """The commit-stage form of rule 1 for reviews.yaml: it must be what the audit chain records.
+
+    Rule 1's path check only meets an editor's write. reviews.yaml is outside the mandate's freeze,
+    so no receipt covers it either; what does is the `reviews_changed` record every legitimate
+    write appends, and a file that differs from it was written by something that recorded nothing
+    — a shell redirect switching a reviewer off, for one.
+
+    A repository with no chain at all runs no cycle — the template repository, whose `.rein/` is the
+    scaffold it ships — and has nothing to compare against. The build refuses such a file anyway
+    (`reviews_cmd.require_bound`); this stage adds nothing there but a failure on every edit of the
+    scaffold.
+    """
+    from rein import reviews_cmd
+
+    if not repo.events.exists():
+        return []
+    problem = reviews_cmd.binding_problem(repo)
+    return [problem] if problem else []
+
+
 def check_diff(repo: repo_mod.Repo | None = None) -> int:
     """Commit-stage check. Fails (1) on a rule-3 violation, an unaccounted gate flip, or a
     frozen artifact whose content no longer matches its receipt.
@@ -665,6 +689,8 @@ def check_diff(repo: repo_mod.Repo | None = None) -> int:
     ]
     flips = _flip_failures(repo) if ".rein/state.yaml" in paths else []
     flips += _frozen_artifact_failures(repo)
+    if ".rein/reviews.yaml" in paths:
+        flips += _reviews_failures(repo)
     if not denied and not flips:
         return 0
     if denied:

@@ -29,7 +29,7 @@ import logging
 import shutil
 from datetime import date
 
-from rein import common, data, event_chain, models
+from rein import common, data, event_chain, models, reviews_cmd
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -127,6 +127,14 @@ def readiness(repo: repo_mod.Repo, *, abandon: bool = False) -> list[str]:
     events, defects = event_chain.scan(repo.events)
     if defects:
         blockers.append(f"the audit chain has {len(defects)} defect(s); the archive would record an unreadable log")
+    # The next chain starts from this one's record of reviews.yaml (`cycle_initialized`), so the
+    # file has to be that record: carried forward otherwise, an unrecorded change would be laundered.
+    try:
+        reviews_problem = reviews_cmd.binding_problem(repo)
+    except reviews_cmd.ReviewsError as exc:
+        reviews_problem = str(exc)
+    if reviews_problem:
+        blockers.append(reviews_problem)
 
     for gate in state.gate_ids:
         receipt = state.gate_receipt(gate)
@@ -296,6 +304,11 @@ def main(argv: list[str] | None = None) -> int:
     if previous is None:
         logger.error("no .rein/state.yaml")
         return 1
+    # Read before the chain it lives in is archived. `readiness` established the file is this.
+    carried = reviews_cmd.recorded(repo)
+    if carried is None:
+        logger.error("the audit chain records no reviews.yaml to carry into the next cycle")
+        return 1
 
     # The archive is assembled and recorded BEFORE the reset, so the closing event is the last
     # entry of the chain being archived rather than the first of a chain that has no history.
@@ -327,7 +340,12 @@ def main(argv: list[str] | None = None) -> int:
         tx.append(
             "cycle_initialized",
             cycle_id=slug,
-            detail={"previous_cycle": previous.cycle_id, "archived_from": f"{today}-{slug}"},
+            detail={
+                "previous_cycle": previous.cycle_id,
+                "archived_from": f"{today}-{slug}",
+                # The new chain's first record of which reviews run (`reviews_cmd.records`).
+                "reviews": {"document": dict(carried.document), "digest": carried.digest},
+            },
         )
 
     print(f"\narchived {len(moved)} item(s), restored {len(restored)} scaffold(s)")

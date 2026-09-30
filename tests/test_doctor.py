@@ -73,10 +73,10 @@ def test_an_invalid_document_fails_with_its_validation_errors(tmp_path: Path) ->
     assert any(f.level == "FAIL" and "plan.yaml" in f.message for f in results)
 
 
-def test_a_healthy_repo_validates_all_four_documents(tmp_path: Path) -> None:
+def test_a_healthy_repo_validates_all_five_documents(tmp_path: Path) -> None:
     repo = healthy(tmp_path)
     _, loaded = doctor.check_documents(repo)
-    assert set(loaded) == {"config", "state", "plan", "review"}
+    assert set(loaded) == {"config", "state", "plan", "review", "reviews"}
 
 
 def test_the_lock_format_is_reported(tmp_path: Path) -> None:
@@ -1290,7 +1290,6 @@ def _gate(*steps: dict[str, object]) -> models.Config:
 def _cmd(name: str, command: list[str], *, required: bool = True, runs_tests: bool = False) -> dict[str, object]:
     return {
         "name": name,
-        "kind": "command",
         "command": command,
         "executor_profile": "quality",
         "retries": 1,
@@ -1332,13 +1331,6 @@ def test_a_step_that_is_not_required_is_reported_as_skippable() -> None:
 
 def test_a_gate_that_establishes_something_passes() -> None:
     results = doctor.check_quality_gate(_gate(_cmd("test", ["python", "-m", "pytest"])))
-
-    assert [f.level for f in results] == ["PASS"]
-
-
-def test_an_agent_step_is_not_judged_by_its_command() -> None:
-    review = {"name": "review", "kind": "agent", "agent_role": "code_reviewer", "retries": 1, "required": True}
-    results = doctor.check_quality_gate(_gate(review))
 
     assert [f.level for f in results] == ["PASS"]
 

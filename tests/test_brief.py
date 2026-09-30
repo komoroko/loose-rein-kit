@@ -282,7 +282,7 @@ def _operations_for(*steps: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _step(name: str, command: list[str], *, required: bool = False) -> dict[str, Any]:
-    return {"name": name, "kind": "command", "command": command, "executor_profile": "quality", "required": required}
+    return {"name": name, "command": command, "executor_profile": "quality", "required": required}
 
 
 def test_operations_reports_the_smoke_command_and_whether_it_is_required() -> None:

@@ -12,7 +12,7 @@ function lineClass(line) {
 
 // `.dl` spans are display:block, so the lines are emitted without separators — a "\n" between them
 // would double the line height.
-function Patch({ text }) {
+export function Patch({ text }) {
   return (
     <pre className="patch">
       {(text || "").split("\n").map((line, i) => (

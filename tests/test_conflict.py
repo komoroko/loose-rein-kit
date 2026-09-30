@@ -76,7 +76,7 @@ def colliding(tmp_path: Path) -> Callable[..., dict[str, Any]]:
             ]
         )
         state = make_state(tasks={"T-001": "done", "T-002": "done"})
-        seed_repo(root, plan=plan, state=state, config=make_config())
+        seed_repo(root, plan=plan, state=state, config=make_config(), reviews=None)
         return {"root": root, "cwd": str(root), "repo": repo_mod.Repo(root), "path": path}
 
     return build

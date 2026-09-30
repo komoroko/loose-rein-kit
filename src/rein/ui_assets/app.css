@@ -442,6 +442,12 @@ tr.ev-closed td { color: var(--ink-3); }
 .rv-read { display: inline-block; width: 1.1rem; color: var(--ink-3); }
 .rv-item.active .rv-read, .rv-item .rv-read.settled { color: var(--ok); }
 .rv-item .rv-read.open { color: var(--brass); }
+/* changed since the last approval: the one mark on the list that says "read this again" */
+.rv-changed { color: var(--brass); font-weight: 700; }
+.changed { margin-bottom: 1rem; }
+/* a field's value before and after, in the approval panel: struck and plain, not only coloured */
+.confirm .was { color: var(--blk-bd); text-decoration: line-through; }
+.confirm .now { color: var(--done-bd); }
 .rv-body { min-width: 0; }
 @media (min-width: 981px) { .rv-body { border-left: 1px solid var(--rule); padding-left: 1.4rem; } }
 
@@ -505,9 +511,13 @@ pre.patch {
 .dl.hunk { color: #8ab8ff; }
 .dl.file { color: #dda63f; font-weight: 700; }
 
-/* the approval footer: the page's last word, and it sticks */
+/* the approval footer: the page's last word, and it sticks. Sticky on #rvFoot, whose parent also
+   holds the reading pane, so it has the pane's height to travel in. It used to be on the bar, whose
+   parent held nothing else — a sticky with no room to move, left at the foot of a long document. An
+   open confirmation sits above the bar, inside the same footer, and scrolls on its own. */
+#rvFoot { position: sticky; bottom: 0; z-index: 4; background: var(--paper); }
+#rvFoot .confirm { max-height: 60vh; overflow: auto; }
 .approvebar {
-  position: sticky; bottom: 0; z-index: 4;
   display: flex; align-items: center; gap: .7rem; flex-wrap: wrap;
   margin-top: 1.2rem; padding: .7rem 0;
   background: var(--paper); border-top: 1px solid var(--rule-2);
@@ -570,3 +580,17 @@ table.lens-grid td.mono { font-size: .8rem; }
 .lens-key > div { display: contents; }
 .lens-key dt { font-family: var(--mono); font-size: .78rem; }
 .lens-key dd { margin: 0; }
+
+/* ---- reviews: a lane per stage the cycle passes through ---------------------- */
+.lanes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 2fr) minmax(0, 1fr); gap: .8rem; margin: 1rem 0; align-items: start; }
+@media (max-width: 1100px) { .lanes { grid-template-columns: 1fr; } }
+.lane { border-top: 2px solid var(--rule-2); padding-top: .4rem; }
+.lane h3 { margin: 0 0 .5rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); }
+.rcard { display: block; border: 1px solid var(--rule-2); border-radius: 2px; padding: .5rem .6rem; margin-bottom: .5rem; background: var(--sheet); }
+.rcard.fixed { color: var(--ink-3); border-style: dashed; }
+.rcard-head { display: flex; align-items: center; gap: .3rem; }
+.rcard-row { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-top: .4rem; }
+.rcard-row input[type="number"] { width: 3.2rem; }
+.rcard select { max-width: 100%; }
+.chips { list-style: none; padding: 0; margin: .4rem 0 0; display: flex; flex-wrap: wrap; gap: .3rem; }
+.chip { border: 1px solid var(--ink-3); border-radius: 999px; padding: 0 .3rem; font-size: .78rem; }

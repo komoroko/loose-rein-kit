@@ -153,8 +153,13 @@ def implementer_prompt(
     return prompt
 
 
-def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: bool = False, batch: bool = False) -> str:
+def _disciplines_note(
+    disciplines: Mapping[str, str] | None, asked: Sequence[str], *, at_the_join: bool = False, batch: bool = False
+) -> str:
     """Offer the host's own review disciplines — with what each one must not do here.
+
+    Only the ones for the reviews this step asks (`reviews.yaml`): a step that does not read for
+    simplification is not pointed at `/simplify` either.
 
     The prompts state every question in full whether or not this returns anything, so a host
     without these asks exactly the same thing. What this adds is the host's own reading of it,
@@ -162,12 +167,13 @@ def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: boo
     fixes, and a reviewer that edits is the arrangement this loop was changed to remove; both
     report where they choose, and the only answer this step reads is the findings file.
     """
-    offered = dict(disciplines or {})
+    offered = {name: command for name, command in (disciplines or {}).items() if name in asked}
     correctness = offered.get(adapters.CORRECTNESS, "")
     simplification = offered.get(adapters.SIMPLIFICATION, "")
-    if not correctness and not simplification:
+    security = offered.get(adapters.SECURITY, "")
+    if not offered:
         return ""
-    named = " and ".join(f"`{c}`" for c in (correctness, simplification) if c)
+    named = ", ".join(f"`{c}`" for c in (correctness, simplification, security) if c)
     where = (
         "They read the branch you name, and yours is the work branch, which holds none of these "
         "changes yet: point them at each task's branch in turn"
@@ -199,12 +205,45 @@ def _disciplines_note(disciplines: Mapping[str, str] | None, *, at_the_join: boo
             "and reporting it again spends an implementer round on a settled question.\n"
         )
     note += (
-        "- Report through neither of them. Whatever they produce, the answer this step reads is the "
+        "- Report through none of them. Whatever they produce, the answer this step reads is the "
         "findings file below — do not print a report and do not use `ReportFindings`.\n"
         "- A discipline that is missing, disabled or renamed on this host is not a reason to stop: "
         "ask the questions above yourself.\n"
     )
     return note
+
+
+#: What each packaged review asks of one task's change. A custom review asks the text of the file
+#: `reviews.yaml` names for it.
+_TASK_ASKS: dict[str, str] = {
+    "correctness": "**Correctness**: bugs — a wrong result, a broken contract, an unhandled failure path, an "
+    "edge case its acceptance criteria name. A requirements/design defect is a finding like any other, not "
+    "something to work around.",
+    "simplification": "**Simplification**: reuse of existing code, needless complexity, and anything its "
+    "acceptance criteria do not require — speculative generality, unused knobs/hooks (YAGNI).",
+    "security": "**Security**: input reaching a query, a command, a path or a deserializer; a missing "
+    "authorization check; a secret in code, in a log or in an error message.",
+}
+
+#: The same reviews asked of a merged tree: what only the join can show.
+_JOIN_ASKS: dict[str, str] = {
+    "correctness": "**Correctness across tasks**: a contract two tasks now read differently, an invariant one "
+    "task relies on and another removed, an order or lifetime that only holds when one of them is absent, "
+    "shared state two tasks both write. The suite that just passed here is the union of the leaves' suites "
+    "and no test in it was written with this merge in view, so a green says nothing about the interaction — "
+    "that is the gap you are here for.",
+    "simplification": "**Shape**: duplication between what two tasks added, one responsibility now living in "
+    "two places, an abstraction one task introduced that the next worked around, anything no ticket's "
+    "acceptance criteria require.",
+    "security": "**Security across tasks**: a check one task added that another path now bypasses, a value "
+    "one task treats as trusted that another fills from input.",
+}
+
+
+def review_asks(reviews: Sequence[str], questions: Mapping[str, str], *, at_the_join: bool = False) -> str:
+    """One bullet per review this step reads for, in the order `reviews.yaml` lists them."""
+    table = _JOIN_ASKS if at_the_join else _TASK_ASKS
+    return "".join(f"- {table[name]}\n" if name in table else f"- **{name}**: {questions[name]}\n" for name in reviews)
 
 
 def lens_note(applied: Sequence[str], proposed: Sequence[str]) -> str:
@@ -249,6 +288,8 @@ def batch_review_prompt(
     *,
     gate_cmds: Sequence[str],
     findings_path: str,
+    reviews: Sequence[str],
+    questions: Mapping[str, str],
     disciplines: Mapping[str, str] | None = None,
     lenses_applied: Sequence[str] = (),
     lenses_proposed: Sequence[str] = (),
@@ -271,9 +312,7 @@ def batch_review_prompt(
     joint = (
         "\n**Then read them as one change**, because they are about to be merged into one tree and no "
         "test in any of them was written with the others in view:\n"
-        "- **Correctness across tasks**: a contract two tasks now read differently, an invariant one "
-        "relies on and another removes, shared state two of them write.\n"
-        "- **Shape**: duplication between what two tasks added, one responsibility now in two places.\n"
+        f"{review_asks(reviews, questions, at_the_join=True)}"
         "A finding about how two tasks meet belongs to the task that has to change for it to hold.\n"
         if len(subjects) > 1
         else ""
@@ -290,11 +329,9 @@ def batch_review_prompt(
         "`prose`: a criterion carrying a `command` or an `artifact` was already established by the "
         "caller, and a prose one is judged by nobody between you and acceptance.\n"
         "\n"
-        "For each task, review its change for correctness bugs, then for simplification: reuse existing "
-        "code, needless complexity, and anything its acceptance criteria do not require — speculative "
-        "generality, unused knobs/hooks (YAGNI). A requirements/design defect is a finding like any "
-        "other, not something to work around.\n"
-        f"{_disciplines_note(disciplines, batch=True)}"
+        "For each task, review its change for:\n"
+        f"{review_asks(reviews, questions)}"
+        f"{_disciplines_note(disciplines, reviews, batch=True)}"
         f"{lens_note(lenses_applied, lenses_proposed)}"
         "\n"
         "**Then read the tests as evidence, not as code that passes.** The caller re-establishes the "
@@ -466,6 +503,8 @@ def integration_review_prompt(
     gate_cmds: Sequence[str],
     diff_cmd: str,
     findings_path: str,
+    reviews: Sequence[str],
+    questions: Mapping[str, str],
     disciplines: Mapping[str, str] | None = None,
     lenses_applied: Sequence[str] = (),
     lenses_proposed: Sequence[str] = (),
@@ -496,16 +535,9 @@ def integration_review_prompt(
         f"These tasks were reviewed before the merge; this is the first time anyone has read the tree "
         f"the merge produced. The combined change is `{diff_cmd}`.\n"
         "\n"
-        "Review it for what only the join can show, and for both halves of that:\n"
-        "- **Correctness across tasks**: a contract two tasks now read differently, an invariant one "
-        "task relies on and another removed, an order or lifetime that only holds when one of them is "
-        "absent, shared state two tasks both write. The suite that just passed here is the union of "
-        "the leaves' suites and no test in it was written with this merge in view, so a green says "
-        "nothing about the interaction — that is the gap you are here for.\n"
-        "- **Shape**: duplication between what two tasks added, one responsibility now living in two "
-        "places, an abstraction one task introduced that the next worked around, anything no ticket's "
-        "acceptance criteria require.\n"
-        f"{_disciplines_note(disciplines, at_the_join=True)}"
+        "Review it for what only the join can show:\n"
+        f"{review_asks(reviews, questions, at_the_join=True)}"
+        f"{_disciplines_note(disciplines, reviews, at_the_join=True)}"
         f"{lens_note(lenses_applied, lenses_proposed)}"
         "\n"
         "Do not re-review either task against its own ticket — that already happened, before the "

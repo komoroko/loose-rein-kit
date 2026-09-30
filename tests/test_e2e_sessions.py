@@ -23,7 +23,6 @@ WORK_BRANCH = "build/demo"
 GATE = [
     {
         "name": "test",
-        "kind": "command",
         "command": [sys.executable, "-c", "pass"],
         "executor_profile": "quality",
         "retries": 1,
