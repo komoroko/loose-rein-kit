@@ -367,7 +367,7 @@ def make_review(
         "actual_extraction": [],
         "claims": [],
         "extra_behaviors": extra_behaviors or [],
-        "security": {"findings": security_findings or []},
+        "security": {"read": True, "findings": security_findings or []},
     }
     if unsupported_files:
         machine["coverage"]["unsupported_files"] = unsupported_files
@@ -399,18 +399,24 @@ SANDBOXED_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def make_reviews(*, steps: list[dict[str, Any]] | None = None, adversarial: bool = True) -> dict[str, Any]:
+def make_reviews(
+    *, steps: list[dict[str, Any]] | None = None, adversarial: bool = True, security: bool = True
+) -> dict[str, Any]:
     """A reviews document. No reviewer step by default, as the default `make_config` has none:
     a test about task consumption has no business launching a reviewer. Tests about reviewing
-    pass `steps` — `[REVIEW_STEP]` is the product's packaged one."""
+    pass `steps` — `[REVIEW_STEP]` is the product's packaged one.
+
+    The security reading at acceptance is on by default, unlike the packaged document: the tests
+    of the grounded review are about what that reading does. A test about it being off says so."""
     return {
         "adversarial": dict.fromkeys(models.ADVERSARIAL_STAGES, adversarial),
         "steps": steps if steps is not None else [],
+        "acceptance": {"security": security},
     }
 
 
 #: The reviewer step the product ships (`scaffold/rein/reviews.yaml`).
-REVIEW_STEP: dict[str, Any] = {"name": "review", "reviews": ["correctness", "simplification"], "retries": 1}
+REVIEW_STEP: dict[str, Any] = {"name": "review", "reviews": ["adversarial"], "retries": 1}
 
 
 def make_config(

@@ -1350,6 +1350,8 @@ def test_a_gate_four_repair_is_committed_onto_the_slice_that_introduced_the_code
 
     monkeypatch.setattr(loop, "_launch", implement)
     monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "")
+    # Where the repair lands is the subject here; whether it proves itself is `test_build_loop`'s.
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("reproduced", "stub"))
 
     found = findings.Attribution("SEC-001", "security", "T-001", "src/T-001.py")
     owning = next(t for t in dag.join(bundle_plan(repo), None).tasks if t.id == "T-001")

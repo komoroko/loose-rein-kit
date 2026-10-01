@@ -153,7 +153,8 @@ Four documents, distinct roles — do not conflate them:
   *separately*. Regenerating the machine review resets the human review; a human answer never
   makes the machine review stale.
 - **`.rein/reviews.yaml`** — which reviews run: the adversarial review before the mandate, per
-  stage, and the reviewer steps that read each batch. Outside the mandate's freeze, and **a human's
+  stage, the reviewer steps that read each batch, and whether acceptance takes a security reading
+  (`acceptance.security`). Outside the mandate's freeze, and **a human's
   to change, never yours**: `rein reviews apply` at their terminal or the dashboard writes it, with
   the reason and the whole document in the chain, and nothing runs on a file that differs from that
   record. Read it with `rein reviews show`; never edit it, and never run `apply` for them —
@@ -244,11 +245,21 @@ the plan.
 
 **Whoever judges does not repair — and both halves are the loop's.** The reviewer is launched
 read-only and writes findings; an implementer resolves them and the reviewer looks again. That
-holds over the whole change as well as inside a task: the build reads the change, repairs every blocking
-finding a task's declared scope owns, and reads it again from cold, up to
-`review_policy.repair_rounds`. No gate moves — a repair inside an approved scope changes no
-requirement, no claim and no plan, and `rein guard` makes that mechanical rather than promised.
-Whether a finding closed is decided by the next reading, never by the fixer's account of itself.
+holds over the whole change as well as inside a task: the build reads the change, repairs every open
+finding a task's declared scope owns whatever its severity, and reads it again from cold, up to
+`review_policy.repair_rounds`. No gate moves — a repair changes no requirement, no claim and no
+plan, and `rein guard` makes that mechanical rather than promised. Whether a finding closed is
+decided by the next reading, never by the fixer's account of itself.
+
+**A repair is made at the cause, and lands only with a test that fails without it.** The task's
+scope is where a finding was charged, not a boundary: a repair may write into another task's paths,
+and while it runs (`state.repair_grant`, honoured only while `rein build` holds its run lock) past
+the mandate's `include` — never into its `exclude`. Every path it writes past `include` is put to
+the human at acceptance as a card (`state.scope_expansions`): adopted, it is inside the mandate
+from then on; refused, the next `rein build` takes it back out and no repair may write there
+again. The run applies only the repair's test changes to the commit before it and runs the tests
+there; a repair with no test, or whose tests pass there, is undone and the reason goes to the next
+round (`build_loop._verify_repair`).
 
 **A finding is routed by what repairing it would change, not by who found it** (`repair.route`).
 Three classes: **code** — one task's scope owns it and no claim, criterion or requirement moves —
@@ -322,7 +333,9 @@ human decides *whether*; the loop does the work.
 ## Security gate
 
 **gitleaks** at commit stage; a **structured security review** feeds the grounded review before
-acceptance. What "stale" means there is measured on content, over **two subjects**: the *product*, and
+acceptance when `.rein/reviews.yaml` has `acceptance.security` on. Off, the review records that no
+security reading was taken, and a blocking finding an earlier reading recorded still stands until
+its code is gone or a human disputes it. What "stale" means there is measured on content, over **two subjects**: the *product*, and
 the **host surfaces** `rein install` wrote — the settings, hooks, MCP servers and instruction files
 a CLI reads before it reads its prompt. The security reviewer is sent a checkout of the head with
 those in it and told that a pre-authorized command or a hook added there is a finding, while the

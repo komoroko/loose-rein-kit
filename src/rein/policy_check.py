@@ -45,6 +45,10 @@ _BANNED_KEYS: frozenset[str] = frozenset(
         "schema_version",
         "gates.enforce_hook",
         "build.headless.cmd",
+        # A `config.yaml` key. Whether acceptance takes a security reading is `reviews.yaml`'s
+        # `acceptance.security`, which only a person writes and every reader checks against the
+        # chain's record (`reviews_cmd`); off, a blocking finding still stands until its code is
+        # gone. What stays banned is switching it off from the document the agent drafts.
         "post_build.security_review",
         "skip_grounding",
         # Named bypasses the release refuses to have. No code reads them and the config schema is

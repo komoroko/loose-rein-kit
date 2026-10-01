@@ -208,6 +208,8 @@ def test_a_stage_schema_is_derived_from_the_one_that_refuses_the_answer() -> Non
     # made to invent it — that is the contract field this release removed, arriving by the back door.
     assert "blocking" in holds["required"]
     assert asked["required"] == [name for name in holds["required"] if name != "blocking"]
+    # And `read`, which the pipeline writes: a reviewer that answers was, by answering, launched.
+    assert "read" in declared["required"] and "read" not in schema["properties"]
     assert "machine" not in schema["$defs"], "28 KB of the 35, and nothing a stage answers refs it"
     assert review_policy.stage_output_schema("code_reviewer") == {}, "a role with no declared shape"
 

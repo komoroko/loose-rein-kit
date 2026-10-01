@@ -257,6 +257,21 @@ def _review_blockers(
     # (`review_reading.freshness`).
     if reason := review_reading.freshness(repo, review, state).reason:
         blockers.append(reason)
+    # Not the code but what was read of it. A review taken without a security reading does not
+    # answer for a repository that now asks for one, and one taken with it holds findings over an
+    # acceptance whose person switched that reading off. Read from the file only when it is what
+    # the chain records, as every reader of it does.
+    try:
+        security = reviews_cmd.require_bound(repo).acceptance_security
+    except reviews_cmd.ReviewsError as exc:
+        blockers.append(str(exc))
+    else:
+        if review.security_read != security:
+            blockers.append(
+                f"the machine review was generated {'with' if review.security_read else 'without'} a security "
+                f"reading, and reviews.yaml now has acceptance.security {'on' if security else 'off'} — "
+                "re-run `rein review generate`"
+            )
     if review.human_status != "frozen":
         blockers.append(
             f"the human review is '{review.human_status}', not 'frozen' — "
@@ -413,17 +428,40 @@ def _boundary_blockers(
             "Fetch the commits the review was taken on, then ask again."
         ]
     include, exclude = plan.scope
+    expansions = {path: str(entry.get("status")) for path, entry in state.scope_expansions.items()}
+    # An `adopted` in state.yaml counts only when the chain says a person adopted that path: the
+    # file is machine-written, and a status nobody's answer stands behind is a widening of the
+    # mandate nobody made.
+    adopted = adoptions(event_chain.scan(repo.events)[0])
+    expansions = {path: status for path, status in expansions.items() if status != "adopted" or path in adopted}
     outside = [
         (path, why)
         for path in sorted({entry for entry in out.split("\0") if entry})
-        if (why := gate_guard.outside_the_mandate(path, include=include, exclude=exclude, guarded=settings.paths))
+        if (
+            why := gate_guard.outside_the_mandate(
+                path, include=include, exclude=exclude, guarded=settings.paths, expansions=expansions, granted=False
+            )
+        )
     ]
     if not outside:
         return []
+    blockers: list[str] = []
+    proposed = [path for path, _ in outside if expansions.get(path) == "proposed"]
+    if proposed:
+        blockers.append(
+            f"{len(proposed)} path(s) a repair wrote outside the approved mandate's scope wait for your "
+            f"decision: {', '.join(proposed[:_NAMED_PATHS])}"
+            + (f" (and {len(proposed) - _NAMED_PATHS} more)" if len(proposed) > _NAMED_PATHS else "")
+            + ". The repair put the fix where the defect came from; answer each one's card in the review "
+            "— adopt it into the scope, or refuse it and `rein build` takes it back out."
+        )
+    outside = [(path, why) for path, why in outside if path not in proposed]
+    if not outside:
+        return blockers
     named = ", ".join(path for path, _ in outside[:_NAMED_PATHS])
     more = f" (and {len(outside) - _NAMED_PATHS} more)" if len(outside) > _NAMED_PATHS else ""
     reasons = sorted({why for _, why in outside})
-    return [
+    return blockers + [
         f"{len(outside)} path(s) in the change this review read are {' and '.join(reasons)}: "
         f"{named}{more}. The mandate is what authorizes a change to the product, and these were "
         "not covered by the one that was approved — a change that never went through `rein build` "
@@ -433,6 +471,19 @@ def _boundary_blockers(
         f"`cycle.base_commit` that is wrong: the reviewers read {base[:12]}..{head[:12]} as this "
         "cycle's change and were shown that code too."
     ]
+
+
+def adoptions(events: Sequence[models.Event]) -> set[str]:
+    """The paths a person adopted into the mandate's scope at acceptance, read off the chain.
+
+    `adopt_scope` is recorded with the path it widens to (`ui._record_scope_decision`); the status
+    in `state.yaml` is the convenience copy every path check reads, and this is what it answers to.
+    """
+    return {
+        str(event.detail.get("path", ""))
+        for event in events
+        if event.event == "disposition_recorded" and event.detail.get("action") == "adopt_scope"
+    } - {""}
 
 
 def _baseline_blockers(state: models.State, gate: str) -> list[str]:

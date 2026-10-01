@@ -605,7 +605,7 @@ def residual_findings(state: models.State | None) -> list[dict[str, Any]]:
     """Per-task review findings that were never resolved, carried to the human at acceptance.
 
     The per-task reviewer's `must_fix` findings are resolved inside the build loop or the task
-    blocks; its `consider` findings stop nothing by design and were written to the task's handoff —
+    blocks; its `question` findings stop nothing by design and were written to the task's handoff —
     where, until this existed, they were read by nobody. Both `build.md` and the reviewer's own
     prompt told the reviewer those findings would reach a human at acceptance, and the state schema
     says so too. This is the code that makes that true.
@@ -637,7 +637,8 @@ def residual_findings(state: models.State | None) -> list[dict[str, Any]]:
                 continue
             row: dict[str, Any] = {
                 "task_id": task_id,
-                "severity": str(finding.get("severity", "consider")),
+                # A finding with no severity is shown to the human: that is the answerable direction.
+                "severity": str(finding.get("severity", "question")),
                 "statement": str(finding["statement"]),
             }
             if finding.get("anchor"):

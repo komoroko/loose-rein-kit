@@ -731,3 +731,38 @@ def test_integrity_is_derived_from_the_committed_blobs(committed_repo: repo_mod.
         independence=_DISTINCT,
     )
     assert moved.claims[0]["integrity"]["status"] == "failed"
+
+
+def test_switching_the_security_reading_off_does_not_clear_a_block(committed_repo: repo_mod.Repo) -> None:
+    """With `acceptance.security` off no reviewer is launched, so nothing re-states a finding and
+    nothing drops one. A blocking finding an earlier reading recorded is carried as it stood while
+    its code is there, and closes the way it always could once the code is gone."""
+    head = committed_repo._git("rev-parse", "HEAD").strip()
+    blob = committed_repo._git("rev-parse", f"{head}:src/app.py").strip()
+    prior = _prior(
+        "SEC-001",
+        blocking=True,
+        status="open",
+        code_anchors=[{"path": "src/app.py", "blob": f"git-blob:{blob}", "start_line": 2, "end_line": 3}],
+    )
+
+    standing = security_review.carry_forward([prior], repo=committed_repo, commit=head)
+    assert standing.findings == (prior,)
+    assert [f["id"] for f in standing.blocking] == ["SEC-001"]
+    assert standing.resolved == ()
+
+    (committed_repo.root / "src" / "app.py").write_text("a\nd\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(committed_repo.root), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(committed_repo.root), "commit", "-qm", "fix"], check=True, capture_output=True)
+    fixed = committed_repo._git("rev-parse", "HEAD").strip()
+
+    closed = security_review.carry_forward([prior], repo=committed_repo, commit=fixed)
+    assert closed.findings[0]["status"] == "resolved" and closed.blocking == ()
+    assert [f["id"] for f in closed.resolved] == ["SEC-001"]
+
+
+def test_an_unanchored_finding_stands_with_the_reading_off() -> None:
+    """Nothing to re-check against the tree, so only a human's dispute closes it, as before."""
+    prior = _prior("SEC-001", blocking=True, status="open")
+    result = security_review.carry_forward([prior], repo=repo_mod.Repo(Path("/x")), commit="HEAD")
+    assert [f["id"] for f in result.blocking] == ["SEC-001"]

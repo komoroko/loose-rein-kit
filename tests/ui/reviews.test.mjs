@@ -1,5 +1,6 @@
 // The reviews screen (CR-51): lanes along the cycle, cards edited in a draft, applied in one write
-// with a reason — and the comparison acceptance is decided by, shown and never offered.
+// with a reason — and the comparison acceptance is decided by, shown and never offered, beside the
+// security reading, which is switched like the adversarial review.
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -8,14 +9,15 @@ import { baseRoutes, boot } from "./_harness.mjs";
 const DOCUMENT = {
   adversarial: { requirements: true, design: true, tasks: true },
   steps: [{ name: "review", reviews: ["correctness", "simplification"], retries: 1, stage: "both" }],
+  acceptance: { security: false },
 };
 
 const PAYLOAD = {
   document: DOCUMENT,
   digest: "sha256:served",
-  builtin: ["correctness", "simplification", "security"],
+  builtin: ["adversarial", "correctness", "simplification", "security"],
   adversarial_stages: ["requirements", "design", "tasks"],
-  acceptance: ["actual extraction", "comparison", "security review"],
+  acceptance: ["actual extraction", "comparison"],
 };
 
 async function reviewsScreen({ readOnly = false } = {}) {
@@ -88,7 +90,26 @@ test("comparison is shown in the acceptance lane and offers nothing to remove it
   const { app } = await reviewsScreen();
   const lane = app.window.document.querySelector('.lane[data-lane="acceptance"]');
   assert.match(lane.textContent, /comparison/);
-  assert.equal(lane.querySelectorAll("button, input, select").length, 0);
+  for (const card of lane.querySelectorAll(".rcard.fixed")) {
+    assert.equal(card.querySelectorAll("button, input, select").length, 0);
+  }
+  // The one control in the lane is the security reading's.
+  const controls = lane.querySelectorAll("button, input, select");
+  assert.equal(controls.length, 1);
+  assert.match(controls[0].closest("label").textContent, /security review/);
+});
+
+test("switching the security reading on is applied as the whole document, with the reason", async () => {
+  const { app, posts } = await reviewsScreen();
+  const doc = app.window.document;
+  assert.equal(doc.querySelector('.lane[data-lane="acceptance"] input[type="checkbox"]').checked, false);
+  assert.match(doc.querySelector('.lane[data-lane="acceptance"]').textContent, /no security reading was taken/);
+  await app.click('.lane[data-lane="acceptance"] input[type="checkbox"]');
+  await app.type('input[aria-label="reason"]', "this change touches auth");
+  await app.click({ text: "Apply" });
+  assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0].document.acceptance, { security: true });
+  assert.equal(posts[0].reason, "this change touches auth");
 });
 
 test("a read-only page shows the lanes and changes nothing", async () => {

@@ -982,7 +982,7 @@ def _generated_review_with_card() -> dict[str, object]:
             "residual_findings": [
                 {
                     "task_id": "T-001",
-                    "severity": "consider",
+                    "severity": "question",
                     "statement": "the retry key could be threaded through instead of rebuilt",
                     "observed_commit": "1" * 40,
                 }
@@ -1059,14 +1059,14 @@ def test_the_orient_stage_carries_the_brief_and_the_unresolved_findings(
 ) -> None:
     """The stage that exists so the decision stage can ask for less.
 
-    The residual findings are the ones the per-task reviewer marked `consider`: they stop nothing,
+    The residual findings are the ones the per-task reviewer marked `question`: they stop nothing,
     they were written to the task handoff, and until this stage existed nothing ever read them back.
     """
     stage = json.loads(_request(review_server, "GET", "/api/review/stage/orient")[1])
     assert stage["brief"]["delivered"][0]["task_id"] == "T-001"
     assert stage["brief"]["execution_boundary"][0]["network"] == "none"
     finding = stage["residual_findings"][0]
-    assert finding["task_id"] == "T-001" and finding["severity"] == "consider"
+    assert finding["task_id"] == "T-001" and finding["severity"] == "question"
     # The finding is stamped with the tree it was observed against, not the reviewed HEAD.
     assert finding["observed_commit"] == "1" * 40
 
@@ -1398,8 +1398,11 @@ def test_the_reviews_screen_reads_the_document_and_what_it_may_offer(server: ui.
     payload = json.loads(body)
     assert status == 200
     assert payload["document"]["adversarial"] == {"requirements": True, "design": True, "tasks": True}
-    assert payload["builtin"] == ["correctness", "simplification", "security"]
+    assert payload["builtin"] == ["adversarial", "correctness", "simplification", "security"]
     assert "comparison" in payload["acceptance"]
+    # The security reading is the document's to switch, not a fixed card.
+    assert "security review" not in payload["acceptance"]
+    assert payload["document"]["acceptance"] == {"security": True}
 
 
 def _served_digest(server: ui.DashboardServer) -> str:
@@ -1411,7 +1414,11 @@ def _served_digest(server: ui.DashboardServer) -> str:
 def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.DashboardServer, repo: Path) -> None:
     from rein import repo as repo_mod
 
-    document = {"adversarial": {"requirements": True, "design": False, "tasks": True}, "steps": []}
+    document = {
+        "adversarial": {"requirements": True, "design": False, "tasks": True},
+        "steps": [],
+        "acceptance": {"security": True},
+    }
     body: dict[str, object] = {"document": document, "reason": "a one-line fix", "expect": _served_digest(server)}
     status, raw = write(server, "/api/reviews", body)
     assert status == 200, raw
@@ -1423,9 +1430,17 @@ def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.Dashb
 def test_a_reviews_change_made_on_a_stale_screen_is_a_conflict(server: ui.DashboardServer) -> None:
     """Two screens, or a screen and a terminal: the second write used to undo the first in silence."""
     served = _served_digest(server)
-    first = {"adversarial": {"requirements": True, "design": False, "tasks": True}, "steps": []}
+    first = {
+        "adversarial": {"requirements": True, "design": False, "tasks": True},
+        "steps": [],
+        "acceptance": {"security": True},
+    }
     assert write(server, "/api/reviews", {"document": first, "reason": "one", "expect": served})[0] == 200
-    second = {"adversarial": {"requirements": False, "design": True, "tasks": True}, "steps": []}
+    second = {
+        "adversarial": {"requirements": False, "design": True, "tasks": True},
+        "steps": [],
+        "acceptance": {"security": True},
+    }
     status, raw = write(server, "/api/reviews", {"document": second, "reason": "two", "expect": served})
     assert status == 409, raw
     assert json.loads(_request(server, "GET", "/api/reviews")[1])["document"]["adversarial"]["design"] is False
@@ -1447,3 +1462,87 @@ def test_a_reviews_change_that_asks_for_comparison_off_is_refused(server: ui.Das
         server, "/api/reviews", {"document": document, "reason": "x", "expect": _served_digest(server)}
     )
     assert status == 400 and "acceptance" in json.loads(body)["error"]
+
+
+# --- a card's answer does what the option means ---------------------------------------------------
+
+
+_WIDENED = "src/util/cause.py"
+
+
+@pytest.fixture
+def scope_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
+    """A review whose one card is a path a repair wrote outside the mandate's `include`."""
+    from rein import decision_cards
+
+    entry = {"status": "proposed", "task_id": "T-001", "findings": ["SEC-001"], "commit": "c" * 40}
+    statements, cards = decision_cards.derive_cards(scope_expansions=[{"path": _WIDENED, **entry}])
+    review = _generated_review_with_card()
+    machine = review["machine"]
+    assert isinstance(machine, dict)
+    machine["statements"], machine["decision_cards"] = statements, cards
+    root = tmp_path / "sc"
+    root.mkdir()
+    state = make_state(project="sc", gates=dict.fromkeys(models.GATE_ENDS, "pending"))
+    state["scope_expansions"] = {_WIDENED: entry}
+    seed_repo(root, state=state, config=make_config(profiles=SANDBOXED_PROFILES), review=review)
+    srv = ui.DashboardServer(("127.0.0.1", 0), root=root, read_only=False)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_adopting_a_widened_path_on_its_card_widens_the_mandate_on_the_record(
+    scope_server: ui.DashboardServer,
+) -> None:
+    """The card is answered with an option letter. Recorded as nothing but that letter, the answer
+    adopted nothing: the path stayed `proposed` and acceptance stayed shut."""
+    from rein import approve
+    from rein import repo as repo_mod
+
+    adopt = next(
+        o["id"]
+        for o in _card(json.loads(_request(scope_server, "GET", "/api/review/stage/decision")[1]), "DC-001")["options"]
+    )
+    body: dict[str, object] = {
+        "card_id": "DC-001",
+        "choice": adopt,
+        "confidence": "high",
+        "reason": "the cause is in the shared helper",
+        "machine_digest": _digest(scope_server),
+    }
+    status, data = write(scope_server, "/api/review/decision", body)
+    assert status == 200, data
+
+    repo = repo_mod.Repo(scope_server.active_root())
+    state = store.Store(repo).read_state()
+    assert state is not None and state.scope_expansions[_WIDENED]["status"] == "adopted"
+    assert _WIDENED in approve.adoptions(store.Store(repo).read_events())
+    session = json.loads(_request(scope_server, "GET", "/api/review/session")[1])
+    assert session["unanswered_decisions"] == [], "and the card counts as answered"
+
+
+def test_a_card_answered_revise_implementation_is_the_loops_to_repair() -> None:
+    """The other half of the same defect: `repair.route` read only dispositions, so a claim a person
+    answered "the code is wrong" on its card was never handed back to the loop."""
+    from rein import decision_cards, repair
+
+    claim = {"claim_id": "C-001", "verdict": "diverged", "expected": "x"}
+    statements, cards = decision_cards.derive_cards(claims=[claim])
+    review = models.Review(
+        {
+            "machine": {"status": "generated", "statements": statements, "decision_cards": cards},
+            "human": {"status": "in_progress"},
+        }
+    )
+    revise = next(
+        o["id"]
+        for o in cards[0]["options"]
+        if next(s for s in statements if s["id"] == o["statement_id"])["applicability"]["disposition"]
+        == "revise_implementation"
+    )
+    human = {"decisions": [{"card_id": cards[0]["id"], "choice": revise, "confidence": "high"}]}
+    assert repair.answered_to_repair(review, human) == {"C-001"}

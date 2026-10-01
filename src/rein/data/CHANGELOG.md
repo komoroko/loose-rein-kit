@@ -4,6 +4,86 @@ Releases, newest first — one `## [x.y.z] - YYYY-MM-DD` heading per release (`r
 shows the sections between the installed version, recorded in `.rein/rein.lock`, and the
 new one). `pyproject.toml [project] version` is the single version source.
 
+## [0.13.0] - 2026-10-01
+
+**A minor release: the format moves to `rein-grounded-v11`, and every repository needs `rein sync
+--force`.** Three documents change shape. `reviews.yaml` requires `acceptance: {security: <bool>}`;
+a generated `review.yaml` records under `machine.security` whether a security reviewer read the
+change (`read`); and the per-task reviewer's `consider` is now `question`, in `state.yaml`'s
+handoffs and `review.yaml`'s residual findings. `state.yaml` also gains `repair_grant` and
+`scope_expansions`. Nothing converts any of it for you.
+
+- **Upgrade after `rein cycle-close`.** A `state.yaml` whose task handoffs hold a `consider`
+  finding is refused by the new schema, and unlike `review.yaml` it cannot be deleted and taken
+  again. A repository between cycles holds none.
+
+- **Before you sync, in a repository whose `review.yaml` is generated, delete `.rein/review.yaml`.**
+  The new schema refuses a generated review without `read`, and so does every verb that reads it,
+  `rein review generate --force` included. `rein sync` writes the empty one back, and `rein review
+  generate` takes the review again; a stage whose inputs have not moved is served from the cache.
+  After `rein cycle-close` there is nothing to delete.
+- **After the sync, apply a `reviews.yaml` that says whether acceptance reads for security.** Copy
+  your file, add `acceptance:` with `security: true` to keep the reading you had or `false` to drop
+  it, and run `rein reviews apply <file> --reason ...` at your terminal. Until then every reader of
+  the file refuses it, as it refuses any file the schema does not accept.
+
+What changes:
+
+- **The packaged reviewer step reads for one review, `adversarial`.** It is an attempt to refute
+  the change rather than to confirm it: the input that breaks it (a boundary, an empty value, an
+  unexpected type, a failure path, concurrency, a half-applied write), the claim that has no
+  evidence behind it but the implementer's summary, and the side that did not change (the callers,
+  the tests that do not cover it, what should have been deleted with it). Each finding names the
+  place, how it breaks and the input that breaks it. `correctness`, `simplification` and `security`
+  are still packaged, with the host's `/code-review`, `/simplify` and `/security-review` offered for
+  them, and are yours to add to a step. A repository that already has a `reviews.yaml` keeps the
+  steps it has: only a new one is seeded with `adversarial`.
+- **Whether acceptance takes a security reading is `reviews.yaml`'s `acceptance.security`, and the
+  packaged document has it off.** Off, the grounded review launches no security reviewer, primes no
+  shared reading for the extractor alone, and records `security.read: false`, so an empty list of
+  findings is never read as a review that found none. A blocking finding an earlier reading
+  recorded still stands: it closes when its anchored code is gone from the tree or when you dispute
+  it, exactly as before, because switching a review off is not a way to clear a block. The
+  acceptance screen, the pull-request body and `rein reviews show` say the reading was not taken.
+- **A review read under the other setting holds acceptance shut.** Switching `acceptance.security`
+  after the review was generated leaves a review that read the wrong thing for this repository;
+  readiness names it and asks for `rein review generate`.
+- The Reviews screen offers the security reading as a switch in the acceptance lane. Comparison and
+  the actual extraction it compares against stay fixed.
+
+How findings are answered:
+
+- **Who answers a finding decides what happens to it, not how much it matters.** The grounded
+  review's security findings are repaired by the loop whenever a task's scope owns their code,
+  whatever their severity: severity decides only whether a finding holds acceptance shut. Before,
+  a `low` or `medium` one was never repaired and reached you as a card nothing required you to
+  answer. The per-task reviewer's `consider` ("worth saying, change nothing") is gone: `must_fix`
+  is anything the change should change, however small, and goes to the implementer; `question` is
+  what the change cannot settle (what a requirement, the design or the plan should say) and is
+  carried to you at acceptance.
+- **A repair is made at the cause.** The task's declared scope is where a finding is charged, not a
+  boundary: a repair may write into another task's paths, which the mandate covers, where before it
+  stopped the run for a human. While it runs, it may also write past the mandate's `include` —
+  never into `exclude`, the plan, or anything the guard protects — through a grant in
+  `state.yaml` that the guard honours only while `rein build` holds its run lock, so a grant a
+  killed run left behind widens nothing. Every path a repair writes past `include` comes to you at
+  acceptance as a card: adopt it into the scope, or refuse it and the next `rein build` takes it
+  back out and no repair may write there again. Acceptance stays shut while one is unanswered.
+- **A repair lands only with a test that fails without it.** The run applies only the repair's test
+  changes to the commit before it and runs the steps that declare `runs_tests` there. A repair
+  whose tests pass there does not reproduce the defect, and one that changes no test proves
+  nothing: either is undone (`git reset --keep`, so the uncommitted `.rein/` state is untouched),
+  recorded as `repair_refused`, and its reason handed to the next round's implementer. An
+  experiment that cannot be run is evidence in neither direction and does not refuse. A finding no
+  round could prove repaired is what reaches you. In a stacked cycle, taking a refused path back
+  out is committed at the tip of the work branch, not on the slice that wrote it.
+- **A Decision Card's answer does what the chosen option says.** Cards are answered with an option
+  letter, and the loop read only dispositions, so answering a `diverged` claim "the code is wrong"
+  on its card never handed it back to the loop, and a dispute answered on a security finding's card
+  was not recorded against the code. The option's meaning is now read through its statement:
+  `revise_implementation` is repaired by the next `rein build`, a dispute is recorded and needs a
+  reason, and a scope card adopts or refuses its path.
+
 ## [0.12.1] - 2026-09-30
 
 **A patch release: the format stays `rein-grounded-v10`.** It fixes the upgrade to 0.12.0 itself.

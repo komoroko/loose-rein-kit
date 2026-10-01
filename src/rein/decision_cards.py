@@ -12,7 +12,8 @@ restatement of a finding the review already made:
   - a claim the Comparator did not find aligned,
   - a gap,
   - an extra behaviour that is not grounded in any requirement,
-  - a security finding.
+  - a security finding,
+  - a path a repair wrote outside the approved mandate's `include` (`state.scope_expansions`).
 
 Asking a model to invent the decision list would put the one artefact the human is answerable for
 back inside the thing being reviewed. Deriving it means the cards cannot disagree with the findings,
@@ -30,6 +31,7 @@ stronger would be the overclaim the whole vocabulary exists to prevent.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -101,6 +103,11 @@ class _IdMinter:
         return f"DC-{self._card:03d}"
 
 
+def expansion_id(path: str) -> str:
+    """The card subject for one widened path: stable across regenerations, and short enough for the schema."""
+    return "SCOPE-" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:8]
+
+
 def _subjects(
     claims: Sequence[Mapping[str, Any]],
     gaps: Sequence[Mapping[str, Any]],
@@ -108,6 +115,7 @@ def _subjects(
     security_findings: Sequence[Mapping[str, Any]],
     plan_risk: Mapping[str, str],
     plan_domains: Mapping[str, tuple[str, ...]],
+    scope_expansions: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Every finding that needs a human decision, in a stable order: claims, gaps, extras, security.
 
@@ -202,6 +210,26 @@ def _subjects(
                 "evidence": {"finding": dict(finding), "expected_choice": "revise_implementation"},
             }
         )
+    for expansion in scope_expansions:
+        # High, so it is one a human must answer before the freeze: the mandate is the line a human
+        # drew, and only a human moves it. The repair has already been proven (a test that fails
+        # without it), so what is asked is not whether the fix works but whether the scope is right.
+        path = str(expansion.get("path", ""))
+        findings = ", ".join(str(f) for f in expansion.get("findings", ()) or ()) or "a finding"
+        subjects.append(
+            {
+                "subject_id": expansion_id(path),
+                "kind": "scope_expansion",
+                "risk": "high",
+                "domains": (),
+                "question": (
+                    f"Repairing {findings} at its cause, {expansion.get('task_id', 'a task')} changed {path}, "
+                    "which the approved mandate's scope does not include. Widen the scope to it?"
+                ),
+                "options": ("adopt_scope", "reduce_scope", "revise_design"),
+                "evidence": {"expansion": dict(expansion), "expected_choice": "adopt_scope"},
+            }
+        )
     return subjects
 
 
@@ -209,6 +237,7 @@ def _subjects(
 #: token used in `_subjects`; the disposition action a UI records is the same token, minus `dispute`
 #: which maps to `dispute_finding` because a dispute must carry a reason.
 _OPTION_TEXT: dict[str, str] = {
+    "adopt_scope": "Adopt it: widen the approved mandate's scope to this path for the rest of the cycle.",
     "revise_implementation": "Return it to the implementer: change the code until the review can be regenerated clean.",
     "revise_design": "Change the expectation: the plan, not the code, is what was wrong here.",
     "revise_requirement": "Adopt it as intended: reopen the requirement so this behaviour is something we asked for.",
@@ -220,6 +249,7 @@ _OPTION_TEXT: dict[str, str] = {
 
 #: Option token → the `models.DISPOSITION_VALUES` action a recorded answer becomes.
 OPTION_DISPOSITION: dict[str, str] = {
+    "adopt_scope": "adopt_scope",
     "revise_implementation": "revise_implementation",
     "revise_design": "revise_design",
     "revise_requirement": "revise_requirement",
@@ -239,6 +269,7 @@ def derive_cards(
     plan_risk: Mapping[str, str] | None = None,
     plan_domains: Mapping[str, tuple[str, ...]] | None = None,
     first_statement: int = 1,
+    scope_expansions: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return `(statements, decision_cards)` for everything the review left for a human to settle.
 
@@ -255,7 +286,9 @@ def derive_cards(
     minter = _IdMinter(first_statement)
     statements: list[dict[str, Any]] = []
     cards: list[dict[str, Any]] = []
-    subjects = _subjects(claims, gaps, extra_behaviors, security_findings, plan_risk or {}, plan_domains or {})
+    subjects = _subjects(
+        claims, gaps, extra_behaviors, security_findings, plan_risk or {}, plan_domains or {}, scope_expansions
+    )
     if len(subjects) > MAX_CARDS:
         raise review_policy.ReviewPolicyError(
             f"this review leaves {len(subjects)} decisions for a human, past the {MAX_CARDS} one "
@@ -290,6 +323,42 @@ def derive_cards(
             card["requires_domains"] = domains[:16]
         cards.append(card)
     return statements, cards
+
+
+def answered(review: models.Review, human: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """What each answered card means: `(subject_id, disposition)`, read off the option chosen.
+
+    A card is answered with an option letter (`human.decisions`), and the option's statement says
+    what choosing it does (`applicability`, written by :func:`derive_cards`). Read through that,
+    so that the thing a person chose is what acts: the loop repairs what was answered
+    `revise_implementation` (`repair.answered_to_repair`), a dispute is recorded against the code,
+    and a scope expansion is adopted or refused. An answer naming a card or option the review does
+    not have resolves to nothing.
+    """
+    machine = review.machine
+    cards = {str(c.get("id")): c for c in machine.get("decision_cards", []) or [] if isinstance(c, Mapping)}
+    statements = {str(s.get("id")): s for s in machine.get("statements", []) or [] if isinstance(s, Mapping)}
+    out: list[tuple[str, str]] = []
+    for decision in human.get("decisions", []) or []:
+        if not isinstance(decision, Mapping):
+            continue
+        if meaning := meaning_of(cards, statements, str(decision.get("card_id")), str(decision.get("choice"))):
+            out.append(meaning)
+    return out
+
+
+def meaning_of(
+    cards: Mapping[str, Mapping[str, Any]], statements: Mapping[str, Mapping[str, Any]], card_id: str, choice: str
+) -> tuple[str, str] | None:
+    """`(subject_id, disposition)` for one option of one card, or None when either is not there."""
+    card = cards.get(card_id)
+    option = next((o for o in (card or {}).get("options", ()) or () if str(o.get("id")) == choice), None)
+    statement = statements.get(str((option or {}).get("statement_id", "")))
+    applicability = (statement or {}).get("applicability")
+    if not isinstance(applicability, Mapping):
+        return None
+    subject, disposition = str(applicability.get("subject_id", "")), str(applicability.get("disposition", ""))
+    return (subject, disposition) if subject and disposition else None
 
 
 def _is_domain(value: object) -> bool:

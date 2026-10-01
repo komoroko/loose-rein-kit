@@ -295,9 +295,11 @@ from your tooling, and nothing else.
 | `guard.paths` | what a pending gate freezes |
 
 Which reviews run is not in `config.yaml`. `.rein/reviews.yaml` holds the adversarial review before
-the mandate, per drafting stage, and the `review` step that reads each batch of tasks — for
-`correctness`, `simplification`, `security`, or a review of your own with its question written in
-the file. It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone
+the mandate, per drafting stage, the `review` step that reads each batch of tasks, and whether
+acceptance takes a security reading. The packaged step reads for `adversarial` alone, an attempt to
+refute the change; `correctness`, `simplification`, `security`, or a review of your own with its
+question written in the file, are yours to add. The security reading at acceptance is off until you
+switch it on. It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone
 to change: `rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews
 screen. Each change is recorded with the document it wrote, and nothing runs on a file that differs
 from that record; `rein reviews restore` writes it back. The comparison acceptance is decided by is
@@ -370,9 +372,11 @@ A job already shaped the old way is not failed retroactively: the base side repo
 ## Security
 
 - **gitleaks** at pre-commit; false positives go in `.gitleaksignore`.
-- A **structured security review** and a **dependency audit** run before acceptance. A blocking
-  finding holds the gate shut until the change closes it, and the next review decides whether it
-  closed by re-reading the code it anchored to — not by asking the reviewer.
+- A **structured security review**, when `.rein/reviews.yaml` switches it on (`acceptance.security`),
+  and a **dependency audit** run before acceptance. A blocking finding holds the gate shut until the
+  change closes it, and the next review decides whether it closed by re-reading the code it
+  anchored to — not by asking the reviewer. Switching the reading off does not clear one: it stands
+  until its code is gone or you dispute it, and acceptance says no security reading was taken.
 - A finding with no code anchor is closed by a human's dispute or not at all.
 
 ## Existing repositories (brownfield)

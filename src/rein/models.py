@@ -250,10 +250,15 @@ GATE_STAGE_VALUES = frozenset(GATE_STAGE_ORDER)
 #: is deliberately absent — it stops there being a `done` for evidence to justify, so it travels as
 #: a task failure under `build_loop.NEGATIVE_CONTROL` instead of as a value here.
 NEGATIVE_CONTROL_VALUES = frozenset({"discriminating", "no_tests_changed", "undetermined"})
-#: What the per-task reviewer may say about a change. `must_fix` sends it back to the implementer
-#: within the review step's own budget; `consider` stops nothing and is carried to acceptance. Neither
-#: passes or fails a task on its own — the reviewer reports, and the loop decides what that costs.
-FINDING_SEVERITY_VALUES = frozenset({"must_fix", "consider"})
+#: What the per-task reviewer may say about a change, named by **who answers it**, never by how
+#: much it matters. `must_fix` is anything the change should change: it goes back to the
+#: implementer within the review step's own budget, however small it is. `question` is what the
+#: change cannot settle — what a requirement, the design or the plan should say — and is carried
+#: to the human at acceptance. There is no third value for "worth saying, change nothing": a
+#: finding the reviewer would not have changed is not reported, and one it would is a `must_fix`.
+#: Neither passes or fails a task on its own — the reviewer reports, and the loop decides what that
+#: costs.
+FINDING_SEVERITY_VALUES = frozenset({"must_fix", "question"})
 AGENT_ROLE_VALUES = frozenset({"implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"})
 
 # --- review vocabulary (plan §6.7) --------------------------------------------
@@ -300,8 +305,12 @@ CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
 #: is not an available disposition for a critical unknown (plan §15.4). `dispute_finding` is —
 #: a review that cannot be contradicted makes the reviewer infallible — but it carries a reason,
 #: because "we disagree" with no why is not a disposition either.
+#: What a human made of a path a repair wrote outside the mandate's `include` (`State.scope_expansions`).
+EXPANSION_STATUSES = frozenset({"proposed", "adopted", "refused"})
+
 DISPOSITION_VALUES = frozenset(
     {
+        "adopt_scope",
         "acknowledge_corrected_model",
         "revise_requirement",
         "revise_design",
@@ -521,6 +530,18 @@ EVENT_ORDER: tuple[str, ...] = (
     # chain is the only place it survives: `review.yaml` holds one generation's findings, and the
     # next generation re-derives the list from a reviewer with no memory of the last one.
     "security_finding_resolved",
+    # A repair of acceptance's findings landed, or was refused and undone. In the chain because
+    # whether a repair showed a test failing without it is the evidence the finding's closing rests
+    # on, and because a refusal is the reason the same finding reaches the next round, or a human.
+    "repair_verified",
+    "repair_refused",
+    # A repair may write where the mandate's `include` does not reach while it runs, and every path it
+    # does is put to a human. The grant's opening and closing are state changes, and so is a path
+    # widened, answered, or taken back out after a human refused it.
+    "repair_grant_opened",
+    "repair_grant_closed",
+    "scope_expanded",
+    "scope_expansion_reverted",
     "review_generated",
     "review_failed",
     # The review pipeline stopped because a *launch* failed for a machine reason time alone fixes
@@ -1478,6 +1499,30 @@ class State:
         return {str(k): v for k, v in value.items() if isinstance(v, dict)}
 
     @property
+    def repair_grant(self) -> Mapping[str, Any] | None:
+        """The repair running now, while one does: it may write where the mandate's include does not reach.
+
+        Opened by `rein build` around one repair launch and closed when it ends
+        (`build_loop._repair`). Nothing else writes it, and a grant still open when a run starts is
+        one a crash left behind, which that run closes before anything launches.
+        """
+        value = self.raw.get("repair_grant")
+        return value if isinstance(value, dict) and value.get("task_id") else None
+
+    @property
+    def scope_expansions(self) -> Mapping[str, Mapping[str, Any]]:
+        """Paths a repair wrote outside the mandate's `include`, by path, with what a human made of each.
+
+        `proposed` until a human answers its card at acceptance; `adopted` widens the mandate to
+        that path for the rest of the cycle; `refused` closes it to every later repair, and the loop
+        takes the change back out (`build_loop._revert_refused_expansions`).
+        """
+        value = self.raw.get("scope_expansions")
+        if not isinstance(value, dict):
+            return {}
+        return {str(k): v for k, v in value.items() if isinstance(v, dict) and v.get("status") in EXPANSION_STATUSES}
+
+    @property
     def task_status(self) -> Mapping[str, str]:
         value = self.raw.get("tasks")
         if not isinstance(value, dict):
@@ -1546,9 +1591,10 @@ class State:
 
 
 #: The reviews a reviewer step can read for without anything else being written down. Each has a
-#: question in `build_prompts` and, on a host that carries one, a discipline of the host's own
-#: (`adapters.Adapter.disciplines`).
-BUILTIN_REVIEWS: tuple[str, ...] = ("correctness", "simplification", "security")
+#: question in `build_prompts`, and the last three, on a host that carries one, a discipline of the
+#: host's own (`adapters.Adapter.disciplines`). `adversarial` has none: it is an attempt to refute
+#: the change, and no host command is written for that.
+BUILTIN_REVIEWS: tuple[str, ...] = ("adversarial", "correctness", "simplification", "security")
 
 #: The drafting stages the adversarial review runs at, in the order a cycle reaches them.
 ADVERSARIAL_STAGES: tuple[str, ...] = ("requirements", "design", "tasks")
@@ -1663,6 +1709,12 @@ class Reviews:
             "adversarial": {stage: self.adversarial(stage) for stage in ADVERSARIAL_STAGES},
             "steps": steps,
         }
+        # Written out only when the document has it. The schema requires it, so every document that
+        # can be applied does; the one that does not is a record written before the key existed,
+        # and normalizing it into a value it never stated would make the change that adds the key
+        # compare equal to that record and never be written.
+        if isinstance(self.raw.get("acceptance"), dict):
+            document["acceptance"] = {"security": self.acceptance_security}
         if self.custom:
             document["custom"] = [
                 {"name": name, "question": question} for name, question in sorted(self.questions.items())
@@ -1672,6 +1724,12 @@ class Reviews:
     def adversarial(self, stage: str) -> bool:
         value = self.raw.get("adversarial")
         return bool(value.get(stage)) if isinstance(value, dict) else False
+
+    @property
+    def acceptance_security(self) -> bool:
+        """Does the grounded review at acceptance take a security reading?"""
+        value = self.raw.get("acceptance")
+        return bool(value.get("security")) if isinstance(value, dict) else False
 
     @property
     def adversarial_off(self) -> tuple[str, ...]:
@@ -1788,6 +1846,24 @@ class Review:
     def security_findings(self) -> tuple[Mapping[str, Any], ...]:
         security = self.machine.get("security")
         return _maps(security, "findings") if isinstance(security, dict) else ()
+
+    @property
+    def security_read(self) -> bool:
+        """Did this review send the change to a security reviewer? (`reviews.yaml` `acceptance.security`)"""
+        security = self.machine.get("security")
+        return isinstance(security, dict) and security.get("read") is True
+
+    @property
+    def open_security_findings(self) -> tuple[Mapping[str, Any], ...]:
+        """Findings not yet closed, whatever their severity: what the loop still has to answer.
+
+        Severity says whether a finding holds acceptance shut (`blocking_security_findings`). It
+        does not say whether the code should be repaired: a `low` finding in code a task owns is a
+        defect inside an approved scope like any other, and the only one who can answer it without
+        a person is the loop (`repair.route`).
+        """
+        closed = {"resolved", "disputed"}
+        return tuple(f for f in self.security_findings if f.get("status") not in closed)
 
     @property
     def blocking_security_findings(self) -> tuple[Mapping[str, Any], ...]:

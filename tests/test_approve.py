@@ -456,6 +456,28 @@ def test_recording_a_review_does_not_make_it_stale(tmp_path: Path) -> None:
     assert not [b for b in approve.readiness(repo, "acceptance") if "says nothing" in b]
 
 
+def test_a_review_read_under_the_other_security_setting_holds_acceptance_shut(tmp_path: Path) -> None:
+    """Switching `acceptance.security` changes what the review has to have read. A review taken
+    without the reading does not answer for a repository that now asks for it, and one taken with it
+    holds findings over an acceptance whose person switched the reading off."""
+    repo, head, change = _reviewed_repo(tmp_path)
+    review = make_review(generated=True, human_status="frozen", effective_risk="low")
+    review["machine"]["binding"]["subject_head_sha"] = head
+    review["machine"]["binding"]["change_digest"] = change
+
+    def blockers(*, read: bool, security: bool) -> list[str]:
+        review["machine"]["security"]["read"] = read
+        seed_repo(
+            tmp_path, state=make_state(tasks={"T-001": "done"}), review=review, reviews=make_reviews(security=security)
+        )
+        return [b for b in approve.readiness(repo, "acceptance") if "acceptance.security" in b]
+
+    assert blockers(read=True, security=True) == []
+    assert blockers(read=False, security=False) == []
+    assert any("without a security reading" in b and "on" in b for b in blockers(read=False, security=True))
+    assert any("with a security reading" in b and "off" in b for b in blockers(read=True, security=False))
+
+
 # --- what acceptance carries rather than re-reads -------------------------------------
 
 
@@ -1946,3 +1968,54 @@ def test_a_rehearsal_must_come_first_and_be_undoable() -> None:
 def test_a_waived_rehearsal_is_accepted_with_its_reason() -> None:
     plan = _irreversible_plan(rehearsal={"waived": "a publish has no smaller form"}, attempts={"max": 1, "cost": "x"})
     assert approve._irreversible_blockers(plan, "mandate") == []
+
+
+# --- what a repair widened is a human's to adopt or refuse at acceptance --------------------------
+
+
+def _widened(repo: repo_mod.Repo, path: str, status: str, *, chain: bool) -> None:
+    store = store_mod.Store(repo)
+    with store.transaction() as tx:
+        state = tx.store.read_state()
+        assert state is not None
+        entry = {"status": status, "task_id": "T-001", "commit": "c" * 40, "findings": ["SEC-001"]}
+        tx.write("state", {**state.raw, "scope_expansions": {path: entry}})
+        tx.append("scope_expanded", cycle_id=state.cycle_id, subject_ids=["T-001"], detail={"paths": [path]})
+        if chain:
+            tx.append(
+                "disposition_recorded",
+                cycle_id=state.cycle_id,
+                subject_ids=["SCOPE-00000000"],
+                detail={"action": "adopt_scope", "path": path},
+            )
+
+
+def test_a_path_a_repair_widened_waits_for_a_decision_rather_than_a_rollback(tmp_path: Path) -> None:
+    """The remedy named is the one that exists here: answer the card. Rolling back the mandate is
+    for a change that never went through `rein build`."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+    _widened(repo, "src/elsewhere/thing.py", "proposed", chain=False)
+
+    blockers = approve.readiness(repo, "acceptance")
+
+    assert any("wait for your decision" in b and "src/elsewhere/thing.py" in b for b in blockers)
+    assert not any("rein revise --to mandate" in b and "src/elsewhere" in b for b in blockers)
+
+
+def test_an_adopted_path_is_inside_the_mandate_at_acceptance(tmp_path: Path) -> None:
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+    _widened(repo, "src/elsewhere/thing.py", "adopted", chain=True)
+
+    assert not [b for b in approve.readiness(repo, "acceptance") if "src/elsewhere" in b]
+
+
+def test_an_adoption_the_chain_does_not_record_widens_nothing(tmp_path: Path) -> None:
+    """state.yaml is machine-written, and a status nobody's answer stands behind is a widening of
+    the mandate nobody made."""
+    repo = _cycle_with_a_commit(tmp_path, path="src/elsewhere/thing.py")
+    _widened(repo, "src/elsewhere/thing.py", "adopted", chain=False)
+
+    assert any(
+        "src/elsewhere/thing.py" in b and "outside the approved mandate's scope" in b
+        for b in approve.readiness(repo, "acceptance")
+    )

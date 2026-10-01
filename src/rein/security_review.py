@@ -478,6 +478,27 @@ def run_security_review(
     return SecurityResult(findings=tuple(findings), resolved=tuple(closed))
 
 
+def carry_forward(prior_blocking: Iterable[Mapping[str, Any]], *, repo: repo_mod.Repo, commit: str) -> SecurityResult:
+    """The security section of a review that took no security reading (`reviews.yaml` `acceptance.security`).
+
+    Switching the reading off is a person's choice about which reviews run; it is not a way to clear
+    a block. So a blocking finding an earlier reading recorded about this base is carried as it
+    stood, and closes the two ways it always could: its anchored code is gone from `commit`
+    (:func:`resolution_of`, the same check a reviewer's drop is held to), or a human disputes it.
+    No reviewer is launched, so nothing new is found and nothing is re-priced.
+    """
+    findings: list[dict[str, Any]] = []
+    closed: list[dict[str, Any]] = []
+    for prior in prior_blocking:
+        resolved = resolution_of(prior, repo=repo, commit=commit)
+        if resolved is None:
+            findings.append(dict(prior))
+        else:
+            findings.append(resolved)
+            closed.append(resolved)
+    return SecurityResult(findings=tuple(findings), resolved=tuple(closed))
+
+
 def _first_seen(prior: Mapping[str, Any] | None, this_change: Mapping[str, str]) -> dict[str, str]:
     """Where this finding was first found: the carried record when there is one, else this change.
 

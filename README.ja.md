@@ -281,7 +281,7 @@ command: notify-send "rein"
 持っていなければ読み取り専用である。
 
 ## 設定できるもの
-<!-- README.md: 09116b30775a -->
+<!-- README.md: 099ea372e82d -->
 
 つまみはすべて `.rein/config.yaml` にあり、その場にコメントが付いている。以下はそのうちプロジェクトが
 普通に触るものである。既存リポジトリでは `rein init` が、認識できた品質ゲートのコマンドだけを埋める。
@@ -297,8 +297,10 @@ command: notify-send "rein"
 | `guard.paths` | pending のゲートが凍結する範囲 |
 
 どのレビューを走らせるかは `config.yaml` には無い。`.rein/reviews.yaml` が、mandate 前の敵対的検証を
-起草の段ごとに、タスクのバッチを読む `review` ステップを、`correctness`・`simplification`・`security`
-または問いをこのファイルに書いた独自のレビューとして持つ。mandate の凍結の外にあるので変えても何も
+起草の段ごとに持ち、タスクのバッチを読む `review` ステップと、acceptance で security の読みを取るか
+どうかを持つ。同梱の `review` ステップは、変更を反証しようとする `adversarial` だけを読む。
+`correctness`・`simplification`・`security` と、問いをこのファイルに書いた独自のレビューは、必要な
+ときに足す。acceptance の security の読みは、有効にするまで取らない。mandate の凍結の外にあるので変えても何も
 巻き戻らず、変えられるのはあなただけである。端末で `rein reviews apply <file> --reason ...` を実行
 するか、ダッシュボードの Reviews 画面を使う。変更は書いた文書ごと記録され、記録と食い違うファイルでは
 何も動かない。`rein reviews restore` が記録された版を書き戻す。acceptance が判断の根拠にする
@@ -370,12 +372,14 @@ Loose Rein はこれらを読んで診断するが、設定はしない。自分
 あり、既存のものを名指しするのは `rein doctor` の役目である。
 
 ## セキュリティ
-<!-- README.md: 8bb0b5f4553b -->
+<!-- README.md: 7a305729cab1 -->
 
 - **gitleaks** を pre-commit で実行する。誤検知は `.gitleaksignore` に入れる。
-- **構造化されたセキュリティレビュー**と**依存関係監査**が acceptance の前に走る。blocking の指摘は
-  変更がそれを解消するまでゲートを閉じたままにし、解消したかどうかは、レビュアーに尋ねることでは
-  なく、その指摘がアンカーしたコードを次の生成が読み直すことで決まる。
+- **構造化されたセキュリティレビュー**(`.rein/reviews.yaml` の `acceptance.security` で有効にした
+  とき)と**依存関係監査**が acceptance の前に走る。blocking の指摘は変更がそれを解消するまでゲートを
+  閉じたままにし、解消したかどうかは、レビュアーに尋ねることではなく、その指摘がアンカーしたコードを
+  次の生成が読み直すことで決まる。読みを無効にしても指摘は消えない。コードが無くなるか異議を申し
+  立てるまで残り、acceptance は security の読みを取らなかったことを示す。
 - コード上のアンカーを持たない指摘は、人間による異議申し立てによってのみ閉じる。
 
 ## 既存リポジトリへの導入(brownfield)

@@ -60,7 +60,7 @@ export function ScopeStage({ data }) {
           />
           <Axis
             label="claims"
-            value={`${c.claims} · gaps ${c.gaps} · scenarios ${c.scenarios} · decision cards ${c.decision_cards} · security ${c.security_findings}`}
+            value={`${c.claims} · gaps ${c.gaps} · scenarios ${c.scenarios} · decision cards ${c.decision_cards} · security ${s.security_read ? c.security_findings : "not taken"}`}
           />
           <Axis
             label="you will be asked"
@@ -729,10 +729,25 @@ function WhatRaisedThese({ data, onDisposition }) {
 
 function SecurityFindings({ data }) {
   const findings = data.security_findings || [];
-  if (!findings.length) return null;
+  const notTaken =
+    data.security_read === false ? (
+      <p className="note">
+        No security reading was taken: reviews.yaml has acceptance.security off.
+        {findings.length ? " These are blocking findings an earlier reading recorded, carried until their code is gone." : ""}
+      </p>
+    ) : null;
+  if (!findings.length) {
+    return notTaken ? (
+      <>
+        <Subhead spaced>Security review</Subhead>
+        {notTaken}
+      </>
+    ) : null;
+  }
   return (
     <>
       <Subhead spaced>Security review</Subhead>
+      {notTaken}
       {findings.map((f) => (
         <div className="card" key={f.id}>
           <div className="subhead">

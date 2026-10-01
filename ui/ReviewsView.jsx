@@ -3,7 +3,8 @@
 // A lane per stage the cycle passes through. The drafting lanes hold the adversarial review before
 // the mandate; the build lane holds the reviewer steps, each reading for the reviews on its card;
 // the acceptance lane holds what acceptance is decided by, shown and never offered — comparison
-// is not a way of improving the work, so there is nothing here to switch it off with.
+// is not a way of improving the work, so there is nothing here to switch it off with — and the
+// security reading, which is one, switched like the adversarial review.
 //
 // The screen edits a draft of the whole document and applies it in one write, with a reason: the
 // same function `rein reviews apply` calls, and the same `reviews_changed` event in the chain.
@@ -222,7 +223,7 @@ export default function ReviewsView() {
                 onClick={() => {
                   let n = draft.steps.length + 1;
                   while (draft.steps.some((s) => s.name === "review-" + n)) n += 1;
-                  setSteps([...draft.steps, { name: "review-" + n, reviews: ["correctness"], retries: 1, stage: "both" }]);
+                  setSteps([...draft.steps, { name: "review-" + n, reviews: ["adversarial"], retries: 1, stage: "both" }]);
                 }}
               >
                 Add a reviewer step
@@ -236,6 +237,18 @@ export default function ReviewsView() {
                 {name}
               </div>
             ))}
+            <label className="rcard">
+              <input
+                type="checkbox"
+                checked={!!draft.acceptance?.security}
+                disabled={READ_ONLY}
+                onChange={(e) => setDraft({ ...draft, acceptance: { ...draft.acceptance, security: e.target.checked } })}
+              />{" "}
+              security review
+              {draft.acceptance?.security ? null : (
+                <div className="note">off — acceptance says no security reading was taken</div>
+              )}
+            </label>
           </section>
         </div>
 

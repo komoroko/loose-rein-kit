@@ -15,12 +15,20 @@ adversarial:
   tasks: true
 
 # The reviewer steps of the quality gate. Each is one launch per batch of tasks, reading for every
-# review it lists: `correctness`, `simplification`, `security`, or a name under `custom`.
+# review it lists: `adversarial`, `correctness`, `simplification`, `security`, or a name under
+# `custom`. The packaged default is the adversarial review alone, an attempt to refute the change;
+# the other three are there to add when this repository wants them read for separately.
 steps:
   - name: review
-    reviews: [correctness, simplification]
+    reviews: [adversarial]
     retries: 1
     stage: both
+
+# The readings acceptance takes beyond the comparison. `security: true` sends the change to a
+# security reviewer as well, whose blocking findings hold acceptance shut until the code no longer
+# has them. Off, acceptance says the reading was not taken.
+acceptance:
+  security: false
 
 # Reviews of your own: a name, and the question the reviewer reads for.
 #   custom:

@@ -1651,9 +1651,13 @@ def keys_for(
     ceiling: int,
     risk_floor: str,
     host_surface: str,
+    security: bool,
     prior_blocking: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, str]:
     """This reading's stage keys, from what the reading measured about itself.
+
+    `security` is `reviews.yaml`'s `acceptance.security`. Off, the reading has no security stage,
+    so it has no key for one: what the run counts, plans and reports is the keys it holds.
 
     The one place the mapping from a reading to its keys lives, because two callers make it and
     they have to agree exactly: `review.generate` at the gate, and `build_loop` when a task lands.
@@ -1667,7 +1671,7 @@ def keys_for(
     ladder that only ever rises as a cycle lands, so at worst the readings taken before a rise are
     re-read once, and in the common case of a floor that never moves nothing is invalidated at all.
     """
-    return reading_keys(
+    keys = reading_keys(
         config=config,
         change=measured.content_digest,
         coverage_digest=digests.of(measured.coverage),
@@ -1678,6 +1682,9 @@ def keys_for(
         prior_blocking=[str(f.get("id", "")) for f in prior_blocking],
         unit=measured.reading.unit,
     )
+    if not security:
+        del keys["security_review"]
+    return keys
 
 
 def warm(
@@ -1694,6 +1701,7 @@ def warm(
     host_surface: str,
     config: models.Config | None,
     cache: review_cache.StageCache,
+    security: bool,
 ) -> ReadOut:
     """Take one reading now, so acceptance finds it already answered.
 
@@ -1723,6 +1731,7 @@ def warm(
         ceiling=limits["max_diff_bytes"],
         risk_floor=risk_floor,
         host_surface=host_surface,
+        security=security,
     )
     return read_one(
         repo,
@@ -1732,6 +1741,7 @@ def warm(
         head=head,
         risk_floor=risk_floor,
         prior_blocking=(),
+        security=security,
         discipline=security_discipline(config),
         cache=cache,
         keys=keys,
@@ -1775,6 +1785,7 @@ def read_one(
     head: str,
     risk_floor: str,
     prior_blocking: Sequence[Mapping[str, Any]],
+    security: bool,
     discipline: str = "",
     on_stage: Callable[[str], None] = lambda _name: None,
     cache: review_cache.StageCache,
@@ -1811,8 +1822,41 @@ def read_one(
     The extractor's failure is the one reported when both fail: it comes first in the pipeline's
     order, and reporting whichever thread lost a race would make the error a reader sees depend on
     timing.
+
+    `security` off (`reviews.yaml` `acceptance.security`) launches no security reviewer: the
+    reading is the extraction alone, and the blocking findings carried into it stand or close
+    against the tree (`security_review.carry_forward`).
     """
     unit = measured.reading.unit
+    carried_ids = tuple(str(f.get("id", "")) for f in prior_blocking)
+
+    def extract() -> actual_extraction.ExtractionResult:
+        # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
+        on_stage("actual_extraction")
+        return cached_stage(
+            cache,
+            "actual_extraction",
+            keys["actual_extraction"],
+            ran,
+            lambda ask: actual_extraction.run_extractor(
+                extraction_request(measured, trusted_base=trusted_base, head=head, risk_floor=risk_floor),
+                ask,
+                repo=repo,
+                commit=head,
+                risk_floor=risk_floor,
+            ),
+            reviewers,
+            reused=reused,
+            on_done=lambda was_reused: on_progress(unit, "actual_extraction", was_reused),
+        )
+
+    if not security:
+        return ReadOut(
+            reading=measured.reading,
+            extraction=extract(),
+            security=security_review.carry_forward(prior_blocking, repo=repo, commit=head),
+            carried_ids=carried_ids,
+        )
     security_req = security_request(
         measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking, discipline=discipline
     )
@@ -1835,32 +1879,15 @@ def read_one(
     with ThreadPoolExecutor(max_workers=1) as pool:
         security_future = pool.submit(run_security)
         try:
-            # Blind actual extraction — the plan is deliberately absent from this request (§12.2).
-            on_stage("actual_extraction")
-            extraction = cached_stage(
-                cache,
-                "actual_extraction",
-                keys["actual_extraction"],
-                ran,
-                lambda ask: actual_extraction.run_extractor(
-                    extraction_request(measured, trusted_base=trusted_base, head=head, risk_floor=risk_floor),
-                    ask,
-                    repo=repo,
-                    commit=head,
-                    risk_floor=risk_floor,
-                ),
-                reviewers,
-                reused=reused,
-                on_done=lambda was_reused: on_progress(unit, "actual_extraction", was_reused),
-            )
+            extraction = extract()
         except BaseException:
             cancel.cancel()
             raise
         on_stage("security_review")
-        security = security_future.result()
+        findings = security_future.result()
     return ReadOut(
         reading=measured.reading,
         extraction=extraction,
-        security=security,
-        carried_ids=tuple(str(f.get("id", "")) for f in prior_blocking),
+        security=findings,
+        carried_ids=carried_ids,
     )

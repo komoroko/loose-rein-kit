@@ -339,13 +339,14 @@ _SHARED_READING_ROLE = "shared_reading"
 _STAGE_ROLES: tuple[str, ...] = tuple(review_policy.STAGE_ROLE.values())
 
 
-def shares_reading(config: models.Config | None) -> bool:
+def shares_reading(config: models.Config | None, *, security: bool) -> bool:
     """Will the extractor and the security reviewer branch one reading of the change?
 
     The question the execution plan asks before anything launches. `LaunchRefused` is left to the
-    caller: for a run whose reviewers were injected it means "cannot say", not "no".
+    caller: for a run whose reviewers were injected it means "cannot say", not "no". No security
+    reading, nothing to branch (`StagedReviewers`).
     """
-    return shareable_reading(config, _READING_ROLES) is not None
+    return security and shareable_reading(config, _READING_ROLES) is not None
 
 
 #: The one stage whose reading benefits from standing in a checkout rather than in an empty
@@ -578,14 +579,16 @@ class StagedReviewers:
     those shapes part of the dispatch contract without anything saying so.
     """
 
-    def __init__(self, repo: repo_mod.Repo, *, config: models.Config | None = None) -> None:
+    def __init__(self, repo: repo_mod.Repo, *, config: models.Config | None = None, security: bool) -> None:
         if config is None:
             config = store_mod.Store(repo).read_config()
         self._ledger = usage_mod.Ledger()
         # The extractor and the security reviewer read the same diff. When they can share one
         # reading without sharing a conclusion, they do; otherwise `shareable_reading` says no and
-        # each is launched exactly as before.
-        shared = shareable_reading(config, _READING_ROLES)
+        # each is launched exactly as before. With no security reading (`reviews.yaml`
+        # `acceptance.security`) there is nothing to share it with, and priming one for a single
+        # branch costs more than launching the extractor alone.
+        shared = shareable_reading(config, _READING_ROLES) if security else None
         reading = (
             SharedReading(
                 repo,

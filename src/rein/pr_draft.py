@@ -75,7 +75,13 @@ def cycle_facts(
         else:
             lines.append("- Coverage: **insufficient** — parts of the change could not be analysed")
             lines.append("- Extra behaviors: **undeterminable** (not zero: we could not look)")
-        lines.append(f"- Security findings: {len(review.blocking_security_findings)} blocking")
+        if review.security_read:
+            lines.append(f"- Security findings: {len(review.blocking_security_findings)} blocking")
+        else:
+            lines.append(
+                "- Security review: **not taken** (`reviews.yaml` `acceptance.security` is off) — "
+                f"{len(review.blocking_security_findings)} blocking carried from an earlier reading"
+            )
         lines.append(f"- Human review: {review.human_status}")
     else:
         lines.append("- Review: not generated")

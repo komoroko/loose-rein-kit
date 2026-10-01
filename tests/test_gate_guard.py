@@ -974,3 +974,57 @@ def test_a_commented_out_registration_is_not_one() -> None:
     text = "repos: []\n# - repo: local\n#   hooks:\n#     - id: g\n#       entry: rein guard --check-diff\n"
 
     assert gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_ABSENT
+
+
+# --- a repair may widen `include` while it runs; a human answers each path it widened ------------
+
+
+def _scoped(tmp_path: Path, **state_extra: object) -> None:
+    plan = make_plan()
+    plan["scope"] = {"include": ["src/core/"], "exclude": ["src/vendor/"]}
+    state = make_state()
+    state.update(state_extra)
+    seed_repo(tmp_path, plan=plan, state=state)
+
+
+_GRANT = {"task_id": "T-001", "opened_at": "2026-10-01T00:00:00Z"}
+
+
+def _building(root: Path) -> store.FileLock:
+    """The run lock `rein build` holds, held here as a running build would."""
+    return store.FileLock(store.Store(repo_mod.Repo(root)).build_lock)
+
+
+def test_a_running_repair_may_write_past_include_but_never_into_exclude(tmp_path: Path) -> None:
+    """`include` is where the work was expected; `exclude` is a human writing "not this"."""
+    _scoped(tmp_path, repair_grant=_GRANT)
+    with _building(tmp_path):
+        assert decide(tmp_path, "src/elsewhere/cause.py")[0]
+        assert not decide(tmp_path, "src/vendor/thing.py")[0]
+
+
+def test_a_grant_no_running_build_holds_widens_nothing(tmp_path: Path) -> None:
+    """A killed run closes nothing, and the grant it opened must not outlive it."""
+    _scoped(tmp_path, repair_grant=_GRANT)
+    assert not decide(tmp_path, "src/elsewhere/cause.py")[0]
+
+
+def test_without_a_running_repair_past_include_is_still_refused(tmp_path: Path) -> None:
+    _scoped(tmp_path)
+    assert not decide(tmp_path, "src/elsewhere/cause.py")[0]
+
+
+def test_an_adopted_path_is_inside_and_a_refused_one_is_outside_even_for_a_repair(tmp_path: Path) -> None:
+    entry = {"task_id": "T-001", "commit": "c" * 40, "findings": ["SEC-001"]}
+    _scoped(
+        tmp_path,
+        repair_grant=_GRANT,
+        scope_expansions={
+            "src/adopted.py": {**entry, "status": "adopted"},
+            "src/refused.py": {**entry, "status": "refused"},
+        },
+    )
+    with _building(tmp_path):
+        assert decide(tmp_path, "src/adopted.py")[0]
+        allowed, reason = decide(tmp_path, "src/refused.py")
+    assert not allowed and "a human refused widening it here" in reason

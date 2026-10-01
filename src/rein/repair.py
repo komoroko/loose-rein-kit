@@ -42,8 +42,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from rein import decision_cards, models
 from rein import findings as findings_mod
-from rein import models
 
 #: The disposition that says "the code is what is wrong". A human answering a Decision Card with
 #: it hands the subject back to the loop; every other answer keeps it.
@@ -63,7 +63,7 @@ class Repair:
 
 @dataclass(frozen=True)
 class Routing:
-    """The acceptance gate's blocking findings, split by who can act on each."""
+    """The acceptance gate's findings, split by who can act on each."""
 
     #: Grouped by task, in plan order, so one launch answers everything about one scope.
     code: tuple[Repair, ...] = ()
@@ -90,36 +90,43 @@ class Routing:
         return "\n".join(lines) or "  nothing blocking."
 
 
-def answered_to_repair(human: Mapping[str, object] | None) -> set[str]:
+def answered_to_repair(review: models.Review, human: Mapping[str, object] | None) -> set[str]:
     """Subjects a human answered with `revise_implementation` — "the code is the thing that is wrong".
 
     Read from the human half rather than derived, because it is the one input here that is not
-    mechanical: it is a person saying which side of a `diverged` claim is the mistaken one. Until
-    this was read, every option on every Decision Card was recorded and none of them did anything.
+    mechanical: it is a person saying which side of a `diverged` claim is the mistaken one. Two
+    places hold that answer, and both count. A disposition names it directly; a Decision Card is
+    answered with an option letter, which means what its statement says it means
+    (`decision_cards.answered`). Reading only the first left every card answer recorded and acting
+    on nothing — the card is how the pane asks.
     """
-    entries = (human or {}).get("dispositions")
-    if not isinstance(entries, list):
-        return set()
-    return {
+    human = human or {}
+    entries = human.get("dispositions")
+    direct = {
         str(entry.get("subject_id", ""))
-        for entry in entries
+        for entry in (entries if isinstance(entries, list) else [])
         if isinstance(entry, Mapping) and str(entry.get("action", "")) == REPAIRS_THE_CODE
     }
+    via_cards = {subject for subject, action in decision_cards.answered(review, human) if action == REPAIRS_THE_CODE}
+    return direct | via_cards
 
 
 def route(
     tasks: Sequence[findings_mod.Owner], review: models.Review | None, human: Mapping[str, object] | None = None
 ) -> Routing:
-    """Split acceptance's blocking findings into what the loop repairs and what a human decides.
+    """Split acceptance's findings into what the loop repairs and what a human decides.
 
-    A security finding is a **code** repair as soon as a task's scope owns its anchor. Nothing
-    about it is a question: the reviewer read the code, named the lines, and the plan says whose
-    they are. Everything else starts as a **judgement** and becomes a code repair only when a
+    A security finding is a **code** repair as soon as a task's scope owns its anchor, **whatever
+    its severity**. Nothing about it is a question: the reviewer read the code, named the lines,
+    and the plan says whose they are. Severity decides whether it holds acceptance shut
+    (`review_policy.blocks`), which is a different question; routing on it left every `low` and
+    `medium` finding in code a task owns unrepaired and on the human's screen as a card nobody had
+    to answer. Everything else starts as a **judgement** and becomes a code repair only when a
     human has said so on the record (:func:`answered_to_repair`).
     """
     if review is None or not review.is_generated:
         return Routing()
-    decided = answered_to_repair(human if human is not None else review.human)
+    decided = answered_to_repair(review, human if human is not None else review.human)
 
     by_task: dict[str, list[findings_mod.Attribution]] = {}
     judgement: list[findings_mod.Attribution] = []

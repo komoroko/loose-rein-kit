@@ -41,6 +41,8 @@ def _machine(**kwargs: Any) -> dict[str, Any]:
     }
     kwargs.setdefault("actual_statements", [])
     kwargs.setdefault("claims", [])
+    kwargs.setdefault("security", {"read": True, "findings": []})
+    kwargs["security"] = {"read": True, **kwargs["security"]}
     return review.assemble(binding=binding, coverage=coverage, **kwargs)
 
 

@@ -45,7 +45,7 @@ from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
-from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import agent_envelope, make_config, make_plan, make_reviews, make_state, make_task, seed_repo
 
 
 def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
@@ -77,7 +77,9 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
             "conformance": {"status": "observed"},
         },
     ]
-    machine = review.assemble(binding=binding, coverage=coverage, actual_statements=[], claims=claims)
+    machine = review.assemble(
+        binding=binding, coverage=coverage, actual_statements=[], claims=claims, security={"read": True, "findings": []}
+    )
     assert models.schema_errors({"machine": machine, "human": {"status": "not_started"}}, "review") == []
     assert machine["summary"]["claims_total"] == 2
     assert machine["summary"]["aligned"] == 1 and machine["summary"]["diverged"] == 1
@@ -675,7 +677,7 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
         return call
 
     monkeypatch.setattr(review_transport, "_adapter_reviewer", fake_adapter)
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo))
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), security=True)
 
     for role in ("actual_extractor", "comparator", "security_reviewer"):
         reviewers.for_role(role)({"actual_digest": "d"})
@@ -688,7 +690,7 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
 def test_a_role_the_pipeline_does_not_launch_is_not_answerable(review_repo: Path) -> None:
     """`for_role` is a lookup, not a factory: a role nobody configured a stage for has no
     reviewer, and inventing one on demand is how a fourth opinion would enter the review."""
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo))
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), security=True)
     with pytest.raises(KeyError):
         reviewers.for_role("implementer")
 
@@ -2654,7 +2656,7 @@ def test_a_launch_that_failed_is_still_on_the_bill(review_repo: Path, monkeypatc
     can be made — a raise carries no return value, and this is why the transport keeps the ledger
     rather than handing the cost back to the pipeline."""
     monkeypatch.setattr(common, "run", lambda *a, **k: (1, "the provider said no"))
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo))
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), security=True)
 
     with pytest.raises(review_policy.AdapterFailure):
         reviewers.for_role("comparator")({"expected_model": {}, "actual_digest": "d"})
@@ -2671,7 +2673,7 @@ def test_the_priming_turn_is_not_charged_to_the_stage_that_triggered_it(
     would make that stage's stored execution say it launched twice, and a later replay would
     report a cost the stage never had."""
     monkeypatch.setattr(common, "run", lambda *a, **k: (0, agent_envelope(review_transport._PRIME_ACK)))
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo))
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), security=True)
 
     answer = reviewers.for_role("actual_extractor")(_a_reading_request())
 
@@ -3251,3 +3253,58 @@ def test_a_review_refuses_to_launch_past_the_cycles_spend_ceiling(review_repo: P
         review.generate(repo, _reviewers(_fake_reviewer))
 
     assert event_chain.load(repo.events), "the refusal is recorded, not only printed"
+
+
+# --- the security reading is `reviews.yaml`'s to switch ---------------------------------------
+
+
+@pytest.mark.integration
+def test_with_the_security_reading_off_no_security_reviewer_is_launched(tmp_path: Path) -> None:
+    """Off is off: the stage is not run, not counted, not planned, and the review says so rather
+    than reporting an empty list of findings as if a reviewer had found none."""
+    seed_repo(
+        tmp_path,
+        state=make_state(project="rv"),
+        plan=make_plan(),
+        config=make_config(),
+        reviews=make_reviews(security=False),
+    )
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    asked: list[str] = []
+
+    def answer(role: str, request: Mapping[str, Any]) -> str:
+        asked.append(role)
+        return _fake_reviewer(role, request)
+
+    repo = repo_mod.Repo(tmp_path)
+    machine = review.generate(repo, _reviewers(answer))
+    assert "security_reviewer" not in asked and "actual_extractor" in asked
+    assert machine["security"] == {"read": False, "findings": []}
+    stored = store_mod.Store(repo).read_review()
+    assert stored is not None and stored.security_read is False
+    kinds = [e.event for e in event_chain.scan(repo.events)[0]]
+    assert "security_review_generated" not in kinds
+    measured = [e for e in event_chain.scan(repo.events)[0] if e.event == "run_measured"][-1]
+    assert all(row["stage"] != "security_review" for row in measured.detail["plan"]["stages"])
+
+
+@pytest.mark.integration
+def test_with_the_security_reading_on_the_review_says_it_was_read(review_repo: Path) -> None:
+    machine = review.generate(repo_mod.Repo(review_repo), _reviewers(_fake_reviewer))
+    assert machine["security"]["read"] is True
+
+
+def test_no_reading_is_shared_when_there_is_no_security_reading() -> None:
+    """Priming a shared reading for the extractor alone costs more than launching it alone."""
+    assert review_transport.shares_reading(None, security=False) is False
+
+
+def test_generate_refuses_a_reviews_file_the_chain_does_not_record(review_repo: Path) -> None:
+    """The switch is read like every other reader reads the file, and refused as a `ReviewError`
+    the CLI reports rather than a traceback."""
+    reviews = review_repo / ".rein" / "reviews.yaml"
+    reviews.write_text(reviews.read_text(encoding="utf-8").replace("security: true", "security: false"), "utf-8")
+    with pytest.raises(review.ReviewError, match="not what the audit chain records"):
+        review._generate_cli(repo_mod.Repo(review_repo), force=False, supervise=False, interval_sec=1)

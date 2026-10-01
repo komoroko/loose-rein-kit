@@ -17,7 +17,7 @@ import logging
 import re
 import subprocess
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -685,10 +685,12 @@ def test_a_task_boundary_repair_commits_as_what_it_is(tmp_path: Path, monkeypatc
         return True
 
     monkeypatch.setattr(loop.ws, "finalize_commit", finalize)
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("reproduced", "stub"))
     task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    item = repair.Repair("T-001", (findings_mod.Attribution("SEC-001", "security", "T-001", "alpha/mod.py"),))
 
-    loop._accept_repair(task, str(loop.root), "a" * 40, where="review")
-    loop._accept_repair(task, str(loop.root), "a" * 40)
+    loop._accept_repair(task, item, str(loop.root), "a" * 40, where="review")
+    loop._accept_repair(task, item, str(loop.root), "a" * 40)
 
     assert subjects == ["T-001: review repair", "T-001: acceptance repair"]
 
@@ -1252,6 +1254,15 @@ def test_a_review_switched_off_is_neither_asked_nor_pointed_at() -> None:
     assert "**Correctness**" in prompt
     assert "Simplification" not in prompt and "YAGNI" not in prompt
     assert "/simplify" not in prompt and "/code-review" in prompt
+
+
+def test_the_adversarial_review_asks_for_the_input_that_breaks_the_change() -> None:
+    """The packaged step reads for this alone. It has no host discipline, so none is offered."""
+    prompt = _batch_prompt("T-001", disciplines=_claude_disciplines(), reviews=("adversarial",))
+    assert "**Adversarial**: try to refute this change" in prompt
+    assert "the input that breaks it" in prompt
+    assert "**Correctness**" not in prompt
+    assert "/code-review" not in prompt and "/simplify" not in prompt and "/security-review" not in prompt
 
 
 def test_a_custom_review_asks_its_own_question() -> None:
@@ -2920,8 +2931,8 @@ def test_the_integration_reviewers_findings_go_to_the_task_whose_scope_owns_them
     ]
     loop._file_integration_findings(
         [
-            {"severity": "consider", "statement": "duplicated helper", "anchor": "beta/mod.py:4"},
-            {"severity": "consider", "statement": "about the join itself"},
+            {"severity": "question", "statement": "duplicated helper", "anchor": "beta/mod.py:4"},
+            {"severity": "question", "statement": "about the join itself"},
         ],
         tasks,
     )
@@ -2933,8 +2944,8 @@ def test_a_second_review_of_a_task_does_not_discard_the_first(tmp_path: Path) ->
     """A task can be read twice — in its worktree and again after it merges — and the two are
     different observations. Replacing the key dropped whichever arrived first."""
     loop = orchestrator(tmp_path)
-    loop._add_review_findings("T-001", [{"severity": "consider", "statement": "from its own reviewer"}])
-    loop._add_review_findings("T-001", [{"severity": "consider", "statement": "from the join"}])
+    loop._add_review_findings("T-001", [{"severity": "question", "statement": "from its own reviewer"}])
+    loop._add_review_findings("T-001", [{"severity": "question", "statement": "from the join"}])
     kept = loop._take_diagnostics("T-001")["review"]["findings"]
     assert [f["statement"] for f in kept] == ["from its own reviewer", "from the join"]
 
@@ -3026,17 +3037,18 @@ def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, m
     assert repaired == []
 
 
-def test_a_non_blocking_finding_is_not_repaired_at_the_task_boundary(
+def test_a_non_blocking_finding_is_repaired_at_the_task_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Below the policy's floor a finding is a Decision Card, not a wall — and spending an
-    implementer launch on one would make the floor mean nothing."""
+    """Below the policy's floor a finding does not hold acceptance shut — which is a different
+    question from whether code the task owns gets repaired. Leaving it was leaving it for a human,
+    as a card nobody had to answer."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(
+    assert loop._repair_warm_findings(
         task, [_read_out("T-001", _sec("SEC-1", "alpha/mod.py", blocking=False))], at_tip=True
     )
-    assert repaired == []
+    assert repaired == ["SEC-1@review"]
 
 
 def test_a_chain_s_reading_repairs_only_the_task_at_the_tip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3612,10 +3624,12 @@ def _repair_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build
     loop = _scoped_repo(tmp_path, rounds=2)
     committed: list[str] = []
     monkeypatch.setattr(loop, "_launch", lambda *a, **k: None)
-    monkeypatch.setattr(loop.ws, "head", lambda: "0" * 40)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "0" * 40)
     monkeypatch.setattr(loop.ws, "changed_since", lambda base, cwd="": ["src/api/client.py"])
     monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
     monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "")
+    # The proof is its own subject (`test_a_repair_*_is_refused`); here it is taken as given.
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("reproduced", "stub"))
 
     def record(cwd: str, message: str) -> bool:
         committed.append(message)
@@ -4256,3 +4270,208 @@ def test_a_spent_task_is_named_when_the_run_stops_at_a_crossing(
     assert loop._consume() == common.EXIT_HUMAN_NEEDED
     gaps = [e for e in store_mod.Store(loop.repo).read_events() if e.detail.get("kind") == "attempt_budget_spent"]
     assert [tuple(g.subject_ids) for g in gaps] == [("T-001",)]
+
+
+# --- a repair lands only with a test that fails without it ---------------------------------------
+
+
+def _repair_controlled(
+    loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch, *, reds: dict[str, str] | None = None
+) -> list[str]:
+    ran = _controlled(loop, monkeypatch, changed=[], reds=reds)
+    monkeypatch.setattr(loop, "_steps_at", lambda stage: _cmd_steps())
+    return ran
+
+
+def test_a_repair_whose_test_fails_against_the_code_as_it_was_is_proven(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = orchestrator(tmp_path)
+    ran = _repair_controlled(loop, monkeypatch, reds={"test": "test_x.py::t FAILED"})
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["src/x.py", "tests/test_x.py"])
+    assert (result, ran) == ("reproduced", ["test"])
+    assert "fails against the code as it was" in said
+
+
+def test_a_repair_whose_tests_pass_without_it_is_refused_as_a_fix_of_the_symptom(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A test that passes against the code as it was does not reproduce the defect, so nothing
+    shows the fix is what removed it — which is the shape a repair of where the defect *showed*
+    takes when the cause is somewhere else."""
+    loop = orchestrator(tmp_path)
+    _repair_controlled(loop, monkeypatch)
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["src/x.py", "tests/test_x.py"])
+    assert result == "inert" and result in build_loop._REPAIR_REFUSED
+    assert "fix of the symptom" in said
+
+
+def test_a_repair_that_changes_no_test_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    ran = _repair_controlled(loop, monkeypatch)
+    result, _ = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["src/x.py"])
+    assert result == "untested" and result in build_loop._REPAIR_REFUSED
+    assert ran == [], "there is nothing to run"
+
+
+def test_a_control_that_cannot_be_taken_does_not_refuse_the_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken experiment is evidence in neither direction."""
+    loop = orchestrator(tmp_path)
+    _controlled(loop, monkeypatch, changed=[], apply_rc=1)
+    monkeypatch.setattr(loop, "_steps_at", lambda stage: _cmd_steps())
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["src/x.py", "tests/test_x.py"])
+    assert result == "undetermined" and result not in build_loop._REPAIR_REFUSED
+    assert "did not apply" in said
+
+
+def test_a_refused_repair_is_undone_without_touching_the_orchestration_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undone with `reset --keep`: the root holds `.rein/` uncommitted, and `--hard` would take the
+    chain with it. The refusal is recorded and is what the task's next repair is told."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": ["alpha/mod.py"])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "c" * 40)
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("untested", "no test"))
+    commands: list[list[str]] = []
+
+    def record(cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
+        commands.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(build_loop, "_run", record)
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    item = repair.Repair("T-001", (findings_mod.Attribution("SEC-001", "security", "T-001", "alpha/mod.py"),))
+
+    assert loop._accept_repair(task, item, str(loop.root), "a" * 40) is False
+    assert ["git", "reset", "--keep", "a" * 40] in commands
+    refused = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "repair_refused"][-1]
+    assert refused.detail["result"] == "untested" and refused.detail["findings"] == ["SEC-001"]
+    assert "previous repair of these was refused and undone: no test" in loop._repair_prompt(task, item)
+
+
+def test_a_repair_may_write_into_another_tasks_scope_inside_the_mandate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The task's scope is where a finding is charged, not a line a human drew. The cause of a
+    defect is where it is, and a repair held to the symptom's file can only treat the symptom."""
+    loop = orchestrator(
+        tmp_path,
+        plan=make_plan(
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], scope_include=["beta/"]),
+            ]
+        ),
+    )
+    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": ["alpha/mod.py", "beta/cause.py"])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "c" * 40)
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("reproduced", "red"))
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    item = repair.Repair("T-001", (findings_mod.Attribution("SEC-001", "security", "T-001", "alpha/mod.py"),))
+
+    assert loop._accept_repair(task, item, str(loop.root), "a" * 40) is True
+    landed = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "repair_verified"][-1]
+    assert landed.detail["beyond_task_scope"] == ["beta/cause.py"]
+    assert landed.detail["result"] == "reproduced"
+
+
+# --- a repair may write past the mandate's include; each path it does is put to a human --------
+
+
+def _widening_loop(tmp_path: Path) -> build_loop.Orchestrator:
+    plan = make_plan(tasks=[make_task("T-001", claim_ids=["C-001"], scope_include=["src/core/"])])
+    plan["scope"] = {"include": ["src/core/"], "exclude": ["src/vendor/"]}
+    return orchestrator(tmp_path, plan=plan)
+
+
+def test_the_repair_grant_is_open_only_while_the_repair_runs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _widening_loop(tmp_path)
+    seen: list[object] = []
+
+    def repair_here(task: dag.Task, item: repair.Repair, *, where: str = "acceptance") -> bool:
+        state = loop.store.read_state()
+        seen.append(state.repair_grant if state else None)
+        raise build_loop.StopLoop("the launch failed")
+
+    monkeypatch.setattr(loop, "_slice_branch", lambda task_id, where="acceptance": "")
+    monkeypatch.setattr(loop, "_repair_on_work_branch", repair_here)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    item = repair.Repair("T-001", (findings_mod.Attribution("SEC-001", "security", "T-001", "src/core/a.py"),))
+
+    with pytest.raises(build_loop.StopLoop):
+        loop._repair(task, item)
+
+    assert seen and isinstance(seen[0], Mapping) and seen[0]["task_id"] == "T-001"
+    state = loop.store.read_state()
+    assert state is not None and state.repair_grant is None, "closed on the way out, failure included"
+    kinds = [e.event for e in loop.store.read_events()]
+    assert kinds.count("repair_grant_opened") == 1 and kinds.count("repair_grant_closed") == 1
+
+
+def test_a_grant_a_crash_left_open_is_closed_with_a_reason(tmp_path: Path) -> None:
+    loop = _widening_loop(tmp_path)
+    loop._open_repair_grant("T-001")
+    loop._close_repair_grant(reason="a grant left open when this run started")
+    state = loop.store.read_state()
+    assert state is not None and state.repair_grant is None
+    closed = [e for e in loop.store.read_events() if e.event == "repair_grant_closed"][-1]
+    assert "left open" in closed.detail["reason"]
+    loop._close_repair_grant(reason="nothing to close")
+    assert [e.event for e in loop.store.read_events()].count("repair_grant_closed") == 1, "a no-op records nothing"
+
+
+def test_every_path_a_repair_wrote_past_include_is_proposed_to_a_human(tmp_path: Path) -> None:
+    loop = _widening_loop(tmp_path)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+
+    loop._record_expansions(task, ["src/core/a.py", "src/util/cause.py", "README.md"], ["SEC-001"], "c" * 40)
+
+    state = loop.store.read_state()
+    assert state is not None
+    assert dict(state.scope_expansions) == {
+        "src/util/cause.py": {"status": "proposed", "task_id": "T-001", "findings": ["SEC-001"], "commit": "c" * 40}
+    }
+    expanded = [e for e in loop.store.read_events() if e.event == "scope_expanded"][-1]
+    assert expanded.detail["paths"] == ["src/util/cause.py"]
+
+
+def test_a_refused_expansion_is_taken_back_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _widening_loop(tmp_path)
+    with loop.store.transaction() as tx:
+        state = tx.store.read_state()
+        assert state is not None
+        entry = {"status": "refused", "task_id": "T-001", "commit": "c" * 40}
+        tx.write("state", {**state.raw, "scope_expansions": {"src/util/cause.py": entry}})
+        tx.append("disposition_recorded", cycle_id=state.cycle_id, subject_ids=["SCOPE-1"], detail={})
+    monkeypatch.setattr(review_reading, "resolve_base", lambda repo, plan, base: "b" * 40)
+    monkeypatch.setattr(
+        repo_mod.Repo, "_git_rc", lambda self, *args: (0, "src/util/cause.py\0") if args[0] == "diff" else (0, "")
+    )
+    commands: list[list[str]] = []
+
+    def record(cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
+        commands.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(build_loop, "_run", record)
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
+
+    loop._revert_refused_expansions()
+
+    assert ["git", "checkout", "b" * 40, "--", "src/util/cause.py"] in commands
+    reverted = [e for e in loop.store.read_events() if e.event == "scope_expansion_reverted"][-1]
+    assert reverted.detail["paths"] == ["src/util/cause.py"]
+
+
+def test_a_repair_that_changed_nothing_is_not_landed_as_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    _repair_controlled(loop, monkeypatch)
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, [])
+    assert result in build_loop._REPAIR_REFUSED and "changed nothing" in said

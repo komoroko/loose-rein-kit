@@ -1,4 +1,4 @@
-"""Which task has to answer each blocking finding of the grounded review.
+"""Which task has to answer each finding of the grounded review the loop can act on.
 
 The acceptance gate produces findings against *code*, and the loop repairs *tasks*. Somebody has been closing
 that gap by hand — reading a security finding's anchor, deciding which ticket owns that file, and
@@ -8,7 +8,9 @@ each finding is grounded in a code anchor whose path was validated against the c
 
 Three kinds of finding, and they are not attributed the same way:
 
-* **security findings** carry their own anchors — path to task, directly.
+* **security findings** carry their own anchors — path to task, directly. Every open one, not
+  only the blocking ones: severity decides whether a finding holds acceptance shut, and what a
+  repair would change decides who answers it (`repair.route`).
 * **extra behaviours** name the actual statements they came from; those carry the anchors.
 * **claim verdicts** need no path at all. A claim that came back `diverged` or `missing` belongs
   to whichever task the plan says answers it, which is a stronger link than any file.
@@ -102,12 +104,26 @@ def _first_owned(tasks: Sequence[Owner], paths: Sequence[str]) -> tuple[str, str
 
 
 def attribute(tasks: Sequence[Owner], review: models.Review | None) -> list[Attribution]:
-    """Every blocking finding of the machine review, with the task that has to answer it."""
+    """Every finding of the machine review the loop can act on, with the task that has to answer it.
+
+    Security findings come first and most severe first, because the repair rounds are bounded
+    (`review_policy.repair_rounds`) and a task's findings go to one launch in this order.
+    """
     if review is None or not review.is_generated:
         return []
     found: list[Attribution] = []
 
-    for finding in review.blocking_security_findings:
+    by_severity = sorted(
+        review.open_security_findings,
+        # An unrecognised severity sorts first: the validator refuses one, and the direction an
+        # unknown falls in is the answerable one.
+        key=lambda f: (
+            -models.RISK_ORDER.index(str(f.get("severity")))
+            if str(f.get("severity")) in models.RISK_ORDER
+            else -len(models.RISK_ORDER)
+        ),
+    )
+    for finding in by_severity:
         task_id, basis = _first_owned(tasks, _anchor_paths(finding))
         found.append(Attribution(str(finding.get("id", "SEC-?")), "security", task_id, basis))
 

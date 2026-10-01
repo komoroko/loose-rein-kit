@@ -427,6 +427,7 @@ machine:
       semantic_support: {status: supported, assessment_basis: machine_assessed}
       conformance: {status: observed}
   security:
+    read: true
     findings:
       - id: SEC-001
         severity: high
