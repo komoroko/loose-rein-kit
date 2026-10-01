@@ -21,14 +21,17 @@ WORK = "build/demo"
 
 
 def _git(root: Path, *args: str) -> str:
-    identity = ["-c", "user.name=t", "-c", "user.email=t@t"]
-    proc = subprocess.run(["git", *identity, *args], cwd=root, check=True, capture_output=True, text=True)
+    proc = subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True)
     return proc.stdout.strip()
 
 
 def _approved(tmp_path: Path, *, integrated: bool = False) -> repo_mod.Repo:
     """A repository whose `main` is the mainline and whose work branch is approved at its tip."""
     _git(tmp_path, "init", "-q", "-b", "main")
+    # The merge integration makes is a commit, and CI's runner has no identity of its own: the repository
+    # carries one, as `seed_repo(git=True)` does.
+    _git(tmp_path, "config", "user.email", "t@e.x")
+    _git(tmp_path, "config", "user.name", "T")
     (tmp_path / "README.md").write_text("start\n", encoding="utf-8")
     (tmp_path / ".gitignore").write_text(".rein/\n.worktrees/\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
