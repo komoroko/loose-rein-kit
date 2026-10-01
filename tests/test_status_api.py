@@ -943,3 +943,45 @@ def test_acceptance_becomes_decidable_once_the_point_is_crossed(tmp_path: Path) 
     decidable = _decidable(_crossing_repo(tmp_path, crossing="approved"))
 
     assert decidable == {"mandate": False, "T-001": False, "acceptance": True}
+
+
+# --- a person is called only when nothing of the machine's is left ------------------------------
+
+
+def _machine(text: str, remedy: str) -> str:
+    from rein import approve
+
+    return approve.Blocker(text, by="machine", remedy=remedy)
+
+
+def test_a_blocker_the_machine_clears_is_not_put_to_a_person() -> None:
+    rec = decide(
+        gate_ready=False,
+        counts={"done": 2},
+        decidable_gate="acceptance",
+        machine_blocker=_machine("the machine review is stale", "rein review generate"),
+    )
+    assert rec.command == "rein review generate" and rec.kind == "machine"
+    assert status_api.pending_decision(rec, "build")["waiting_on_human"] is False
+
+
+def test_unfinished_work_is_the_phase_not_a_machine_blocker() -> None:
+    rec = decide(
+        gate_ready=False,
+        counts={"todo": 1, "done": 1},
+        decidable_gate="acceptance",
+        machine_blocker=_machine("tasks not done: T-002", "rein build"),
+    )
+    assert rec.kind == "run_phase"
+
+
+def test_what_is_left_and_is_a_person_s_is_put_to_them() -> None:
+    rec = decide(gate_ready=False, counts={"done": 2}, decidable_gate="acceptance")
+    assert rec.command == "rein ui" and rec.kind == "decide"
+    assert status_api.pending_decision(rec, "build")["waiting_on_human"] is True
+
+
+def test_an_approval_not_yet_carried_out_is_finished_without_asking() -> None:
+    rec = decide(stage="done", gates={"mandate": "approved", "acceptance": "approved"}, integration_pending=True)
+    assert rec.command == "rein integrate" and rec.kind == "machine"
+    assert decide(stage="done", gates={"mandate": "approved", "acceptance": "approved"}).kind == "close"

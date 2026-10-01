@@ -47,7 +47,7 @@ _PROSE_KEYS = frozenset({"description", "title", "$comment", "examples"})
 #: pin exists to catch, and it is not this.
 _FORMAT_PIN: tuple[str, str] = (
     "rein-grounded-v11",
-    "sha256:f52e65f6220a6988f102504708fcec6610a09eba95712483a88ea3a3bc5247a6",
+    "sha256:41e3c9fad6e0646ab56bed90cbf38ae12c9ae50962573f2ede1facf503ab2a19",
 )
 
 

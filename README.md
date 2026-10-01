@@ -252,13 +252,17 @@ Then, per cycle:
    diagnostics and decision recording, never phase execution or push. Also `rein dag --mermaid`
    for the dependency diagram, and `rein decisions` / `rein claims` to read the archives back.
 
-7. **Ship** — `rein pr-draft` assembles a PR body from the SSOT into `.rein/pr-draft.md`. Creating
-   and pushing the PR stays yours. Or ship a **stack, one pull request per task**: `rein pr-stack`
-   cuts the work branch at each task's landing commit and writes one body per slice, `--push`
-   opens them as drafts after a confirmation typed at a terminal, `--ready` lifts them once
-   acceptance is approved, and `--restack` carries a fix upward by merging. **A stack is never
-   rebased and never merged in part** — either strands the commits the record points at. Land the
-   whole of it with `gh stack merge <top> --merge`, which needs `gh extension install
+7. **Ship** — approving acceptance integrates the work branch into the mainline
+   (`project.mainline` in `config.yaml`) in the same act: through its pull request on `origin`
+   (pushed, opened with `rein pr-draft`'s body, lifted, merged as a merge commit), through the stack
+   if the cycle was published as one, or by a local merge when there is no remote. `rein integrate`
+   finishes an integration that stopped — the forge waiting on required checks, say — and asks
+   nothing, because the decision is on the record. To read the change on the forge before deciding,
+   ship a **stack, one pull request per task**: `rein pr-stack` cuts the work branch at each task's
+   landing commit and writes one body per slice, `--push` opens them as drafts after a confirmation
+   typed at a terminal, and `--restack` carries a fix upward by merging. **A stack is never rebased
+   and never merged in part** — either strands the commits the record points at; approving merges
+   the whole of it with `gh stack merge <top> --merge`, which needs `gh extension install
    github/gh-stack` — `rein doctor` says whether you have it. Optionally `rein issue-sync`
    one-way-mirrors the plan's tasks to GitHub Issues (off by default).
 
@@ -372,7 +376,7 @@ A job already shaped the old way is not failed retroactively: the base side repo
 ## Security
 
 - **gitleaks** at pre-commit; false positives go in `.gitleaksignore`.
-- A **structured security review**, when `.rein/reviews.yaml` switches it on (`acceptance.security`),
+- A **structured security review**, when `.rein/reviews.yaml` switches it on (`whole_change.security`),
   and a **dependency audit** run before acceptance. A blocking finding holds the gate shut until the
   change closes it, and the next review decides whether it closed by re-reading the code it
   anchored to — not by asking the reviewer. Switching the reading off does not clear one: it stands

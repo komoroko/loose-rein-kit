@@ -349,7 +349,7 @@ is the point; never fold them into the implementer's session.
 
    The reading runs a deterministic Coverage Manifest, a **blind**
    actual-behaviour extraction (never given the plan), the structured security review when
-   `reviews.yaml` has `acceptance.security` on, and the Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
+   `reviews.yaml` has `whole_change.security` on, and the Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
    **The change is read in *readings*, not in one sitting**: one per dependency chain the plan
    scopes — a line of tasks each built on the one before and on nothing else, read as the one
    change it is, and task by task only when the chain's diff will not fit `max_diff_bytes` — plus

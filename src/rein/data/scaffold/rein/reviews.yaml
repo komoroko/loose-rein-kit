@@ -24,10 +24,11 @@ steps:
     retries: 1
     stage: both
 
-# The readings acceptance takes beyond the comparison. `security: true` sends the change to a
-# security reviewer as well, whose blocking findings hold acceptance shut until the code no longer
-# has them. Off, acceptance says the reading was not taken.
-acceptance:
+# Reviews of the whole change, read once every task has merged and before acceptance: what one
+# task leaves open and another path reaches is only in the merged tree. Their findings are repaired
+# by the loop; what reaches acceptance is only what no repair could close. `security: true` sends
+# the whole change to a security reviewer. Off, acceptance says the reading was not taken.
+whole_change:
   security: false
 
 # Reviews of your own: a name, and the question the reviewer reads for.

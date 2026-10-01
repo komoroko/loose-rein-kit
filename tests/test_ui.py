@@ -1147,29 +1147,29 @@ def test_a_stage_tick_means_a_recorded_judgement_not_a_visit(review_server: ui.D
     session = json.loads(_request(review_server, "GET", "/api/review/session")[1])
     settled = {s["name"]: s["settled"] for s in session["stages"]}
     assert settled["decision"] is False  # DC-001 is not decided yet
-    assert settled["freeze"] is False  # not frozen
+    assert settled["accept"] is False  # not approved, so not frozen
     # The reading stages record nothing — including orient, which exists to lower what the reviewer
     # has to reconstruct, so ticking it on open would be the "a mouse moved" claim exactly.
     assert settled["scope"] is None and settled["orient"] is None and settled["diff"] is None
 
 
-def test_a_dashboard_behind_the_repository_refuses_to_freeze(review_server: ui.DashboardServer) -> None:
-    """The one acceptance precondition that does not pass `approve.readiness`, and the one process
-    whose answer changes while it runs.
-
-    The `rein sync` that materialises a newer release's schema happens in another terminal, and
-    this server has been holding the old `Config` model since before it. `_WATCHED` already stats
-    `rein.lock`, so the fact is on disk and reaching the page; what was missing was anybody asking
-    it at the door where a human freezes a review.
-    """
+def test_a_dashboard_behind_the_repository_refuses_to_record_an_answer(review_server: ui.DashboardServer) -> None:
+    """The process whose answer changes while it runs. The `rein sync` that materialises a newer
+    release's schema happens in another terminal, and this server has been holding the old models
+    since before it; every write of the review half asks first. Approving asks too, through
+    `approve.readiness`."""
     from rein import lock as lock_mod
 
     digest = _digest(review_server)
     lock_mod.write(review_server.root / ".rein" / "rein.lock", lock_mod.new("99.0.0", "git+https://github.com/o/r@x"))
-    status, data = write(review_server, "/api/review/complete", {"machine_digest": digest})
+    body: dict[str, object] = {"card_id": "DC-001", "choice": "B", "confidence": "high", "machine_digest": digest}
+    status, data = write(review_server, "/api/review/decision", body)
     assert status == 409
     assert "written by rein 99.0.0" in json.loads(data)["error"]
     assert "refusing to write" in json.loads(data)["error"]
+
+    status, data = write(review_server, "/api/review/complete", {"machine_digest": digest})
+    assert status == 404, "the review is frozen by approving acceptance, not by a separate act"
 
 
 def test_review_post_without_token_is_403(review_server: ui.DashboardServer) -> None:
@@ -1402,7 +1402,7 @@ def test_the_reviews_screen_reads_the_document_and_what_it_may_offer(server: ui.
     assert "comparison" in payload["acceptance"]
     # The security reading is the document's to switch, not a fixed card.
     assert "security review" not in payload["acceptance"]
-    assert payload["document"]["acceptance"] == {"security": True}
+    assert payload["document"]["whole_change"] == {"security": True}
 
 
 def _served_digest(server: ui.DashboardServer) -> str:
@@ -1417,7 +1417,7 @@ def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.Dashb
     document = {
         "adversarial": {"requirements": True, "design": False, "tasks": True},
         "steps": [],
-        "acceptance": {"security": True},
+        "whole_change": {"security": True},
     }
     body: dict[str, object] = {"document": document, "reason": "a one-line fix", "expect": _served_digest(server)}
     status, raw = write(server, "/api/reviews", body)
@@ -1433,13 +1433,13 @@ def test_a_reviews_change_made_on_a_stale_screen_is_a_conflict(server: ui.Dashbo
     first = {
         "adversarial": {"requirements": True, "design": False, "tasks": True},
         "steps": [],
-        "acceptance": {"security": True},
+        "whole_change": {"security": True},
     }
     assert write(server, "/api/reviews", {"document": first, "reason": "one", "expect": served})[0] == 200
     second = {
         "adversarial": {"requirements": False, "design": True, "tasks": True},
         "steps": [],
-        "acceptance": {"security": True},
+        "whole_change": {"security": True},
     }
     status, raw = write(server, "/api/reviews", {"document": second, "reason": "two", "expect": served})
     assert status == 409, raw

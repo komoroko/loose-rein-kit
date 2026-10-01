@@ -28,6 +28,10 @@ honesty buys interventions `unknown_at_mandate` beside `judgement_raised` — ma
 comprehension is a         `acceptance_reopened` — acceptance approved and then rolled
 by-product of deciding     back. The heaviest row: somebody said yes to something they
                            turned out not to have understood.
+acceptance asks only       `acceptance_residual` — at each approval, how many things
+the residue                were left that the machine could not settle. Never read by
+                           the gate; it is what a later decision about approvals with
+                           nothing left in them would be made from.
 the harness owns waiting   `waited_seconds` — from the decision being derived to it
                            being answered, under each of the two conditions it could
                            be spent in. What this falsifies is that the harness owns
@@ -79,6 +83,7 @@ KINDS: tuple[str, ...] = (
     "unknown_at_mandate",
     "judgement_raised",
     "acceptance_reopened",
+    "acceptance_residual",
     "waited_seconds",
 )
 KIND_VALUES = frozenset(KINDS)
@@ -171,6 +176,10 @@ CLAIMS: Mapping[str, str] = {
     "unknown_at_mandate": "honesty at the mandate is what buys fewer interventions later",
     "judgement_raised": "...measured against this: findings that needed a human to sort code from plan",
     "acceptance_reopened": "comprehension is a by-product of deciding — a reopened acceptance says it was not",
+    "acceptance_residual": (
+        "acceptance asks a person only what the machine could not settle — how much was left to accept, "
+        "per approval; a run of zeros is what would make an approval with nothing in it worth questioning"
+    ),
     "waited_seconds": (
         "the harness owns waiting: how long a decision sat, kept apart for the waits somebody was told "
         "about and the waits nobody was — two conditions recorded, never a controlled comparison"

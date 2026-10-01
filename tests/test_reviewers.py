@@ -734,7 +734,7 @@ def test_integrity_is_derived_from_the_committed_blobs(committed_repo: repo_mod.
 
 
 def test_switching_the_security_reading_off_does_not_clear_a_block(committed_repo: repo_mod.Repo) -> None:
-    """With `acceptance.security` off no reviewer is launched, so nothing re-states a finding and
+    """With `whole_change.security` off no reviewer is launched, so nothing re-states a finding and
     nothing drops one. A blocking finding an earlier reading recorded is carried as it stood while
     its code is there, and closes the way it always could once the code is gone."""
     head = committed_repo._git("rev-parse", "HEAD").strip()

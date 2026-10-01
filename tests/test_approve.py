@@ -362,13 +362,41 @@ def test_gate_four_blocks_on_a_blocking_security_finding(tmp_path: Path) -> None
     assert any("SEC-001" in b for b in approve.readiness(repo, "acceptance"))
 
 
-def test_gate_four_blocks_until_the_human_review_is_frozen(tmp_path: Path) -> None:
-    repo = repo_at(
-        tmp_path,
-        state=make_state(tasks={"T-001": "done"}),
-        review=make_review(generated=True, human_status="in_progress"),
-    )
-    assert any("not 'frozen'" in b for b in approve.readiness(repo, "acceptance"))
+def _with_review(repo: repo_mod.Repo, review: dict[str, Any]) -> None:
+    with store_mod.Store(repo).transaction() as tx:
+        state = tx.store.read_state()
+        assert state is not None
+        tx.write("review", review)
+        tx.append("review_generated", cycle_id=state.cycle_id, actor="test")
+
+
+def test_approving_acceptance_freezes_the_answers_it_is_approved_on(tmp_path: Path) -> None:
+    """The freeze was a step of its own in front of the approval — a second act for one decision.
+    Approving freezes, in the same write, and the receipt binds the frozen answers."""
+    repo, head, change = _reviewed_repo(tmp_path)
+    review = make_review(generated=True, human_status="in_progress", effective_risk="low")
+    review["machine"]["binding"]["subject_head_sha"] = head
+    review["machine"]["binding"]["change_digest"] = change
+    _with_review(repo, review)
+    assert not [b for b in approve.readiness(repo, "acceptance") if "frozen" in b]
+
+    approve.record_approval(repo, "acceptance", approve.approval_subject(repo, "acceptance"))
+
+    stored = store_mod.Store(repo).read_review()
+    state = store_mod.Store(repo).read_state()
+    assert stored is not None and stored.human_status == "frozen"
+    receipt = state.gate_receipt("acceptance") if state is not None else None
+    assert receipt is not None and receipt["human_digest"] == stored.human_digest()
+    assert "human_review_frozen" in [e.event for e in store_mod.Store(repo).read_events()]
+
+
+def test_an_unanswered_card_is_a_person_s_blocker_and_a_stale_review_the_machine_s(tmp_path: Path) -> None:
+    """The board calls a person only when nothing of the machine's is left (`approve.Blocker`)."""
+    repo = repo_at(tmp_path, state=make_state(tasks={"T-001": "done"}), review=make_review(generated=True))
+    blockers = approve.readiness(repo, "acceptance")
+    stale = [b for b in blockers if "says nothing about the code" in b or "could not be measured" in b]
+    assert stale and all(approve.owner(b) == "machine" for b in stale)
+    assert all(getattr(b, "remedy", "") == "rein review generate" for b in stale)
 
 
 def test_gate_four_blocks_while_tasks_are_unfinished(tmp_path: Path) -> None:
@@ -457,7 +485,7 @@ def test_recording_a_review_does_not_make_it_stale(tmp_path: Path) -> None:
 
 
 def test_a_review_read_under_the_other_security_setting_holds_acceptance_shut(tmp_path: Path) -> None:
-    """Switching `acceptance.security` changes what the review has to have read. A review taken
+    """Switching `whole_change.security` changes what the review has to have read. A review taken
     without the reading does not answer for a repository that now asks for it, and one taken with it
     holds findings over an acceptance whose person switched the reading off."""
     repo, head, change = _reviewed_repo(tmp_path)
@@ -470,7 +498,7 @@ def test_a_review_read_under_the_other_security_setting_holds_acceptance_shut(tm
         seed_repo(
             tmp_path, state=make_state(tasks={"T-001": "done"}), review=review, reviews=make_reviews(security=security)
         )
-        return [b for b in approve.readiness(repo, "acceptance") if "acceptance.security" in b]
+        return [b for b in approve.readiness(repo, "acceptance") if "whole_change.security" in b]
 
     assert blockers(read=True, security=True) == []
     assert blockers(read=False, security=False) == []
@@ -707,6 +735,7 @@ def test_acceptance_does_not_touch_the_plan_block(tmp_path: Path) -> None:
     assert before is not None and before.plan_status == "frozen"
     frozen = dict(before.raw["plan"])
 
+    _with_review(repo, make_review(generated=True))
     approve.record_approval(repo, "acceptance", approve.approval_subject(repo, "acceptance"))
     after = store_mod.Store(repo).read_state()
     assert after is not None and after.raw["plan"] == frozen
@@ -1014,7 +1043,8 @@ def test_the_cost_of_overruling_is_one_string_both_screens_say(tmp_path: Path) -
 
 def test_the_naming_layer_is_the_mandate_s_alone(tmp_path: Path) -> None:
     """The mandate is the last moment disagreeing with a reach call costs an edit rather than a
-    `/revise`, so it is the only gate with anything to name."""
+    `/revise`, so it is the only gate with anything of that to name. Acceptance names what it takes
+    on instead: the residue, and what approving does to the mainline."""
     repo = repo_at(
         tmp_path,
         state=make_state(gates=PENDING_ALL, plan_status="draft"),
@@ -1030,8 +1060,12 @@ def test_the_naming_layer_is_the_mandate_s_alone(tmp_path: Path) -> None:
         "delta": [],
         "documents": [],
         "adversarial_off": [],
+        "residue": {},
+        "integration": "",
     }
-    assert approve.naming(repo, "acceptance") == empty
+    named = approve.naming(repo, "acceptance")
+    assert named["integration"].startswith("Approving integrates build/demo into main")
+    assert {**named, "integration": ""} == empty
 
 
 def test_the_naming_layer_carries_the_whole_lens_selection_not_one_task_s(tmp_path: Path) -> None:
@@ -2019,3 +2053,29 @@ def test_an_adoption_the_chain_does_not_record_widens_nothing(tmp_path: Path) ->
         "src/elsewhere/thing.py" in b and "outside the approved mandate's scope" in b
         for b in approve.readiness(repo, "acceptance")
     )
+
+
+def test_an_approval_whose_answers_cannot_be_frozen_is_not_recorded(tmp_path: Path) -> None:
+    """Asked again under the store lock: an answer withdrawn after `readiness` must not leave an
+    approval standing over a review that was never frozen."""
+    repo, head, change = _reviewed_repo(tmp_path)
+    review = make_review(generated=True, human_status="in_progress", effective_risk="low")
+    review["machine"]["binding"]["subject_head_sha"] = head
+    review["machine"]["binding"]["change_digest"] = change
+    review["machine"]["decision_cards"] = [
+        {
+            "id": "DC-001",
+            "question": "q?",
+            "risk": "high",
+            "options": [{"id": "A", "statement_id": "STMT-001"}, {"id": "B", "statement_id": "STMT-002"}],
+        }
+    ]
+    review["machine"]["statements"] = [
+        {"id": sid, "text": "t", "epistemic_status": "machine_inferred"} for sid in ("STMT-001", "STMT-002")
+    ]
+    _with_review(repo, review)
+
+    with pytest.raises(approve.ApprovalError, match="cannot be frozen"):
+        approve.record_approval(repo, "acceptance", approve.approval_subject(repo, "acceptance"))
+    state = store_mod.Store(repo).read_state()
+    assert state is not None and state.gate_status("acceptance") != "approved"

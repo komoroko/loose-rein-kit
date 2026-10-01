@@ -7,12 +7,15 @@ new one). `pyproject.toml [project] version` is the single version source.
 ## [0.13.0] - 2026-10-01
 
 **A minor release: the format moves to `rein-grounded-v11`, and every repository needs `rein sync
---force`.** Three documents change shape. `reviews.yaml` requires `acceptance: {security: <bool>}`;
+--force`.** Four documents change shape. `config.yaml` requires `project.mainline`, the branch
+acceptance integrates into. `reviews.yaml` requires `whole_change: {security: <bool>}`;
 a generated `review.yaml` records under `machine.security` whether a security reviewer read the
 change (`read`); and the per-task reviewer's `consider` is now `question`, in `state.yaml`'s
 handoffs and `review.yaml`'s residual findings. `state.yaml` also gains `repair_grant` and
 `scope_expansions`. Nothing converts any of it for you.
 
+- **Add `mainline: main` (or your mainline's name) under `project:` in `config.yaml`.** It is
+  frozen with the mandate, so do it between cycles.
 - **Upgrade after `rein cycle-close`.** A `state.yaml` whose task handoffs hold a `consider`
   finding is refused by the new schema, and unlike `review.yaml` it cannot be deleted and taken
   again. A repository between cycles holds none.
@@ -22,9 +25,9 @@ handoffs and `review.yaml`'s residual findings. `state.yaml` also gains `repair_
   `rein review generate --force` included. `rein sync` writes the empty one back, and `rein review
   generate` takes the review again; a stage whose inputs have not moved is served from the cache.
   After `rein cycle-close` there is nothing to delete.
-- **After the sync, apply a `reviews.yaml` that says whether acceptance reads for security.** Copy
-  your file, add `acceptance:` with `security: true` to keep the reading you had or `false` to drop
-  it, and run `rein reviews apply <file> --reason ...` at your terminal. Until then every reader of
+- **After the sync, apply a `reviews.yaml` that says whether the whole change is read for
+  security.** Copy your file, add `whole_change:` with `security: true` to keep the reading you had
+  or `false` to drop it, and run `rein reviews apply <file> --reason ...` at your terminal. Until then every reader of
   the file refuses it, as it refuses any file the schema does not accept.
 
 What changes:
@@ -38,18 +41,49 @@ What changes:
   are still packaged, with the host's `/code-review`, `/simplify` and `/security-review` offered for
   them, and are yours to add to a step. A repository that already has a `reviews.yaml` keeps the
   steps it has: only a new one is seeded with `adversarial`.
-- **Whether acceptance takes a security reading is `reviews.yaml`'s `acceptance.security`, and the
-  packaged document has it off.** Off, the grounded review launches no security reviewer, primes no
+- **The security review is a review of the whole change, switched in `reviews.yaml`'s
+  `whole_change.security`, and the packaged document has it off.** It reads the merged tree once
+  every task has landed and before acceptance, because what one task leaves open and another path
+  reaches is only there; its findings are the loop's to repair. Off, the grounded review launches no security reviewer, primes no
   shared reading for the extractor alone, and records `security.read: false`, so an empty list of
   findings is never read as a review that found none. A blocking finding an earlier reading
   recorded still stands: it closes when its anchored code is gone from the tree or when you dispute
   it, exactly as before, because switching a review off is not a way to clear a block. The
   acceptance screen, the pull-request body and `rein reviews show` say the reading was not taken.
-- **A review read under the other setting holds acceptance shut.** Switching `acceptance.security`
+- **A review read under the other setting holds acceptance shut.** Switching `whole_change.security`
   after the review was generated leaves a review that read the wrong thing for this repository;
   readiness names it and asks for `rein review generate`.
-- The Reviews screen offers the security reading as a switch in the acceptance lane. Comparison and
-  the actual extraction it compares against stay fixed.
+- The Reviews screen gives the reviews of the whole change a lane of their own, between the build
+  and acceptance. Comparison and the actual extraction it compares against stay fixed in the
+  acceptance lane.
+
+What acceptance is:
+
+- **Approving acceptance is one act, and it integrates the cycle.** It used to be four: `rein review
+  complete` froze the answers, `rein approve acceptance` recorded the decision, `rein pr-stack
+  --ready` lifted the drafts, and a person merged on the forge, outside anything the harness
+  recorded. Approving now freezes the answers in the same write as the receipt (which binds the
+  frozen half) and integrates the work branch into `project.mainline`: through its pull request on
+  `origin` (pushed, opened with `rein pr-draft`'s body if it has none, lifted, merged as a merge
+  commit), through the stack if the cycle was published as one (lifted, then merged whole), or by a
+  local merge in a scratch worktree when there is no remote. `cycle_integrated` or
+  `integration_failed` records which. `rein integrate` finishes an integration that stopped and
+  asks nothing; it integrates only the commit the approved review read. `rein review complete`,
+  the dashboard's freeze button and `rein pr-stack --ready` are gone, and `pr-stack` and
+  `pr-draft` take the base from `project.mainline` instead of `--base`. `rein cycle-close` refuses
+  an approved cycle that is not integrated.
+- **Acceptance shows what is left, not what passed.** Both approval routes list the residue — claims
+  not aligned, cards not answered, claims aligned on an AI's reading alone, `question` findings, and
+  what nobody read — and say what approving will do to the mainline. The review rail's last stage is
+  `accept` (it was `freeze`). How much was left is recorded at each approval
+  (`acceptance_residual`), and nothing that decides reads it.
+- **A blocker the machine clears is not put to a person.** Readiness says whose each blocker is: a
+  stale review, a review read under the other security setting, an audit due, unfinished tasks, a
+  refused path still in the change, a work branch that no longer merges into the mainline are the
+  machine's, each with the command that clears it. `rein next` and the board recommend that command
+  and call nobody while one stands; the gate is put to you only when what is left is yours. Being
+  able to integrate cleanly is now a precondition of acceptance, checked before, because approving
+  does it.
 
 How findings are answered:
 

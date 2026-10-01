@@ -79,7 +79,7 @@ def cycle_facts(
             lines.append(f"- Security findings: {len(review.blocking_security_findings)} blocking")
         else:
             lines.append(
-                "- Security review: **not taken** (`reviews.yaml` `acceptance.security` is off) — "
+                "- Security review: **not taken** (`reviews.yaml` `whole_change.security` is off) — "
                 f"{len(review.blocking_security_findings)} blocking carried from an earlier reading"
             )
         lines.append(f"- Human review: {review.human_status}")

@@ -306,17 +306,17 @@ def test_the_packaged_reviews_read_for_the_adversarial_review_alone() -> None:
     security reading at acceptance, are a person's to switch on."""
     packaged = models.Reviews.parse(data.read_text(reviews_cmd.PACKAGED))
     assert [step.reviews for step in packaged.steps] == [("adversarial",)]
-    assert packaged.acceptance_security is False
+    assert packaged.whole_change_security is False
     assert set(models.BUILTIN_REVIEWS) == {"adversarial", "correctness", "simplification", "security"}
 
 
 def test_switching_the_security_reading_is_a_recorded_change(tmp_path: Path) -> None:
     repo = _frozen(tmp_path)
-    changes = _apply(repo, {**make_reviews(steps=[_TWO]), "acceptance": {"security": False}}, "no auth here")
-    assert changes == ["security review at acceptance: OFF"]
+    changes = _apply(repo, {**make_reviews(steps=[_TWO]), "whole_change": {"security": False}}, "no auth here")
+    assert changes == ["security review of the whole change: OFF"]
     reviews = store.Store(repo).read_reviews()
-    assert reviews is not None and reviews.acceptance_security is False
-    assert "security review: OFF" in reviews_cmd.render(reviews)
+    assert reviews is not None and reviews.whole_change_security is False
+    assert "  security: OFF" in reviews_cmd.render(reviews)
 
 
 def test_a_record_from_before_the_switch_existed_is_replaced_by_the_document_that_adds_it(tmp_path: Path) -> None:
@@ -329,5 +329,5 @@ def test_a_record_from_before_the_switch_existed_is_replaced_by_the_document_tha
         "steps": [{**_TWO, "stage": "both"}],
     }
     assert reviews_cmd.describe(old, models.Reviews(make_reviews(steps=[_TWO], security=False)).normalized()) == [
-        "security review at acceptance: OFF"
+        "security review of the whole change: OFF"
     ]

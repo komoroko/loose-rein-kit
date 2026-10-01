@@ -12,6 +12,7 @@
 project:
   name: loose-rein-kit
   work_branch: build/loose-rein-kit   # `rein init --name X` rewrites this to build/X
+  mainline: main   # what acceptance integrates the work branch into
 
 execution:
   max_parallel: 3            # concurrent independent leaf tasks within the frontier

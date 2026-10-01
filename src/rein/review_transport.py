@@ -586,7 +586,7 @@ class StagedReviewers:
         # The extractor and the security reviewer read the same diff. When they can share one
         # reading without sharing a conclusion, they do; otherwise `shareable_reading` says no and
         # each is launched exactly as before. With no security reading (`reviews.yaml`
-        # `acceptance.security`) there is nothing to share it with, and priming one for a single
+        # `whole_change.security`) there is nothing to share it with, and priming one for a single
         # branch costs more than launching the extractor alone.
         shared = shareable_reading(config, _READING_ROLES) if security else None
         reading = (

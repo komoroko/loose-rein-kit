@@ -378,7 +378,8 @@ def collect_review(root: str | Path, gate: str) -> dict[str, object]:
 
 # The deliverable review above answers "what do I read"; this session answers the harder question
 # acceptance asks — "what do *you* decide". The stages run scope (what this approval covers) → orient
-# (what was actually built, and under which conditions) → decision (the answers) → diff → freeze.
+# (what was actually built, and under which conditions) → decision (the answers) → diff → accept
+# (what is left that the machine could not settle, and the approval that takes it on).
 # The two reading stages before the questions are the load-bearing part: a reviewer who has to
 # reconstruct the change from a diff before every card spends their attention on reconstruction.
 # The rules live in human_review and the orient content in brief; this layer only shapes them into
@@ -642,7 +643,8 @@ def stage_data(root: str | Path, stage: str) -> dict[str, object]:
         payload["unanswered"] = human_review.unanswered_decisions(review, human)
     elif stage == "diff":
         payload["diff"] = _diff_block(root)
-    elif stage == "freeze":
+    elif stage == "accept":
         payload["can_freeze"] = human_review.can_freeze(review, human)
         payload["completion_blockers"] = human_review.completion_blockers(review, human)
+        payload["residue"] = human_review.residue(review, human)
     return payload

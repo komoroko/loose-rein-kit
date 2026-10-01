@@ -17,7 +17,8 @@
       "additionalProperties": false,
       "required": [
         "name",
-        "work_branch"
+        "work_branch",
+        "mainline"
       ],
       "properties": {
         "name": {
@@ -26,6 +27,12 @@
           "maxLength": 200
         },
         "work_branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "mainline": {
+          "description": "The branch a cycle is integrated into once acceptance is approved — the mainline later cycles build on. Frozen with the mandate, because where the work lands is part of what is authorized. Approving acceptance integrates the work branch into it: through the pull request (or the stack) on the `origin` remote when there is one, by a local merge when there is not.",
           "type": "string",
           "minLength": 1,
           "maxLength": 200

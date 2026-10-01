@@ -195,7 +195,7 @@ API に到達できないエージェントは何もできない —— ので�
 サンドボックスを無効化すること —— 入れ子のサンドボックスはエージェントが書き込む地点で失敗する。
 
 ## 使い方
-<!-- README.md: 1da5101373a6 -->
+<!-- README.md: 86c7b0fe6289 -->
 
 日常的に使うのは次の3つで、それ以外はダッシュボードのボタンに相当する操作である。
 
@@ -253,13 +253,16 @@ rein ui           # ローカルダッシュボード。成果物を読み、そ
    記録に限られ、フェーズ実行や push は行えない。ほかに `rein dag --mermaid` が依存図を生成し、
    `rein decisions` と `rein claims` がアーカイブを読み戻す。
 
-7. **PR にする** —— `rein pr-draft` が SSOT から PR 本文を組み立て、`.rein/pr-draft.md` に出力する。
-   PR の作成と push は人間が行う。1タスク1PR の**スタック**として出すこともできる:
-   `rein pr-stack` は各タスクが着地したコミットで作業ブランチを切り分け、スライスごとに本文を書く。
-   `--push` は端末で確認を取ってから draft として開き、`--ready` は acceptance の承認後に draft を
-   外し、`--restack` は修正をマージで上へ伝播させる。**スタックを rebase してはならず、部分的に
-   マージしてもならない** —— どちらも記録が指すコミットが失われる結果になる。全体の着地は
-   `gh stack merge <top> --merge` で行う。これには `gh extension install github/gh-stack` が要り、
+7. **統合する** —— acceptance を承認すると、同じ操作で作業ブランチが mainline(`config.yaml` の
+   `project.mainline`)へ統合される。`origin` があればその pull request を通す(push し、
+   `rein pr-draft` の本文で開き、draft を外し、merge commit で統合する)。サイクルをスタックとして
+   公開していればスタックを通し、remote が無ければローカルで merge する。止まった統合は
+   `rein integrate` が仕上げる。判断は記録済みなので、何も尋ねない。判断の前に forge 上で読みたい
+   ときは、1タスク1PR の**スタック**として出す: `rein pr-stack` は各タスクが着地したコミットで
+   作業ブランチを切り分け、スライスごとに本文を書く。`--push` は端末で確認を取ってから draft として
+   開き、`--restack` は修正をマージで上へ伝播させる。**スタックを rebase してはならず、部分的に
+   マージしてもならない** —— どちらも記録が指すコミットが失われる結果になる。承認はスタック全体を
+   `gh stack merge <top> --merge` で統合する。これには `gh extension install github/gh-stack` が要り、
    導入済みかどうかは `rein doctor` が答える。任意で `rein issue-sync` が plan のタスクを
    GitHub Issues へ一方向ミラーする(既定は off)。
 
@@ -372,10 +375,10 @@ Loose Rein はこれらを読んで診断するが、設定はしない。自分
 あり、既存のものを名指しするのは `rein doctor` の役目である。
 
 ## セキュリティ
-<!-- README.md: 7a305729cab1 -->
+<!-- README.md: 9d11cc6d0af4 -->
 
 - **gitleaks** を pre-commit で実行する。誤検知は `.gitleaksignore` に入れる。
-- **構造化されたセキュリティレビュー**(`.rein/reviews.yaml` の `acceptance.security` で有効にした
+- **構造化されたセキュリティレビュー**(`.rein/reviews.yaml` の `whole_change.security` で有効にした
   とき)と**依存関係監査**が acceptance の前に走る。blocking の指摘は変更がそれを解消するまでゲートを
   閉じたままにし、解消したかどうかは、レビュアーに尋ねることではなく、その指摘がアンカーしたコードを
   次の生成が読み直すことで決まる。読みを無効にしても指摘は消えない。コードが無くなるか異議を申し

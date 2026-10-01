@@ -347,7 +347,7 @@ class Config:
     adapter_argv: tuple[str, ...]
     launch_retries: int
     #: Does the grounded review at acceptance take a security reading (`reviews.yaml`)?
-    acceptance_security: bool
+    whole_change_security: bool
     #: Dollars this cycle may spend before the loop stops and hands back. 0.0 = no ceiling.
     max_cost_usd: float = 0.0
     #: The question each custom review asks (`reviews.yaml`).
@@ -414,7 +414,7 @@ class Config:
             adapter_argv=argv,
             max_cost_usd=config.max_cost_usd,
             launch_retries=max(0, config.launch_retries),
-            acceptance_security=reviews.acceptance_security,
+            whole_change_security=reviews.whole_change_security,
             questions=reviews.questions,
         )
 
@@ -2635,7 +2635,7 @@ class Orchestrator:
                 review_reading.warm(
                     self.repo,
                     review_transport.StagedReviewers(
-                        self.repo, config=self.config.raw, security=self.config.acceptance_security
+                        self.repo, config=self.config.raw, security=self.config.whole_change_security
                     ),
                     reading=reading,
                     base=base,
@@ -2647,7 +2647,7 @@ class Orchestrator:
                     host_surface=review_reading.host_surface_digest(self.repo, head),
                     config=self.config.raw,
                     cache=review_cache.StageCache(self.repo.root),
-                    security=self.config.acceptance_security,
+                    security=self.config.whole_change_security,
                 )
                 for reading in due
             ]
@@ -4823,7 +4823,7 @@ class Orchestrator:
         try:
             review_mod.generate(
                 self.repo,
-                review_transport.StagedReviewers(self.repo, security=self.config.acceptance_security),
+                review_transport.StagedReviewers(self.repo, security=self.config.whole_change_security),
                 actor="rein build",
             )
             return True

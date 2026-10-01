@@ -799,7 +799,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (approve.ApprovalError, models.DocumentError, store_mod.StoreError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
         logger.warning(f"gate '{gate}' opened from the dashboard ({approval_id})")
-        self._send_json(HTTPStatus.OK, {"ok": True, "gate": gate, "approval_id": approval_id})
+        reply: dict[str, object] = {"ok": True, "gate": gate, "approval_id": approval_id}
+        if gate == "acceptance":
+            # The approval is the decision and integrating it is the same act: carried out here, and
+            # reported beside the approval whether or not it completed (`rein integrate` finishes it).
+            reply["integration"], reply["integrated"] = approve.integrate_approved(repo)
+        self._send_json(HTTPStatus.OK, reply)
 
     def _send_reviews(self) -> None:
         """Which reviews run, the digest an edit of it is made against, and what the screen may offer."""
@@ -819,7 +824,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "builtin": list(models.BUILTIN_REVIEWS),
                 "adversarial_stages": list(models.ADVERSARIAL_STAGES),
                 # Shown, never offered: acceptance is decided by these, not improved by them. The
-                # security reading is the document's `acceptance.security`, switched like any other.
+                # security review of the whole change is the document's `whole_change`, switched like any other.
                 "acceptance": ["actual extraction", "comparison"],
             },
         )
@@ -880,7 +885,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "expertise": self._review_expertise,
             "disposition": self._review_disposition,
             "expert": self._review_expert,
-            "complete": self._review_complete,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -1174,9 +1178,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "expert_requested",
             lambda _review, human: human_review.request_expert(human, domain, subject_ids, reason=reason),
         )
-
-    def _review_complete(self, body: dict[str, object]) -> None:
-        self._review_mutate(body, "human_review_frozen", lambda review, human: human_review.freeze(review, human))
 
     def _select_project(self, body: dict[str, object]) -> None:
         # The client sends only a registered *name*; the server maps it to a root through the

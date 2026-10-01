@@ -909,7 +909,7 @@
           ],
           "properties": {
             "read": {
-              "description": "Whether this review sent the change to a security reviewer (`reviews.yaml` `acceptance.security`). False: no security reading was taken, and `findings` holds only what an earlier reading recorded as blocking, carried forward and re-checked against the tree without a reviewer. An empty list under `read: false` says nothing about the change's security.",
+              "description": "Whether this review sent the change to a security reviewer (`reviews.yaml` `whole_change.security`). False: no security reading was taken, and `findings` holds only what an earlier reading recorded as blocking, carried forward and re-checked against the tree without a reviewer. An empty list under `read: false` says nothing about the change's security.",
               "type": "boolean"
             },
             "findings": {

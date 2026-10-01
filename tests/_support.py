@@ -411,7 +411,7 @@ def make_reviews(
     return {
         "adversarial": dict.fromkeys(models.ADVERSARIAL_STAGES, adversarial),
         "steps": steps if steps is not None else [],
-        "acceptance": {"security": security},
+        "whole_change": {"security": security},
     }
 
 
@@ -443,7 +443,7 @@ def make_config(
     if launch_retries is not None:
         execution["launch_retries"] = launch_retries
     body: dict[str, Any] = {
-        "project": {"name": project, "work_branch": branch},
+        "project": {"name": project, "work_branch": branch, "mainline": "main"},
         "execution": execution,
         "executors": {
             "quality_gate_profile": "quality",

@@ -1656,7 +1656,7 @@ def keys_for(
 ) -> dict[str, str]:
     """This reading's stage keys, from what the reading measured about itself.
 
-    `security` is `reviews.yaml`'s `acceptance.security`. Off, the reading has no security stage,
+    `security` is `reviews.yaml`'s `whole_change.security`. Off, the reading has no security stage,
     so it has no key for one: what the run counts, plans and reports is the keys it holds.
 
     The one place the mapping from a reading to its keys lives, because two callers make it and
@@ -1823,7 +1823,7 @@ def read_one(
     order, and reporting whichever thread lost a race would make the error a reader sees depend on
     timing.
 
-    `security` off (`reviews.yaml` `acceptance.security`) launches no security reviewer: the
+    `security` off (`reviews.yaml` `whole_change.security`) launches no security reviewer: the
     reading is the extraction alone, and the blocking findings carried into it stand or close
     against the tree (`security_review.carry_forward`).
     """

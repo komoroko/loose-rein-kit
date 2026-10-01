@@ -154,7 +154,7 @@ Four documents, distinct roles — do not conflate them:
   makes the machine review stale.
 - **`.rein/reviews.yaml`** — which reviews run: the adversarial review before the mandate, per
   stage, the reviewer steps that read each batch, and whether acceptance takes a security reading
-  (`acceptance.security`). Outside the mandate's freeze, and **a human's
+  (`whole_change.security`). Outside the mandate's freeze, and **a human's
   to change, never yours**: `rein reviews apply` at their terminal or the dashboard writes it, with
   the reason and the whole document in the chain, and nothing runs on a file that differs from that
   record. Read it with `rein reviews show`; never edit it, and never run `apply` for them —
@@ -333,7 +333,7 @@ human decides *whether*; the loop does the work.
 ## Security gate
 
 **gitleaks** at commit stage; a **structured security review** feeds the grounded review before
-acceptance when `.rein/reviews.yaml` has `acceptance.security` on. Off, the review records that no
+acceptance when `.rein/reviews.yaml` has `whole_change.security` on. Off, the review records that no
 security reading was taken, and a blocking finding an earlier reading recorded still stands until
 its code is gone or a human disputes it. What "stale" means there is measured on content, over **two subjects**: the *product*, and
 the **host surfaces** `rein install` wrote — the settings, hooks, MCP servers and instruction files
@@ -360,18 +360,22 @@ not "the answer is bad" (detail: build.md, verify.md).
   worktree's record survives its deletion.
 - Per-task commits **`T-NNN: <summary>`**; commit each phase's deliverables at its gate approval.
 - **Push and PR are outward-facing** — human approval only, same for GitHub Issues.
-- **Merging into the base is outside this harness.** It takes a change to acceptance and leaves it
-  reviewable; acceptance approved the change, not the push to the base, and asking a second time
-  for the same decision is one approval too many. Whoever owns the base lands it.
-- A cycle may ship as **one pull request** (`rein pr-draft` assembles the body) or as a **stack of
-  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before acceptance and is
-  lifted by `rein pr-stack --ready` once a human approves it. Both confirm at a terminal first and
-  neither may be pre-authorized. The slices are registered as a **GitHub stack** at push time.
-- **A stack is merged whole, never in part.** This is the harness's to *say*, not to do: merging a
-  subset makes GitHub rebase the pull requests above the cut onto the new base with new commit ids,
-  so every `completed_commit` above it names a commit in no branch's history. Squash and rebase
-  merges strand them the same way. `gh stack merge <top> --merge` lands the whole of it atomically,
-  and nothing is rebased. The pull-request body carries this warning to whoever presses the button.
+- **Approving acceptance integrates the change, in the same act.** Approving is the decision to take
+  the change into the mainline (`project.mainline`), and the approval carries itself out: through
+  the work branch's pull request on `origin`, through the stack if the cycle was published as one,
+  or by a local merge when there is no remote. Asking again for the push, the lift and the merge
+  was asking four times for one decision. `rein integrate` finishes an integration that stopped
+  (the forge waiting on required checks) and asks nothing, because the decision is on the record;
+  it refuses to integrate anything but the commit the approved review read. Never merge by hand
+  around it.
+- A cycle may ship as **one pull request** (`rein pr-draft`'s body) or as a **stack of them, one per
+  task** (`rein pr-stack`). A stack opens as **drafts** before acceptance (`--push`, confirmed at a
+  terminal, never pre-authorized) for reading on the forge; approving lifts and merges it. The
+  slices are registered as a **GitHub stack** at push time.
+- **A stack is merged whole, never in part.** Merging a subset makes GitHub rebase the pull requests
+  above the cut onto the new base with new commit ids, so every `completed_commit` above it names a
+  commit in no branch's history. Squash and rebase merges strand them the same way. Approving
+  lands it with `gh stack merge <top> --merge`, atomically, and nothing is rebased.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
   `completed_commit` and gate receipt on commits that no longer exist. The grounded review's own repairs follow

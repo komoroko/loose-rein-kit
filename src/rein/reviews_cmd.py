@@ -234,8 +234,8 @@ def describe(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> list
         ):
             if was_value != now_value:
                 lines.append(f"step {name}: {key} {was_value} → {now_value}")
-    if (before or {}).get("acceptance") != after.get("acceptance"):
-        lines.append(f"security review at acceptance: {'on' if new.acceptance_security else 'OFF'}")
+    if (before or {}).get("whole_change") != after.get("whole_change"):
+        lines.append(f"security review of the whole change: {'on' if new.whole_change_security else 'OFF'}")
     old_questions, new_questions = old.questions, new.questions
     for name in sorted(old_questions.keys() - new_questions.keys()):
         lines.append(f"custom review {name}: removed")
@@ -384,8 +384,9 @@ def render(reviews: models.Reviews) -> str:
     if reviews.custom:
         lines.append("custom reviews:")
         lines += [f"  {name}: {question}" for name, question in reviews.questions.items()]
+    lines.append("reviews of the whole change, before acceptance:")
+    lines.append(f"  security: {'on' if reviews.whole_change_security else 'OFF'}")
     lines.append("acceptance: actual extraction and comparison (not configurable)")
-    lines.append(f"  security review: {'on' if reviews.acceptance_security else 'OFF'}")
     return "\n".join(lines)
 
 

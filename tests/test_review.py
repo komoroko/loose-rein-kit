@@ -351,12 +351,10 @@ def test_an_extra_behavior_that_omits_grounded_still_reaches_a_human() -> None:
 
 
 @pytest.mark.integration
-def test_generate_then_complete_freezes_a_clean_review(review_repo: Path) -> None:
-    repo = repo_mod.Repo(review_repo)
-    review.generate(repo, _reviewers(_fake_reviewer))
-    review.complete(repo)  # no challenges, no blockers → freezes
-    stored = store_mod.Store(repo).read_review()
-    assert stored is not None and stored.human_status == "frozen"
+def test_there_is_no_freeze_apart_from_the_approval() -> None:
+    """Approving acceptance freezes the answers (`approve.record_approval`); a verb that froze them
+    first was a second act for one decision."""
+    assert not hasattr(review, "complete")
 
 
 # -- what the comparator is actually handed ------------------------------------

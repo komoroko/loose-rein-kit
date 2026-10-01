@@ -479,7 +479,7 @@ def run_security_review(
 
 
 def carry_forward(prior_blocking: Iterable[Mapping[str, Any]], *, repo: repo_mod.Repo, commit: str) -> SecurityResult:
-    """The security section of a review that took no security reading (`reviews.yaml` `acceptance.security`).
+    """The security section of a review that took no security reading (`reviews.yaml` `whole_change.security`).
 
     Switching the reading off is a person's choice about which reviews run; it is not a way to clear
     a block. So a blocking finding an earlier reading recorded about this base is carried as it

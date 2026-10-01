@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/komoroko/loose-rein-kit/schema/reviews.schema.json",
   "title": "Loose Rein reviews.yaml",
-  "description": "Which reviews this repository runs: the adversarial review before the mandate, stage by stage, the reviewer steps that read each batch of tasks, and whether acceptance takes a security reading. Outside the mandate's freeze on purpose — which tool raises the quality of the work is inside what the mandate delegates, not part of what it decides — and written only by `rein reviews apply` at a terminal or by the dashboard's write session, each change recorded in the audit chain with the whole document it wrote, which is what the file on disk is checked against. The comparison acceptance rests on is not here and cannot be put here: it is what a human decides by, not a way of improving the work.",
+  "description": "Which reviews this repository runs: the adversarial review before the mandate, stage by stage, the reviewer steps that read each batch of tasks, and the reviews of the whole change read before acceptance. Outside the mandate's freeze on purpose — which tool raises the quality of the work is inside what the mandate delegates, not part of what it decides — and written only by `rein reviews apply` at a terminal or by the dashboard's write session, each change recorded in the audit chain with the whole document it wrote, which is what the file on disk is checked against. The comparison acceptance rests on is not here and cannot be put here: it is what a human decides by, not a way of improving the work.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "adversarial",
     "steps",
-    "acceptance"
+    "whole_change"
   ],
   "properties": {
     "adversarial": {
@@ -85,8 +85,8 @@
         }
       }
     },
-    "acceptance": {
-      "description": "The readings acceptance takes beyond the comparison it is decided by. `security`: whether the grounded review sends the change to a security reviewer. Off, the review records that it took no security reading, a blocking finding an earlier reading recorded still stands until its anchored code is gone or a human disputes it, and acceptance says the reading was not taken.",
+    "whole_change": {
+      "description": "Reviews of the whole change: read once every task has merged and before acceptance, because what one task leaves open and another path reaches is only in the merged tree. Their findings are repaired by the loop like any other; what reaches acceptance is only what no repair could close. `security`: whether a security reviewer reads it. Off, the review records that it took no security reading, a blocking finding an earlier reading recorded still stands until its anchored code is gone or a human disputes it, and acceptance says the reading was not taken.",
       "type": "object",
       "additionalProperties": false,
       "required": [

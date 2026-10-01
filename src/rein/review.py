@@ -1284,13 +1284,13 @@ def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str
 
 
 def _security(repo: repo_mod.Repo) -> bool:
-    """Does this review take a security reading (`reviews.yaml` `acceptance.security`)?
+    """Does this review take a security reading (`reviews.yaml` `whole_change.security`)?
 
     Read from the file only when it is what the chain records, as the build reads it: a switch
     flipped by a shell write is nobody's choice.
     """
     try:
-        return reviews_cmd.require_bound(repo).acceptance_security
+        return reviews_cmd.require_bound(repo).whole_change_security
     except reviews_cmd.ReviewsError as exc:
         raise ReviewError(str(exc)) from None
 
@@ -1506,25 +1506,6 @@ def _extra_behaviors(
     return out
 
 
-def complete(repo: repo_mod.Repo, *, actor: str = "") -> None:
-    """Freeze the human review, refusing while any completion blocker stands (plan §21.5)."""
-    store = store_mod.Store(repo)
-    review = store.read_review()
-    if review is None or not review.is_generated:
-        raise ReviewError("no machine review to complete — run `rein review generate` first")
-    seen = store_mod.read_digest(review)
-    try:
-        new_human = human_review.freeze(review, dict(review.human))
-    except ValueError as exc:
-        raise ReviewError(str(exc)) from None
-    state = store.read_state()
-    if state is None or not state.cycle_id:
-        raise ReviewError("cannot record the freeze — .rein/state.yaml names no cycle; run `rein doctor`")
-    with store.transaction() as tx:
-        tx.write("review", {**review.raw, "human": new_human}, expect_digest=seen)
-        tx.append("human_review_frozen", cycle_id=state.cycle_id, actor=actor)
-
-
 # -- CLI ----------------------------------------------------------------------
 
 
@@ -1645,7 +1626,6 @@ def main(argv: list[str] | None = None) -> int:
         default=900,
         help="seconds to sleep between retries under --supervise (default: 900, the build loop's interval)",
     )
-    sub.add_parser("complete", help="freeze the human review (all blockers must be clear)")
     sub.add_parser("show", help="print the current review.yaml")
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -1673,11 +1653,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if measured := usage_mod.summarize(spend, what="review"):
                 print(measured)
-            print("review.yaml generated — review it in `rein ui`, then `rein review complete`")
-            return 0
-        if args.cmd == "complete":
-            complete(repo)
-            print(f"human review frozen — `rein approve {models.GATE_LAST}` can now be run")
+            print("review.yaml generated — review it in `rein ui`, then `rein approve acceptance`")
             return 0
         if args.cmd == "show":
             text = repo.review.read_text(encoding="utf-8") if repo.review.exists() else "(no review.yaml yet)"

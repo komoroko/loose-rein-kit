@@ -139,8 +139,9 @@ def test_risk_acceptance_is_not_a_disposition() -> None:
 def test_the_gate_four_rail_reads_before_it_asks() -> None:
     """Twelve stages used to show the same finding four times over. The surviving rail is two
     reading stages — scope (what this approval covers) then orient (what was built, and under what
-    conditions) — before decision, the one screen that asks for anything, then diff and freeze."""
-    assert models.REVIEW_STAGE_ORDER == ("scope", "orient", "decision", "diff", "freeze")
+    conditions) — before decision, the one screen that asks for anything, then diff and accept: what is
+    left that the machine could not settle, and the approval that takes it on."""
+    assert models.REVIEW_STAGE_ORDER == ("scope", "orient", "decision", "diff", "accept")
 
 
 @pytest.mark.parametrize("name", ["plan", "state", "review", "config"])

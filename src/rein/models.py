@@ -408,7 +408,7 @@ SECURITY_CATEGORY_VALUES = frozenset(
 #: the change from a diff before every card.
 #: `decision` is the only screen that asks for anything, and each card carries its own evidence.
 #: `diff` is the change itself, for a reviewer who wants to read it rather than be told about it.
-REVIEW_STAGE_ORDER: tuple[str, ...] = ("scope", "orient", "decision", "diff", "freeze")
+REVIEW_STAGE_ORDER: tuple[str, ...] = ("scope", "orient", "decision", "diff", "accept")
 REVIEW_STAGE_VALUES = frozenset(REVIEW_STAGE_ORDER)
 
 #: What a task may declare it will require of a person, in `plan.yaml`'s `operator_surface`.
@@ -439,6 +439,10 @@ EVENT_ORDER: tuple[str, ...] = (
     "cycle_initialized",
     "knowledge_gap",
     "gate_approved",
+    # What approving acceptance does, carried out: the approved work branch reached the mainline, or
+    # it did not and the forge's or git's own words say why (`rein integrate` finishes it).
+    "cycle_integrated",
+    "integration_failed",
     # A crossing gate re-approved by the mandate approval that re-froze the plan, because nothing
     # it authorizes moved since a human confirmed it (`approve.crossing_digest`). Its own kind, not
     # a second `gate_approved`: that one is a person stopping to decide, and counting a carry as a
@@ -1713,8 +1717,8 @@ class Reviews:
         # can be applied does; the one that does not is a record written before the key existed,
         # and normalizing it into a value it never stated would make the change that adds the key
         # compare equal to that record and never be written.
-        if isinstance(self.raw.get("acceptance"), dict):
-            document["acceptance"] = {"security": self.acceptance_security}
+        if isinstance(self.raw.get("whole_change"), dict):
+            document["whole_change"] = {"security": self.whole_change_security}
         if self.custom:
             document["custom"] = [
                 {"name": name, "question": question} for name, question in sorted(self.questions.items())
@@ -1726,9 +1730,15 @@ class Reviews:
         return bool(value.get(stage)) if isinstance(value, dict) else False
 
     @property
-    def acceptance_security(self) -> bool:
-        """Does the grounded review at acceptance take a security reading?"""
-        value = self.raw.get("acceptance")
+    def whole_change_security(self) -> bool:
+        """Does a security reviewer read the whole change once every task has merged, before acceptance?
+
+        A review of the whole change rather than of one task's: what one task's check leaves open
+        that another path now reaches is only in the merged tree. It runs where the grounded review
+        reads the change (`review.generate`), and its findings are the loop's to repair
+        (`repair.route`); what reaches acceptance is only what no repair could close.
+        """
+        value = self.raw.get("whole_change")
         return bool(value.get("security")) if isinstance(value, dict) else False
 
     @property
@@ -1849,7 +1859,7 @@ class Review:
 
     @property
     def security_read(self) -> bool:
-        """Did this review send the change to a security reviewer? (`reviews.yaml` `acceptance.security`)"""
+        """Did this review send the change to a security reviewer? (`reviews.yaml` `whole_change.security`)"""
         security = self.machine.get("security")
         return isinstance(security, dict) and security.get("read") is True
 
@@ -2147,6 +2157,12 @@ class Config:
     def work_branch(self) -> str:
         project = self.raw.get("project")
         return _str(project, "work_branch") if isinstance(project, dict) else ""
+
+    @property
+    def mainline(self) -> str:
+        """The branch acceptance integrates the work branch into (`project.mainline`)."""
+        project = self.raw.get("project")
+        return _str(project, "mainline") if isinstance(project, dict) else ""
 
     @property
     def execution(self) -> Mapping[str, Any]:
