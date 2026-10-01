@@ -366,6 +366,7 @@ def make_review(
         },
         "actual_extraction": [],
         "claims": [],
+        "acceptance": {"actual_extraction": True, "comparison": True},
         "extra_behaviors": extra_behaviors or [],
         "security": {"read": True, "findings": security_findings or []},
     }
@@ -400,7 +401,12 @@ SANDBOXED_PROFILES: dict[str, dict[str, Any]] = {
 
 
 def make_reviews(
-    *, steps: list[dict[str, Any]] | None = None, adversarial: bool = True, security: bool = True
+    *,
+    steps: list[dict[str, Any]] | None = None,
+    adversarial: bool = True,
+    actual_extraction: bool = True,
+    comparison: bool = True,
+    security: bool = True,
 ) -> dict[str, Any]:
     """A reviews document. No reviewer step by default, as the default `make_config` has none:
     a test about task consumption has no business launching a reviewer. Tests about reviewing
@@ -411,6 +417,7 @@ def make_reviews(
     return {
         "adversarial": dict.fromkeys(models.ADVERSARIAL_STAGES, adversarial),
         "steps": steps if steps is not None else [],
+        "acceptance": {"actual_extraction": actual_extraction, "comparison": comparison},
         "whole_change": {"security": security},
     }
 

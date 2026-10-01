@@ -975,6 +975,7 @@ def _generated_review_with_card() -> dict[str, object]:
             },
             "actual_extraction": [],
             "claims": [],
+            "acceptance": {"actual_extraction": True, "comparison": True},
             "brief": {
                 "delivered": [{"task_id": "T-001", "title": "the retry path", "status": "done"}],
                 "execution_boundary": [{"step": "test", "profile": "quality", "sandbox": "oci", "network": "none"}],
@@ -1399,9 +1400,10 @@ def test_the_reviews_screen_reads_the_document_and_what_it_may_offer(server: ui.
     assert status == 200
     assert payload["document"]["adversarial"] == {"requirements": True, "design": True, "tasks": True}
     assert payload["builtin"] == ["adversarial", "correctness", "simplification", "security"]
-    assert "comparison" in payload["acceptance"]
-    # The security reading is the document's to switch, not a fixed card.
-    assert "security review" not in payload["acceptance"]
+    # Nothing is fixed: acceptance's own readings are offered as switches.
+    assert payload["whole_change"] == ["security"]
+    assert payload["acceptance"] == ["actual_extraction", "comparison"]
+    assert payload["document"]["acceptance"] == {"actual_extraction": True, "comparison": True}
     assert payload["document"]["whole_change"] == {"security": True}
 
 
@@ -1417,6 +1419,7 @@ def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.Dashb
     document = {
         "adversarial": {"requirements": True, "design": False, "tasks": True},
         "steps": [],
+        "acceptance": {"actual_extraction": True, "comparison": True},
         "whole_change": {"security": True},
     }
     body: dict[str, object] = {"document": document, "reason": "a one-line fix", "expect": _served_digest(server)}
@@ -1433,12 +1436,14 @@ def test_a_reviews_change_made_on_a_stale_screen_is_a_conflict(server: ui.Dashbo
     first = {
         "adversarial": {"requirements": True, "design": False, "tasks": True},
         "steps": [],
+        "acceptance": {"actual_extraction": True, "comparison": True},
         "whole_change": {"security": True},
     }
     assert write(server, "/api/reviews", {"document": first, "reason": "one", "expect": served})[0] == 200
     second = {
         "adversarial": {"requirements": False, "design": True, "tasks": True},
         "steps": [],
+        "acceptance": {"actual_extraction": True, "comparison": True},
         "whole_change": {"security": True},
     }
     status, raw = write(server, "/api/reviews", {"document": second, "reason": "two", "expect": served})

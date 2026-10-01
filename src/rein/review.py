@@ -134,6 +134,7 @@ def assemble(
     unanswered: Sequence[str] = (),
     gaps: Sequence[Mapping[str, Any]] = (),
     extra_behaviors: Sequence[Mapping[str, Any]] = (),
+    acceptance: Mapping[str, bool],
     security: Mapping[str, Any],
     effective_risk: str = "",
     plan: models.Plan | None = None,
@@ -176,6 +177,7 @@ def assemble(
         "coverage": dict(coverage),
         "actual_extraction": [dict(a) for a in actual_statements],
         "claims": [dict(c) for c in claims],
+        "acceptance": dict(acceptance),
         "security": dict(security),
     }
     if effective_risk:
@@ -471,7 +473,7 @@ def generate(
         cycle = state.cycle_id if state else ""
         plan = store.read_plan()
         config = store.read_config()
-        security = _security(repo)
+        switched = _readings(repo)
         # Read once and used three times over — the staleness digest, the reuse check, and the
         # carried-over blocking findings all ask about the same document, and parsing it once per
         # question meant three YAML loads of a file that can hold a whole review.
@@ -624,14 +626,14 @@ def generate(
                 # question up under one key.
                 risk_floor=facts.risk_floor,
                 host_surface=surface,
-                security=security,
+                readings=switched,
                 prior_blocking=prior_by_unit[m.reading.unit],
             )
             for m in measures
         }
         ran: set[str] = set()
         risk_by_unit = {m.reading.unit: m.facts.risk_floor for m in measures}
-        plan_of_run = _execution_plan(config, cache, keys_by_unit, risk_by_unit, security=security)
+        plan_of_run = _execution_plan(config, cache, keys_by_unit, risk_by_unit, readings=switched)
         print(_render_execution_plan(plan_of_run))
         # The same plan the console prints, in the one place the dashboard can see it. Opened here
         # rather than at the top of the run because this is the first moment there is a figure to
@@ -640,14 +642,16 @@ def generate(
         live = run_progress.Writer(
             repo.root,
             run_id=run_id,
-            total=sum(len(k) for k in keys_by_unit.values()) + 1,
+            total=sum(len(k) for k in keys_by_unit.values()) + (1 if switched.comparison else 0),
             stages=plan_of_run.get("stages", ()),
         )
 
-        # Every reading's two stages, plus the one comparison over the merged Actual. `keys_by_unit`
-        # holds only the two — `reading_keys` mints no comparison key, because the Actual it takes
-        # as an input does not exist yet — so counting it alone would end the run at "19/18".
-        progress = _Progress(reviewers, total=sum(len(k) for k in keys_by_unit.values()) + 1, live=live)
+        # Every reading's stages, plus the one comparison over the merged Actual when there is one.
+        # `keys_by_unit` holds only the readings' — `reading_keys` mints no comparison key, because
+        # the Actual it takes as an input does not exist yet — so counting it alone would end the
+        # run at "19/18".
+        stages_total = sum(len(k) for k in keys_by_unit.values()) + (1 if switched.comparison else 0)
+        progress = _Progress(reviewers, total=stages_total, live=live)
         discipline = review_reading.security_discipline(config)
 
         def read(m: review_reading.ReadingFacts) -> review_reading.ReadOut:
@@ -664,7 +668,7 @@ def generate(
                     head=head,
                     risk_floor=facts.risk_floor,
                     prior_blocking=prior_by_unit[m.reading.unit],
-                    security=security,
+                    readings=switched,
                     discipline=discipline,
                     on_stage=here.entered,
                     cache=cache,
@@ -695,21 +699,24 @@ def generate(
                     stage, unit = first.stage, first.unit
                 raise
         composed = review_reading.merge(readouts, coverage=coverage)
-        with common.Heartbeat("comparison"):
-            comparison = _compare(
-                repo,
-                reviewers,
-                plan=plan,
-                config=config,
-                head=head,
-                composed=composed,
-                effective=effective,
-                on_stage=entered,
-                cache=cache,
-                ran=ran,
-                reused=reused,
-            )
-        progress.landed(review_reading.WHOLE, "comparison", "comparison" not in ran)
+        if switched.comparison:
+            with common.Heartbeat("comparison"):
+                comparison = _compare(
+                    repo,
+                    reviewers,
+                    plan=plan,
+                    config=config,
+                    head=head,
+                    composed=composed,
+                    effective=effective,
+                    on_stage=entered,
+                    cache=cache,
+                    ran=ran,
+                    reused=reused,
+                )
+            progress.landed(review_reading.WHOLE, "comparison", "comparison" not in ran)
+        else:
+            comparison = conformance.not_compared([c.id for c in plan.claims] if plan is not None else [])
 
         entered("assembly")
         binding: dict[str, Any] = {
@@ -728,11 +735,12 @@ def generate(
             unanswered=comparison.unanswered,
             gaps=gaps,
             extra_behaviors=_extra_behaviors(comparison.extra_behaviors, gaps=gaps),
+            acceptance={name: getattr(switched, name) for name in models.ACCEPTANCE_READINGS},
             # Disputes re-applied here rather than trusted to survive in the human half: the
             # reviewer has no memory of the last review, so a deterministic false positive is
             # found again, and a regeneration discards the human answers that had settled it.
             security={
-                "read": security,
+                "read": switched.security,
                 "findings": security_review.apply_disputes(repo, state, composed.findings),
             },
             effective_risk=effective,
@@ -1017,7 +1025,7 @@ def _execution_plan(
     keys_by_unit: Mapping[str, Mapping[str, str]],
     risk_by_unit: Mapping[str, str],
     *,
-    security: bool,
+    readings: models.Readings,
 ) -> dict[str, Any]:
     """What this run intends to do, settled before it does any of it.
 
@@ -1042,12 +1050,12 @@ def _execution_plan(
     do and why it intended to do it in that sequence — the ordering was a judgement nothing wrote
     down. The comparison row's risk is the empty string: it reads the Actual, not a reading.
 
-    A stage the run does not take at all has no row: with `security` off (`reviews.yaml`) there is
-    no security stage to decide about, and "undecided" would say there is.
+    A stage the run does not take at all has no row: a reading `readings` switches off
+    (`reviews.yaml`) has no stage to decide about, and "undecided" would say there is.
     """
     stages: list[dict[str, Any]] = []
     for stage in _STAGE_ORDER:
-        if stage == "security_review" and not security:
+        if not getattr(readings, "security" if stage == "security_review" else stage):
             continue
         role = review_policy.STAGE_ROLE[stage]
         for unit, keys in keys_by_unit.items():
@@ -1067,13 +1075,13 @@ def _execution_plan(
             if stage == "comparison":
                 break  # one comparison over the merged Actual, whatever it was read in
     plan: dict[str, Any] = {"stages": stages}
-    shared = _shares_reading(config, security=security)
+    shared = _shares_reading(config, readings=readings)
     if shared is not None:
         plan["shared_reading"] = shared
     return plan
 
 
-def _shares_reading(config: models.Config | None, *, security: bool) -> bool | None:
+def _shares_reading(config: models.Config | None, *, readings: models.Readings) -> bool | None:
     """Will the extractor and the security reviewer branch one reading? None when it cannot be said.
 
     The transport refuses a role this release cannot launch, which is a real answer in the
@@ -1082,7 +1090,7 @@ def _shares_reading(config: models.Config | None, *, security: bool) -> bool | N
     rather than rendered as `false`.
     """
     try:
-        return review_transport.shares_reading(config, security=security)
+        return review_transport.shares_reading(config, readings=readings)
     except adapters.LaunchRefused:
         return None
 
@@ -1283,14 +1291,14 @@ def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str
     return ids
 
 
-def _security(repo: repo_mod.Repo) -> bool:
-    """Does this review take a security reading (`reviews.yaml` `whole_change.security`)?
+def _readings(repo: repo_mod.Repo) -> models.Readings:
+    """What this review reads (`reviews.yaml` `acceptance` and `whole_change`).
 
     Read from the file only when it is what the chain records, as the build reads it: a switch
     flipped by a shell write is nobody's choice.
     """
     try:
-        return reviews_cmd.require_bound(repo).whole_change_security
+        return reviews_cmd.require_bound(repo).readings
     except reviews_cmd.ReviewsError as exc:
         raise ReviewError(str(exc)) from None
 
@@ -1565,7 +1573,7 @@ def _generate_cli(
     dict the caller passed down, because a supervised run's bill is every launch it made and the
     per-attempt transports are the only things that know.
     """
-    build_reviewers = make_reviewers or (lambda: review_transport.StagedReviewers(repo, security=_security(repo)))
+    build_reviewers = make_reviewers or (lambda: review_transport.StagedReviewers(repo, readings=_readings(repo)))
     spend: dict[str, usage_mod.Usage] = {}
     attempt = 0
     while True:

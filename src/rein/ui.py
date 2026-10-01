@@ -823,9 +823,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 "digest": digests.of(document),
                 "builtin": list(models.BUILTIN_REVIEWS),
                 "adversarial_stages": list(models.ADVERSARIAL_STAGES),
-                # Shown, never offered: acceptance is decided by these, not improved by them. The
-                # security review of the whole change is the document's `whole_change`, switched like any other.
-                "acceptance": ["actual extraction", "comparison"],
+                # Dragged onto the whole-change lane like any review, while acceptance's own readings
+                # are switched in place: they make what acceptance is decided by.
+                "whole_change": ["security"],
+                "acceptance": list(models.ACCEPTANCE_READINGS),
             },
         )
 

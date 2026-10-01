@@ -1603,6 +1603,26 @@ BUILTIN_REVIEWS: tuple[str, ...] = ("adversarial", "correctness", "simplificatio
 #: The drafting stages the adversarial review runs at, in the order a cycle reaches them.
 ADVERSARIAL_STAGES: tuple[str, ...] = ("requirements", "design", "tasks")
 
+#: The readings acceptance is decided by, in the order they run (`reviews.yaml` `acceptance`).
+ACCEPTANCE_READINGS: tuple[str, ...] = ("actual_extraction", "comparison")
+
+
+@dataclass(frozen=True)
+class Readings:
+    """What the grounded review reads before acceptance (`reviews.yaml` `acceptance`, `whole_change`).
+
+    `actual_extraction` reads the code blind, without the plan, for what it does; `comparison` holds
+    that Actual against the mandate's claims, and so needs it. Both are acceptance's own: they make
+    what a person decides by rather than improving the work. `security` is a security reviewer's
+    reading of the whole change, a review whose findings the loop repairs. Each may be off: what was
+    not read is recorded as not read (`Review.extraction_read`, `Review.comparison_read`,
+    `Review.security_read`), never inferred from an empty list.
+    """
+
+    actual_extraction: bool
+    comparison: bool
+    security: bool
+
 
 @dataclass(frozen=True)
 class ReviewStep:
@@ -1662,10 +1682,17 @@ class Reviews:
         errors: list[str] = []
         custom = [c.get("name") for c in self.custom]
         for name in custom:
-            if name in BUILTIN_REVIEWS:
-                errors.append(f"custom/{name}: `{name}` is a packaged review — a custom one needs a name of its own")
+            if name in BUILTIN_REVIEWS or name in ACCEPTANCE_READINGS:
+                errors.append(
+                    f"custom/{name}: `{name}` is a packaged review or reading — a custom one needs a name of its own"
+                )
         if len(set(custom)) != len(custom):
             errors.append("custom: two reviews share a name")
+        if self.readings.comparison and not self.readings.actual_extraction:
+            errors.append(
+                "acceptance: `comparison` compares the actual extraction with the claims, so it needs "
+                "`actual_extraction` on"
+            )
         names = [step.name for step in self.steps]
         if len(set(names)) != len(names):
             errors.append("steps: two steps share a name")
@@ -1717,8 +1744,10 @@ class Reviews:
         # can be applied does; the one that does not is a record written before the key existed,
         # and normalizing it into a value it never stated would make the change that adds the key
         # compare equal to that record and never be written.
+        if isinstance(self.raw.get("acceptance"), dict):
+            document["acceptance"] = {name: getattr(self.readings, name) for name in ACCEPTANCE_READINGS}
         if isinstance(self.raw.get("whole_change"), dict):
-            document["whole_change"] = {"security": self.whole_change_security}
+            document["whole_change"] = {"security": self.readings.security}
         if self.custom:
             document["custom"] = [
                 {"name": name, "question": question} for name, question in sorted(self.questions.items())
@@ -1730,16 +1759,22 @@ class Reviews:
         return bool(value.get(stage)) if isinstance(value, dict) else False
 
     @property
-    def whole_change_security(self) -> bool:
-        """Does a security reviewer read the whole change once every task has merged, before acceptance?
+    def readings(self) -> Readings:
+        """What the grounded review reads once every task has merged, before acceptance.
 
-        A review of the whole change rather than of one task's: what one task's check leaves open
-        that another path now reaches is only in the merged tree. It runs where the grounded review
-        reads the change (`review.generate`), and its findings are the loop's to repair
-        (`repair.route`); what reaches acceptance is only what no repair could close.
+        All of it reads the merged tree: what a claim of the mandate rests on, and what one task
+        leaves open that another path now reaches, are only there. It runs where the grounded review
+        reads the change (`review.generate`); a security finding is the loop's to repair
+        (`repair.route`), and what was not read is named at acceptance as not read.
         """
-        value = self.raw.get("whole_change")
-        return bool(value.get("security")) if isinstance(value, dict) else False
+        acceptance, whole = self.raw.get("acceptance"), self.raw.get("whole_change")
+        acceptance = acceptance if isinstance(acceptance, dict) else {}
+        whole = whole if isinstance(whole, dict) else {}
+        return Readings(
+            actual_extraction=bool(acceptance.get("actual_extraction")),
+            comparison=bool(acceptance.get("comparison")),
+            security=bool(whole.get("security")),
+        )
 
     @property
     def adversarial_off(self) -> tuple[str, ...]:
@@ -1856,6 +1891,18 @@ class Review:
     def security_findings(self) -> tuple[Mapping[str, Any], ...]:
         security = self.machine.get("security")
         return _maps(security, "findings") if isinstance(security, dict) else ()
+
+    @property
+    def extraction_read(self) -> bool:
+        """Did this review read the code blind for what it does? (`reviews.yaml` `acceptance.actual_extraction`)"""
+        acceptance = self.machine.get("acceptance")
+        return isinstance(acceptance, dict) and acceptance.get("actual_extraction") is True
+
+    @property
+    def comparison_read(self) -> bool:
+        """Did this review compare the change with the mandate's claims? (`reviews.yaml` `acceptance.comparison`)"""
+        acceptance = self.machine.get("acceptance")
+        return isinstance(acceptance, dict) and acceptance.get("comparison") is True
 
     @property
     def security_read(self) -> bool:

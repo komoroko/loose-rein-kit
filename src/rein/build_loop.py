@@ -346,8 +346,8 @@ class Config:
     timeout_agent: float | None
     adapter_argv: tuple[str, ...]
     launch_retries: int
-    #: Does the grounded review at acceptance take a security reading (`reviews.yaml`)?
-    whole_change_security: bool
+    #: What the grounded review reads before acceptance (`reviews.yaml`).
+    readings: models.Readings
     #: Dollars this cycle may spend before the loop stops and hands back. 0.0 = no ceiling.
     max_cost_usd: float = 0.0
     #: The question each custom review asks (`reviews.yaml`).
@@ -414,7 +414,7 @@ class Config:
             adapter_argv=argv,
             max_cost_usd=config.max_cost_usd,
             launch_retries=max(0, config.launch_retries),
-            whole_change_security=reviews.whole_change_security,
+            readings=reviews.readings,
             questions=reviews.questions,
         )
 
@@ -2599,6 +2599,9 @@ class Orchestrator:
             return []
         if not task.scope_include:
             return []
+        if not (self.config.readings.actual_extraction or self.config.readings.security):
+            # Nothing the gate reads is a launch: a reading taken here would warm no key.
+            return []
         try:
             # The same base the gate will resolve, not the plan's field: they differ whenever the
             # plan names a commit this checkout does not have, and a warm-up taken against a
@@ -2634,9 +2637,7 @@ class Orchestrator:
             return [
                 review_reading.warm(
                     self.repo,
-                    review_transport.StagedReviewers(
-                        self.repo, config=self.config.raw, security=self.config.whole_change_security
-                    ),
+                    review_transport.StagedReviewers(self.repo, config=self.config.raw, readings=self.config.readings),
                     reading=reading,
                     base=base,
                     head=head,
@@ -2647,7 +2648,7 @@ class Orchestrator:
                     host_surface=review_reading.host_surface_digest(self.repo, head),
                     config=self.config.raw,
                     cache=review_cache.StageCache(self.repo.root),
-                    security=self.config.whole_change_security,
+                    readings=self.config.readings,
                 )
                 for reading in due
             ]
@@ -4823,7 +4824,7 @@ class Orchestrator:
         try:
             review_mod.generate(
                 self.repo,
-                review_transport.StagedReviewers(self.repo, security=self.config.whole_change_security),
+                review_transport.StagedReviewers(self.repo, readings=self.config.readings),
                 actor="rein build",
             )
             return True

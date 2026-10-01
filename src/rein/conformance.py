@@ -249,15 +249,33 @@ def run_comparator(
 _UNANSWERED_TEXT = "the comparator returned no result for this claim"
 
 
-def _unanswered_claim(claim_id: str) -> dict[str, Any]:
+#: What every claim is recorded as when the repository switched the comparison off.
+_NOT_COMPARED_TEXT = "no comparison was taken (`reviews.yaml` `acceptance.comparison` is off)"
+
+
+def _unanswered_claim(claim_id: str, why: str = _UNANSWERED_TEXT) -> dict[str, Any]:
     return {
         "claim_id": claim_id,
         "verdict": "unknown",
         "integrity": {"status": "unavailable"},
         "semantic_support": {"status": "unknown", "assessment_basis": "machine_assessed"},
         "conformance": {"status": "unknown"},
-        "unknowns": [_UNANSWERED_TEXT],
+        "unknowns": [why],
     }
+
+
+def not_compared(expected_claim_ids: Iterable[str]) -> ComparatorResult:
+    """The comparison of a review that took none: every claim of the plan, each `unknown`.
+
+    The same row a claim the Comparator was silent about gets, for the same reason — nobody looked
+    — with the reason saying who decided that nobody would. Each becomes a decision card
+    (`decision_cards`), so what the machine did not compare is what a person is asked about. None is
+    `unanswered`: that names a Comparator's silence, and no Comparator was asked.
+    """
+    return ComparatorResult(
+        claims=tuple(_unanswered_claim(cid, _NOT_COMPARED_TEXT) for cid in expected_claim_ids),
+        actual_coverage_gaps=(),
+    )
 
 
 def _frame_by_expected(

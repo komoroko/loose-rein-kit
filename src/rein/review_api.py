@@ -472,6 +472,8 @@ def scope_block(root: Path, review: models.Review) -> dict[str, object]:
         "generated_at": str(binding.get("generated_at", "")) or None,
         "effective_risk": review.effective_risk,
         "independence": binding.get("independence") or {},
+        "extraction_read": review.extraction_read,
+        "comparison_read": review.comparison_read,
         "security_read": review.security_read,
         "coverage": _coverage_totals(review),
         "counts": {
@@ -637,6 +639,8 @@ def stage_data(root: str | Path, stage: str) -> dict[str, object]:
         payload["gaps"] = list(machine.get("gaps", []) or [])
         payload["extra_behaviors"] = list(review.extra_behaviors)
         payload["security_findings"] = list(review.security_findings)
+        payload["extraction_read"] = review.extraction_read
+        payload["comparison_read"] = review.comparison_read
         payload["security_read"] = review.security_read
         payload["summary"] = machine.get("summary", {})
         payload["decisions"] = [d for d in human.get("decisions", []) or [] if isinstance(d, dict)]

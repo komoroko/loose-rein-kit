@@ -484,26 +484,44 @@ def test_recording_a_review_does_not_make_it_stale(tmp_path: Path) -> None:
     assert not [b for b in approve.readiness(repo, "acceptance") if "says nothing" in b]
 
 
-def test_a_review_read_under_the_other_security_setting_holds_acceptance_shut(tmp_path: Path) -> None:
-    """Switching `whole_change.security` changes what the review has to have read. A review taken
-    without the reading does not answer for a repository that now asks for it, and one taken with it
-    holds findings over an acceptance whose person switched the reading off."""
+@pytest.mark.parametrize(
+    ("setting", "recorded"),
+    [
+        ("acceptance.actual_extraction", ("acceptance", "actual_extraction")),
+        ("acceptance.comparison", ("acceptance", "comparison")),
+        ("whole_change.security", ("security", "read")),
+    ],
+)
+def test_a_review_read_under_the_other_setting_holds_acceptance_shut(
+    tmp_path: Path, setting: str, recorded: tuple[str, str]
+) -> None:
+    """Switching a reading changes what the review has to have read. A review taken without it does
+    not answer for a repository that now asks for it, and one taken with it holds an answer over an
+    acceptance whose person switched it off. The machine clears it by reading again."""
     repo, head, change = _reviewed_repo(tmp_path)
     review = make_review(generated=True, human_status="frozen", effective_risk="low")
     review["machine"]["binding"]["subject_head_sha"] = head
     review["machine"]["binding"]["change_digest"] = change
+    section, key = recorded
+    name = setting.split(".")[1]
 
-    def blockers(*, read: bool, security: bool) -> list[str]:
-        review["machine"]["security"]["read"] = read
-        seed_repo(
-            tmp_path, state=make_state(tasks={"T-001": "done"}), review=review, reviews=make_reviews(security=security)
-        )
-        return [b for b in approve.readiness(repo, "acceptance") if "whole_change.security" in b]
+    def blockers(*, read: bool, wanted: bool) -> list[str]:
+        review["machine"][section][key] = read
+        # The other readings stay as recorded; only this one is moved on each side.
+        reviews = make_reviews()
+        reviews[setting.split(".")[0]][name] = wanted
+        if name == "actual_extraction":
+            # The comparison needs the extraction, so a document without it has neither.
+            reviews["acceptance"]["comparison"] = wanted
+            review["machine"]["acceptance"]["comparison"] = read
+        seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=review, reviews=reviews)
+        return [b for b in approve.readiness(repo, "acceptance") if setting in b]
 
-    assert blockers(read=True, security=True) == []
-    assert blockers(read=False, security=False) == []
-    assert any("without a security reading" in b and "on" in b for b in blockers(read=False, security=True))
-    assert any("with a security reading" in b and "off" in b for b in blockers(read=True, security=False))
+    assert blockers(read=True, wanted=True) == []
+    assert blockers(read=False, wanted=False) == []
+    [missing] = blockers(read=False, wanted=True)
+    assert "without the" in missing and approve.owner(missing) == "machine"
+    assert any("with the" in b and "off" in b for b in blockers(read=True, wanted=False))
 
 
 # --- what acceptance carries rather than re-reads -------------------------------------

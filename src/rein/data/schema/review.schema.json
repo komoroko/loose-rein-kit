@@ -239,7 +239,8 @@
               "binding",
               "coverage",
               "actual_extraction",
-              "claims"
+              "claims",
+              "acceptance"
             ],
             "properties": {
               "binding": {
@@ -797,6 +798,23 @@
                   "$ref": "#/$defs/text"
                 }
               }
+            }
+          }
+        },
+        "acceptance": {
+          "description": "Which readings acceptance is decided by this review took (`reviews.yaml` `acceptance`). `actual_extraction` false: nobody read the code blind and `actual_extraction` is empty. `comparison` false: no claim was compared, and every claim is `unknown` because nobody compared it, not because a comparison could not decide.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actual_extraction",
+            "comparison"
+          ],
+          "properties": {
+            "actual_extraction": {
+              "type": "boolean"
+            },
+            "comparison": {
+              "type": "boolean"
             }
           }
         },

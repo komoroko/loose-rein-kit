@@ -1651,13 +1651,13 @@ def keys_for(
     ceiling: int,
     risk_floor: str,
     host_surface: str,
-    security: bool,
+    readings: models.Readings,
     prior_blocking: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, str]:
     """This reading's stage keys, from what the reading measured about itself.
 
-    `security` is `reviews.yaml`'s `whole_change.security`. Off, the reading has no security stage,
-    so it has no key for one: what the run counts, plans and reports is the keys it holds.
+    `readings` is what `reviews.yaml` has the review read. A reading it switches off has no stage
+    here, so it has no key for one: what the run counts, plans and reports is the keys it holds.
 
     The one place the mapping from a reading to its keys lives, because two callers make it and
     they have to agree exactly: `review.generate` at the gate, and `build_loop` when a task lands.
@@ -1682,7 +1682,9 @@ def keys_for(
         prior_blocking=[str(f.get("id", "")) for f in prior_blocking],
         unit=measured.reading.unit,
     )
-    if not security:
+    if not readings.actual_extraction:
+        del keys["actual_extraction"]
+    if not readings.security:
         del keys["security_review"]
     return keys
 
@@ -1701,7 +1703,7 @@ def warm(
     host_surface: str,
     config: models.Config | None,
     cache: review_cache.StageCache,
-    security: bool,
+    readings: models.Readings,
 ) -> ReadOut:
     """Take one reading now, so acceptance finds it already answered.
 
@@ -1731,7 +1733,7 @@ def warm(
         ceiling=limits["max_diff_bytes"],
         risk_floor=risk_floor,
         host_surface=host_surface,
-        security=security,
+        readings=readings,
     )
     return read_one(
         repo,
@@ -1741,7 +1743,7 @@ def warm(
         head=head,
         risk_floor=risk_floor,
         prior_blocking=(),
-        security=security,
+        readings=readings,
         discipline=security_discipline(config),
         cache=cache,
         keys=keys,
@@ -1785,7 +1787,7 @@ def read_one(
     head: str,
     risk_floor: str,
     prior_blocking: Sequence[Mapping[str, Any]],
-    security: bool,
+    readings: models.Readings,
     discipline: str = "",
     on_stage: Callable[[str], None] = lambda _name: None,
     cache: review_cache.StageCache,
@@ -1823,9 +1825,10 @@ def read_one(
     order, and reporting whichever thread lost a race would make the error a reader sees depend on
     timing.
 
-    `security` off (`reviews.yaml` `whole_change.security`) launches no security reviewer: the
-    reading is the extraction alone, and the blocking findings carried into it stand or close
-    against the tree (`security_review.carry_forward`).
+    `readings` is what `reviews.yaml` has the review read. `security` off launches no security
+    reviewer: the blocking findings carried into the reading stand or close against the tree
+    (`security_review.carry_forward`). `actual_extraction` off launches no extractor: the reading
+    carries no statement. Both off, this reading launches nothing.
     """
     unit = measured.reading.unit
     carried_ids = tuple(str(f.get("id", "")) for f in prior_blocking)
@@ -1850,34 +1853,36 @@ def read_one(
             on_done=lambda was_reused: on_progress(unit, "actual_extraction", was_reused),
         )
 
-    if not security:
-        return ReadOut(
-            reading=measured.reading,
-            extraction=extract(),
-            security=security_review.carry_forward(prior_blocking, repo=repo, commit=head),
-            carried_ids=carried_ids,
+    def read_security() -> security_review.SecurityResult:
+        if not readings.security:
+            return security_review.carry_forward(prior_blocking, repo=repo, commit=head)
+        request = security_request(
+            measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking, discipline=discipline
         )
-    security_req = security_request(
-        measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking, discipline=discipline
-    )
-
-    def run_security() -> security_review.SecurityResult:
-        # Bound on this thread — the worker's — because the transport is reached through the
-        # injected reviewers, whose signature is not ours to change.
+        # Bound on this thread — the worker's when it runs beside the extractor — because the
+        # transport is reached through the injected reviewers, whose signature is not ours to change.
         with common.cancelling(cancel):
             return cached_stage(
                 cache,
                 "security_review",
                 keys["security_review"],
                 ran,
-                lambda ask: security_review.run_security_review(security_req, ask, repo=repo, commit=head),
+                lambda ask: security_review.run_security_review(request, ask, repo=repo, commit=head),
                 reviewers,
                 reused=reused,
                 on_done=lambda was_reused: on_progress(unit, "security_review", was_reused),
             )
 
+    if not (readings.actual_extraction and readings.security):
+        # One stage or none: nothing runs beside anything, so nothing needs a pool.
+        extraction = extract() if readings.actual_extraction else not_extracted(measured)
+        on_stage("security_review")
+        return ReadOut(
+            reading=measured.reading, extraction=extraction, security=read_security(), carried_ids=carried_ids
+        )
+
     with ThreadPoolExecutor(max_workers=1) as pool:
-        security_future = pool.submit(run_security)
+        security_future = pool.submit(read_security)
         try:
             extraction = extract()
         except BaseException:
@@ -1890,4 +1895,18 @@ def read_one(
         extraction=extraction,
         security=findings,
         carried_ids=carried_ids,
+    )
+
+
+def not_extracted(measured: ReadingFacts) -> actual_extraction.ExtractionResult:
+    """The extraction of a reading nobody extracted (`acceptance.actual_extraction` off): no statement.
+
+    Empty, and said to be empty by the review's `acceptance.actual_extraction`, not by this list: an
+    empty Actual from an extractor that ran would mean it found nothing to state.
+    """
+    coverage = dict(measured.coverage)
+    return actual_extraction.ExtractionResult(
+        actual_statements=(),
+        coverage=coverage,
+        actual_digest=digests.of({"actual_statements": [], "coverage": coverage}),
     )

@@ -153,8 +153,9 @@ Four documents, distinct roles — do not conflate them:
   *separately*. Regenerating the machine review resets the human review; a human answer never
   makes the machine review stale.
 - **`.rein/reviews.yaml`** — which reviews run: the adversarial review before the mandate, per
-  stage, the reviewer steps that read each batch, and whether acceptance takes a security reading
-  (`whole_change.security`). Outside the mandate's freeze, and **a human's
+  stage, the reviewer steps that read each batch, the security review of the whole change
+  (`whole_change.security`), and what acceptance is decided by (`acceptance.actual_extraction`,
+  `acceptance.comparison`). Any of them may be off; what was not read is named at acceptance. Outside the mandate's freeze, and **a human's
   to change, never yours**: `rein reviews apply` at their terminal or the dashboard writes it, with
   the reason and the whole document in the chain, and nothing runs on a file that differs from that
   record. Read it with `rein reviews show`; never edit it, and never run `apply` for them —

@@ -32,6 +32,7 @@ from rein import (
     diff_facts,
     digests,
     event_chain,
+    human_review,
     models,
     review,
     review_cache,
@@ -46,6 +47,10 @@ from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
 from tests._support import agent_envelope, make_config, make_plan, make_reviews, make_state, make_task, seed_repo
+
+#: Every reading, as a review taken under the packaged `reviews.yaml` with the security reading
+#: switched on.
+_BOTH = models.Readings(actual_extraction=True, comparison=True, security=True)
 
 
 def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
@@ -78,7 +83,12 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
         },
     ]
     machine = review.assemble(
-        binding=binding, coverage=coverage, actual_statements=[], claims=claims, security={"read": True, "findings": []}
+        binding=binding,
+        coverage=coverage,
+        actual_statements=[],
+        claims=claims,
+        acceptance={"actual_extraction": True, "comparison": True},
+        security={"read": True, "findings": []},
     )
     assert models.schema_errors({"machine": machine, "human": {"status": "not_started"}}, "review") == []
     assert machine["summary"]["claims_total"] == 2
@@ -675,7 +685,7 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
         return call
 
     monkeypatch.setattr(review_transport, "_adapter_reviewer", fake_adapter)
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), security=True)
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), readings=_BOTH)
 
     for role in ("actual_extractor", "comparator", "security_reviewer"):
         reviewers.for_role(role)({"actual_digest": "d"})
@@ -688,7 +698,7 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
 def test_a_role_the_pipeline_does_not_launch_is_not_answerable(review_repo: Path) -> None:
     """`for_role` is a lookup, not a factory: a role nobody configured a stage for has no
     reviewer, and inventing one on demand is how a fourth opinion would enter the review."""
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), security=True)
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), readings=_BOTH)
     with pytest.raises(KeyError):
         reviewers.for_role("implementer")
 
@@ -2654,7 +2664,7 @@ def test_a_launch_that_failed_is_still_on_the_bill(review_repo: Path, monkeypatc
     can be made — a raise carries no return value, and this is why the transport keeps the ledger
     rather than handing the cost back to the pipeline."""
     monkeypatch.setattr(common, "run", lambda *a, **k: (1, "the provider said no"))
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), security=True)
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), readings=_BOTH)
 
     with pytest.raises(review_policy.AdapterFailure):
         reviewers.for_role("comparator")({"expected_model": {}, "actual_digest": "d"})
@@ -2671,7 +2681,7 @@ def test_the_priming_turn_is_not_charged_to_the_stage_that_triggered_it(
     would make that stage's stored execution say it launched twice, and a later replay would
     report a cost the stage never had."""
     monkeypatch.setattr(common, "run", lambda *a, **k: (0, agent_envelope(review_transport._PRIME_ACK)))
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), security=True)
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), readings=_BOTH)
 
     answer = reviewers.for_role("actual_extractor")(_a_reading_request())
 
@@ -3294,9 +3304,84 @@ def test_with_the_security_reading_on_the_review_says_it_was_read(review_repo: P
     assert machine["security"]["read"] is True
 
 
-def test_no_reading_is_shared_when_there_is_no_security_reading() -> None:
-    """Priming a shared reading for the extractor alone costs more than launching it alone."""
-    assert review_transport.shares_reading(None, security=False) is False
+def test_no_reading_is_shared_unless_both_readings_are_taken() -> None:
+    """Priming a shared reading for one stage alone costs more than launching that stage alone."""
+    for readings in (
+        models.Readings(actual_extraction=True, comparison=True, security=False),
+        models.Readings(actual_extraction=False, comparison=False, security=True),
+    ):
+        assert review_transport.shares_reading(None, readings=readings) is False
+
+
+def _generate_with(
+    tmp_path: Path, *, actual_extraction: bool = True, comparison: bool = True, security: bool = True
+) -> tuple[repo_mod.Repo, dict[str, Any], list[str]]:
+    """Generate a review under `reviews.yaml` switches, and say which reviewer roles were launched."""
+    seed_repo(
+        tmp_path,
+        state=make_state(project="rv"),
+        plan=make_plan(),
+        config=make_config(),
+        reviews=make_reviews(actual_extraction=actual_extraction, comparison=comparison, security=security),
+    )
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    asked: list[str] = []
+
+    def answer(role: str, request: Mapping[str, Any]) -> str:
+        asked.append(role)
+        return _fake_reviewer(role, request)
+
+    repo = repo_mod.Repo(tmp_path)
+    return repo, review.generate(repo, _reviewers(answer)), asked
+
+
+def _planned_stages(repo: repo_mod.Repo) -> set[str]:
+    measured = [e for e in event_chain.scan(repo.events)[0] if e.event == "run_measured"][-1]
+    return {row["stage"] for row in measured.detail["plan"]["stages"]}
+
+
+@pytest.mark.integration
+def test_with_the_comparison_off_no_claim_is_compared_and_each_is_put_to_a_person(tmp_path: Path) -> None:
+    """Off is off: no comparator is launched or planned, and every claim of the plan reaches
+    acceptance as `unknown` saying who decided nobody would compare it, each a decision card. The
+    blind extraction still runs, so the person decides beside what it read."""
+    repo, machine, asked = _generate_with(tmp_path, comparison=False)
+
+    assert "comparator" not in asked and "actual_extractor" in asked
+    assert machine["acceptance"] == {"actual_extraction": True, "comparison": False}
+    plan_claims = [c.id for c in models.Plan(make_plan()).claims]
+    assert [c["claim_id"] for c in machine["claims"]] == plan_claims
+    assert all(c["verdict"] == "unknown" and "acceptance.comparison" in c["unknowns"][0] for c in machine["claims"])
+    assert "unanswered" not in machine["summary"], "no comparator was asked, so none was silent"
+    carded = {str(st["applicability"]["subject_id"]) for st in machine.get("statements", [])}
+    assert set(plan_claims) <= carded, "what the machine did not compare is what a person is asked"
+    stored = store_mod.Store(repo).read_review()
+    assert stored is not None and stored.comparison_read is False and stored.extraction_read is True
+    assert any("acceptance.comparison" in line for line in human_review.residue(stored)["not_read"])
+    assert _planned_stages(repo) == {"actual_extraction", "security_review"}
+
+
+@pytest.mark.integration
+def test_with_acceptance_s_readings_off_only_the_security_reading_is_launched(tmp_path: Path) -> None:
+    repo, machine, asked = _generate_with(tmp_path, actual_extraction=False, comparison=False)
+
+    assert asked == ["security_reviewer"]
+    assert machine["acceptance"] == {"actual_extraction": False, "comparison": False}
+    assert machine["actual_extraction"] == []
+    stored = store_mod.Store(repo).read_review()
+    assert stored is not None
+    not_read = human_review.residue(stored)["not_read"]
+    assert any("acceptance.actual_extraction" in line for line in not_read)
+    assert _planned_stages(repo) == {"security_review"}
+
+
+@pytest.mark.integration
+def test_with_every_reading_off_nothing_is_launched(tmp_path: Path) -> None:
+    _, machine, asked = _generate_with(tmp_path, actual_extraction=False, comparison=False, security=False)
+    assert asked == []
+    assert machine["security"] == {"read": False, "findings": []}
 
 
 def test_generate_refuses_a_reviews_file_the_chain_does_not_record(review_repo: Path) -> None:

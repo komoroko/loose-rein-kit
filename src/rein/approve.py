@@ -293,25 +293,30 @@ def _review_blockers(
     # (`review_reading.freshness`).
     if reason := review_reading.freshness(repo, review, state).reason:
         blockers.append(Blocker(reason, by="machine", remedy="rein review generate"))
-    # Not the code but what was read of it. A review taken without a security reading does not
-    # answer for a repository that now asks for one, and one taken with it holds findings over an
-    # acceptance whose person switched that reading off. Read from the file only when it is what
-    # the chain records, as every reader of it does.
+    # Not the code but what was read of it. A review taken without a reading does not answer for a
+    # repository that now asks for one, and one taken with it holds findings over an acceptance
+    # whose person switched that reading off. Read from the file only when it is what the chain
+    # records, as every reader of it does.
     try:
-        security = reviews_cmd.require_bound(repo).whole_change_security
+        readings = reviews_cmd.require_bound(repo).readings
     except reviews_cmd.ReviewsError as exc:
         blockers.append(str(exc))
     else:
-        if review.security_read != security:
-            blockers.append(
-                Blocker(
-                    f"the machine review was generated {'with' if review.security_read else 'without'} a "
-                    f"security reading, and reviews.yaml now has whole_change.security "
-                    f"{'on' if security else 'off'}",
-                    by="machine",
-                    remedy="rein review generate",
+        for setting, wanted, read in (
+            ("acceptance.actual_extraction", readings.actual_extraction, review.extraction_read),
+            ("acceptance.comparison", readings.comparison, review.comparison_read),
+            ("whole_change.security", readings.security, review.security_read),
+        ):
+            if read != wanted:
+                name = setting.split(".")[1].replace("_", " ")
+                blockers.append(
+                    Blocker(
+                        f"the machine review was generated {'with' if read else 'without'} the {name}, "
+                        f"and reviews.yaml now has {setting} {'on' if wanted else 'off'}",
+                        by="machine",
+                        remedy="rein review generate",
+                    )
                 )
-            )
     return blockers
 
 

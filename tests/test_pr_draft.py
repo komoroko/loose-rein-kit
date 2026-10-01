@@ -39,6 +39,15 @@ def test_sufficient_coverage_reports_the_count(tmp_path: Path) -> None:
     assert "Extra behaviors: 0 blocking, 0 total" in body
 
 
+def test_a_review_that_compared_nothing_says_so(tmp_path: Path) -> None:
+    """An all-`unknown` claim list under a comparison switched off is not a comparison that could
+    not decide, and the body that sets a reviewer's expectations does not let it read as one."""
+    review = make_review(generated=True)
+    review["machine"]["acceptance"]["comparison"] = False
+    assert "Comparison: **not taken**" in body_for(tmp_path, review=review)
+    assert "Comparison:" not in body_for(tmp_path, review=make_review(generated=True))
+
+
 def test_a_blocking_extra_behaviour_is_counted(tmp_path: Path) -> None:
     extra = {
         "id": "EXTRA-001",

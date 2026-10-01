@@ -191,6 +191,15 @@ def _record_write(
     )
 
 
+#: Each reading's switch: the section of `reviews.yaml` it is in, its name, and how a change to it
+#: is said.
+_READING_SWITCHES: tuple[tuple[str, str, str], ...] = (
+    ("acceptance", "actual_extraction", "actual extraction at acceptance"),
+    ("acceptance", "comparison", "comparison at acceptance"),
+    ("whole_change", "security", "security review of the whole change"),
+)
+
+
 def describe(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> list[str]:
     """What a change does, one line per thing a reader would call a change.
 
@@ -234,8 +243,12 @@ def describe(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> list
         ):
             if was_value != now_value:
                 lines.append(f"step {name}: {key} {was_value} → {now_value}")
-    if (before or {}).get("whole_change") != after.get("whole_change"):
-        lines.append(f"security review of the whole change: {'on' if new.whole_change_security else 'OFF'}")
+    # A record from before a section existed stated none of its switches, so each is news.
+    for section, name, label in _READING_SWITCHES:
+        now_on = getattr(new.readings, name)
+        stated = isinstance((before or {}).get(section), dict)
+        if not stated or getattr(old.readings, name) != now_on:
+            lines.append(f"{label}: {'on' if now_on else 'OFF'}")
     old_questions, new_questions = old.questions, new.questions
     for name in sorted(old_questions.keys() - new_questions.keys()):
         lines.append(f"custom review {name}: removed")
@@ -385,8 +398,12 @@ def render(reviews: models.Reviews) -> str:
         lines.append("custom reviews:")
         lines += [f"  {name}: {question}" for name, question in reviews.questions.items()]
     lines.append("reviews of the whole change, before acceptance:")
-    lines.append(f"  security: {'on' if reviews.whole_change_security else 'OFF'}")
-    lines.append("acceptance: actual extraction and comparison (not configurable)")
+    lines.append(f"  security: {'on' if reviews.readings.security else 'OFF'}")
+    lines.append("what acceptance is decided by:")
+    lines += [
+        f"  {name.replace('_', ' ')}: {'on' if getattr(reviews.readings, name) else 'OFF'}"
+        for name in models.ACCEPTANCE_READINGS
+    ]
     return "\n".join(lines)
 
 

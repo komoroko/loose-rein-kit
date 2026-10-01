@@ -8,9 +8,9 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 **A minor release: the format moves to `rein-grounded-v11`, and every repository needs `rein sync
 --force`.** Four documents change shape. `config.yaml` requires `project.mainline`, the branch
-acceptance integrates into. `reviews.yaml` requires `whole_change: {security: <bool>}`;
-a generated `review.yaml` records under `machine.security` whether a security reviewer read the
-change (`read`); and the per-task reviewer's `consider` is now `question`, in `state.yaml`'s
+acceptance integrates into. `reviews.yaml` requires `whole_change: {security: <bool>}` and
+`acceptance: {actual_extraction: <bool>, comparison: <bool>}`; a generated `review.yaml` records
+under `machine.acceptance` and `machine.security` whether each reading was taken; and the per-task reviewer's `consider` is now `question`, in `state.yaml`'s
 handoffs and `review.yaml`'s residual findings. `state.yaml` also gains `repair_grant` and
 `scope_expansions`. Nothing converts any of it for you.
 
@@ -21,14 +21,15 @@ handoffs and `review.yaml`'s residual findings. `state.yaml` also gains `repair_
   again. A repository between cycles holds none.
 
 - **Before you sync, in a repository whose `review.yaml` is generated, delete `.rein/review.yaml`.**
-  The new schema refuses a generated review without `read`, and so does every verb that reads it,
+  The new schema refuses a generated review without those records, and so does every verb that reads it,
   `rein review generate --force` included. `rein sync` writes the empty one back, and `rein review
   generate` takes the review again; a stage whose inputs have not moved is served from the cache.
   After `rein cycle-close` there is nothing to delete.
-- **After the sync, apply a `reviews.yaml` that says whether the whole change is read for
-  security.** Copy your file, add `whole_change:` with `security: true` to keep the reading you had
-  or `false` to drop it, and run `rein reviews apply <file> --reason ...` at your terminal. Until then every reader of
-  the file refuses it, as it refuses any file the schema does not accept.
+- **After the sync, apply a `reviews.yaml` that says what is read before acceptance.** Copy your
+  file, add `acceptance:` with `actual_extraction: true` and `comparison: true` to keep what
+  acceptance had, and `whole_change:` with `security: true` to keep the security reading you had
+  (`false` drops any of them), and run `rein reviews apply <file> --reason ...` at your terminal.
+  Until then every reader of the file refuses it, as it refuses any file the schema does not accept.
 
 What changes:
 
@@ -50,12 +51,24 @@ What changes:
   recorded still stands: it closes when its anchored code is gone from the tree or when you dispute
   it, exactly as before, because switching a review off is not a way to clear a block. The
   acceptance screen, the pull-request body and `rein reviews show` say the reading was not taken.
-- **A review read under the other setting holds acceptance shut.** Switching `whole_change.security`
-  after the review was generated leaves a review that read the wrong thing for this repository;
-  readiness names it and asks for `rein review generate`.
-- The Reviews screen gives the reviews of the whole change a lane of their own, between the build
-  and acceptance. Comparison and the actual extraction it compares against stay fixed in the
-  acceptance lane.
+- **Nothing is required: what acceptance is decided by is switched too, in `reviews.yaml`'s
+  `acceptance`.** `actual_extraction` and `comparison` are on in the packaged document, and the
+  comparison needs the extraction it compares. With the comparison off, no comparator is launched and
+  every claim of the plan is framed as `unknown` with the reason that nobody was asked to compare it,
+  so each is a decision card for a person, decided beside the blind extraction if that still runs.
+  With the extraction off as well, the Actual is empty. Acceptance, the pull-request body and
+  `rein reviews show` say which reading was not taken. With every reading off nothing is launched at
+  all, and the build warms no reading. A custom review may not take either reading's name.
+- **A review read under the other setting holds acceptance shut.** Switching any reading after the
+  review was generated leaves a review that read the wrong thing for this repository; readiness
+  names it as the machine's and asks for `rein review generate`.
+- **The Reviews screen is a palette and the cycle's lanes.** A review is dragged onto the lane that
+  runs it (the adversarial review onto a drafting stage, any step review onto a step or onto the
+  build lane for a step of its own, the security review onto the whole-change lane) and taken off
+  with ×. Taking off a step's last review takes off the step, and deleting a custom review takes it
+  off every step. The acceptance lane holds its two readings as on/off switches rather than fixed
+  cards; switching the comparison on switches the extraction on, and the extraction off the
+  comparison.
 
 What acceptance is:
 

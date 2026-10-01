@@ -299,15 +299,18 @@ from your tooling, and nothing else.
 | `guard.paths` | what a pending gate freezes |
 
 Which reviews run is not in `config.yaml`. `.rein/reviews.yaml` holds the adversarial review before
-the mandate, per drafting stage, the `review` step that reads each batch of tasks, and whether
-acceptance takes a security reading. The packaged step reads for `adversarial` alone, an attempt to
-refute the change; `correctness`, `simplification`, `security`, or a review of your own with its
-question written in the file, are yours to add. The security reading at acceptance is off until you
-switch it on. It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone
-to change: `rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews
-screen. Each change is recorded with the document it wrote, and nothing runs on a file that differs
-from that record; `rein reviews restore` writes it back. The comparison acceptance is decided by is
-not in it and cannot be switched off.
+the mandate, per drafting stage, the `review` step that reads each batch of tasks, the security
+review of the whole change, and what acceptance is decided by: the blind extraction of what the code
+does and its comparison with the mandate's claims. The packaged step reads for `adversarial` alone,
+an attempt to refute the change; `correctness`, `simplification`, `security`, or a review of your
+own with its question written in the file, are yours to add. The extraction and the comparison are
+on and the security review is off until you switch them. Nothing is required: switched off, the
+comparison sends every claim to you as a question, and acceptance names whatever was not read. It is
+outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone to change:
+`rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews screen, where
+reviews are dragged onto the cycle and removed with ×, and acceptance's two readings are switched
+on and off. Each change is recorded with the document it wrote, and nothing runs on a file that
+differs from that record; `rein reviews restore` writes it back.
 
 **Running unattended.** `rein build`'s exit code is the signal: `0` done, `1` or `2` need a human,
 and `3` is transient — capacity, a signal, another run holding the lock — and safe to retry with

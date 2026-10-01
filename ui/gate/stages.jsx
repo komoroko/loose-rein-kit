@@ -60,7 +60,7 @@ export function ScopeStage({ data }) {
           />
           <Axis
             label="claims"
-            value={`${c.claims} · gaps ${c.gaps} · scenarios ${c.scenarios} · decision cards ${c.decision_cards} · security ${s.security_read ? c.security_findings : "not taken"}`}
+            value={`${c.claims}${s.comparison_read ? "" : " (comparison not taken)"} · gaps ${c.gaps} · scenarios ${c.scenarios} · decision cards ${c.decision_cards} · security ${s.security_read ? c.security_findings : "not taken"}`}
           />
           <Axis
             label="you will be asked"
@@ -781,6 +781,13 @@ export function DecisionStage({ data, onPost }) {
 
   return (
     <>
+      {data.comparison_read === false ? (
+        <p className="note">
+          No comparison was taken: reviews.yaml has acceptance.comparison off. Nothing compared the code with the
+          claims, so each claim is a card for you to decide
+          {data.extraction_read ? ", beside what the blind extraction read." : " from the code itself."}
+        </p>
+      ) : null}
       {cards.length ? (
         cards.map((card) => (
           <DecisionCard

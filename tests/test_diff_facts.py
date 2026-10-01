@@ -130,6 +130,7 @@ def test_a_manifest_naming_an_unread_file_can_actually_be_written() -> None:
             "coverage": entry,
             "actual_extraction": [],
             "claims": [],
+            "acceptance": {"actual_extraction": True, "comparison": True},
         },
         "human": {"status": "not_started"},
     }

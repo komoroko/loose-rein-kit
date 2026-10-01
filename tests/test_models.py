@@ -427,6 +427,7 @@ machine:
       integrity: {status: verified}
       semantic_support: {status: supported, assessment_basis: machine_assessed}
       conformance: {status: observed}
+  acceptance: {actual_extraction: true, comparison: true}
   security:
     read: true
     findings:

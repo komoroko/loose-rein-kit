@@ -284,7 +284,7 @@ command: notify-send "rein"
 持っていなければ読み取り専用である。
 
 ## 設定できるもの
-<!-- README.md: 099ea372e82d -->
+<!-- README.md: ba503d459f16 -->
 
 つまみはすべて `.rein/config.yaml` にあり、その場にコメントが付いている。以下はそのうちプロジェクトが
 普通に触るものである。既存リポジトリでは `rein init` が、認識できた品質ゲートのコマンドだけを埋める。
@@ -300,14 +300,17 @@ command: notify-send "rein"
 | `guard.paths` | pending のゲートが凍結する範囲 |
 
 どのレビューを走らせるかは `config.yaml` には無い。`.rein/reviews.yaml` が、mandate 前の敵対的検証を
-起草の段ごとに持ち、タスクのバッチを読む `review` ステップと、acceptance で security の読みを取るか
-どうかを持つ。同梱の `review` ステップは、変更を反証しようとする `adversarial` だけを読む。
-`correctness`・`simplification`・`security` と、問いをこのファイルに書いた独自のレビューは、必要な
-ときに足す。acceptance の security の読みは、有効にするまで取らない。mandate の凍結の外にあるので変えても何も
-巻き戻らず、変えられるのはあなただけである。端末で `rein reviews apply <file> --reason ...` を実行
-するか、ダッシュボードの Reviews 画面を使う。変更は書いた文書ごと記録され、記録と食い違うファイルでは
-何も動かない。`rein reviews restore` が記録された版を書き戻す。acceptance が判断の根拠にする
-comparison はここに無く、外せない。
+起草の段ごとに持ち、タスクのバッチを読む `review` ステップと、変更全体の security レビューと、
+acceptance の判断材料を持つ。判断材料は、計画を見せずにコードの振る舞いを読む抽出と、それを mandate
+の claim と突き合わせる comparison である。同梱の `review` ステップは、変更を反証しようとする
+`adversarial` だけを読む。`correctness`・`simplification`・`security` と、問いをこのファイルに書いた
+独自のレビューは、必要なときに足す。抽出と comparison は有効、security レビューは無効が既定である。
+必須のものはない。comparison を外すと、すべての claim があなたへの問いになり、読まなかったものは
+acceptance で名指しされる。mandate の凍結の外にあるので変えても何も巻き戻らず、変えられるのはあなた
+だけである。端末で `rein reviews apply <file> --reason ...` を実行するか、ダッシュボードの Reviews
+画面を使う。画面ではレビューをサイクルの上へドラッグして足して × で外し、acceptance の2つの読みは
+オンとオフで切り替える。変更は書いた文書ごと記録され、記録と食い違うファイルでは何も動かない。
+`rein reviews restore` が記録された版を書き戻す。
 
 **無人での実行。** `rein build` の終了コードが信号である: `0` は完了、`1` と `2` は人間を必要とし、
 `3` は一時的 —— 容量制限、シグナル、別の実行がロックを保持している —— で、何も記録せず予算も消費

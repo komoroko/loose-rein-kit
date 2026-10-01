@@ -264,6 +264,14 @@ def residue(review: models.Review, human: Mapping[str, Any] | None = None) -> di
         out["not_read"].append("the coverage manifest is insufficient: parts of the change could not be analysed")
     for gap in _machine_list(review, "gaps"):
         out["not_read"].append(f"{gap.get('id', '')}: {gap.get('kind', 'gap')}")
+    if not review.extraction_read:
+        out["not_read"].append(
+            "nobody read the code blind for what it does (`reviews.yaml` `acceptance.actual_extraction`)"
+        )
+    if not review.comparison_read:
+        out["not_read"].append(
+            "nobody compared the change with the mandate's claims (`reviews.yaml` `acceptance.comparison`)"
+        )
     if not review.security_read:
         out["not_read"].append("no security reviewer read the whole change (`reviews.yaml` `whole_change.security`)")
     return out
