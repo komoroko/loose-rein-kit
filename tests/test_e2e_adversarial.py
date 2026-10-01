@@ -43,6 +43,7 @@ def _review(machine: dict[str, Any], human: dict[str, Any] | None = None) -> mod
         },
         "actual_extraction": [],
         "claims": [],
+        "acceptance": {"actual_extraction": True, "comparison": True},
     }
     base.update(machine)
     return models.Review({"machine": base, "human": human or {"status": "not_started"}})

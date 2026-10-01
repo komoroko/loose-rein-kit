@@ -73,6 +73,9 @@ export async function record(path, body) {
       return false;
     }
     toast(data.approval_id ? `✓ gate ${data.gate} approved (${data.approval_id})` : "done", "ok");
+    // Approving acceptance integrates it in the same act; whether that completed is said beside the
+    // approval, and an integration that stopped is the one thing left to run (`rein integrate`).
+    if (data.integration) toast(data.integration, data.integrated ? "ok" : "err");
     return true;
   } catch (e) {
     toast("request failed: " + e, "err");

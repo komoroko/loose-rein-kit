@@ -68,6 +68,7 @@ from typing import Any
 
 from rein import common, models, strict_yaml
 from rein import repo as repo_mod
+from rein import store as store_mod
 
 logger = logging.getLogger(__name__)
 
@@ -336,7 +337,7 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
         return True, ""
     state = _read_state(repo)
     if state is not None and state.gate_status("mandate") == "approved":
-        return _inside_the_mandate(repo, rel, settings.paths)
+        return _inside_the_mandate(repo, rel, settings.paths, state)
     if not is_guarded(file_path, settings.paths, repo):
         return True, ""
     if state is None:
@@ -352,7 +353,9 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
     )
 
 
-def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[str]) -> tuple[bool, str]:
+def _inside_the_mandate(
+    repo: repo_mod.Repo, rel: str | None, guarded: Sequence[str], state: models.State
+) -> tuple[bool, str]:
     """(allowed, why not) for a write under an approved mandate, measured against `plan.scope`.
 
     Read off `plan.yaml`, which the mandate approval froze — so the scope a write is measured
@@ -369,6 +372,9 @@ def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[
 
     An empty `include` is unbounded, so a cycle that has not narrowed itself is not one that has
     forbidden everything (`models.Plan.scope`).
+
+    `state` says what has widened `include` since the approval: a human's answer about a path a
+    repair wrote (`scope_expansions`), and the repair running now (`repair_grant`).
     """
     if rel is None:
         return True, ""
@@ -382,7 +388,14 @@ def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[
             " what is wrong with it."
         )
     include, exclude = models.Plan(document).scope
-    why = outside_the_mandate(rel, include=include, exclude=exclude, guarded=guarded)
+    why = outside_the_mandate(
+        rel,
+        include=include,
+        exclude=exclude,
+        guarded=guarded,
+        expansions={path: str(entry.get("status")) for path, entry in state.scope_expansions.items()},
+        granted=state.repair_grant is not None and _a_build_is_running(repo),
+    )
     if not why:
         return True, ""
     return False, (
@@ -391,7 +404,31 @@ def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[
     )
 
 
-def outside_the_mandate(rel: str, *, include: Sequence[str], exclude: Sequence[str], guarded: Sequence[str]) -> str:
+def _a_build_is_running(repo: repo_mod.Repo) -> bool:
+    """Is `rein build` holding its run lock right now?
+
+    A repair grant counts only while the run that opened it is alive. It is closed on every exit
+    the run takes (`build_loop._repair`), but a killed process takes none of them, and a grant
+    left in `state.yaml` would then let every later writer past `include` until the next run
+    closed it. Asking the lock instead makes a stale grant inert by construction: the lock is the
+    operating system's, released with the process.
+    """
+    try:
+        with store_mod.FileLock(store_mod.Store(repo).build_lock):
+            return False
+    except store_mod.LockUnavailableError:
+        return True
+
+
+def outside_the_mandate(
+    rel: str,
+    *,
+    include: Sequence[str],
+    exclude: Sequence[str],
+    guarded: Sequence[str],
+    expansions: Mapping[str, str],
+    granted: bool,
+) -> str:
     """Why rule 3 refuses this path under an approved mandate, or `""` when it does not.
 
     The rule with nothing read off disk, so the same sentence decides a write at the hook and a
@@ -401,12 +438,25 @@ def outside_the_mandate(rel: str, *, include: Sequence[str], exclude: Sequence[s
 
     The asymmetry is :func:`_inside_the_mandate`'s: `exclude` binds wherever it points, `include`
     only narrows the guarded set, and an empty `include` is unbounded rather than empty.
+
+    **`include` can widen after the approval; `exclude` cannot.** `exclude` is a human writing "not
+    this", and nothing the loop does reopens it. `include` is where the work was expected to be,
+    and a defect's cause is where it is: a repair running now (`granted`) may write past it, and
+    every path it does is put to a human at acceptance (`expansions`, path → status). `adopted`
+    is inside from then on; `refused` is outside even for a repair.
     """
     if common.longest_cover(rel, {p: p for p in exclude}) is not None:
         return "excluded by the approved mandate's scope"
     if not common.longest_cover(rel, {p: p for p in guarded}):
         return ""
     if include and common.longest_cover(rel, {p: p for p in include}) is None:
+        status = expansions.get(rel, "")
+        if status == "adopted":
+            return ""
+        if status == "refused":
+            return f"outside the approved mandate's scope ({', '.join(include)}), and a human refused widening it here"
+        if granted:
+            return ""
         return f"outside the approved mandate's scope ({', '.join(include)})"
     return ""
 

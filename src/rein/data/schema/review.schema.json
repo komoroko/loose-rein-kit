@@ -35,8 +35,9 @@
       ]
     },
     "disposition": {
-      "description": "What a human may do about a gap. `accept the risk` is deliberately absent (plan 15.4); `dispute_finding` says the reviewer is wrong and carries the reason.",
+      "description": "What a human may do about a gap. `accept the risk` is deliberately absent (plan 15.4); `dispute_finding` says the reviewer is wrong and carries the reason. `adopt_scope` widens the approved mandate to a path a repair wrote outside its `include`.",
       "enum": [
+        "adopt_scope",
         "acknowledge_corrected_model",
         "revise_requirement",
         "revise_design",
@@ -238,7 +239,8 @@
               "binding",
               "coverage",
               "actual_extraction",
-              "claims"
+              "claims",
+              "acceptance"
             ],
             "properties": {
               "binding": {
@@ -799,6 +801,23 @@
             }
           }
         },
+        "acceptance": {
+          "description": "Which readings acceptance is decided by this review took (`reviews.yaml` `acceptance`). `actual_extraction` false: nobody read the code blind and `actual_extraction` is empty. `comparison` false: no claim was compared, and every claim is `unknown` because nobody compared it, not because a comparison could not decide.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actual_extraction",
+            "comparison"
+          ],
+          "properties": {
+            "actual_extraction": {
+              "type": "boolean"
+            },
+            "comparison": {
+              "type": "boolean"
+            }
+          }
+        },
         "gaps": {
           "type": "array",
           "maxItems": 512,
@@ -903,9 +922,14 @@
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "read",
             "findings"
           ],
           "properties": {
+            "read": {
+              "description": "Whether this review sent the change to a security reviewer (`reviews.yaml` `whole_change.security`). False: no security reading was taken, and `findings` holds only what an earlier reading recorded as blocking, carried forward and re-checked against the tree without a reviewer. An empty list under `read: false` says nothing about the change's security.",
+              "type": "boolean"
+            },
             "findings": {
               "type": "array",
               "maxItems": 256,
@@ -1511,7 +1535,7 @@
           }
         },
         "residual_findings": {
-          "description": "Per-task review findings that were never resolved — the `consider` ones stop nothing by design and would otherwise die with the session that produced them. Each carries the commit and tree fingerprint it was observed against, which is NOT `subject_head_sha`: a reviewer looked at one task's worktree at one moment, and presenting that as an observation about the merged tree would be the overclaim this document exists to prevent.",
+          "description": "Per-task review findings that were never resolved — the `question` ones stop nothing by design and would otherwise die with the session that produced them. Each carries the commit and tree fingerprint it was observed against, which is NOT `subject_head_sha`: a reviewer looked at one task's worktree at one moment, and presenting that as an observation about the merged tree would be the overclaim this document exists to prevent.",
           "type": "array",
           "maxItems": 50,
           "items": {
@@ -1529,7 +1553,7 @@
               "severity": {
                 "enum": [
                   "must_fix",
-                  "consider"
+                  "question"
                 ]
               },
               "statement": {

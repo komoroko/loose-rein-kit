@@ -60,7 +60,7 @@ export function ScopeStage({ data }) {
           />
           <Axis
             label="claims"
-            value={`${c.claims} · gaps ${c.gaps} · scenarios ${c.scenarios} · decision cards ${c.decision_cards} · security ${c.security_findings}`}
+            value={`${c.claims}${s.comparison_read ? "" : " (comparison not taken)"} · gaps ${c.gaps} · scenarios ${c.scenarios} · decision cards ${c.decision_cards} · security ${s.security_read ? c.security_findings : "not taken"}`}
           />
           <Axis
             label="you will be asked"
@@ -729,10 +729,25 @@ function WhatRaisedThese({ data, onDisposition }) {
 
 function SecurityFindings({ data }) {
   const findings = data.security_findings || [];
-  if (!findings.length) return null;
+  const notTaken =
+    data.security_read === false ? (
+      <p className="note">
+        No security reading was taken: reviews.yaml has whole_change.security off.
+        {findings.length ? " These are blocking findings an earlier reading recorded, carried until their code is gone." : ""}
+      </p>
+    ) : null;
+  if (!findings.length) {
+    return notTaken ? (
+      <>
+        <Subhead spaced>Security review</Subhead>
+        {notTaken}
+      </>
+    ) : null;
+  }
   return (
     <>
       <Subhead spaced>Security review</Subhead>
+      {notTaken}
       {findings.map((f) => (
         <div className="card" key={f.id}>
           <div className="subhead">
@@ -766,6 +781,13 @@ export function DecisionStage({ data, onPost }) {
 
   return (
     <>
+      {data.comparison_read === false ? (
+        <p className="note">
+          No comparison was taken: reviews.yaml has acceptance.comparison off. Nothing compared the code with the
+          claims, so each claim is a card for you to decide
+          {data.extraction_read ? ", beside what the blind extraction read." : " from the code itself."}
+        </p>
+      ) : null}
       {cards.length ? (
         cards.map((card) => (
           <DecisionCard
@@ -785,7 +807,7 @@ export function DecisionStage({ data, onPost }) {
   );
 }
 
-// --- freeze --------------------------------------------------------------------
+// --- accept --------------------------------------------------------------------
 
 function ExpertiseCard({ gap, onPost }) {
   const [level, setLevel] = useState("");
@@ -821,34 +843,58 @@ function ExpertiseCard({ gap, onPost }) {
   );
 }
 
-export function FreezeStage({ data, session, onPost, onFreeze }) {
+const RESIDUE_TITLES = {
+  unsettled: "claims not found aligned",
+  undecided: "decision cards not answered",
+  inferred: "claims aligned on an AI's reading alone",
+  questions: "questions only a person can settle",
+  not_read: "what nobody read",
+};
+
+// What approving takes on: not the checks that passed, which are the machine's and on the record,
+// but what was left that nothing could settle. Approving here freezes the answers and integrates
+// the cycle into the mainline — one act, so there is no separate freeze to press first.
+export function AcceptStage({ data, session, onPost, onApprove }) {
   const blockers = data.completion_blockers || session.completion_blockers || [];
-  const frozen = session.human_status === "frozen";
+  const residue = data.residue || {};
+  const kinds = Object.keys(RESIDUE_TITLES).filter((k) => (residue[k] || []).length);
+  const approved = session.human_status === "frozen";
   return (
     <>
       {(session.expertise_gaps || []).map((g) => <ExpertiseCard gap={g} key={g.domain} onPost={onPost} />)}
+      <Subhead>What you are accepting that the machine could not settle</Subhead>
+      {kinds.length ? (
+        kinds.map((k) => (
+          <div className="card" key={k} data-residue={k}>
+            <div className="subhead">
+              {RESIDUE_TITLES[k]} ({residue[k].length})
+            </div>
+            <ul>
+              {residue[k].map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          </div>
+        ))
+      ) : (
+        <OkLine>✓ nothing — every claim is established and every question answered.</OkLine>
+      )}
       {blockers.length ? (
         <Warn>
-          <b>The human review cannot be frozen yet.</b>
+          <b>Settle these before approving.</b>
           <ul>
             {blockers.map((b) => <li key={b}>{b}</li>)}
           </ul>
         </Warn>
-      ) : (
-        <OkLine>✓ every blocker is clear.</OkLine>
-      )}
+      ) : null}
       <div className="row" style={{ marginTop: ".8rem" }}>
-        {frozen ? (
-          <span className="okline">✓ the human review is {session.human_status}</span>
+        {approved ? (
+          <span className="okline">✓ approved</span>
         ) : (
-          <button className="primary" disabled={blockers.length > 0} onClick={onFreeze}>
-            Freeze the human review
+          <button className="primary" disabled={blockers.length > 0} onClick={onApprove}>
+            Approve acceptance
           </button>
         )}
       </div>
-      <p className="note">
-        Freezing records your review. Opening the gate is a separate act, and it is the one below.
-      </p>
+      <p className="note">Approving freezes your answers and integrates the cycle into the mainline.</p>
     </>
   );
 }
@@ -882,9 +928,9 @@ export function StageList({ stages, stage, onSelect }) {
 }
 
 // Real stage names come from the server (models.REVIEW_STAGE_ORDER: scope, orient, decision, diff,
-// freeze) — these cases must match those verbatim, or a stage silently falls through to "nothing to
+// accept) — these cases must match those verbatim, or a stage silently falls through to "nothing to
 // show" and its form becomes unreachable from the dashboard.
-export function StageBody({ data, review, session, asBuilt, onAsBuilt, onPost, onFreeze }) {
+export function StageBody({ data, review, session, asBuilt, onAsBuilt, onPost, onApprove }) {
   if (!data) return <Empty>loading…</Empty>;
   if (data.error) return <Warn>{data.error}</Warn>;
   if (data.generated === false) {
@@ -904,8 +950,8 @@ export function StageBody({ data, review, session, asBuilt, onAsBuilt, onPost, o
       return <DecisionStage data={data} onPost={onPost} />;
     case "diff":
       return <Diff diff={data.diff || {}} meta={review.review_meta} />;
-    case "freeze":
-      return <FreezeStage data={data} session={session} onPost={onPost} onFreeze={onFreeze} />;
+    case "accept":
+      return <AcceptStage data={data} session={session} onPost={onPost} onApprove={onApprove} />;
     default:
       return <Empty>nothing to show.</Empty>;
   }

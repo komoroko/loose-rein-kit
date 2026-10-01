@@ -52,6 +52,7 @@ from rein import (
     review_policy,
     review_reading,
     review_transport,
+    reviews_cmd,
     run_progress,
     run_record,
     security_review,
@@ -133,11 +134,13 @@ def assemble(
     unanswered: Sequence[str] = (),
     gaps: Sequence[Mapping[str, Any]] = (),
     extra_behaviors: Sequence[Mapping[str, Any]] = (),
-    security: Mapping[str, Any] | None = None,
+    acceptance: Mapping[str, bool],
+    security: Mapping[str, Any],
     effective_risk: str = "",
     plan: models.Plan | None = None,
     brief_sections: Mapping[str, Any] | None = None,
     residual_findings: Sequence[Mapping[str, Any]] = (),
+    scope_expansions: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Compose a schema-valid `machine` half from the validated pieces (plan §6.6).
 
@@ -174,7 +177,8 @@ def assemble(
         "coverage": dict(coverage),
         "actual_extraction": [dict(a) for a in actual_statements],
         "claims": [dict(c) for c in claims],
-        "security": dict(security) if security is not None else {"findings": []},
+        "acceptance": dict(acceptance),
+        "security": dict(security),
     }
     if effective_risk:
         machine["effective_risk"] = effective_risk
@@ -188,12 +192,13 @@ def assemble(
         machine["extra_behaviors"] = [dict(e) for e in extra_behaviors]
 
     plan_claims = {c.id: c.raw for c in plan.claims} if plan is not None else {}
-    findings = list((security or {}).get("findings", ()) or ())
+    findings = list(security.get("findings", ()) or ())
     statements, cards = decision_cards.derive_cards(
         claims=claims,
         gaps=gaps,
         extra_behaviors=extra_behaviors,
         security_findings=findings,
+        scope_expansions=scope_expansions,
         plan_risk={cid: str(raw.get("risk", "low")) for cid, raw in plan_claims.items()},
         plan_domains={cid: tuple(str(d) for d in raw.get("domains", ()) or ()) for cid, raw in plan_claims.items()},
         first_statement=decision_cards.next_statement_index(
@@ -468,6 +473,7 @@ def generate(
         cycle = state.cycle_id if state else ""
         plan = store.read_plan()
         config = store.read_config()
+        switched = _readings(repo)
         # Read once and used three times over — the staleness digest, the reuse check, and the
         # carried-over blocking findings all ask about the same document, and parsing it once per
         # question meant three YAML loads of a file that can hold a whole review.
@@ -620,13 +626,14 @@ def generate(
                 # question up under one key.
                 risk_floor=facts.risk_floor,
                 host_surface=surface,
+                readings=switched,
                 prior_blocking=prior_by_unit[m.reading.unit],
             )
             for m in measures
         }
         ran: set[str] = set()
         risk_by_unit = {m.reading.unit: m.facts.risk_floor for m in measures}
-        plan_of_run = _execution_plan(config, cache, keys_by_unit, risk_by_unit)
+        plan_of_run = _execution_plan(config, cache, keys_by_unit, risk_by_unit, readings=switched)
         print(_render_execution_plan(plan_of_run))
         # The same plan the console prints, in the one place the dashboard can see it. Opened here
         # rather than at the top of the run because this is the first moment there is a figure to
@@ -635,14 +642,16 @@ def generate(
         live = run_progress.Writer(
             repo.root,
             run_id=run_id,
-            total=sum(len(k) for k in keys_by_unit.values()) + 1,
+            total=sum(len(k) for k in keys_by_unit.values()) + (1 if switched.comparison else 0),
             stages=plan_of_run.get("stages", ()),
         )
 
-        # Every reading's two stages, plus the one comparison over the merged Actual. `keys_by_unit`
-        # holds only the two — `reading_keys` mints no comparison key, because the Actual it takes
-        # as an input does not exist yet — so counting it alone would end the run at "19/18".
-        progress = _Progress(reviewers, total=sum(len(k) for k in keys_by_unit.values()) + 1, live=live)
+        # Every reading's stages, plus the one comparison over the merged Actual when there is one.
+        # `keys_by_unit` holds only the readings' — `reading_keys` mints no comparison key, because
+        # the Actual it takes as an input does not exist yet — so counting it alone would end the
+        # run at "19/18".
+        stages_total = sum(len(k) for k in keys_by_unit.values()) + (1 if switched.comparison else 0)
+        progress = _Progress(reviewers, total=stages_total, live=live)
         discipline = review_reading.security_discipline(config)
 
         def read(m: review_reading.ReadingFacts) -> review_reading.ReadOut:
@@ -659,6 +668,7 @@ def generate(
                     head=head,
                     risk_floor=facts.risk_floor,
                     prior_blocking=prior_by_unit[m.reading.unit],
+                    readings=switched,
                     discipline=discipline,
                     on_stage=here.entered,
                     cache=cache,
@@ -689,21 +699,24 @@ def generate(
                     stage, unit = first.stage, first.unit
                 raise
         composed = review_reading.merge(readouts, coverage=coverage)
-        with common.Heartbeat("comparison"):
-            comparison = _compare(
-                repo,
-                reviewers,
-                plan=plan,
-                config=config,
-                head=head,
-                composed=composed,
-                effective=effective,
-                on_stage=entered,
-                cache=cache,
-                ran=ran,
-                reused=reused,
-            )
-        progress.landed(review_reading.WHOLE, "comparison", "comparison" not in ran)
+        if switched.comparison:
+            with common.Heartbeat("comparison"):
+                comparison = _compare(
+                    repo,
+                    reviewers,
+                    plan=plan,
+                    config=config,
+                    head=head,
+                    composed=composed,
+                    effective=effective,
+                    on_stage=entered,
+                    cache=cache,
+                    ran=ran,
+                    reused=reused,
+                )
+            progress.landed(review_reading.WHOLE, "comparison", "comparison" not in ran)
+        else:
+            comparison = conformance.not_compared([c.id for c in plan.claims] if plan is not None else [])
 
         entered("assembly")
         binding: dict[str, Any] = {
@@ -722,10 +735,14 @@ def generate(
             unanswered=comparison.unanswered,
             gaps=gaps,
             extra_behaviors=_extra_behaviors(comparison.extra_behaviors, gaps=gaps),
+            acceptance={name: getattr(switched, name) for name in models.ACCEPTANCE_READINGS},
             # Disputes re-applied here rather than trusted to survive in the human half: the
             # reviewer has no memory of the last review, so a deterministic false positive is
             # found again, and a regeneration discards the human answers that had settled it.
-            security={"findings": security_review.apply_disputes(repo, state, composed.findings)},
+            security={
+                "read": switched.security,
+                "findings": security_review.apply_disputes(repo, state, composed.findings),
+            },
             effective_risk=effective,
             plan=plan,
             # The orientation stage, derived here rather than inside `assemble` because it reads
@@ -741,6 +758,13 @@ def generate(
                 reviews_applied=brief.reviews_by_task(event_chain.scan(repo.events)[0]),
             ),
             residual_findings=brief.residual_findings(state),
+            # What a repair widened and nobody has answered yet, and only while the change still
+            # carries it: a path taken back out has nothing left to decide.
+            scope_expansions=[
+                {"path": path, **dict(entry)}
+                for path, entry in sorted((state.scope_expansions if state is not None else {}).items())
+                if entry.get("status") == "proposed" and path in changed
+            ],
         )
 
         entered("write")
@@ -1000,6 +1024,8 @@ def _execution_plan(
     cache: review_cache.StageCache,
     keys_by_unit: Mapping[str, Mapping[str, str]],
     risk_by_unit: Mapping[str, str],
+    *,
+    readings: models.Readings,
 ) -> dict[str, Any]:
     """What this run intends to do, settled before it does any of it.
 
@@ -1023,9 +1049,14 @@ def _execution_plan(
     are in reading order, so the plan recorded on `run_measured` says both what the run intended to
     do and why it intended to do it in that sequence — the ordering was a judgement nothing wrote
     down. The comparison row's risk is the empty string: it reads the Actual, not a reading.
+
+    A stage the run does not take at all has no row: a reading `readings` switches off
+    (`reviews.yaml`) has no stage to decide about, and "undecided" would say there is.
     """
     stages: list[dict[str, Any]] = []
     for stage in _STAGE_ORDER:
+        if not getattr(readings, "security" if stage == "security_review" else stage):
+            continue
         role = review_policy.STAGE_ROLE[stage]
         for unit, keys in keys_by_unit.items():
             key = keys.get(stage, "")
@@ -1044,13 +1075,13 @@ def _execution_plan(
             if stage == "comparison":
                 break  # one comparison over the merged Actual, whatever it was read in
     plan: dict[str, Any] = {"stages": stages}
-    shared = _shares_reading(config)
+    shared = _shares_reading(config, readings=readings)
     if shared is not None:
         plan["shared_reading"] = shared
     return plan
 
 
-def _shares_reading(config: models.Config | None) -> bool | None:
+def _shares_reading(config: models.Config | None, *, readings: models.Readings) -> bool | None:
     """Will the extractor and the security reviewer branch one reading? None when it cannot be said.
 
     The transport refuses a role this release cannot launch, which is a real answer in the
@@ -1059,7 +1090,7 @@ def _shares_reading(config: models.Config | None) -> bool | None:
     rather than rendered as `false`.
     """
     try:
-        return review_transport.shares_reading(config)
+        return review_transport.shares_reading(config, readings=readings)
     except adapters.LaunchRefused:
         return None
 
@@ -1258,6 +1289,18 @@ def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str
     if plan is not None:
         ids += [c.id for c in plan.claims]
     return ids
+
+
+def _readings(repo: repo_mod.Repo) -> models.Readings:
+    """What this review reads (`reviews.yaml` `acceptance` and `whole_change`).
+
+    Read from the file only when it is what the chain records, as the build reads it: a switch
+    flipped by a shell write is nobody's choice.
+    """
+    try:
+        return reviews_cmd.require_bound(repo).readings
+    except reviews_cmd.ReviewsError as exc:
+        raise ReviewError(str(exc)) from None
 
 
 def _prior_blocking(
@@ -1471,25 +1514,6 @@ def _extra_behaviors(
     return out
 
 
-def complete(repo: repo_mod.Repo, *, actor: str = "") -> None:
-    """Freeze the human review, refusing while any completion blocker stands (plan §21.5)."""
-    store = store_mod.Store(repo)
-    review = store.read_review()
-    if review is None or not review.is_generated:
-        raise ReviewError("no machine review to complete — run `rein review generate` first")
-    seen = store_mod.read_digest(review)
-    try:
-        new_human = human_review.freeze(review, dict(review.human))
-    except ValueError as exc:
-        raise ReviewError(str(exc)) from None
-    state = store.read_state()
-    if state is None or not state.cycle_id:
-        raise ReviewError("cannot record the freeze — .rein/state.yaml names no cycle; run `rein doctor`")
-    with store.transaction() as tx:
-        tx.write("review", {**review.raw, "human": new_human}, expect_digest=seen)
-        tx.append("human_review_frozen", cycle_id=state.cycle_id, actor=actor)
-
-
 # -- CLI ----------------------------------------------------------------------
 
 
@@ -1549,7 +1573,7 @@ def _generate_cli(
     dict the caller passed down, because a supervised run's bill is every launch it made and the
     per-attempt transports are the only things that know.
     """
-    build_reviewers = make_reviewers or (lambda: review_transport.StagedReviewers(repo))
+    build_reviewers = make_reviewers or (lambda: review_transport.StagedReviewers(repo, readings=_readings(repo)))
     spend: dict[str, usage_mod.Usage] = {}
     attempt = 0
     while True:
@@ -1610,7 +1634,6 @@ def main(argv: list[str] | None = None) -> int:
         default=900,
         help="seconds to sleep between retries under --supervise (default: 900, the build loop's interval)",
     )
-    sub.add_parser("complete", help="freeze the human review (all blockers must be clear)")
     sub.add_parser("show", help="print the current review.yaml")
     args = parser.parse_args(argv)
     common.configure_logging()
@@ -1638,11 +1661,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if measured := usage_mod.summarize(spend, what="review"):
                 print(measured)
-            print("review.yaml generated — review it in `rein ui`, then `rein review complete`")
-            return 0
-        if args.cmd == "complete":
-            complete(repo)
-            print(f"human review frozen — `rein approve {models.GATE_LAST}` can now be run")
+            print("review.yaml generated — review it in `rein ui`, then `rein approve acceptance`")
             return 0
         if args.cmd == "show":
             text = repo.review.read_text(encoding="utf-8") if repo.review.exists() else "(no review.yaml yet)"

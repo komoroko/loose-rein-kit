@@ -250,10 +250,15 @@ GATE_STAGE_VALUES = frozenset(GATE_STAGE_ORDER)
 #: is deliberately absent — it stops there being a `done` for evidence to justify, so it travels as
 #: a task failure under `build_loop.NEGATIVE_CONTROL` instead of as a value here.
 NEGATIVE_CONTROL_VALUES = frozenset({"discriminating", "no_tests_changed", "undetermined"})
-#: What the per-task reviewer may say about a change. `must_fix` sends it back to the implementer
-#: within the review step's own budget; `consider` stops nothing and is carried to acceptance. Neither
-#: passes or fails a task on its own — the reviewer reports, and the loop decides what that costs.
-FINDING_SEVERITY_VALUES = frozenset({"must_fix", "consider"})
+#: What the per-task reviewer may say about a change, named by **who answers it**, never by how
+#: much it matters. `must_fix` is anything the change should change: it goes back to the
+#: implementer within the review step's own budget, however small it is. `question` is what the
+#: change cannot settle — what a requirement, the design or the plan should say — and is carried
+#: to the human at acceptance. There is no third value for "worth saying, change nothing": a
+#: finding the reviewer would not have changed is not reported, and one it would is a `must_fix`.
+#: Neither passes or fails a task on its own — the reviewer reports, and the loop decides what that
+#: costs.
+FINDING_SEVERITY_VALUES = frozenset({"must_fix", "question"})
 AGENT_ROLE_VALUES = frozenset({"implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"})
 
 # --- review vocabulary (plan §6.7) --------------------------------------------
@@ -300,8 +305,12 @@ CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
 #: is not an available disposition for a critical unknown (plan §15.4). `dispute_finding` is —
 #: a review that cannot be contradicted makes the reviewer infallible — but it carries a reason,
 #: because "we disagree" with no why is not a disposition either.
+#: What a human made of a path a repair wrote outside the mandate's `include` (`State.scope_expansions`).
+EXPANSION_STATUSES = frozenset({"proposed", "adopted", "refused"})
+
 DISPOSITION_VALUES = frozenset(
     {
+        "adopt_scope",
         "acknowledge_corrected_model",
         "revise_requirement",
         "revise_design",
@@ -399,7 +408,7 @@ SECURITY_CATEGORY_VALUES = frozenset(
 #: the change from a diff before every card.
 #: `decision` is the only screen that asks for anything, and each card carries its own evidence.
 #: `diff` is the change itself, for a reviewer who wants to read it rather than be told about it.
-REVIEW_STAGE_ORDER: tuple[str, ...] = ("scope", "orient", "decision", "diff", "freeze")
+REVIEW_STAGE_ORDER: tuple[str, ...] = ("scope", "orient", "decision", "diff", "accept")
 REVIEW_STAGE_VALUES = frozenset(REVIEW_STAGE_ORDER)
 
 #: What a task may declare it will require of a person, in `plan.yaml`'s `operator_surface`.
@@ -430,6 +439,10 @@ EVENT_ORDER: tuple[str, ...] = (
     "cycle_initialized",
     "knowledge_gap",
     "gate_approved",
+    # What approving acceptance does, carried out: the approved work branch reached the mainline, or
+    # it did not and the forge's or git's own words say why (`rein integrate` finishes it).
+    "cycle_integrated",
+    "integration_failed",
     # A crossing gate re-approved by the mandate approval that re-froze the plan, because nothing
     # it authorizes moved since a human confirmed it (`approve.crossing_digest`). Its own kind, not
     # a second `gate_approved`: that one is a person stopping to decide, and counting a carry as a
@@ -521,6 +534,18 @@ EVENT_ORDER: tuple[str, ...] = (
     # chain is the only place it survives: `review.yaml` holds one generation's findings, and the
     # next generation re-derives the list from a reviewer with no memory of the last one.
     "security_finding_resolved",
+    # A repair of acceptance's findings landed, or was refused and undone. In the chain because
+    # whether a repair showed a test failing without it is the evidence the finding's closing rests
+    # on, and because a refusal is the reason the same finding reaches the next round, or a human.
+    "repair_verified",
+    "repair_refused",
+    # A repair may write where the mandate's `include` does not reach while it runs, and every path it
+    # does is put to a human. The grant's opening and closing are state changes, and so is a path
+    # widened, answered, or taken back out after a human refused it.
+    "repair_grant_opened",
+    "repair_grant_closed",
+    "scope_expanded",
+    "scope_expansion_reverted",
     "review_generated",
     "review_failed",
     # The review pipeline stopped because a *launch* failed for a machine reason time alone fixes
@@ -1478,6 +1503,30 @@ class State:
         return {str(k): v for k, v in value.items() if isinstance(v, dict)}
 
     @property
+    def repair_grant(self) -> Mapping[str, Any] | None:
+        """The repair running now, while one does: it may write where the mandate's include does not reach.
+
+        Opened by `rein build` around one repair launch and closed when it ends
+        (`build_loop._repair`). Nothing else writes it, and a grant still open when a run starts is
+        one a crash left behind, which that run closes before anything launches.
+        """
+        value = self.raw.get("repair_grant")
+        return value if isinstance(value, dict) and value.get("task_id") else None
+
+    @property
+    def scope_expansions(self) -> Mapping[str, Mapping[str, Any]]:
+        """Paths a repair wrote outside the mandate's `include`, by path, with what a human made of each.
+
+        `proposed` until a human answers its card at acceptance; `adopted` widens the mandate to
+        that path for the rest of the cycle; `refused` closes it to every later repair, and the loop
+        takes the change back out (`build_loop._revert_refused_expansions`).
+        """
+        value = self.raw.get("scope_expansions")
+        if not isinstance(value, dict):
+            return {}
+        return {str(k): v for k, v in value.items() if isinstance(v, dict) and v.get("status") in EXPANSION_STATUSES}
+
+    @property
     def task_status(self) -> Mapping[str, str]:
         value = self.raw.get("tasks")
         if not isinstance(value, dict):
@@ -1546,12 +1595,33 @@ class State:
 
 
 #: The reviews a reviewer step can read for without anything else being written down. Each has a
-#: question in `build_prompts` and, on a host that carries one, a discipline of the host's own
-#: (`adapters.Adapter.disciplines`).
-BUILTIN_REVIEWS: tuple[str, ...] = ("correctness", "simplification", "security")
+#: question in `build_prompts`, and the last three, on a host that carries one, a discipline of the
+#: host's own (`adapters.Adapter.disciplines`). `adversarial` has none: it is an attempt to refute
+#: the change, and no host command is written for that.
+BUILTIN_REVIEWS: tuple[str, ...] = ("adversarial", "correctness", "simplification", "security")
 
 #: The drafting stages the adversarial review runs at, in the order a cycle reaches them.
 ADVERSARIAL_STAGES: tuple[str, ...] = ("requirements", "design", "tasks")
+
+#: The readings acceptance is decided by, in the order they run (`reviews.yaml` `acceptance`).
+ACCEPTANCE_READINGS: tuple[str, ...] = ("actual_extraction", "comparison")
+
+
+@dataclass(frozen=True)
+class Readings:
+    """What the grounded review reads before acceptance (`reviews.yaml` `acceptance`, `whole_change`).
+
+    `actual_extraction` reads the code blind, without the plan, for what it does; `comparison` holds
+    that Actual against the mandate's claims, and so needs it. Both are acceptance's own: they make
+    what a person decides by rather than improving the work. `security` is a security reviewer's
+    reading of the whole change, a review whose findings the loop repairs. Each may be off: what was
+    not read is recorded as not read (`Review.extraction_read`, `Review.comparison_read`,
+    `Review.security_read`), never inferred from an empty list.
+    """
+
+    actual_extraction: bool
+    comparison: bool
+    security: bool
 
 
 @dataclass(frozen=True)
@@ -1612,10 +1682,17 @@ class Reviews:
         errors: list[str] = []
         custom = [c.get("name") for c in self.custom]
         for name in custom:
-            if name in BUILTIN_REVIEWS:
-                errors.append(f"custom/{name}: `{name}` is a packaged review — a custom one needs a name of its own")
+            if name in BUILTIN_REVIEWS or name in ACCEPTANCE_READINGS:
+                errors.append(
+                    f"custom/{name}: `{name}` is a packaged review or reading — a custom one needs a name of its own"
+                )
         if len(set(custom)) != len(custom):
             errors.append("custom: two reviews share a name")
+        if self.readings.comparison and not self.readings.actual_extraction:
+            errors.append(
+                "acceptance: `comparison` compares the actual extraction with the claims, so it needs "
+                "`actual_extraction` on"
+            )
         names = [step.name for step in self.steps]
         if len(set(names)) != len(names):
             errors.append("steps: two steps share a name")
@@ -1663,6 +1740,14 @@ class Reviews:
             "adversarial": {stage: self.adversarial(stage) for stage in ADVERSARIAL_STAGES},
             "steps": steps,
         }
+        # Written out only when the document has it. The schema requires it, so every document that
+        # can be applied does; the one that does not is a record written before the key existed,
+        # and normalizing it into a value it never stated would make the change that adds the key
+        # compare equal to that record and never be written.
+        if isinstance(self.raw.get("acceptance"), dict):
+            document["acceptance"] = {name: getattr(self.readings, name) for name in ACCEPTANCE_READINGS}
+        if isinstance(self.raw.get("whole_change"), dict):
+            document["whole_change"] = {"security": self.readings.security}
         if self.custom:
             document["custom"] = [
                 {"name": name, "question": question} for name, question in sorted(self.questions.items())
@@ -1672,6 +1757,24 @@ class Reviews:
     def adversarial(self, stage: str) -> bool:
         value = self.raw.get("adversarial")
         return bool(value.get(stage)) if isinstance(value, dict) else False
+
+    @property
+    def readings(self) -> Readings:
+        """What the grounded review reads once every task has merged, before acceptance.
+
+        All of it reads the merged tree: what a claim of the mandate rests on, and what one task
+        leaves open that another path now reaches, are only there. It runs where the grounded review
+        reads the change (`review.generate`); a security finding is the loop's to repair
+        (`repair.route`), and what was not read is named at acceptance as not read.
+        """
+        acceptance, whole = self.raw.get("acceptance"), self.raw.get("whole_change")
+        acceptance = acceptance if isinstance(acceptance, dict) else {}
+        whole = whole if isinstance(whole, dict) else {}
+        return Readings(
+            actual_extraction=bool(acceptance.get("actual_extraction")),
+            comparison=bool(acceptance.get("comparison")),
+            security=bool(whole.get("security")),
+        )
 
     @property
     def adversarial_off(self) -> tuple[str, ...]:
@@ -1788,6 +1891,36 @@ class Review:
     def security_findings(self) -> tuple[Mapping[str, Any], ...]:
         security = self.machine.get("security")
         return _maps(security, "findings") if isinstance(security, dict) else ()
+
+    @property
+    def extraction_read(self) -> bool:
+        """Did this review read the code blind for what it does? (`reviews.yaml` `acceptance.actual_extraction`)"""
+        acceptance = self.machine.get("acceptance")
+        return isinstance(acceptance, dict) and acceptance.get("actual_extraction") is True
+
+    @property
+    def comparison_read(self) -> bool:
+        """Did this review compare the change with the mandate's claims? (`reviews.yaml` `acceptance.comparison`)"""
+        acceptance = self.machine.get("acceptance")
+        return isinstance(acceptance, dict) and acceptance.get("comparison") is True
+
+    @property
+    def security_read(self) -> bool:
+        """Did this review send the change to a security reviewer? (`reviews.yaml` `whole_change.security`)"""
+        security = self.machine.get("security")
+        return isinstance(security, dict) and security.get("read") is True
+
+    @property
+    def open_security_findings(self) -> tuple[Mapping[str, Any], ...]:
+        """Findings not yet closed, whatever their severity: what the loop still has to answer.
+
+        Severity says whether a finding holds acceptance shut (`blocking_security_findings`). It
+        does not say whether the code should be repaired: a `low` finding in code a task owns is a
+        defect inside an approved scope like any other, and the only one who can answer it without
+        a person is the loop (`repair.route`).
+        """
+        closed = {"resolved", "disputed"}
+        return tuple(f for f in self.security_findings if f.get("status") not in closed)
 
     @property
     def blocking_security_findings(self) -> tuple[Mapping[str, Any], ...]:
@@ -2071,6 +2204,12 @@ class Config:
     def work_branch(self) -> str:
         project = self.raw.get("project")
         return _str(project, "work_branch") if isinstance(project, dict) else ""
+
+    @property
+    def mainline(self) -> str:
+        """The branch acceptance integrates the work branch into (`project.mainline`)."""
+        project = self.raw.get("project")
+        return _str(project, "mainline") if isinstance(project, dict) else ""
 
     @property
     def execution(self) -> Mapping[str, Any]:

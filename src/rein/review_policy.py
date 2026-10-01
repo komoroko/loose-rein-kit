@@ -172,6 +172,10 @@ def stage_output_schema(role: str) -> dict[str, Any]:
         # wrong with it being a contract field at all, arriving through the back door.
         item = node["properties"]["findings"]["items"]
         item["required"] = [name for name in item["required"] if name != "blocking"]
+        # `read` is the pipeline's record of whether this reviewer was launched at all. A reviewer
+        # answering is the answer to it, so it is not the reviewer's to state.
+        node["required"] = [name for name in node["required"] if name != "read"]
+        node["properties"] = {name: body for name, body in node["properties"].items() if name != "read"}
     root: dict[str, Any] = dict(node) if not key else {"type": "object", "required": [key], "properties": {key: node}}
     if role == "comparator":
         # The comparator echoes the Actual's digest so the answer names what it compared against

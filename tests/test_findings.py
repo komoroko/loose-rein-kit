@@ -86,7 +86,8 @@ def test_a_security_finding_is_attributed_by_its_own_anchor() -> None:
     assert result[0].basis == "src/auth/check.py"
 
 
-def test_a_non_blocking_security_finding_is_left_alone() -> None:
+def test_a_non_blocking_security_finding_is_still_the_owning_tasks_to_repair() -> None:
+    """Severity decides whether a finding holds acceptance shut, not who answers it."""
     plan = plan_with_scopes(t_1=["src/auth/"])
     review = review_with(
         security=[
@@ -101,7 +102,8 @@ def test_a_non_blocking_security_finding_is_left_alone() -> None:
         ]
     )
 
-    assert findings.attribute(plan.tasks, review) == []
+    attributed = findings.attribute(plan.tasks, review)
+    assert [(a.finding_id, a.task_id) for a in attributed] == [("SEC-002", "T-1")]
 
 
 def test_an_extra_behavior_is_attributed_through_the_statement_it_came_from() -> None:

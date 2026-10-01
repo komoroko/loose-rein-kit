@@ -409,7 +409,7 @@ def test_push_after_approval_warns_instead_of_dead_ending(cycle: Callable[..., d
     result = preconditions(cycle(gates={"acceptance": "approved"}), "push")
 
     assert result.ok
-    assert any("--ready" in warning for warning in result.warnings)
+    assert any("rein integrate" in warning for warning in result.warnings)
 
 
 def test_ready_refuses_slices_that_were_never_pushed(cycle: Callable[..., dict[str, Any]]) -> None:
@@ -803,10 +803,10 @@ def test_every_created_pull_request_is_a_draft(cycle: Callable[..., dict[str, An
 def test_the_run_says_how_to_merge_and_forbids_squash(cycle: Callable[..., dict[str, Any]]) -> None:
     _, out = run_cli(cycle())
 
-    assert "Landing the stack is yours" in out
-    assert "gh stack merge" in out
-    assert "part of a stack is what you must not do" in out
-    assert "Squash and rebase merges strand them" in out
+    assert "Approving acceptance lands the stack" in out
+    assert "rein integrate" in out
+    assert "Never merge part of it by" in out
+    assert "Squash and rebase" in out
     assert "rein pr-stack --merge" not in out
 
 
@@ -974,7 +974,7 @@ def test_the_prompt_says_the_pull_requests_are_drafts(
 
     printed = capsys.readouterr().out
     assert "DRAFT pull request(s)" in printed
-    assert "--ready" in printed
+    assert "rein integrate" in printed
 
 
 # --- lifting out of draft -----------------------------------------------------
@@ -1104,23 +1104,18 @@ def test_declining_the_ready_prompt_lifts_nothing(
         pr_stack._confirm_ready(documents(bundle), derive(bundle), [])
 
 
-def test_push_and_ready_are_two_steps_not_one_flag(cycle: Callable[..., dict[str, Any]]) -> None:
-    rc, _ = run_cli(cycle(), "--push", "--ready")
+def test_integrating_refuses_what_landed_after_the_approval(cycle: Callable[..., dict[str, Any]]) -> None:
+    """Only what was approved is integrated, and the branches a reviewer is reading do not move."""
+    from rein import integrate
 
-    assert rc == 2
-
-
-def test_ready_never_repoints_a_branch(cycle: Callable[..., dict[str, Any]]) -> None:
-    """The branches a reviewer is reading must not move underneath them."""
     bundle = cycle()
     run, _ = recorder()
     approved_stack(bundle, run)
     commit_on(bundle["root"], WORK_BRANCH, "landed after approval", path="docs/10-requirements.md")
     before = branches(bundle["root"])
 
-    rc, _ = run_cli(bundle, "--ready")
-
-    assert rc == 2  # the review no longer binds the head, so it stops before anything
+    with pytest.raises(integrate.IntegrationError, match="Only what was approved is integrated"):
+        integrate.run(bundle["repo"], runner=run)
     assert branches(bundle["root"]) == before
 
 
@@ -1282,11 +1277,31 @@ def test_restack_is_refused_once_acceptance_is_approved_through_the_cli(cycle: C
     assert rc == 2
 
 
-def test_the_three_actions_are_separate_steps(cycle: Callable[..., dict[str, Any]]) -> None:
+def test_an_approved_stack_is_lifted_then_merged_whole(cycle: Callable[..., dict[str, Any]]) -> None:
+    """Approving acceptance lands the stack: every draft lifted, then the whole stack merged as merge
+    commits — never a part of it, never squashed or rebased."""
+    from rein import integrate
+
+    bundle = cycle()
+    run, calls = recorder()
+    approved_stack(bundle, run)
+
+    outcome = integrate.run(bundle["repo"], runner=run)
+
+    assert outcome.mode == "stack"
+    gh = [c for c in calls if c[:1] == ["gh"]]
+    readied = [c for c in gh if c[:3] == ["gh", "pr", "ready"]]
+    merges = [c for c in gh if c[:3] == ["gh", "stack", "merge"]]
+    assert readied and len(merges) == 1 and merges[0][-1] == "--merge"
+    assert gh.index(merges[0]) > gh.index(readied[-1]), "lifted first, then merged"
+    events = [e.event for e in event_chain.load(bundle["root"] / ".rein/events.ndjson")]
+    assert "cycle_integrated" in events
+
+
+def test_push_and_restack_are_separate_steps(cycle: Callable[..., dict[str, Any]]) -> None:
     bundle = cycle()
 
     assert run_cli(bundle, "--push", "--restack")[0] == 2
-    assert run_cli(bundle, "--ready", "--restack")[0] == 2
 
 
 def test_a_trailing_slice_with_no_diff_is_not_a_slice(cycle: Callable[..., dict[str, Any]]) -> None:
@@ -1350,6 +1365,8 @@ def test_a_gate_four_repair_is_committed_onto_the_slice_that_introduced_the_code
 
     monkeypatch.setattr(loop, "_launch", implement)
     monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "")
+    # Where the repair lands is the subject here; whether it proves itself is `test_build_loop`'s.
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("reproduced", "stub"))
 
     found = findings.Attribution("SEC-001", "security", "T-001", "src/T-001.py")
     owning = next(t for t in dag.join(bundle_plan(repo), None).tasks if t.id == "T-001")

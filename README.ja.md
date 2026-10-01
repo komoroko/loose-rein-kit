@@ -195,7 +195,7 @@ API に到達できないエージェントは何もできない —— ので�
 サンドボックスを無効化すること —— 入れ子のサンドボックスはエージェントが書き込む地点で失敗する。
 
 ## 使い方
-<!-- README.md: 1da5101373a6 -->
+<!-- README.md: 86c7b0fe6289 -->
 
 日常的に使うのは次の3つで、それ以外はダッシュボードのボタンに相当する操作である。
 
@@ -253,13 +253,16 @@ rein ui           # ローカルダッシュボード。成果物を読み、そ
    記録に限られ、フェーズ実行や push は行えない。ほかに `rein dag --mermaid` が依存図を生成し、
    `rein decisions` と `rein claims` がアーカイブを読み戻す。
 
-7. **PR にする** —— `rein pr-draft` が SSOT から PR 本文を組み立て、`.rein/pr-draft.md` に出力する。
-   PR の作成と push は人間が行う。1タスク1PR の**スタック**として出すこともできる:
-   `rein pr-stack` は各タスクが着地したコミットで作業ブランチを切り分け、スライスごとに本文を書く。
-   `--push` は端末で確認を取ってから draft として開き、`--ready` は acceptance の承認後に draft を
-   外し、`--restack` は修正をマージで上へ伝播させる。**スタックを rebase してはならず、部分的に
-   マージしてもならない** —— どちらも記録が指すコミットが失われる結果になる。全体の着地は
-   `gh stack merge <top> --merge` で行う。これには `gh extension install github/gh-stack` が要り、
+7. **統合する** —— acceptance を承認すると、同じ操作で作業ブランチが mainline(`config.yaml` の
+   `project.mainline`)へ統合される。`origin` があればその pull request を通す(push し、
+   `rein pr-draft` の本文で開き、draft を外し、merge commit で統合する)。サイクルをスタックとして
+   公開していればスタックを通し、remote が無ければローカルで merge する。止まった統合は
+   `rein integrate` が仕上げる。判断は記録済みなので、何も尋ねない。判断の前に forge 上で読みたい
+   ときは、1タスク1PR の**スタック**として出す: `rein pr-stack` は各タスクが着地したコミットで
+   作業ブランチを切り分け、スライスごとに本文を書く。`--push` は端末で確認を取ってから draft として
+   開き、`--restack` は修正をマージで上へ伝播させる。**スタックを rebase してはならず、部分的に
+   マージしてもならない** —— どちらも記録が指すコミットが失われる結果になる。承認はスタック全体を
+   `gh stack merge <top> --merge` で統合する。これには `gh extension install github/gh-stack` が要り、
    導入済みかどうかは `rein doctor` が答える。任意で `rein issue-sync` が plan のタスクを
    GitHub Issues へ一方向ミラーする(既定は off)。
 
@@ -281,7 +284,7 @@ command: notify-send "rein"
 持っていなければ読み取り専用である。
 
 ## 設定できるもの
-<!-- README.md: 09116b30775a -->
+<!-- README.md: ba503d459f16 -->
 
 つまみはすべて `.rein/config.yaml` にあり、その場にコメントが付いている。以下はそのうちプロジェクトが
 普通に触るものである。既存リポジトリでは `rein init` が、認識できた品質ゲートのコマンドだけを埋める。
@@ -297,12 +300,17 @@ command: notify-send "rein"
 | `guard.paths` | pending のゲートが凍結する範囲 |
 
 どのレビューを走らせるかは `config.yaml` には無い。`.rein/reviews.yaml` が、mandate 前の敵対的検証を
-起草の段ごとに、タスクのバッチを読む `review` ステップを、`correctness`・`simplification`・`security`
-または問いをこのファイルに書いた独自のレビューとして持つ。mandate の凍結の外にあるので変えても何も
-巻き戻らず、変えられるのはあなただけである。端末で `rein reviews apply <file> --reason ...` を実行
-するか、ダッシュボードの Reviews 画面を使う。変更は書いた文書ごと記録され、記録と食い違うファイルでは
-何も動かない。`rein reviews restore` が記録された版を書き戻す。acceptance が判断の根拠にする
-comparison はここに無く、外せない。
+起草の段ごとに持ち、タスクのバッチを読む `review` ステップと、変更全体の security レビューと、
+acceptance の判断材料を持つ。判断材料は、計画を見せずにコードの振る舞いを読む抽出と、それを mandate
+の claim と突き合わせる comparison である。同梱の `review` ステップは、変更を反証しようとする
+`adversarial` だけを読む。`correctness`・`simplification`・`security` と、問いをこのファイルに書いた
+独自のレビューは、必要なときに足す。抽出と comparison は有効、security レビューは無効が既定である。
+必須のものはない。comparison を外すと、すべての claim があなたへの問いになり、読まなかったものは
+acceptance で名指しされる。mandate の凍結の外にあるので変えても何も巻き戻らず、変えられるのはあなた
+だけである。端末で `rein reviews apply <file> --reason ...` を実行するか、ダッシュボードの Reviews
+画面を使う。画面ではレビューをサイクルの上へドラッグして足して × で外し、acceptance の2つの読みは
+オンとオフで切り替える。変更は書いた文書ごと記録され、記録と食い違うファイルでは何も動かない。
+`rein reviews restore` が記録された版を書き戻す。
 
 **無人での実行。** `rein build` の終了コードが信号である: `0` は完了、`1` と `2` は人間を必要とし、
 `3` は一時的 —— 容量制限、シグナル、別の実行がロックを保持している —— で、何も記録せず予算も消費
@@ -370,12 +378,14 @@ Loose Rein はこれらを読んで診断するが、設定はしない。自分
 あり、既存のものを名指しするのは `rein doctor` の役目である。
 
 ## セキュリティ
-<!-- README.md: 8bb0b5f4553b -->
+<!-- README.md: 9d11cc6d0af4 -->
 
 - **gitleaks** を pre-commit で実行する。誤検知は `.gitleaksignore` に入れる。
-- **構造化されたセキュリティレビュー**と**依存関係監査**が acceptance の前に走る。blocking の指摘は
-  変更がそれを解消するまでゲートを閉じたままにし、解消したかどうかは、レビュアーに尋ねることでは
-  なく、その指摘がアンカーしたコードを次の生成が読み直すことで決まる。
+- **構造化されたセキュリティレビュー**(`.rein/reviews.yaml` の `whole_change.security` で有効にした
+  とき)と**依存関係監査**が acceptance の前に走る。blocking の指摘は変更がそれを解消するまでゲートを
+  閉じたままにし、解消したかどうかは、レビュアーに尋ねることではなく、その指摘がアンカーしたコードを
+  次の生成が読み直すことで決まる。読みを無効にしても指摘は消えない。コードが無くなるか異議を申し
+  立てるまで残り、acceptance は security の読みを取らなかったことを示す。
 - コード上のアンカーを持たない指摘は、人間による異議申し立てによってのみ閉じる。
 
 ## 既存リポジトリへの導入(brownfield)

@@ -248,7 +248,9 @@ is the point; never fold them into the implementer's session.
   are part of the step. In a project without `make`, substitute that project's commands in the
   config steps.
 - **A reviewer step** (`.rein/reviews.yaml`, not `config.yaml`) asks the reviews it lists —
-  the packaged **correctness** (bugs), **simplification** (reuse, needless complexity, and what the
+  the packaged **adversarial** (an attempt to refute the change: the input that breaks it, the
+  claim with no evidence behind it, the side that did not change; the packaged step reads for this
+  alone), **correctness** (bugs), **simplification** (reuse, needless complexity, and what the
   ticket's acceptance criteria do not require: speculative generality, unused knobs/hooks; YAGNI)
   and **security**, and any custom review the file names with a question of its own — and then
   reads the **tests as evidence**: for each acceptance criterion, which test in this change would go red if
@@ -288,7 +290,7 @@ is the point; never fold them into the implementer's session.
   merged tree did not exist yet:
   duplication between what two tasks added, one responsibility now in two places, an abstraction
   one task introduced that the next worked around. Its `must_fix` findings go to the integration
-  fixer within the step's own budget; its `consider` findings are filed against the merged task
+  fixer within the step's own budget; its `question` findings are filed against the merged task
   whose scope owns the anchor and reach the human at the acceptance gate.
 - **`stage:`** on any step says where it runs — `task`, `integration`, or `both` (the default).
   It moves *when* a step runs, never whether: a fast focused suite can guard each task while the
@@ -325,11 +327,19 @@ is the point; never fold them into the implementer's session.
 
 1. **Answer any open change requests first.** Run `rein changes list --gate acceptance --json`. Each anchors a place (`docs/...#R-3`, `T-004`, `C-001`) and says what is wrong: **read and edit only the slice it names** — do not re-run the phase over the whole deliverable. Then `rein changes address <id> --note <what you changed>`; the note is what the human reads beside the digests before deciding, so "done" is not an answer. An open request holds the acceptance gate shut, and approving is what closes the addressed ones.
 2. **The grounded review is taken by the run itself, and the run repairs what it may.** `rein
-   build` ends by reading the change, repairing every blocking finding a task's declared scope
-   owns, and reading it again from cold — up to `review_policy.repair_rounds` (default 2). No gate
-   moves: a repair inside an approved scope changes no requirement, no claim and no plan, and
-   `rein guard` denies a write to `plan.yaml` or `config.yaml` while the plan is frozen, so it
-   cannot become one. Whether a finding closed is decided by the **next** reading — a blind one
+   build` ends by reading the change, repairing every open finding a task's declared scope owns
+   **whatever its severity** (severity decides whether a finding holds the gate shut, not whether
+   it is repaired), and reading it again from cold — up to `review_policy.repair_rounds` (default
+   2). No gate moves: a repair changes no requirement, no claim and no plan, and `rein guard`
+   denies a write to `plan.yaml` or `config.yaml` while the plan is frozen, so it cannot become
+   one. **A repair is made at the cause and proven.** It may write into another task's paths — the
+   mandate covers them — and, while it runs, past the mandate's `include` (never into `exclude`);
+   each path it writes past `include` comes to you as a card at acceptance, to adopt into the scope
+   or refuse, and a refused one is taken back out by the next `rein build`. It lands only if a test
+   it adds fails against the code as it was: the run applies only the repair's test changes to the
+   commit before it and runs the tests there, and a repair with no test, or whose tests pass there,
+   is undone and the reason handed to the next round. A finding no round could prove repaired is
+   what reaches you. Whether a finding closed is decided by the **next** reading — a blind one
    with no memory of having raised it — never by the fixer's account of its own work. What reaches
    you is what a machine cannot decide: whether a `diverged` claim means the code is wrong or the
    plan is, and whether an extra behaviour nobody asked for is unwanted. **Answering such a card
@@ -338,8 +348,8 @@ is the point; never fold them into the implementer's session.
    review generate` yourself when the reading could not be taken, or when `repair_rounds` is 0.
 
    The reading runs a deterministic Coverage Manifest, a **blind**
-   actual-behaviour extraction (never given the plan), the structured security review, and the
-   Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
+   actual-behaviour extraction (never given the plan), the structured security review when
+   `reviews.yaml` has `whole_change.security` on, and the Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
    **The change is read in *readings*, not in one sitting**: one per dependency chain the plan
    scopes — a line of tasks each built on the one before and on nothing else, read as the one
    change it is, and task by task only when the chain's diff will not fit `max_diff_bytes` — plus
@@ -375,7 +385,7 @@ is the point; never fold them into the implementer's session.
    those to the implementer to fix (a fix moves HEAD, so re-generate; a later commit leaves the
    review stale) and record judgment calls as escalation events for the human. Do not present
    the acceptance gate while a blocker stands. **A security finding closes itself**: the next generation
-   re-checks the code each blocking finding anchored to, and records the finding `resolved` when
+   re-checks the code each carried blocking finding anchored to, and records the finding `resolved` when
    that code is gone — in that generation's findings and in the audit chain, which is where it
    outlives a document the next generation rewrites. Fixing it is the way through, and re-stating
    it is refused only while the code is still there. One that named no anchor is closed by a

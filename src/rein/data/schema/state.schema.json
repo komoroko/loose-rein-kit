@@ -446,7 +446,7 @@
                 }
               },
               "review": {
-                "description": "What the independent reviewer said about the last attempt. Carried so the next launch reads it instead of the reviewer re-deriving the same objection, and so `consider` findings — which stop nothing — still reach the human at acceptance rather than dying with the session that produced them.",
+                "description": "What the independent reviewer said about the last attempt. Carried so the next launch reads it instead of the reviewer re-deriving the same objection, and so `question` findings — which stop nothing — still reach the human at acceptance rather than dying with the session that produced them.",
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
@@ -460,7 +460,7 @@
                         "severity": {
                           "enum": [
                             "must_fix",
-                            "consider"
+                            "question"
                           ]
                         },
                         "statement": {
@@ -789,6 +789,72 @@
         "dependencies": {
           "description": "A digest over this tree's dependency manifests and lockfiles. What the audit is about, and so what retires it — binding to the commit would retire the answer on every source edit, which is a re-run bought for nothing.",
           "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "repair_grant": {
+      "description": "The repair `rein build` is running now, while one runs. Its launch may write a path the approved mandate's `include` does not reach, so that a defect is repaired where its cause is; the mandate's `exclude`, the plan and everything rule 1 and 2 protect stay refused. Opened and closed around one launch, each with an event; a run that starts with one open closes it first.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "opened_at"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "opened_at": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    },
+    "scope_expansions": {
+      "description": "Paths a repair wrote outside the approved mandate's `include`, by path. `proposed` until a human answers the expansion's card at acceptance; `adopted` widens the mandate to that path for the rest of the cycle; `refused` closes it to every later repair and the loop takes the change back out. Acceptance does not open while one is `proposed` or a `refused` one is still in the change.",
+      "type": "object",
+      "maxProperties": 500,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "task_id",
+          "commit"
+        ],
+        "properties": {
+          "status": {
+            "enum": [
+              "proposed",
+              "adopted",
+              "refused"
+            ]
+          },
+          "task_id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            }
+          },
+          "commit": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "decided_at": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 2000
+          }
         }
       }
     }

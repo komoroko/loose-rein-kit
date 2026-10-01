@@ -191,6 +191,15 @@ def _record_write(
     )
 
 
+#: Each reading's switch: the section of `reviews.yaml` it is in, its name, and how a change to it
+#: is said.
+_READING_SWITCHES: tuple[tuple[str, str, str], ...] = (
+    ("acceptance", "actual_extraction", "actual extraction at acceptance"),
+    ("acceptance", "comparison", "comparison at acceptance"),
+    ("whole_change", "security", "security review of the whole change"),
+)
+
+
 def describe(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> list[str]:
     """What a change does, one line per thing a reader would call a change.
 
@@ -234,6 +243,12 @@ def describe(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> list
         ):
             if was_value != now_value:
                 lines.append(f"step {name}: {key} {was_value} → {now_value}")
+    # A record from before a section existed stated none of its switches, so each is news.
+    for section, name, label in _READING_SWITCHES:
+        now_on = getattr(new.readings, name)
+        stated = isinstance((before or {}).get(section), dict)
+        if not stated or getattr(old.readings, name) != now_on:
+            lines.append(f"{label}: {'on' if now_on else 'OFF'}")
     old_questions, new_questions = old.questions, new.questions
     for name in sorted(old_questions.keys() - new_questions.keys()):
         lines.append(f"custom review {name}: removed")
@@ -382,7 +397,13 @@ def render(reviews: models.Reviews) -> str:
     if reviews.custom:
         lines.append("custom reviews:")
         lines += [f"  {name}: {question}" for name, question in reviews.questions.items()]
-    lines.append("acceptance: actual extraction, comparison, security review (not configurable)")
+    lines.append("reviews of the whole change, before acceptance:")
+    lines.append(f"  security: {'on' if reviews.readings.security else 'OFF'}")
+    lines.append("what acceptance is decided by:")
+    lines += [
+        f"  {name.replace('_', ' ')}: {'on' if getattr(reviews.readings, name) else 'OFF'}"
+        for name in models.ACCEPTANCE_READINGS
+    ]
     return "\n".join(lines)
 
 

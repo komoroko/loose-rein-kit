@@ -13,9 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from rein import approve, brief, build_loop, doctor, event_chain, gate_guard, models, reviews_cmd, store
+from rein import approve, brief, build_loop, data, doctor, event_chain, gate_guard, models, reviews_cmd, store
 from rein import repo as repo_mod
 from tests._support import REVIEW_STEP, make_plan, make_reviews, make_state, seed_repo
+
+#: A step reading for two reviews, so a test can take one away or swap their order.
+_TWO = {**REVIEW_STEP, "reviews": ["correctness", "simplification"]}
 
 
 def _frozen(tmp_path: Path) -> repo_mod.Repo:
@@ -24,7 +27,7 @@ def _frozen(tmp_path: Path) -> repo_mod.Repo:
         tmp_path,
         plan=make_plan(),
         state=make_state(gates={"mandate": "pending"}, plan_status="draft"),
-        reviews=make_reviews(steps=[REVIEW_STEP]),
+        reviews=make_reviews(steps=[_TWO]),
         git=True,
     )
     repo = repo_mod.Repo(tmp_path)
@@ -44,7 +47,7 @@ def _apply(repo: repo_mod.Repo, document: dict[str, object], reason: str = "r") 
 
 
 def _without_simplification() -> dict[str, object]:
-    return make_reviews(steps=[{**REVIEW_STEP, "reviews": ["correctness"]}])
+    return make_reviews(steps=[{**_TWO, "reviews": ["correctness"]}])
 
 
 def test_changing_the_reviews_after_the_freeze_rewinds_nothing(tmp_path: Path) -> None:
@@ -169,7 +172,7 @@ def test_reordering_is_a_change(tmp_path: Path) -> None:
 
 def test_a_default_written_out_is_not_a_change(tmp_path: Path) -> None:
     repo = _frozen(tmp_path)
-    explicit = make_reviews(steps=[{**REVIEW_STEP, "retries": 1, "stage": "both"}])
+    explicit = make_reviews(steps=[{**_TWO, "retries": 1, "stage": "both"}])
     assert _apply(repo, explicit) == []
 
 
@@ -187,10 +190,9 @@ def test_the_terminal_route_refuses_a_stdin_that_is_not_one(
     assert reviews is not None and reviews.steps[0].reviews == ("correctness", "simplification")
 
 
-def test_comparison_cannot_be_switched_off(tmp_path: Path) -> None:
-    """It is what acceptance is decided by, not a way of improving the work: there is no key for it."""
-    document = {**make_reviews(), "acceptance": {"comparison": False}}
-    with pytest.raises(models.DocumentError, match="acceptance"):
+def test_a_custom_review_may_not_take_the_name_of_an_acceptance_reading() -> None:
+    document = {**make_reviews(), "custom": [{"name": "comparison", "question": "Is it what was asked?"}]}
+    with pytest.raises(models.DocumentError, match="packaged review"):
         models.Reviews.parse(store.dump_yaml(document).decode())
 
 
@@ -296,3 +298,55 @@ def test_a_stage_already_off_when_the_round_began_says_so(tmp_path: Path) -> Non
 
     [row] = approve.naming(repo, "mandate")["adversarial_off"]
     assert row["change"].startswith("off when this round began") and "we never review design here" in row["change"]
+
+
+def test_the_packaged_reviews_read_for_the_adversarial_review_alone() -> None:
+    """The default is one review, an attempt to refute the change, and the comparison acceptance
+    reads its residue from. The other three, and the security reading of the whole change, are a
+    person's to switch on."""
+    packaged = models.Reviews.parse(data.read_text(reviews_cmd.PACKAGED))
+    assert [step.reviews for step in packaged.steps] == [("adversarial",)]
+    assert packaged.readings == models.Readings(actual_extraction=True, comparison=True, security=False)
+    assert set(models.BUILTIN_REVIEWS) == {"adversarial", "correctness", "simplification", "security"}
+
+
+def test_switching_the_security_reading_is_a_recorded_change(tmp_path: Path) -> None:
+    repo = _frozen(tmp_path)
+    changes = _apply(repo, make_reviews(steps=[_TWO], security=False), "no auth here")
+    assert changes == ["security review of the whole change: OFF"]
+    reviews = store.Store(repo).read_reviews()
+    assert reviews is not None and reviews.readings.security is False
+    assert "  security: OFF" in reviews_cmd.render(reviews)
+
+
+def test_switching_the_comparison_off_is_a_recorded_change(tmp_path: Path) -> None:
+    """Nothing is required: the comparison is switched off like any other review, by a person,
+    on the record."""
+    repo = _frozen(tmp_path)
+    changes = _apply(repo, make_reviews(steps=[_TWO], comparison=False), "a spike nobody will ship")
+    assert changes == ["comparison at acceptance: OFF"]
+    reviews = store.Store(repo).read_reviews()
+    assert reviews is not None and reviews.readings.comparison is False
+    assert "  comparison: OFF" in reviews_cmd.render(reviews)
+
+
+def test_a_comparison_without_the_extraction_it_compares_is_refused() -> None:
+    document = make_reviews(actual_extraction=False, comparison=True)
+    with pytest.raises(models.DocumentError, match="needs `actual_extraction` on"):
+        models.Reviews.parse(store.dump_yaml(document).decode())
+
+
+def test_a_record_from_before_the_switch_existed_is_replaced_by_the_document_that_adds_it(tmp_path: Path) -> None:
+    """A repository upgraded from 0.12 records a document with no `acceptance`. The document that
+    adds it has to be a change — normalizing the old record into a value it never stated would make
+    the two compare equal, and the write that repairs the file would never happen."""
+    old = {"adversarial": dict.fromkeys(models.ADVERSARIAL_STAGES, True), "steps": [_TWO]}
+    assert models.Reviews(old).normalized() == {
+        "adversarial": old["adversarial"],
+        "steps": [{**_TWO, "stage": "both"}],
+    }
+    assert reviews_cmd.describe(old, models.Reviews(make_reviews(steps=[_TWO], security=False)).normalized()) == [
+        "actual extraction at acceptance: on",
+        "comparison at acceptance: on",
+        "security review of the whole change: OFF",
+    ]

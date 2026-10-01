@@ -216,6 +216,12 @@ def _disciplines_note(
 #: What each packaged review asks of one task's change. A custom review asks the text of the file
 #: `reviews.yaml` names for it.
 _TASK_ASKS: dict[str, str] = {
+    "adversarial": "**Adversarial**: try to refute this change, not to confirm it. Break it — a boundary value, an "
+    "empty input, an unexpected type, a failure path, concurrency, a half-applied write. Separate the claim from "
+    'the evidence: "it works" is shown by a test that ran, not by the implementer\'s summary. Read the side that '
+    "did not change — the callers, the tests that do not cover this, what should have been deleted with it, what "
+    "else it reaches. Each finding names the place, how it breaks and the input that breaks it; a finding without "
+    "the input is an impression, not a finding.",
     "correctness": "**Correctness**: bugs — a wrong result, a broken contract, an unhandled failure path, an "
     "edge case its acceptance criteria name. A requirements/design defect is a finding like any other, not "
     "something to work around.",
@@ -227,6 +233,11 @@ _TASK_ASKS: dict[str, str] = {
 
 #: The same reviews asked of a merged tree: what only the join can show.
 _JOIN_ASKS: dict[str, str] = {
+    "adversarial": "**Adversarial across tasks**: try to refute the join, not each task again. Break it where two "
+    "tasks meet — a contract they now read differently, an invariant one relies on and another removed, an order "
+    "or lifetime that holds only while one of them is absent, state both write. The suite that just passed is the "
+    "union of the leaves' suites and no test in it was written with this merge in view, so a green is not "
+    "evidence here. Each finding names the place, how it breaks and the input that breaks it.",
     "correctness": "**Correctness across tasks**: a contract two tasks now read differently, an invariant one "
     "task relies on and another removed, an order or lifetime that only holds when one of them is absent, "
     "shared state two tasks both write. The suite that just passed here is the union of the leaves' suites "
@@ -354,44 +365,64 @@ def batch_review_prompt(
         '  {"tasks": {"' + ids[0] + '": {"findings": [{"severity": "must_fix", "statement": "…", '
         '"anchor": "src/x.py:42"}]}}}\n'
         "**Every task above gets an entry**, an empty `findings` list included: a task with no entry "
-        "has not been reviewed, and it does not land. `must_fix` is a defect the change cannot land "
-        "with — a bug, a broken contract, a security problem — and it goes back to that task's "
-        "implementer. `consider` is everything else worth saying; it stops nothing and is carried to "
-        "the human at acceptance. An empty list is a real answer, and the right one when the change "
-        "is sound: inventing a finding to look thorough costs an implementer round for nothing."
+        "has not been reviewed, and it does not land. `must_fix` is anything this change should "
+        "change — a bug, a broken contract, a security problem, and the smaller things too — and it "
+        "goes back to that task's implementer, who fixes it. `question` is what the change cannot "
+        "settle: what a requirement, the design or the plan should say. It stops nothing and is "
+        'carried to the human at acceptance. There is no value for "worth saying, change '
+        'nothing": if you would not have it changed, do not report it. An empty list is a real '
+        "answer, and the right one when the change is sound: inventing a finding to look thorough "
+        "costs an implementer round for nothing."
     )
 
 
-def gate_four_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str]) -> str:
-    """Hand acceptance's blocking findings about one task back to an implementer.
+def gate_four_fix_prompt(task: dag.Task, findings: str, *, gate_cmds: Sequence[str], refused: str = "") -> str:
+    """Hand acceptance's findings about one task back to an implementer.
 
     Not the batch review's send-back (`implementer_prompt`'s `review_findings`): that one is about a
     change that has not landed, inside its own worktree, with the task's own send-back budget. This is the *grounded*
     review — a blind reading of the merged tree compared against the frozen plan — and its
-    findings arrive after everything is `done` and merged. What differs is not the tone: it is
-    what a finished fix looks like. The plan is frozen, the task's acceptance criteria are already
-    established, and this is a repair inside a scope somebody already approved. Widening it is not
-    an option the implementer has, and saying so is what keeps a security finding from turning
-    into a redesign.
+    findings arrive after everything is `done` and merged. The plan is frozen and the task's
+    acceptance criteria are already established, so a finished fix is a repair of a defect, not a
+    redesign.
+
+    **A finished repair is one that removes the cause and proves it.** The task's scope is where the
+    finding was charged, not a boundary: the cause may sit in code another task wrote, and a repair
+    held to the symptom's file is a repair of the symptom. The proof is mechanical — the loop runs
+    the repair's tests against the code as it was and lands the repair only if one fails there
+    (`build_loop._verify_repair`) — so the prompt says what will be checked rather than asking for
+    care. `refused` is why the last repair of this task was undone, when one was.
 
     The findings name their own code anchors, so the change is pointed at lines rather than at a
     subject. And the reviewer that raised them has no memory of having done so: the next round
     reads the code again from cold, which is what decides whether the finding closed — never this
     launch's account of it.
     """
+    again = (
+        f"\nYour previous repair of these was refused and undone: {refused}. Start from the cause, not "
+        "from what was refused.\n"
+        if refused
+        else ""
+    )
     return (
         f'You are the implementer for task {task.id} "{task.title}". The grounded review at acceptance read '
         "the merged tree against the frozen plan and found the following in code your task's declared "
         "scope owns:\n"
         f"{findings}\n"
-        "Repair them, and nothing else. The plan is frozen and this task is already done and merged: "
-        "this is a fix inside a scope that was approved, not a second attempt at the task. Stay inside "
-        "the scope — a change outside it blocks rather than lands. If a finding is *wrong*, say so in "
-        "`rein report --summary` and change nothing for it; the review is taken again from cold "
-        "afterwards, by a reader with no memory of having raised it, and that is what decides whether "
-        "it closed.\n"
-        "Write or amend a test that would have caught it wherever the finding admits one — a repair no "
-        "test exercises is a claim about code nobody re-reads. Keep "
+        f"{again}"
+        "Repair each at its cause. The line a finding names is where the defect showed; find where it "
+        "comes from and fix it there, even when that is in code another task of this plan wrote — the "
+        "approved mandate covers it. What the mandate does not cover is refused, as is the plan, and "
+        "that is where to stop and say so. Do not redesign, and change nothing the findings do not "
+        "need. If a finding is *wrong*, say so in `rein report --summary` and change nothing for it; "
+        "the review is taken again from cold afterwards, by a reader with no memory of having raised "
+        "it, and that is what decides whether it closed.\n"
+        "**Every repair comes with a test that fails against the code as it was and passes with your "
+        "fix.** That is checked, not trusted: the loop applies only your test changes to the commit "
+        "before your repair and runs the tests there, and a repair whose tests pass there — or that "
+        "changes no test — is undone. A test that passes without the fix proves nothing about it. If "
+        "no test can reproduce a finding, say so in `rein report --summary` and leave it: a human "
+        "decides that one. Keep "
         f'{_gate_list(gate_cmds)} green, and commit with the "{task.id}: " prefix.'
     )
 
@@ -549,7 +580,9 @@ def integration_review_prompt(
         "\n"
         f"Write your findings to `{findings_path}` and nothing else:\n"
         '  {"findings": [{"severity": "must_fix", "statement": "…", "anchor": "src/x.py:42"}]}\n'
-        "`must_fix` is a defect the merged tree cannot land with. `consider` is everything else worth "
-        "saying; it stops nothing and is carried to the human at acceptance. An empty list is a real "
-        "answer, and the right one when the join is sound."
+        "`must_fix` is anything the merged tree should change, and an implementer fixes it. "
+        "`question` is what the join cannot settle — what a requirement, the design or the plan "
+        "should say; it stops nothing and is carried to the human at acceptance. If you would not "
+        "have it changed, do not report it. An empty list is a real answer, and the right one when "
+        "the join is sound."
     )

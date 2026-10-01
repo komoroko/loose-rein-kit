@@ -378,7 +378,8 @@ def collect_review(root: str | Path, gate: str) -> dict[str, object]:
 
 # The deliverable review above answers "what do I read"; this session answers the harder question
 # acceptance asks — "what do *you* decide". The stages run scope (what this approval covers) → orient
-# (what was actually built, and under which conditions) → decision (the answers) → diff → freeze.
+# (what was actually built, and under which conditions) → decision (the answers) → diff → accept
+# (what is left that the machine could not settle, and the approval that takes it on).
 # The two reading stages before the questions are the load-bearing part: a reviewer who has to
 # reconstruct the change from a diff before every card spends their attention on reconstruction.
 # The rules live in human_review and the orient content in brief; this layer only shapes them into
@@ -471,6 +472,9 @@ def scope_block(root: Path, review: models.Review) -> dict[str, object]:
         "generated_at": str(binding.get("generated_at", "")) or None,
         "effective_risk": review.effective_risk,
         "independence": binding.get("independence") or {},
+        "extraction_read": review.extraction_read,
+        "comparison_read": review.comparison_read,
+        "security_read": review.security_read,
         "coverage": _coverage_totals(review),
         "counts": {
             "claims": len(review.claim_results),
@@ -635,12 +639,16 @@ def stage_data(root: str | Path, stage: str) -> dict[str, object]:
         payload["gaps"] = list(machine.get("gaps", []) or [])
         payload["extra_behaviors"] = list(review.extra_behaviors)
         payload["security_findings"] = list(review.security_findings)
+        payload["extraction_read"] = review.extraction_read
+        payload["comparison_read"] = review.comparison_read
+        payload["security_read"] = review.security_read
         payload["summary"] = machine.get("summary", {})
         payload["decisions"] = [d for d in human.get("decisions", []) or [] if isinstance(d, dict)]
         payload["unanswered"] = human_review.unanswered_decisions(review, human)
     elif stage == "diff":
         payload["diff"] = _diff_block(root)
-    elif stage == "freeze":
+    elif stage == "accept":
         payload["can_freeze"] = human_review.can_freeze(review, human)
         payload["completion_blockers"] = human_review.completion_blockers(review, human)
+        payload["residue"] = human_review.residue(review, human)
     return payload

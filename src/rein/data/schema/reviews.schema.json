@@ -2,12 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/komoroko/loose-rein-kit/schema/reviews.schema.json",
   "title": "Loose Rein reviews.yaml",
-  "description": "Which reviews this repository runs: the adversarial review before the mandate, stage by stage, and the reviewer steps that read each batch of tasks. Outside the mandate's freeze on purpose — which tool raises the quality of the work is inside what the mandate delegates, not part of what it decides — and written only by `rein reviews apply` at a terminal or by the dashboard's write session, each change recorded in the audit chain with the whole document it wrote, which is what the file on disk is checked against. The comparison acceptance rests on is not here and cannot be put here: it is what a human decides by, not a way of improving the work.",
+  "description": "Which reviews this repository runs: the adversarial review before the mandate, stage by stage, the reviewer steps that read each batch of tasks, the security review of the whole change, and the readings acceptance is decided by. Every one of them can be switched off: what was not read is named as not read where it is decided on. Outside the mandate's freeze on purpose — which reading the work gets is inside what the mandate delegates, not part of what it decides — and written only by `rein reviews apply` at a terminal or by the dashboard's write session, each change recorded in the audit chain with the whole document it wrote, which is what the file on disk is checked against.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "adversarial",
-    "steps"
+    "steps",
+    "acceptance",
+    "whole_change"
   ],
   "properties": {
     "adversarial": {
@@ -50,7 +52,7 @@
             "pattern": "^[a-z0-9][a-z0-9_-]*$"
           },
           "reviews": {
-            "description": "What this step reads for: `correctness`, `simplification`, `security`, or the name of an entry under `custom`.",
+            "description": "What this step reads for: `adversarial`, `correctness`, `simplification`, `security`, or the name of an entry under `custom`.",
             "type": "array",
             "minItems": 1,
             "maxItems": 16,
@@ -84,8 +86,38 @@
         }
       }
     },
+    "acceptance": {
+      "description": "The readings acceptance is decided by, read once every task has merged. `actual_extraction`: the code is read blind, without the plan, for what it does. `comparison`: that Actual is held against the mandate's claims, so it needs `actual_extraction` on. Off, no claim is compared: every claim reaches acceptance as `unknown`, a decision card for a person, and acceptance says which reading was not taken.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "actual_extraction",
+        "comparison"
+      ],
+      "properties": {
+        "actual_extraction": {
+          "type": "boolean"
+        },
+        "comparison": {
+          "type": "boolean"
+        }
+      }
+    },
+    "whole_change": {
+      "description": "Reviews of the whole change: read once every task has merged and before acceptance, because what one task leaves open and another path reaches is only in the merged tree. Their findings are repaired by the loop like any other; what reaches acceptance is only what no repair could close. `security`: whether a security reviewer reads it. Off, the review records that it took no security reading, a blocking finding an earlier reading recorded still stands until its anchored code is gone or a human disputes it, and acceptance says the reading was not taken.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "security"
+      ],
+      "properties": {
+        "security": {
+          "type": "boolean"
+        }
+      }
+    },
     "custom": {
-      "description": "Reviews beyond the packaged three: a name, and the question the reviewer reads for. The question is held here rather than in a file of its own so that what a review asks is written by the same person, through the same path, and bound by the same record as whether it runs.",
+      "description": "Reviews beyond the packaged four: a name, and the question the reviewer reads for. The question is held here rather than in a file of its own so that what a review asks is written by the same person, through the same path, and bound by the same record as whether it runs.",
       "type": "array",
       "maxItems": 16,
       "items": {

@@ -127,6 +127,15 @@ def readiness(repo: repo_mod.Repo, *, abandon: bool = False) -> list[str]:
     events, defects = event_chain.scan(repo.events)
     if defects:
         blockers.append(f"the audit chain has {len(defects)} defect(s); the archive would record an unreadable log")
+    # Approving acceptance is the decision and integrating it is the same act. A cycle closed
+    # between the two would archive a decision nobody carried out.
+    if not abandon and state.gate_status("acceptance") == "approved":
+        from rein import integrate
+
+        if not integrate.integrated(events, state.cycle_id):
+            blockers.append(
+                "acceptance is approved and the work is not in the mainline yet — finish it with `rein integrate`"
+            )
     # The next chain starts from this one's record of reviews.yaml (`cycle_initialized`), so the
     # file has to be that record: carried forward otherwise, an unrecorded change would be laundered.
     try:

@@ -137,7 +137,7 @@ def test_three_sound_leaves_are_read_by_one_reviewer_launch(tmp_path: Path, monk
     # What each task was read for is in the chain, for acceptance to list (CR-50).
     [applied] = [e for e in store_mod.Store(repo).read_events() if e.event == "reviews_applied"]
     assert list(applied.subject_ids) == list(LEAVES)
-    assert applied.detail == {"step": "review", "stage": "task", "reviews": ["correctness", "simplification"]}
+    assert applied.detail == {"step": "review", "stage": "task", "reviews": ["adversarial"]}
 
 
 def test_a_must_fix_goes_back_to_the_session_that_wrote_it_and_only_that_task_is_read_again(

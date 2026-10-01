@@ -2,10 +2,8 @@
 # nothing. Written only by `rein reviews apply <file> --reason ...` at a terminal, or by the
 # dashboard's write session, and every change is recorded in the audit chain with the document it
 # wrote. Nothing runs on a file that differs from that record: `rein reviews restore` writes the
-# recorded one back.
-#
-# The comparison acceptance rests on is not configurable and is not here: it is what a human
-# decides by, not a way of improving the work.
+# recorded one back. Every review here can be switched off; what was not read is named as not read
+# where it is decided on.
 
 # The fresh-context adversarial review before the mandate, per drafting stage. A stage switched
 # off is named on the mandate's approval screen.
@@ -15,12 +13,28 @@ adversarial:
   tasks: true
 
 # The reviewer steps of the quality gate. Each is one launch per batch of tasks, reading for every
-# review it lists: `correctness`, `simplification`, `security`, or a name under `custom`.
+# review it lists: `adversarial`, `correctness`, `simplification`, `security`, or a name under
+# `custom`. The packaged default is the adversarial review alone, an attempt to refute the change;
+# the other three are there to add when this repository wants them read for separately.
 steps:
   - name: review
-    reviews: [correctness, simplification]
+    reviews: [adversarial]
     retries: 1
     stage: both
+
+# Reviews of the whole change, read once every task has merged and before acceptance: what one
+# task leaves open and another path reaches is only in the merged tree. Their findings are repaired
+# by the loop; what reaches acceptance is only what no repair could close. `security: true` sends
+# the whole change to a security reviewer; off, acceptance says the reading was not taken.
+whole_change:
+  security: false
+
+# What acceptance is decided by. `actual_extraction` reads the code blind, without the plan, for
+# what it does; `comparison` holds that against the mandate's claims, and needs the extraction.
+# Off, every claim reaches acceptance as a question for you, and acceptance says what was not read.
+acceptance:
+  actual_extraction: true
+  comparison: true
 
 # Reviews of your own: a name, and the question the reviewer reads for.
 #   custom:

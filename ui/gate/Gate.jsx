@@ -84,12 +84,30 @@ function Naming({ naming, gate }) {
   const delta = (naming || {}).delta || [];
   const documents = (naming || {}).documents || [];
   const adversarialOff = (naming || {}).adversarial_off || [];
-  const lists = [unasked, lenses, crossing, undeclared, delta, documents, adversarialOff];
-  if (!lists.some((list) => list.length)) return null;
+  const residue = (naming || {}).residue || {};
+  const residueKinds = Object.keys(residue).filter((k) => (residue[k] || []).length);
+  const integration = (naming || {}).integration || "";
+  const lists = [unasked, lenses, crossing, undeclared, delta, documents, adversarialOff, residueKinds];
+  if (!lists.some((list) => list.length) && !integration) return null;
   const crossingTasks = [...new Set(crossing.filter((c) => !c.carried_from).map((c) => c.task_id))];
   const proposedCount = lenses.filter((l) => l.status === "proposed").length;
   return (
     <>
+      {integration ? (
+        <p className="note" data-naming="integration">
+          {integration}
+        </p>
+      ) : null}
+      {residueKinds.length ? (
+        <>
+          <div className="subhead" style={{ marginTop: ".8rem" }}>
+            What you are accepting that the machine could not settle
+          </div>
+          <ul data-naming="residue">
+            {residueKinds.flatMap((k) => residue[k].map((item) => <li key={k + item}>{item}</li>))}
+          </ul>
+        </>
+      ) : null}
       {delta.length ? (
         <>
           {/* On a re-approval, the part of the plan that is new since the last yes. The approval
@@ -255,7 +273,7 @@ function Naming({ naming, gate }) {
   );
 }
 
-function Panel({ panel, review, unopened, onClose, onApprove, onChanges, onFreeze }) {
+function Panel({ panel, review, unopened, onClose, onApprove, onChanges }) {
   const [target, setTarget] = useState(panel.kind === "changes" ? panel.suggested : "");
   const [reason, setReason] = useState("");
   const name = (review || {}).gate || "";
@@ -334,21 +352,7 @@ function Panel({ panel, review, unopened, onClose, onApprove, onChanges, onFreez
     );
   }
 
-  return (
-    <div className="confirm">
-      <p className="lede">Freeze the human review?</p>
-      <p className="note">
-        It is then bound to this machine review, and regenerating the machine review resets it. This does not
-        approve the gate.
-      </p>
-      <div className="row">
-        <button className="primary" onClick={onFreeze}>
-          Freeze it
-        </button>
-        {cancel}
-      </div>
-    </div>
-  );
+  return null;
 }
 
 export default function Gate({ status, gate }) {
@@ -508,7 +512,7 @@ export default function Gate({ status, gate }) {
               asBuilt={asBuilt}
               onAsBuilt={showAsBuilt}
               onPost={post}
-              onFreeze={() => setPanel({ kind: "freeze" })}
+              onApprove={openApproval}
             />
           ) : (
             <DeliverableBody review={review} selected={selected} />
@@ -543,10 +547,6 @@ export default function Gate({ status, gate }) {
                   onClose={() => setPanel(null)}
                   onApprove={confirmApproval}
                   onChanges={submitChanges}
-                  onFreeze={() => {
-                    setPanel(null);
-                    post("complete", {});
-                  }}
                 />
               ) : null}
               <div className="approvebar">
@@ -589,7 +589,7 @@ function Footer({ review, session, isBuild, gate, onApprove, onChanges }) {
       <>
         {warn}
         <span className="warn">
-          The human review is not frozen — {(session.completion_blockers || []).length} blocker(s).
+          {(session.completion_blockers || []).length} thing(s) to settle before approving — see the accept stage.
         </span>
         <button className="primary" disabled>
           Approve gate {review.gate}

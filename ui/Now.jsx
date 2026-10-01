@@ -8,7 +8,7 @@ function NextCommand({ status }) {
   const n = status.next || {};
   const awaiting = awaitingGate(status);
   // A command the human runs is not a link to the gate; a decision at a gate is.
-  const showRead = !(n.kind === "run_phase" || n.kind === "close" || !awaiting);
+  const showRead = !(n.kind === "run_phase" || n.kind === "machine" || n.kind === "close" || !awaiting);
   const also = n.also || [];
   return (
     <>

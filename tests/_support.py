@@ -366,8 +366,9 @@ def make_review(
         },
         "actual_extraction": [],
         "claims": [],
+        "acceptance": {"actual_extraction": True, "comparison": True},
         "extra_behaviors": extra_behaviors or [],
-        "security": {"findings": security_findings or []},
+        "security": {"read": True, "findings": security_findings or []},
     }
     if unsupported_files:
         machine["coverage"]["unsupported_files"] = unsupported_files
@@ -399,18 +400,30 @@ SANDBOXED_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def make_reviews(*, steps: list[dict[str, Any]] | None = None, adversarial: bool = True) -> dict[str, Any]:
+def make_reviews(
+    *,
+    steps: list[dict[str, Any]] | None = None,
+    adversarial: bool = True,
+    actual_extraction: bool = True,
+    comparison: bool = True,
+    security: bool = True,
+) -> dict[str, Any]:
     """A reviews document. No reviewer step by default, as the default `make_config` has none:
     a test about task consumption has no business launching a reviewer. Tests about reviewing
-    pass `steps` — `[REVIEW_STEP]` is the product's packaged one."""
+    pass `steps` — `[REVIEW_STEP]` is the product's packaged one.
+
+    The security reading at acceptance is on by default, unlike the packaged document: the tests
+    of the grounded review are about what that reading does. A test about it being off says so."""
     return {
         "adversarial": dict.fromkeys(models.ADVERSARIAL_STAGES, adversarial),
         "steps": steps if steps is not None else [],
+        "acceptance": {"actual_extraction": actual_extraction, "comparison": comparison},
+        "whole_change": {"security": security},
     }
 
 
 #: The reviewer step the product ships (`scaffold/rein/reviews.yaml`).
-REVIEW_STEP: dict[str, Any] = {"name": "review", "reviews": ["correctness", "simplification"], "retries": 1}
+REVIEW_STEP: dict[str, Any] = {"name": "review", "reviews": ["adversarial"], "retries": 1}
 
 
 def make_config(
@@ -437,7 +450,7 @@ def make_config(
     if launch_retries is not None:
         execution["launch_retries"] = launch_retries
     body: dict[str, Any] = {
-        "project": {"name": project, "work_branch": branch},
+        "project": {"name": project, "work_branch": branch, "mainline": "main"},
         "execution": execution,
         "executors": {
             "quality_gate_profile": "quality",

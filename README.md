@@ -252,13 +252,17 @@ Then, per cycle:
    diagnostics and decision recording, never phase execution or push. Also `rein dag --mermaid`
    for the dependency diagram, and `rein decisions` / `rein claims` to read the archives back.
 
-7. **Ship** — `rein pr-draft` assembles a PR body from the SSOT into `.rein/pr-draft.md`. Creating
-   and pushing the PR stays yours. Or ship a **stack, one pull request per task**: `rein pr-stack`
-   cuts the work branch at each task's landing commit and writes one body per slice, `--push`
-   opens them as drafts after a confirmation typed at a terminal, `--ready` lifts them once
-   acceptance is approved, and `--restack` carries a fix upward by merging. **A stack is never
-   rebased and never merged in part** — either strands the commits the record points at. Land the
-   whole of it with `gh stack merge <top> --merge`, which needs `gh extension install
+7. **Ship** — approving acceptance integrates the work branch into the mainline
+   (`project.mainline` in `config.yaml`) in the same act: through its pull request on `origin`
+   (pushed, opened with `rein pr-draft`'s body, lifted, merged as a merge commit), through the stack
+   if the cycle was published as one, or by a local merge when there is no remote. `rein integrate`
+   finishes an integration that stopped — the forge waiting on required checks, say — and asks
+   nothing, because the decision is on the record. To read the change on the forge before deciding,
+   ship a **stack, one pull request per task**: `rein pr-stack` cuts the work branch at each task's
+   landing commit and writes one body per slice, `--push` opens them as drafts after a confirmation
+   typed at a terminal, and `--restack` carries a fix upward by merging. **A stack is never rebased
+   and never merged in part** — either strands the commits the record points at; approving merges
+   the whole of it with `gh stack merge <top> --merge`, which needs `gh extension install
    github/gh-stack` — `rein doctor` says whether you have it. Optionally `rein issue-sync`
    one-way-mirrors the plan's tasks to GitHub Issues (off by default).
 
@@ -295,13 +299,18 @@ from your tooling, and nothing else.
 | `guard.paths` | what a pending gate freezes |
 
 Which reviews run is not in `config.yaml`. `.rein/reviews.yaml` holds the adversarial review before
-the mandate, per drafting stage, and the `review` step that reads each batch of tasks — for
-`correctness`, `simplification`, `security`, or a review of your own with its question written in
-the file. It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone
-to change: `rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews
-screen. Each change is recorded with the document it wrote, and nothing runs on a file that differs
-from that record; `rein reviews restore` writes it back. The comparison acceptance is decided by is
-not in it and cannot be switched off.
+the mandate, per drafting stage, the `review` step that reads each batch of tasks, the security
+review of the whole change, and what acceptance is decided by: the blind extraction of what the code
+does and its comparison with the mandate's claims. The packaged step reads for `adversarial` alone,
+an attempt to refute the change; `correctness`, `simplification`, `security`, or a review of your
+own with its question written in the file, are yours to add. The extraction and the comparison are
+on and the security review is off until you switch them. Nothing is required: switched off, the
+comparison sends every claim to you as a question, and acceptance names whatever was not read. It is
+outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone to change:
+`rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews screen, where
+reviews are dragged onto the cycle and removed with ×, and acceptance's two readings are switched
+on and off. Each change is recorded with the document it wrote, and nothing runs on a file that
+differs from that record; `rein reviews restore` writes it back.
 
 **Running unattended.** `rein build`'s exit code is the signal: `0` done, `1` or `2` need a human,
 and `3` is transient — capacity, a signal, another run holding the lock — and safe to retry with
@@ -370,9 +379,11 @@ A job already shaped the old way is not failed retroactively: the base side repo
 ## Security
 
 - **gitleaks** at pre-commit; false positives go in `.gitleaksignore`.
-- A **structured security review** and a **dependency audit** run before acceptance. A blocking
-  finding holds the gate shut until the change closes it, and the next review decides whether it
-  closed by re-reading the code it anchored to — not by asking the reviewer.
+- A **structured security review**, when `.rein/reviews.yaml` switches it on (`whole_change.security`),
+  and a **dependency audit** run before acceptance. A blocking finding holds the gate shut until the
+  change closes it, and the next review decides whether it closed by re-reading the code it
+  anchored to — not by asking the reviewer. Switching the reading off does not clear one: it stands
+  until its code is gone or you dispute it, and acceptance says no security reading was taken.
 - A finding with no code anchor is closed by a human's dispute or not at all.
 
 ## Existing repositories (brownfield)

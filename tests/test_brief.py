@@ -370,17 +370,17 @@ def _state_with_findings(findings: list[dict[str, Any]], *, status: str = "done"
     )
 
 
-def test_a_consider_finding_reaches_gate_four_stamped_with_the_tree_it_was_made_against() -> None:
-    """`consider` stops nothing by design, so nothing in the build loop ever acts on it. Both the
+def test_a_question_finding_reaches_gate_four_stamped_with_the_tree_it_was_made_against() -> None:
+    """`question` stops nothing by design, so nothing in the build loop ever acts on it. Both the
     reviewer's prompt and the state schema promised it would reach a human here; this is what
     makes that true — and the stamp is what stops it being read as a claim about the merged tree."""
     state = _state_with_findings(
-        [{"severity": "consider", "statement": "the retry key could be threaded through", "anchor": "src/a.py:42"}]
+        [{"severity": "question", "statement": "the retry key could be threaded through", "anchor": "src/a.py:42"}]
     )
     findings = brief.residual_findings(state)
     assert len(findings) == 1
     assert findings[0]["task_id"] == "T-001"
-    assert findings[0]["severity"] == "consider"
+    assert findings[0]["severity"] == "question"
     assert findings[0]["anchor"] == "src/a.py:42"
     assert findings[0]["observed_commit"] == "a" * 40
     assert findings[0]["observed_tree"] == "sha256:" + "b" * 64
@@ -388,7 +388,7 @@ def test_a_consider_finding_reaches_gate_four_stamped_with_the_tree_it_was_made_
 
 def test_a_must_fix_finding_on_a_blocked_task_is_carried_at_its_own_severity() -> None:
     """A task that blocked with its findings unresolved is exactly the case worth surfacing, and
-    downgrading it to `consider` on the way here would hide why the task never landed."""
+    downgrading it to `question` on the way here would hide why the task never landed."""
     state = _state_with_findings(
         [{"severity": "must_fix", "statement": "the token is logged in cleartext"}], status="blocked"
     )
@@ -396,7 +396,7 @@ def test_a_must_fix_finding_on_a_blocked_task_is_carried_at_its_own_severity() -
 
 
 def test_a_finding_with_no_statement_is_dropped() -> None:
-    state = _state_with_findings([{"severity": "consider", "statement": ""}])
+    state = _state_with_findings([{"severity": "question", "statement": ""}])
     assert brief.residual_findings(state) == []
 
 

@@ -153,7 +153,9 @@ Four documents, distinct roles — do not conflate them:
   *separately*. Regenerating the machine review resets the human review; a human answer never
   makes the machine review stale.
 - **`.rein/reviews.yaml`** — which reviews run: the adversarial review before the mandate, per
-  stage, and the reviewer steps that read each batch. Outside the mandate's freeze, and **a human's
+  stage, the reviewer steps that read each batch, the security review of the whole change
+  (`whole_change.security`), and what acceptance is decided by (`acceptance.actual_extraction`,
+  `acceptance.comparison`). Any of them may be off; what was not read is named at acceptance. Outside the mandate's freeze, and **a human's
   to change, never yours**: `rein reviews apply` at their terminal or the dashboard writes it, with
   the reason and the whole document in the chain, and nothing runs on a file that differs from that
   record. Read it with `rein reviews show`; never edit it, and never run `apply` for them —
@@ -244,11 +246,21 @@ the plan.
 
 **Whoever judges does not repair — and both halves are the loop's.** The reviewer is launched
 read-only and writes findings; an implementer resolves them and the reviewer looks again. That
-holds over the whole change as well as inside a task: the build reads the change, repairs every blocking
-finding a task's declared scope owns, and reads it again from cold, up to
-`review_policy.repair_rounds`. No gate moves — a repair inside an approved scope changes no
-requirement, no claim and no plan, and `rein guard` makes that mechanical rather than promised.
-Whether a finding closed is decided by the next reading, never by the fixer's account of itself.
+holds over the whole change as well as inside a task: the build reads the change, repairs every open
+finding a task's declared scope owns whatever its severity, and reads it again from cold, up to
+`review_policy.repair_rounds`. No gate moves — a repair changes no requirement, no claim and no
+plan, and `rein guard` makes that mechanical rather than promised. Whether a finding closed is
+decided by the next reading, never by the fixer's account of itself.
+
+**A repair is made at the cause, and lands only with a test that fails without it.** The task's
+scope is where a finding was charged, not a boundary: a repair may write into another task's paths,
+and while it runs (`state.repair_grant`, honoured only while `rein build` holds its run lock) past
+the mandate's `include` — never into its `exclude`. Every path it writes past `include` is put to
+the human at acceptance as a card (`state.scope_expansions`): adopted, it is inside the mandate
+from then on; refused, the next `rein build` takes it back out and no repair may write there
+again. The run applies only the repair's test changes to the commit before it and runs the tests
+there; a repair with no test, or whose tests pass there, is undone and the reason goes to the next
+round (`build_loop._verify_repair`).
 
 **A finding is routed by what repairing it would change, not by who found it** (`repair.route`).
 Three classes: **code** — one task's scope owns it and no claim, criterion or requirement moves —
@@ -322,7 +334,9 @@ human decides *whether*; the loop does the work.
 ## Security gate
 
 **gitleaks** at commit stage; a **structured security review** feeds the grounded review before
-acceptance. What "stale" means there is measured on content, over **two subjects**: the *product*, and
+acceptance when `.rein/reviews.yaml` has `whole_change.security` on. Off, the review records that no
+security reading was taken, and a blocking finding an earlier reading recorded still stands until
+its code is gone or a human disputes it. What "stale" means there is measured on content, over **two subjects**: the *product*, and
 the **host surfaces** `rein install` wrote — the settings, hooks, MCP servers and instruction files
 a CLI reads before it reads its prompt. The security reviewer is sent a checkout of the head with
 those in it and told that a pre-authorized command or a hook added there is a finding, while the
@@ -347,18 +361,22 @@ not "the answer is bad" (detail: build.md, verify.md).
   worktree's record survives its deletion.
 - Per-task commits **`T-NNN: <summary>`**; commit each phase's deliverables at its gate approval.
 - **Push and PR are outward-facing** — human approval only, same for GitHub Issues.
-- **Merging into the base is outside this harness.** It takes a change to acceptance and leaves it
-  reviewable; acceptance approved the change, not the push to the base, and asking a second time
-  for the same decision is one approval too many. Whoever owns the base lands it.
-- A cycle may ship as **one pull request** (`rein pr-draft` assembles the body) or as a **stack of
-  them, one per task** (`rein pr-stack`). A stack opens as **drafts** before acceptance and is
-  lifted by `rein pr-stack --ready` once a human approves it. Both confirm at a terminal first and
-  neither may be pre-authorized. The slices are registered as a **GitHub stack** at push time.
-- **A stack is merged whole, never in part.** This is the harness's to *say*, not to do: merging a
-  subset makes GitHub rebase the pull requests above the cut onto the new base with new commit ids,
-  so every `completed_commit` above it names a commit in no branch's history. Squash and rebase
-  merges strand them the same way. `gh stack merge <top> --merge` lands the whole of it atomically,
-  and nothing is rebased. The pull-request body carries this warning to whoever presses the button.
+- **Approving acceptance integrates the change, in the same act.** Approving is the decision to take
+  the change into the mainline (`project.mainline`), and the approval carries itself out: through
+  the work branch's pull request on `origin`, through the stack if the cycle was published as one,
+  or by a local merge when there is no remote. Asking again for the push, the lift and the merge
+  was asking four times for one decision. `rein integrate` finishes an integration that stopped
+  (the forge waiting on required checks) and asks nothing, because the decision is on the record;
+  it refuses to integrate anything but the commit the approved review read. Never merge by hand
+  around it.
+- A cycle may ship as **one pull request** (`rein pr-draft`'s body) or as a **stack of them, one per
+  task** (`rein pr-stack`). A stack opens as **drafts** before acceptance (`--push`, confirmed at a
+  terminal, never pre-authorized) for reading on the forge; approving lifts and merges it. The
+  slices are registered as a **GitHub stack** at push time.
+- **A stack is merged whole, never in part.** Merging a subset makes GitHub rebase the pull requests
+  above the cut onto the new base with new commit ids, so every `completed_commit` above it names a
+  commit in no branch's history. Squash and rebase merges strand them the same way. Approving
+  lands it with `gh stack merge <top> --merge`, atomically, and nothing is rebased.
 - **A stack is never rebased.** A review fix is committed onto the slice that introduced the code
   and carried upward by `rein pr-stack --restack`, which merges. Rewriting history strands every
   `completed_commit` and gate receipt on commits that no longer exist. The grounded review's own repairs follow

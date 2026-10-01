@@ -35,6 +35,7 @@ def _review(*, machine: dict[str, Any] | None = None, human: dict[str, Any] | No
         },
         "actual_extraction": [],
         "claims": [],
+        "acceptance": {"actual_extraction": True, "comparison": True},
     }
     base_machine.update(machine or {})
     return models.Review({"machine": base_machine, "human": human or {"status": "not_started"}})
@@ -371,3 +372,56 @@ def test_a_diverged_high_risk_claim_blocks_completion_until_it_is_decided() -> N
     }
     review = _review(machine={"decision_cards": [card]})
     assert any("DC-001" in b for b in human_review.completion_blockers(review, dict(review.human)))
+
+
+# --- the residue: what acceptance asks a person to take on --------------------------------------
+
+
+def _claim(cid: str, verdict: str, basis: str) -> dict[str, Any]:
+    return {"claim_id": cid, "verdict": verdict, "semantic_support": {"status": "supported", "assessment_basis": basis}}
+
+
+def test_the_residue_is_what_the_machine_could_not_settle_and_nothing_it_did() -> None:
+    review = _review(
+        machine={
+            "claims": [
+                _claim("C-001", "aligned", "experimental"),
+                _claim("C-002", "aligned", "machine_assessed"),
+                _claim("C-003", "diverged", "machine_assessed"),
+            ],
+            "decision_cards": [_card("DC-001", risk="low")],
+            "residual_findings": [
+                {"task_id": "T-001", "severity": "question", "statement": "should retries be bounded?"},
+                {"task_id": "T-001", "severity": "must_fix", "statement": "settled inside the loop"},
+            ],
+            "gaps": [{"id": "GAP-001", "kind": "evidence_gap"}],
+            "acceptance": {"actual_extraction": False, "comparison": False},
+            "security": {"read": False, "findings": []},
+        }
+    )
+
+    residue = human_review.residue(review)
+
+    assert residue["unsettled"] == ["C-003: diverged"]
+    assert residue["inferred"] == ["C-002: aligned on an AI's reading alone"], "C-001 was established"
+    assert [item.split(":")[0] for item in residue["undecided"]] == ["DC-001"], "a low card is still undecided"
+    assert residue["questions"] == ["T-001: should retries be bounded?"]
+    assert residue["not_read"] == [
+        "GAP-001: evidence_gap",
+        "nobody read the code blind for what it does (`reviews.yaml` `acceptance.actual_extraction`)",
+        "nobody compared the change with the mandate's claims (`reviews.yaml` `acceptance.comparison`)",
+        "no security reviewer read the whole change (`reviews.yaml` `whole_change.security`)",
+    ]
+
+
+def test_an_empty_residue_says_so_rather_than_saying_nothing() -> None:
+    review = _review(
+        machine={
+            "claims": [_claim("C-001", "aligned", "formal")],
+            "acceptance": {"actual_extraction": True, "comparison": True},
+            "security": {"read": True, "findings": []},
+        }
+    )
+    residue = human_review.residue(review)
+    assert not any(residue.values())
+    assert "nothing" in human_review.render_residue(residue)
