@@ -827,14 +827,14 @@ def test_an_insufficient_coverage_manifest_fails() -> None:
 
 def test_a_blocking_security_finding_fails() -> None:
     finding = {
-        "id": "SEC-001",
+        "id": "F-001",
         "severity": "critical",
-        "category": "sandbox_escape",
-        "attack_scenario": "the sandbox reaches the docker socket",
+        "review": "security",
+        "scenario": "the sandbox reaches the docker socket",
         "blocking": True,
     }
-    review = models.Review(make_review(generated=True, security_findings=[finding]))
-    assert any(f.level == "FAIL" and "1 blocking security" in f.message for f in doctor.check_review(review))
+    review = models.Review(make_review(generated=True, review_findings=[finding]))
+    assert any(f.level == "FAIL" and "1 blocking finding" in f.message for f in doctor.check_review(review))
 
 
 # --- the CLI ------------------------------------------------------------------
@@ -1158,7 +1158,7 @@ def review_aborted_chain(*, hours_ago: float = 0.0, then: tuple[str, ...] = ()) 
 
     from rein import event_chain
 
-    detail: dict[str, object] = {"stage": "security_review", "reason": "session limit \u00b7 resets 3:30am"}
+    detail: dict[str, object] = {"stage": "change_review", "reason": "session limit \u00b7 resets 3:30am"}
     built: list[models.Event] = []
     previous: models.Event | None = None
     for name in ("cycle_initialized", "review_aborted", *then):
@@ -1178,7 +1178,7 @@ def test_a_review_run_the_machine_stopped_is_surfaced_because_nothing_else_shows
     """
     results = doctor.check_last_review_run(healthy(tmp_path, events=review_aborted_chain()))
     assert [f.level for f in results] == ["INFO"]
-    assert "security_review" in results[0].message
+    assert "change_review" in results[0].message
     assert "cached" in results[0].message, "the fact that makes a re-run cheap is the point"
 
 

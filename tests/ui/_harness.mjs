@@ -135,6 +135,24 @@ export async function boot({ hash = "#now", readOnly = false, routes = () => ({}
       await settle();
       return el;
     },
+    /**
+     * Drag the element matching `from` onto the one matching `to`, as a browser fires it. jsdom has
+     * no DataTransfer, so the events carry none: what the page needs during a drag it keeps itself.
+     */
+    async drag(from, to) {
+      const source = w.document.querySelector(from);
+      const target = w.document.querySelector(to);
+      assert.ok(source, "no such element: " + from);
+      assert.ok(target, "no such element: " + to);
+      const fire = (el, type) => el.dispatchEvent(new w.Event(type, { bubbles: true, cancelable: true }));
+      fire(source, "dragstart");
+      await settle();
+      const over = !fire(target, "dragover");
+      if (over) fire(target, "drop");
+      fire(source, "dragend");
+      await settle();
+      return over;
+    },
     async select(selector, value) {
       const el = w.document.querySelector(selector);
       assert.ok(el, "no such element: " + selector);

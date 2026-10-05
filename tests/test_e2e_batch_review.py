@@ -21,7 +21,6 @@ from rein import build_loop, common
 from rein import repo as repo_mod
 from rein import store as store_mod
 from tests._support import (
-    REVIEW_STEP,
     agent_envelope,
     make_config,
     make_plan,
@@ -42,6 +41,10 @@ GATE = [
 ]
 LEAVES = ("T-002", "T-003", "T-004")
 
+#: A reviewer at `build`, and nothing read at acceptance: these tests are about the batch's
+#: reviewer, and `repair_rounds: 1` would otherwise send the finished build on to read the change.
+_REVIEWS = make_reviews(build=["adversarial"], actual_extraction=False, comparison=False, acceptance=())
+
 
 def git(root: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
@@ -59,8 +62,8 @@ def seeded(tmp_path: Path) -> repo_mod.Repo:
     ]
     seed_repo(
         root,
-        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
-        reviews=make_reviews(steps=[REVIEW_STEP]),
+        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0, repair_rounds=1),
+        reviews=_REVIEWS,
         plan=make_plan(tasks=tasks),
         state={**make_state(plan_status="frozen"), "tasks": {"T-001": {"status": "done"}}},
     )
@@ -137,7 +140,7 @@ def test_three_sound_leaves_are_read_by_one_reviewer_launch(tmp_path: Path, monk
     # What each task was read for is in the chain, for acceptance to list (CR-50).
     [applied] = [e for e in store_mod.Store(repo).read_events() if e.event == "reviews_applied"]
     assert list(applied.subject_ids) == list(LEAVES)
-    assert applied.detail == {"step": "review", "stage": "task", "reviews": ["correctness", "simplification"]}
+    assert applied.detail == {"step": "review", "stage": "task", "reviews": ["adversarial"]}
 
 
 def test_a_must_fix_goes_back_to_the_session_that_wrote_it_and_only_that_task_is_read_again(
@@ -170,7 +173,7 @@ def test_a_finding_that_outlives_the_rounds_holds_back_its_task_and_nothing_else
 
     assert status_of(repo, "T-003") == "blocked"
     assert status_of(repo, "T-002") == "done" and status_of(repo, "T-004") == "done"
-    assert agents.reviews == [list(LEAVES), ["T-003"]], "retries: 1 is one send-back and one more reading"
+    assert agents.reviews == [list(LEAVES), ["T-003"]], "repair_rounds: 1 is one send-back and one more reading"
 
 
 def test_the_reviewer_is_shown_work_the_implementer_did_not_commit(
@@ -210,8 +213,8 @@ def _operating(tmp_path: Path, *, attempts: dict[str, Any] | None, gate_red_once
     gate = [{**GATE[0], "command": [sys.executable, "-c", red_once if gate_red_once else "pass"]}]
     seed_repo(
         root,
-        config=make_config(branch=WORK_BRANCH, quality_gate=gate, launch_retries=0),
-        reviews=make_reviews(steps=[REVIEW_STEP]),
+        config=make_config(branch=WORK_BRANCH, quality_gate=gate, launch_retries=0, repair_rounds=1),
+        reviews=_REVIEWS,
         plan=make_plan(tasks=[task]),
         state=make_state(plan_status="frozen"),
     )
@@ -276,7 +279,7 @@ def test_a_chain_reading_repairs_only_the_task_whose_work_is_the_tip(
     """A chain is read when its last task lands. A finding about the first task, repaired on top of
     the branch, moved the *last* task's `completed_commit` onto it — so the stack cut along those
     commits put the first task's fix in the last task's pull request."""
-    from rein import actual_extraction, review_reading, security_review
+    from rein import actual_extraction, change_review, review_reading
 
     root = tmp_path / "product"
     root.mkdir()
@@ -310,8 +313,8 @@ def test_a_chain_reading_repairs_only_the_task_whose_work_is_the_tip(
                     unit="T-001+T-002", include=("src/T-001.py", "src/T-002.py"), members=("T-001", "T-002")
                 ),
                 extraction=actual_extraction.ExtractionResult(actual_statements=(), coverage={}, actual_digest=""),
-                security=security_review.SecurityResult(
-                    findings=(finding("SEC-001", "src/T-001.py"), finding("SEC-002", "src/T-002.py"))
+                review=change_review.ChangeReviewResult(
+                    findings=(finding("F-001", "src/T-001.py"), finding("F-002", "src/T-002.py"))
                 ),
             )
         ]
@@ -353,8 +356,8 @@ def test_two_tasks_that_operate_are_read_at_once_without_reading_each_other_s_an
         tasks.append(task)
     seed_repo(
         root,
-        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0),
-        reviews=make_reviews(steps=[REVIEW_STEP]),
+        config=make_config(branch=WORK_BRANCH, quality_gate=GATE, launch_retries=0, repair_rounds=1),
+        reviews=_REVIEWS,
         plan=make_plan(tasks=tasks),
         state=make_state(plan_status="frozen"),
     )

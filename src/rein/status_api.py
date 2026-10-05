@@ -137,6 +137,11 @@ def next_action(
     #: action for a row whose blocker was the crossing.
     decidable_gate: str | None = None,
     gate_ready: bool | None = None,
+    #: The first blocker of the probed gate that the machine clears (`approve.Blocker`), or None.
+    #: While one stands the gate is not put to anybody: the row says what clears it instead.
+    machine_blocker: str | None = None,
+    #: Acceptance is approved and its integration did not complete (`integrate.integrated`).
+    integration_pending: bool = False,
     open_change_requests: int = 0,
     repairable_findings: int = 0,
     decidable_findings: int = 0,
@@ -258,7 +263,17 @@ def next_action(
             reason=f"{attention_count} condition(s) await a human decision; record a disposition for each "
             "before the acceptance decision.",
         )
-    # 7. Everything approved: the cycle is over.
+    # 7. Everything approved, and the approval not yet carried out: integrating it is the decision a
+    # person already made, so finishing it asks nobody.
+    if stage == "done" and integration_pending:
+        return Recommendation(
+            command="rein integrate",
+            kind="machine",
+            reason="Acceptance is approved and its integration into the mainline did not complete. Finishing it "
+            "asks nothing: the decision is on the record.",
+            also=("rein events --summary",),
+        )
+    # 7b. Everything approved and integrated: the cycle is over.
     if stage == "done":
         return Recommendation(
             command="rein cycle-close --name <slug>",
@@ -291,6 +306,20 @@ def next_action(
             reason=f"{open_change_requests} change request(s) you raised are still open, and the {decidable_gate} gate "
             "stays shut until they are. Read them, fix only what each one anchors, and mark each addressed.",
             also=(f"rein changes list --gate {decidable_gate}",),
+        )
+    # Something stands that the machine clears — a review to take again, an audit to re-run, a refused
+    # path to take back out, a mainline to merge in. Putting the gate to a person now would be calling
+    # them to be told to wait.
+    # Unfinished tasks are the phase itself, and the row for the phase below already names it. With
+    # no task graph to count (`counts` is None) whether work remains is not known, and the phase row
+    # is the one that says so.
+    finished = counts is not None and not any(n for status, n in counts.items() if status != "done")
+    if machine_blocker is not None and finished:
+        return Recommendation(
+            command=getattr(machine_blocker, "remedy", "") or f"rein approve {decidable_gate} --check",
+            kind="machine",
+            reason=f"Before the {decidable_gate} gate is anybody's to decide: {machine_blocker}",
+            also=(f"rein approve {decidable_gate} --check",),
         )
     # Nothing mechanical is left: what remains is a person deciding. This is the only row producing
     # `approve_gate`, and so the only thing that ever turns `waiting_on_human` on — the state the
@@ -330,6 +359,17 @@ def next_action(
             "decide: whether the code or the plan is the mistaken half. Answer the Decision Cards — "
             "`revise_implementation` hands the subject back to `rein build` as a code repair.",
             also=("rein review generate", f"rein approve {gate} --check"),
+        )
+    # What is left is a person's and is not a finding the loop routed: an unanswered card, a widened
+    # path to adopt or refuse, a change the mandate never covered. The build would only end by
+    # saying so, so the recommendation is the place those are answered.
+    if stage == "building" and gate_ready is False and machine_blocker is None and finished:
+        return Recommendation(
+            command="rein ui",
+            kind="decide",
+            reason=f"What stands before the {decidable_gate} gate is yours to settle — `rein approve "
+            f"{decidable_gate} --check` lists it. Nothing of the machine's is left.",
+            also=(f"rein approve {decidable_gate} --check",),
         )
     also: tuple[str, ...] = (f"rein approve {gate} --check",)
     if stage == "building":
@@ -633,7 +673,7 @@ def _tasks_block(graph: dag.Graph, state: models.State | None = None) -> dict[st
 
 #: Recommendation kinds that are the *agent's* next move rather than a call the human has to make.
 #: Everything else in the decision table ends with a person deciding something.
-_AGENT_KINDS = frozenset({"run_phase"})
+_AGENT_KINDS = frozenset({"run_phase", "machine"})
 
 
 def pending_decision(
@@ -755,10 +795,21 @@ def pending_queue(
             )
         )
     if probe_gate is not None and gate_blockers is not None:
-        # The remedy travels in the message: `readiness` writes each blocker as a sentence that
-        # names what to run. The action here is the command that re-lists them authoritatively.
+        # A blocker the machine can clear is not a person's: it is listed with the command that
+        # clears it, and while any stands the gate is not put to anybody (`approve.Blocker`). The
+        # rest name what to run in their own sentence; the action is the command that re-lists them.
+        from rein import approve as approve_mod
+
         check = f"rein approve {probe_gate} --check"
-        items += [_pending_item("blocking", "gate_blocker", probe_gate, b, check) for b in gate_blockers]
+        machine = [b for b in gate_blockers if approve_mod.owner(b) == "machine"]
+        items += [
+            _pending_item("blocking", "machine_blocker", probe_gate, b, getattr(b, "remedy", check)) for b in machine
+        ]
+        items += [
+            _pending_item("blocking", "gate_blocker", probe_gate, b, check)
+            for b in gate_blockers
+            if approve_mod.owner(b) == "human"
+        ]
         if not gate_blockers:
             items.append(
                 _pending_item(
@@ -882,7 +933,7 @@ def _review_block(review: models.Review | None) -> dict[str, object]:
         # "sufficient" or "undeterminable" — never a count that reads as "we checked and found none".
         "coverage": "sufficient" if review.coverage_sufficient else "undeterminable",
         "extra_behaviors": len(review.extra_behaviors) if review.coverage_sufficient else None,
-        "blocking_security": len(review.blocking_security_findings),
+        "blocking_findings": len(review.blocking_findings),
     }
 
 
@@ -1025,6 +1076,9 @@ def collect_status(
         except (OSError, models.DocumentError, strict_yaml.StrictParseError, store_mod.StoreError) as exc:
             warnings.append(f"cannot check gate readiness for '{probe_gate}': {exc}")
 
+    from rein import approve as approve_mod
+    from rein import integrate as integrate_mod
+
     recommendation = next_action(
         stage=stage,
         gates=gates,
@@ -1039,6 +1093,12 @@ def collect_status(
         decidable_gate=probe_gate,
         # None when readiness was not probed — the table must not read that as "blocked".
         gate_ready=None if gate_blockers is None else not gate_blockers,
+        machine_blocker=next((b for b in gate_blockers or () if approve_mod.owner(b) == "machine"), None),
+        integration_pending=bool(
+            state is not None
+            and state.gate_status("acceptance") == "approved"
+            and not integrate_mod.integrated(events, state.cycle_id)
+        ),
         open_change_requests=len(state.change_requests_for(probe_gate, "open")) if state and probe_gate else 0,
         # Split by `repair.route`, the same function `rein build` routes them with, so the board
         # and the loop cannot disagree about which findings anybody has to act on by hand.

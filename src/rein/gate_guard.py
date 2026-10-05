@@ -66,7 +66,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rein import common, models, strict_yaml
+from rein import common, control_plane, event_chain, models, strict_yaml
 from rein import repo as repo_mod
 
 logger = logging.getLogger(__name__)
@@ -250,8 +250,16 @@ def _read_state(repo: repo_mod.Repo) -> models.State | None:
         return None
 
 
-def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = "edit") -> tuple[bool, str]:
+def evaluate(
+    file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = "edit", repair: bool | None = None
+) -> tuple[bool, str]:
     """(allowed, deny reason) for one path. `stage` selects which rules apply.
+
+    `repair` says whether the writer is a repair, which may write past the mandate's `include`.
+    The loop, checking a change it already knows the author of, says so. Left `None` — the hook
+    and the commit stage, which run inside an agent's launch — the control plane is asked whether
+    this process's token carries the grant (`control_plane.repair_granted`), and only when the
+    answer would change the verdict.
 
     ``edit`` (the hook) applies all of rules 1–3. ``commit`` applies rule 3 only, because
     rules 1 and 2 forbid *hand edits*, not commits: the Central Store writes `state.yaml` and
@@ -269,7 +277,7 @@ def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = 
     if rel is None:
         return True, ""
     if stage == "commit":
-        return _rule_three(repo, file_path)
+        return _rule_three(repo, file_path, repair)
 
     # Rule 1 — machine-written artifacts. Not relaxed by template_mode.
     if _matches(rel, MACHINE_WRITTEN):
@@ -310,10 +318,10 @@ def evaluate(file_path: str, repo: repo_mod.Repo | None = None, *, stage: str = 
         return True, ""
 
     # Rule 3 — the product waits for a mandate that covers it.
-    return _rule_three(repo, file_path)
+    return _rule_three(repo, file_path, repair)
 
 
-def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
+def _rule_three(repo: repo_mod.Repo, file_path: str, repair: bool | None) -> tuple[bool, str]:
     """Rule 3 alone: changing the product needs an approved mandate that covers the path."""
     settings = guard_settings(repo)
     rel = repo.rel(file_path)
@@ -336,7 +344,7 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
         return True, ""
     state = _read_state(repo)
     if state is not None and state.gate_status("mandate") == "approved":
-        return _inside_the_mandate(repo, rel, settings.paths)
+        return _inside_the_mandate(repo, rel, settings.paths, state, repair)
     if not is_guarded(file_path, settings.paths, repo):
         return True, ""
     if state is None:
@@ -352,7 +360,9 @@ def _rule_three(repo: repo_mod.Repo, file_path: str) -> tuple[bool, str]:
     )
 
 
-def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[str]) -> tuple[bool, str]:
+def _inside_the_mandate(
+    repo: repo_mod.Repo, rel: str | None, guarded: Sequence[str], state: models.State, repair: bool | None
+) -> tuple[bool, str]:
     """(allowed, why not) for a write under an approved mandate, measured against `plan.scope`.
 
     Read off `plan.yaml`, which the mandate approval froze — so the scope a write is measured
@@ -369,6 +379,9 @@ def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[
 
     An empty `include` is unbounded, so a cycle that has not narrowed itself is not one that has
     forbidden everything (`models.Plan.scope`).
+
+    `state` says what has widened `include` since the approval: a human's answer about a path a
+    repair wrote (`expansions_in_force`). `repair` says whether the writer is a repair (`evaluate`).
     """
     if rel is None:
         return True, ""
@@ -382,16 +395,66 @@ def _inside_the_mandate(repo: repo_mod.Repo, rel: str | None, guarded: Sequence[
             " what is wrong with it."
         )
     include, exclude = models.Plan(document).scope
-    why = outside_the_mandate(rel, include=include, exclude=exclude, guarded=guarded)
+    expansions = expansions_in_force(repo, state)
+    why = outside_the_mandate(
+        rel, include=include, exclude=exclude, guarded=guarded, expansions=expansions, granted=False
+    )
     if not why:
         return True, ""
+    if not outside_the_mandate(
+        rel, include=include, exclude=exclude, guarded=guarded, expansions=expansions, granted=True
+    ):
+        # Only a repair may write here, so whether the writer is one decides it.
+        granted, not_granted = (
+            (repair, "the writer is not a repair") if repair is not None else control_plane.repair_granted()
+        )
+        if granted:
+            return True, ""
+        why = f"{why}, and {not_granted}"
     return False, (
         f"Blocked: {rel} is {why}. Widening what the loop may change is a human's decision —"
         " `rein revise --to mandate` re-opens it."
     )
 
 
-def outside_the_mandate(rel: str, *, include: Sequence[str], exclude: Sequence[str], guarded: Sequence[str]) -> str:
+def adoptions(events: Sequence[models.Event]) -> set[str]:
+    """The paths a person adopted into the mandate's scope at acceptance, read off the chain.
+
+    `adopt_scope` is recorded with the path it widens to (`ui._record_scope_decision`); the status
+    in `state.yaml` is the convenience copy, and this is what it answers to.
+    """
+    return {
+        str(event.detail.get("path", ""))
+        for event in events
+        if event.event == "disposition_recorded" and event.detail.get("action") == "adopt_scope"
+    } - {""}
+
+
+def expansions_in_force(repo: repo_mod.Repo, state: models.State) -> dict[str, str]:
+    """`scope_expansions` as every path check reads it: path → `proposed`, `adopted` or `refused`.
+
+    An `adopted` counts only when the chain records a person adopting that path: `state.yaml` is
+    machine-written, and a status nobody's answer stands behind is a widening of the mandate nobody
+    made. A chain that cannot be read whole backs no adoption. Read here once for the guard, the
+    loop and acceptance alike, so the three cannot disagree about where the mandate reaches.
+    """
+    statuses = {path: str(entry.get("status")) for path, entry in state.scope_expansions.items()}
+    if "adopted" not in statuses.values():
+        return statuses
+    events, defects = event_chain.scan(repo.events)
+    adopted = set() if defects else adoptions(events)
+    return {path: status for path, status in statuses.items() if status != "adopted" or path in adopted}
+
+
+def outside_the_mandate(
+    rel: str,
+    *,
+    include: Sequence[str],
+    exclude: Sequence[str],
+    guarded: Sequence[str],
+    expansions: Mapping[str, str],
+    granted: bool,
+) -> str:
     """Why rule 3 refuses this path under an approved mandate, or `""` when it does not.
 
     The rule with nothing read off disk, so the same sentence decides a write at the hook and a
@@ -401,12 +464,25 @@ def outside_the_mandate(rel: str, *, include: Sequence[str], exclude: Sequence[s
 
     The asymmetry is :func:`_inside_the_mandate`'s: `exclude` binds wherever it points, `include`
     only narrows the guarded set, and an empty `include` is unbounded rather than empty.
+
+    **`include` can widen after the approval; `exclude` cannot.** `exclude` is a human writing "not
+    this", and nothing the loop does reopens it. `include` is where the work was expected to be,
+    and a defect's cause is where it is: a repair running now (`granted`) may write past it, and
+    every path it does is put to a human at acceptance (`expansions`, path → status). `adopted`
+    is inside from then on; `refused` is outside even for a repair.
     """
     if common.longest_cover(rel, {p: p for p in exclude}) is not None:
         return "excluded by the approved mandate's scope"
     if not common.longest_cover(rel, {p: p for p in guarded}):
         return ""
     if include and common.longest_cover(rel, {p: p for p in include}) is None:
+        status = expansions.get(rel, "")
+        if status == "adopted":
+            return ""
+        if status == "refused":
+            return f"outside the approved mandate's scope ({', '.join(include)}), and a human refused widening it here"
+        if granted:
+            return ""
         return f"outside the approved mandate's scope ({', '.join(include)})"
     return ""
 

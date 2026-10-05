@@ -86,7 +86,9 @@ from rein import (
     agent_cli,
     approve,
     change_request,
+    change_review,
     common,
+    decision_cards,
     digests,
     event_chain,
     human_review,
@@ -96,7 +98,6 @@ from rein import (
     review_api,
     reviews_cmd,
     run_progress,
-    security_review,
     status_api,
 )
 from rein import events as events_mod
@@ -279,6 +280,26 @@ def _log_identity(root: Path) -> tuple[str, int, int] | None:
 def _revision(log_id: tuple[str, int, int] | None) -> dict[str, object]:
     """The `record` event's body: what the log looks like now, so a reader can tell two apart."""
     return {"revision": f"{log_id[1]}-{log_id[2]}" if log_id else ""}
+
+
+#: What answering a scope-expansion card does to the path (`State.scope_expansions`). `revise_design`
+#: changes nothing here: the person is taking it to `/revise`, and the path stays put to them.
+_SCOPE_DECISIONS: dict[str, str] = {"adopt_scope": "adopted", "reduce_scope": "refused", "revise_design": ""}
+
+
+def _answered(
+    review: models.Review, subject: str, action: str, note: str, answer: tuple[str, str, str] | None
+) -> dict[str, object]:
+    """The human half with the disposition recorded, and the card answered too when that is how it came.
+
+    One answer, two records of it: the card's (`decisions`, which `unanswered_decisions` reads and
+    a freeze waits for) and the disposition it means (`dispositions`, which the loop reads).
+    """
+    human = human_review.record_disposition(dict(review.human), subject, action, note=note)
+    if answer is None:
+        return human
+    card_id, choice, confidence = answer
+    return human_review.record_decision(review, human, card_id, choice, confidence=confidence, reason=note)
 
 
 class UiActionError(Exception):
@@ -762,6 +783,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
         try:
             repo = repo_mod.Repo(self.server.active_root())
+            if gate == "acceptance":
+                approve.refresh_integration_target(repo)
             blockers = approve.readiness(repo, gate)
             if blockers:
                 raise UiActionError(HTTPStatus.CONFLICT, approve.render_blockers(gate, blockers))
@@ -778,7 +801,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (approve.ApprovalError, models.DocumentError, store_mod.StoreError) as exc:
             raise UiActionError(HTTPStatus.BAD_REQUEST, str(exc)) from None
         logger.warning(f"gate '{gate}' opened from the dashboard ({approval_id})")
-        self._send_json(HTTPStatus.OK, {"ok": True, "gate": gate, "approval_id": approval_id})
+        reply: dict[str, object] = {"ok": True, "gate": gate, "approval_id": approval_id}
+        if gate == "acceptance":
+            # The approval is the decision and integrating it is the same act: carried out here, and
+            # reported beside the approval whether or not it completed (`rein integrate` finishes it).
+            reply["integration"], reply["integrated"] = approve.integrate_approved(repo)
+        self._send_json(HTTPStatus.OK, reply)
 
     def _send_reviews(self) -> None:
         """Which reviews run, the digest an edit of it is made against, and what the screen may offer."""
@@ -796,9 +824,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 # What `apply` is handed back as `expect`: a change is made against this version.
                 "digest": digests.of(document),
                 "builtin": list(models.BUILTIN_REVIEWS),
-                "adversarial_stages": list(models.ADVERSARIAL_STAGES),
-                # Shown, never offered: acceptance is decided by these, not improved by them.
-                "acceptance": ["actual extraction", "comparison", "security review"],
+                # The lanes, in cycle order, and what belongs to each alone: switched in place, while
+                # any review is dragged onto any lane.
+                "stages": [
+                    {"name": stage, "switches": list(models.STAGE_SWITCHES[stage])} for stage in models.REVIEW_STAGES
+                ],
             },
         )
 
@@ -858,7 +888,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "expertise": self._review_expertise,
             "disposition": self._review_disposition,
             "expert": self._review_expert,
-            "complete": self._review_complete,
         }
         handler = handlers.get(action)
         if handler is None:
@@ -930,6 +959,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
         confidence, reason = str(body.get("confidence") or ""), str(body.get("reason") or "")
         if not confidence:
             raise UiActionError(HTTPStatus.BAD_REQUEST, "confidence is required (low, medium or high)")
+        # What the chosen option means decides what else the answer has to do. Read here to route,
+        # and settled again inside the transaction, which refuses a review that moved meanwhile.
+        current = store_mod.Store(repo_mod.Repo(self.server.active_root())).read_review()
+        meaning = (
+            decision_cards.meaning_of(
+                {str(c.get("id")): c for c in current.machine.get("decision_cards", []) or []},
+                {str(x.get("id")): x for x in current.machine.get("statements", []) or []},
+                cid,
+                choice,
+            )
+            if current is not None
+            else None
+        )
+        answer = (cid, choice, confidence)
+        if meaning and meaning[1] == "dispute_finding" and change_review.FINDING_ID_RE.match(meaning[0]):
+            if not reason.strip():
+                raise UiActionError(
+                    HTTPStatus.BAD_REQUEST,
+                    "a dispute needs a reason — it is a human contradicting the reviewer on the record",
+                )
+            self._record_dispute(body, meaning[0], reason, answer=answer)
+            return
+        if meaning and meaning[0].startswith("SCOPE-") and meaning[1] in _SCOPE_DECISIONS:
+            self._record_scope_decision(body, meaning[0], meaning[1], reason, answer=answer)
+            return
         self._review_mutate(
             body,
             "decision_recorded",
@@ -947,13 +1001,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _review_disposition(self, body: dict[str, object]) -> None:
         subject, action = str(body.get("subject_id") or ""), str(body.get("action") or "")
         note = str(body.get("note") or "")
-        # A dispute of a security finding is a statement about *code*, and it has to outlive the
+        # A dispute of a review finding is a statement about *code*, and it has to outlive the
         # machine review that raised it — regenerating discards the human half, and until this
         # existed a disputed false positive came back on every regeneration with nothing to settle
-        # it (`security_review.apply_disputes`). A dispute with no reason is refused: a review that
+        # it (`change_review.apply_disputes`). A dispute with no reason is refused: a review that
         # cannot be contradicted makes it infallible, and one that can be waved away makes it
         # pointless.
-        if action == "dispute_finding" and security_review.FINDING_ID_RE.match(subject):
+        if action == "dispute_finding" and change_review.FINDING_ID_RE.match(subject):
             if not note.strip():
                 raise UiActionError(
                     HTTPStatus.BAD_REQUEST,
@@ -961,13 +1015,86 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 )
             self._record_dispute(body, subject, note)
             return
+        if subject.startswith("SCOPE-") and action in _SCOPE_DECISIONS:
+            self._record_scope_decision(body, subject, action, note)
+            return
         self._review_mutate(
             body,
             "disposition_recorded",
             lambda _review, human: human_review.record_disposition(human, subject, action, note=note),
         )
 
-    def _record_dispute(self, body: dict[str, object], finding_id: str, reason: str) -> None:
+    def _record_scope_decision(
+        self,
+        body: dict[str, object],
+        subject: str,
+        action: str,
+        note: str,
+        *,
+        answer: tuple[str, str, str] | None = None,
+    ) -> None:
+        """Answer a scope-expansion card: widen the mandate to the path, or refuse and have it taken out.
+
+        The same two records `_record_dispute` makes, for the same reason. The card's answer belongs to
+        this review and goes when it does; what it decided about the *mandate* has to outlive that,
+        so the path's status is written to `state.yaml` and the chain carries the path with the
+        action — which is what every path check trusts an `adopted` by (`gate_guard.expansions_in_force`).
+        """
+        expected = str(body.get("machine_digest") or "")
+        if not expected:
+            raise UiActionError(
+                HTTPStatus.BAD_REQUEST,
+                "machine_digest is required — an answer has to name the machine review it is about",
+            )
+        repo = repo_mod.Repo(self.server.active_root())
+        store = store_mod.Store(repo)
+        try:
+            with store.transaction() as tx:
+                review = tx.store.read_review()
+                if review is None or not review.is_generated:
+                    raise UiActionError(HTTPStatus.BAD_REQUEST, "no machine review to answer")
+                human_review.assert_machine_current(review, expected)
+                state = tx.store.read_state()
+                if state is None or not state.cycle_id:
+                    raise UiActionError(HTTPStatus.CONFLICT, "state.yaml names no cycle — run `rein doctor`")
+                path = next((p for p in state.scope_expansions if decision_cards.expansion_id(p) == subject), "")
+                if not path:
+                    raise UiActionError(HTTPStatus.BAD_REQUEST, f"{subject} is not a scope expansion of this cycle")
+                tx.write(
+                    "review",
+                    {**review.raw, "human": _answered(review, subject, action, note, answer)},
+                    expect_digest=store_mod.read_digest(review),
+                )
+                status = _SCOPE_DECISIONS[action]
+                if status:
+                    entry = {
+                        **dict(state.scope_expansions[path]),
+                        "status": status,
+                        "decided_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                        **({"reason": note[:2000]} if note.strip() else {}),
+                    }
+                    tx.write("state", {**state.raw, "scope_expansions": {**dict(state.scope_expansions), path: entry}})
+                tx.append(
+                    "disposition_recorded",
+                    cycle_id=state.cycle_id,
+                    subject_ids=[subject],
+                    detail={"action": action, "path": path, **({"reason": note[:500]} if note.strip() else {})},
+                )
+            fresh = store.read_review()
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "machine_digest": fresh.machine_digest() if fresh else "",
+                    "session": review_api.review_session(self.server.active_root()),
+                },
+            )
+        except human_review.StaleReview as exc:
+            raise UiActionError(HTTPStatus.CONFLICT, str(exc)) from None
+
+    def _record_dispute(
+        self, body: dict[str, object], finding_id: str, reason: str, *, answer: tuple[str, str, str] | None = None
+    ) -> None:
         """Record the dispute in `state.yaml` and answer the card, in one transaction.
 
         Two records of two different facts, not one fact written twice. The `human.dispositions`
@@ -994,12 +1121,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if state is None or not state.cycle_id:
                     raise UiActionError(HTTPStatus.CONFLICT, "state.yaml names no cycle — run `rein doctor`")
                 finding = next(
-                    (f for f in review.security_findings if str(f.get("id", "")) == finding_id),
+                    (f for f in review.review_findings if str(f.get("id", "")) == finding_id),
                     None,
                 )
                 if finding is None:
                     raise UiActionError(HTTPStatus.BAD_REQUEST, f"{finding_id} is not a finding in this review")
-                bound = security_review.anchors_digest(repo, finding)
+                bound = change_review.anchors_digest(repo, finding)
                 if not bound:
                     raise UiActionError(
                         HTTPStatus.CONFLICT,
@@ -1009,12 +1136,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     )
                 tx.write(
                     "review",
-                    {
-                        **review.raw,
-                        "human": human_review.record_disposition(
-                            dict(review.human), finding_id, "dispute_finding", note=reason
-                        ),
-                    },
+                    {**review.raw, "human": _answered(review, finding_id, "dispute_finding", reason, answer)},
                     expect_digest=store_mod.read_digest(review),
                 )
                 tx.write(
@@ -1059,9 +1181,6 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "expert_requested",
             lambda _review, human: human_review.request_expert(human, domain, subject_ids, reason=reason),
         )
-
-    def _review_complete(self, body: dict[str, object]) -> None:
-        self._review_mutate(body, "human_review_frozen", lambda review, human: human_review.freeze(review, human))
 
     def _select_project(self, body: dict[str, object]) -> None:
         # The client sends only a registered *name*; the server maps it to a root through the

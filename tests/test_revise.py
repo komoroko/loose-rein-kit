@@ -251,13 +251,13 @@ def test_the_reason_lands_in_the_audit_chain(tmp_path: Path) -> None:
 
 def _review_with_blocking_finding(path: str = "src/api/client.py") -> dict[str, Any]:
     review = make_review(generated=True)
-    review["machine"]["security"] = {
+    review["machine"]["reviews"] = {
         "findings": [
             {
-                "id": "SEC-001",
+                "id": "F-001",
                 "severity": "high",
-                "category": "authz_bypass",
-                "attack_scenario": "anyone can read anyone's record",
+                "review": "security",
+                "scenario": "anyone can read anyone's record",
                 "blocking": True,
                 "code_anchors": [{"path": path, "start_line": 1, "end_line": 2, "blob": "git-blob:" + "a" * 40}],
             }

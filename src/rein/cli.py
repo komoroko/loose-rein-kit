@@ -69,6 +69,7 @@ VERBS: dict[str, Verb] = {
     "ui": Verb("ui", "local dashboard — read gates, do the acceptance human review, run doctor/revise, pick agents"),
     # gates and shipping
     "approve": Verb("approve", "readiness check, then the human's confirmation at this terminal"),
+    "integrate": Verb("integrate", "finish integrating the approved work into the mainline (approval starts it)"),
     "changes": Verb("change_request", "ask for changes instead of approving (holds the gate shut)"),
     "revise": Verb("revise", "roll back upstream on a specification defect (gates reset in a chain)"),
     "review": Verb("review", "the grounded machine review (generate --supervise waits out a capacity stop)"),

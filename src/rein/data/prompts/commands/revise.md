@@ -21,7 +21,7 @@ chain records it and acceptance lists it. A re-approval after a real roll back s
 what changed since their last yes, not the plan again.
 
 **Not for any of these**, which need no approval and no roll back:
-- A code defect the grounded review found. `rein build` repairs every blocking finding a task's
+- A code defect the grounded review found. `rein build` repairs every open finding a task's
   declared scope owns and reads the change again, moving no gate (`repair.route`).
 - A defect `/verify` finds in the code. Add the task; the mandate already authorizes fixing it.
 
@@ -39,7 +39,7 @@ what changed since their last yes, not the plan again.
      rein revise --impacted T-00x,T-00y
      ```
      (combinable with `--to` in one invocation; `--dry-run` previews; `rein dag --impacted` enumerates the same set read-only). Missing an impacted task is the dangerous direction, so the **whole closure is marked mechanically** — nothing in it runs until reconciled.
-   - **A code defect the acceptance gate found is not an upstream change, and does not come here.** `rein build` repairs every blocking finding a task's declared scope owns and reads the change again, without moving a gate (`repair.route`). What reaches `/revise` from the acceptance gate is what a human decided *is* an upstream defect: a Decision Card answered `revise_design` or `revise_requirement`, which is a different sentence from "the code is wrong".
+   - **A code defect the acceptance gate found is not an upstream change, and does not come here.** `rein build` repairs every open finding a task's declared scope owns and reads the change again, without moving a gate (`repair.route`). What reaches `/revise` from the acceptance gate is what a human decided *is* an upstream defect: a Decision Card answered `revise_design` or `revise_requirement`, which is a different sentence from "the code is wrong".
    - Marking is all this step does. The marked closure is then reclassified inside the re-run of `/tasks` ("Re-run after a roll back", which owns the keep / modify / obsolete / new taxonomy and what becomes of a task that was `done`) — nothing in the closure runs until that reconcile has happened.
 5. **Guide to rebuilding**: say which document has to change and point at the command that writes it (`/req`, `/design`, `/tasks` — in whatever order the defect calls for). Reflect the reconcile inside the re-run of `/tasks`, and present the **impact (the impacted list and classification)** to the human at the mandate gate for re-approval.
 

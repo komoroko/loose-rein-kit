@@ -43,7 +43,18 @@ import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from rein import build_git, common, conflict, dag, event_chain, models, policy_check, pr_draft, status_api
+from rein import (
+    build_git,
+    common,
+    conflict,
+    dag,
+    event_chain,
+    models,
+    policy_check,
+    pr_draft,
+    review_reading,
+    status_api,
+)
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -448,8 +459,9 @@ def preconditions(
     """What has to hold before `mode` may run. Errors stop the run; warnings are printed and passed.
 
     The acceptance split is the load-bearing one. `--push` and `--restack` are how a change gets *to*
-    a reviewer, so they belong to the window before the gate opens; `--ready` is what says a human
-    approved, so it may not run before one has. Changing code after acceptance is approved
+    a reviewer, so they belong to the window before the gate opens; `ready` (lifting the drafts,
+    which `rein integrate` does as part of an approved acceptance) is what says a human approved, so
+    it may not run before one has. Changing code after acceptance is approved
     is rewinding an approval, which is a human's privilege (AGENTS.md) — hence `--restack` refuses
     there rather than quietly moving approved commits around.
     """
@@ -480,7 +492,7 @@ def preconditions(
     if mode == "push" and approved:
         warnings.append(
             "the acceptance gate is already approved — these pull requests still open as drafts. "
-            "Run `rein pr-stack --ready` straight after to lift them."
+            "`rein integrate` lifts them and merges the stack."
         )
 
     if mode in ("push", "ready") and not any(s.task_id for s in slices):
@@ -488,14 +500,12 @@ def preconditions(
 
     if mode == "ready":
         head = _rev_parse(repo, config.work_branch)
-        subject = review.subject_head_sha if review is not None else ""
-        if not subject:
+        if review is None or not review.is_generated:
             errors.append("no machine review has been generated — there is nothing binding these slices")
-        elif subject != head:
-            errors.append(
-                f"the review was generated against {subject[:12]} but the work branch is at {head[:12]} — "
-                "something landed after the review. Regenerate it with `rein review generate`."
-            )
+        elif reason := review_reading.freshness(repo, review, state, at=config.work_branch).reason:
+            # On content, as acceptance's own check is: the gate's commit of `review.yaml` lands after
+            # the review and moves no byte it read.
+            errors.append(f"{config.work_branch}: {reason}")
         stranded = [s.label for s in slices if not is_ancestor(repo, s.head_sha, head)]
         if stranded:
             errors.append(
@@ -860,12 +870,11 @@ OUT_DIR = ".rein/pr-stack"
 NETWORK_TIMEOUT_SEC = 300
 
 MERGE_NOTE = (
-    "Landing the stack is yours. Acceptance approved the change; it did not approve the push to the\n"
-    "base, and the harness stops here rather than asking a second time for the same decision.\n"
-    "Merge the whole stack, as merge commits: `gh stack merge <top pull request> --merge`. Merging\n"
-    "part of a stack is what you must not do: GitHub rebases the branches above the cut onto the new\n"
-    "base with new commit ids, and every recorded `completed_commit` above it then names a commit in\n"
-    "no branch's history. Squash and rebase merges strand them the same way."
+    "Approving acceptance lands the stack: it lifts the drafts and merges the whole stack, as merge\n"
+    "commits (`rein integrate`, which finishes an integration that stopped). Never merge part of it by\n"
+    "hand: GitHub rebases the branches above the cut onto the new base with new commit ids, and every\n"
+    "recorded `completed_commit` above it then names a commit in no branch's history. Squash and rebase\n"
+    "merges strand them the same way."
 )
 
 
@@ -924,7 +933,7 @@ def _confirm_push(slices: Sequence[Slice], remote: str, *, base: str) -> None:
     print(render(slices, base=base))
     print(
         "\nThey open as drafts because the grounded review has not approved them yet. "
-        "`rein pr-stack --ready` lifts them once acceptance is open."
+        "Approving acceptance lifts them and merges the stack (`rein integrate`)."
     )
     if not common.ask_yes_no(f"Push and open {len(slices)} draft pull request(s)?"):
         raise PublishError("nothing was pushed.")
@@ -1125,19 +1134,14 @@ def _report(result: Preconditions) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="cut the work branch into one draft pull request per task (stacked)",
-        epilog="--push, --ready and --merge are outward-facing: each confirms at a terminal first.",
+        epilog="--push is outward-facing and confirms at a terminal first. Approving acceptance lifts the drafts "
+        "and merges the stack (`rein integrate`).",
     )
-    parser.add_argument("--base", default="main", help="the branch the bottom of the stack targets (default: main)")
     parser.add_argument("--remote", default="origin", help="the remote to push to (default: origin)")
     parser.add_argument(
         "--push",
         action="store_true",
         help="after a confirmation typed at a terminal, push the branches and open the draft pull requests",
-    )
-    parser.add_argument(
-        "--ready",
-        action="store_true",
-        help="once acceptance is approved: rewrite each body and lift the drafts (confirms at a terminal)",
     )
     parser.add_argument(
         "--restack",
@@ -1155,30 +1159,21 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
-    chosen = [
-        name
-        for name, on in (
-            ("--push", args.push),
-            ("--ready", args.ready),
-            ("--restack", args.restack),
-        )
-        if on
-    ]
-    if len(chosen) > 1:
-        logger.error(f"{' and '.join(chosen)} are separate steps with a human between them, not one flag")
+    if args.push and args.restack:
+        logger.error("--push and --restack are separate steps, not one flag")
         return 2
-    mode = "ready" if args.ready else "restack" if args.restack else "push"
+    mode = "restack" if args.restack else "push"
 
     try:
         docs = Documents.read(repo)
-        slices = derive(repo, docs, base=args.base)
-        if not _report(preconditions(repo, docs, slices, mode=mode, base=args.base)):
+        base = docs.config.mainline
+        slices = derive(repo, docs, base=base)
+        if not _report(preconditions(repo, docs, slices, mode=mode, base=base)):
             return 2
-        # Neither `--ready` nor `--restack` repoints a ref. The pull requests they touch
-        # are open on the branches as they stand, and moving one now would be a force-push under a
-        # reviewer; `--restack` moves them forward by merging, which is a commit, not a repoint.
-        skip = args.ready or args.restack
-        outcome = Materialized() if skip else materialize(repo, slices, dry_run=args.dry_run)
+        # `--restack` repoints no ref. The pull requests it touches are open on the branches as
+        # they stand, and moving one now would be a force-push under a reviewer; it moves them
+        # forward by merging, which is a commit, not a repoint.
+        outcome = Materialized() if args.restack else materialize(repo, slices, dry_run=args.dry_run)
     except (StackError, dag.DagError, models.DocumentError, store_mod.StoreError) as exc:
         logger.error(str(exc))
         return 2
@@ -1187,7 +1182,7 @@ def main(argv: list[str] | None = None) -> int:
         print("no task has landed on the work branch yet — nothing to stack")
         return 0
 
-    print(render(slices, base=args.base))
+    print(render(slices, base=base))
     if args.dry_run:
         print(f"\ndry run: would create {len(outcome.created)} branch(es), advance {len(outcome.advanced)}")
         return 0
@@ -1200,20 +1195,10 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     try:
-        bodies = write_bodies(repo, docs, slices, base=args.base)
+        bodies = write_bodies(repo, docs, slices, base=base)
     except (StackError, OSError) as exc:
         logger.error(f"could not write the pull-request bodies: {exc}")
         return 2
-
-    if args.ready:
-        try:
-            _confirm_ready(docs, slices, ledger(docs.events))
-            lifted = lift(repo, docs, slices, bodies)
-        except (PublishError, store_mod.StoreError) as exc:
-            logger.error(str(exc))
-            return 2
-        print(f"\n{len(lifted)} pull request(s) are ready for review.\n\n{MERGE_NOTE}")
-        return 0
 
     if not args.push:
         print("\nReview the bodies, then open the stack bottom first:")
@@ -1223,7 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     try:
-        _confirm_push(slices, args.remote, base=args.base)
+        _confirm_push(slices, args.remote, base=base)
         publish(repo, docs, slices, bodies, remote=args.remote)
     except (PublishError, store_mod.StoreError) as exc:
         logger.error(str(exc))

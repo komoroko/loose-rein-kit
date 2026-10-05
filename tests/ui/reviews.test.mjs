@@ -1,21 +1,30 @@
-// The reviews screen (CR-51): lanes along the cycle, cards edited in a draft, applied in one write
-// with a reason — and the comparison acceptance is decided by, shown and never offered.
+// The reviews screen (CR-51): a lane per stage, each with what belongs to that stage alone, switched
+// in place, and the reviews dragged onto it from the palette and taken off with ×. The draft is
+// applied in one write with a reason. Nothing is required.
 
 import assert from "node:assert/strict";
 import test from "node:test";
 import { baseRoutes, boot } from "./_harness.mjs";
 
 const DOCUMENT = {
-  adversarial: { requirements: true, design: true, tasks: true },
-  steps: [{ name: "review", reviews: ["correctness", "simplification"], retries: 1, stage: "both" }],
+  requirements: { adversarial: true, reviews: [] },
+  design: { adversarial: true, reviews: [] },
+  tasks: { adversarial: true, reviews: [] },
+  build: { reviews: ["correctness", "simplification"] },
+  acceptance: { actual_extraction: true, comparison: true, reviews: [] },
 };
 
 const PAYLOAD = {
   document: DOCUMENT,
   digest: "sha256:served",
-  builtin: ["correctness", "simplification", "security"],
-  adversarial_stages: ["requirements", "design", "tasks"],
-  acceptance: ["actual extraction", "comparison", "security review"],
+  builtin: ["adversarial", "correctness", "simplification", "security"],
+  stages: [
+    { name: "requirements", switches: ["adversarial"] },
+    { name: "design", switches: ["adversarial"] },
+    { name: "tasks", switches: ["adversarial"] },
+    { name: "build", switches: [] },
+    { name: "acceptance", switches: ["actual_extraction", "comparison"] },
+  ],
 };
 
 async function reviewsScreen({ readOnly = false } = {}) {
@@ -27,7 +36,7 @@ async function reviewsScreen({ readOnly = false } = {}) {
       if (url !== "/api/reviews") return undefined;
       if (options?.method === "POST") {
         posts.push(JSON.parse(options.body));
-        return { ok: true, changes: ["step review: no longer reads for simplification"] };
+        return { ok: true, changes: ["recorded"] };
       }
       return PAYLOAD;
     }),
@@ -36,66 +45,120 @@ async function reviewsScreen({ readOnly = false } = {}) {
   return { app, posts };
 }
 
-test("a review taken off a step's card is applied as the whole document, with the reason", async () => {
-  const { app, posts } = await reviewsScreen();
+async function applyWith(app, reason) {
+  await app.type('input[aria-label="reason"]', reason);
+  await app.click({ text: "Apply" });
+}
+
+const PALETTE = (name) => `.palette .chip[data-review="${name}"]`;
+const LANE = (name) => `.lane[data-lane="${name}"]`;
+const TOGGLE = (lane, label) => `${LANE(lane)} input[aria-label="${label}"]`;
+
+test("every stage is a lane, and every review on one has a ×", async () => {
+  const { app } = await reviewsScreen();
   const doc = app.window.document;
   const lanes = [...doc.querySelectorAll(".lane")].map((lane) => lane.dataset.lane);
   assert.deepEqual(lanes, ["requirements", "design", "tasks", "build", "acceptance"]);
+  const placed = [...doc.querySelectorAll(".lane .chip")];
+  assert.ok(placed.length);
+  for (const review of placed) assert.ok(review.querySelector("button[aria-label^='remove']"), review.dataset.review);
+});
 
-  await app.click('button[aria-label="stop reading for simplification"]');
-  assert.equal(doc.querySelector('.chip[data-review="simplification"]'), null);
+test("a review taken off a lane is applied as the whole document, with the reason", async () => {
+  const { app, posts } = await reviewsScreen();
+  const doc = app.window.document;
+  await app.click('button[aria-label="remove simplification from build"]');
+  assert.equal(doc.querySelector(`${LANE("build")} .chip[data-review="simplification"]`), null);
   assert.ok(byText(doc, "Apply").disabled, "no reason, no write");
 
-  await app.type('input[aria-label="reason"]', "the team runs its own linter");
-  await app.click({ text: "Apply" });
+  await applyWith(app, "the team runs its own linter");
 
   assert.equal(posts.length, 1);
-  assert.deepEqual(posts[0].document.steps[0].reviews, ["correctness"]);
+  assert.deepEqual(posts[0].document.build.reviews, ["correctness"]);
   assert.equal(posts[0].reason, "the team runs its own linter");
   // Made against the version the screen was served, so a change that landed meanwhile is refused.
   assert.equal(posts[0].expect, "sha256:served");
 });
 
-test("asking a step's reviews in another order is a change the screen sends", async () => {
+test("asking a lane's reviews in another order is a change the screen sends", async () => {
   const { app, posts } = await reviewsScreen();
-  await app.click('.chip[data-review="simplification"] button[title="ask earlier"]');
-  await app.type('input[aria-label="reason"]', "simplify first");
-  await app.click({ text: "Apply" });
-  assert.deepEqual(posts[0].document.steps[0].reviews, ["simplification", "correctness"]);
+  await app.click(`${LANE("build")} .chip[data-review="simplification"] button[title="ask earlier"]`);
+  await applyWith(app, "simplify first");
+  assert.deepEqual(posts[0].document.build.reviews, ["simplification", "correctness"]);
 });
 
-test("a custom review carries its question in the document", async () => {
+test("any review dropped on any lane reads what that lane reads", async () => {
   const { app, posts } = await reviewsScreen();
-  await app.type('input[aria-label="custom review name"]', "performance");
-  await app.type('textarea[aria-label="custom review question"]', "Does every query use an index?");
-  await app.click("#view-reviews .block > .rcard-row > button");
-  await app.type('input[aria-label="reason"]', "slow pages");
-  await app.click({ text: "Apply" });
-  assert.deepEqual(posts[0].document.custom, [{ name: "performance", question: "Does every query use an index?" }]);
+  assert.ok(await app.drag(PALETTE("security"), LANE("design")), "a security reading of the design");
+  assert.ok(await app.drag(PALETTE("security"), LANE("acceptance")), "and of the whole change");
+  assert.ok(await app.drag(PALETTE("adversarial"), LANE("acceptance")));
+  await applyWith(app, "this cycle touches auth");
+  assert.deepEqual(posts[0].document.design.reviews, ["security"]);
+  assert.deepEqual(posts[0].document.acceptance.reviews, ["security", "adversarial"]);
 });
 
-test("switching a stage's adversarial review off says what the mandate screen will show", async () => {
+test("a lane refuses a review it already reads, and its own review, which is switched", async () => {
+  const { app } = await reviewsScreen();
+  assert.equal(await app.drag(PALETTE("correctness"), LANE("build")), false, "already read there");
+  assert.equal(await app.drag(PALETTE("adversarial"), LANE("design")), false, "the design's own review");
+  assert.ok(await app.drag(PALETTE("adversarial"), LANE("build")), "at build it is a review like any other");
+});
+
+test("a drafting stage's adversarial review is switched in place", async () => {
+  const { app, posts } = await reviewsScreen();
+  const lane = () => app.window.document.querySelector(LANE("design"));
+  await app.click(TOGGLE("design", "adversarial review"));
+  assert.match(lane().textContent, /names this stage, with when and why/);
+  await applyWith(app, "a one-line fix");
+  assert.deepEqual(posts[0].document.design, { adversarial: false, reviews: [] });
+});
+
+test("acceptance's readings are switched in place, and the comparison never runs without the extraction", async () => {
   const { app, posts } = await reviewsScreen();
   const doc = app.window.document;
-  await app.click('.lane[data-lane="design"] input[type="checkbox"]');
-  assert.match(doc.querySelector('.lane[data-lane="design"]').textContent, /names this stage, with when and why/);
-  await app.type('input[aria-label="reason"]', "a one-line fix");
-  await app.click({ text: "Apply" });
-  assert.equal(posts[0].document.adversarial.design, false);
+  const lane = () => doc.querySelector(LANE("acceptance"));
+
+  await app.click(TOGGLE("acceptance", "comparison"));
+  assert.match(lane().textContent, /every claim reaches acceptance as a question for you/);
+  await app.click(TOGGLE("acceptance", "actual extraction"));
+  await app.click(TOGGLE("acceptance", "comparison"));
+  assert.ok(doc.querySelector(TOGGLE("acceptance", "actual extraction")).checked, "the comparison takes the extraction");
+  await app.click(TOGGLE("acceptance", "actual extraction"));
+  assert.equal(doc.querySelector(TOGGLE("acceptance", "comparison")).checked, false, "and the extraction the comparison");
+
+  await applyWith(app, "a spike nobody will ship");
+  assert.deepEqual(posts[0].document.acceptance, { actual_extraction: false, comparison: false, reviews: [] });
 });
 
-test("comparison is shown in the acceptance lane and offers nothing to remove it with", async () => {
-  const { app } = await reviewsScreen();
-  const lane = app.window.document.querySelector('.lane[data-lane="acceptance"]');
-  assert.match(lane.textContent, /comparison/);
-  assert.equal(lane.querySelectorAll("button, input, select").length, 0);
+test("a custom review joins the palette, and deleting it takes it off every lane", async () => {
+  const { app, posts } = await reviewsScreen();
+  const doc = app.window.document;
+  const addPerformance = async () => {
+    await app.type('input[aria-label="custom review name"]', "performance");
+    await app.type('textarea[aria-label="custom review question"]', "Does every query use an index?");
+    await app.click("#view-reviews .block > .rcard-row > button");
+  };
+  await addPerformance();
+  assert.ok(await app.drag(PALETTE("performance"), LANE("build")));
+  assert.ok(await app.drag(PALETTE("performance"), LANE("acceptance")));
+
+  await app.click('button[aria-label="delete performance"]');
+  assert.equal(doc.querySelector('[data-review="performance"]'), null, "off the palette and off every lane");
+
+  await addPerformance();
+  await applyWith(app, "slow pages");
+  assert.deepEqual(posts[0].document.custom, [{ name: "performance", question: "Does every query use an index?" }]);
+  assert.deepEqual(posts[0].document.build.reviews, ["correctness", "simplification"]);
+  assert.deepEqual(posts[0].document.acceptance.reviews, []);
 });
 
-test("a read-only page shows the lanes and changes nothing", async () => {
+test("a read-only page shows the lanes, drags nothing and changes nothing", async () => {
   const { app } = await reviewsScreen({ readOnly: true });
   const doc = app.window.document;
-  assert.ok(doc.querySelector('.chip[data-review="correctness"]'));
+  assert.ok(doc.querySelector(`${LANE("build")} .chip[data-review="correctness"]`));
   assert.equal(byText(doc, "Apply"), null);
+  assert.ok([...doc.querySelectorAll(".palette .chip")].every((chip) => chip.getAttribute("draggable") === "false"));
+  assert.equal(await app.drag(PALETTE("security"), LANE("acceptance")), false);
   const controls = [...doc.querySelectorAll("#view-reviews button, #view-reviews input, #view-reviews select")];
   assert.ok(controls.length && controls.every((el) => el.disabled), "every control is disabled");
 });

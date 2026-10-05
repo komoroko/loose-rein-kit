@@ -35,8 +35,9 @@
       ]
     },
     "disposition": {
-      "description": "What a human may do about a gap. `accept the risk` is deliberately absent (plan 15.4); `dispute_finding` says the reviewer is wrong and carries the reason.",
+      "description": "What a human may do about a gap. `accept the risk` is deliberately absent (plan 15.4); `dispute_finding` says the reviewer is wrong and carries the reason. `adopt_scope` widens the approved mandate to a path a repair wrote outside its `include`.",
       "enum": [
+        "adopt_scope",
         "acknowledge_corrected_model",
         "revise_requirement",
         "revise_design",
@@ -70,9 +71,9 @@
       "type": "string",
       "pattern": "^AST-[0-9]{3,}$"
     },
-    "securityFindingId": {
+    "findingId": {
       "type": "string",
-      "pattern": "^SEC-[0-9]{3,}$"
+      "pattern": "^F-[0-9]{3,}$"
     },
     "taskId": {
       "type": "string",
@@ -238,7 +239,8 @@
               "binding",
               "coverage",
               "actual_extraction",
-              "claims"
+              "claims",
+              "acceptance"
             ],
             "properties": {
               "binding": {
@@ -274,7 +276,7 @@
               "$ref": "#/$defs/digest"
             },
             "host_surface_digest": {
-              "description": "The committed tree at `subject_head_sha` narrowed to the surfaces `rein install <agent>` wrote — the phase commands, the role prompts, the hooks and the settings each host reads before it reads its prompt. `change_digest` is taken with those paths excluded, because the blind extractor must not read this tool's own orchestration text; the security reviewer is launched into a checkout of the head and told to review them, so a pre-authorized command, a hook or an MCP server added there is a finding. On one digest, a commit that added nothing but a `permissions.allow` entry moved no key, replayed the cached answer, launched no reviewer, and left the review reporting itself fresh. Two subjects, two digests.",
+              "description": "The committed tree at `subject_head_sha` narrowed to the surfaces `rein install <agent>` wrote — the phase commands, the role prompts, the hooks and the settings each host reads before it reads its prompt. `change_digest` is taken with those paths excluded, because the blind extractor must not read this tool's own orchestration text; the reviewer of the whole change is launched into a checkout of the head and, reading for security, told to review them, so a pre-authorized command, a hook or an MCP server added there is a finding. On one digest, a commit that added nothing but a `permissions.allow` entry moved no key, replayed the cached answer, launched no reviewer, and left the review reporting itself fresh. Two subjects, two digests.",
               "$ref": "#/$defs/digest"
             },
             "plan_digest": {
@@ -317,7 +319,7 @@
                 "comparator": {
                   "$ref": "#/$defs/independenceGroup"
                 },
-                "security_reviewer": {
+                "reviewer": {
                   "$ref": "#/$defs/independenceGroup"
                 }
               }
@@ -799,6 +801,23 @@
             }
           }
         },
+        "acceptance": {
+          "description": "Which readings acceptance is decided by this review took (`reviews.yaml` `acceptance`). `actual_extraction` false: nobody read the code blind and `actual_extraction` is empty. `comparison` false: no claim was compared, and every claim is `unknown` because nobody compared it, not because a comparison could not decide.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "actual_extraction",
+            "comparison"
+          ],
+          "properties": {
+            "actual_extraction": {
+              "type": "boolean"
+            },
+            "comparison": {
+              "type": "boolean"
+            }
+          }
+        },
         "gaps": {
           "type": "array",
           "maxItems": 512,
@@ -899,13 +918,23 @@
             }
           }
         },
-        "security": {
+        "reviews": {
           "type": "object",
           "additionalProperties": false,
           "required": [
+            "read",
             "findings"
           ],
           "properties": {
+            "read": {
+              "description": "Which reviews this review sent the whole change to (`reviews.yaml` `acceptance.reviews`), in the order asked. Empty: no review read it, and `findings` holds only what an earlier reading recorded as blocking, carried forward and re-checked against the tree without a reviewer. An empty list of findings says nothing about a review that was not read.",
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/reviewName"
+              }
+            },
             "findings": {
               "type": "array",
               "maxItems": 256,
@@ -914,36 +943,24 @@
                 "additionalProperties": false,
                 "required": [
                   "id",
+                  "review",
                   "severity",
-                  "category",
-                  "attack_scenario",
+                  "scenario",
                   "blocking"
                 ],
                 "properties": {
                   "id": {
-                    "$ref": "#/$defs/securityFindingId"
+                    "$ref": "#/$defs/findingId"
                   },
                   "severity": {
                     "$ref": "#/$defs/risk"
                   },
-                  "category": {
-                    "enum": [
-                      "credential_exposure",
-                      "injection",
-                      "authz_bypass",
-                      "authn_weakness",
-                      "crypto_misuse",
-                      "ssrf",
-                      "path_traversal",
-                      "deserialization",
-                      "supply_chain",
-                      "sandbox_escape",
-                      "information_disclosure",
-                      "denial_of_service",
-                      "other"
-                    ]
+                  "review": {
+                    "description": "Which review raised this finding: a name under `reviews.yaml` `acceptance.reviews`. A finding carried forward keeps the review that raised it, whether or not that review is still added.",
+                    "$ref": "#/$defs/reviewName"
                   },
-                  "attack_scenario": {
+                  "scenario": {
+                    "description": "What breaks and how: the input or state that breaks it, and what goes wrong. For a security finding, who does what and what they get.",
                     "$ref": "#/$defs/text"
                   },
                   "reading": {
@@ -1511,7 +1528,7 @@
           }
         },
         "residual_findings": {
-          "description": "Per-task review findings that were never resolved — the `consider` ones stop nothing by design and would otherwise die with the session that produced them. Each carries the commit and tree fingerprint it was observed against, which is NOT `subject_head_sha`: a reviewer looked at one task's worktree at one moment, and presenting that as an observation about the merged tree would be the overclaim this document exists to prevent.",
+          "description": "Per-task review findings that were never resolved — the `question` ones stop nothing by design and would otherwise die with the session that produced them. Each carries the commit and tree fingerprint it was observed against, which is NOT `subject_head_sha`: a reviewer looked at one task's worktree at one moment, and presenting that as an observation about the merged tree would be the overclaim this document exists to prevent.",
           "type": "array",
           "maxItems": 50,
           "items": {
@@ -1529,7 +1546,7 @@
               "severity": {
                 "enum": [
                   "must_fix",
-                  "consider"
+                  "question"
                 ]
               },
               "statement": {
@@ -1718,6 +1735,12 @@
           ]
         }
       }
+    },
+    "reviewName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
     }
   }
 }

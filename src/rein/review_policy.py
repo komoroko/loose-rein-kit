@@ -74,7 +74,7 @@ class AdapterFailure(ReviewPolicyError):
 STAGE_ROLE: Mapping[str, str] = {
     "actual_extraction": "actual_extractor",
     "comparison": "comparator",
-    "security_review": "security_reviewer",
+    "change_review": "reviewer",
 }
 
 
@@ -145,7 +145,7 @@ UNPARSEABLE_EXCERPT_CHARS = 500
 _STAGE_ANSWER: Mapping[str, tuple[str, str]] = {
     "actual_extractor": ("actual_statements", "actual_extraction"),
     "comparator": ("claims", "claims"),
-    "security_reviewer": ("", "security"),
+    "reviewer": ("", "reviews"),
 }
 
 
@@ -166,12 +166,16 @@ def stage_output_schema(role: str) -> dict[str, Any]:
         return {}
     defs: Any = models.schema("review")["$defs"]
     node = copy.deepcopy(defs["machine"]["properties"][where])
-    if role == "security_reviewer":
+    if role == "reviewer":
         # `blocking` is required *of the document* and written by :func:`blocks`. Asking the
         # reviewer for it — which a CLI constrained by this schema would — is the thing that was
         # wrong with it being a contract field at all, arriving through the back door.
         item = node["properties"]["findings"]["items"]
         item["required"] = [name for name in item["required"] if name != "blocking"]
+        # `read` is the pipeline's record of which reviews this reviewer was asked. A reviewer
+        # answering is the answer to it, so it is not the reviewer's to state.
+        node["required"] = [name for name in node["required"] if name != "read"]
+        node["properties"] = {name: body for name, body in node["properties"].items() if name != "read"}
     root: dict[str, Any] = dict(node) if not key else {"type": "object", "required": [key], "properties": {key: node}}
     if role == "comparator":
         # The comparator echoes the Actual's digest so the answer names what it compared against
@@ -714,10 +718,10 @@ def _unread_paths(manifest: Mapping[str, Any]) -> str:
 def disputed_subjects(human: Mapping[str, Any]) -> set[str]:
     """Subjects a human recorded `dispute_finding` against — "the reviewer is wrong", with a reason.
 
-    The one way a security finding the code did *not* change can stop blocking. `dispute_finding`
+    The one way a finding the code did *not* change can stop blocking. `dispute_finding`
     is already in the schema's disposition list and was already offered on every decision card; it
     simply had no effect on the gate, so a finding with no anchors — nothing for
-    `security_review.resolution_of` to re-check — had no exit at all. This is not "accept the
+    `change_review.resolution_of` to re-check — had no exit at all. This is not "accept the
     risk", which the card deliberately does not offer: it is a human saying the finding is not
     true, on the record, in a document a gate receipt binds.
     """
@@ -732,10 +736,12 @@ def blocking_reasons(review: models.Review, effective: str, human: Mapping[str, 
     """Every mechanical reason this review cannot open acceptance, aggregated (plan §14, §15)."""
     disputed = disputed_subjects(human if human is not None else review.human)
     reasons: list[str] = []
-    for finding in review.blocking_security_findings:
+    for finding in review.blocking_findings:
         if str(finding.get("id", "")) in disputed:
             continue
-        reasons.append(f"blocking security finding {finding.get('id', '?')}: {finding.get('attack_scenario', '')}")
+        reasons.append(
+            f"blocking finding {finding.get('id', '?')} ({finding.get('review', '?')}): {finding.get('scenario', '')}"
+        )
     for gap in review.machine.get("gaps", []) if isinstance(review.machine.get("gaps"), list) else []:
         if isinstance(gap, Mapping) and gap.get("blocking") is True:
             reasons.append(f"blocking gap {gap.get('id', '?')} ({gap.get('kind', '?')})")

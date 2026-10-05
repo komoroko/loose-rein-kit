@@ -17,7 +17,7 @@ import logging
 import re
 import subprocess
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -29,8 +29,10 @@ from rein import (
     build_git,
     build_loop,
     build_prompts,
+    change_review,
     common,
     conflict,
+    control_plane,
     dag,
     digests,
     dossier,
@@ -43,7 +45,6 @@ from rein import (
     repair,
     review_policy,
     review_reading,
-    security_review,
 )
 from rein import events as events_mod
 from rein import findings as findings_mod
@@ -52,7 +53,6 @@ from rein import store as store_mod
 from rein import usage as usage_mod
 from tests._support import (
     DEMO_CYCLE,
-    REVIEW_STEP,
     agent_output,
     events_since_seed,
     fake_git,
@@ -206,7 +206,7 @@ def test_a_step_command_is_an_argv_list_not_a_shell_string() -> None:
 
 # --- an agent step launches the role it declares -------------------------------
 #
-# An agent step launched `agents.implementer`'s adapter while calling itself `code_reviewer`. Two
+# An agent step launched `agents.implementer`'s adapter while calling itself `reviewer`. Two
 # roles an operator had configured separately were one process — the reviewer asked for a second
 # opinion was the same model that had just written the code. The template's own config sets both
 # roles to `claude`, so nothing observable changed and the defect survived; these tests pin the
@@ -216,14 +216,14 @@ def test_a_step_command_is_an_argv_list_not_a_shell_string() -> None:
 def _config_with_split_adapters(reviewer: str = "codex") -> build_loop.Config:
     raw = make_config()
     raw["agents"]["implementer"] = {"adapter": "claude"}
-    raw["agents"]["code_reviewer"] = {"adapter": reviewer}
-    return build_loop.Config.from_models(models.Config(raw), models.Reviews(make_reviews(steps=[REVIEW_STEP])))
+    raw["agents"]["reviewer"] = {"adapter": reviewer}
+    return build_loop.Config.from_models(models.Config(raw), models.Reviews(make_reviews(build=["adversarial"])))
 
 
 def test_an_agent_step_resolves_its_own_role_not_the_implementers() -> None:
     config = _config_with_split_adapters()
     step = next(s for s in config.steps if s.kind == "agent")
-    assert step.agent_role == "code_reviewer"
+    assert step.agent_role == "reviewer"
     assert step.agent_argv == adapters.ADAPTER_TABLE["codex"].launch_argv()
     # The implementer's own adapter is untouched — the two are resolved independently.
     assert config.adapter_argv == adapters.ADAPTER_TABLE["claude"].launch_argv()
@@ -280,7 +280,7 @@ def test_an_agent_step_launches_with_its_roles_adapter(tmp_path: Path, monkeypat
 
     assert launched, "the agent step never launched anything"
     assert tuple(launched[0][:3]) == adapters.ADAPTER_TABLE["codex"].launch_argv(), (
-        f"the agent step launched {launched[0][:3]} — it must use agents.code_reviewer, not agents.implementer"
+        f"the agent step launched {launched[0][:3]} — it must use agents.reviewer, not agents.implementer"
     )
 
 
@@ -441,8 +441,10 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
     """
     from rein import common, review_transport
 
+    # A role with no declared answer shape, so the launch carries the access flags and nothing a
+    # schema would add (`review_policy.stage_output_schema`).
     raw = make_config()
-    raw["agents"]["code_reviewer"] = {"adapter": adapter}
+    raw["agents"]["implementer"] = {"adapter": adapter}
     repo = repo_mod.Repo(seed_repo(tmp_path, config=raw))
     launched: list[list[str]] = []
 
@@ -455,7 +457,7 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
     # object by accident of import, and mypy is right that it is not part of its interface.
     monkeypatch.setattr(common, "run", fake_run)
     ledger = usage_mod.Ledger()
-    review_transport._adapter_reviewer(repo, "code_reviewer", ledger=ledger)({"request": "x"})
+    review_transport._adapter_reviewer(repo, "implementer", ledger=ledger)({"request": "x"})
 
     record = adapters.ADAPTER_TABLE[adapter]
     payload = json.dumps({"request": "x"})
@@ -467,9 +469,9 @@ def test_the_review_transport_is_granted_a_read_and_no_more(
 def test_an_unlaunchable_role_adapter_stops_the_build_before_it_starts() -> None:
     """Refused up front, not at the first step that needed it — halfway through a task."""
     raw = make_config()
-    raw["agents"]["code_reviewer"] = {"adapter": "nonesuch"}
-    with pytest.raises(adapters.LaunchRefused, match="agents.code_reviewer.adapter"):
-        build_loop.Config.from_models(models.Config(raw), models.Reviews(make_reviews(steps=[REVIEW_STEP])))
+    raw["agents"]["reviewer"] = {"adapter": "nonesuch"}
+    with pytest.raises(adapters.LaunchRefused, match="agents.reviewer.adapter"):
+        build_loop.Config.from_models(models.Config(raw), models.Reviews(make_reviews(build=["adversarial"])))
 
 
 # --- task status goes through the Central Store -------------------------------
@@ -543,7 +545,7 @@ def _merging_batch(loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
-    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths, repair=False: [])
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop, "_integration_gate", lambda merged, before_join: (True, ""))
@@ -660,7 +662,7 @@ def test_a_repair_is_labelled_by_what_asked_for_it(
     has to be read against the code to be believed."""
     loop = orchestrator(tmp_path)
     task = dag.Task(id="T-001", title="leaf", kind="parallel")
-    item = repair.Repair("T-001", (findings_mod.Attribution("SEC-001", "security", "T-001", "alpha/mod.py"),))
+    item = repair.Repair("T-001", (findings_mod.Attribution("F-001", "finding", "T-001", "alpha/mod.py"),))
     monkeypatch.setattr(loop, "_slice_branch", lambda task_id, where="acceptance": "")
     monkeypatch.setattr(loop, "_repair_on_work_branch", lambda t, i, where="acceptance": None)
     monkeypatch.setattr(loop, "_gate_after_repair", lambda t, where="acceptance": [])
@@ -678,17 +680,19 @@ def test_a_task_boundary_repair_commits_as_what_it_is(tmp_path: Path, monkeypatc
     loop = orchestrator(tmp_path)
     subjects: list[str] = []
     monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": [])
-    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths, repair=False: [])
 
     def finalize(cwd: str, message: str) -> bool:
         subjects.append(message)
         return True
 
     monkeypatch.setattr(loop.ws, "finalize_commit", finalize)
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("reproduced", "stub"))
     task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    item = repair.Repair("T-001", (findings_mod.Attribution("F-001", "finding", "T-001", "alpha/mod.py"),))
 
-    loop._accept_repair(task, str(loop.root), "a" * 40, where="review")
-    loop._accept_repair(task, str(loop.root), "a" * 40)
+    loop._accept_repair(task, item, str(loop.root), "a" * 40, where="review")
+    loop._accept_repair(task, item, str(loop.root), "a" * 40)
 
     assert subjects == ["T-001: review repair", "T-001: acceptance repair"]
 
@@ -1254,6 +1258,15 @@ def test_a_review_switched_off_is_neither_asked_nor_pointed_at() -> None:
     assert "/simplify" not in prompt and "/code-review" in prompt
 
 
+def test_the_adversarial_review_asks_for_the_input_that_breaks_the_change() -> None:
+    """The packaged step reads for this alone. It has no host discipline, so none is offered."""
+    prompt = _batch_prompt("T-001", disciplines=_claude_disciplines(), reviews=("adversarial",))
+    assert "**Adversarial**: try to refute this change" in prompt
+    assert "the input that breaks it" in prompt
+    assert "**Correctness**" not in prompt
+    assert "/code-review" not in prompt and "/simplify" not in prompt and "/security-review" not in prompt
+
+
 def test_a_custom_review_asks_its_own_question() -> None:
     question = "Does every new query use an index? Name the query and the index."
     prompt = _batch_prompt("T-001", reviews=("correctness", "performance"), questions={"performance": question})
@@ -1361,17 +1374,6 @@ def test_the_join_says_to_keep_only_what_the_join_shows() -> None:
     )
     assert "Keep what only the join shows" in prompt
     assert "already reviewed before the merge" in prompt
-
-
-def test_the_security_discipline_is_offered_in_the_contract_and_never_replaces_it() -> None:
-    """Its own output is a markdown report; the answer here is the JSON, every finding anchored."""
-    from rein import security_review as sec
-
-    offered = sec.contract("/security-review")
-    assert "/security-review" in offered
-    assert "not the answer here" in offered
-    assert "one JSON object and no other text" in offered  # the contract is unchanged underneath
-    assert "/security-review" not in sec.contract()
 
 
 def test_the_joins_two_send_backs_are_not_framed_as_the_same_work() -> None:
@@ -1896,7 +1898,7 @@ def test_a_stopped_leaf_keeps_its_worktree_while_its_batchmates_still_merge(
     monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: outcomes[task.id])
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
-    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths, repair=False: [])
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "_cleanup_worktree", lambda task: cleaned.append(task.id))
 
@@ -2228,7 +2230,7 @@ def test_the_measurement_lands_in_the_audit_chain(tmp_path: Path, monkeypatch: p
     loop = orchestrator(tmp_path)
     monkeypatch.setattr(build_loop, "_run", lambda cmd, *a, **k: (0, agent_output(cmd)))
     loop._launch(["claude", "-p", "go"], cwd=str(tmp_path), where="w", role="implementer")
-    loop._spend_handover("code_reviewer", 1024)
+    loop._spend_handover("reviewer", 1024)
     loop._record_spend("retry-later")
 
     measured = [e for e in loop.store.read_events() if e.event == "run_measured"]
@@ -2238,10 +2240,10 @@ def test_the_measurement_lands_in_the_audit_chain(tmp_path: Path, monkeypatch: p
     # beside `by_role` were the sums of these, and a sum recorded next to its own addends is a
     # field that can disagree with itself.
     assert detail["kind"] == "build" and detail["outcome"] == "retry-later"
-    assert set(detail["by_role"]) == {"implementer", "code_reviewer"}
+    assert set(detail["by_role"]) == {"implementer", "reviewer"}
     assert detail["by_role"]["implementer"]["launches"] == 1
     assert detail["by_role"]["implementer"]["cold_launches"] == 1
-    assert detail["by_role"]["code_reviewer"]["handed_bytes"] == 1024
+    assert detail["by_role"]["reviewer"]["handed_bytes"] == 1024
     assert detail["by_role"]["implementer"]["prompt_bytes"] > 0
 
 
@@ -2589,7 +2591,7 @@ def test_a_leaf_that_landed_elsewhere_is_left_out_of_the_integration_gate(
     monkeypatch.setattr(loop.ws, "add_worktree", lambda task_id, restore_from="": f"build/x-{task_id}")
     monkeypatch.setattr(loop, "_safe_run_task", lambda task, cwd: build_loop.LeafOutcome(ok=True))
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
-    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths, repair=False: [])
     monkeypatch.setattr(loop.ws, "branch_changed_paths", lambda task_id, cwd="": [])
     monkeypatch.setattr(loop, "merge_leaf", lambda task, branch: True)
     monkeypatch.setattr(loop.ws, "landed", lambda task_id: "a" * 40)
@@ -2897,7 +2899,7 @@ def test_an_agent_step_declared_at_the_integration_stage_runs_there(
     skipped outright, which made the join the one tree no reviewer ever read."""
     loop = orchestrator(tmp_path)
     monkeypatch.setattr(common, "run", fake_git())
-    step = build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer", stage="integration")
+    step = build_loop.GateStep(name="review", kind="agent", agent_role="reviewer", stage="integration")
     monkeypatch.setattr(loop, "_steps_at", lambda stage: (step,) if stage == "integration" else ())
 
     seen: list[str] = []
@@ -2920,8 +2922,8 @@ def test_the_integration_reviewers_findings_go_to_the_task_whose_scope_owns_them
     ]
     loop._file_integration_findings(
         [
-            {"severity": "consider", "statement": "duplicated helper", "anchor": "beta/mod.py:4"},
-            {"severity": "consider", "statement": "about the join itself"},
+            {"severity": "question", "statement": "duplicated helper", "anchor": "beta/mod.py:4"},
+            {"severity": "question", "statement": "about the join itself"},
         ],
         tasks,
     )
@@ -2933,8 +2935,8 @@ def test_a_second_review_of_a_task_does_not_discard_the_first(tmp_path: Path) ->
     """A task can be read twice — in its worktree and again after it merges — and the two are
     different observations. Replacing the key dropped whichever arrived first."""
     loop = orchestrator(tmp_path)
-    loop._add_review_findings("T-001", [{"severity": "consider", "statement": "from its own reviewer"}])
-    loop._add_review_findings("T-001", [{"severity": "consider", "statement": "from the join"}])
+    loop._add_review_findings("T-001", [{"severity": "question", "statement": "from its own reviewer"}])
+    loop._add_review_findings("T-001", [{"severity": "question", "statement": "from the join"}])
     kept = loop._take_diagnostics("T-001")["review"]["findings"]
     assert [f["statement"] for f in kept] == ["from its own reviewer", "from the join"]
 
@@ -2972,7 +2974,7 @@ def _read_out(unit: str, *findings: dict[str, object]) -> review_reading.ReadOut
     return review_reading.ReadOut(
         reading=review_reading.Reading(unit=unit, include=("alpha/",), members=(unit,)),
         extraction=actual_extraction.ExtractionResult(actual_statements=(), coverage={}, actual_digest=""),
-        security=security_review.SecurityResult(findings=tuple(findings)),
+        review=change_review.ChangeReviewResult(findings=tuple(findings)),
     )
 
 
@@ -2980,8 +2982,8 @@ def _sec(fid: str, path: str, *, blocking: bool = True) -> dict[str, object]:
     return {
         "id": fid,
         "severity": "critical",
-        "category": "credential_exposure",
-        "attack_scenario": "reads a token out of the log",
+        "review": "security",
+        "scenario": "reads a token out of the log",
         "blocking": blocking,
         "code_anchors": [{"path": path, "start_line": 1, "end_line": 2, "blob": "b" * 40}],
     }
@@ -3012,8 +3014,8 @@ def test_a_blocking_finding_from_the_warm_up_goes_back_to_the_task_that_owns_it(
     """
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-001", "alpha/mod.py"))], at_tip=True)
-    assert repaired == ["SEC-001@review"]
+    assert loop._repair_warm_findings(task, [_read_out("T-001", _sec("F-001", "alpha/mod.py"))], at_tip=True)
+    assert repaired == ["F-001@review"]
 
 
 def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3022,21 +3024,22 @@ def test_a_finding_outside_the_task_scope_is_left_to_gate_four(tmp_path: Path, m
     with the whole picture in front of them."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-001", "beta/mod.py"))], at_tip=True)
+    assert not loop._repair_warm_findings(task, [_read_out("T-001", _sec("F-001", "beta/mod.py"))], at_tip=True)
     assert repaired == []
 
 
-def test_a_non_blocking_finding_is_not_repaired_at_the_task_boundary(
+def test_a_non_blocking_finding_is_repaired_at_the_task_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Below the policy's floor a finding is a Decision Card, not a wall — and spending an
-    implementer launch on one would make the floor mean nothing."""
+    """Below the policy's floor a finding does not hold acceptance shut — which is a different
+    question from whether code the task owns gets repaired. Leaving it was leaving it for a human,
+    as a card nobody had to answer."""
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(
-        task, [_read_out("T-001", _sec("SEC-1", "alpha/mod.py", blocking=False))], at_tip=True
+    assert loop._repair_warm_findings(
+        task, [_read_out("T-001", _sec("F-1", "alpha/mod.py", blocking=False))], at_tip=True
     )
-    assert repaired == []
+    assert repaired == ["F-1@review"]
 
 
 def test_a_chain_s_reading_repairs_only_the_task_at_the_tip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3060,13 +3063,11 @@ def test_a_chain_s_reading_repairs_only_the_task_at_the_tip(tmp_path: Path, monk
     readout = review_reading.ReadOut(
         reading=review_reading.Reading(unit="T-001+T-002", include=("alpha/", "beta/"), members=("T-001", "T-002")),
         extraction=actual_extraction.ExtractionResult(actual_statements=(), coverage={}, actual_digest=""),
-        security=security_review.SecurityResult(
-            findings=(_sec("SEC-001", "alpha/mod.py"), _sec("SEC-002", "beta/mod.py"))
-        ),
+        review=change_review.ChangeReviewResult(findings=(_sec("F-001", "alpha/mod.py"), _sec("F-002", "beta/mod.py"))),
     )
     last = next(t for t in loop._load_graph().tasks if t.id == "T-002")
     assert loop._repair_warm_findings(last, [readout], at_tip=True)
-    assert repaired == ["T-002:SEC-002"], "SEC-001 is T-001's, and T-001's work is not the tip"
+    assert repaired == ["T-002:F-002"], "F-001 is T-001's, and T-001's work is not the tip"
 
 
 def test_a_task_that_is_not_the_tip_is_not_repaired_even_for_its_own_finding(
@@ -3074,7 +3075,7 @@ def test_a_task_that_is_not_the_tip_is_not_repaired_even_for_its_own_finding(
 ) -> None:
     loop, repaired = _warm_loop(tmp_path, monkeypatch)
     task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
-    assert not loop._repair_warm_findings(task, [_read_out("T-001", _sec("SEC-001", "alpha/mod.py"))], at_tip=False)
+    assert not loop._repair_warm_findings(task, [_read_out("T-001", _sec("F-001", "alpha/mod.py"))], at_tip=False)
     assert repaired == []
 
 
@@ -3274,7 +3275,7 @@ def test_a_dod_with_no_command_step_records_that_it_could_not_be_controlled(
     all — no record, and so no row on the orient brief, which skips a task that has none."""
     loop = orchestrator(tmp_path)
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
-    agents_only = (build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),)
+    agents_only = (build_loop.GateStep(name="review", kind="agent", agent_role="reviewer"),)
 
     assert loop._negative_control(_task(), str(tmp_path / "wt"), agents_only) == (None, "")
     assert ran == []
@@ -3348,7 +3349,7 @@ def test_the_control_runs_only_the_command_steps_that_actually_passed(
     loop = orchestrator(tmp_path)
     ran = _controlled(loop, monkeypatch, changed=["src/x.py", "tests/test_x.py"])
     passed = (
-        build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer"),
+        build_loop.GateStep(name="review", kind="agent", agent_role="reviewer"),
         build_loop.GateStep(name="smoke", kind="command"),
         build_loop.GateStep(name="lint", kind="command", command=("make", "lint")),
         build_loop.GateStep(name="test", kind="command", command=("make", "test"), runs_tests=True),
@@ -3435,7 +3436,7 @@ def test_the_integration_reviewer_reads_the_join_and_not_the_cycle(
     matched no owner, was printed instead of filed, and never reached the human."""
     loop = orchestrator(tmp_path)
     monkeypatch.setattr(common, "run", fake_git())
-    step = build_loop.GateStep(name="review", kind="agent", agent_role="code_reviewer", stage="integration")
+    step = build_loop.GateStep(name="review", kind="agent", agent_role="reviewer", stage="integration")
     prompts: list[str] = []
     target = dossier.findings_path(loop.root, "integration")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -3522,12 +3523,12 @@ def _scoped_repo(tmp_path: Path, rounds: int) -> build_loop.Orchestrator:
     return build_loop.Orchestrator(build_loop.Config.load(repo), dry_run=False, repo=repo)
 
 
-def _blocking(fid: str = "SEC-001", path: str = "src/api/client.py") -> dict[str, Any]:
+def _blocking(fid: str = "F-001", path: str = "src/api/client.py") -> dict[str, Any]:
     return {
         "id": fid,
         "severity": "high",
-        "category": "credential_exposure",
-        "attack_scenario": "a caller reaches a host credential",
+        "review": "security",
+        "scenario": "a caller reaches a host credential",
         "blocking": True,
         "code_anchors": [{"path": path, "blob": "git-blob:" + "a" * 40, "start_line": 1, "end_line": 2}],
     }
@@ -3550,7 +3551,7 @@ def test_gate_four_reads_repairs_and_reads_again(tmp_path: Path, monkeypatch: py
     def read() -> bool:
         readings.append(1)
         findings = [] if len(readings) > 1 else [_blocking()]
-        seed_repo(tmp_path, review=make_review(generated=True, security_findings=findings))
+        seed_repo(tmp_path, review=make_review(generated=True, review_findings=findings))
         loop.store = store_mod.Store(loop.repo)
         return True
 
@@ -3570,7 +3571,7 @@ def test_a_finding_that_survives_the_rounds_reaches_the_human(
     loop = _scoped_repo(tmp_path, rounds=2)
     # Read before `seed_repo` below, which writes a default plan beside the review it seeds.
     graph = loop._load_graph()
-    seed_repo(tmp_path, review=make_review(generated=True, security_findings=[_blocking()]))
+    seed_repo(tmp_path, review=make_review(generated=True, review_findings=[_blocking()]))
     attempts: list[str] = []
     monkeypatch.setattr(loop, "_generate_review", lambda: True)
     monkeypatch.setattr(loop, "_repair", lambda graph, item: attempts.append(item.task_id))
@@ -3612,10 +3613,12 @@ def _repair_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[build
     loop = _scoped_repo(tmp_path, rounds=2)
     committed: list[str] = []
     monkeypatch.setattr(loop, "_launch", lambda *a, **k: None)
-    monkeypatch.setattr(loop.ws, "head", lambda: "0" * 40)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "0" * 40)
     monkeypatch.setattr(loop.ws, "changed_since", lambda base, cwd="": ["src/api/client.py"])
-    monkeypatch.setattr(loop, "_gate_violations", lambda paths: [])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths, repair=False: [])
     monkeypatch.setattr(loop, "_run_cmd_step", lambda step, cwd: "")
+    # The proof is its own subject (`test_a_repair_*_is_refused`); here it is taken as given.
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("reproduced", "stub"))
 
     def record(cwd: str, message: str) -> bool:
         committed.append(message)
@@ -3637,7 +3640,7 @@ def test_a_gate_four_repair_is_committed_before_the_next_reading(
     for the same reason (`build_git.finalize_commit`), and this is the one launch that did not.
     """
     loop, committed = _repair_loop(tmp_path, monkeypatch)
-    found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
+    found = findings_mod.Attribution("F-001", "finding", "T-001", "src/api/client.py")
     loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
     assert committed == ["T-001: acceptance repair"]
 
@@ -3648,7 +3651,7 @@ def test_a_cycle_that_is_not_a_stack_repairs_on_the_work_branch(
     """A single pull request has one place for the fix, and `derive` refusing to cut a stack out of
     this repository means exactly that — not that the repair has nowhere to go."""
     loop, committed = _repair_loop(tmp_path, monkeypatch)
-    found = findings_mod.Attribution("SEC-001", "security", "T-001", "src/api/client.py")
+    found = findings_mod.Attribution("F-001", "finding", "T-001", "src/api/client.py")
     loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
 
     assert committed == ["T-001: acceptance repair"]
@@ -3661,7 +3664,7 @@ def test_a_repair_that_cannot_be_committed_stops_the_loop(tmp_path: Path, monkey
     loop, _ = _repair_loop(tmp_path, monkeypatch)
     monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: False)
     with pytest.raises(build_loop.StopLoop, match="could not be committed"):
-        found = findings_mod.Attribution("SEC-001", "security", "T-001", "x")
+        found = findings_mod.Attribution("F-001", "finding", "T-001", "x")
         loop._repair(next(t for t in loop._load_graph().tasks if t.id == "T-001"), repair.Repair("T-001", (found,)))
 
 
@@ -4256,3 +4259,232 @@ def test_a_spent_task_is_named_when_the_run_stops_at_a_crossing(
     assert loop._consume() == common.EXIT_HUMAN_NEEDED
     gaps = [e for e in store_mod.Store(loop.repo).read_events() if e.detail.get("kind") == "attempt_budget_spent"]
     assert [tuple(g.subject_ids) for g in gaps] == [("T-001",)]
+
+
+# --- a repair lands only with a test that fails without it ---------------------------------------
+
+
+def _repair_controlled(
+    loop: build_loop.Orchestrator, monkeypatch: pytest.MonkeyPatch, *, reds: dict[str, str] | None = None
+) -> list[str]:
+    ran = _controlled(loop, monkeypatch, changed=[], reds=reds)
+    monkeypatch.setattr(loop, "_steps_at", lambda stage: _cmd_steps())
+    return ran
+
+
+def test_a_repair_whose_test_fails_against_the_code_as_it_was_is_proven(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = orchestrator(tmp_path)
+    ran = _repair_controlled(loop, monkeypatch, reds={"test": "test_x.py::t FAILED"})
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["src/x.py", "tests/test_x.py"])
+    assert (result, ran) == ("reproduced", ["test"])
+    assert "fails against the code as it was" in said
+
+
+def test_a_repair_whose_tests_pass_without_it_is_refused_as_a_fix_of_the_symptom(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A test that passes against the code as it was does not reproduce the defect, so nothing
+    shows the fix is what removed it — which is the shape a repair of where the defect *showed*
+    takes when the cause is somewhere else."""
+    loop = orchestrator(tmp_path)
+    _repair_controlled(loop, monkeypatch)
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["src/x.py", "tests/test_x.py"])
+    assert result == "inert" and result in build_loop._REPAIR_REFUSED
+    assert "fix of the symptom" in said
+
+
+def test_a_repair_that_changes_no_test_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    ran = _repair_controlled(loop, monkeypatch)
+    result, _ = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["src/x.py"])
+    assert result == "untested" and result in build_loop._REPAIR_REFUSED
+    assert ran == [], "there is nothing to run"
+
+
+def test_a_control_that_cannot_be_taken_does_not_refuse_the_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken experiment is evidence in neither direction."""
+    loop = orchestrator(tmp_path)
+    _controlled(loop, monkeypatch, changed=[], apply_rc=1)
+    monkeypatch.setattr(loop, "_steps_at", lambda stage: _cmd_steps())
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["src/x.py", "tests/test_x.py"])
+    assert result == "undetermined" and result not in build_loop._REPAIR_REFUSED
+    assert "did not apply" in said
+
+
+def test_a_refused_repair_is_undone_without_touching_the_orchestration_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Undone with `reset --keep`: the root holds `.rein/` uncommitted, and `--hard` would take the
+    chain with it. The refusal is recorded and is what the task's next repair is told."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": ["alpha/mod.py"])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths, repair=False: [])
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "c" * 40)
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("untested", "no test"))
+    commands: list[list[str]] = []
+
+    def record(cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
+        commands.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(build_loop, "_run", record)
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    item = repair.Repair("T-001", (findings_mod.Attribution("F-001", "finding", "T-001", "alpha/mod.py"),))
+
+    assert loop._accept_repair(task, item, str(loop.root), "a" * 40) is False
+    assert ["git", "reset", "--keep", "a" * 40] in commands
+    refused = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "repair_refused"][-1]
+    assert refused.detail["result"] == "untested" and refused.detail["findings"] == ["F-001"]
+    assert "previous repair of these was refused and undone: no test" in loop._repair_prompt(task, item)
+
+
+def test_a_repair_may_write_into_another_tasks_scope_inside_the_mandate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The task's scope is where a finding is charged, not a line a human drew. The cause of a
+    defect is where it is, and a repair held to the symptom's file can only treat the symptom."""
+    loop = orchestrator(
+        tmp_path,
+        plan=make_plan(
+            tasks=[
+                make_task("T-001", claim_ids=["C-001"], scope_include=["alpha/"]),
+                make_task("T-002", claim_ids=["C-001"], scope_include=["beta/"]),
+            ]
+        ),
+    )
+    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": ["alpha/mod.py", "beta/cause.py"])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths, repair=False: [])
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "c" * 40)
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("reproduced", "red"))
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    item = repair.Repair("T-001", (findings_mod.Attribution("F-001", "finding", "T-001", "alpha/mod.py"),))
+
+    assert loop._accept_repair(task, item, str(loop.root), "a" * 40) is True
+    landed = [e for e in store_mod.Store(loop.repo).read_events() if e.event == "repair_verified"][-1]
+    assert landed.detail["beyond_task_scope"] == ["beta/cause.py"]
+    assert landed.detail["result"] == "reproduced"
+
+
+def test_a_repair_landed_without_its_experiment_is_not_recorded_as_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`undetermined` lands — a broken sandbox is not a refusal — but it was recorded as
+    `repair_verified`, the event that says a test failed without the repair."""
+    loop = orchestrator(tmp_path)
+    monkeypatch.setattr(loop.ws, "changed_since", lambda before, cwd="": ["alpha/mod.py", "tests/test_mod.py"])
+    monkeypatch.setattr(loop, "_gate_violations", lambda paths, repair=False: [])
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
+    monkeypatch.setattr(loop.ws, "head", lambda cwd=None: "c" * 40)
+    monkeypatch.setattr(loop, "_verify_repair", lambda task, cwd, before, changed: ("undetermined", "no sandbox"))
+    task = dag.Task(id="T-001", title="leaf", kind="parallel")
+    item = repair.Repair("T-001", (findings_mod.Attribution("F-001", "finding", "T-001", "alpha/mod.py"),))
+
+    assert loop._accept_repair(task, item, str(loop.root), "a" * 40) is True
+    kinds = [e.event for e in store_mod.Store(loop.repo).read_events()]
+    assert "repair_unverified" in kinds and "repair_verified" not in kinds
+
+
+# --- a repair may write past the mandate's include; each path it does is put to a human --------
+
+
+def _widening_loop(tmp_path: Path) -> build_loop.Orchestrator:
+    plan = make_plan(tasks=[make_task("T-001", claim_ids=["C-001"], scope_include=["src/core/"])])
+    plan["scope"] = {"include": ["src/core/"], "exclude": ["src/vendor/"]}
+    return orchestrator(tmp_path, plan=plan)
+
+
+def test_only_a_repair_s_launch_carries_leave_to_write_past_include(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The leave is the repair launch's token, not a field of `state.yaml` every writer of the run
+    shared while the build held its lock."""
+    loop = _widening_loop(tmp_path)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+    launched: list[dict[str, str] | None] = []
+
+    def launch(argv: list[str], **kwargs: Any) -> str:
+        launched.append(kwargs.get("env"))
+        return ""
+
+    monkeypatch.setattr(loop, "_launch", launch)
+    monkeypatch.setattr(loop, "_accept_repair", lambda *args, **kwargs: False)
+    item = repair.Repair("T-001", (findings_mod.Attribution("F-001", "finding", "T-001", "src/core/a.py"),))
+    with control_plane.serving(loop.repo) as server:
+        loop.control = server
+        loop._repair_on_work_branch(task, item)
+        implementer = loop._leaf_env(task)
+    assert launched and launched[0] is not None and implementer is not None
+
+    def capabilities(env: Mapping[str, str]) -> tuple[str, ...]:
+        return control_plane.verify(server.secret, env[control_plane.TOKEN_ENV]).capabilities
+
+    assert control_plane.REPAIR_GRANT in capabilities(launched[0])
+    assert control_plane.REPAIR_GRANT not in capabilities(implementer)
+    assert "repair_grant" not in (loop.store.read_state() or models.State({})).raw, "nothing is written to state"
+
+
+def test_a_repair_that_changes_only_tests_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """It landed as `undetermined`, the verdict for an experiment that could not be run. Here there
+    is nothing to run it on: the code is as it was, so a test that passes now passed before, and a
+    test weakened or deleted to quiet the finding read exactly the same."""
+    loop = orchestrator(tmp_path)
+    ran = _repair_controlled(loop, monkeypatch)
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, ["tests/test_x.py"])
+    assert result == "test_only" and result in build_loop._REPAIR_REFUSED
+    assert "changed only tests" in said and ran == []
+
+
+def test_every_path_a_repair_wrote_past_include_is_proposed_to_a_human(tmp_path: Path) -> None:
+    loop = _widening_loop(tmp_path)
+    task = next(t for t in loop._load_graph().tasks if t.id == "T-001")
+
+    loop._record_expansions(task, ["src/core/a.py", "src/util/cause.py", "README.md"], ["F-001"], "c" * 40)
+
+    state = loop.store.read_state()
+    assert state is not None
+    assert dict(state.scope_expansions) == {
+        "src/util/cause.py": {"status": "proposed", "task_id": "T-001", "findings": ["F-001"], "commit": "c" * 40}
+    }
+    expanded = [e for e in loop.store.read_events() if e.event == "scope_expanded"][-1]
+    assert expanded.detail["paths"] == ["src/util/cause.py"]
+
+
+def test_a_refused_expansion_is_taken_back_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _widening_loop(tmp_path)
+    with loop.store.transaction() as tx:
+        state = tx.store.read_state()
+        assert state is not None
+        entry = {"status": "refused", "task_id": "T-001", "commit": "c" * 40}
+        tx.write("state", {**state.raw, "scope_expansions": {"src/util/cause.py": entry}})
+        tx.append("disposition_recorded", cycle_id=state.cycle_id, subject_ids=["SCOPE-1"], detail={})
+    monkeypatch.setattr(review_reading, "resolve_base", lambda repo, plan, base: "b" * 40)
+    monkeypatch.setattr(
+        repo_mod.Repo, "_git_rc", lambda self, *args: (0, "src/util/cause.py\0") if args[0] == "diff" else (0, "")
+    )
+    commands: list[list[str]] = []
+
+    def record(cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
+        commands.append(cmd)
+        return 0, ""
+
+    monkeypatch.setattr(build_loop, "_run", record)
+    monkeypatch.setattr(loop.ws, "finalize_commit", lambda cwd, message: True)
+
+    loop._revert_refused_expansions()
+
+    assert ["git", "checkout", "b" * 40, "--", "src/util/cause.py"] in commands
+    reverted = [e for e in loop.store.read_events() if e.event == "scope_expansion_reverted"][-1]
+    assert reverted.detail["paths"] == ["src/util/cause.py"]
+
+
+def test_a_repair_that_changed_nothing_is_not_landed_as_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = orchestrator(tmp_path)
+    _repair_controlled(loop, monkeypatch)
+    result, said = loop._verify_repair(_task(), str(loop.root), "b" * 40, [])
+    assert result in build_loop._REPAIR_REFUSED and "changed nothing" in said

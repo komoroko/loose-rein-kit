@@ -30,8 +30,8 @@ def _finding(fid: str, path: str) -> dict[str, Any]:
     return {
         "id": fid,
         "severity": "high",
-        "category": "credential_exposure",
-        "attack_scenario": "a caller reaches a host credential",
+        "review": "security",
+        "scenario": "a caller reaches a host credential",
         "blocking": True,
         "code_anchors": [{"path": path, "blob": "git-blob:" + "a" * 40, "start_line": 1, "end_line": 2}],
     }
@@ -49,7 +49,7 @@ def test_a_security_finding_a_task_scope_owns_is_the_loops_to_repair() -> None:
     says whose they are; and the repair changes no claim, no criterion and no requirement."""
     routing = repair.route(
         _plan_with_scopes().tasks,
-        _review(security_findings=[_finding("SEC-001", "src/api/client.py")]),
+        _review(review_findings=[_finding("F-001", "src/api/client.py")]),
     )
     assert [r.task_id for r in routing.code] == ["T-001"]
     assert routing.judgement == () and routing.unowned == ()
@@ -62,15 +62,15 @@ def test_findings_are_grouped_by_task_in_plan_order() -> None:
     routing = repair.route(
         _plan_with_scopes().tasks,
         _review(
-            security_findings=[
-                _finding("SEC-002", "src/ui/page.tsx"),
-                _finding("SEC-001", "src/api/client.py"),
-                _finding("SEC-003", "src/api/auth.py"),
+            review_findings=[
+                _finding("F-002", "src/ui/page.tsx"),
+                _finding("F-001", "src/api/client.py"),
+                _finding("F-003", "src/api/auth.py"),
             ]
         ),
     )
     assert [r.task_id for r in routing.code] == ["T-001", "T-002"]
-    assert [a.finding_id for a in routing.code[0].items] == ["SEC-001", "SEC-003"]
+    assert [a.finding_id for a in routing.code[0].items] == ["F-001", "F-003"]
 
 
 def test_a_finding_no_declared_scope_owns_is_never_guessed_at() -> None:
@@ -78,10 +78,10 @@ def test_a_finding_no_declared_scope_owns_is_never_guessed_at() -> None:
     be inventing the answer the attribution exists to derive."""
     routing = repair.route(
         _plan_with_scopes().tasks,
-        _review(security_findings=[_finding("SEC-001", "vendor/thing.py")]),
+        _review(review_findings=[_finding("F-001", "vendor/thing.py")]),
     )
     assert routing.code == ()
-    assert [a.finding_id for a in routing.unowned] == ["SEC-001"]
+    assert [a.finding_id for a in routing.unowned] == ["F-001"]
 
 
 def test_a_diverged_claim_is_a_judgement_until_a_human_makes_it_a_repair() -> None:

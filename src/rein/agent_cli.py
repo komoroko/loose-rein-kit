@@ -1,6 +1,6 @@
 """`rein agent <cli>` — point the AI roles at an adapter, without hand-editing config.
 
-Two of the five roles must **not** be the same thing: the actual extractor and the comparator
+Two of the four roles must **not** be the same thing: the actual extractor and the comparator
 need distinct independence groups for a critical change, because an extractor and a comparator
 sharing a model share its blind spots (plan §12.4).
 
@@ -32,10 +32,9 @@ logger = logging.getLogger(__name__)
 #: The roles a human may point at an adapter, in config order.
 ROLES: tuple[str, ...] = (
     "implementer",
-    "code_reviewer",
+    "reviewer",
     "actual_extractor",
     "comparator",
-    "security_reviewer",
 )
 
 #: The two roles a critical change requires to differ (plan §12.4).
@@ -110,7 +109,7 @@ def apply_switch(text: str, adapter: str, roles: tuple[str, ...], model: str = "
                 continue
             raise AgentCliError(
                 f"agents.{role} is not declared in .rein/config.yaml — add the role block first "
-                "(the scaffold declares all five)"
+                "(the scaffold declares all four)"
             )
         if model:
             text, _ = _set_role_key(text, role, "model", model)

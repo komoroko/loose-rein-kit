@@ -132,8 +132,12 @@ def test_minting_refuses_an_unknown_capability() -> None:
 
 
 def test_leaf_capabilities_and_central_only_partition_the_vocabulary() -> None:
-    assert control_plane.LEAF_CAPABILITIES | models.CENTRAL_ONLY_CAPABILITIES == models.CAPABILITY_VALUES
+    assert (
+        control_plane.LEAF_CAPABILITIES | models.CENTRAL_ONLY_CAPABILITIES | models.REPAIR_ONLY_CAPABILITIES
+        == models.CAPABILITY_VALUES
+    )
     assert not (control_plane.LEAF_CAPABILITIES & models.CENTRAL_ONLY_CAPABILITIES)
+    assert not (control_plane.LEAF_CAPABILITIES & models.REPAIR_ONLY_CAPABILITIES)
     assert "gate.approve" in models.CENTRAL_ONLY_CAPABILITIES
 
 

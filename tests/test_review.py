@@ -27,11 +27,13 @@ import pytest
 from rein import (
     actual_extraction,
     adapters,
+    change_review,
     common,
     conformance,
     diff_facts,
     digests,
     event_chain,
+    human_review,
     models,
     review,
     review_cache,
@@ -39,13 +41,16 @@ from rein import (
     review_reading,
     review_transport,
     run_progress,
-    security_review,
 )
 from rein import events as events_mod
 from rein import repo as repo_mod
 from rein import store as store_mod
 from rein import usage as usage_mod
-from tests._support import agent_envelope, make_config, make_plan, make_state, make_task, seed_repo
+from tests._support import agent_envelope, make_config, make_plan, make_reviews, make_state, make_task, seed_repo
+
+#: Every reading, as a review taken under the packaged `reviews.yaml` with the security reading
+#: switched on.
+_BOTH = models.Readings(actual_extraction=True, comparison=True, reviews=("security",))
 
 
 def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
@@ -77,7 +82,14 @@ def test_assemble_is_schema_valid_and_counts_verdicts() -> None:
             "conformance": {"status": "observed"},
         },
     ]
-    machine = review.assemble(binding=binding, coverage=coverage, actual_statements=[], claims=claims)
+    machine = review.assemble(
+        binding=binding,
+        coverage=coverage,
+        actual_statements=[],
+        claims=claims,
+        acceptance={"actual_extraction": True, "comparison": True},
+        reviews={"read": ["security"], "findings": []},
+    )
     assert models.schema_errors({"machine": machine, "human": {"status": "not_started"}}, "review") == []
     assert machine["summary"]["claims_total"] == 2
     assert machine["summary"]["aligned"] == 1 and machine["summary"]["diverged"] == 1
@@ -139,7 +151,7 @@ def _fake_reviewer(role: str, request: Mapping[str, Any]) -> str:
 
     if role == "comparator":  # echo the digest it was handed, no claims
         return json.dumps({"claims": [], "actual_digest": request["actual_digest"]})
-    if role == "security_reviewer":
+    if role == "reviewer":
         return json.dumps({"findings": []})
     return json.dumps({"actual_statements": [], "coverage": {}})  # the blind extractor
 
@@ -195,7 +207,7 @@ def test_what_the_change_requires_of_a_person_survives_the_schema_validated_writ
     def reviewer(role: str, request: Mapping[str, Any]) -> str:
         if role == "comparator":
             return json.dumps({"claims": [], "actual_digest": request["actual_digest"]})
-        if role == "security_reviewer":
+        if role == "reviewer":
             return json.dumps({"findings": []})
         return json.dumps(
             {
@@ -307,7 +319,7 @@ def test_an_extra_behavior_the_comparator_found_reaches_the_review(review_repo: 
                     ],
                 }
             )
-        if role == "security_reviewer":
+        if role == "reviewer":
             return json.dumps({"findings": []})
         return json.dumps(
             {
@@ -349,12 +361,10 @@ def test_an_extra_behavior_that_omits_grounded_still_reaches_a_human() -> None:
 
 
 @pytest.mark.integration
-def test_generate_then_complete_freezes_a_clean_review(review_repo: Path) -> None:
-    repo = repo_mod.Repo(review_repo)
-    review.generate(repo, _reviewers(_fake_reviewer))
-    review.complete(repo)  # no challenges, no blockers → freezes
-    stored = store_mod.Store(repo).read_review()
-    assert stored is not None and stored.human_status == "frozen"
+def test_there_is_no_freeze_apart_from_the_approval() -> None:
+    """Approving acceptance freezes the answers (`approve.record_approval`); a verb that froze them
+    first was a second act for one decision."""
+    assert not hasattr(review, "complete")
 
 
 # -- what the comparator is actually handed ------------------------------------
@@ -599,8 +609,14 @@ def test_every_stage_carries_its_own_contract() -> None:
         trusted_base_sha="a" * 40, subject_head_sha="b" * 40, diff_text="d", deterministic_facts={}
     )
     compare = conformance.build_request(expected_model={"claims": []}, actual_statements=[], actual_digest="d")
-    security = security_review.build_request(
-        diff_text="d", deterministic_facts={}, trusted_base_sha="a" * 40, subject_head_sha="b" * 40
+    security = change_review.build_request(
+        reviews=["security"],
+        questions={},
+        disciplines={},
+        diff_text="d",
+        deterministic_facts={},
+        trusted_base_sha="a" * 40,
+        subject_head_sha="b" * 40,
     )
     for request in (extract, compare, security):
         assert request["contract"].strip()
@@ -630,14 +646,13 @@ def test_a_contract_names_only_vocabulary_the_schema_allows() -> None:
     """
     schema = models.schema("review")["$defs"]["machine"]["properties"]
     statement_categories = schema["actual_extraction"]["items"]["properties"]["category"]["enum"]
-    finding_categories = schema["security"]["properties"]["findings"]["items"]["properties"]["category"]["enum"]
+    severities = models.schema("review")["$defs"]["risk"]["enum"]
 
     assert set(actual_extraction.categories()) == set(statement_categories)
-    assert set(security_review.categories()) == set(finding_categories)
     for category in statement_categories:
         assert category in actual_extraction.contract()
-    for category in finding_categories:
-        assert category in security_review.contract()
+    for severity in severities:
+        assert severity in change_review.contract(["security"], {}, {})
     for verdict in models.VERDICT_VALUES:
         assert verdict in conformance.contract()
 
@@ -675,12 +690,12 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
         return call
 
     monkeypatch.setattr(review_transport, "_adapter_reviewer", fake_adapter)
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo))
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), readings=_BOTH)
 
-    for role in ("actual_extractor", "comparator", "security_reviewer"):
+    for role in ("actual_extractor", "comparator", "reviewer"):
         reviewers.for_role(role)({"actual_digest": "d"})
 
-    assert routed == ["actual_extractor", "comparator", "security_reviewer"]
+    assert routed == ["actual_extractor", "comparator", "reviewer"]
     # And the one ledger is what every role's launch is charged to.
     assert set(reviewers.spend()) == set(routed)
 
@@ -688,7 +703,7 @@ def test_each_stage_goes_to_the_adapter_configured_for_it(review_repo: Path, mon
 def test_a_role_the_pipeline_does_not_launch_is_not_answerable(review_repo: Path) -> None:
     """`for_role` is a lookup, not a factory: a role nobody configured a stage for has no
     reviewer, and inventing one on demand is how a fourth opinion would enter the review."""
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo))
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), readings=_BOTH)
     with pytest.raises(KeyError):
         reviewers.for_role("implementer")
 
@@ -725,7 +740,10 @@ def _a_reading_request(diff: str = "the diff") -> dict[str, Any]:
 
 
 def _a_security_request(diff: str = "the diff") -> dict[str, Any]:
-    return security_review.build_request(
+    return change_review.build_request(
+        reviews=["security"],
+        questions={},
+        disciplines={},
         diff_text=diff,
         deterministic_facts={"signals": [], "files": []},
         trusted_base_sha="a" * 40,
@@ -746,18 +764,18 @@ def test_only_a_cli_that_can_branch_a_session_can_share_a_reading() -> None:
 def test_two_roles_on_one_launch_share_a_reading_and_two_launches_do_not() -> None:
     """Decided on the argv the roles are actually launched with, not on the adapter's name and not
     on `independence_group` — nothing in the launcher varies by the group today."""
-    roles = ("actual_extractor", "security_reviewer")
+    roles = ("actual_extractor", "reviewer")
     same = models.Config.parse(json.dumps(make_config()))
     assert review_transport.shareable_reading(same, roles) is not None
 
     raw = make_config()
-    raw["agents"]["security_reviewer"] = {"adapter": "codex"}
+    raw["agents"]["reviewer"] = {"adapter": "codex"}
     split = models.Config.parse(json.dumps(raw))
     assert review_transport.shareable_reading(split, roles) is None
 
     raw = make_config()
     raw["agents"]["actual_extractor"] = {"adapter": "gemini"}
-    raw["agents"]["security_reviewer"] = {"adapter": "gemini"}
+    raw["agents"]["reviewer"] = {"adapter": "gemini"}
     unforkable = models.Config.parse(json.dumps(raw))
     assert review_transport.shareable_reading(unforkable, roles) is None
 
@@ -767,9 +785,9 @@ def test_two_roles_on_different_models_do_not_share_a_reading() -> None:
     not another's, and the reading would be paid for twice anyway."""
     raw = make_config()
     raw["agents"]["actual_extractor"] = {"adapter": "claude", "model": "opus"}
-    raw["agents"]["security_reviewer"] = {"adapter": "claude", "model": "sonnet"}
+    raw["agents"]["reviewer"] = {"adapter": "claude", "model": "sonnet"}
     split = models.Config.parse(json.dumps(raw))
-    assert review_transport.shareable_reading(split, ("actual_extractor", "security_reviewer")) is None
+    assert review_transport.shareable_reading(split, ("actual_extractor", "reviewer")) is None
 
 
 def test_the_shipped_scaffold_lets_the_two_diff_readers_share() -> None:
@@ -779,9 +797,9 @@ def test_the_shipped_scaffold_lets_the_two_diff_readers_share() -> None:
     from rein import data, strict_yaml
 
     scaffold = models.Config(strict_yaml.load_mapping(data.read_text("scaffold/rein/config.yaml")))
-    assert scaffold.model("actual_extractor") == scaffold.model("security_reviewer")
+    assert scaffold.model("actual_extractor") == scaffold.model("reviewer")
     assert scaffold.model("comparator") != scaffold.model("actual_extractor")
-    assert review_transport.shareable_reading(scaffold, ("actual_extractor", "security_reviewer")) is not None
+    assert review_transport.shareable_reading(scaffold, ("actual_extractor", "reviewer")) is not None
 
 
 def test_a_branch_carries_a_pointer_where_the_reading_was(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -812,7 +830,10 @@ def test_the_reading_precedes_every_volatile_field_in_a_request() -> None:
         assert keys.index("diff") < keys.index("deterministic_facts")
         assert keys[0] == "contract", "the one field that never moves goes first"
 
-    with_tests = security_review.build_request(
+    with_tests = change_review.build_request(
+        reviews=["security"],
+        questions={},
+        disciplines={},
         diff_text="the diff",
         tests_diff="the tests",
         deterministic_facts={"signals": [], "files": []},
@@ -977,11 +998,14 @@ def _capturing_run(sent: list[dict[str, Any]]) -> Any:
 
 
 def test_a_reviewer_is_told_which_blocks_it_may_not_drop() -> None:
-    """`run_security_review` refuses an answer that drops a previously blocking finding, and was
+    """`run_change_review` refuses an answer that drops a previously blocking finding, and was
     refusing on knowledge the reviewer had never been given: the ids were a Python argument to the
-    validator and nothing more. A regeneration with a blocker standing had to re-invent `SEC-001`
+    validator and nothing more. A regeneration with a blocker standing had to re-invent `F-001`
     by coincidence to pass a check whose own instruction is "resolve the finding and re-run"."""
-    request = security_review.build_request(
+    request = change_review.build_request(
+        reviews=["security"],
+        questions={},
+        disciplines={},
         diff_text="d",
         deterministic_facts={},
         trusted_base_sha="a" * 40,
@@ -991,8 +1015,14 @@ def test_a_reviewer_is_told_which_blocks_it_may_not_drop() -> None:
     assert request["prior_blocking"] == [BLOCKING_FINDING]
     assert "prior_blocking" in request["contract"]
     # Nothing to carry is not an empty list to explain: the key stays out of the request entirely.
-    clean = security_review.build_request(
-        diff_text="d", deterministic_facts={}, trusted_base_sha="a" * 40, subject_head_sha="b" * 40
+    clean = change_review.build_request(
+        reviews=["security"],
+        questions={},
+        disciplines={},
+        diff_text="d",
+        deterministic_facts={},
+        trusted_base_sha="a" * 40,
+        subject_head_sha="b" * 40,
     )
     assert "prior_blocking" not in clean
 
@@ -1258,7 +1288,7 @@ def test_the_security_reviewer_stands_in_a_checkout_of_the_change(
     review_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A git repository holding the tree — not the repo itself, and not the others' empty directory."""
-    seen = _seen_by(review_repo, "security_reviewer", monkeypatch)
+    seen = _seen_by(review_repo, "reviewer", monkeypatch)
     assert seen["is_repo"] is True
     assert seen["cwd"] != str(review_repo)
     assert seen["entries"], "a checkout with nothing in it is not a checkout"
@@ -1288,7 +1318,7 @@ def test_the_change_is_there_as_pending_changes(review_repo: Path, monkeypatch: 
 
     common_run = common.run
     monkeypatch.setattr(common, "run", record)
-    call = review_transport._adapter_reviewer(repo, "security_reviewer", ledger=usage_mod.Ledger())
+    call = review_transport._adapter_reviewer(repo, "reviewer", ledger=usage_mod.Ledger())
     call({"diff": "", "trusted_base_sha": base, "subject_head_sha": head})
     # Unstaged (a leading space, not `A`/`M` in the first column): the working tree is head and the
     # index is base, which is what "pending changes on the current branch" means.
@@ -1302,7 +1332,7 @@ def test_the_checkout_is_isolated_from_the_repository_it_is_a_checkout_of(
     store, the refs and `.git/hooks`, so a reviewer standing in one could move a branch or push,
     and every git command it ran fired this repository's real hooks. "Whoever judges does not
     repair" was a property of the prompt and of nothing else. A clone has its own."""
-    seen = _seen_by(review_repo, "security_reviewer", monkeypatch)
+    seen = _seen_by(review_repo, "reviewer", monkeypatch)
     assert seen["is_repo"] is True
     assert seen["remotes"] == "", "no remote is no push target"
     assert seen["own_git_dir"] is True, "a real git dir, not a pointer file into the repo's own"
@@ -1356,7 +1386,7 @@ def test_the_changes_own_host_configuration_never_governs_the_launch_reviewing_i
         return 0, agent_envelope('{"findings": []}')
 
     monkeypatch.setattr(common, "run", record)
-    call = review_transport._adapter_reviewer(repo, "security_reviewer", ledger=usage_mod.Ledger())
+    call = review_transport._adapter_reviewer(repo, "reviewer", ledger=usage_mod.Ledger())
     call({"diff": "", "trusted_base_sha": base, "subject_head_sha": head})
 
     # The reviewer's world is the reviewed one: what the change added is there to be read.
@@ -1384,7 +1414,7 @@ def test_a_cli_that_cannot_be_isolated_from_the_directory_is_given_no_checkout(
     """
     record = adapters.ADAPTER_TABLE["claude"]
     monkeypatch.setitem(adapters.ADAPTER_TABLE, "claude", dataclasses.replace(record, config_isolation=()))
-    seen = _seen_by(review_repo, "security_reviewer", monkeypatch)
+    seen = _seen_by(review_repo, "reviewer", monkeypatch)
     assert seen["entries"] == []
 
 
@@ -1397,7 +1427,7 @@ def test_a_worktree_that_cannot_be_made_falls_back_to_the_empty_directory(
     discipline then finds no repository, says so, and the reviewer reads the diff it was sent.
     """
     monkeypatch.setattr(review_transport, "_pending_changes", lambda *a, **k: contextlib.nullcontext(None))
-    seen = _seen_by(review_repo, "security_reviewer", monkeypatch)
+    seen = _seen_by(review_repo, "reviewer", monkeypatch)
     assert seen["entries"] == []
 
 
@@ -1406,7 +1436,7 @@ def test_a_host_with_no_security_discipline_is_still_given_the_checkout(
 ) -> None:
     """The checkout is what the question is *about*, not how it is asked.
 
-    A host discipline is offered, never relied on: `security_review.contract` states the question in
+    A host discipline is offered, never relied on: `change_review.contract` states the question in
     full beside it, so a CLI without `/security-review` asks the same thing itself. Gating the
     checkout on the discipline made every CLI but one review a different change from the one the
     contract described — the settings, hooks and MCP servers the contract names as findings were
@@ -1414,7 +1444,7 @@ def test_a_host_with_no_security_discipline_is_still_given_the_checkout(
     """
     bare = dataclasses.replace(adapters.ADAPTER_TABLE["claude"], disciplines={})
     monkeypatch.setitem(adapters.ADAPTER_TABLE, "claude", bare)
-    assert _seen_by(review_repo, "security_reviewer", monkeypatch)["entries"] != []
+    assert _seen_by(review_repo, "reviewer", monkeypatch)["entries"] != []
 
 
 # -- what the pipeline had been handing its own stages -------------------------
@@ -1438,10 +1468,10 @@ def test_an_unset_independence_group_is_empty_not_invented() -> None:
 BASE_A, BASE_B = "a" * 40, "b" * 40
 
 BLOCKING_FINDING = {
-    "id": "SEC-001",
+    "id": "F-001",
     "severity": "high",
-    "category": "credential_exposure",
-    "attack_scenario": "the reviewer container reaches a host credential",
+    "review": "security",
+    "scenario": "the reviewer container reaches a host credential",
     "blocking": True,
 }
 
@@ -1449,7 +1479,7 @@ BLOCKING_FINDING = {
 def _stored_review(base: str) -> models.Review:
     from tests._support import make_review
 
-    return models.Review(make_review(generated=True, security_findings=[BLOCKING_FINDING], base_sha=base))
+    return models.Review(make_review(generated=True, review_findings=[BLOCKING_FINDING], base_sha=base))
 
 
 def test_prior_blocking_findings_are_carried_into_the_next_security_review(tmp_path: Path) -> None:
@@ -1492,7 +1522,7 @@ def test_a_disputed_finding_is_not_carried_forward_and_is_marked_in_the_next_rev
 ) -> None:
     """The deadlock a false positive used to be.
 
-    A human disputes SEC-001; the machine review is regenerated (which discards the human half);
+    A human disputes F-001; the machine review is regenerated (which discards the human half);
     the reviewer, honestly, does not re-emit a finding it does not believe; `resolution_of` cannot
     close it because the code it named is correct and still there — so the drop is refused as "a
     reviewer cannot clear its own block", for the rest of the cycle. There was no exit.
@@ -1505,18 +1535,18 @@ def test_a_disputed_finding_is_not_carried_forward_and_is_marked_in_the_next_rev
 
     repo = repo_mod.Repo(review_repo)
     finding = _anchored_finding(review_repo, "vault.py", "TOKEN = os.environ['T']\n")
-    stored = models.Review(make_review(generated=True, security_findings=[finding], base_sha=BASE_A))
+    stored = models.Review(make_review(generated=True, review_findings=[finding], base_sha=BASE_A))
 
     # Without a dispute the finding carries, and a reviewer that drops it is refused.
     assert review._prior_blocking(repo, stored, BASE_A, None) == [finding]
 
-    bound = security_review.anchors_digest(repo, finding)
+    bound = change_review.anchors_digest(repo, finding)
     assert bound, "an anchored finding can be bound to the code it named"
     state = models.State(
         {
             **make_state(project="rv"),
             "disputed_findings": {
-                "SEC-001": {"reason": "that is a test fixture, not a live credential", "anchors_digest": bound},
+                "F-001": {"reason": "that is a test fixture, not a live credential", "anchors_digest": bound},
             },
         }
     )
@@ -1525,7 +1555,7 @@ def test_a_disputed_finding_is_not_carried_forward_and_is_marked_in_the_next_rev
     assert review._prior_blocking(repo, stored, BASE_A, state) == []
     # …and if it *is* found again — the same reading of the same code — it is marked rather than
     # left to be disputed once per regeneration for the rest of the cycle.
-    marked = security_review.apply_disputes(repo, state, [finding])
+    marked = change_review.apply_disputes(repo, state, [finding])
     assert marked[0]["blocking"] is False
     assert marked[0]["status"] == "disputed"
     assert "test fixture" in marked[0]["disputed_at"]["reason"]
@@ -1540,28 +1570,28 @@ def test_a_dispute_lapses_when_the_code_it_was_about_is_edited(review_repo: Path
         {
             **make_state(project="rv"),
             "disputed_findings": {
-                "SEC-001": {"reason": "a fixture", "anchors_digest": security_review.anchors_digest(repo, finding)},
+                "F-001": {"reason": "a fixture", "anchors_digest": change_review.anchors_digest(repo, finding)},
             },
         }
     )
-    assert security_review.live_disputes(repo, state, [finding]) == {"SEC-001"}
+    assert change_review.live_disputes(repo, state, [finding]) == {"F-001"}
 
     moved = _anchored_finding(review_repo, "vault.py", "TOKEN = 'hunter2'\n")
-    assert security_review.live_disputes(repo, state, [moved]) == set()
+    assert change_review.live_disputes(repo, state, [moved]) == set()
 
 
 def test_a_finding_with_no_readable_anchor_is_never_treated_as_disputed(review_repo: Path) -> None:
     """ "Cannot say" is not "the human said no". A dispute that could not be bound to anything would
     either silence the finding for good or never match at all."""
     repo = repo_mod.Repo(review_repo)
-    assert security_review.anchors_digest(repo, BLOCKING_FINDING) == ""
+    assert change_review.anchors_digest(repo, BLOCKING_FINDING) == ""
     state = models.State(
         {
             **make_state(project="rv"),
-            "disputed_findings": {"SEC-001": {"reason": "no", "anchors_digest": "sha256:" + "0" * 64}},
+            "disputed_findings": {"F-001": {"reason": "no", "anchors_digest": "sha256:" + "0" * 64}},
         }
     )
-    assert security_review.live_disputes(repo, state, [BLOCKING_FINDING]) == set()
+    assert change_review.live_disputes(repo, state, [BLOCKING_FINDING]) == set()
 
 
 # --- the pipeline's shape -----------------------------------------------------
@@ -1593,7 +1623,7 @@ def test_the_security_stage_does_not_wait_behind_the_extraction(review_repo: Pat
     machine = review.generate(repo_mod.Repo(review_repo), _reviewers(reviewer))
 
     assert "security" in order
-    assert "findings" in machine["security"]  # the stage answered, off the chain's thread
+    assert "findings" in machine["reviews"]  # the stage answered, off the chain's thread
 
 
 @pytest.mark.integration
@@ -1802,13 +1832,13 @@ def test_a_stage_whose_answer_would_not_parse_is_launched_once_more(review_repo:
 
     def malformed_once(role: str, request: Mapping[str, Any]) -> str:
         seen.append(role)
-        if role == "security_reviewer" and seen.count("security_reviewer") == 1:
+        if role == "reviewer" and seen.count("reviewer") == 1:
             return "Sure! Here is the review:\n```json\n{}\n```"
         return _fake_reviewer(role, request)
 
     machine = review.generate(repo_mod.Repo(review_repo), _reviewers(malformed_once))
     assert machine["status"] == "generated"
-    assert seen.count("security_reviewer") == 2, seen
+    assert seen.count("reviewer") == 2, seen
 
 
 def test_an_answer_that_will_not_parse_twice_is_a_verdict(review_repo: Path) -> None:
@@ -1818,13 +1848,13 @@ def test_an_answer_that_will_not_parse_twice_is_a_verdict(review_repo: Path) -> 
 
     def always_malformed(role: str, request: Mapping[str, Any]) -> str:
         seen.append(role)
-        if role == "security_reviewer":
+        if role == "reviewer":
             return ""
         return _fake_reviewer(role, request)
 
     with pytest.raises(review_policy.ReviewPolicyError):
         review.generate(repo_mod.Repo(review_repo), _reviewers(always_malformed))
-    assert seen.count("security_reviewer") == review_reading._RELAUNCH_ON_REFUSED + 1, seen
+    assert seen.count("reviewer") == review_reading._RELAUNCH_ON_REFUSED + 1, seen
 
 
 def test_the_relaunch_budget_belongs_to_the_stage_and_not_to_the_run(tmp_path: Path) -> None:
@@ -1855,14 +1885,14 @@ def test_the_relaunch_budget_belongs_to_the_stage_and_not_to_the_run(tmp_path: P
         def spend(self) -> dict[str, usage_mod.Usage]:
             return {}
 
-    for stage, key in (("actual_extraction", "k1"), ("security_review", "k2")):
+    for stage, key in (("actual_extraction", "k1"), ("change_review", "k2")):
         assert (
             review_reading.cached_stage(
                 cache, stage, key, set(), run_for(stage), _Reviewers(), reused=usage_mod.Ledger()
             )
             == "{}"
         )
-    assert refused == {"actual_extraction": 2, "security_review": 2}
+    assert refused == {"actual_extraction": 2, "change_review": 2}
 
 
 def test_a_launch_that_produced_no_output_is_left_to_supervise(tmp_path: Path) -> None:
@@ -1902,9 +1932,9 @@ def test_the_execution_plan_reports_counts_and_names_only_what_will_launch() -> 
     plan = {
         "stages": [
             {"stage": "actual_extraction", "unit": "T-001", "decision": "run", "adapter": "", "model": "opus"},
-            {"stage": "security_review", "unit": "T-001", "decision": "reuse", "adapter": "", "model": "opus"},
+            {"stage": "change_review", "unit": "T-001", "decision": "reuse", "adapter": "", "model": "opus"},
             {"stage": "actual_extraction", "unit": "T-002", "decision": "reuse", "adapter": "", "model": "opus"},
-            {"stage": "security_review", "unit": "T-002", "decision": "reuse", "adapter": "", "model": "opus"},
+            {"stage": "change_review", "unit": "T-002", "decision": "reuse", "adapter": "", "model": "opus"},
             {"stage": "comparison", "unit": "T-001", "decision": "undecided", "adapter": "", "model": "opus"},
         ],
         "shared_reading": True,
@@ -1984,15 +2014,15 @@ def test_what_each_stage_cost_is_reported_in_tokens_not_in_bytes_on_stdin() -> N
     assert usage_mod.summarize({}, what="review") == ""
     heavy = usage_mod.Usage(available=True, launches=1, input_tokens=40_000, output_tokens=900)
     light = usage_mod.Usage(available=True, launches=1, input_tokens=2_000, output_tokens=100)
-    line = usage_mod.summarize({"actual_extractor": heavy, "security_reviewer": light}, what="review")
+    line = usage_mod.summarize({"actual_extractor": heavy, "reviewer": light}, what="review")
     assert line.startswith("review: 42.0k input + 1000 output tokens over 2 launch(es)")
-    assert line.index("actual_extractor") < line.index("security_reviewer")  # worst first
+    assert line.index("actual_extractor") < line.index("reviewer")  # worst first
 
 
 def test_a_stage_whose_adapter_reports_nothing_is_named_rather_than_counted_as_free() -> None:
-    line = usage_mod.summarize({"security_reviewer": usage_mod.Usage.unavailable()}, what="review")
+    line = usage_mod.summarize({"reviewer": usage_mod.Usage.unavailable()}, what="review")
     assert "no adapter here reports token usage" in line
-    assert "usage unavailable for security_reviewer" in line
+    assert "usage unavailable for reviewer" in line
 
 
 # --- a subject that has not moved is not re-read -------------------------------
@@ -2085,15 +2115,15 @@ def test_a_re_reading_that_says_something_else_resets_the_human_half(review_repo
         tx.append("decision_recorded", cycle_id="demo-cycle")
 
     def a_finding(role: str, request: Mapping[str, Any]) -> str:
-        if role == "security_reviewer":
+        if role == "reviewer":
             return json.dumps(
                 {
                     "findings": [
                         {
-                            "id": "SEC-001",
+                            "id": "F-001",
                             "severity": "high",
-                            "category": "credential_exposure",
-                            "attack_scenario": "the reviewer container could reach a host credential",
+                            "review": "security",
+                            "scenario": "the reviewer container could reach a host credential",
                             "blocking": True,
                         }
                     ]
@@ -2169,7 +2199,7 @@ def test_editing_the_plan_re_runs_only_the_comparator(review_repo: Path) -> None
     events = [e.event for e in store_mod.Store(repo).read_events()]
     assert events.count("comparison_generated") == 2
     assert events.count("actual_extraction_generated") == 1
-    assert events.count("security_review_generated") == 1
+    assert events.count("change_review_generated") == 1
 
 
 def test_a_stage_that_succeeded_before_a_failure_is_not_paid_for_twice(review_repo: Path) -> None:
@@ -2384,7 +2414,7 @@ def test_a_deleted_files_body_is_withheld_and_named_as_a_deletion() -> None:
 def test_a_deletion_the_detector_found_a_signal_in_is_sent_whole() -> None:
     """The one deletion whose body a reviewer can still act on, so the one that is not withheld.
 
-    A security finding may stand without an anchor (`security_review._validate_finding`), unlike an
+    A security finding may stand without an anchor (`change_review._validate_finding`), unlike an
     extracted statement — so the security reviewer *can* report "the deleted module held the only
     permission check and nothing replaces it", and folding every deletion blind would have taken
     exactly the quietly-removed-safety case `deleted_guard` exists to catch. What it is told about
@@ -2554,6 +2584,7 @@ def test_a_commit_that_cannot_change_the_payload_keeps_the_stage_keys() -> None:
             risk_floor="low",
             prior_blocking=[],
             host_surface="sha256:" + "3" * 64,
+            asked={"security": ""},
         )
 
     assert keys() == keys()
@@ -2639,11 +2670,11 @@ def test_the_run_records_the_plan_it_was_going_to_follow(review_repo: Path) -> N
 
     plans = [d["plan"] for d in _run_measurements(repo)]
     first = {row["stage"]: row["decision"] for row in plans[0]["stages"]}
-    assert first["actual_extraction"] == "run" and first["security_review"] == "run"
+    assert first["actual_extraction"] == "run" and first["change_review"] == "run"
     # The comparator's key takes the Actual as an input, and the Actual does not exist yet.
     assert first["comparison"] == "undecided"
     second = {row["stage"]: row["decision"] for row in plans[1]["stages"]}
-    assert second["actual_extraction"] == "reuse" and second["security_review"] == "reuse"
+    assert second["actual_extraction"] == "reuse" and second["change_review"] == "reuse"
 
 
 # --- adversarial: what the launch reports, and what it must not report ---------
@@ -2654,7 +2685,7 @@ def test_a_launch_that_failed_is_still_on_the_bill(review_repo: Path, monkeypatc
     can be made — a raise carries no return value, and this is why the transport keeps the ledger
     rather than handing the cost back to the pipeline."""
     monkeypatch.setattr(common, "run", lambda *a, **k: (1, "the provider said no"))
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo))
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), readings=_BOTH)
 
     with pytest.raises(review_policy.AdapterFailure):
         reviewers.for_role("comparator")({"expected_model": {}, "actual_digest": "d"})
@@ -2671,7 +2702,7 @@ def test_the_priming_turn_is_not_charged_to_the_stage_that_triggered_it(
     would make that stage's stored execution say it launched twice, and a later replay would
     report a cost the stage never had."""
     monkeypatch.setattr(common, "run", lambda *a, **k: (0, agent_envelope(review_transport._PRIME_ACK)))
-    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo))
+    reviewers = review_transport.StagedReviewers(repo_mod.Repo(review_repo), readings=_BOTH)
 
     answer = reviewers.for_role("actual_extractor")(_a_reading_request())
 
@@ -2692,7 +2723,7 @@ def test_a_run_that_reused_every_stage_records_what_it_did_not_pay_for(review_re
     second = _run_measurements(repo)[-1]
     assert second["outcome"] == "unchanged"
     assert "billed_by_role" not in second, "nothing was launched, so nothing was billed"
-    assert set(second["reused_by_role"]) == {"actual_extractor", "comparator", "security_reviewer"}
+    assert set(second["reused_by_role"]) == {"actual_extractor", "comparator", "reviewer"}
 
 
 def test_a_finding_that_stopped_blocking_is_recorded_where_it_outlives_the_document(
@@ -2703,26 +2734,26 @@ def test_a_finding_that_stopped_blocking_is_recorded_where_it_outlives_the_docum
     and a finding id needs no uniqueness across time there — nothing resolves a reference by it."""
     repo = repo_mod.Repo(review_repo)
     resolved = {
-        "id": "SEC-001",
+        "id": "F-001",
         "severity": "high",
-        "category": "credential_exposure",
-        "attack_scenario": "reaches a host cred",
+        "review": "security",
+        "scenario": "reaches a host cred",
         "blocking": False,
         "status": "resolved",
         "resolved_at": {"subject_head_sha": "f" * 40},
     }
-    real = security_review.run_security_review
+    real = change_review.run_change_review
 
-    def with_a_resolution(*args: Any, **kwargs: Any) -> security_review.SecurityResult:
+    def with_a_resolution(*args: Any, **kwargs: Any) -> change_review.ChangeReviewResult:
         result = real(*args, **kwargs)
-        return security_review.SecurityResult(findings=(*result.findings, resolved), resolved=(resolved,))
+        return change_review.ChangeReviewResult(findings=(*result.findings, resolved), resolved=(resolved,))
 
-    monkeypatch.setattr(security_review, "run_security_review", with_a_resolution)
+    monkeypatch.setattr(change_review, "run_change_review", with_a_resolution)
     review.generate(repo, _reviewers(_fake_reviewer))
 
-    closed = [e for e in event_chain.load(repo.events) if e.event == "security_finding_resolved"]
+    closed = [e for e in event_chain.load(repo.events) if e.event == "finding_resolved"]
     assert len(closed) == 1
-    assert closed[0].subject_ids == ("SEC-001",)  # the finding is the event's subject, not a detail
+    assert closed[0].subject_ids == ("F-001",)  # the finding is the event's subject, not a detail
     assert closed[0].detail["resolved_at"] == {"subject_head_sha": "f" * 40}
 
 
@@ -3251,3 +3282,137 @@ def test_a_review_refuses_to_launch_past_the_cycles_spend_ceiling(review_repo: P
         review.generate(repo, _reviewers(_fake_reviewer))
 
     assert event_chain.load(repo.events), "the refusal is recorded, not only printed"
+
+
+# --- the reviews of the whole change are `reviews.yaml`'s to add ---------------------------------
+
+
+@pytest.mark.integration
+def test_with_no_review_added_at_acceptance_no_reviewer_is_launched(tmp_path: Path) -> None:
+    """None added is none run: the stage is not run, not counted, not planned, and the review says
+    so rather than reporting an empty list of findings as if a reviewer had found none."""
+    seed_repo(
+        tmp_path,
+        state=make_state(project="rv"),
+        plan=make_plan(),
+        config=make_config(),
+        reviews=make_reviews(acceptance=()),
+    )
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    asked: list[str] = []
+
+    def answer(role: str, request: Mapping[str, Any]) -> str:
+        asked.append(role)
+        return _fake_reviewer(role, request)
+
+    repo = repo_mod.Repo(tmp_path)
+    machine = review.generate(repo, _reviewers(answer))
+    assert "reviewer" not in asked and "actual_extractor" in asked
+    assert machine["reviews"] == {"read": [], "findings": []}
+    stored = store_mod.Store(repo).read_review()
+    assert stored is not None and stored.reviews_read == ()
+    kinds = [e.event for e in event_chain.scan(repo.events)[0]]
+    assert "change_review_generated" not in kinds
+    measured = [e for e in event_chain.scan(repo.events)[0] if e.event == "run_measured"][-1]
+    assert all(row["stage"] != "change_review" for row in measured.detail["plan"]["stages"])
+
+
+@pytest.mark.integration
+def test_the_review_says_which_reviews_read_the_whole_change(review_repo: Path) -> None:
+    machine = review.generate(repo_mod.Repo(review_repo), _reviewers(_fake_reviewer))
+    assert machine["reviews"]["read"] == ["security"]
+
+
+def test_no_reading_is_shared_unless_both_readings_are_taken() -> None:
+    """Priming a shared reading for one stage alone costs more than launching that stage alone."""
+    for readings in (
+        models.Readings(actual_extraction=True, comparison=True, reviews=()),
+        models.Readings(actual_extraction=False, comparison=False, reviews=("security",)),
+    ):
+        assert review_transport.shares_reading(None, readings=readings) is False
+
+
+def _generate_with(
+    tmp_path: Path,
+    *,
+    actual_extraction: bool = True,
+    comparison: bool = True,
+    acceptance: tuple[str, ...] = ("security",),
+) -> tuple[repo_mod.Repo, dict[str, Any], list[str]]:
+    """Generate a review under `reviews.yaml` switches, and say which reviewer roles were launched."""
+    seed_repo(
+        tmp_path,
+        state=make_state(project="rv"),
+        plan=make_plan(),
+        config=make_config(),
+        reviews=make_reviews(actual_extraction=actual_extraction, comparison=comparison, acceptance=acceptance),
+    )
+    _git(tmp_path, "init", "-q", "-b", "main")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "seed")
+    asked: list[str] = []
+
+    def answer(role: str, request: Mapping[str, Any]) -> str:
+        asked.append(role)
+        return _fake_reviewer(role, request)
+
+    repo = repo_mod.Repo(tmp_path)
+    return repo, review.generate(repo, _reviewers(answer)), asked
+
+
+def _planned_stages(repo: repo_mod.Repo) -> set[str]:
+    measured = [e for e in event_chain.scan(repo.events)[0] if e.event == "run_measured"][-1]
+    return {row["stage"] for row in measured.detail["plan"]["stages"]}
+
+
+@pytest.mark.integration
+def test_with_the_comparison_off_no_claim_is_compared_and_each_is_put_to_a_person(tmp_path: Path) -> None:
+    """Off is off: no comparator is launched or planned, and every claim of the plan reaches
+    acceptance as `unknown` saying who decided nobody would compare it, each a decision card. The
+    blind extraction still runs, so the person decides beside what it read."""
+    repo, machine, asked = _generate_with(tmp_path, comparison=False)
+
+    assert "comparator" not in asked and "actual_extractor" in asked
+    assert machine["acceptance"] == {"actual_extraction": True, "comparison": False}
+    plan_claims = [c.id for c in models.Plan(make_plan()).claims]
+    assert [c["claim_id"] for c in machine["claims"]] == plan_claims
+    assert all(c["verdict"] == "unknown" and "acceptance.comparison" in c["unknowns"][0] for c in machine["claims"])
+    assert "unanswered" not in machine["summary"], "no comparator was asked, so none was silent"
+    carded = {str(st["applicability"]["subject_id"]) for st in machine.get("statements", [])}
+    assert set(plan_claims) <= carded, "what the machine did not compare is what a person is asked"
+    stored = store_mod.Store(repo).read_review()
+    assert stored is not None and stored.comparison_read is False and stored.extraction_read is True
+    assert any("acceptance.comparison" in line for line in human_review.residue(stored)["not_read"])
+    assert _planned_stages(repo) == {"actual_extraction", "change_review"}
+
+
+@pytest.mark.integration
+def test_with_acceptance_s_readings_off_only_the_security_reading_is_launched(tmp_path: Path) -> None:
+    repo, machine, asked = _generate_with(tmp_path, actual_extraction=False, comparison=False)
+
+    assert asked == ["reviewer"]
+    assert machine["acceptance"] == {"actual_extraction": False, "comparison": False}
+    assert machine["actual_extraction"] == []
+    stored = store_mod.Store(repo).read_review()
+    assert stored is not None
+    not_read = human_review.residue(stored)["not_read"]
+    assert any("acceptance.actual_extraction" in line for line in not_read)
+    assert _planned_stages(repo) == {"change_review"}
+
+
+@pytest.mark.integration
+def test_with_every_reading_off_nothing_is_launched(tmp_path: Path) -> None:
+    _, machine, asked = _generate_with(tmp_path, actual_extraction=False, comparison=False, acceptance=())
+    assert asked == []
+    assert machine["reviews"] == {"read": [], "findings": []}
+
+
+def test_generate_refuses_a_reviews_file_the_chain_does_not_record(review_repo: Path) -> None:
+    """The switch is read like every other reader reads the file, and refused as a `ReviewError`
+    the CLI reports rather than a traceback."""
+    reviews = review_repo / ".rein" / "reviews.yaml"
+    reviews.write_text(reviews.read_text(encoding="utf-8").replace("comparison: true", "comparison: false"), "utf-8")
+    with pytest.raises(review.ReviewError, match="not what the audit chain records"):
+        review._generate_cli(repo_mod.Repo(review_repo), force=False, supervise=False, interval_sec=1)

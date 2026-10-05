@@ -19,15 +19,27 @@ import pytest
 from rein import cycle, models, reviews_cmd, strict_yaml
 from rein import repo as repo_mod
 from rein import store as store_mod
-from tests._support import chain, make_reviews, make_state, seed_repo
+from tests._support import DEMO_CYCLE, chain, make_reviews, make_state, seed_repo
 
 ALL_APPROVED = dict.fromkeys(models.GATE_ENDS, "approved")
 
 
-def finished_repo(tmp_path: Path, **kwargs: object) -> repo_mod.Repo:
-    """A repo whose acceptance gate is approved, each gate carrying a schema-valid receipt."""
+def finished_repo(tmp_path: Path, *, integrated: bool = True, **kwargs: object) -> repo_mod.Repo:
+    """A repo whose acceptance gate is approved, each gate carrying a schema-valid receipt — and,
+    unless `integrated` says otherwise, whose approved work reached the mainline."""
     seed_repo(tmp_path, state=make_state(gates=ALL_APPROVED), docs=True, **kwargs)  # type: ignore[arg-type]
-    return repo_mod.Repo(tmp_path)
+    repo = repo_mod.Repo(tmp_path)
+    if integrated:
+        with store_mod.Store(repo).transaction() as tx:
+            tx.append("cycle_integrated", cycle_id=DEMO_CYCLE, actor="test", detail={"mode": "local"})
+    return repo
+
+
+def test_an_approved_cycle_whose_work_is_not_in_the_mainline_does_not_close(tmp_path: Path) -> None:
+    """Approving acceptance is the decision and integrating it is the same act; closing between the
+    two would archive a decision nobody carried out."""
+    repo = finished_repo(tmp_path, integrated=False)
+    assert any("rein integrate" in b for b in cycle.readiness(repo))
 
 
 # --- readiness ----------------------------------------------------------------
@@ -231,7 +243,7 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
 def test_a_reviews_yaml_the_chain_does_not_record_blocks_the_close(tmp_path: Path) -> None:
     """Carried into the next chain as it stands, an unrecorded change would come out recorded."""
     repo = finished_repo(tmp_path)
-    repo.reviews.write_bytes(store_mod.dump_yaml({**make_reviews(), "steps": []}) + b"# edited\n")
+    repo.reviews.write_bytes(store_mod.dump_yaml(make_reviews()) + b"# edited\n")
     assert cycle.readiness(repo) == []
     repo.reviews.write_bytes(store_mod.dump_yaml(make_reviews(adversarial=False)))
     assert any("not what the audit chain records" in b for b in cycle.readiness(repo))

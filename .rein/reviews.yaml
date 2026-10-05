@@ -1,26 +1,43 @@
-# .rein/reviews.yaml — which reviews run. Outside the mandate's freeze: changing one rewinds
-# nothing. Written only by `rein reviews apply <file> --reason ...` at a terminal, or by the
-# dashboard's write session, and every change is recorded in the audit chain with the document it
-# wrote. Nothing runs on a file that differs from that record: `rein reviews restore` writes the
+# .rein/reviews.yaml — which reviews run, stage by stage. Outside the mandate's freeze: changing
+# one rewinds nothing. Written only by `rein reviews apply <file> --reason ...` at a terminal, or by
+# the dashboard's write session, and every change is recorded in the audit chain with the document
+# it wrote. Nothing runs on a file that differs from that record: `rein reviews restore` writes the
 # recorded one back.
 #
-# The comparison acceptance rests on is not configurable and is not here: it is what a human
-# decides by, not a way of improving the work.
+# Every stage has the same two parts: what belongs to it alone, switched on or off, and `reviews`
+# added to it — `adversarial`, `correctness`, `simplification`, `security`, or a name under
+# `custom`. Where a review is added is what it reads: the stage's document, each task's change, or
+# the whole change. One reviewer launch reads for all of a stage's reviews. Nothing is required;
+# what was not read is named as not read where it is decided on.
 
-# The fresh-context adversarial review before the mandate, per drafting stage. A stage switched
-# off is named on the mandate's approval screen.
-adversarial:
-  requirements: true
-  design: true
-  tasks: true
+# The drafting stages, read before the mandate. `adversarial` is the fresh-context adversarial
+# review of the stage's document, working through the lenses the mandate froze; switched off, the
+# mandate's approval screen names the stage.
+requirements:
+  adversarial: true
+  reviews: []
+design:
+  adversarial: true
+  reviews: []
+tasks:
+  adversarial: true
+  reviews: []
 
-# The reviewer steps of the quality gate. Each is one launch per batch of tasks, reading for every
-# review it lists: `correctness`, `simplification`, `security`, or a name under `custom`.
-steps:
-  - name: review
-    reviews: [correctness, simplification]
-    retries: 1
-    stage: both
+# Each task, read before it merges. Findings go back to the implementer, as many times as
+# `review_policy.repair_rounds` in config.yaml allows. The packaged default is the adversarial
+# review alone, an attempt to refute the change.
+build:
+  reviews: [adversarial]
+
+# The whole change, once every task has merged. `actual_extraction` reads the code blind, without
+# the plan, for what it does; `comparison` holds that against the mandate's claims, and needs the
+# extraction. Off, every claim reaches acceptance as a question for you. `reviews` read the whole
+# change, and their findings are repaired by the loop; what reaches acceptance is only what no
+# repair could close. Add `security` here to have the merged tree read for security.
+acceptance:
+  actual_extraction: true
+  comparison: true
+  reviews: []
 
 # Reviews of your own: a name, and the question the reviewer reads for.
 #   custom:

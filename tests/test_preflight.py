@@ -126,8 +126,8 @@ def test_a_missing_adapter_is_told_how_to_be_installed_not_installed(monkeypatch
 
 
 def test_a_role_with_no_command_configured_is_reported() -> None:
-    problems = preflight.check(_config(), [_step("test")], {"code_reviewer": []}, runtime=None)
-    assert [p.what for p in problems] == ["role 'code_reviewer' has no agent command configured"]
+    problems = preflight.check(_config(), [_step("test")], {"reviewer": []}, runtime=None)
+    assert [p.what for p in problems] == ["role 'reviewer' has no agent command configured"]
 
 
 # --- exhaustiveness -------------------------------------------------------------

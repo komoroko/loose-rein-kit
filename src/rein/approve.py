@@ -60,10 +60,10 @@ from rein import (
     digests,
     event_chain,
     gate_guard,
+    human_review,
     mdlite,
     models,
     observations,
-    review_policy,
     review_reading,
     reviews_cmd,
     strict_yaml,
@@ -83,6 +83,33 @@ MANDATE_SOURCES: tuple[str, ...] = ("docs/10-requirements.md", "docs/20-design.m
 
 #: The marker a phase agent leaves at the exact spot it would otherwise have guessed.
 _CLARIFICATION_RE = re.compile(r"\[NEEDS CLARIFICATION\b")
+
+
+class Blocker(str):
+    """One reason a gate cannot open, and **who clears it**.
+
+    A blocker the machine can clear — a review to take again, an audit to re-run, a refused path to
+    take back out — is not a question for a person, and putting it in front of one is calling them
+    to be told to wait. So each says whose it is (`by`: `machine` or `human`) and what clears it
+    (`remedy`). The status board calls a person only when nothing of the machine's is left.
+
+    A `str`, so every reader that only prints a blocker reads it unchanged.
+    """
+
+    by: str
+    remedy: str
+
+    def __new__(cls, text: str, *, by: str, remedy: str) -> Blocker:
+        if by not in ("machine", "human"):
+            raise ValueError(f"a blocker is the machine's or a human's, not {by!r}")
+        made = super().__new__(cls, text)
+        made.by, made.remedy = by, remedy
+        return made
+
+
+def owner(blocker: str) -> str:
+    """Whose a blocker is. One that does not say is a person's: that is what every blocker was."""
+    return blocker.by if isinstance(blocker, Blocker) else "human"
 
 
 class ApprovalError(RuntimeError):
@@ -225,7 +252,9 @@ def _task_blockers(plan: models.Plan | None, state: models.State | None, gate: s
     if gate == "acceptance":
         unfinished = sorted(t.id for t in graph.tasks if not t.is_done)
         if unfinished:
-            blockers.append(f"tasks not done: {', '.join(unfinished)}")
+            # The build's to finish. A task that cannot — blocked, sent back, waiting on evidence —
+            # says so through its own status, which the board reads before this.
+            blockers.append(Blocker(f"tasks not done: {', '.join(unfinished)}", by="machine", remedy="rein build"))
     return blockers
 
 
@@ -246,22 +275,56 @@ def _review_blockers(
         return []
     if review is None or not review.is_generated:
         return [
-            "no machine review has been generated — run `rein review generate`. "
-            "Acceptance rests on a grounded review, not on a green test run."
+            Blocker(
+                "no machine review has been generated. Acceptance rests on a grounded review, not on a green test run.",
+                by="machine",
+                remedy="rein review generate",
+            )
         ]
-    blockers = review_policy.blocking_reasons(review, review.effective_risk)
+    # What the review leaves for a person: the policy's blocking reasons, the cards nobody has
+    # answered, the expertise a high-risk domain is missing. The freeze used to be a step of its
+    # own (`rein review complete`) in front of this check; approving is what freezes it now
+    # (`record_approval`), so the wall it guarded is read here directly.
+    blockers: list[str] = list(human_review.completion_blockers(review, dict(review.human)))
     # Three documents say a later commit leaves the review stale. Only the UI pane had ever
     # checked, so generate → commit → approve opened acceptance over code no reviewer saw. Asked on
     # the product's content rather than on HEAD's id, because the workflow's own
     # `review.yaml` commit is a later commit and must not invalidate the thing it records
     # (`review_reading.freshness`).
     if reason := review_reading.freshness(repo, review, state).reason:
-        blockers.append(reason)
-    if review.human_status != "frozen":
-        blockers.append(
-            f"the human review is '{review.human_status}', not 'frozen' — "
-            "complete it in the review UI (`rein review complete`)"
-        )
+        blockers.append(Blocker(reason, by="machine", remedy="rein review generate"))
+    # Not the code but what was read of it. A review taken without a reading does not answer for a
+    # repository that now asks for one, and one taken with it holds findings over an acceptance
+    # whose person switched that reading off. Read from the file only when it is what the chain
+    # records, as every reader of it does.
+    try:
+        readings = reviews_cmd.require_bound(repo).readings
+    except reviews_cmd.ReviewsError as exc:
+        blockers.append(str(exc))
+    else:
+        for name, wanted, read in (
+            ("actual_extraction", readings.actual_extraction, review.extraction_read),
+            ("comparison", readings.comparison, review.comparison_read),
+        ):
+            if read != wanted:
+                blockers.append(
+                    Blocker(
+                        f"the machine review was generated {'with' if read else 'without'} the "
+                        f"{name.replace('_', ' ')}, and reviews.yaml now has acceptance.{name} "
+                        f"{'on' if wanted else 'off'}",
+                        by="machine",
+                        remedy="rein review generate",
+                    )
+                )
+        if review.reviews_read != readings.reviews:
+            blockers.append(
+                Blocker(
+                    f"the machine review read the whole change for {', '.join(review.reviews_read) or 'nothing'}, "
+                    f"and reviews.yaml now has acceptance.reviews {', '.join(readings.reviews) or 'empty'}",
+                    by="machine",
+                    remedy="rein review generate",
+                )
+            )
     return blockers
 
 
@@ -295,7 +358,7 @@ def _audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Con
         now=datetime.now(timezone.utc),
         max_age=audit.max_age_days(config),
     )
-    return [reason] if reason else []
+    return [Blocker(reason, by="machine", remedy="rein audit run")] if reason else []
 
 
 def _mandate_audit_blockers(repo: repo_mod.Repo, state: models.State, config: models.Config | None) -> list[str]:
@@ -413,17 +476,51 @@ def _boundary_blockers(
             "Fetch the commits the review was taken on, then ask again."
         ]
     include, exclude = plan.scope
+    expansions = gate_guard.expansions_in_force(repo, state)
     outside = [
         (path, why)
         for path in sorted({entry for entry in out.split("\0") if entry})
-        if (why := gate_guard.outside_the_mandate(path, include=include, exclude=exclude, guarded=settings.paths))
+        if (
+            why := gate_guard.outside_the_mandate(
+                path, include=include, exclude=exclude, guarded=settings.paths, expansions=expansions, granted=False
+            )
+        )
     ]
     if not outside:
         return []
+    blockers: list[str] = []
+    proposed = [path for path, _ in outside if expansions.get(path) == "proposed"]
+    if proposed:
+        blockers.append(
+            Blocker(
+                f"{len(proposed)} path(s) a repair wrote outside the approved mandate's scope wait for your "
+                f"decision: {', '.join(proposed[:_NAMED_PATHS])}"
+                + (f" (and {len(proposed) - _NAMED_PATHS} more)" if len(proposed) > _NAMED_PATHS else "")
+                + ". The repair put the fix where the defect came from; answer each one's card in the review "
+                "— adopt it into the scope, or refuse it and `rein build` takes it back out.",
+                by="human",
+                remedy="rein ui",
+            )
+        )
+    # A path a person refused is still in the change only until the next `rein build`, which takes it
+    # back out (`build_loop._revert_refused_expansions`): the machine's to clear, not a question.
+    refused = [path for path, _ in outside if expansions.get(path) == "refused"]
+    if refused:
+        blockers.append(
+            Blocker(
+                f"{len(refused)} path(s) you refused to widen the mandate to are still in the change: "
+                f"{', '.join(refused[:_NAMED_PATHS])}",
+                by="machine",
+                remedy="rein build",
+            )
+        )
+    outside = [(path, why) for path, why in outside if path not in proposed and path not in refused]
+    if not outside:
+        return blockers
     named = ", ".join(path for path, _ in outside[:_NAMED_PATHS])
     more = f" (and {len(outside) - _NAMED_PATHS} more)" if len(outside) > _NAMED_PATHS else ""
     reasons = sorted({why for _, why in outside})
-    return [
+    return blockers + [
         f"{len(outside)} path(s) in the change this review read are {' and '.join(reasons)}: "
         f"{named}{more}. The mandate is what authorizes a change to the product, and these were "
         "not covered by the one that was approved — a change that never went through `rein build` "
@@ -433,6 +530,23 @@ def _boundary_blockers(
         f"`cycle.base_commit` that is wrong: the reviewers read {base[:12]}..{head[:12]} as this "
         "cycle's change and were shown that code too."
     ]
+
+
+def _integration_blockers(repo: repo_mod.Repo, config: models.Config | None, gate: str) -> list[str]:
+    """Can what acceptance approves be integrated as it stands? Asked before, because approving does it.
+
+    `integrate.obstacles` is the one list, read here and again by the integration itself: an
+    approval whose integration then stops would hand a person back a decision they already made.
+    """
+    if gate != "acceptance" or config is None:
+        return []
+    from rein import integrate, pr_stack
+
+    try:
+        docs = pr_stack.Documents.read(repo)
+    except (pr_stack.StackError, models.DocumentError, store_mod.StoreError) as exc:
+        return [f"what approving would integrate could not be read: {exc}"]
+    return [Blocker(o.text, by=o.by, remedy=o.remedy) for o in integrate.obstacles(repo, docs)]
 
 
 def _baseline_blockers(state: models.State, gate: str) -> list[str]:
@@ -657,6 +771,7 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _chain_blockers(state, gate, already_approved_blocks=already_approved_blocks)
     blockers += _baseline_blockers(state, gate)
     blockers += _boundary_blockers(repo, plan, state, review, gate)
+    blockers += _integration_blockers(repo, config, gate)
     blockers += _audit_blockers(repo, state, config, gate)
     blockers += _change_request_blockers(plan, state, gate)
     blockers += _clarification_blockers(repo, gate)
@@ -666,7 +781,16 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _irreversible_blockers(plan, gate)
     blockers += _worktree_blockers(repo, plan, gate)
     blockers += _review_blockers(repo, review, state, gate)
-    return blockers
+    # Two checks can reach the same sentence — a stale review read at HEAD by the review's own
+    # check and at the work branch's tip by the integration's, when they are one commit — and a
+    # person is told each thing once.
+    told: set[str] = set()
+    once: list[str] = []
+    for blocker in blockers:
+        if str(blocker) not in told:
+            told.add(str(blocker))
+            once.append(blocker)
+    return once
 
 
 # --- what an approval covers -------------------------------------------------------
@@ -714,7 +838,11 @@ def approval_subject(repo: repo_mod.Repo, gate: str) -> dict[str, str]:
         subject["environment_digest"] = config.environment_digest()
     if review is not None and review.is_generated:
         subject["machine_digest"] = review.machine_digest()
-        subject["human_digest"] = review.human_digest()
+        # At acceptance, the human half *as this approval freezes it* (`record_approval`): the
+        # answers on screen with the status the approval gives them, so the receipt binds the
+        # document the approval writes rather than the one it replaces.
+        approved = _approved_human(review) if gate == "acceptance" else review
+        subject["human_digest"] = approved.human_digest()
     if gate == "mandate":
         # One digest over the documents the mandate is written from, in a fixed order, so the
         # receipt binds the prose a human read and not only the machine-readable plan. Present-only
@@ -724,6 +852,17 @@ def approval_subject(repo: repo_mod.Repo, gate: str) -> dict[str, str]:
             subject["artifact_digest"] = digests.of(present)
     subject["validation_digest"] = digests.of({"gate": gate, "readiness": "clear"})
     return subject
+
+
+def _approved_human(review: models.Review) -> models.Review:
+    """The review with its human half frozen, as approving acceptance writes it; unchanged if it cannot be."""
+    if review.human_status == "frozen":
+        return review
+    try:
+        frozen = human_review.freeze(review, dict(review.human))
+    except ValueError:
+        return review  # `readiness` names why; nothing is approved over it
+    return models.Review({**review.raw, "human": frozen})
 
 
 def crossing_digest(repo: repo_mod.Repo, plan: models.Plan, config: models.Config, task_id: str) -> str:
@@ -1016,6 +1155,28 @@ def record_approval(
         receipt.update({key: subject[key] for key in _RECEIPT_DIGESTS if subject.get(key)})
 
         raw["gates"][gate] = {"status": "approved", "receipt": receipt}
+        # Approving acceptance freezes the answers it is approved on, in the same write: a freeze of
+        # its own (`rein review complete`) was a second act for one decision.
+        residue_count = -1
+        if gate == "acceptance":
+            review = tx.store.read_review()
+            if review is None or not review.is_generated:
+                raise ApprovalError("there is no machine review for acceptance to be approved on")
+            approved = _approved_human(review)
+            if approved.human_status != "frozen":
+                # `readiness` refused this already; asked again under the lock, because an answer
+                # withdrawn between that check and this write would otherwise be approved unfrozen.
+                blockers = human_review.completion_blockers(review, dict(review.human))
+                raise ApprovalError("the answers cannot be frozen:\n  - " + "\n  - ".join(blockers))
+            if approved.human_digest() != str(subject.get("human_digest", "")):
+                raise ApprovalError(
+                    "the answers in the review moved while the confirmation was on screen. Re-run "
+                    f"`rein approve {gate}`."
+                )
+            residue_count = sum(len(v) for v in human_review.residue(approved).values())
+            if review.human_status != "frozen":
+                tx.write("review", approved.raw, expect_digest=store_mod.read_digest(review))
+                tx.append("human_review_frozen", cycle_id=state.cycle_id, actor="local-confirmation")
         # And nothing else. This used to write `current_phase` in the same breath, which made one
         # transaction the author of two facts — what has been permitted, and how far the work has
         # got — that could then disagree. Where the cycle stands is read off the gates
@@ -1090,6 +1251,14 @@ def record_approval(
                 )
 
         tx.write("state", raw, expect_digest=seen)
+    if residue_count >= 0:
+        observations.record(
+            "acceptance_residual",
+            project=repo.root.name,
+            cycle_id=state.cycle_id,
+            value=float(residue_count),
+            subject=approval_id,
+        )
     if gate == FREEZING_GATE:
         observations.record(
             "unknown_at_mandate", project=repo.root.name, cycle_id=state.cycle_id, value=admitted, subject=approval_id
@@ -1272,6 +1441,12 @@ def confirm_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         # the notes are the agent's claim that they were made, and approving closes them.
         say(f"{len(addressed)} change request(s) you raised were addressed:")
         say(change_request.render(addressed) + "\n")
+    if gate == "acceptance":
+        # What this approval actually takes on: not the checks that passed, which are the machine's
+        # and are on the record, but what was left that nothing could settle.
+        say("What you are accepting that the machine could not settle:")
+        say(human_review.render_residue(named["residue"]) + "\n")
+        say(named["integration"] + "\n")
     say(AUTHORITY_NOTE)
     if not common.ask_yes_no(f"Approve gate '{gate}'?"):
         raise ApprovalError(
@@ -1297,6 +1472,10 @@ class Naming(TypedDict):
     delta: list[dict[str, str]]
     documents: list[dict[str, str]]
     adversarial_off: list[dict[str, str]]
+    #: At acceptance: what is left that the machine could not settle (`human_review.residue`).
+    residue: dict[str, list[str]]
+    #: At acceptance: what approving will do to the mainline (`integration_note`).
+    integration: str
 
 
 def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> Naming:
@@ -1336,6 +1515,8 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         "delta": [],
         "documents": [],
         "adversarial_off": [],
+        "residue": {},
+        "integration": "",
     }
     out["crossing"] = crossing_declarations(repo, gate)
     unasked = _unasked_decisions(repo, gate)
@@ -1351,6 +1532,11 @@ def naming(repo: repo_mod.Repo, gate: str, *, include_library: bool = True) -> N
         }
         for d in unasked
     ]
+    if gate == "acceptance":
+        review = store_mod.Store(repo).read_review()
+        if review is not None and review.is_generated:
+            out["residue"] = human_review.residue(review)
+        out["integration"] = integration_note(repo)
     if gate != FREEZING_GATE:
         return out
     try:
@@ -1787,7 +1973,7 @@ def render_lenses(rows: Sequence[Mapping[str, str]]) -> str:
 
 
 def approve_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) -> int:
-    """Confirm, re-check, record, report."""
+    """Confirm, re-check, record, carry out, report."""
     confirm_locally(repo, gate, subject)
     # Re-checked after the pause: the repository may have moved while the prompt waited, and
     # recording a second receipt over a gate something else opened is not a no-op.
@@ -1797,7 +1983,57 @@ def approve_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
         return 1
     approval_id = record_approval(repo, gate, subject)
     print(f"gate '{gate}' opened ({approval_id})")
-    return 0
+    if gate != "acceptance":
+        return 0
+    said, ok = integrate_approved(repo)
+    (print if ok else logger.error)(said)
+    return 0 if ok else 1
+
+
+def refresh_integration_target(repo: repo_mod.Repo) -> None:
+    """Read the forge's mainline before acceptance is approved, because approving integrates into it.
+
+    Readiness reads `origin/<mainline>` as last fetched and never fetches; the act that integrates is
+    the one that has to see the forge as it is (`integrate.refresh`).
+    """
+    from rein import integrate, pr_stack
+
+    try:
+        integrate.refresh(repo)
+    except (integrate.IntegrationError, pr_stack.StackError, models.DocumentError, store_mod.StoreError) as exc:
+        raise ApprovalError(str(exc)) from None
+
+
+def integration_note(repo: repo_mod.Repo) -> str:
+    """What approving acceptance will do next, said before the question rather than after it."""
+    from rein import integrate, pr_stack
+
+    try:
+        docs = pr_stack.Documents.read(repo)
+        mode = integrate.mode_of(repo, docs)
+    except (pr_stack.StackError, models.DocumentError, store_mod.StoreError) as exc:
+        return f"Approving integrates the work branch into the mainline; how could not be read: {exc}"
+    how = {
+        "stack": "lifts the stack's drafts and merges the whole stack, as merge commits",
+        "pull_request": "pushes the work branch, opens or lifts its pull request, and merges it",
+        "local": "merges the work branch into it here, in a scratch worktree",
+    }[mode]
+    return f"Approving integrates {docs.config.work_branch} into {docs.config.mainline}: it {how}."
+
+
+def integrate_approved(repo: repo_mod.Repo) -> tuple[str, bool]:
+    """Carry out an approved acceptance. `(what happened, whether it did)` — never raises.
+
+    The approval stands either way: it is on the record, and an integration that stopped is
+    finished by `rein integrate`, which asks nothing because the decision has been made.
+    """
+    from rein import integrate, pr_stack
+
+    try:
+        outcome = integrate.run(repo)
+    except (integrate.IntegrationError, pr_stack.StackError, models.DocumentError, store_mod.StoreError) as exc:
+        return f"the approval stands; integrating it did not complete: {exc}\nFinish it with `rein integrate`.", False
+    return f"integrated ({outcome.mode}): {', '.join(outcome.landed)}", True
 
 
 # --- CLI -------------------------------------------------------------------------
@@ -1822,6 +2058,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
+    if args.gate == "acceptance" and not args.check:
+        try:
+            refresh_integration_target(repo)
+        except ApprovalError as exc:
+            logger.error(str(exc))
+            return 1
     try:
         blockers = readiness(repo, args.gate)
     except ApprovalError as exc:

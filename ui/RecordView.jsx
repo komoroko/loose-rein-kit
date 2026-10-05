@@ -11,7 +11,7 @@ import { getJson } from "./api.js";
 import { Empty, Scroll, Warn } from "./parts.jsx";
 
 const ESCALATION_KINDS = new Set(["blocked", "merge_conflict", "integration_red", "no_runnable", "gate_violation"]);
-const OK_KINDS = new Set(["gate_approved", "task_done", "resolve", "security_review"]);
+const OK_KINDS = new Set(["gate_approved", "task_done", "resolve", "finding_resolved"]);
 
 // `needs_decision` is the server's word for "this event is still waiting on a human" — it is
 // computed in ui.py from events.ATTENTION_EVENTS, so the feed and the Now screen agree by

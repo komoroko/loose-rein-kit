@@ -12,6 +12,7 @@
 project:
   name: loose-rein-kit
   work_branch: build/loose-rein-kit   # `rein init --name X` rewrites this to build/X
+  mainline: main   # what acceptance integrates the work branch into
 
 execution:
   max_parallel: 3            # concurrent independent leaf tasks within the frontier
@@ -126,8 +127,6 @@ executor_profiles:
 agents:
   implementer:
     adapter: claude
-  code_reviewer:
-    adapter: claude
   # `model` is passed to the CLI, and the independence group a critical change is checked
   # against is derived from it (`<adapter>/<model>`) — so a separation written here is one the
   # launch actually makes. The extractor and the comparator must differ (plan 12.4).
@@ -137,14 +136,15 @@ agents:
   comparator:
     adapter: claude
     model: sonnet
-  # Deliberately the extractor's model, not the comparator's: 12.4 constrains the
-  # extractor/comparator pair and says nothing about this role, and matching the extractor lets
-  # the two stages share one reading of the source half of the change
-  # (`review_transport.SharedReading`). They still reach independent verdicts — the session is
-  # branched, never continued — and only this role is then sent the test half, because tests run
-  # with your credentials and because a test name paraphrases the requirement the blind extractor
-  # must not read.
-  security_reviewer:
+  # The reviewer reads every review `.rein/reviews.yaml` adds, at every stage: each task as it is
+  # built, and the whole change before acceptance. Deliberately the extractor's model, not the
+  # comparator's: 12.4 constrains the extractor/comparator pair and says nothing about this role,
+  # and matching the extractor lets the two share one reading of the source half of the whole
+  # change (`review_transport.SharedReading`). They still reach independent verdicts — the session
+  # is branched, never continued — and only this role is then sent the test half, because tests
+  # run with your credentials and because a test name paraphrases the requirement the blind
+  # extractor must not read.
+  reviewer:
     adapter: claude
     model: opus
 

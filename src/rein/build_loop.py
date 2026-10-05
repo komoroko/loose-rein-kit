@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import fnmatch
 import json
 import logging
@@ -58,7 +59,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -114,6 +115,10 @@ logger = logging.getLogger(__name__)
 #: branch that introduced the code. Its own name rather than `pr_stack.RESTACK_WORKTREE`, because
 #: the propagation that follows creates that one and git refuses the same path twice.
 _GATE4_WORKTREE = "_gate4"
+
+#: What `_verify_repair` refuses to land: a repair with no test, one that changed only tests, and one
+#: whose tests pass without it.
+_REPAIR_REFUSED = frozenset({"untested", "test_only", "inert"})
 
 #: What the integration reviewer's findings file is named after. Not a task id — the subject is the
 #: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
@@ -269,6 +274,11 @@ _RUN_OUTCOME: Mapping[int, str] = {
 }
 
 
+#: The name the reviewer step is recorded under: its events, its findings file, and the step a
+#: task's failure names.
+REVIEW_STEP = "review"
+
+
 @dataclass(frozen=True)
 class GateStep:
     """One quality-gate step, normalized from config.
@@ -295,7 +305,7 @@ class GateStep:
     executor_profile: str = ""
     #: The role an agent step runs as, and the argv that launches that role's adapter. Dropping
     #: it makes the step launch `agents.implementer`'s adapter while calling itself
-    #: `code_reviewer` — two roles the operator configured separately become one process.
+    #: `reviewer` — two roles the operator configured separately become one process.
     agent_role: str = ""
     agent_argv: tuple[str, ...] = ()
     #: Glob patterns (fnmatch-style) restricting this step to a matching diff. Empty: every
@@ -342,6 +352,8 @@ class Config:
     timeout_agent: float | None
     adapter_argv: tuple[str, ...]
     launch_retries: int
+    #: What the grounded review reads before acceptance (`reviews.yaml`).
+    readings: models.Readings
     #: Dollars this cycle may spend before the loop stops and hands back. 0.0 = no ceiling.
     max_cost_usd: float = 0.0
     #: The question each custom review asks (`reviews.yaml`).
@@ -361,7 +373,12 @@ class Config:
         through a task.
 
         The command steps come from `config.yaml` and are frozen with the mandate; the reviewer
-        steps come from `reviews.yaml`, which is not (`models.Reviews`). Both run as one DoD.
+        step comes from `reviews.yaml`, which is not (`models.Reviews`). Both run as one DoD.
+
+        One reviewer step, reading for every review `build` adds, or none when it adds none. It
+        reads each batch before it merges and a join whose merge resolved a conflict — that tree
+        holds code no reviewer was shown — and sends a finding back as many times as
+        `review_policy.repair_rounds` allows, the same budget acceptance repairs its findings on.
         """
         commands = tuple(
             GateStep(
@@ -378,19 +395,22 @@ class Config:
             )
             for step in config.quality_gate
         )
-        readers = tuple(
-            GateStep(
-                name=step.name,
-                kind="agent",
-                retries=max(0, step.retries),
-                required=True,
-                agent_role="code_reviewer",
-                agent_argv=adapters.launch_argv(config, "code_reviewer"),
-                paths=step.paths,
-                stage=step.stage,
-                reviews=step.reviews,
+        asked = reviews.reviews_at("build")
+        readers = (
+            (
+                GateStep(
+                    name=REVIEW_STEP,
+                    kind="agent",
+                    retries=max(0, config.repair_rounds),
+                    required=True,
+                    agent_role="reviewer",
+                    agent_argv=adapters.launch_argv(config, "reviewer"),
+                    stage="both",
+                    reviews=asked,
+                ),
             )
-            for step in reviews.steps
+            if asked
+            else ()
         )
         steps = commands + readers
         argv = adapters.launch_argv(config, "implementer")
@@ -408,6 +428,7 @@ class Config:
             adapter_argv=argv,
             max_cost_usd=config.max_cost_usd,
             launch_retries=max(0, config.launch_retries),
+            readings=reviews.readings,
             questions=reviews.questions,
         )
 
@@ -984,6 +1005,8 @@ class Orchestrator:
         #: Set once an acceptance warm-up could not be taken. Retrying it per task would spend a session
         #: limit on an optimization, and the gate takes the reading either way (`_warm_reading`).
         self._warming_off = False
+        #: Why each task's last repair was refused (`_accept_repair`), handed to its next one.
+        self._repair_refusals: dict[str, str] = {}
         # What each task's gate steps were established green against, keyed by task id. Written
         # into `state.yaml` beside the `done` it justifies — this is the auditable half.
         self._evidence: dict[str, dict[str, Any]] = {}
@@ -1707,7 +1730,7 @@ class Orchestrator:
             )
         return flags
 
-    def _leaf_env(self, task: dag.Task, role: str = "implementer") -> dict[str, str] | None:
+    def _leaf_env(self, task: dag.Task, role: str = "implementer", *, repair: bool = False) -> dict[str, str] | None:
         """The environment an implementer runs with: the control socket, a scoped token, and who it is.
 
         The token is scoped to this run and this task, granting only what a leaf legitimately
@@ -1724,6 +1747,11 @@ class Orchestrator:
         None when there is no control plane (a dry run), which means the leaf inherits this
         process's environment and its `rein decision add` will refuse rather than write
         into a worktree that is about to be deleted.
+
+        `repair` is the launch of a repair, whose token also carries `scope.repair`: leave to write
+        where the mandate's `include` does not reach, which the gate guard asks this run's control
+        plane about. Carried by the token rather than written anywhere, so it reaches this launch
+        alone and dies with the run.
         """
         if self.control is None:
             return None
@@ -1731,7 +1759,7 @@ class Orchestrator:
             self.control.secret,
             run_id=self.run_id,
             task_id=task.id,
-            capabilities=sorted(control_plane.LEAF_CAPABILITIES),
+            capabilities=sorted(control_plane.REPAIR_CAPABILITIES if repair else control_plane.LEAF_CAPABILITIES),
             ttl_sec=int(self.config.timeout_agent or control_plane.DEFAULT_TTL_SEC),
         )
         declared = task_environment(task)[0] if role == "implementer" else {}
@@ -1823,7 +1851,7 @@ class Orchestrator:
 
     def _review_subject(self, task: dag.Task) -> build_prompts.ReviewSubject:
         cwd = self.ws.worktree_path(task.id)
-        written = self._write_dossier(task, cwd, "code_reviewer")
+        written = self._write_dossier(task, cwd, "reviewer")
         where = Path(cwd).relative_to(self.root) if Path(cwd).is_relative_to(self.root) else Path(cwd)
         branch = self.ws.branch_for(task.id)
         return build_prompts.ReviewSubject(
@@ -1903,7 +1931,7 @@ class Orchestrator:
         file — is a `stop`. When the launch never happened every subject gets the `fault`: the
         machine stopping a reviewer is not a verdict about any task.
         """
-        role = step.agent_role or "code_reviewer"
+        role = step.agent_role or "reviewer"
         ids = [task.id for task in subjects]
         argv = step.agent_argv or self.config.adapter_argv
         target = dossier.findings_path(self.root, _BATCH_REVIEW_SUBJECT.format(ids="+".join(ids)))
@@ -2334,7 +2362,7 @@ class Orchestrator:
         The DoD is the only automated evidence a task's `done` rests on, and until this existed
         nobody ever asked whether it could go red. The tests it runs were written by the
         implementer in the same launch as the code they test; the blind extractor is deliberately
-        never shown them (`review_reading.split_tests`), and the security reviewer reads them only
+        never shown them (`review_reading.split_tests`), and the change reviewer reads them only
         for what an attacker could do with them. So the Expected/Actual split this whole workflow is
         built on reached the code and — until the per-task reviewer was asked the question named
         below — never once the tests, and a test that asserts nothing produces a green that
@@ -2430,41 +2458,20 @@ class Orchestrator:
         self, task: dag.Task, control_base: str, patch: str, commands: Sequence[GateStep]
     ) -> tuple[str | None, str]:
         """Run `commands` over `control_base` + `patch` and report which of them went red."""
-        with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as handle:
-            handle.write(patch)
-            patch_file = handle.name
-        try:
-            with build_git.scratch_worktree(
-                self.repo, self.config.worktree_dir, f"control-{task.id}", control_base, _late_run
-            ) as control_cwd:
-                rc, out = _late_run(["git", "apply", patch_file], cwd=control_cwd)
-                if rc != 0:
-                    return self._control_undetermined(
-                        f"the test half did not apply onto {control_base[:12]}: {out[-300:]}"
-                    )
-                for step in commands:
-                    # `note=False`: this green is a fact about the control tree, not about the
-                    # task's, and the task's `evidence.steps` is the list of what its own DoD
-                    # established. The ledger still records it — it is a true fact about a real
-                    # tree, keyed on that tree's fingerprint, so it can never be mistaken for one
-                    # about the task's.
-                    if self._run_cmd_step(step, control_cwd, note=False):
-                        self._note_control("discriminating", base=control_base, step=step.name)
-                        print(
-                            f"    [control] {task.id}: '{step.name}' goes red without the change "
-                            "— the test half is not inert"
-                        )
-                        return None, ""
-        finally:
-            Path(patch_file).unlink(missing_ok=True)
+        result, said = self._red_without(f"control-{task.id}", control_base, patch, commands)
+        if result == "undetermined":
+            return self._control_undetermined(said)
+        if result == "discriminating":
+            self._note_control("discriminating", base=control_base, step=said)
+            print(f"    [control] {task.id}: '{said}' goes red without the change — the test half is not inert")
+            return None, ""
         # Deliberately not noted: `evidence.negative_control` justifies a `done`, and this verdict
         # is the one that stops there being one. It travels as a task failure instead — the same
         # channel a red step uses, under the step name `NEGATIVE_CONTROL` — so the event chain
         # carries it and the next attempt inherits the summary.
-        names = ", ".join(step.name for step in commands)
         return NEGATIVE_CONTROL, (
             f"The quality gate is green, and it is green without your change. Re-running "
-            f"{names} over {control_base[:12]} with only this task's test files applied passed "
+            f"{said} over {control_base[:12]} with only this task's test files applied passed "
             "every step, which means no test in this change exercises it: whatever the code now "
             "does, the suite would say the same if the code were not there.\n"
             "Add or fix a test that fails against the code as it was and passes against the code "
@@ -2473,6 +2480,34 @@ class Orchestrator:
             "the acceptance criterion that has no observable form, rather than writing a test that "
             "cannot fail."
         )
+
+    def _red_without(self, label: str, base: str, patch: str, commands: Sequence[GateStep]) -> tuple[str, str]:
+        """Apply `patch` (a test half) onto `base` alone and run `commands` there.
+
+        `("discriminating", step)` when a step goes red — the tests fail against the code as it
+        was; `("inert", names)` when every step stays green; `("undetermined", why)` when the
+        experiment could not be run, which is evidence in neither direction. The one experiment
+        both the task's negative control and a repair's proof take (`_verify_repair`).
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as handle:
+            handle.write(patch)
+            patch_file = handle.name
+        try:
+            with build_git.scratch_worktree(self.repo, self.config.worktree_dir, label, base, _late_run) as control_cwd:
+                rc, out = _late_run(["git", "apply", patch_file], cwd=control_cwd)
+                if rc != 0:
+                    return "undetermined", f"the test half did not apply onto {base[:12]}: {out[-300:]}"
+                for step in commands:
+                    # `note=False`: this green is a fact about the control tree, not about the
+                    # task's, and the task's `evidence.steps` is the list of what its own DoD
+                    # established. The ledger still records it — it is a true fact about a real
+                    # tree, keyed on that tree's fingerprint, so it can never be mistaken for one
+                    # about the task's.
+                    if self._run_cmd_step(step, control_cwd, note=False):
+                        return "discriminating", step.name
+        finally:
+            Path(patch_file).unlink(missing_ok=True)
+        return "inert", ", ".join(step.name for step in commands)
 
     def _control_undetermined(self, detail: str) -> tuple[str | None, str]:
         self._note_control("undetermined", detail=detail)
@@ -2573,7 +2608,7 @@ class Orchestrator:
         a property of the whole change and it only ever rises, so this stops the warming for the
         rest of the run the same way an unanswerable adapter does.
 
-        **The `ReadOut`s are the point of the return type.** This launched a security reviewer and
+        **The `ReadOut`s are the point of the return type.** This launched a change reviewer and
         then threw its answer away: the finding was paid for here and first read at acceptance,
         by which time the code it names has been built on. `_repair_warm_findings` reads them. An
         empty list means no reading was taken — a skip, a chain still landing, or an adapter that
@@ -2582,6 +2617,9 @@ class Orchestrator:
         if self.dry_run or self._warming_off or self.config.raw.composition == review_reading.WHOLE:
             return []
         if not task.scope_include:
+            return []
+        if not (self.config.readings.actual_extraction or self.config.readings.reviews):
+            # Nothing the gate reads is a launch: a reading taken here would warm no key.
             return []
         try:
             # The same base the gate will resolve, not the plan's field: they differ whenever the
@@ -2618,7 +2656,7 @@ class Orchestrator:
             return [
                 review_reading.warm(
                     self.repo,
-                    review_transport.StagedReviewers(self.repo, config=self.config.raw),
+                    review_transport.StagedReviewers(self.repo, config=self.config.raw, readings=self.config.readings),
                     reading=reading,
                     base=base,
                     head=head,
@@ -2629,6 +2667,7 @@ class Orchestrator:
                     host_surface=review_reading.host_surface_digest(self.repo, head),
                     config=self.config.raw,
                     cache=review_cache.StageCache(self.repo.root),
+                    readings=self.config.readings,
                 )
                 for reading in due
             ]
@@ -2645,14 +2684,14 @@ class Orchestrator:
     def _repair_warm_findings(
         self, task: dag.Task, readouts: Sequence[review_reading.ReadOut], *, at_tip: bool
     ) -> bool:
-        """Hand `task` the blocking security findings its readings found in its own code — at the tip only.
+        """Hand `task` the open findings its readings found in its own code — at the tip only.
 
         **The readings were already taken and already paid for** (`_warm_reading`); until now their
-        answers were written to the stage cache and read by nobody. So a security finding about
+        answers were written to the stage cache and read by nobody. So a finding about
         code a task wrote was first seen at acceptance — after every later task had been built on
         top of it. Reading it here costs nothing that was not already spent, and the judge is still
-        a different one: the finding comes from the security reviewer's own launch, validated by
-        `security_review.run_security_review`, and the fixer is an implementer.
+        a different one: the finding comes from the change reviewer's own launch, validated by
+        `change_review.run_change_review`, and the fixer is an implementer.
 
         **Only a finding `task` owns, and only while `task`'s own work is the tip of the branch.** A
         repair here is committed on top of the work branch, and a pull-request stack is cut along
@@ -2679,8 +2718,10 @@ class Orchestrator:
         tasks = self._load_graph().tasks
         owned: list[findings_mod.Attribution] = []
         for readout in readouts:
-            for finding in readout.security.findings:
-                if finding.get("blocking") is not True:
+            for finding in readout.review.findings:
+                # Every open one, whatever its severity: severity decides whether a finding holds
+                # acceptance shut, not whether code a task owns gets repaired (`repair.route`).
+                if finding.get("status") in {"resolved", "disputed"}:
                     continue
                 paths = [
                     str(anchor.get("path", ""))
@@ -2689,11 +2730,11 @@ class Orchestrator:
                 ]
                 hit = next((p for p in paths if findings_mod.owner_of_path(tasks, p) == task.id), "")
                 if hit:
-                    owned.append(findings_mod.Attribution(str(finding.get("id", "SEC-?")), "security", task.id, hit))
+                    owned.append(findings_mod.Attribution(str(finding.get("id", "F-?")), "finding", task.id, hit))
         if not owned:
             return False
         print(
-            f"    [review] {task.id}: the security review found {len(owned)} blocking finding(s) in its own "
+            f"    [review] {task.id}: the review of the change found {len(owned)} finding(s) in its own "
             "scope — repairing them here rather than at acceptance"
         )
         self._repair(task, repair_mod.Repair(task.id, tuple(owned)), where="review")
@@ -3406,7 +3447,7 @@ class Orchestrator:
 
         Its `must_fix` findings go back to the integration fixer within this step's own retries,
         the same shape a red command step takes; unresolved ones stop the batch rather than being
-        reported as passed. Its `consider` findings are attributed to the merged task whose
+        reported as passed. Its `question` findings are attributed to the merged task whose
         declared scope owns the anchor — the same derivation acceptance uses to decide which task
         answers a finding (`findings.owner_of_path`) — so they reach the human through
         `brief.residual_findings` beside that task's own review, stamped with the tree they were
@@ -3439,7 +3480,7 @@ class Orchestrator:
                 ),
                 cwd=self.root,
                 where=f"{ids}: the '{step.name}' agent step over the merged tree",
-                role=step.agent_role or "code_reviewer",
+                role=step.agent_role or "reviewer",
             )
             if not target.exists():
                 raise StopLoop(
@@ -3515,7 +3556,7 @@ class Orchestrator:
         except StopLoop as exc:
             return LeafOutcome(ok=False, log=str(exc))
 
-    def _gate_violations(self, paths: list[str]) -> list[tuple[str, str]]:
+    def _gate_violations(self, paths: list[str], *, repair: bool = False) -> list[tuple[str, str]]:
         """Gate-guard verdict for each path; [(path, deny reason)] for the denied ones.
 
         The merge/finalize-stage twin of gate_guard's edit-time and commit-stage checkpoints.
@@ -3524,8 +3565,12 @@ class Orchestrator:
         (a diff vs HEAD) can never see it again — so what a task actually changed is re-checked
         in code here, before it lands. template_mode / enforce_hook short-circuit inside
         evaluate() exactly as they do for the other checkpoints.
+
+        `repair` says whose change it is: a repair's may reach past the mandate's `include`, a
+        task's may not. The loop knows which it is checking, so it says so rather than letting the
+        guard ask this process's environment, which is the orchestrator's and carries no grant.
         """
-        verdicts = ((p, gate_guard.evaluate(str(self.repo.path(p)), self.repo)) for p in paths)
+        verdicts = ((p, gate_guard.evaluate(str(self.repo.path(p)), self.repo, repair=repair)) for p in paths)
         return [(p, reason) for p, (ok, reason) in verdicts if not ok]
 
     def _escalate_gate_violation(self, task_id: str, where: str, violations: list[tuple[str, str]]) -> None:
@@ -3777,7 +3822,7 @@ class Orchestrator:
         roles = {"implementer": self.config.adapter_argv}
         for step in self.config.steps:
             if step.kind == "agent" and step.agent_argv:
-                roles[step.agent_role or "code_reviewer"] = step.agent_argv
+                roles[step.agent_role or "reviewer"] = step.agent_argv
         return preflight.check(
             self.config.raw, self.config.raw.quality_gate, roles, runtime=executors.container_runtime()
         )
@@ -4748,6 +4793,7 @@ class Orchestrator:
         # run that repairs here. Without it `_repair` has no record of which steps the mandate approved
         # as already red, and it stops the loop over a failure the plan was approved on top of.
         self._load_baseline()
+        self._revert_refused_expansions()
         repaired, read = 0, False
         for round_no in range(rounds + 1):
             print(f"\n[acceptance] reading the change ({'first reading' if not round_no else f'round {round_no}'})")
@@ -4796,7 +4842,11 @@ class Orchestrator:
         from rein import review as review_mod
 
         try:
-            review_mod.generate(self.repo, review_transport.StagedReviewers(self.repo), actor="rein build")
+            review_mod.generate(
+                self.repo,
+                review_transport.StagedReviewers(self.repo, readings=self.config.readings),
+                actor="rein build",
+            )
             return True
         except review_policy.AdapterFailure as failure:
             if faults.classify_launch(failure.rc, failure.output) is faults.Fault.ENV_TRANSIENT:
@@ -4850,11 +4900,14 @@ class Orchestrator:
         """
         print(f"    [{where}] {task.id}: {len(item.items)} finding(s) → the implementer")
         slice_branch = self._slice_branch(task.id, where=where)
+        # The repair may write where the mandate's `include` does not reach — its launch's token says
+        # so (`_leaf_env`) — and every path it does is put to a human (`_record_expansions`).
         if slice_branch:
-            self._repair_on_slice(task, item, slice_branch, where=where)
+            landed = self._repair_on_slice(task, item, slice_branch, where=where)
         else:
-            self._repair_on_work_branch(task, item, where=where)
-        self._restate_evidence(task.id, self._gate_after_repair(task, where=where))
+            landed = self._repair_on_work_branch(task, item, where=where)
+        if landed:
+            self._restate_evidence(task.id, self._gate_after_repair(task, where=where))
 
     def _slice_branch(self, task_id: str, *, where: str = "acceptance") -> str:
         """The stack branch that introduced this task's code, or "" when this is not a stack.
@@ -4879,25 +4932,30 @@ class Orchestrator:
             return ""
         return found.branch if review_reading.commit_exists(self.repo, found.branch) else ""
 
-    def _repair_on_work_branch(self, task: dag.Task, item: repair_mod.Repair, *, where: str = "acceptance") -> None:
-        """The single-pull-request case: repair where everything is already merged."""
+    def _repair_prompt(self, task: dag.Task, item: repair_mod.Repair) -> str:
+        return build_prompts.gate_four_fix_prompt(
+            task,
+            item.render(),
+            gate_cmds=self.config.gate_cmds,
+            refused=self._repair_refusals.get(task.id, ""),
+        )
+
+    def _repair_on_work_branch(self, task: dag.Task, item: repair_mod.Repair, *, where: str = "acceptance") -> bool:
+        """The single-pull-request case: repair where everything is already merged. True when it landed."""
         before = self.ws.head()
         self._launch(
-            adapters.command(
-                self.config.adapter_argv,
-                build_prompts.gate_four_fix_prompt(task, item.render(), gate_cmds=self.config.gate_cmds),
-                access=adapters.WRITE,
-            ),
+            adapters.command(self.config.adapter_argv, self._repair_prompt(task, item), access=adapters.WRITE),
             cwd=self.root,
             where=f"{task.id}: the repair",
+            env=self._leaf_env(task, repair=True),
             task_id=task.id,
             role="implementer",
         )
-        self._accept_repair(task, self.root, before, where=where)
+        return self._accept_repair(task, item, self.root, before, where=where)
 
     def _repair_on_slice(
         self, task: dag.Task, item: repair_mod.Repair, branch: str, *, where: str = "acceptance"
-    ) -> None:
+    ) -> bool:
         """The stacked case: repair on the slice that introduced the code, then merge it upward."""
         print(f"    [{where}] {task.id}: on its own slice {branch}, then up the stack")
         with build_git.scratch_worktree(self.repo, self.config.worktree_dir, _GATE4_WORKTREE, branch, common.run) as (
@@ -4905,21 +4963,35 @@ class Orchestrator:
         ):
             before = self.ws.head(cwd=path)
             self._launch(
-                adapters.command(
-                    self.config.adapter_argv,
-                    build_prompts.gate_four_fix_prompt(task, item.render(), gate_cmds=self.config.gate_cmds),
-                    access=adapters.WRITE,
-                ),
+                adapters.command(self.config.adapter_argv, self._repair_prompt(task, item), access=adapters.WRITE),
                 cwd=path,
                 where=f"{task.id}: the repair on {branch}",
+                env=self._leaf_env(task, repair=True),
                 task_id=task.id,
                 role="implementer",
             )
-            self._accept_repair(task, path, before, where=where)
-        self._propagate(task, where=where)
+            landed = self._accept_repair(task, item, path, before, where=where)
+        if landed:
+            self._propagate(task, where=where)
+        return landed
 
-    def _accept_repair(self, task: dag.Task, cwd: str, before: str, *, where: str = "acceptance") -> None:
-        """Check what the repair touched, then commit it. Raises rather than letting either slide.
+    def _accept_repair(
+        self, task: dag.Task, item: repair_mod.Repair, cwd: str, before: str, *, where: str = "acceptance"
+    ) -> bool:
+        """Check what the repair touched, commit it, and land it only if it proves itself. True when landed.
+
+        **Where it may write is the mandate's scope, not the task's.** The task's declared scope says
+        where its work was expected to land, which is how a finding is charged to it
+        (`findings.owner_of_path`); it is not a boundary a human drew. The cause of a defect is
+        where it is, and a repair held to the task's paths can only treat the symptom that showed up
+        there. Crossing into another task's paths stays inside what the mandate delegated, so it
+        lands and is recorded. What the mandate does not cover, the guard still refuses
+        (`_gate_violations`) — that line a human drew.
+
+        **And it lands only with a test that fails without it** (`_verify_repair`). A repair the
+        loop cannot show reproduces the defect is a claim, and the reading that follows may simply
+        not see the symptom any more. Refused, it is undone, recorded with why, and handed to the
+        next round's implementer; a finding no round could prove repaired is what reaches a human.
 
         **The next reading is over committed history**, so an uncommitted repair is one that never
         happened: `review.generate` resolves HEAD and digests the committed tree, the machine half
@@ -4929,17 +5001,10 @@ class Orchestrator:
         """
         phase = where.replace(" ", "-")
         changed = self.ws.changed_since(before, cwd=cwd) if before else []
-        if violations := self._gate_violations(changed):
+        if violations := self._gate_violations(changed, repair=True):
             raise StopLoop(
                 f"{task.id}: the {phase} repair changed paths the gate guard refuses:\n"
                 + "\n".join(f"  - {path}: {why}" for path, why in violations),
-                code=common.EXIT_HUMAN_NEEDED,
-            )
-        if outside := dossier.scope_violations(task, changed):
-            raise StopLoop(
-                f"{task.id}: the {phase} repair changed {', '.join(outside)}, which its declared scope does "
-                "not cover. A repair that reaches into another task's territory is a scope change, and a "
-                "scope change to an approved plan is a human's decision.",
                 code=common.EXIT_HUMAN_NEEDED,
             )
         if not self.ws.finalize_commit(cwd, f"{task.id}: {phase} repair"):
@@ -4948,6 +5013,192 @@ class Orchestrator:
                 "has been lost; commit it yourself, then re-run `rein build`.",
                 code=common.EXIT_HUMAN_NEEDED,
             )
+        after = self.ws.head(cwd=cwd)
+        findings = [a.finding_id for a in item.items]
+        detail: dict[str, Any] = {"findings": findings, "before": before, "after": after}
+        if beyond := dossier.scope_violations(task, changed):
+            detail["beyond_task_scope"] = list(beyond)
+        result, said = self._verify_repair(task, cwd, before, changed)
+        detail["result"] = result
+        if said:
+            detail["detail"] = said[:500]
+        if result in _REPAIR_REFUSED:
+            # `--keep`, not `--hard`: the root holds the orchestration state uncommitted (every
+            # repair commit excludes `.rein/`), and a hard reset would take the chain with it.
+            rc, out = _late_run(["git", "reset", "--keep", before], cwd=cwd)
+            if rc != 0:
+                raise StopLoop(
+                    f"{task.id}: the {phase} repair was refused ({said}) and could not be undone: {out[-300:]}",
+                    code=common.EXIT_HUMAN_NEEDED,
+                )
+            self._repair_refusals[task.id] = said
+            self._event("repair_refused", [task.id], detail)
+            print(f"    [{where}] {task.id}: repair refused and undone — {said}")
+            return False
+        self._repair_refusals.pop(task.id, None)
+        # Only a reproduced repair is a verified one; `undetermined` landed on no evidence either way.
+        self._event("repair_verified" if result == "reproduced" else "repair_unverified", [task.id], detail)
+        print(f"    [{where}] {task.id}: repair landed ({result})")
+        self._record_expansions(task, changed, findings, after)
+        return True
+
+    def _update_state(
+        self, event: str, subjects: Sequence[str], detail: dict[str, Any], change: Callable[[dict[str, Any]], bool]
+    ) -> None:
+        """Change state.yaml and record why, in one transaction. `change` edits the raw document in
+        place and says whether it changed anything; nothing is written or recorded when it did not."""
+        if self.dry_run or not self.cycle_id:
+            return
+        with self.store.transaction() as tx:
+            state = tx.store.read_state()
+            if state is None:
+                raise StopLoop("state.yaml vanished while the build was running — `rein doctor`")
+            raw = copy.deepcopy(dict(state.raw))
+            if not change(raw):
+                return
+            tx.write("state", raw)
+            tx.append(event, cycle_id=self.cycle_id, subject_ids=list(subjects), detail=detail)
+
+    def _record_expansions(self, task: dag.Task, changed: Sequence[str], findings: Sequence[str], commit: str) -> None:
+        """Put every path this repair wrote outside the mandate's `include` to a human, as `proposed`.
+
+        Measured with the grant closed — the same rule the guard applies, read the way acceptance
+        will read it — so a path a human already adopted is not asked about again, and one the
+        mandate covers is not asked about at all.
+        """
+        state = self.store.read_state()
+        plan = self._plan
+        if state is None or plan is None:
+            return
+        include, exclude = plan.scope
+        guarded = gate_guard.guard_settings(self.repo).paths
+        statuses = gate_guard.expansions_in_force(self.repo, state)
+        widened = [
+            path
+            for path in changed
+            if gate_guard.outside_the_mandate(
+                path, include=include, exclude=exclude, guarded=guarded, expansions=statuses, granted=False
+            )
+        ]
+        if not widened:
+            return
+
+        def change(raw: dict[str, Any]) -> bool:
+            table = dict(raw.get("scope_expansions") or {})
+            for path in widened:
+                table[path] = {"status": "proposed", "task_id": task.id, "findings": list(findings), "commit": commit}
+            raw["scope_expansions"] = table
+            return True
+
+        self._update_state(
+            "scope_expanded", [task.id], {"paths": widened, "findings": list(findings), "commit": commit}, change
+        )
+        print(f"    [repair] {task.id}: {len(widened)} path(s) outside the mandate's scope — put to you at acceptance")
+
+    def _revert_refused_expansions(self) -> None:
+        """Take back out every path a human refused to widen the mandate to, while the change still has it.
+
+        The refusal is the human's answer to a card; this is the loop doing what that answer means,
+        mechanically and in one commit: each such path goes back to what the base had (or away, if
+        the base had none). The finding the repair was about is then open again, and the next
+        repair cannot write there (`outside_the_mandate` refuses a refused path even under a grant)
+        — so it is fixed inside the mandate, or it reaches a human as a finding.
+        """
+        if self.dry_run or self.state is None:
+            return
+        state = self.store.read_state()
+        expansions = state.scope_expansions if state is not None else {}
+        refused = [path for path, entry in expansions.items() if entry.get("status") == "refused"]
+        if not refused:
+            return
+        try:
+            base = review_reading.resolve_base(self.repo, self._plan, None)
+        except review_reading.ReviewError as exc:
+            raise StopLoop(
+                f"refused scope expansions cannot be taken back out: {exc}", code=common.EXIT_HUMAN_NEEDED
+            ) from None
+        rc, out = self.repo._git_rc("diff", "-z", "--name-only", base, "--", *refused)
+        still = [path for path in out.split("\0") if path] if rc == 0 else []
+        if not still:
+            return
+        for path in still:
+            present = self.repo._git_rc("cat-file", "-e", f"{base}:{path}")[0] == 0
+            cmd = ["git", "checkout", base, "--", path] if present else ["git", "rm", "-q", "-f", "--", path]
+            rc, out = _late_run(cmd, cwd=self.root)
+            if rc != 0:
+                raise StopLoop(
+                    f"could not take {path} back to {base[:12]}: {out[-300:]}", code=common.EXIT_HUMAN_NEEDED
+                )
+        if not self.ws.finalize_commit(self.root, "revert the scope expansions a human refused"):
+            raise StopLoop(
+                "the refused scope expansions were taken back in the tree but could not be committed — commit "
+                "them yourself, then re-run `rein build`.",
+                code=common.EXIT_HUMAN_NEEDED,
+            )
+        self._event("scope_expansion_reverted", [self.cycle_id], {"paths": still, "base": base})
+        print(f"\n[acceptance] took {len(still)} refused scope expansion(s) back out: {', '.join(still)}")
+
+    def _verify_repair(self, task: dag.Task, cwd: str, before: str, changed: Sequence[str]) -> tuple[str, str]:
+        """Does a test in this repair fail against the code as it was? `(result, what it found)`.
+
+        The same experiment as a task's negative control (`_red_without`), aimed at the repair:
+        the commit before it, plus only the test half of what it changed. A step that goes red
+        there is a test that reproduces the defect and passes once the fix is in — the DoD that
+        runs next establishes the second half. Read it for what it is worth: red says the tests are
+        *not inert* against the old code, which a test that only imports a new symbol also is. It
+        is the mechanical half; whether the test is about the finding is the next reading's.
+
+        `untested`, `test_only` and `inert` refuse the repair (`_REPAIR_REFUSED`). `reproduced` lands it.
+        `undetermined` lands it too, recorded: an experiment that could not be run is evidence in
+        neither direction, and refusing on it would make a broken sandbox a human's problem.
+        """
+        if self.dry_run:
+            return "undetermined", "a dry run takes no control"
+        commands = [
+            step for step in self._steps_at("task") if step.kind == "command" and step.command and step.runs_tests
+        ]
+        if not commands:
+            return "undetermined", (
+                "no quality-gate step declares `runs_tests`, so no test can be run against the code as it was"
+            )
+        if not changed:
+            return "untested", (
+                "the repair changed nothing. A finding that is wrong is said so in `rein report --summary` "
+                "and reaches a human as it stands; one that is right is fixed with a test that fails without the fix"
+            )
+        tests = [path for path in changed if diff_facts.classify_path(path) == "test"]
+        if not tests:
+            return "untested", (
+                "the repair changed no test, so nothing shows the defect was there or that this change is "
+                "what removed it. Write a test that fails against the code as it was and passes with the fix"
+            )
+        if len(tests) == len(changed):
+            # Not an experiment that could not be run: there is nothing to run it on. With the code
+            # unchanged, a test that passes now passed before, so no test here can show a defect
+            # that this repair removed, and a test weakened or deleted would read the same.
+            return "test_only", (
+                "the repair changed only tests, so the code is as it was and nothing can fail without the "
+                "repair that passes with it. If the finding is in the code, fix it there with a test that "
+                "fails before the fix. If it is in a test, say so in `rein report --summary`: no round can "
+                "prove that repair, and it reaches a human as a finding"
+            )
+        patch = self.ws.diff_from(before, cwd, tests)
+        if patch is None or not patch.strip():
+            return "undetermined", f"the test half of the repair against {before[:12]} could not be read out of git"
+        try:
+            result, said = self._red_without(f"repair-{task.id}", before, patch, commands)
+        except (EnvironmentFault, StopLoop) as exc:
+            return "undetermined", str(exc)
+        if result == "discriminating":
+            return "reproduced", f"'{said}' fails against the code as it was"
+        if result == "inert":
+            return "inert", (
+                f"the repair's tests pass against the code as it was ({said} green over {before[:12]} with only "
+                "the test half applied), so they do not reproduce the defect and nothing shows the fix is what "
+                "removed it. That is the shape a fix of the symptom takes. Find where the defect comes from, "
+                "write a test that fails there before the fix, and fix it there"
+            )
+        return result, said
 
     def _propagate(self, task: dag.Task, *, where: str = "acceptance") -> None:
         """Carry a slice's repair up the stack by merging, never by rewriting.

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -330,7 +330,7 @@ def make_review(
     coverage_status: str = "sufficient",
     human_status: str = "not_started",
     extra_behaviors: list[dict[str, Any]] | None = None,
-    security_findings: list[dict[str, Any]] | None = None,
+    review_findings: list[dict[str, Any]] | None = None,
     effective_risk: str = "",
     gaps: list[dict[str, Any]] | None = None,
     analyzed_bytes: int = 0,
@@ -366,8 +366,9 @@ def make_review(
         },
         "actual_extraction": [],
         "claims": [],
+        "acceptance": {"actual_extraction": True, "comparison": True},
         "extra_behaviors": extra_behaviors or [],
-        "security": {"findings": security_findings or []},
+        "reviews": {"read": ["security"], "findings": review_findings or []},
     }
     if unsupported_files:
         machine["coverage"]["unsupported_files"] = unsupported_files
@@ -399,18 +400,51 @@ SANDBOXED_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def make_reviews(*, steps: list[dict[str, Any]] | None = None, adversarial: bool = True) -> dict[str, Any]:
-    """A reviews document. No reviewer step by default, as the default `make_config` has none:
-    a test about task consumption has no business launching a reviewer. Tests about reviewing
-    pass `steps` — `[REVIEW_STEP]` is the product's packaged one."""
+def bind_review(root: Path, review: dict[str, Any], ref: str = "HEAD") -> dict[str, Any]:
+    """`review` bound to the product at `ref` as `review generate` binds it: the real digests.
+
+    `make_review`'s digests are placeholders, which every freshness check reads as moved. A test of
+    what may be integrated needs a review that does speak for a commit, so it can show which commit.
+    """
+    from rein import repo as repo_mod
+    from rein import review_reading
+
+    repo = repo_mod.Repo(root)
+    head = subprocess.run(
+        ["git", "rev-parse", ref], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    state = store.Store(repo).read_state()
+    binding = review["machine"]["binding"]
+    binding["change_digest"] = review_reading.change_digest(repo, head, review_reading.not_the_product(repo, state))
+    binding["host_surface_digest"] = review_reading.host_surface_digest(repo, head)
+    return review
+
+
+def make_reviews(
+    *,
+    build: Sequence[str] = (),
+    acceptance: Sequence[str] = ("security",),
+    drafting: Sequence[str] = (),
+    adversarial: bool = True,
+    actual_extraction: bool = True,
+    comparison: bool = True,
+) -> dict[str, Any]:
+    """A reviews document. No review at `build` by default, as the default `make_config` has no
+    reviewer: a test about task consumption has no business launching one. Tests about reviewing
+    pass `build` — `["adversarial"]` is the product's packaged one.
+
+    `security` is added at acceptance by default, unlike the packaged document: the tests of the
+    grounded review are about what reading the whole change does. A test about no review there
+    says so with `acceptance=()`."""
     return {
-        "adversarial": dict.fromkeys(models.ADVERSARIAL_STAGES, adversarial),
-        "steps": steps if steps is not None else [],
+        **{stage: {"adversarial": adversarial, "reviews": list(drafting)} for stage in models.DRAFTING_STAGES},
+        "build": {"reviews": list(build)},
+        "acceptance": {
+            "actual_extraction": actual_extraction,
+            "comparison": comparison,
+            "reviews": list(acceptance),
+        },
     }
-
-
-#: The reviewer step the product ships (`scaffold/rein/reviews.yaml`).
-REVIEW_STEP: dict[str, Any] = {"name": "review", "reviews": ["correctness", "simplification"], "retries": 1}
 
 
 def make_config(
@@ -437,7 +471,7 @@ def make_config(
     if launch_retries is not None:
         execution["launch_retries"] = launch_retries
     body: dict[str, Any] = {
-        "project": {"name": project, "work_branch": branch},
+        "project": {"name": project, "work_branch": branch, "mainline": "main"},
         "execution": execution,
         "executors": {
             "quality_gate_profile": "quality",
@@ -450,13 +484,12 @@ def make_config(
         "executor_profiles": profiles or {"quality": {"kind": "host", "containerfile": "python"}},
         "agents": {
             "implementer": {"adapter": "claude"},
-            "code_reviewer": {"adapter": "claude"},
             # The model is what the independence group derives from, and what actually gets passed
-            # to the CLI — the extractor and the security reviewer share one so they share a
-            # reading, the comparator differs because §12.4 requires it to.
+            # to the CLI — the extractor and the reviewer share one so they share a reading of the
+            # whole change, the comparator differs because §12.4 requires it to.
             "actual_extractor": {"adapter": "claude", "model": "opus"},
             "comparator": {"adapter": "claude", "model": "sonnet"},
-            "security_reviewer": {"adapter": "claude", "model": "opus"},
+            "reviewer": {"adapter": "claude", "model": "opus"},
         },
         "quality_gate": quality_gate
         or [

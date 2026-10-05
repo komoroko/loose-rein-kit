@@ -78,12 +78,17 @@ def scratch_worktree(repo: repo_mod.Repo, worktree_dir: str, name: str, branch: 
     re-establishment over the base. A leftover from a killed run is cleared first — it holds no work
     of its own, so removing it cannot lose anything, which is exactly what is *not* true of the leaf
     worktrees above.
+
+    **Never a branch another worktree holds.** git refuses that, and the refusal is the point: a
+    commit made here would move the branch under the other checkout, whose index and files would
+    then disagree with its own HEAD — the next commit made there undoes this one. A caller that
+    wants to change such a branch changes it where it is checked out (:func:`worktree_heads`).
     """
     path = str(repo.path(worktree_dir) / name)
     with _WORKTREE_ADMIN:
         run(["git", "worktree", "remove", "--force", path], cwd=str(repo.root))
         run(["git", "worktree", "prune"], cwd=str(repo.root))
-        rc, out = run(["git", "worktree", "add", "--force", path, branch], cwd=str(repo.root))
+        rc, out = run(["git", "worktree", "add", path, branch], cwd=str(repo.root))
     if rc != 0:
         raise StopLoop(f"could not create the scratch worktree at {path}: {out}")
     try:

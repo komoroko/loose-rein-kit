@@ -334,7 +334,7 @@ def test_a_shared_object_is_repeated_rather_than_anchored() -> None:
     finding wrote a `review.yaml` that never parsed again — the loader naming a line and not the
     cause.
     """
-    finding = {"id": "SEC-001", "severity": "high"}
+    finding = {"id": "F-001", "severity": "high"}
     text = store.dump_yaml({"security": {"findings": [finding]}, "cards": [{"evidence": [finding]}]}).decode("utf-8")
     assert "&id" not in text and "*id" not in text
     assert strict_yaml.load_mapping(text)["cards"][0]["evidence"] == [finding]

@@ -109,7 +109,8 @@ def stage_settled(review: models.Review, human: Mapping[str, Any], stage: str) -
     """
     if stage == "decision":
         return not unanswered_decisions(review, human)
-    if stage == "freeze":
+    if stage == "accept":
+        # Approving acceptance is what freezes the answers (`approve.record_approval`).
         return str(human.get("status", "not_started")) == "frozen"
     return None
 
@@ -217,6 +218,80 @@ def completion_blockers(review: models.Review | None, human: Mapping[str, Any] |
         )
 
     return blockers
+
+
+#: The order the residue is shown in: what the decision rests on first, what was never looked at last.
+RESIDUE_KINDS: tuple[str, ...] = ("unsettled", "undecided", "inferred", "questions", "not_read")
+
+
+def residue(review: models.Review, human: Mapping[str, Any] | None = None) -> dict[str, list[str]]:
+    """What the machine could not settle — the only thing acceptance asks a person to take on.
+
+    Everything the loop could establish it has, or it is still the loop's (`approve.Blocker`). What
+    is left is of five kinds, and none of them is a re-statement of a check that passed:
+
+    * `unsettled` — a claim the comparison did not find aligned;
+    * `undecided` — a Decision Card with no answer yet, whatever its risk;
+    * `inferred` — a claim found aligned on an AI's reading alone (`assessment_basis:
+      machine_assessed`): nothing executed or attested stands behind it, and approving is accepting
+      that;
+    * `questions` — what a reviewer said only a person could settle (`question` findings);
+    * `not_read` — what nobody looked at: a coverage gap, an analysis that came out insufficient, a
+      whole change no security reviewer read.
+
+    Empty means there is nothing left to accept beyond the approval itself. That is measured at
+    every approval (`observations.acceptance_residual`) and read by nothing that decides.
+    """
+    human = human if human is not None else dict(review.human)
+    out: dict[str, list[str]] = {kind: [] for kind in RESIDUE_KINDS}
+    for result in review.claim_results:
+        claim_id = str(result.get("claim_id", ""))
+        verdict = str(result.get("verdict", "unknown"))
+        support = result.get("semantic_support")
+        basis = str(support.get("assessment_basis", "")) if isinstance(support, Mapping) else ""
+        if verdict != "aligned":
+            out["unsettled"].append(f"{claim_id}: {verdict}")
+        elif basis in ("", "machine_assessed"):
+            out["inferred"].append(f"{claim_id}: aligned on an AI's reading alone")
+    answered = answered_card_ids(human)
+    for card in _machine_list(review, "decision_cards"):
+        if str(card.get("id")) not in answered:
+            out["undecided"].append(f"{card.get('id')}: {str(card.get('question', ''))[:200]}")
+    for finding in _machine_list(review, "residual_findings"):
+        if finding.get("severity") == "question":
+            out["questions"].append(f"{finding.get('task_id', '')}: {str(finding.get('statement', ''))[:200]}")
+    if not review.coverage_sufficient:
+        out["not_read"].append("the coverage manifest is insufficient: parts of the change could not be analysed")
+    for gap in _machine_list(review, "gaps"):
+        out["not_read"].append(f"{gap.get('id', '')}: {gap.get('kind', 'gap')}")
+    if not review.extraction_read:
+        out["not_read"].append(
+            "nobody read the code blind for what it does (`reviews.yaml` `acceptance.actual_extraction`)"
+        )
+    if not review.comparison_read:
+        out["not_read"].append(
+            "nobody compared the change with the mandate's claims (`reviews.yaml` `acceptance.comparison`)"
+        )
+    if not review.reviews_read:
+        out["not_read"].append("no review read the whole change (`reviews.yaml` `acceptance.reviews`)")
+    return out
+
+
+def render_residue(residue_: Mapping[str, Sequence[str]]) -> str:
+    """The residue as a terminal shows it: each kind with what is in it, or one line saying it is empty."""
+    titles = {
+        "unsettled": "claims not found aligned",
+        "undecided": "decision cards not answered",
+        "inferred": "claims aligned on an AI's reading alone",
+        "questions": "questions only a person can settle",
+        "not_read": "what nobody read",
+    }
+    lines = [
+        f"  {titles[kind]} ({len(residue_[kind])}):\n" + "\n".join(f"    - {item}" for item in residue_[kind])
+        for kind in RESIDUE_KINDS
+        if residue_.get(kind)
+    ]
+    return "\n".join(lines) if lines else "  nothing — every claim is established and every question answered"
 
 
 def can_freeze(review: models.Review | None, human: Mapping[str, Any] | None = None) -> bool:

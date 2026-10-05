@@ -33,7 +33,7 @@ executor_profiles:
 agents:
   implementer:
     adapter: claude
-  code_reviewer:
+  reviewer:
     adapter: claude
   actual_extractor:
     adapter: claude          # trailing comment survives
@@ -50,7 +50,7 @@ agents:
 def test_setting_one_role_leaves_the_others_alone() -> None:
     updated = agent_cli.apply_switch(SCAFFOLD, "codex", ("implementer",))
     assert "  implementer:\n    adapter: codex" in updated
-    assert "  code_reviewer:\n    adapter: claude" in updated
+    assert "  reviewer:\n    adapter: claude" in updated
 
 
 def test_the_surgery_does_not_stray_into_another_section() -> None:
@@ -78,7 +78,7 @@ def test_the_model_can_be_set_alongside() -> None:
 
 
 def test_a_missing_model_key_is_added() -> None:
-    updated = agent_cli.apply_switch(SCAFFOLD, "codex", ("code_reviewer",), "o1")
+    updated = agent_cli.apply_switch(SCAFFOLD, "codex", ("reviewer",), "o1")
     assert "model: o1" in updated
 
 
@@ -237,7 +237,7 @@ def test_a_bulk_switch_onto_an_adapter_with_no_model_flag_is_refused(
     seed_repo(tmp_path)
     assert agent_cli.main(["amp", "--repo", str(tmp_path)]) == 2
     err = capsys.readouterr().err
-    for role in ("actual_extractor", "comparator", "security_reviewer"):
+    for role in ("actual_extractor", "comparator", "reviewer"):
         assert f"agents.{role}.model" in err, role
     assert parsed(tmp_path).adapter("comparator") == "claude", "the config on disk is untouched"
 

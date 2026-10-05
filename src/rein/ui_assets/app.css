@@ -582,12 +582,15 @@ table.lens-grid td.mono { font-size: .8rem; }
 .lens-key dd { margin: 0; }
 
 /* ---- reviews: a lane per stage the cycle passes through ---------------------- */
-.lanes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 2fr) minmax(0, 1fr); gap: .8rem; margin: 1rem 0; align-items: start; }
+.lanes { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .8rem; margin: 1rem 0; align-items: start; }
 @media (max-width: 1100px) { .lanes { grid-template-columns: 1fr; } }
 .lane { border-top: 2px solid var(--rule-2); padding-top: .4rem; }
 .lane h3 { margin: 0 0 .5rem; font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); }
 .rcard { display: block; border: 1px solid var(--rule-2); border-radius: 2px; padding: .5rem .6rem; margin-bottom: .5rem; background: var(--sheet); }
-.rcard.fixed { color: var(--ink-3); border-style: dashed; }
+.rcard.placed { display: flex; align-items: center; gap: .3rem; }
+.palette { margin: .6rem 0 0; }
+.palette .chip[draggable="true"] { cursor: grab; padding: .1rem .5rem; }
+[data-accepts="yes"] { outline: 2px dashed var(--brass); outline-offset: 2px; background: var(--brass-soft); }
 .rcard-head { display: flex; align-items: center; gap: .3rem; }
 .rcard-row { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; margin-top: .4rem; }
 .rcard-row input[type="number"] { width: 3.2rem; }

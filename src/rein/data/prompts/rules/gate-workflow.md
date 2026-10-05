@@ -47,8 +47,12 @@ human for is a **judgement**, not a reading. `rein build` writes the machine hal
 it may of its own blocking findings — every one a task's declared scope owns — reading the change
 again from cold after each round, so what survives to the screen is what a machine cannot decide.
 `rein review generate` writes it on request. The human half is worked through in `rein ui` — a
-rail of **scope → orient → decision → diff → freeze** — and frozen with `rein review complete`.
-Freezing is a precondition of `rein approve acceptance` — it is **not** the approval.
+rail of **scope → orient → decision → diff → accept**. The accept stage lists the **residue** — what
+the machine could not settle (claims not aligned, cards unanswered, claims aligned on an AI's
+reading alone, `question` findings, what nobody read) — and approving there, or with `rein approve
+acceptance`, freezes the answers and integrates the cycle into the mainline in one act. A blocker the
+machine clears (a stale review, an audit due, a mainline to merge in) is the machine's: the board
+names its command and does not put the gate to a person while one stands.
 
 **A Decision Card answer is an instruction, not a note.** `revise_implementation` says the code is
 the mistaken half of a `diverged` claim, and the next `rein build` repairs that subject like any

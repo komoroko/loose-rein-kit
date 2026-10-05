@@ -39,7 +39,7 @@ from functools import cache
 from itertools import zip_longest
 from pathlib import Path
 
-from rein import common, dag, gate_guard, gitignore, install, models, strict_yaml
+from rein import build_loop, common, dag, gate_guard, gitignore, install, models, strict_yaml
 
 # Not `logging.getLogger(__name__)`: this script is run directly (`__name__ == "__main__"`,
 # makefile's `template-lint` target) as often as it is imported, and `common.configure_logging()`
@@ -170,10 +170,11 @@ def gate_names() -> list[str]:
 
 
 def quality_gate_steps(config_text: str, reviews_text: str) -> list[str]:
-    """The DoD step names — the commands from config.yaml, the reviewers from reviews.yaml — each
-    defined once there and echoed by the prose that teaches them."""
+    """The DoD step names — the commands from config.yaml, and the reviewer step while reviews.yaml
+    adds a review at `build` — each defined once and echoed by the prose that teaches them."""
     commands = [step.name for step in models.Config.parse(config_text).quality_gate if step.name]
-    return commands + [step.name for step in models.Reviews.parse(reviews_text).steps]
+    reviewer = [build_loop.REVIEW_STEP] if models.Reviews.parse(reviews_text).reviews_at("build") else []
+    return commands + reviewer
 
 
 def check_vocabulary(files: dict[str, str]) -> list[str]:
