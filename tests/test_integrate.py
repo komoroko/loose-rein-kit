@@ -56,7 +56,7 @@ def _approved(tmp_path: Path, *, integrated: bool = False) -> repo_mod.Repo:
     return repo
 
 
-def _real(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
+def _real(cmd: list[str], cwd: str | None = None, timeout: float | None = None) -> tuple[int, str]:
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     return proc.returncode, proc.stdout + proc.stderr
 
@@ -114,7 +114,7 @@ def test_a_mainline_checked_out_in_the_root_is_never_moved_under_it(tmp_path: Pa
 
     blockers = approve._integration_blockers(repo, store.Store(repo).read_config(), "acceptance")
     assert len(blockers) == 1 and approve.owner(blockers[0]) == "human"
-    assert f"git switch {WORK}" == blockers[0].remedy
+    assert isinstance(blockers[0], approve.Blocker) and blockers[0].remedy == f"git switch {WORK}"
     with pytest.raises(integrate.IntegrationError, match="canonical checkout has the mainline"):
         integrate.run(repo)
 
