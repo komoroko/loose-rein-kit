@@ -673,11 +673,11 @@
       }
     },
     "disputed_findings": {
-      "description": "Security findings a human has contradicted, with the reason, and bound to the code the finding named. This is the durable half of `dispute_finding`: the review's own `human.dispositions` entry records that a decision card was answered and is discarded when the machine review is regenerated, which left a disputed false positive with no exit at all — the regeneration carried it forward as a prior blocker, the reviewer honestly did not re-emit it, and `security_review.resolution_of` could not close it because the code it named was correct and still there. Kept here it survives the regeneration, and it retires the way acceptance evidence does: `anchors_digest` binds the anchored text, so editing the code the dispute was about revives the finding rather than silencing it forever.",
+      "description": "Findings of a review of the whole change that a human has contradicted, with the reason, and bound to the code the finding named. This is the durable half of `dispute_finding`: the review's own `human.dispositions` entry records that a decision card was answered and is discarded when the machine review is regenerated, which left a disputed false positive with no exit at all — the regeneration carried it forward as a prior blocker, the reviewer honestly did not re-emit it, and `security_review.resolution_of` could not close it because the code it named was correct and still there. Kept here it survives the regeneration, and it retires the way acceptance evidence does: `anchors_digest` binds the anchored text, so editing the code the dispute was about revives the finding rather than silencing it forever.",
       "type": "object",
       "maxProperties": 500,
       "propertyNames": {
-        "pattern": "^SEC-[0-9]{3,}$"
+        "pattern": "^F-[0-9]{3,}$"
       },
       "additionalProperties": {
         "type": "object",
@@ -789,25 +789,6 @@
         "dependencies": {
           "description": "A digest over this tree's dependency manifests and lockfiles. What the audit is about, and so what retires it — binding to the commit would retire the answer on every source edit, which is a re-run bought for nothing.",
           "$ref": "#/$defs/digest"
-        }
-      }
-    },
-    "repair_grant": {
-      "description": "The repair `rein build` is running now, while one runs. Its launch may write a path the approved mandate's `include` does not reach, so that a defect is repaired where its cause is; the mandate's `exclude`, the plan and everything rule 1 and 2 protect stay refused. Opened and closed around one launch, each with an event; a run that starts with one open closes it first.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "task_id",
-        "opened_at"
-      ],
-      "properties": {
-        "task_id": {
-          "type": "string",
-          "maxLength": 64
-        },
-        "opened_at": {
-          "type": "string",
-          "maxLength": 64
         }
       }
     },

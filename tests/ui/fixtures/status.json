@@ -247,7 +247,7 @@
         "group": ""
       },
       {
-        "role": "code_reviewer",
+        "role": "reviewer",
         "adapter": "claude",
         "model": "",
         "group": ""
@@ -263,12 +263,6 @@
         "adapter": "claude",
         "model": "sonnet",
         "group": "claude/sonnet"
-      },
-      {
-        "role": "security_reviewer",
-        "adapter": "claude",
-        "model": "opus",
-        "group": "claude/opus"
       }
     ],
     "independence": {

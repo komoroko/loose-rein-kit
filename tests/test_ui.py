@@ -16,8 +16,8 @@ from typing import Any
 
 import pytest
 
-from rein import adapters, models, registry, store, ui
-from tests._support import SANDBOXED_PROFILES, chain, make_config, make_state, seed_repo
+from rein import adapters, gate_guard, models, registry, store, ui
+from tests._support import SANDBOXED_PROFILES, chain, make_config, make_reviews, make_state, seed_repo
 
 # The frontend's source. `ui_assets/app.js` is a built bundle — minified React plus this code — so a
 # canary about what the page *says* reads the sources it was built from, and only the canaries about
@@ -1398,13 +1398,17 @@ def test_the_reviews_screen_reads_the_document_and_what_it_may_offer(server: ui.
     status, body = _request(server, "GET", "/api/reviews")
     payload = json.loads(body)
     assert status == 200
-    assert payload["document"]["adversarial"] == {"requirements": True, "design": True, "tasks": True}
     assert payload["builtin"] == ["adversarial", "correctness", "simplification", "security"]
-    # Nothing is fixed: acceptance's own readings are offered as switches.
-    assert payload["whole_change"] == ["security"]
-    assert payload["acceptance"] == ["actual_extraction", "comparison"]
-    assert payload["document"]["acceptance"] == {"actual_extraction": True, "comparison": True}
-    assert payload["document"]["whole_change"] == {"security": True}
+    # Every stage is a lane, and what belongs to one alone is offered as a switch.
+    assert payload["stages"] == [
+        {"name": "requirements", "switches": ["adversarial"]},
+        {"name": "design", "switches": ["adversarial"]},
+        {"name": "tasks", "switches": ["adversarial"]},
+        {"name": "build", "switches": []},
+        {"name": "acceptance", "switches": ["actual_extraction", "comparison"]},
+    ]
+    assert payload["document"]["design"] == {"adversarial": True, "reviews": []}
+    assert payload["document"]["acceptance"] == {"actual_extraction": True, "comparison": True, "reviews": ["security"]}
 
 
 def _served_digest(server: ui.DashboardServer) -> str:
@@ -1413,16 +1417,20 @@ def _served_digest(server: ui.DashboardServer) -> str:
     return str(json.loads(body)["digest"])
 
 
+def _with_design(on: bool) -> dict[str, Any]:
+    document = make_reviews()
+    document["design"]["adversarial"] = on
+    return document
+
+
 def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.DashboardServer, repo: Path) -> None:
     from rein import repo as repo_mod
 
-    document = {
-        "adversarial": {"requirements": True, "design": False, "tasks": True},
-        "steps": [],
-        "acceptance": {"actual_extraction": True, "comparison": True},
-        "whole_change": {"security": True},
+    body: dict[str, object] = {
+        "document": _with_design(False),
+        "reason": "a one-line fix",
+        "expect": _served_digest(server),
     }
-    body: dict[str, object] = {"document": document, "reason": "a one-line fix", "expect": _served_digest(server)}
     status, raw = write(server, "/api/reviews", body)
     assert status == 200, raw
     assert json.loads(raw)["changes"] == ["adversarial review at design: OFF"]
@@ -1433,22 +1441,12 @@ def test_a_reviews_change_from_the_screen_lands_with_its_reason(server: ui.Dashb
 def test_a_reviews_change_made_on_a_stale_screen_is_a_conflict(server: ui.DashboardServer) -> None:
     """Two screens, or a screen and a terminal: the second write used to undo the first in silence."""
     served = _served_digest(server)
-    first = {
-        "adversarial": {"requirements": True, "design": False, "tasks": True},
-        "steps": [],
-        "acceptance": {"actual_extraction": True, "comparison": True},
-        "whole_change": {"security": True},
-    }
-    assert write(server, "/api/reviews", {"document": first, "reason": "one", "expect": served})[0] == 200
-    second = {
-        "adversarial": {"requirements": False, "design": True, "tasks": True},
-        "steps": [],
-        "acceptance": {"actual_extraction": True, "comparison": True},
-        "whole_change": {"security": True},
-    }
+    assert write(server, "/api/reviews", {"document": _with_design(False), "reason": "one", "expect": served})[0] == 200
+    second = make_reviews()
+    second["requirements"]["adversarial"] = False
     status, raw = write(server, "/api/reviews", {"document": second, "reason": "two", "expect": served})
     assert status == 409, raw
-    assert json.loads(_request(server, "GET", "/api/reviews")[1])["document"]["adversarial"]["design"] is False
+    assert json.loads(_request(server, "GET", "/api/reviews")[1])["document"]["design"]["adversarial"] is False
 
 
 def test_a_reviews_change_still_needs_the_session(server: ui.DashboardServer) -> None:
@@ -1480,7 +1478,7 @@ def scope_server(tmp_path: Path) -> Iterator[ui.DashboardServer]:
     """A review whose one card is a path a repair wrote outside the mandate's `include`."""
     from rein import decision_cards
 
-    entry = {"status": "proposed", "task_id": "T-001", "findings": ["SEC-001"], "commit": "c" * 40}
+    entry = {"status": "proposed", "task_id": "T-001", "findings": ["F-001"], "commit": "c" * 40}
     statements, cards = decision_cards.derive_cards(scope_expansions=[{"path": _WIDENED, **entry}])
     review = _generated_review_with_card()
     machine = review["machine"]
@@ -1505,7 +1503,6 @@ def test_adopting_a_widened_path_on_its_card_widens_the_mandate_on_the_record(
 ) -> None:
     """The card is answered with an option letter. Recorded as nothing but that letter, the answer
     adopted nothing: the path stayed `proposed` and acceptance stayed shut."""
-    from rein import approve
     from rein import repo as repo_mod
 
     adopt = next(
@@ -1525,7 +1522,7 @@ def test_adopting_a_widened_path_on_its_card_widens_the_mandate_on_the_record(
     repo = repo_mod.Repo(scope_server.active_root())
     state = store.Store(repo).read_state()
     assert state is not None and state.scope_expansions[_WIDENED]["status"] == "adopted"
-    assert _WIDENED in approve.adoptions(store.Store(repo).read_events())
+    assert _WIDENED in gate_guard.adoptions(store.Store(repo).read_events())
     session = json.loads(_request(scope_server, "GET", "/api/review/session")[1])
     assert session["unanswered_decisions"] == [], "and the card counts as answered"
 

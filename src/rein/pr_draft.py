@@ -80,12 +80,15 @@ def cycle_facts(
                 "- Comparison: **not taken** (`reviews.yaml` `acceptance.comparison` is off) — every claim "
                 f"was decided by a person{', beside the blind extraction' if review.extraction_read else ', unaided'}"
             )
-        if review.security_read:
-            lines.append(f"- Security findings: {len(review.blocking_security_findings)} blocking")
+        if review.reviews_read:
+            lines.append(
+                f"- Reviews of the whole change ({', '.join(review.reviews_read)}): "
+                f"{len(review.blocking_findings)} blocking finding(s)"
+            )
         else:
             lines.append(
-                "- Security review: **not taken** (`reviews.yaml` `whole_change.security` is off) — "
-                f"{len(review.blocking_security_findings)} blocking carried from an earlier reading"
+                "- Reviews of the whole change: **none taken** (`reviews.yaml` `acceptance.reviews` is empty) — "
+                f"{len(review.blocking_findings)} blocking carried from an earlier reading"
             )
         lines.append(f"- Human review: {review.human_status}")
     else:

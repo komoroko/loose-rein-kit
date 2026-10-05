@@ -237,7 +237,7 @@ that finished that upstream rather than reading the codebase from cold. The fork
 upstream's session as it was, so two leaves under one foundation never see each other's
 conclusions. Which session finished which task is a cache outside the working tree
 (`$XDG_CACHE_HOME/rein/<repo>/sessions.json`); a miss is a cold start and nothing else. The
-`review` step, the integration fixer, and the security reviewer
+`review` step, the integration fixer, and the reviewer of the whole change
 always run in **fresh contexts, independent of the implementer** — independent verification
 is the point; never fold them into the implementer's session.
 
@@ -247,19 +247,20 @@ is the point; never fold them into the implementer's session.
   all of it). Auto-fixable hooks (ruff/format) resolve on the re-run; manual fixes (mypy, tsc)
   are part of the step. In a project without `make`, substitute that project's commands in the
   config steps.
-- **A reviewer step** (`.rein/reviews.yaml`, not `config.yaml`) asks the reviews it lists —
-  the packaged **adversarial** (an attempt to refute the change: the input that breaks it, the
-  claim with no evidence behind it, the side that did not change; the packaged step reads for this
-  alone), **correctness** (bugs), **simplification** (reuse, needless complexity, and what the
-  ticket's acceptance criteria do not require: speculative generality, unused knobs/hooks; YAGNI)
-  and **security**, and any custom review the file names with a question of its own — and then
+- **The `review` step** asks every review `.rein/reviews.yaml` adds at `build` (not
+  `config.yaml`; none added, no step) — the packaged **adversarial** (an attempt to refute the
+  change: the input that breaks it, the claim with no evidence behind it, the side that did not
+  change; the packaged default reads for this alone), **correctness** (bugs), **simplification**
+  (reuse, needless complexity, and what the ticket's acceptance criteria do not require:
+  speculative generality, unused knobs/hooks; YAGNI) and **security**, and any custom review the
+  file names with a question of its own — and then
   reads the **tests as evidence**: for each acceptance criterion, which test in this change would go red if
   the behaviour were wrong, and which assertions would hold for any output at all. The negative
   control below can show that the test half is not *inert*; whether the tests are any *good* is
   asked here and nowhere else. **It reports; it does
   not repair, and it is launched without write access.** One launch reads the whole batch (5a),
   and its findings go to `.rein/work/review.<task ids>.findings.json` with one entry per task; each task's
-  implementer resolves its `must_fix` ones within the step's own `retries` budget and the reviewer
+  implementer resolves its `must_fix` ones within `review_policy.repair_rounds` and the reviewer
   looks again at the tasks sent back. A review whose findings cannot be read holds back every task
   it was reading: an unreadable answer is not an answer that found nothing.
   **The code-stage lenses this cycle's mandate froze reach it too** — `rein lens --select code
@@ -348,8 +349,9 @@ is the point; never fold them into the implementer's session.
    review generate` yourself when the reading could not be taken, or when `repair_rounds` is 0.
 
    The reading runs a deterministic Coverage Manifest, a **blind**
-   actual-behaviour extraction (never given the plan), the structured security review when
-   `reviews.yaml` has `whole_change.security` on, and the Expected/Actual comparison — writing `.rein/review.yaml` and recording the pipeline events.
+   actual-behaviour extraction (never given the plan), the reviews `reviews.yaml` adds at
+   `acceptance` read over the whole change, and the Expected/Actual comparison — each only while
+   `reviews.yaml` asks for it — writing `.rein/review.yaml` and recording the pipeline events.
    **The change is read in *readings*, not in one sitting**: one per dependency chain the plan
    scopes — a line of tasks each built on the one before and on nothing else, read as the one
    change it is, and task by task only when the chain's diff will not fit `max_diff_bytes` — plus

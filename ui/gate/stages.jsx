@@ -60,7 +60,7 @@ export function ScopeStage({ data }) {
           />
           <Axis
             label="claims"
-            value={`${c.claims}${s.comparison_read ? "" : " (comparison not taken)"} · gaps ${c.gaps} · scenarios ${c.scenarios} · decision cards ${c.decision_cards} · security ${s.security_read ? c.security_findings : "not taken"}`}
+            value={`${c.claims}${s.comparison_read ? "" : " (comparison not taken)"} · gaps ${c.gaps} · scenarios ${c.scenarios} · decision cards ${c.decision_cards} · findings ${(s.reviews_read || []).length ? c.review_findings : "no review read the whole change"}`}
           />
           <Axis
             label="you will be asked"
@@ -727,38 +727,33 @@ function WhatRaisedThese({ data, onDisposition }) {
   );
 }
 
-function SecurityFindings({ data }) {
-  const findings = data.security_findings || [];
-  const notTaken =
-    data.security_read === false ? (
-      <p className="note">
-        No security reading was taken: reviews.yaml has whole_change.security off.
-        {findings.length ? " These are blocking findings an earlier reading recorded, carried until their code is gone." : ""}
-      </p>
-    ) : null;
-  if (!findings.length) {
-    return notTaken ? (
-      <>
-        <Subhead spaced>Security review</Subhead>
-        {notTaken}
-      </>
-    ) : null;
-  }
+function ReviewFindings({ data }) {
+  const findings = data.review_findings || [];
+  const read = data.reviews_read || [];
+  const which = read.length ? (
+    <p className="note">Read over the whole change for {read.join(", ")}.</p>
+  ) : (
+    <p className="note">
+      No review read the whole change: reviews.yaml adds none at acceptance.
+      {findings.length ? " These are blocking findings an earlier reading recorded, carried until their code is gone." : ""}
+    </p>
+  );
+  if (!findings.length && read.length) return null;
   return (
     <>
-      <Subhead spaced>Security review</Subhead>
-      {notTaken}
+      <Subhead spaced>Reviews of the whole change</Subhead>
+      {which}
       {findings.map((f) => (
         <div className="card" key={f.id}>
           <div className="subhead">
-            {f.id} {f.category || ""} <RiskBadge risk={f.severity} />
+            {f.id} {f.review || ""} <RiskBadge risk={f.severity} />
             {f.status === "resolved" ? (
               <span className="conf high">resolved</span>
             ) : f.blocking === true ? (
               <span className="conf low">blocking</span>
             ) : null}
           </div>
-          <p>{f.attack_scenario || ""}</p>
+          <p>{f.scenario || ""}</p>
           {f.status === "resolved" ? (
             <p className="note">
               The code this finding anchored to is gone at{" "}
@@ -802,7 +797,7 @@ export function DecisionStage({ data, onPost }) {
         <OkLine>✓ nothing in this review needs a decision.</OkLine>
       )}
       <WhatRaisedThese data={data} onDisposition={(body) => onPost("disposition", body)} />
-      <SecurityFindings data={data} />
+      <ReviewFindings data={data} />
     </>
   );
 }

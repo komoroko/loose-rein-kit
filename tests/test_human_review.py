@@ -313,14 +313,14 @@ def test_a_review_that_does_not_say_what_it_weighed_takes_the_strict_path() -> N
 
 def test_blocking_security_finding_blocks_completion() -> None:
     finding = {
-        "id": "SEC-001",
+        "id": "F-001",
         "severity": "critical",
-        "category": "authz_bypass",
-        "attack_scenario": "x",
+        "review": "security",
+        "scenario": "x",
         "blocking": True,
     }
-    review = _review(machine={"security": {"findings": [finding]}})
-    assert any("security" in b for b in human_review.completion_blockers(review, dict(review.human)))
+    review = _review(machine={"reviews": {"findings": [finding]}})
+    assert any("blocking finding F-001" in b for b in human_review.completion_blockers(review, dict(review.human)))
 
 
 def test_the_freeze_and_the_gate_read_the_machine_half_through_one_function() -> None:
@@ -340,13 +340,13 @@ def test_the_freeze_and_the_gate_read_the_machine_half_through_one_function() ->
             "gaps": [
                 {"id": "GAP-001", "kind": "evidence_gap", "statement_id": "STMT-001", "risk": "high", "blocking": True}
             ],
-            "security": {
+            "reviews": {
                 "findings": [
                     {
-                        "id": "SEC-001",
+                        "id": "F-001",
                         "severity": "critical",
-                        "category": "authz_bypass",
-                        "attack_scenario": "x",
+                        "review": "security",
+                        "scenario": "x",
                         "blocking": True,
                     }
                 ]
@@ -396,7 +396,7 @@ def test_the_residue_is_what_the_machine_could_not_settle_and_nothing_it_did() -
             ],
             "gaps": [{"id": "GAP-001", "kind": "evidence_gap"}],
             "acceptance": {"actual_extraction": False, "comparison": False},
-            "security": {"read": False, "findings": []},
+            "reviews": {"read": [], "findings": []},
         }
     )
 
@@ -410,7 +410,7 @@ def test_the_residue_is_what_the_machine_could_not_settle_and_nothing_it_did() -
         "GAP-001: evidence_gap",
         "nobody read the code blind for what it does (`reviews.yaml` `acceptance.actual_extraction`)",
         "nobody compared the change with the mandate's claims (`reviews.yaml` `acceptance.comparison`)",
-        "no security reviewer read the whole change (`reviews.yaml` `whole_change.security`)",
+        "no review read the whole change (`reviews.yaml` `acceptance.reviews`)",
     ]
 
 
@@ -419,7 +419,7 @@ def test_an_empty_residue_says_so_rather_than_saying_nothing() -> None:
         machine={
             "claims": [_claim("C-001", "aligned", "formal")],
             "acceptance": {"actual_extraction": True, "comparison": True},
-            "security": {"read": True, "findings": []},
+            "reviews": {"read": ["security"], "findings": []},
         }
     )
     residue = human_review.residue(review)

@@ -29,12 +29,12 @@ def plan_with_scopes(**scopes: list[str] | None) -> models.Plan:
 
 def review_with(
     *,
-    security: list[dict[str, Any]] | None = None,
+    found: list[dict[str, Any]] | None = None,
     extras: list[dict[str, Any]] | None = None,
     statements: list[dict[str, Any]] | None = None,
     claims: list[dict[str, Any]] | None = None,
 ) -> models.Review:
-    document = make_review(generated=True, security_findings=security or [], extra_behaviors=extras or [])
+    document = make_review(generated=True, review_findings=found or [], extra_behaviors=extras or [])
     document["machine"]["actual_extraction"] = statements or []
     document["machine"]["claims"] = claims or []
     return models.Review(document)
@@ -68,12 +68,12 @@ def test_a_task_with_no_declared_scope_owns_nothing() -> None:
 def test_a_security_finding_is_attributed_by_its_own_anchor() -> None:
     plan = plan_with_scopes(t_1=["src/auth/"], t_2=["src/api/"])
     review = review_with(
-        security=[
+        found=[
             {
-                "id": "SEC-001",
+                "id": "F-001",
                 "severity": "high",
-                "category": "authz_bypass",
-                "attack_scenario": "anyone can read anyone's record",
+                "review": "security",
+                "scenario": "anyone can read anyone's record",
                 "blocking": True,
                 "code_anchors": [anchor("src/auth/check.py")],
             }
@@ -82,7 +82,7 @@ def test_a_security_finding_is_attributed_by_its_own_anchor() -> None:
 
     result = findings.attribute(plan.tasks, review)
 
-    assert [(a.finding_id, a.kind, a.task_id) for a in result] == [("SEC-001", "security", "T-1")]
+    assert [(a.finding_id, a.kind, a.task_id) for a in result] == [("F-001", "finding", "T-1")]
     assert result[0].basis == "src/auth/check.py"
 
 
@@ -90,12 +90,12 @@ def test_a_non_blocking_security_finding_is_still_the_owning_tasks_to_repair() -
     """Severity decides whether a finding holds acceptance shut, not who answers it."""
     plan = plan_with_scopes(t_1=["src/auth/"])
     review = review_with(
-        security=[
+        found=[
             {
-                "id": "SEC-002",
+                "id": "F-002",
                 "severity": "low",
-                "category": "other",
-                "attack_scenario": "noted",
+                "review": "security",
+                "scenario": "noted",
                 "blocking": False,
                 "code_anchors": [anchor("src/auth/check.py")],
             }
@@ -103,7 +103,7 @@ def test_a_non_blocking_security_finding_is_still_the_owning_tasks_to_repair() -
     )
 
     attributed = findings.attribute(plan.tasks, review)
-    assert [(a.finding_id, a.task_id) for a in attributed] == [("SEC-002", "T-1")]
+    assert [(a.finding_id, a.task_id) for a in attributed] == [("F-002", "T-1")]
 
 
 def test_an_extra_behavior_is_attributed_through_the_statement_it_came_from() -> None:
@@ -180,12 +180,12 @@ def test_a_claim_the_review_could_not_tell_about_is_not_a_task_s_problem() -> No
 def test_a_finding_no_scope_covers_is_reported_not_assigned() -> None:
     plan = plan_with_scopes(t_1=["src/auth/"], t_2=["src/api/"])
     review = review_with(
-        security=[
+        found=[
             {
-                "id": "SEC-003",
+                "id": "F-003",
                 "severity": "high",
-                "category": "supply_chain",
-                "attack_scenario": "a dependency nobody declared",
+                "review": "security",
+                "scenario": "a dependency nobody declared",
                 "blocking": True,
                 "code_anchors": [anchor("vendor/thing.py")],
             }
@@ -203,12 +203,12 @@ def test_a_finding_no_scope_covers_is_reported_not_assigned() -> None:
 def test_seeds_are_deduplicated_and_ordered() -> None:
     plan = plan_with_scopes(t_1=["src/auth/"], t_2=["src/api/"])
     review = review_with(
-        security=[
+        found=[
             {
-                "id": f"SEC-00{n}",
+                "id": f"F-00{n}",
                 "severity": "high",
-                "category": "other",
-                "attack_scenario": "x",
+                "review": "security",
+                "scenario": "x",
                 "blocking": True,
                 "code_anchors": [anchor(path)],
             }

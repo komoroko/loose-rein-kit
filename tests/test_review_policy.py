@@ -198,8 +198,8 @@ def test_leniency_is_still_not_the_repair(raw: str) -> None:
 def test_a_stage_schema_is_derived_from_the_one_that_refuses_the_answer() -> None:
     """A second description of the shape, written to constrain the model, would be a second thing
     to keep in step with the validator — which is the failure mode this whole file is about."""
-    schema = review_policy.stage_output_schema("security_reviewer")
-    declared = models.schema("review")["$defs"]["machine"]["properties"]["security"]
+    schema = review_policy.stage_output_schema("reviewer")
+    declared = models.schema("review")["$defs"]["machine"]["properties"]["reviews"]
     assert schema["required"] == ["findings"]
     asked, holds = schema["properties"]["findings"]["items"], declared["properties"]["findings"]["items"]
     assert asked["properties"] == holds["properties"]
@@ -211,14 +211,14 @@ def test_a_stage_schema_is_derived_from_the_one_that_refuses_the_answer() -> Non
     # And `read`, which the pipeline writes: a reviewer that answers was, by answering, launched.
     assert "read" in declared["required"] and "read" not in schema["properties"]
     assert "machine" not in schema["$defs"], "28 KB of the 35, and nothing a stage answers refs it"
-    assert review_policy.stage_output_schema("code_reviewer") == {}, "a role with no declared shape"
+    assert review_policy.stage_output_schema("implementer") == {}, "a role with no declared shape"
 
 
 def test_deriving_a_stage_schema_does_not_edit_the_one_on_disk() -> None:
     """The strip above is a copy. Mutating the loaded schema would make the *document* validator
     stop requiring `blocking` too, for every caller in the process."""
-    review_policy.stage_output_schema("security_reviewer")
-    declared = models.schema("review")["$defs"]["machine"]["properties"]["security"]
+    review_policy.stage_output_schema("reviewer")
+    declared = models.schema("review")["$defs"]["machine"]["properties"]["reviews"]
     assert "blocking" in declared["properties"]["findings"]["items"]["required"]
 
 
@@ -388,27 +388,27 @@ def test_roundtrip_json_is_parseable() -> None:
 # --- a security finding's life, seen from the gate (D4) -----------------------
 
 _A_FINDING = {
-    "id": "SEC-001",
+    "id": "F-001",
     "severity": "high",
-    "category": "credential_exposure",
-    "attack_scenario": "the reviewer container reaches a host credential",
+    "review": "security",
+    "scenario": "the reviewer container reaches a host credential",
     "blocking": True,
 }
 
 
 def test_a_resolved_finding_no_longer_holds_the_gate_shut() -> None:
-    """`resolved` is not the reviewer's word for it: `security_review.resolution_of` records it only
+    """`resolved` is not the reviewer's word for it: `change_review.resolution_of` records it only
     when the code the finding anchored to is gone from the tree. The finding stays in the document —
     that is the record of what closed it — and stops being a blocker."""
-    review = _review(machine={"security": {"findings": [{**_A_FINDING, "status": "resolved"}]}})
-    assert review.blocking_security_findings == ()
-    assert review.security_findings, "a resolved finding is kept, never deleted"
-    assert not [r for r in review_policy.blocking_reasons(review, "low") if "SEC-001" in r]
+    review = _review(machine={"reviews": {"findings": [{**_A_FINDING, "status": "resolved"}]}})
+    assert review.blocking_findings == ()
+    assert review.review_findings, "a resolved finding is kept, never deleted"
+    assert not [r for r in review_policy.blocking_reasons(review, "low") if "F-001" in r]
 
 
 def test_an_open_finding_still_holds_the_gate_shut() -> None:
-    review = _review(machine={"security": {"findings": [_A_FINDING]}})
-    assert [r for r in review_policy.blocking_reasons(review, "low") if "SEC-001" in r]
+    review = _review(machine={"reviews": {"findings": [_A_FINDING]}})
+    assert [r for r in review_policy.blocking_reasons(review, "low") if "F-001" in r]
 
 
 def test_a_human_may_dispute_a_finding_the_change_did_not_touch() -> None:
@@ -418,31 +418,31 @@ def test_a_human_may_dispute_a_finding_the_change_did_not_touch() -> None:
     the risk", which no card offers: it is a human saying the finding is not true, on the record."""
     review = models.Review(
         {
-            "machine": {"status": "generated", "security": {"findings": [_A_FINDING]}},
+            "machine": {"status": "generated", "reviews": {"findings": [_A_FINDING]}},
             "human": {
                 "status": "in_progress",
-                "dispositions": [{"subject_id": "SEC-001", "action": "dispute_finding"}],
+                "dispositions": [{"subject_id": "F-001", "action": "dispute_finding"}],
             },
         }
     )
-    assert not [r for r in review_policy.blocking_reasons(review, "low") if "SEC-001" in r]
+    assert not [r for r in review_policy.blocking_reasons(review, "low") if "F-001" in r]
     # Any other disposition is not a dispute. "I will revise the implementation" leaves it standing.
     still = models.Review(
         {
             "machine": review.machine,
-            "human": {"status": "in_progress", "dispositions": [{"subject_id": "SEC-001", "action": "reduce_scope"}]},
+            "human": {"status": "in_progress", "dispositions": [{"subject_id": "F-001", "action": "reduce_scope"}]},
         }
     )
-    assert [r for r in review_policy.blocking_reasons(still, "low") if "SEC-001" in r]
+    assert [r for r in review_policy.blocking_reasons(still, "low") if "F-001" in r]
 
 
 def test_a_resolved_finding_asks_the_human_nothing() -> None:
-    """A card is a question. `security_review.resolution_of` answered this one against the
+    """A card is a question. `change_review.resolution_of` answered this one against the
     committed tree, which is a stronger answer than the card would collect — and left in, a fixed
     `high` finding raised a mandatory card, so fixing the code was what stopped the freeze."""
     resolved = {**_A_FINDING, "blocking": False, "status": "resolved", "resolved_at": {"subject_head_sha": "f" * 40}}
     _, cards = decision_cards.derive_cards(
-        claims=[], gaps=[], extra_behaviors=[], security_findings=[resolved], plan_risk={}, plan_domains={}
+        claims=[], gaps=[], extra_behaviors=[], review_findings=[resolved], plan_risk={}, plan_domains={}
     )
     assert cards == []
 
@@ -452,7 +452,7 @@ def test_an_open_finding_still_asks() -> None:
         claims=[],
         gaps=[],
         extra_behaviors=[],
-        security_findings=[{**_A_FINDING, "status": "open"}],
+        review_findings=[{**_A_FINDING, "status": "open"}],
         plan_risk={},
         plan_domains={},
     )
@@ -460,9 +460,9 @@ def test_an_open_finding_still_asks() -> None:
 
 
 def test_a_finding_with_no_status_at_all_still_asks() -> None:
-    """Fail closed, the same way `blocking_security_findings` does: only the word `resolved`
+    """Fail closed, the same way `blocking_findings` does: only the word `resolved`
     silences a finding, never the absence of one."""
     _, cards = decision_cards.derive_cards(
-        claims=[], gaps=[], extra_behaviors=[], security_findings=[_A_FINDING], plan_risk={}, plan_domains={}
+        claims=[], gaps=[], extra_behaviors=[], review_findings=[_A_FINDING], plan_risk={}, plan_domains={}
     )
     assert [c["risk"] for c in cards] == ["high"]

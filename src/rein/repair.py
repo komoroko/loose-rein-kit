@@ -116,7 +116,7 @@ def route(
 ) -> Routing:
     """Split acceptance's findings into what the loop repairs and what a human decides.
 
-    A security finding is a **code** repair as soon as a task's scope owns its anchor, **whatever
+    A review finding is a **code** repair as soon as a task's scope owns its anchor, **whatever
     its severity**. Nothing about it is a question: the reviewer read the code, named the lines,
     and the plan says whose they are. Severity decides whether it holds acceptance shut
     (`review_policy.blocks`), which is a different question; routing on it left every `low` and
@@ -135,7 +135,7 @@ def route(
         if not attribution.owned:
             unowned.append(attribution)
             continue
-        if attribution.kind == "security" or attribution.finding_id in decided:
+        if attribution.kind == "finding" or attribution.finding_id in decided:
             by_task.setdefault(attribution.task_id, []).append(attribution)
         else:
             judgement.append(attribution)

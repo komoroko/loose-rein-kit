@@ -132,14 +132,14 @@ def shareable_reading(config: models.Config | None, roles: Sequence[str]) -> ada
 class SharedReading:
     """One reading of the change, primed once and **branched** for each stage that needs it.
 
-    The extractor and the security reviewer are handed the same diff — up to `max_diff_bytes`, so
+    The extractor and the reviewer of the whole change are handed the same diff — up to `max_diff_bytes`, so
     up to half a megabyte — and were launched separately, each paying to read it in full. Measured
     on an 82 KB payload: two independent launches cost $0.2153, a priming turn plus two branches
     cost $0.1298. Repeated on a 58 KB payload with real request shapes: $0.196 against $0.126.
 
     **Serialising them into one session is not the answer**, which is why this branches rather than
     continues: the second stage would read the first stage's conclusions and inherit its frame, and
-    catching what the extraction's frame missed is the whole value of the security review. A fork
+    catching what the extraction's frame missed is the whole value of the change review. A fork
     shares everything read before the fork and none of what any branch then concludes.
 
     Three facts this rests on, all measured rather than assumed — the alternatives look identical
@@ -313,7 +313,7 @@ class SharedReading:
         # The acknowledgement is the whole contract of this turn, and it was being thrown away.
         # Whatever the model says here is in *both* branches' context afterwards, so a model that
         # answered by analysing the diff instead of acking would hand the extractor and the
-        # security reviewer one shared reading of it — the correlated blindness this class forks
+        # change reviewer one shared reading of it — the correlated blindness this class forks
         # rather than continues in order to avoid, arriving through the door it opened.
         # `actual_extraction.assert_blind` cannot see it: it guards the payload, and this is the
         # answer.
@@ -328,7 +328,7 @@ class SharedReading:
 #: The two stages handed the same reading of the change. The comparator is deliberately absent: it
 #: is given the Actual and the Expected, never the code, so it has no reading to share — and §12.4
 #: forbids it sharing one with the extractor in any case.
-_READING_ROLES: tuple[str, ...] = ("actual_extractor", "security_reviewer")
+_READING_ROLES: tuple[str, ...] = ("actual_extractor", "reviewer")
 
 #: The priming turn belongs to no stage — it is what both of them read — so it is counted under a
 #: name of its own. Folding it into either role would make that role's cost a fiction.
@@ -340,19 +340,20 @@ _STAGE_ROLES: tuple[str, ...] = tuple(review_policy.STAGE_ROLE.values())
 
 
 def shares_reading(config: models.Config | None, *, readings: models.Readings) -> bool:
-    """Will the extractor and the security reviewer branch one reading of the change?
+    """Will the extractor and the reviewer of the whole change branch one reading of the change?
 
     The question the execution plan asks before anything launches. `LaunchRefused` is left to the
     caller: for a run whose reviewers were injected it means "cannot say", not "no". Without both
-    an extraction and a security reading there is nothing to branch (`StagedReviewers`).
+    an extraction and a review there is nothing to branch (`StagedReviewers`).
     """
-    return readings.actual_extraction and readings.security and shareable_reading(config, _READING_ROLES) is not None
+    both = readings.actual_extraction and bool(readings.reviews)
+    return both and shareable_reading(config, _READING_ROLES) is not None
 
 
 #: The one stage whose reading benefits from standing in a checkout rather than in an empty
-#: directory: the host's security discipline reviews a branch's *pending changes*, and outside a
-#: repository it refuses outright. The other two stages read only what the request carries.
-_CHECKOUT_ROLE = "security_reviewer"
+#: directory: the host's review disciplines read a branch's *pending changes*, and outside a
+#: repository they refuse outright. The other two stages read only what the request carries.
+_CHECKOUT_ROLE = "reviewer"
 
 
 @contextlib.contextmanager
@@ -450,8 +451,8 @@ def _adapter_reviewer(
     have to run to anchor anything. What the launch can still read is the user's own global CLI
     configuration, which is theirs and not this repository's to remove.
 
-    **The security reviewer is the exception, and only when its host has a discipline to use.** A
-    host security review reads a branch's pending changes and refuses outside a repository, so that
+    **The reviewer of the whole change is the exception.** A host review discipline reads a branch's
+    pending changes and refuses outside a repository, so that
     stage is given a throwaway clone holding exactly this change, unstaged (`_pending_changes`).
     It costs that stage the property the other two keep — its answer is no longer a function of the
     request alone, since the base tree and `.rein/plan.yaml` are on disk beside it.
@@ -476,7 +477,7 @@ def _adapter_reviewer(
     record = adapters.adapter_for_role(config, role)
     # `READ` and never more: an acceptance stage is handed its request, answers on stdout, and must
     # change nothing. That is not the same as passing no flags — a CLI whose tools are
-    # deny-by-default without a grant cannot open the checkout the security stage is given to
+    # deny-by-default without a grant cannot open the checkout the change review is given to
     # read. How the request reaches it — stdin, or an argument — is `prompt_call`'s question.
     role_argv = (*adapters.launch_argv(config, role), *record.access_flags(adapters.READ))
     timeout = float(config.agent_timeout_sec) if config is not None else 0.0
@@ -485,9 +486,9 @@ def _adapter_reviewer(
     # this launch inside a directory whose settings, hooks and MCP servers *are* the thing under
     # review, so it is handed one only when the CLI can be told to ignore them
     # (`adapters.Adapter.config_isolation`). A CLI with no such mechanism gets the empty directory
-    # and reads the diff, which is what `security_review.contract` already asks of it.
+    # and reads the diff, which is what `change_review.contract` already asks of it.
     #
-    # There used to be a third — that the CLI carried a host security discipline of its own — and it
+    # There used to be a third — that the CLI carried a host review discipline of its own — and it
     # was wrong twice over. A discipline is *offered*, never relied on (`adapters.Adapter.disciplines`):
     # the contract states the question in full beside it, so a CLI without one asks the same thing
     # itself. And the checkout is what the question is *about*, not how it is asked, so making the
@@ -497,7 +498,7 @@ def _adapter_reviewer(
     # It does not widen the set today: `claude` is still the only adapter that declares
     # `config_isolation`, so it is still the only CLI handed a checkout. What it changes is what
     # the set is a function of — a CLI that gains such a flag gets the checkout by declaring it,
-    # rather than by also happening to carry a `/security-review` command.
+    # rather than by also happening to carry a review command.
     wants_checkout = role == _CHECKOUT_ROLE and bool(record.config_isolation)
     if wants_checkout:
         role_argv = (*role_argv, *record.config_isolation)
@@ -530,7 +531,7 @@ def _adapter_reviewer(
                 # Written here rather than beside the reviewer, so the file's lifetime is the
                 # launch's: a path handed out and deleted later is a launch that reads nothing.
                 # `empty` is the scratch directory in both cases — it exists whether or not the
-                # security stage is also given a checkout to work in.
+                # change review is also given a checkout to work in.
                 schema_file = pathlib.Path(empty) / f"{role}.schema.json"
                 schema_file.write_text(schema_json, encoding="utf-8")
                 launch_argv = (*role_argv, *(p.format(schema=schema_file) for p in record.output_schema_flags))
@@ -583,12 +584,12 @@ class StagedReviewers:
         if config is None:
             config = store_mod.Store(repo).read_config()
         self._ledger = usage_mod.Ledger()
-        # The extractor and the security reviewer read the same diff. When they can share one
+        # The extractor and the change reviewer read the same diff. When they can share one
         # reading without sharing a conclusion, they do; otherwise `shareable_reading` says no and
         # each is launched exactly as before. Without both readings (`reviews.yaml`)
         # there is nothing to share, and priming one for a single branch costs more than launching
         # that stage alone.
-        shared = shareable_reading(config, _READING_ROLES) if readings.actual_extraction and readings.security else None
+        shared = shareable_reading(config, _READING_ROLES) if readings.actual_extraction and readings.reviews else None
         reading = (
             SharedReading(
                 repo,

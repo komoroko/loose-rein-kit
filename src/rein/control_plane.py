@@ -73,7 +73,15 @@ TOKEN_ENV = "REIN_CAPABILITY_TOKEN"
 #: What a leaf is granted. Everything else — approving a gate, confirming as an expert,
 #: completing a human review, replacing the machine review or the state, importing an
 #: state replacement — is central-only and refused by the server regardless of the token.
-LEAF_CAPABILITIES: frozenset[str] = models.CAPABILITY_VALUES - models.CENTRAL_ONLY_CAPABILITIES
+LEAF_CAPABILITIES: frozenset[str] = (
+    models.CAPABILITY_VALUES - models.CENTRAL_ONLY_CAPABILITIES - models.REPAIR_ONLY_CAPABILITIES
+)
+
+#: What the launch of a repair is granted: a leaf's, and leave to write past the mandate's `include`.
+REPAIR_CAPABILITIES: frozenset[str] = LEAF_CAPABILITIES | models.REPAIR_ONLY_CAPABILITIES
+
+#: The capability the gate guard asks about. A question, not a mutation: the answer is the token.
+REPAIR_GRANT = "scope.repair"
 
 #: A token outlives one task, not one build. Long enough that a slow implementer does not trip
 #: over it, short enough that a token in a captured log is stale by the time anyone reads it.
@@ -506,7 +514,7 @@ class _Handler(socketserver.StreamRequestHandler):
                 f"{capability} is central-only and is never served over the control plane — "
                 "a leaf that could approve its own work has not been reviewed by anyone"
             )
-        if capability not in LEAF_CAPABILITIES:
+        if capability not in REPAIR_CAPABILITIES:
             raise ControlPlaneError(f"unknown capability {capability!r}")
 
         token = verify(server.secret, str(payload.get("token", "")))
@@ -519,6 +527,10 @@ class _Handler(socketserver.StreamRequestHandler):
         if not server.claim_nonce(token.nonce, request_nonce):
             raise TokenError("request replayed — each (token, nonce) pair is accepted once")
 
+        if capability == REPAIR_GRANT:
+            # Asked by the gate guard of a repair's launch. Answering is the grant: the token was
+            # minted for that launch alone, and this socket lives exactly as long as the run.
+            return {"granted": True, "task_id": token.task_id}
         args = payload.get("args")
         request = Request(
             capability=capability,
@@ -580,6 +592,24 @@ def call(socket_path: str | Path, request: Request) -> dict[str, Any]:
         raise ControlPlaneError(str(answer.get("error", "refused")))
     result = answer.get("result")
     return result if isinstance(result, dict) else {}
+
+
+def repair_granted() -> tuple[bool, str]:
+    """Is this process running under a repair's launch? `(granted, why not)`.
+
+    The grant is the token in this process's environment, and only the control plane that minted it
+    can say it is genuine and still alive. So it is asked, every time: a run that has ended has no
+    socket, and a token minted for an implementer or a reviewer does not carry the capability.
+    """
+    socket_path = os.environ.get(SOCKET_ENV, "")
+    raw_token = os.environ.get(TOKEN_ENV, "")
+    if not socket_path or not raw_token:
+        return False, "this process is not the launch of a repair"
+    try:
+        call(socket_path, Request(capability=REPAIR_GRANT, token=raw_token))
+    except ControlPlaneError as exc:
+        return False, f"the control plane did not grant a repair: {exc}"
+    return True, ""
 
 
 def route(repo: repo_mod.Repo, capability: str, args: dict[str, Any]) -> dict[str, Any]:

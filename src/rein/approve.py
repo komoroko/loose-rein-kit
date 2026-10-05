@@ -302,21 +302,29 @@ def _review_blockers(
     except reviews_cmd.ReviewsError as exc:
         blockers.append(str(exc))
     else:
-        for setting, wanted, read in (
-            ("acceptance.actual_extraction", readings.actual_extraction, review.extraction_read),
-            ("acceptance.comparison", readings.comparison, review.comparison_read),
-            ("whole_change.security", readings.security, review.security_read),
+        for name, wanted, read in (
+            ("actual_extraction", readings.actual_extraction, review.extraction_read),
+            ("comparison", readings.comparison, review.comparison_read),
         ):
             if read != wanted:
-                name = setting.split(".")[1].replace("_", " ")
                 blockers.append(
                     Blocker(
-                        f"the machine review was generated {'with' if read else 'without'} the {name}, "
-                        f"and reviews.yaml now has {setting} {'on' if wanted else 'off'}",
+                        f"the machine review was generated {'with' if read else 'without'} the "
+                        f"{name.replace('_', ' ')}, and reviews.yaml now has acceptance.{name} "
+                        f"{'on' if wanted else 'off'}",
                         by="machine",
                         remedy="rein review generate",
                     )
                 )
+        if review.reviews_read != readings.reviews:
+            blockers.append(
+                Blocker(
+                    f"the machine review read the whole change for {', '.join(review.reviews_read) or 'nothing'}, "
+                    f"and reviews.yaml now has acceptance.reviews {', '.join(readings.reviews) or 'empty'}",
+                    by="machine",
+                    remedy="rein review generate",
+                )
+            )
     return blockers
 
 
@@ -468,12 +476,7 @@ def _boundary_blockers(
             "Fetch the commits the review was taken on, then ask again."
         ]
     include, exclude = plan.scope
-    expansions = {path: str(entry.get("status")) for path, entry in state.scope_expansions.items()}
-    # An `adopted` in state.yaml counts only when the chain says a person adopted that path: the
-    # file is machine-written, and a status nobody's answer stands behind is a widening of the
-    # mandate nobody made.
-    adopted = adoptions(event_chain.scan(repo.events)[0])
-    expansions = {path: status for path, status in expansions.items() if status != "adopted" or path in adopted}
+    expansions = gate_guard.expansions_in_force(repo, state)
     outside = [
         (path, why)
         for path in sorted({entry for entry in out.split("\0") if entry})
@@ -529,49 +532,21 @@ def _boundary_blockers(
     ]
 
 
-def adoptions(events: Sequence[models.Event]) -> set[str]:
-    """The paths a person adopted into the mandate's scope at acceptance, read off the chain.
-
-    `adopt_scope` is recorded with the path it widens to (`ui._record_scope_decision`); the status
-    in `state.yaml` is the convenience copy every path check reads, and this is what it answers to.
-    """
-    return {
-        str(event.detail.get("path", ""))
-        for event in events
-        if event.event == "disposition_recorded" and event.detail.get("action") == "adopt_scope"
-    } - {""}
-
-
 def _integration_blockers(repo: repo_mod.Repo, config: models.Config | None, gate: str) -> list[str]:
     """Can what acceptance approves be integrated as it stands? Asked before, because approving does it.
 
-    The mainline has to exist, and the work branch has to merge into it cleanly: an approval whose
-    integration then stops on a conflict would hand a person back a decision they already made. A
-    conflict is the machine's to clear — merge the mainline into the work branch and take the review
-    again, so that what is approved is what will land.
+    `integrate.obstacles` is the one list, read here and again by the integration itself: an
+    approval whose integration then stops would hand a person back a decision they already made.
     """
     if gate != "acceptance" or config is None:
         return []
-    from rein import pr_stack
+    from rein import integrate, pr_stack
 
-    mainline, work = config.mainline, config.work_branch
-    base = repo._git_rc("rev-parse", "--verify", "--quiet", f"{mainline}^{{commit}}")[1].strip()
-    if not base:
-        return [
-            f"the mainline `{mainline}` (`project.mainline`) does not exist here, so there is nothing for an "
-            "approval to integrate the cycle into"
-        ]
-    tip = repo._git_rc("rev-parse", "--verify", "--quiet", f"{work}^{{commit}}")[1].strip()
-    if tip and pr_stack.conflicts_with(repo, tip, base):
-        return [
-            Blocker(
-                f"{work} no longer merges cleanly into {mainline}. Do not rebase: merge {mainline} into the "
-                "work branch, then take the review again so that what is approved is what lands",
-                by="machine",
-                remedy=f"git merge {mainline}; rein review generate",
-            )
-        ]
-    return []
+    try:
+        docs = pr_stack.Documents.read(repo)
+    except (pr_stack.StackError, models.DocumentError, store_mod.StoreError) as exc:
+        return [f"what approving would integrate could not be read: {exc}"]
+    return [Blocker(o.text, by=o.by, remedy=o.remedy) for o in integrate.obstacles(repo, docs)]
 
 
 def _baseline_blockers(state: models.State, gate: str) -> list[str]:
@@ -806,7 +781,16 @@ def readiness(repo: repo_mod.Repo, gate: str, *, already_approved_blocks: bool =
     blockers += _irreversible_blockers(plan, gate)
     blockers += _worktree_blockers(repo, plan, gate)
     blockers += _review_blockers(repo, review, state, gate)
-    return blockers
+    # Two checks can reach the same sentence — a stale review read at HEAD by the review's own
+    # check and at the work branch's tip by the integration's, when they are one commit — and a
+    # person is told each thing once.
+    told: set[str] = set()
+    once: list[str] = []
+    for blocker in blockers:
+        if str(blocker) not in told:
+            told.add(str(blocker))
+            once.append(blocker)
+    return once
 
 
 # --- what an approval covers -------------------------------------------------------
@@ -2006,6 +1990,20 @@ def approve_locally(repo: repo_mod.Repo, gate: str, subject: Mapping[str, str]) 
     return 0 if ok else 1
 
 
+def refresh_integration_target(repo: repo_mod.Repo) -> None:
+    """Read the forge's mainline before acceptance is approved, because approving integrates into it.
+
+    Readiness reads `origin/<mainline>` as last fetched and never fetches; the act that integrates is
+    the one that has to see the forge as it is (`integrate.refresh`).
+    """
+    from rein import integrate, pr_stack
+
+    try:
+        integrate.refresh(repo)
+    except (integrate.IntegrationError, pr_stack.StackError, models.DocumentError, store_mod.StoreError) as exc:
+        raise ApprovalError(str(exc)) from None
+
+
 def integration_note(repo: repo_mod.Repo) -> str:
     """What approving acceptance will do next, said before the question rather than after it."""
     from rein import integrate, pr_stack
@@ -2060,6 +2058,12 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(str(exc))
         return 1
 
+    if args.gate == "acceptance" and not args.check:
+        try:
+            refresh_integration_target(repo)
+        except ApprovalError as exc:
+            logger.error(str(exc))
+            return 1
     try:
         blockers = readiness(repo, args.gate)
     except ApprovalError as exc:

@@ -44,6 +44,13 @@ Report each lens you were handed as `finding(s)` or `attacked — no finding` (w
 you tried). The reference set below is what the packaged library holds, for when you were adopted
 inline and handed nothing; a delegated reviewer uses the list it was given.
 
+## Questions added to the stage
+The lead may also hand you questions the human added to this stage in `.rein/reviews.yaml` — a
+correctness, simplification or security reading of the document, or one of their own. Ask each one
+of the same inputs and report what it finds the way you report a lens, under the question's name. A
+lead may hand you questions and no lenses, when the adversarial review is switched off: then those
+questions are the whole of your job.
+
 ## Reference: attack lenses — requirements (the mandate gate)
 1. **Testability attack**: for each acceptance criterion, attempt an implementation that
    satisfies its letter while betraying its intent. If you succeed, the criterion is too weak.

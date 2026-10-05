@@ -116,8 +116,9 @@ logger = logging.getLogger(__name__)
 #: the propagation that follows creates that one and git refuses the same path twice.
 _GATE4_WORKTREE = "_gate4"
 
-#: What `_verify_repair` refuses to land: a repair with no test, and one whose tests pass without it.
-_REPAIR_REFUSED = frozenset({"untested", "inert"})
+#: What `_verify_repair` refuses to land: a repair with no test, one that changed only tests, and one
+#: whose tests pass without it.
+_REPAIR_REFUSED = frozenset({"untested", "test_only", "inert"})
 
 #: What the integration reviewer's findings file is named after. Not a task id — the subject is the
 #: join of a batch — and `dossier.findings_path` only needs a stable name to write beside.
@@ -273,6 +274,11 @@ _RUN_OUTCOME: Mapping[int, str] = {
 }
 
 
+#: The name the reviewer step is recorded under: its events, its findings file, and the step a
+#: task's failure names.
+REVIEW_STEP = "review"
+
+
 @dataclass(frozen=True)
 class GateStep:
     """One quality-gate step, normalized from config.
@@ -299,7 +305,7 @@ class GateStep:
     executor_profile: str = ""
     #: The role an agent step runs as, and the argv that launches that role's adapter. Dropping
     #: it makes the step launch `agents.implementer`'s adapter while calling itself
-    #: `code_reviewer` — two roles the operator configured separately become one process.
+    #: `reviewer` — two roles the operator configured separately become one process.
     agent_role: str = ""
     agent_argv: tuple[str, ...] = ()
     #: Glob patterns (fnmatch-style) restricting this step to a matching diff. Empty: every
@@ -367,7 +373,12 @@ class Config:
         through a task.
 
         The command steps come from `config.yaml` and are frozen with the mandate; the reviewer
-        steps come from `reviews.yaml`, which is not (`models.Reviews`). Both run as one DoD.
+        step comes from `reviews.yaml`, which is not (`models.Reviews`). Both run as one DoD.
+
+        One reviewer step, reading for every review `build` adds, or none when it adds none. It
+        reads each batch before it merges and a join whose merge resolved a conflict — that tree
+        holds code no reviewer was shown — and sends a finding back as many times as
+        `review_policy.repair_rounds` allows, the same budget acceptance repairs its findings on.
         """
         commands = tuple(
             GateStep(
@@ -384,19 +395,22 @@ class Config:
             )
             for step in config.quality_gate
         )
-        readers = tuple(
-            GateStep(
-                name=step.name,
-                kind="agent",
-                retries=max(0, step.retries),
-                required=True,
-                agent_role="code_reviewer",
-                agent_argv=adapters.launch_argv(config, "code_reviewer"),
-                paths=step.paths,
-                stage=step.stage,
-                reviews=step.reviews,
+        asked = reviews.reviews_at("build")
+        readers = (
+            (
+                GateStep(
+                    name=REVIEW_STEP,
+                    kind="agent",
+                    retries=max(0, config.repair_rounds),
+                    required=True,
+                    agent_role="reviewer",
+                    agent_argv=adapters.launch_argv(config, "reviewer"),
+                    stage="both",
+                    reviews=asked,
+                ),
             )
-            for step in reviews.steps
+            if asked
+            else ()
         )
         steps = commands + readers
         argv = adapters.launch_argv(config, "implementer")
@@ -1716,7 +1730,7 @@ class Orchestrator:
             )
         return flags
 
-    def _leaf_env(self, task: dag.Task, role: str = "implementer") -> dict[str, str] | None:
+    def _leaf_env(self, task: dag.Task, role: str = "implementer", *, repair: bool = False) -> dict[str, str] | None:
         """The environment an implementer runs with: the control socket, a scoped token, and who it is.
 
         The token is scoped to this run and this task, granting only what a leaf legitimately
@@ -1733,6 +1747,11 @@ class Orchestrator:
         None when there is no control plane (a dry run), which means the leaf inherits this
         process's environment and its `rein decision add` will refuse rather than write
         into a worktree that is about to be deleted.
+
+        `repair` is the launch of a repair, whose token also carries `scope.repair`: leave to write
+        where the mandate's `include` does not reach, which the gate guard asks this run's control
+        plane about. Carried by the token rather than written anywhere, so it reaches this launch
+        alone and dies with the run.
         """
         if self.control is None:
             return None
@@ -1740,7 +1759,7 @@ class Orchestrator:
             self.control.secret,
             run_id=self.run_id,
             task_id=task.id,
-            capabilities=sorted(control_plane.LEAF_CAPABILITIES),
+            capabilities=sorted(control_plane.REPAIR_CAPABILITIES if repair else control_plane.LEAF_CAPABILITIES),
             ttl_sec=int(self.config.timeout_agent or control_plane.DEFAULT_TTL_SEC),
         )
         declared = task_environment(task)[0] if role == "implementer" else {}
@@ -1832,7 +1851,7 @@ class Orchestrator:
 
     def _review_subject(self, task: dag.Task) -> build_prompts.ReviewSubject:
         cwd = self.ws.worktree_path(task.id)
-        written = self._write_dossier(task, cwd, "code_reviewer")
+        written = self._write_dossier(task, cwd, "reviewer")
         where = Path(cwd).relative_to(self.root) if Path(cwd).is_relative_to(self.root) else Path(cwd)
         branch = self.ws.branch_for(task.id)
         return build_prompts.ReviewSubject(
@@ -1912,7 +1931,7 @@ class Orchestrator:
         file — is a `stop`. When the launch never happened every subject gets the `fault`: the
         machine stopping a reviewer is not a verdict about any task.
         """
-        role = step.agent_role or "code_reviewer"
+        role = step.agent_role or "reviewer"
         ids = [task.id for task in subjects]
         argv = step.agent_argv or self.config.adapter_argv
         target = dossier.findings_path(self.root, _BATCH_REVIEW_SUBJECT.format(ids="+".join(ids)))
@@ -2343,7 +2362,7 @@ class Orchestrator:
         The DoD is the only automated evidence a task's `done` rests on, and until this existed
         nobody ever asked whether it could go red. The tests it runs were written by the
         implementer in the same launch as the code they test; the blind extractor is deliberately
-        never shown them (`review_reading.split_tests`), and the security reviewer reads them only
+        never shown them (`review_reading.split_tests`), and the change reviewer reads them only
         for what an attacker could do with them. So the Expected/Actual split this whole workflow is
         built on reached the code and — until the per-task reviewer was asked the question named
         below — never once the tests, and a test that asserts nothing produces a green that
@@ -2589,7 +2608,7 @@ class Orchestrator:
         a property of the whole change and it only ever rises, so this stops the warming for the
         rest of the run the same way an unanswerable adapter does.
 
-        **The `ReadOut`s are the point of the return type.** This launched a security reviewer and
+        **The `ReadOut`s are the point of the return type.** This launched a change reviewer and
         then threw its answer away: the finding was paid for here and first read at acceptance,
         by which time the code it names has been built on. `_repair_warm_findings` reads them. An
         empty list means no reading was taken — a skip, a chain still landing, or an adapter that
@@ -2599,7 +2618,7 @@ class Orchestrator:
             return []
         if not task.scope_include:
             return []
-        if not (self.config.readings.actual_extraction or self.config.readings.security):
+        if not (self.config.readings.actual_extraction or self.config.readings.reviews):
             # Nothing the gate reads is a launch: a reading taken here would warm no key.
             return []
         try:
@@ -2665,14 +2684,14 @@ class Orchestrator:
     def _repair_warm_findings(
         self, task: dag.Task, readouts: Sequence[review_reading.ReadOut], *, at_tip: bool
     ) -> bool:
-        """Hand `task` the open security findings its readings found in its own code — at the tip only.
+        """Hand `task` the open findings its readings found in its own code — at the tip only.
 
         **The readings were already taken and already paid for** (`_warm_reading`); until now their
-        answers were written to the stage cache and read by nobody. So a security finding about
+        answers were written to the stage cache and read by nobody. So a finding about
         code a task wrote was first seen at acceptance — after every later task had been built on
         top of it. Reading it here costs nothing that was not already spent, and the judge is still
-        a different one: the finding comes from the security reviewer's own launch, validated by
-        `security_review.run_security_review`, and the fixer is an implementer.
+        a different one: the finding comes from the change reviewer's own launch, validated by
+        `change_review.run_change_review`, and the fixer is an implementer.
 
         **Only a finding `task` owns, and only while `task`'s own work is the tip of the branch.** A
         repair here is committed on top of the work branch, and a pull-request stack is cut along
@@ -2699,7 +2718,7 @@ class Orchestrator:
         tasks = self._load_graph().tasks
         owned: list[findings_mod.Attribution] = []
         for readout in readouts:
-            for finding in readout.security.findings:
+            for finding in readout.review.findings:
                 # Every open one, whatever its severity: severity decides whether a finding holds
                 # acceptance shut, not whether code a task owns gets repaired (`repair.route`).
                 if finding.get("status") in {"resolved", "disputed"}:
@@ -2711,11 +2730,11 @@ class Orchestrator:
                 ]
                 hit = next((p for p in paths if findings_mod.owner_of_path(tasks, p) == task.id), "")
                 if hit:
-                    owned.append(findings_mod.Attribution(str(finding.get("id", "SEC-?")), "security", task.id, hit))
+                    owned.append(findings_mod.Attribution(str(finding.get("id", "F-?")), "finding", task.id, hit))
         if not owned:
             return False
         print(
-            f"    [review] {task.id}: the security review found {len(owned)} finding(s) in its own "
+            f"    [review] {task.id}: the review of the change found {len(owned)} finding(s) in its own "
             "scope — repairing them here rather than at acceptance"
         )
         self._repair(task, repair_mod.Repair(task.id, tuple(owned)), where="review")
@@ -3461,7 +3480,7 @@ class Orchestrator:
                 ),
                 cwd=self.root,
                 where=f"{ids}: the '{step.name}' agent step over the merged tree",
-                role=step.agent_role or "code_reviewer",
+                role=step.agent_role or "reviewer",
             )
             if not target.exists():
                 raise StopLoop(
@@ -3537,7 +3556,7 @@ class Orchestrator:
         except StopLoop as exc:
             return LeafOutcome(ok=False, log=str(exc))
 
-    def _gate_violations(self, paths: list[str]) -> list[tuple[str, str]]:
+    def _gate_violations(self, paths: list[str], *, repair: bool = False) -> list[tuple[str, str]]:
         """Gate-guard verdict for each path; [(path, deny reason)] for the denied ones.
 
         The merge/finalize-stage twin of gate_guard's edit-time and commit-stage checkpoints.
@@ -3546,8 +3565,12 @@ class Orchestrator:
         (a diff vs HEAD) can never see it again — so what a task actually changed is re-checked
         in code here, before it lands. template_mode / enforce_hook short-circuit inside
         evaluate() exactly as they do for the other checkpoints.
+
+        `repair` says whose change it is: a repair's may reach past the mandate's `include`, a
+        task's may not. The loop knows which it is checking, so it says so rather than letting the
+        guard ask this process's environment, which is the orchestrator's and carries no grant.
         """
-        verdicts = ((p, gate_guard.evaluate(str(self.repo.path(p)), self.repo)) for p in paths)
+        verdicts = ((p, gate_guard.evaluate(str(self.repo.path(p)), self.repo, repair=repair)) for p in paths)
         return [(p, reason) for p, (ok, reason) in verdicts if not ok]
 
     def _escalate_gate_violation(self, task_id: str, where: str, violations: list[tuple[str, str]]) -> None:
@@ -3745,9 +3768,6 @@ class Orchestrator:
                 try:
                     if refusal := self._tree_refusal():
                         return refusal
-                    self._close_repair_grant(
-                        reason="a grant left open when this run started — the run that opened it never closed it"
-                    )
                     rc = self._run_loop()
                     outcome = _RUN_OUTCOME.get(rc, "failed")
                     return rc
@@ -3802,7 +3822,7 @@ class Orchestrator:
         roles = {"implementer": self.config.adapter_argv}
         for step in self.config.steps:
             if step.kind == "agent" and step.agent_argv:
-                roles[step.agent_role or "code_reviewer"] = step.agent_argv
+                roles[step.agent_role or "reviewer"] = step.agent_argv
         return preflight.check(
             self.config.raw, self.config.raw.quality_gate, roles, runtime=executors.container_runtime()
         )
@@ -4880,16 +4900,12 @@ class Orchestrator:
         """
         print(f"    [{where}] {task.id}: {len(item.items)} finding(s) → the implementer")
         slice_branch = self._slice_branch(task.id, where=where)
-        # The repair may write where the mandate's `include` does not reach, for as long as it runs
-        # and no longer (`gate_guard.outside_the_mandate`): every path it does is put to a human.
-        self._open_repair_grant(task.id)
-        try:
-            if slice_branch:
-                landed = self._repair_on_slice(task, item, slice_branch, where=where)
-            else:
-                landed = self._repair_on_work_branch(task, item, where=where)
-        finally:
-            self._close_repair_grant(reason="the repair launch ended")
+        # The repair may write where the mandate's `include` does not reach — its launch's token says
+        # so (`_leaf_env`) — and every path it does is put to a human (`_record_expansions`).
+        if slice_branch:
+            landed = self._repair_on_slice(task, item, slice_branch, where=where)
+        else:
+            landed = self._repair_on_work_branch(task, item, where=where)
         if landed:
             self._restate_evidence(task.id, self._gate_after_repair(task, where=where))
 
@@ -4931,6 +4947,7 @@ class Orchestrator:
             adapters.command(self.config.adapter_argv, self._repair_prompt(task, item), access=adapters.WRITE),
             cwd=self.root,
             where=f"{task.id}: the repair",
+            env=self._leaf_env(task, repair=True),
             task_id=task.id,
             role="implementer",
         )
@@ -4949,6 +4966,7 @@ class Orchestrator:
                 adapters.command(self.config.adapter_argv, self._repair_prompt(task, item), access=adapters.WRITE),
                 cwd=path,
                 where=f"{task.id}: the repair on {branch}",
+                env=self._leaf_env(task, repair=True),
                 task_id=task.id,
                 role="implementer",
             )
@@ -4983,7 +5001,7 @@ class Orchestrator:
         """
         phase = where.replace(" ", "-")
         changed = self.ws.changed_since(before, cwd=cwd) if before else []
-        if violations := self._gate_violations(changed):
+        if violations := self._gate_violations(changed, repair=True):
             raise StopLoop(
                 f"{task.id}: the {phase} repair changed paths the gate guard refuses:\n"
                 + "\n".join(f"  - {path}: {why}" for path, why in violations),
@@ -5018,7 +5036,8 @@ class Orchestrator:
             print(f"    [{where}] {task.id}: repair refused and undone — {said}")
             return False
         self._repair_refusals.pop(task.id, None)
-        self._event("repair_verified", [task.id], detail)
+        # Only a reproduced repair is a verified one; `undetermined` landed on no evidence either way.
+        self._event("repair_verified" if result == "reproduced" else "repair_unverified", [task.id], detail)
         print(f"    [{where}] {task.id}: repair landed ({result})")
         self._record_expansions(task, changed, findings, after)
         return True
@@ -5040,21 +5059,6 @@ class Orchestrator:
             tx.write("state", raw)
             tx.append(event, cycle_id=self.cycle_id, subject_ids=list(subjects), detail=detail)
 
-    def _open_repair_grant(self, task_id: str) -> None:
-        def change(raw: dict[str, Any]) -> bool:
-            raw["repair_grant"] = {"task_id": task_id, "opened_at": event_chain.now_iso()}
-            return True
-
-        self._update_state("repair_grant_opened", [task_id], {}, change)
-
-    def _close_repair_grant(self, *, reason: str) -> None:
-        """Close the repair grant if one is open. A no-op otherwise, so it is safe to call on every exit."""
-
-        def change(raw: dict[str, Any]) -> bool:
-            return raw.pop("repair_grant", None) is not None
-
-        self._update_state("repair_grant_closed", [self.cycle_id], {"reason": reason}, change)
-
     def _record_expansions(self, task: dag.Task, changed: Sequence[str], findings: Sequence[str], commit: str) -> None:
         """Put every path this repair wrote outside the mandate's `include` to a human, as `proposed`.
 
@@ -5068,7 +5072,7 @@ class Orchestrator:
             return
         include, exclude = plan.scope
         guarded = gate_guard.guard_settings(self.repo).paths
-        statuses = {path: str(entry.get("status")) for path, entry in state.scope_expansions.items()}
+        statuses = gate_guard.expansions_in_force(self.repo, state)
         widened = [
             path
             for path in changed
@@ -5144,7 +5148,7 @@ class Orchestrator:
         *not inert* against the old code, which a test that only imports a new symbol also is. It
         is the mechanical half; whether the test is about the finding is the next reading's.
 
-        `untested` and `inert` refuse the repair (`_REPAIR_REFUSED`). `reproduced` lands it.
+        `untested`, `test_only` and `inert` refuse the repair (`_REPAIR_REFUSED`). `reproduced` lands it.
         `undetermined` lands it too, recorded: an experiment that could not be run is evidence in
         neither direction, and refusing on it would make a broken sandbox a human's problem.
         """
@@ -5169,7 +5173,15 @@ class Orchestrator:
                 "what removed it. Write a test that fails against the code as it was and passes with the fix"
             )
         if len(tests) == len(changed):
-            return "undetermined", "every path the repair changed is a test path — there is no fix to take away"
+            # Not an experiment that could not be run: there is nothing to run it on. With the code
+            # unchanged, a test that passes now passed before, so no test here can show a defect
+            # that this repair removed, and a test weakened or deleted would read the same.
+            return "test_only", (
+                "the repair changed only tests, so the code is as it was and nothing can fail without the "
+                "repair that passes with it. If the finding is in the code, fix it there with a test that "
+                "fails before the fix. If it is in a test, say so in `rein report --summary`: no round can "
+                "prove that repair, and it reaches a human as a finding"
+            )
         patch = self.ws.diff_from(before, cwd, tests)
         if patch is None or not patch.strip():
             return "undetermined", f"the test half of the repair against {before[:12]} could not be read out of git"

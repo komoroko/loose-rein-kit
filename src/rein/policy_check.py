@@ -46,7 +46,7 @@ _BANNED_KEYS: frozenset[str] = frozenset(
         "gates.enforce_hook",
         "build.headless.cmd",
         # `config.yaml` keys. Whether acceptance takes its readings and a security reading is
-        # `reviews.yaml`'s `acceptance` and `whole_change`, which only a person writes and every
+        # `reviews.yaml`'s `acceptance`, which only a person writes and every
         # reader checks against the chain's record (`reviews_cmd`); off, acceptance names what was
         # not read and a blocking finding still stands until its code is gone. What stays banned is
         # switching any of them off from the document the agent drafts.

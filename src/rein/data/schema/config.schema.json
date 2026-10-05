@@ -112,16 +112,13 @@
         "implementer": {
           "$ref": "#/$defs/agentRole"
         },
-        "code_reviewer": {
+        "reviewer": {
           "$ref": "#/$defs/agentRole"
         },
         "actual_extractor": {
           "$ref": "#/$defs/agentRole"
         },
         "comparator": {
-          "$ref": "#/$defs/agentRole"
-        },
-        "security_reviewer": {
           "$ref": "#/$defs/agentRole"
         }
       }
@@ -255,7 +252,7 @@
           "description": "What one reviewer launch may be asked to hold. There is deliberately no ceiling on how much a human may be asked to read or decide at acceptance: such a ceiling named \"split the scope\" as its remedy, which is not a move that exists once every task is implemented, merged and done, so it was raised rather than obeyed. `max_diff_bytes` survives because it is enforced where the remedy exists — `read_facts` refuses a reading before a launch is paid for, and `rein doctor` names a too-broad task while the mandate can still be split."
         },
         "repair_rounds": {
-          "description": "How many times acceptance may repair its own blocking findings and read the change again before it stops and asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",
+          "description": "How many times a review's findings are sent back for repair before the loop stops: a task's reviewer sends a `must_fix` back to its implementer this many times before the task stops, and acceptance repairs its own findings and reads the change again this many times before it asks a human. Default 2. A finding is repaired only when a task's declared scope owns the code it anchored to and the fix changes no claim, acceptance criterion or requirement (`repair.route`); the next round's review is what decides whether it closed, never the fixer's account of it. The ceiling is the point: repairing a false positive is the failure this bounds, and an unbounded loop would spend a session limit on a finding that was never true. 0 turns the repair off, and `rein build` then takes no reading at all — a review it cannot act on is one the human runs `rein review generate` for.",
           "type": "integer",
           "minimum": 0,
           "maximum": 5

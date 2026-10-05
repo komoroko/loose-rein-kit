@@ -272,8 +272,8 @@ def residue(review: models.Review, human: Mapping[str, Any] | None = None) -> di
         out["not_read"].append(
             "nobody compared the change with the mandate's claims (`reviews.yaml` `acceptance.comparison`)"
         )
-    if not review.security_read:
-        out["not_read"].append("no security reviewer read the whole change (`reviews.yaml` `whole_change.security`)")
+    if not review.reviews_read:
+        out["not_read"].append("no review read the whole change (`reviews.yaml` `acceptance.reviews`)")
     return out
 
 

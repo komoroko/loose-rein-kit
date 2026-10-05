@@ -71,9 +71,9 @@
       "type": "string",
       "pattern": "^AST-[0-9]{3,}$"
     },
-    "securityFindingId": {
+    "findingId": {
       "type": "string",
-      "pattern": "^SEC-[0-9]{3,}$"
+      "pattern": "^F-[0-9]{3,}$"
     },
     "taskId": {
       "type": "string",
@@ -276,7 +276,7 @@
               "$ref": "#/$defs/digest"
             },
             "host_surface_digest": {
-              "description": "The committed tree at `subject_head_sha` narrowed to the surfaces `rein install <agent>` wrote — the phase commands, the role prompts, the hooks and the settings each host reads before it reads its prompt. `change_digest` is taken with those paths excluded, because the blind extractor must not read this tool's own orchestration text; the security reviewer is launched into a checkout of the head and told to review them, so a pre-authorized command, a hook or an MCP server added there is a finding. On one digest, a commit that added nothing but a `permissions.allow` entry moved no key, replayed the cached answer, launched no reviewer, and left the review reporting itself fresh. Two subjects, two digests.",
+              "description": "The committed tree at `subject_head_sha` narrowed to the surfaces `rein install <agent>` wrote — the phase commands, the role prompts, the hooks and the settings each host reads before it reads its prompt. `change_digest` is taken with those paths excluded, because the blind extractor must not read this tool's own orchestration text; the reviewer of the whole change is launched into a checkout of the head and, reading for security, told to review them, so a pre-authorized command, a hook or an MCP server added there is a finding. On one digest, a commit that added nothing but a `permissions.allow` entry moved no key, replayed the cached answer, launched no reviewer, and left the review reporting itself fresh. Two subjects, two digests.",
               "$ref": "#/$defs/digest"
             },
             "plan_digest": {
@@ -319,7 +319,7 @@
                 "comparator": {
                   "$ref": "#/$defs/independenceGroup"
                 },
-                "security_reviewer": {
+                "reviewer": {
                   "$ref": "#/$defs/independenceGroup"
                 }
               }
@@ -918,7 +918,7 @@
             }
           }
         },
-        "security": {
+        "reviews": {
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -927,8 +927,13 @@
           ],
           "properties": {
             "read": {
-              "description": "Whether this review sent the change to a security reviewer (`reviews.yaml` `whole_change.security`). False: no security reading was taken, and `findings` holds only what an earlier reading recorded as blocking, carried forward and re-checked against the tree without a reviewer. An empty list under `read: false` says nothing about the change's security.",
-              "type": "boolean"
+              "description": "Which reviews this review sent the whole change to (`reviews.yaml` `acceptance.reviews`), in the order asked. Empty: no review read it, and `findings` holds only what an earlier reading recorded as blocking, carried forward and re-checked against the tree without a reviewer. An empty list of findings says nothing about a review that was not read.",
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/reviewName"
+              }
             },
             "findings": {
               "type": "array",
@@ -938,36 +943,24 @@
                 "additionalProperties": false,
                 "required": [
                   "id",
+                  "review",
                   "severity",
-                  "category",
-                  "attack_scenario",
+                  "scenario",
                   "blocking"
                 ],
                 "properties": {
                   "id": {
-                    "$ref": "#/$defs/securityFindingId"
+                    "$ref": "#/$defs/findingId"
                   },
                   "severity": {
                     "$ref": "#/$defs/risk"
                   },
-                  "category": {
-                    "enum": [
-                      "credential_exposure",
-                      "injection",
-                      "authz_bypass",
-                      "authn_weakness",
-                      "crypto_misuse",
-                      "ssrf",
-                      "path_traversal",
-                      "deserialization",
-                      "supply_chain",
-                      "sandbox_escape",
-                      "information_disclosure",
-                      "denial_of_service",
-                      "other"
-                    ]
+                  "review": {
+                    "description": "Which review raised this finding: a name under `reviews.yaml` `acceptance.reviews`. A finding carried forward keeps the review that raised it, whether or not that review is still added.",
+                    "$ref": "#/$defs/reviewName"
                   },
-                  "attack_scenario": {
+                  "scenario": {
+                    "description": "What breaks and how: the input or state that breaks it, and what goes wrong. For a security finding, who does what and what they get.",
                     "$ref": "#/$defs/text"
                   },
                   "reading": {
@@ -1742,6 +1735,12 @@
           ]
         }
       }
+    },
+    "reviewName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9_-]*$"
     }
   }
 }

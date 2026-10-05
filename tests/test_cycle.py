@@ -243,7 +243,7 @@ def test_close_archives_resets_and_records(tmp_path: Path) -> None:
 def test_a_reviews_yaml_the_chain_does_not_record_blocks_the_close(tmp_path: Path) -> None:
     """Carried into the next chain as it stands, an unrecorded change would come out recorded."""
     repo = finished_repo(tmp_path)
-    repo.reviews.write_bytes(store_mod.dump_yaml({**make_reviews(), "steps": []}) + b"# edited\n")
+    repo.reviews.write_bytes(store_mod.dump_yaml(make_reviews()) + b"# edited\n")
     assert cycle.readiness(repo) == []
     repo.reviews.write_bytes(store_mod.dump_yaml(make_reviews(adversarial=False)))
     assert any("not what the audit chain records" in b for b in cycle.readiness(repo))

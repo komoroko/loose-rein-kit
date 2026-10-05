@@ -42,8 +42,8 @@ def _machine(**kwargs: Any) -> dict[str, Any]:
     kwargs.setdefault("actual_statements", [])
     kwargs.setdefault("claims", [])
     kwargs.setdefault("acceptance", {"actual_extraction": True, "comparison": True})
-    kwargs.setdefault("security", {"read": True, "findings": []})
-    kwargs["security"] = {"read": True, **kwargs["security"]}
+    kwargs.setdefault("reviews", {"findings": []})
+    kwargs["reviews"] = {"read": ["security"], **kwargs["reviews"]}
     return review.assemble(binding=binding, coverage=coverage, **kwargs)
 
 
@@ -74,11 +74,11 @@ def test_every_unsettled_finding_becomes_exactly_one_card() -> None:
                 "grounded": True,
             },
         ],
-        security={"findings": [{"id": "SEC-001", "severity": "high", "category": "ssrf", "blocking": True}]},
+        reviews={"findings": [{"id": "F-001", "severity": "high", "review": "security", "blocking": True}]},
     )
     subjects = [c["question"].split()[0] for c in machine["decision_cards"]]
     # aligned C-002 and the grounded EXTRA-002 are settled; everything else needs a human
-    assert subjects == ["C-001", "C-003", "GAP-001", "EXTRA-001", "SEC-001"]
+    assert subjects == ["C-001", "C-003", "GAP-001", "EXTRA-001", "F-001"]
 
 
 def test_an_all_aligned_review_asks_for_no_decisions() -> None:
@@ -91,7 +91,7 @@ def test_no_card_offers_accepting_the_risk() -> None:
     machine = _machine(
         claims=[_claim("C-001", "diverged")],
         gaps=[{"id": "GAP-001", "kind": "evidence_gap", "statement_id": "STMT-001", "risk": "critical"}],
-        security={"findings": [{"id": "SEC-001", "severity": "critical", "category": "authz_bypass"}]},
+        reviews={"findings": [{"id": "F-001", "severity": "critical", "review": "security"}]},
     )
     by_id = {s["id"]: s for s in machine["statements"]}
     for card in machine["decision_cards"]:
@@ -120,7 +120,7 @@ def test_card_risk_and_domains_come_from_the_frozen_plan(tmp_path_factory: pytes
 
 
 def test_security_cards_route_to_the_security_domain() -> None:
-    machine = _machine(security={"findings": [{"id": "SEC-001", "severity": "high", "category": "ssrf"}]})
+    machine = _machine(reviews={"findings": [{"id": "F-001", "severity": "high", "review": "security"}]})
     assert machine["decision_cards"][0]["requires_domains"] == ["security"]
 
 
@@ -149,13 +149,13 @@ def test_derived_review_is_schema_valid() -> None:
                 "blocking": False,
             }
         ],
-        security={
+        reviews={
             "findings": [
                 {
-                    "id": "SEC-001",
+                    "id": "F-001",
                     "severity": "critical",
-                    "category": "authz_bypass",
-                    "attack_scenario": "An unauthenticated caller reaches the admin route.",
+                    "review": "security",
+                    "scenario": "An unauthenticated caller reaches the admin route.",
                     "code_anchors": [],
                     "blocking": True,
                 }

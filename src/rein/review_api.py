@@ -474,7 +474,7 @@ def scope_block(root: Path, review: models.Review) -> dict[str, object]:
         "independence": binding.get("independence") or {},
         "extraction_read": review.extraction_read,
         "comparison_read": review.comparison_read,
-        "security_read": review.security_read,
+        "reviews_read": list(review.reviews_read),
         "coverage": _coverage_totals(review),
         "counts": {
             "claims": len(review.claim_results),
@@ -482,7 +482,7 @@ def scope_block(root: Path, review: models.Review) -> dict[str, object]:
             "extra_behaviors": len(review.extra_behaviors),
             "scenarios": len(machine.get("scenarios", []) or []),
             "decision_cards": len(machine.get("decision_cards", []) or []),
-            "security_findings": len(review.security_findings),
+            "review_findings": len(review.review_findings),
             "statements": len(machine.get("statements", []) or []),
         },
         # How much of a judgement this session will actually ask for. Only high/critical cards
@@ -638,10 +638,10 @@ def stage_data(root: str | Path, stage: str) -> dict[str, object]:
         payload["statements"] = list(machine.get("statements", []) or [])
         payload["gaps"] = list(machine.get("gaps", []) or [])
         payload["extra_behaviors"] = list(review.extra_behaviors)
-        payload["security_findings"] = list(review.security_findings)
+        payload["review_findings"] = list(review.review_findings)
         payload["extraction_read"] = review.extraction_read
         payload["comparison_read"] = review.comparison_read
-        payload["security_read"] = review.security_read
+        payload["reviews_read"] = list(review.reviews_read)
         payload["summary"] = machine.get("summary", {})
         payload["decisions"] = [d for d in human.get("decisions", []) or [] if isinstance(d, dict)]
         payload["unanswered"] = human_review.unanswered_decisions(review, human)

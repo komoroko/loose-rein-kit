@@ -44,9 +44,10 @@ _DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 #: Verdicts that leave a claim needing a human decision. `aligned` is the only one that does not.
 _UNSETTLED_VERDICTS = frozenset({"diverged", "missing", "unverified", "unknown"})
 
-#: The security domain is the one `requires_domains` value this module knows without being told;
-#: every other domain comes from the plan claim's own `domains`, never guessed from prose.
-_SECURITY_DOMAIN = "security"
+#: The domain a finding of a packaged review requires of whoever answers its card. Security is the
+#: one this module knows without being told; every other domain comes from the plan claim's own
+#: `domains`, never guessed from prose.
+_REVIEW_DOMAINS: Mapping[str, tuple[str, ...]] = {"security": ("security",)}
 
 #: Option ids are single upper-case letters (schema), so a card may not exceed 8 options anyway.
 _OPTION_LETTERS = "ABCDEFGH"
@@ -112,12 +113,12 @@ def _subjects(
     claims: Sequence[Mapping[str, Any]],
     gaps: Sequence[Mapping[str, Any]],
     extra_behaviors: Sequence[Mapping[str, Any]],
-    security_findings: Sequence[Mapping[str, Any]],
+    review_findings: Sequence[Mapping[str, Any]],
     plan_risk: Mapping[str, str],
     plan_domains: Mapping[str, tuple[str, ...]],
     scope_expansions: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
-    """Every finding that needs a human decision, in a stable order: claims, gaps, extras, security.
+    """Every finding that needs a human decision, in a stable order: claims, gaps, extras, findings.
 
     A grounded extra behaviour is deliberately not a subject: the requirement that grounds it has
     already been decided. An ungrounded one is the loop asking "did you want this at all?". Nor is
@@ -187,8 +188,8 @@ def _subjects(
                 "evidence": {"extra_behavior": dict(extra), "expected_choice": "reduce_scope"},
             }
         )
-    for finding in security_findings:
-        # A finding the change closed is not a question for a human: `security_review.resolution_of`
+    for finding in review_findings:
+        # A finding the change closed is not a question for a human: `change_review.resolution_of`
         # settled it against the committed tree, which is a stronger answer than the one this card
         # would ask for. Left in, a fixed `high` finding raised a mandatory card asking "what is
         # done about it?" — so fixing the code was what stopped the human review freezing. The test
@@ -199,12 +200,12 @@ def _subjects(
         subjects.append(
             {
                 "subject_id": sid,
-                "kind": "security",
+                "kind": "finding",
                 "risk": _severity_of(finding),
-                "domains": (_SECURITY_DOMAIN,),
+                "domains": _REVIEW_DOMAINS.get(str(finding.get("review", "")), ()),
                 "question": (
-                    f"{sid} ({finding.get('category', 'other')}, severity {finding.get('severity', 'medium')}): "
-                    f"{finding.get('attack_scenario', 'no scenario recorded')} What is done about it?"
+                    f"{sid} ({finding.get('review', '?')}, severity {finding.get('severity', 'medium')}): "
+                    f"{finding.get('scenario', 'no scenario recorded')} What is done about it?"
                 ),
                 "options": ("revise_implementation", "reduce_scope", "request_expert", "dispute"),
                 "evidence": {"finding": dict(finding), "expected_choice": "revise_implementation"},
@@ -265,7 +266,7 @@ def derive_cards(
     claims: Sequence[Mapping[str, Any]] = (),
     gaps: Sequence[Mapping[str, Any]] = (),
     extra_behaviors: Sequence[Mapping[str, Any]] = (),
-    security_findings: Sequence[Mapping[str, Any]] = (),
+    review_findings: Sequence[Mapping[str, Any]] = (),
     plan_risk: Mapping[str, str] | None = None,
     plan_domains: Mapping[str, tuple[str, ...]] | None = None,
     first_statement: int = 1,
@@ -287,7 +288,7 @@ def derive_cards(
     statements: list[dict[str, Any]] = []
     cards: list[dict[str, Any]] = []
     subjects = _subjects(
-        claims, gaps, extra_behaviors, security_findings, plan_risk or {}, plan_domains or {}, scope_expansions
+        claims, gaps, extra_behaviors, review_findings, plan_risk or {}, plan_domains or {}, scope_expansions
     )
     if len(subjects) > MAX_CARDS:
         raise review_policy.ReviewPolicyError(

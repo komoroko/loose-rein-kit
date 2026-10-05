@@ -289,7 +289,7 @@ test("the console names the agent behind each role and switches one without a co
   await app.push("status", STATUS);
 
   const roles = app.text("agentRoles");
-  for (const role of ["implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"]) {
+  for (const role of ["implementer", "reviewer", "actual_extractor", "comparator"]) {
     assert.match(roles, new RegExp(role), "every role the config declares is on the page");
   }
   // The independence verdict comes from the payload, so the page cannot disagree with `rein agent

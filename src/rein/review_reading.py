@@ -11,7 +11,7 @@ that keeps tests away from the blind extractor, and the byte budget that refuses
 to read. Plus :class:`Reading` — one unit of the change, run through the two stages that read code.
 
 The invariants the pipeline rests on are enforced where they were before, one layer down:
-``actual_extraction.assert_blind`` walks every request built here, and ``security_review`` refuses
+``actual_extraction.assert_blind`` walks every request built here, and ``change_review`` refuses
 an answer that drops a carried-forward blocking finding. A reading is a smaller subject, never a
 weaker one.
 """
@@ -27,6 +27,7 @@ from typing import Any, Protocol, TypeVar
 from rein import (
     actual_extraction,
     adapters,
+    change_review,
     common,
     dag,
     diff_facts,
@@ -34,7 +35,6 @@ from rein import (
     models,
     review_cache,
     review_policy,
-    security_review,
 )
 from rein import install as install_mod
 from rein import lock as lock_mod
@@ -68,11 +68,11 @@ def host_surface(repo: repo_mod.Repo) -> tuple[str, ...]:
       orchestration text — the command bodies say what each gate expects, the role prompts say how
       each stage is meant to answer — and handing it to a reader whose whole job is to say what the
       code does, without having read the plan, is handing over the plan in another file's clothes.
-    - The **security reviewer** is told to read it, in as many words: a pre-authorized command, a
-      hook, an MCP server or an instruction added to these paths is a finding
-      (`security_review.contract`). That reviewer is launched into a checkout of the head, whole.
+    - The **change reviewer**, reading for security, is told to read it, in as many words: a
+      pre-authorized command, a hook, an MCP server or an instruction added to these paths is a
+      finding (`change_review.contract`). That reviewer is launched into a checkout of the head, whole.
 
-    So this set is excluded from the product's digest *and* is a subject the security stage is a
+    So this set is excluded from the product's digest *and* is a subject the change review is a
     function of. `host_surface_digest` is what makes the second half true; before it existed, a
     commit that only widened `permissions.allow` moved no key, replayed the cached answer, never
     launched a reviewer, and left the review reporting itself fresh.
@@ -82,7 +82,7 @@ def host_surface(repo: repo_mod.Repo) -> tuple[str, ...]:
     `lock.FORMAT` bump records no integrations while every surface it once named is still on disk,
     and so does a repository whose lock was restored from an older commit. Reading only the record
     turned that into an empty surface — the extractor gets this tool's own orchestration text and
-    the security stage keys on the digest of an empty tree, both reporting themselves fine. So the
+    the change review keys on the digest of an empty tree, both reporting themselves fine. So the
     answer is the union: what the lock recorded, plus what each integration's own spec says it
     writes and is actually present. The settings file is recorded apart from `files` because
     install *merges* into it rather than owning it; which file that is comes off the spec either
@@ -135,10 +135,10 @@ def not_the_product(repo: repo_mod.Repo, state: models.State | None) -> tuple[st
     `docs` exclusion would hide user-facing documentation from the only reader it gets.
 
     **This answers "what is the product" for the diff and for `change_digest`, and it is not the
-    whole answer to "what does a reviewer read".** The security stage is sent a checkout of the head
+    whole answer to "what does a reviewer read".** The change review is sent a checkout of the head
     with `host_surface` in it and is told to review it, so that stage is keyed on
     `host_surface_digest` as well. Keeping the two questions in two functions is the repair: one
-    set could not say "hide this from the extractor" and "measure this for the security reviewer"
+    set could not say "hide this from the extractor" and "measure this for the change reviewer"
     at the same time, and the second half was simply lost.
 
     A directory keeps its trailing slash and a file does not — `digests.filter_tree` and
@@ -174,7 +174,7 @@ def host_surface_digest(repo: repo_mod.Repo, commit: str) -> str:
     """The digest of the host surfaces at `commit` — the second half of what a review is bound to.
 
     `change_digest` answers "has the product moved". This answers "has the change moved anything the
-    security stage is told to review but the product digest cannot see". They are separate digests
+    change review is told to review but the product digest cannot see". They are separate digests
     because they are separate subjects with separate readers, and folding them into one would put
     `.claude/` back into the blind extractor's key for no reason and undo the exclusion's own point.
 
@@ -204,14 +204,19 @@ class Freshness:
     fresh: bool
     #: The commit the review was generated against, for a reader who wants to look at it.
     reviewed_head: str
-    #: The commit the repository is on now.
+    #: The commit it was measured against: HEAD, or the commit the caller named.
     head: str
     #: Why it does not speak for it. "" when it does, or when nothing could be measured.
     reason: str
 
 
-def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.State | None) -> Freshness:
+def freshness(
+    repo: repo_mod.Repo, review: models.Review | None, state: models.State | None, *, at: str = "HEAD"
+) -> Freshness:
     """Does `review` still describe this tree? Measured on content, never on the commit id.
+
+    `at` is the commit asked about: HEAD by default, or another ref — integrating asks it of the
+    work branch's tip, because that is the commit it merges, whatever the root has checked out.
 
     **A review is about the product, and `.rein/` is not the product.** The question used to be
     asked as `binding.subject_head_sha != git rev-parse HEAD`, which is a question about the
@@ -227,7 +232,7 @@ def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.S
     speaking for exactly what it read.
 
     **And it compares `binding.host_surface_digest`, because the product is not the whole of what
-    was reviewed.** The security stage is launched into a checkout of the head with the installed
+    was reviewed.** The change review is launched into a checkout of the head with the installed
     surfaces in it and is told to review them — a pre-authorized command, a hook, an MCP server
     added to `.claude/`, `.codex/`, `.github/` or `.gemini/` is a finding. Those paths are outside
     `not_the_product`'s answer, so on one digest a commit that added nothing but a
@@ -249,7 +254,7 @@ def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.S
     that branch means the repository, not the document, is what could not be read.
     """
     reviewed_head = review.subject_head_sha if review is not None else ""
-    rc, out = repo._git_rc("rev-parse", "HEAD")
+    rc, out = repo._git_rc("rev-parse", "--verify", "--quiet", f"{at}^{{commit}}")
     head = out.strip() if rc == 0 else ""
     recorded = review.change_digest if review is not None else ""
     if review is None or not review.is_generated:
@@ -260,7 +265,7 @@ def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.S
         head=head,
         reason=(
             "whether the machine review still speaks for this tree could not be measured — "
-            + ("git cannot resolve HEAD" if not head else "the review records no change digest")
+            + (f"git cannot resolve {at}" if not head else "the review records no change digest")
             + ". Nothing here may read that as current; run `rein doctor`."
         ),
     )
@@ -277,8 +282,8 @@ def freshness(repo: repo_mod.Repo, review: models.Review | None, state: models.S
     elif current_surface != review.host_surface_digest:
         # A binding that names no host surface has not measured one, and "" is not the digest of an
         # empty tree — so it reads as moved. That is the right way round: a document that cannot
-        # say what its security stage was bound to has not said it is still bound to it.
-        moved = "the host surfaces the security review reads have changed since"
+        # say what its change review was bound to has not said it is still bound to it.
+        moved = "the host surfaces the change review reads have changed since"
     if not moved:
         return Freshness(fresh=True, reviewed_head=reviewed_head, head=head, reason="")
     return Freshness(
@@ -375,7 +380,7 @@ def fold_bodies(
 
     A lockfile's eight hundred changed lines say one thing — the dependencies moved — and they say
     it by burying the twelve lines of hand-written code in the same diff. Every reviewer here was
-    handed the raw whole, twice over (the extractor and the security reviewer each get their own
+    handed the raw whole, twice over (the extractor and the change reviewer each get their own
     copy), and the meaningful change was somewhere in the middle of it.
 
     A whole-file deletion is the same shape with a different reason, and one measured cycle spent
@@ -387,8 +392,8 @@ def fold_bodies(
     the whole extraction if any part of it fails. So the blind extractor could never have said one
     word about a deleted body, however many bytes of it were sent.
 
-    **The security reviewer is the exception, and it is why `signalled` exists.** Its findings may
-    stand without an anchor (`security_review._validate_finding`), so it *can* report "the deleted
+    **The change reviewer is the exception, and it is why `signalled` exists.** Its findings may
+    stand without an anchor (`change_review._validate_finding`), so it *can* report "the deleted
     module held the only permission check and nothing replaces it" — and folding the body blind
     would have taken exactly the quietly-removed-safety case the `deleted_guard` signal was added
     to catch. `signalled` is the set of paths the deterministic detector matched a signal inside,
@@ -463,12 +468,12 @@ def split_tests(diff_text: str, files: Sequence[diff_facts.DiffFile]) -> tuple[s
     Coverage Manifest's file list without reading a single assertion. Measured on one cycle:
     `backend/tests/` was 544,421 bytes, 25% of the payload.
 
-    **The security reviewer should.** Tests are code an agent wrote and they run with the
+    **The change reviewer should.** Tests are code an agent wrote and they run with the
     operator's credentials, which this repository's own config comments say in as many words.
 
     So the split is not a quality/cost trade in either direction: the extraction gets *more* blind
-    and 25% cheaper at once, and the security review loses nothing. `SharedReading` primes on the
-    source half — the part both stages read — and the test half rides inline on the security
+    and 25% cheaper at once, and the change review loses nothing. `SharedReading` primes on the
+    source half — the part both stages read — and the test half rides inline on the change review
     reviewer's own branch, which is what keeps one reading serving two stages.
     """
     tests = {f.path for f in files if diff_facts.classify_path(f.path) == "test"}
@@ -507,7 +512,7 @@ def bytes_by_kind(diff_text: str) -> dict[str, int]:
     changes above this line — and neither was visible from anything the tool printed.
 
     Deliberately `classify_path`'s vocabulary rather than a new one: those five kinds are what the
-    levers are denominated in. `test` is the half `split_tests` sends only to the security
+    levers are denominated in. `test` is the half `split_tests` sends only to the change
     reviewer; `dependency` and `generated` are `MECHANICAL_KINDS`, whose content nobody needs to
     read; `source` is the thing actually under review. A breakdown in categories the tool cannot
     act on would be trivia. The plan's own prose does not appear at all because
@@ -608,7 +613,7 @@ class Reviewable:
     context_lines: tuple[int, int]
     folded: tuple[str, ...] = ()
     #: The two halves of `text`, split by `split_tests`: what every reading stage gets, and what
-    #: only the security reviewer does. `text` stays whole because it is what the ceiling and the
+    #: only the change reviewer does. `text` stays whole because it is what the ceiling and the
     #: coverage context are measured over — the split decides who is sent which part, not what the
     #: change is.
     source: str = ""
@@ -768,7 +773,7 @@ def refuse_over_budget(diff_bytes: int, limits: Mapping[str, int], *, unit: str 
     ceiling on the side that cannot tell it has failed, which is the only side a ceiling protects.
 
     So `diff_bytes` is what the largest launch of this reading is handed: the folded diff whole,
-    which is the security reviewer's payload (the extractor gets its source half). A lockfile body
+    which is the change reviewer's payload (the extractor gets its source half). A lockfile body
     nobody is sent is no reason to refuse the reading, and refusing on it named a remedy — split
     the scope — that cannot take a lockfile out of the scope that made it.
 
@@ -965,33 +970,36 @@ def extraction_request(
     )
 
 
-def security_discipline(config: models.Config | None) -> str:
-    """The host's own security review, when the configured reviewer has one (`adapters`).
+def reviewer_disciplines(config: models.Config | None) -> Mapping[str, str]:
+    """The host's own reviews, by the neutral name a review asks for, when the reviewer has them.
 
     Read from the role's adapter rather than passed down from a caller, so the offer and the launch
-    cannot disagree. It is not in the stage key: `reviewer_identity` already covers the adapter this
-    is derived from, so pointing the role at a different CLI re-reads, and pointing it at the same
-    one cannot change the answer to this.
+    cannot disagree. Not in the stage key: `reviewer_identity` already covers the adapter these are
+    derived from, so pointing the role at a different CLI re-reads, and pointing it at the same one
+    cannot change the answer to this.
     """
     try:
-        return adapters.adapter_for_role(config, "security_reviewer").disciplines.get(adapters.SECURITY, "")
+        return adapters.adapter_for_role(config, "reviewer").disciplines
     except adapters.LaunchRefused:
         # A role this release cannot launch is refused where it is launched, with a message that
         # says what to repair. Refusing here as well would report it from the wrong place.
-        return ""
+        return {}
 
 
-def security_request(
+def change_request(
     measured: ReadingFacts,
     *,
     trusted_base: str,
     head: str,
+    readings: models.Readings,
     prior_blocking: Sequence[Mapping[str, Any]] = (),
-    discipline: str = "",
+    disciplines: Mapping[str, str],
 ) -> dict[str, Any]:
-    """The security reviewer's input for one reading — the only stage sent the test half."""
-    return security_review.build_request(
-        discipline=discipline,
+    """The change reviewer's input for one reading — the only stage sent the test half."""
+    return change_review.build_request(
+        reviews=readings.reviews,
+        questions=readings.questions,
+        disciplines=disciplines,
         diff_text=measured.reviewable.source,
         tests_diff=measured.reviewable.tests,
         deterministic_facts={
@@ -1136,12 +1144,13 @@ def reading_keys(
     risk_floor: str,
     prior_blocking: Sequence[str],
     host_surface: str,
+    asked: Mapping[str, str],
     unit: str = WHOLE,
 ) -> dict[str, str]:
     """What each reviewer stage is a function of, for one reading, one key per stage (`review_cache`).
 
     Written out rather than folded into one `subject` digest, because that is the whole repair:
-    the extractor and the security reviewer are not functions of `plan.yaml`, and none of the three
+    the extractor and the change reviewer are not functions of `plan.yaml`, and none of the three
     is a function of `state.yaml`'s task statuses — the orientation brief is, and no model produces
     it. `comparison` is missing from here because it takes the Actual as an input and the Actual
     does not exist yet; `_comparison_key` mints it once the extractor has answered.
@@ -1153,9 +1162,10 @@ def reading_keys(
     are named instead. `environment_digest` describes the OCI sandbox, and a reviewer stage does
     not run in one: `review_transport` launches the CLI on the host, in an empty directory.
 
-    **`host_surface` is in the security stage's key and in no other.** That stage is launched into
-    a checkout of the head with the installed surfaces in it and is told to review them, so it is a
-    function of them; the extractor and the comparator never see them. It is the repair for a real
+    **`host_surface` is in the change review's key and in no other.** That stage is launched into
+    a checkout of the head with the installed surfaces in it and, reading for security, is told to
+    review them, so it is a function of them; `asked` is what it is asked — each review's name and,
+    for a custom one, its question; the extractor and the comparator never see them. It is the repair for a real
     hole: `change_digest` is taken with those paths excluded, so a commit that added a
     pre-authorized command and nothing else moved no key, replayed the cached answer, launched no
     reviewer — and `freshness`, measuring the same one digest, called the review current.
@@ -1196,11 +1206,13 @@ def reading_keys(
                 "risk_floor": risk_floor,
             },
         ),
-        "security_review": review_cache.stage_key(
-            "security_review",
+        "change_review": review_cache.stage_key(
+            "change_review",
             {
                 **diff_inputs,
-                **reviewer_identity(config, "security_reviewer"),
+                **reviewer_identity(config, "reviewer"),
+                # Which reviews are asked, in order, and what a custom one asks: the contract.
+                "reviews": [[name, question] for name, question in asked.items()],
                 # A finding the previous review left blocking is in the request, and the validator
                 # refuses an answer that drops one — so it changes what a valid answer is.
                 "prior_blocking_ids": sorted(prior_blocking),
@@ -1420,7 +1432,7 @@ def _prior_owner(paths: Sequence[str], slices: Sequence[Reading], seam: Reading 
 
     **None is a real answer and the caller acts on it.** A finding anchored in code that is inside
     no reading cannot be re-stated by anybody — the reviewer would be asked about a file it was
-    never sent — and `security_review.run_security_review` refuses an answer that drops it, so the
+    never sent — and `change_review.run_change_review` refuses an answer that drops it, so the
     composition simply cannot hold that finding.
     """
     for path in paths:
@@ -1492,8 +1504,8 @@ def priors_by_reading(
     reading, and a path that two task scopes both cover is inside *three* of them: both tasks', and
     the seam's, which lists that path precisely because more than one scope covers it. So one
     carried finding was handed to three readings, each of them was required to re-state it, and
-    `merge` kept the id of anything a reading had carried — producing one review carrying `SEC-001`
-    three times, three `security_finding_resolved` events for one resolution, and the same defect
+    `merge` kept the id of anything a reading had carried — producing one review carrying `F-001`
+    three times, three `finding_resolved` events for one resolution, and the same defect
     printed three times to the human it was meant to reach once. Verified against the real
     functions before it was fixed; a schema that validates the shape of an id cannot see it.
 
@@ -1526,16 +1538,16 @@ def priors_by_reading(
 # -- merging what several readings said ---------------------------------------
 
 #: Statement and finding ids are minted per reading, so two readings both start at 001. The
-#: patterns the schema enforces are `AST-[0-9]{3,}` and `SEC-[0-9]{3,}`.
+#: patterns the schema enforces are `AST-[0-9]{3,}` and `F-[0-9]{3,}`.
 _AST = "AST-{:03d}"
-_SEC = "SEC-{:03d}"
+_FINDING = "F-{:03d}"
 
 #: What one review may carry, read from the schema that enforces it. A composition can reach these
 #: where a single reading never did, and the answer is to refuse rather than to truncate: a list
 #: silently cut is a review that says less than it read, which is the failure "extra behaviours: 0"
 #: exists to prevent. 0.3.7 deleted a `truncated` field for exactly this reason.
 MAX_STATEMENTS = review_policy.review_schema_max_items("actual_extraction")
-MAX_FINDINGS = review_policy.review_schema_max_items("security", "properties", "findings")
+MAX_FINDINGS = review_policy.review_schema_max_items("reviews", "properties", "findings")
 
 
 @dataclass(frozen=True)
@@ -1544,7 +1556,7 @@ class ReadOut:
 
     reading: Reading
     extraction: actual_extraction.ExtractionResult
-    security: security_review.SecurityResult
+    review: change_review.ChangeReviewResult
     #: The ids of the blocking findings this reading was handed (`priors_by_reading`). A finding answering
     #: to one of them is the carried finding itself and keeps its number; anything else that comes
     #: back under the same number is a different reading's new finding and is renumbered.
@@ -1562,7 +1574,7 @@ class Composition:
 
 
 def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Composition:
-    """One set of Actual Statements and one set of security findings, out of several readings.
+    """One set of Actual Statements and one set of findings, out of several readings.
 
     Two jobs, and both are about identity.
 
@@ -1578,7 +1590,7 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
 
     **Findings keep the id they were carried forward under, and only new ones are renumbered.** A
     blocking finding's id is what the next generation hands back to the reviewer that must re-state
-    it (`security_review.run_security_review`), so renumbering a carried finding would break the
+    it (`change_review.run_change_review`), so renumbering a carried finding would break the
     continuity the carry-over exists to provide. A finding this generation minted is new to the
     document either way, so moving its number costs nothing.
 
@@ -1603,8 +1615,8 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
         return Composition(
             statements=tuple(dict(s) for s in only.extraction.actual_statements),
             actual_digest=only.extraction.actual_digest,
-            findings=tuple(dict(f) for f in only.security.findings),
-            resolved=tuple(dict(f) for f in only.security.resolved),
+            findings=tuple(dict(f) for f in only.review.findings),
+            resolved=tuple(dict(f) for f in only.review.resolved),
         )
 
     statements: list[dict[str, Any]] = []
@@ -1619,16 +1631,16 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
     taken = {fid for readout in readouts for fid in readout.carried_ids}
     findings: list[dict[str, Any]] = []
     for readout in readouts:
-        for finding in readout.security.findings:
+        for finding in readout.review.findings:
             fid = str(finding.get("id", ""))
             if fid not in readout.carried_ids and fid in taken:
-                fid = _next_free(_SEC, taken)
+                fid = _next_free(_FINDING, taken)
             taken.add(fid)
             findings.append({**dict(finding), "id": fid, "reading": readout.reading.unit})
     if len(statements) > MAX_STATEMENTS or len(findings) > MAX_FINDINGS:
         raise ReviewError(
             f"this cycle's readings produced {len(statements)} actual statement(s) and "
-            f"{len(findings)} security finding(s), past what one review may carry "
+            f"{len(findings)} finding(s), past what one review may carry "
             f"({MAX_STATEMENTS} and {MAX_FINDINGS}). Reduce what this cycle claims through "
             "`/revise` and review the remainder in its own acceptance round — a list cut to fit is a "
             "review that says less than it read."
@@ -1639,7 +1651,7 @@ def merge(readouts: Sequence[ReadOut], *, coverage: Mapping[str, Any]) -> Compos
         # binds what the comparator is handed, and what it is handed is this.
         actual_digest=digests.of({"actual_statements": statements, "coverage": dict(coverage)}),
         findings=tuple(findings),
-        resolved=tuple(dict(f) for r in readouts for f in r.security.resolved),
+        resolved=tuple(dict(f) for r in readouts for f in r.review.resolved),
     )
 
 
@@ -1680,12 +1692,13 @@ def keys_for(
         risk_floor=risk_floor,
         host_surface=host_surface,
         prior_blocking=[str(f.get("id", "")) for f in prior_blocking],
+        asked={name: readings.questions.get(name, "") for name in readings.reviews},
         unit=measured.reading.unit,
     )
     if not readings.actual_extraction:
         del keys["actual_extraction"]
-    if not readings.security:
-        del keys["security_review"]
+    if not readings.reviews:
+        del keys["change_review"]
     return keys
 
 
@@ -1744,7 +1757,7 @@ def warm(
         risk_floor=risk_floor,
         prior_blocking=(),
         readings=readings,
-        discipline=security_discipline(config),
+        disciplines=reviewer_disciplines(config),
         cache=cache,
         keys=keys,
         ran=set(),
@@ -1788,7 +1801,7 @@ def read_one(
     risk_floor: str,
     prior_blocking: Sequence[Mapping[str, Any]],
     readings: models.Readings,
-    discipline: str = "",
+    disciplines: Mapping[str, str] | None = None,
     on_stage: Callable[[str], None] = lambda _name: None,
     cache: review_cache.StageCache,
     keys: Mapping[str, str],
@@ -1805,7 +1818,7 @@ def read_one(
     composed review printed nothing between its first line and its last — thirteen hours on one
     measured run — and a run that says nothing is indistinguishable from a run that has hung.
 
-    The security review reads the same bytes the extractor does and consumes nothing the extractor
+    The change review reads the same bytes the extractor does and consumes nothing the extractor
     produces, so it does not wait behind it — and when both are configured on one adapter they
     branch a single priming turn of those bytes (`review_transport.SharedReading`), which is why
     they belong to the same reading rather than to the pipeline at large.
@@ -1815,7 +1828,7 @@ def read_one(
     `ThreadPoolExecutor.__exit__` then blocks in `shutdown(wait=True)` until the adapter call it
     failed to cancel finishes. So a failure would be reported when the *discarded* call ends rather
     than when it happens: measured across two runs of one cycle, the extraction failure surfaced
-    1m36s and 3m54s late, each run having paid in full for a security review nobody would read.
+    1m36s and 3m54s late, each run having paid in full for a change review nobody would read.
     `shutdown(wait=False, cancel_futures=True)` does not fix it either —
     `concurrent.futures.thread` registers an atexit hook that joins every worker, so the wait moves
     to interpreter exit and the process returns no sooner. The only thing that ends a launch early
@@ -1825,9 +1838,9 @@ def read_one(
     order, and reporting whichever thread lost a race would make the error a reader sees depend on
     timing.
 
-    `readings` is what `reviews.yaml` has the review read. `security` off launches no security
-    reviewer: the blocking findings carried into the reading stand or close against the tree
-    (`security_review.carry_forward`). `actual_extraction` off launches no extractor: the reading
+    `readings` is what `reviews.yaml` has the review read. No review added at acceptance launches
+    no reviewer: the blocking findings carried into the reading stand or close against the tree
+    (`change_review.carry_forward`). `actual_extraction` off launches no extractor: the reading
     carries no statement. Both off, this reading launches nothing.
     """
     unit = measured.reading.unit
@@ -1853,47 +1866,50 @@ def read_one(
             on_done=lambda was_reused: on_progress(unit, "actual_extraction", was_reused),
         )
 
-    def read_security() -> security_review.SecurityResult:
-        if not readings.security:
-            return security_review.carry_forward(prior_blocking, repo=repo, commit=head)
-        request = security_request(
-            measured, trusted_base=trusted_base, head=head, prior_blocking=prior_blocking, discipline=discipline
+    def read_change() -> change_review.ChangeReviewResult:
+        if not readings.reviews:
+            return change_review.carry_forward(prior_blocking, repo=repo, commit=head)
+        request = change_request(
+            measured,
+            trusted_base=trusted_base,
+            head=head,
+            readings=readings,
+            prior_blocking=prior_blocking,
+            disciplines=disciplines or {},
         )
         # Bound on this thread — the worker's when it runs beside the extractor — because the
         # transport is reached through the injected reviewers, whose signature is not ours to change.
         with common.cancelling(cancel):
             return cached_stage(
                 cache,
-                "security_review",
-                keys["security_review"],
+                "change_review",
+                keys["change_review"],
                 ran,
-                lambda ask: security_review.run_security_review(request, ask, repo=repo, commit=head),
+                lambda ask: change_review.run_change_review(request, ask, repo=repo, commit=head),
                 reviewers,
                 reused=reused,
-                on_done=lambda was_reused: on_progress(unit, "security_review", was_reused),
+                on_done=lambda was_reused: on_progress(unit, "change_review", was_reused),
             )
 
-    if not (readings.actual_extraction and readings.security):
+    if not (readings.actual_extraction and readings.reviews):
         # One stage or none: nothing runs beside anything, so nothing needs a pool.
         extraction = extract() if readings.actual_extraction else not_extracted(measured)
-        on_stage("security_review")
-        return ReadOut(
-            reading=measured.reading, extraction=extraction, security=read_security(), carried_ids=carried_ids
-        )
+        on_stage("change_review")
+        return ReadOut(reading=measured.reading, extraction=extraction, review=read_change(), carried_ids=carried_ids)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
-        security_future = pool.submit(read_security)
+        review_future = pool.submit(read_change)
         try:
             extraction = extract()
         except BaseException:
             cancel.cancel()
             raise
-        on_stage("security_review")
-        findings = security_future.result()
+        on_stage("change_review")
+        findings = review_future.result()
     return ReadOut(
         reading=measured.reading,
         extraction=extraction,
-        security=findings,
+        review=findings,
         carried_ids=carried_ids,
     )
 

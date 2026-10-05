@@ -1742,8 +1742,8 @@ def check_review(review: models.Review | None, fresh: review_reading.Freshness |
                 "the coverage manifest is insufficient — extra-behaviour counts are undeterminable, not zero",
             )
         )
-    blocking = review.blocking_security_findings
-    findings.append(Finding("FAIL" if blocking else "PASS", "review", f"{len(blocking)} blocking security finding(s)"))
+    blocking = review.blocking_findings
+    findings.append(Finding("FAIL" if blocking else "PASS", "review", f"{len(blocking)} blocking finding(s)"))
     findings.append(Finding("INFO", "review", f"human review: {review.human_status}"))
     return findings
 

@@ -157,9 +157,9 @@ def test_merging_a_reported_launch_with_an_unreported_one_keeps_both_facts() -> 
 
 def test_a_role_whose_adapter_reports_nothing_is_named_in_the_summary() -> None:
     _, reported = usage.parse_claude_envelope(json.dumps(ENVELOPE))
-    line = usage.summarize({"comparator": reported, "security_reviewer": usage.Usage.unavailable()}, what="review")
+    line = usage.summarize({"comparator": reported, "reviewer": usage.Usage.unavailable()}, what="review")
     assert "review: 21.0k input + 42 output tokens" in line
-    assert "usage unavailable for security_reviewer (1 launch(es), not counted above)" in line
+    assert "usage unavailable for reviewer (1 launch(es), not counted above)" in line
 
 
 def test_the_summary_is_empty_when_nothing_launched() -> None:

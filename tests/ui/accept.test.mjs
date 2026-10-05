@@ -36,7 +36,7 @@ async function accept(stage, session = {}) {
 
 test("the residue is listed by kind and the approval is offered when nothing blocks it", async () => {
   const app = await accept({
-    residue: { inferred: ["C-002: aligned on an AI's reading alone"], not_read: ["no security reviewer read it"] },
+    residue: { inferred: ["C-002: aligned on an AI's reading alone"], not_read: ["no review read the whole change"] },
     completion_blockers: [],
   });
   const html = app.html("rvMain");

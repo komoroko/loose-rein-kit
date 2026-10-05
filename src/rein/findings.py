@@ -1,14 +1,15 @@
 """Which task has to answer each finding of the grounded review the loop can act on.
 
 The acceptance gate produces findings against *code*, and the loop repairs *tasks*. Somebody has been closing
-that gap by hand — reading a security finding's anchor, deciding which ticket owns that file, and
+that gap by hand — reading a finding's anchor, deciding which ticket owns that file, and
 typing the id into `rein revise --impacted`. Everything needed to derive it is already recorded:
 each finding is grounded in a code anchor whose path was validated against the committed tree
 (`review_policy.validate_anchor`), and each task declares the paths it owns (`scope.include`).
 
 Three kinds of finding, and they are not attributed the same way:
 
-* **security findings** carry their own anchors — path to task, directly. Every open one, not
+* **review findings** — what the reviews of the whole change found — carry their own anchors:
+  path to task, directly. Every open one, not
   only the blocking ones: severity decides whether a finding holds acceptance shut, and what a
   repair would change decides who answers it (`repair.route`).
 * **extra behaviours** name the actual statements they came from; those carry the anchors.
@@ -114,7 +115,7 @@ def attribute(tasks: Sequence[Owner], review: models.Review | None) -> list[Attr
     found: list[Attribution] = []
 
     by_severity = sorted(
-        review.open_security_findings,
+        review.open_findings,
         # An unrecognised severity sorts first: the validator refuses one, and the direction an
         # unknown falls in is the answerable one.
         key=lambda f: (
@@ -125,7 +126,7 @@ def attribute(tasks: Sequence[Owner], review: models.Review | None) -> list[Attr
     )
     for finding in by_severity:
         task_id, basis = _first_owned(tasks, _anchor_paths(finding))
-        found.append(Attribution(str(finding.get("id", "SEC-?")), "security", task_id, basis))
+        found.append(Attribution(str(finding.get("id", "F-?")), "finding", task_id, basis))
 
     statements = {str(s.get("id")): s for s in review.machine.get("actual_extraction", []) if isinstance(s, dict)}
     for extra in review.extra_behaviors:

@@ -13,9 +13,9 @@ from typing import Any
 
 import pytest
 
-from rein import approve, integrate, store
+from rein import approve, build_git, common, integrate, store
 from rein import repo as repo_mod
-from tests._support import make_review, make_state, seed_repo
+from tests._support import bind_review, make_review, make_state, seed_repo
 
 WORK = "build/demo"
 
@@ -48,10 +48,17 @@ def _approved(tmp_path: Path, *, integrated: bool = False) -> repo_mod.Repo:
         review=make_review(generated=True, human_status="frozen", head_sha=head),
     )
     repo = repo_mod.Repo(tmp_path)
+    review = bind_review(tmp_path, make_review(generated=True, human_status="frozen", head_sha=head))
+    repo.review.write_bytes(store.dump_yaml(review))
     if integrated:
         with store.Store(repo).transaction() as tx:
             tx.append("cycle_integrated", cycle_id="demo-cycle", actor="test", detail={"mode": "local"})
     return repo
+
+
+def _real(cmd: list[str], cwd: str | None = None) -> tuple[int, str]:
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    return proc.returncode, proc.stdout + proc.stderr
 
 
 def test_with_no_remote_the_work_is_merged_into_the_mainline_here(tmp_path: Path) -> None:
@@ -75,15 +82,63 @@ def test_only_what_was_approved_is_integrated(tmp_path: Path) -> None:
     _git(tmp_path, "commit", "-qm", "landed after the approval")
     before = _git(tmp_path, "rev-parse", "main")
 
-    with pytest.raises(integrate.IntegrationError, match="Only what was approved is integrated"):
+    with pytest.raises(integrate.IntegrationError, match="the product has changed since"):
         integrate.run(repo)
     assert _git(tmp_path, "rev-parse", "main") == before
 
 
-def test_an_unapproved_or_finished_cycle_is_not_integrated(tmp_path: Path) -> None:
-    repo = _approved(tmp_path, integrated=True)
-    with pytest.raises(integrate.IntegrationError, match="already integrated"):
+def test_committing_the_gate_s_own_documents_does_not_stop_the_integration(tmp_path: Path) -> None:
+    """The workflow commits `.rein/` at each gate. Acceptance measures the review on the product's
+    content and reads that commit as moving nothing; integrating compared commit ids, so it refused
+    every approval made after it — and `rein next` kept recommending the `rein integrate` that
+    refused."""
+    repo = _approved(tmp_path)
+    _git(tmp_path, "add", "-f", ".rein/review.yaml")
+    _git(tmp_path, "commit", "-qm", "the acceptance gate's deliverables")
+    tip = _git(tmp_path, "rev-parse", WORK)
+
+    assert approve._integration_blockers(repo, store.Store(repo).read_config(), "acceptance") == []
+    outcome = integrate.run(repo)
+
+    assert outcome.mode == "local"
+    assert _git(tmp_path, "merge-base", "--is-ancestor", tip, "main") == ""
+
+
+def test_a_mainline_checked_out_in_the_root_is_never_moved_under_it(tmp_path: Path) -> None:
+    """The scratch worktree was made with `--force`, so it checked out the branch the root held, and
+    the merge moved `main` under the root: its index still described the old commit, and the next
+    commit made there would have undone the integration."""
+    repo = _approved(tmp_path)
+    _git(tmp_path, "checkout", "-q", "main")
+    before = _git(tmp_path, "rev-parse", "main")
+
+    blockers = approve._integration_blockers(repo, store.Store(repo).read_config(), "acceptance")
+    assert len(blockers) == 1 and approve.owner(blockers[0]) == "human"
+    assert f"git switch {WORK}" == blockers[0].remedy
+    with pytest.raises(integrate.IntegrationError, match="canonical checkout has the mainline"):
         integrate.run(repo)
+
+    assert _git(tmp_path, "rev-parse", "main") == before
+    assert _git(tmp_path, "status", "--porcelain", "--untracked-files=no") == ""
+
+
+def test_a_mainline_checked_out_elsewhere_is_merged_where_it_is(tmp_path: Path) -> None:
+    repo = _approved(tmp_path)
+    elsewhere = tmp_path.parent / f"{tmp_path.name}-main"
+    _git(tmp_path, "worktree", "add", "-q", str(elsewhere), "main")
+    tip = _git(tmp_path, "rev-parse", WORK)
+
+    integrate.run(repo)
+
+    assert _git(elsewhere, "merge-base", "--is-ancestor", tip, "HEAD") == ""
+    assert _git(elsewhere, "status", "--porcelain") == "", "the checkout that holds it moved with it"
+
+
+def test_a_scratch_worktree_is_never_a_branch_another_checkout_holds(tmp_path: Path) -> None:
+    repo = _approved(tmp_path)
+    with pytest.raises(common.StopLoop, match="could not create the scratch worktree"):
+        with build_git.scratch_worktree(repo, ".worktrees", "probe", WORK, _real):
+            pytest.fail("checked out the branch the root holds")
 
 
 def test_a_merge_that_fails_is_recorded_with_its_own_words(tmp_path: Path) -> None:
@@ -92,8 +147,7 @@ def test_a_merge_that_fails_is_recorded_with_its_own_words(tmp_path: Path) -> No
     def refusing(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: Any) -> tuple[int, str]:
         if cmd[:2] == ["git", "merge"] and "--abort" not in cmd:
             return 1, "CONFLICT (content): Merge conflict in src/app.py"
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-        return proc.returncode, proc.stdout + proc.stderr
+        return _real(cmd, cwd)
 
     with pytest.raises(integrate.IntegrationError, match="Merge conflict"):
         integrate.run(repo, runner=refusing)
@@ -102,56 +156,98 @@ def test_a_merge_that_fails_is_recorded_with_its_own_words(tmp_path: Path) -> No
     assert not integrate.integrated(store.Store(repo).read_events(), "demo-cycle")
 
 
-def test_with_a_remote_the_pull_request_is_pushed_opened_and_merged(tmp_path: Path) -> None:
-    repo = _approved(tmp_path)
-    calls: list[list[str]] = []
+def _forge(tmp_path: Path, calls: list[list[str]], **answers: tuple[int, str]) -> integrate.Runner:
+    """A forge: `origin` exists and its `main` is the local one; `gh` answers what the test says."""
+    _git(tmp_path, "update-ref", "refs/remotes/origin/main", "main")
 
-    def forge(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: Any) -> tuple[int, str]:
+    def run(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: Any) -> tuple[int, str]:
         calls.append(cmd)
         if cmd[:3] == ["git", "remote", "get-url"]:
             return 0, "https://example.invalid/o/r.git"
-        if cmd[:2] == ["git", "push"]:
+        if cmd[:2] in (["git", "push"], ["git", "fetch"]):
             return 0, ""
-        if cmd[:3] == ["gh", "pr", "view"] and "url" in cmd:
-            return 1, "no pull requests found"
+        if cmd[:3] == ["gh", "pr", "list"]:
+            return answers.get("list", (0, ""))
         if cmd[:3] == ["gh", "pr", "create"]:
             return 0, "https://example.invalid/o/r/pull/7\n"
         if cmd[:3] == ["gh", "pr", "view"]:
-            return 0, "true"
-        if cmd[:3] in (["gh", "pr", "ready"], ["gh", "pr", "merge"]):
+            return answers.get("draft", (0, "true"))
+        if cmd[:3] == ["gh", "pr", "ready"]:
             return 0, ""
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-        return proc.returncode, proc.stdout + proc.stderr
+        if cmd[:3] == ["gh", "pr", "merge"]:
+            return answers.get("merge", (0, ""))
+        return _real(cmd, cwd)
 
-    outcome = integrate.run(repo, runner=forge)
+    return run
+
+
+def test_with_a_remote_the_approved_commit_is_pushed_opened_and_merged(tmp_path: Path) -> None:
+    repo = _approved(tmp_path)
+    tip = _git(tmp_path, "rev-parse", WORK)
+    calls: list[list[str]] = []
+
+    outcome = integrate.run(repo, runner=_forge(tmp_path, calls))
 
     assert outcome == integrate.Outcome(mode="pull_request", landed=("https://example.invalid/o/r/pull/7",))
-    issued = [c[:3] for c in calls if c[0] == "gh" or c[:2] == ["git", "push"]]
-    assert ["git", "push", "origin"] in issued
+    assert ["git", "push", "origin", f"{tip}:refs/heads/{WORK}"] in calls, "the commit, not the branch's name"
     create = next(c for c in calls if c[:3] == ["gh", "pr", "create"])
     assert create[create.index("--base") + 1] == "main" and create[create.index("--head") + 1] == WORK
-    assert issued.index(["gh", "pr", "ready"]) < issued.index(["gh", "pr", "merge"]), "lifted, then merged"
     merge = next(c for c in calls if c[:3] == ["gh", "pr", "merge"])
     assert "--merge" in merge, "a merge commit: squash and rebase strand the recorded commits"
+    assert merge[merge.index("--match-head-commit") + 1] == tip, "a head pushed since is not merged"
+    issued = [c[:3] for c in calls if c[0] == "gh"]
+    assert issued.index(["gh", "pr", "ready"]) < issued.index(["gh", "pr", "merge"]), "lifted, then merged"
+
+
+def test_the_pull_request_is_the_open_one_into_the_mainline(tmp_path: Path) -> None:
+    """The work branch outlives a cycle. Looked up by its name alone, a branch whose previous cycle's
+    pull request was merged found that one, and every merge after it failed on a merged pull request."""
+    repo = _approved(tmp_path)
+    calls: list[list[str]] = []
+
+    integrate.run(repo, runner=_forge(tmp_path, calls, list=(0, "https://example.invalid/o/r/pull/9\n")))
+
+    asked = next(c for c in calls if c[:3] == ["gh", "pr", "list"])
+    assert asked[asked.index("--head") + 1] == WORK and asked[asked.index("--base") + 1] == "main"
+    assert asked[asked.index("--state") + 1] == "open"
+    assert not any(c[:3] == ["gh", "pr", "create"] for c in calls), "the open one is used"
+    assert next(c for c in calls if c[:3] == ["gh", "pr", "merge"])[3] == "https://example.invalid/o/r/pull/9"
 
 
 def test_a_forge_still_waiting_on_checks_leaves_the_approval_standing(tmp_path: Path) -> None:
     repo = _approved(tmp_path)
-
-    def forge(cmd: list[str], cwd: str | None = None, timeout: float | None = None, **_: Any) -> tuple[int, str]:
-        if cmd[:3] == ["git", "remote", "get-url"] or cmd[:2] == ["git", "push"]:
-            return 0, ""
-        if cmd[:3] == ["gh", "pr", "view"]:
-            return 0, "https://example.invalid/o/r/pull/7" if "url" in cmd else "false"
-        if cmd[:3] == ["gh", "pr", "merge"]:
-            return 1, "Pull request is not mergeable: required status checks are pending"
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
-        return proc.returncode, proc.stdout + proc.stderr
+    calls: list[list[str]] = []
+    waiting = (1, "Pull request is not mergeable: required status checks are pending")
 
     with pytest.raises(integrate.IntegrationError, match="rein integrate"):
-        integrate.run(repo, runner=forge)
+        integrate.run(repo, runner=_forge(tmp_path, calls, draft=(0, "false"), merge=waiting))
     state = store.Store(repo).read_state()
     assert state is not None and state.gate_status("acceptance") == "approved"
+
+
+def test_a_forge_whose_mainline_moved_into_a_conflict_blocks_before_the_approval(tmp_path: Path) -> None:
+    """The conflict check read the local `main`, while a forge merges into its own. A local `main`
+    behind the forge's passed readiness, and the forge refused after the approval."""
+    origin = tmp_path.parent / f"{tmp_path.name}-origin.git"
+    _git(tmp_path.parent, "init", "-q", "--bare", "-b", "main", str(origin))
+    repo = _approved(tmp_path)
+    _git(tmp_path, "remote", "add", "origin", str(origin))
+    _git(tmp_path, "push", "-q", "origin", "main")
+    other = tmp_path.parent / f"{tmp_path.name}-other"
+    _git(tmp_path.parent, "clone", "-q", str(origin), str(other))
+    _git(other, "config", "user.email", "t@e.x")
+    _git(other, "config", "user.name", "T")
+    (other / "src").mkdir()
+    (other / "src" / "app.py").write_text("print('the forge moved')\n", encoding="utf-8")
+    _git(other, "add", "src/app.py")
+    _git(other, "commit", "-qm", "the forge's main moved")
+    _git(other, "push", "-q", "origin", "main")
+
+    approve.refresh_integration_target(repo)
+    blockers = approve._integration_blockers(repo, store.Store(repo).read_config(), "acceptance")
+
+    assert len(blockers) == 1 and approve.owner(blockers[0]) == "machine"
+    assert "no longer merges cleanly into refs/remotes/origin/main" in blockers[0]
 
 
 # --- what approving says before it asks, and what it does after -------------------------------

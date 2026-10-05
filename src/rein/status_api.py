@@ -933,7 +933,7 @@ def _review_block(review: models.Review | None) -> dict[str, object]:
         # "sufficient" or "undeterminable" — never a count that reads as "we checked and found none".
         "coverage": "sufficient" if review.coverage_sufficient else "undeterminable",
         "extra_behaviors": len(review.extra_behaviors) if review.coverage_sufficient else None,
-        "blocking_security": len(review.blocking_security_findings),
+        "blocking_findings": len(review.blocking_findings),
     }
 
 

@@ -98,11 +98,35 @@ def test_two_readings_of_the_same_bytes_are_not_one_answer() -> None:
             risk_floor="low",
             prior_blocking=[],
             host_surface="sha256:" + "3" * 64,
+            asked={"security": ""},
             unit=unit,
         )
 
     assert keys("T-001") == keys("T-001")
     assert keys("T-001") != keys("seam")
+
+
+def test_what_the_change_review_asks_is_in_its_key_and_in_no_other() -> None:
+    """A review added, or a custom question reworded, is a different question to the reviewer of
+    the whole change, and the same one to the blind extractor."""
+
+    def keys(asked: dict[str, str]) -> dict[str, str]:
+        return review_reading.reading_keys(
+            config=None,
+            change="sha256:" + "1" * 64,
+            coverage_digest="sha256:" + "2" * 64,
+            trusted_base="b" * 40,
+            ceiling=400_000,
+            risk_floor="low",
+            prior_blocking=[],
+            host_surface="sha256:" + "3" * 64,
+            asked=asked,
+        )
+
+    base = keys({"security": ""})
+    for other in ({"security": "", "correctness": ""}, {"perf": "Is every loop bounded?"}, {"perf": "Indexed?"}):
+        assert keys(other)["change_review"] != base["change_review"]
+        assert keys(other)["actual_extraction"] == base["actual_extraction"]
 
 
 # --- the host surfaces are a second subject, with a second digest --------------
@@ -148,7 +172,7 @@ def test_the_installed_surfaces_are_excluded_from_the_product_and_named_on_their
 def test_widening_permissions_allow_moves_the_security_key_and_nothing_else(installed_repo: Path) -> None:
     """The hole this pair of digests closes.
 
-    `security_review.contract` tells the reviewer that a pre-authorized command added to `.claude/`
+    `change_review.contract` tells the reviewer that a pre-authorized command added to `.claude/`
     is a finding, and `not_the_product` excludes exactly that path from the product digest. On one
     digest, a commit that widened `permissions.allow` and touched nothing else changed no key: the
     stage replayed its cached answer, no reviewer was launched, no checkout of the head was made,
@@ -168,6 +192,7 @@ def test_widening_permissions_allow_moves_the_security_key_and_nothing_else(inst
             risk_floor="low",
             prior_blocking=[],
             host_surface=review_reading.host_surface_digest(repo, head),
+            asked={"security": ""},
         )
 
     before = keys()
@@ -178,7 +203,7 @@ def test_widening_permissions_allow_moves_the_security_key_and_nothing_else(inst
     _git(installed_repo, "commit", "-qm", "widen the allowlist and nothing else")
     after = keys()
 
-    assert after["security_review"] != before["security_review"]
+    assert after["change_review"] != before["change_review"]
     # And only that stage: the blind extractor is never sent the surfaces, so it is not a function
     # of them and keying it on them would re-read a half-megabyte extraction for nothing.
     assert after["actual_extraction"] == before["actual_extraction"]
@@ -279,7 +304,7 @@ def test_a_composed_review_is_refused_at_critical() -> None:
 def test_a_statement_carries_the_reading_it_came_out_of() -> None:
     """A composed review must never present a statement about one slice as a reading of the tree,
     and the digest it hands the comparator has to be over the statements it hands the comparator."""
-    from rein import actual_extraction, security_review
+    from rein import actual_extraction, change_review
 
     def readout(unit: str) -> review_reading.ReadOut:
         return review_reading.ReadOut(
@@ -289,7 +314,7 @@ def test_a_statement_carries_the_reading_it_came_out_of() -> None:
                 coverage={},
                 actual_digest="sha256:" + "0" * 64,
             ),
-            security=security_review.SecurityResult(findings=()),
+            review=change_review.ChangeReviewResult(findings=()),
         )
 
     composed = review_reading.merge([readout("T-001"), readout("T-002")], coverage={})
@@ -303,7 +328,7 @@ def test_a_whole_change_reading_keeps_the_digest_the_extractor_minted() -> None:
     comparator is handed, and the extractor minted it over the statements it produced. `whole` is
     what `coverage.composition.mode` already says, so the field would cost that binding to repeat
     what the manifest states."""
-    from rein import actual_extraction, security_review
+    from rein import actual_extraction, change_review
 
     minted = "sha256:" + "a" * 64
     only = review_reading.ReadOut(
@@ -311,7 +336,7 @@ def test_a_whole_change_reading_keeps_the_digest_the_extractor_minted() -> None:
         extraction=actual_extraction.ExtractionResult(
             actual_statements=({"id": "AST-001", "statement": "x"},), coverage={}, actual_digest=minted
         ),
-        security=security_review.SecurityResult(findings=()),
+        review=change_review.ChangeReviewResult(findings=()),
     )
 
     composed = review_reading.merge([only], coverage={"anything": 1})
@@ -372,7 +397,7 @@ def _reviewer_seeing(seen: list[tuple[str, str]]) -> Any:
         if role == "comparator":
             return json.dumps({"claims": [], "actual_digest": request["actual_digest"]})
         seen.append((role, str(request.get("diff", ""))))
-        if role == "security_reviewer":
+        if role == "reviewer":
             return json.dumps({"findings": []})
         return json.dumps({"actual_statements": [], "coverage": {}})
 
@@ -491,7 +516,7 @@ def test_the_operator_can_ask_for_one_reading_of_everything(tmp_path: Path) -> N
 def test_a_composition_past_what_one_review_may_carry_is_refused_not_cut() -> None:
     """A list silently cut is a review that says less than it read, which is the failure
     "extra behaviours: 0" exists to prevent. 0.3.7 deleted a `truncated` field for this reason."""
-    from rein import actual_extraction, security_review
+    from rein import actual_extraction, change_review
 
     def readout(unit: str, count: int) -> review_reading.ReadOut:
         statements = [{"id": f"AST-{i + 1:03d}", "statement": "x"} for i in range(count)]
@@ -500,7 +525,7 @@ def test_a_composition_past_what_one_review_may_carry_is_refused_not_cut() -> No
             extraction=actual_extraction.ExtractionResult(
                 actual_statements=tuple(statements), coverage={}, actual_digest="sha256:" + "0" * 64
             ),
-            security=security_review.SecurityResult(findings=()),
+            review=change_review.ChangeReviewResult(findings=()),
         )
 
     half = review_reading.MAX_STATEMENTS // 2 + 1
@@ -607,28 +632,28 @@ def test_a_carried_finding_is_answered_by_exactly_one_reading() -> None:
     """A path two scopes both cover is inside three readings — both tasks' and the seam's, which
     lists it *because* more than one scope covers it. Asked per reading, all three were handed the
     same carried finding, all three were required to re-state it, and `merge` keeps the id of
-    anything a reading carried: one review carrying `SEC-001` three times.
+    anything a reading carried: one review carrying `F-001` three times.
     """
     readings = review_reading.plan_readings(_scoped_plan().tasks, ["alpha/mod.py", "alpha/shared.py", "loose.py"])
     assert review_reading.SEAM in {r.unit for r in readings}
     prior: list[Mapping[str, Any]] = [
-        {"id": "SEC-001", "code_anchors": [{"path": "alpha/shared.py", "line": 1}]},
-        {"id": "SEC-002", "code_anchors": [{"path": "loose.py", "line": 1}]},
-        {"id": "SEC-003"},
+        {"id": "F-001", "code_anchors": [{"path": "alpha/shared.py", "line": 1}]},
+        {"id": "F-002", "code_anchors": [{"path": "loose.py", "line": 1}]},
+        {"id": "F-003"},
     ]
     assigned = review_reading.priors_by_reading(readings, prior)
-    assert [f["id"] for f in assigned["T-002"]] == ["SEC-001"], "the most specific scope owns it"
+    assert [f["id"] for f in assigned["T-002"]] == ["F-001"], "the most specific scope owns it"
     assert [f["id"] for f in assigned["T-001"]] == []
-    assert [f["id"] for f in assigned[review_reading.SEAM]] == ["SEC-002", "SEC-003"], "unowned, and anchorless"
+    assert [f["id"] for f in assigned[review_reading.SEAM]] == ["F-002", "F-003"], "unowned, and anchorless"
     handed = [f["id"] for findings in assigned.values() for f in findings]
-    assert sorted(handed) == ["SEC-001", "SEC-002", "SEC-003"], "each carried finding travels once"
+    assert sorted(handed) == ["F-001", "F-002", "F-003"], "each carried finding travels once"
 
 
 def test_the_whole_change_reading_carries_every_prior() -> None:
     """There is no slice to own anything, so the one reading answers for all of them."""
-    prior: list[Mapping[str, Any]] = [{"id": "SEC-001", "code_anchors": [{"path": "anywhere.py"}]}, {"id": "SEC-002"}]
+    prior: list[Mapping[str, Any]] = [{"id": "F-001", "code_anchors": [{"path": "anywhere.py"}]}, {"id": "F-002"}]
     assigned = review_reading.priors_by_reading([review_reading.WHOLE_READING], prior)
-    assert [f["id"] for f in assigned[review_reading.WHOLE]] == ["SEC-001", "SEC-002"]
+    assert [f["id"] for f in assigned[review_reading.WHOLE]] == ["F-001", "F-002"]
 
 
 @pytest.mark.integration
@@ -642,7 +667,7 @@ def test_a_carried_finding_outside_every_scope_is_re_read_whole(tmp_path: Path) 
     """
     import json
 
-    from rein import review, security_review
+    from rein import change_review, review
     from tests.test_review import _reviewers
 
     # `legacy.py` is committed on the base, so it is in the tree the security stage is handed and
@@ -651,10 +676,10 @@ def test_a_carried_finding_outside_every_scope_is_re_read_whole(tmp_path: Path) 
     repo = repo_mod.Repo(root)
     blob = _git(root, "rev-parse", "HEAD:legacy.py").strip()
     finding = {
-        "id": "SEC-001",
+        "id": "F-001",
         "severity": "high",
-        "category": "credential_exposure",
-        "attack_scenario": "the change reintroduces a credential path this file still reaches",
+        "review": "security",
+        "scenario": "the change reintroduces a credential path this file still reaches",
         "blocking": True,
         "code_anchors": [{"path": "legacy.py", "blob": "git-blob:" + blob, "start_line": 1, "end_line": 1}],
     }
@@ -662,21 +687,21 @@ def test_a_carried_finding_outside_every_scope_is_re_read_whole(tmp_path: Path) 
     def reviewer(role: str, request: Any) -> str:
         if role == "comparator":
             return json.dumps({"claims": [], "actual_digest": request["actual_digest"]})
-        if role == "security_reviewer":
+        if role == "reviewer":
             # What was carried in is re-stated, as a real reviewer must; the finding is minted from
             # one reading only, so the carry-over is one finding rather than one per slice.
-            carried = list(security_review.prior_blocking_of(request))
+            carried = list(change_review.prior_blocking_of(request))
             fresh = [finding] if not carried and "alpha/mod.py" in str(request.get("diff", "")) else []
             return json.dumps({"findings": carried + fresh})
         return json.dumps({"actual_statements": [], "coverage": {}})
 
     first = review.generate(repo, _reviewers(reviewer))
     assert first["coverage"]["composition"]["mode"] == "composed"
-    assert [f["id"] for f in first["security"]["findings"]] == ["SEC-001"]
+    assert [f["id"] for f in first["reviews"]["findings"]] == ["F-001"]
 
     second = review.generate(repo, _reviewers(reviewer), force=True)
-    assert second["coverage"]["composition"]["mode"] == "whole", "no slice can answer for SEC-001"
-    assert [f["id"] for f in second["security"]["findings"]] == ["SEC-001"], "and it is still carried"
+    assert second["coverage"]["composition"]["mode"] == "whole", "no slice can answer for F-001"
+    assert [f["id"] for f in second["reviews"]["findings"]] == ["F-001"], "and it is still carried"
 
 
 def test_a_carried_finding_no_reading_can_see_stops_the_composition() -> None:
@@ -692,10 +717,10 @@ def test_a_carried_finding_no_reading_can_see_stops_the_composition() -> None:
     """
     readings = review_reading.plan_readings(_scoped_plan().tasks, ["alpha/mod.py"])
     assert review_reading.SEAM not in {r.unit for r in readings}, "nothing shared, nothing unowned"
-    unreachable: list[Mapping[str, Any]] = [{"id": "SEC-009", "code_anchors": [{"path": "beta/caller.py"}]}]
-    assert review_reading.unowned_priors(readings, unreachable) == ["SEC-009"]
+    unreachable: list[Mapping[str, Any]] = [{"id": "F-009", "code_anchors": [{"path": "beta/caller.py"}]}]
+    assert review_reading.unowned_priors(readings, unreachable) == ["F-009"]
     # And nothing else is: a finding a scope covers, and one the whole-change reading holds.
-    inside: list[Mapping[str, Any]] = [{"id": "SEC-001", "code_anchors": [{"path": "alpha/mod.py"}]}]
+    inside: list[Mapping[str, Any]] = [{"id": "F-001", "code_anchors": [{"path": "alpha/mod.py"}]}]
     assert review_reading.unowned_priors(readings, inside) == []
     assert review_reading.unowned_priors([review_reading.WHOLE_READING], unreachable) == []
 
@@ -712,7 +737,7 @@ def test_the_reading_shown_a_finding_is_the_task_it_is_filed_against() -> None:
     plan = _scoped_plan()
     readings = review_reading.plan_readings(plan.tasks, ["alpha/mod.py", "alpha/shared.py", "loose.py"])
     finding: Mapping[str, Any] = {
-        "id": "SEC-004",
+        "id": "F-004",
         "code_anchors": [{"path": "alpha/mod.py"}, {"path": "alpha/shared.py"}],
     }
     filed = findings_mod.owner_of_path(plan.tasks, "alpha/mod.py")
@@ -879,7 +904,31 @@ def test_the_chain_reading_shown_a_finding_holds_the_task_it_is_filed_against() 
     plan = _chain_plan()
     readings = review_reading.plan_readings(plan.tasks, ["alpha/mod.py", "beta/b.py", "delta/d.py"])
     for path in ("alpha/mod.py", "alpha/shared.py", "beta/b.py", "delta/d.py"):
-        finding: Mapping[str, Any] = {"id": "SEC-001", "code_anchors": [{"path": path}]}
+        finding: Mapping[str, Any] = {"id": "F-001", "code_anchors": [{"path": path}]}
         shown = next(unit for unit, carried in review_reading.priors_by_reading(readings, [finding]).items() if carried)
         filed = findings_mod.owner_of_path(plan.tasks, path)
         assert filed in next(r.members for r in readings if r.unit == shown), (path, shown, filed)
+
+
+def test_two_readings_minting_the_same_finding_id_merge_into_ids_the_schema_accepts() -> None:
+    """Each reading mints its findings from `F-001` up, so a merge renumbers a clash — and the
+    number it mints has to be one the review's schema accepts, or the composed review cannot be
+    written at all."""
+    import re
+
+    from rein import actual_extraction, change_review
+
+    def readout(unit: str) -> review_reading.ReadOut:
+        finding = {"id": "F-001", "review": "security", "severity": "high", "scenario": "x", "blocking": True}
+        return review_reading.ReadOut(
+            reading=review_reading.Reading(unit=unit, include=(f"{unit}/",)),
+            extraction=actual_extraction.ExtractionResult(
+                actual_statements=(), coverage={}, actual_digest="sha256:" + "0" * 64
+            ),
+            review=change_review.ChangeReviewResult(findings=(finding,)),
+        )
+
+    merged = review_reading.merge([readout("T-001"), readout("T-002")], coverage={})
+    ids = [f["id"] for f in merged.findings]
+    pattern = re.compile(models.schema("review")["$defs"]["findingId"]["pattern"])
+    assert len(set(ids)) == 2 and all(pattern.match(fid) for fid in ids), ids

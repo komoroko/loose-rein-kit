@@ -298,19 +298,22 @@ from your tooling, and nothing else.
 | `review_policy.repair_rounds` | how many times the reviewer re-reads after an implementer resolves its findings |
 | `guard.paths` | what a pending gate freezes |
 
-Which reviews run is not in `config.yaml`. `.rein/reviews.yaml` holds the adversarial review before
-the mandate, per drafting stage, the `review` step that reads each batch of tasks, the security
-review of the whole change, and what acceptance is decided by: the blind extraction of what the code
-does and its comparison with the mandate's claims. The packaged step reads for `adversarial` alone,
-an attempt to refute the change; `correctness`, `simplification`, `security`, or a review of your
-own with its question written in the file, are yours to add. The extraction and the comparison are
-on and the security review is off until you switch them. Nothing is required: switched off, the
-comparison sends every claim to you as a question, and acceptance names whatever was not read. It is
-outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone to change:
-`rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews screen, where
-reviews are dragged onto the cycle and removed with ×, and acceptance's two readings are switched
-on and off. Each change is recorded with the document it wrote, and nothing runs on a file that
-differs from that record; `rein reviews restore` writes it back.
+Which reviews run is not in `config.yaml`. `.rein/reviews.yaml` holds them stage by stage: each
+drafting stage (requirements, design, tasks), `build` (each task, before it merges) and `acceptance`
+(the whole change, once every task has merged). Every stage has the same two parts: what belongs to
+it alone, switched on or off, and the reviews added to it. A drafting stage's own is the adversarial
+review of its document; acceptance's are the blind extraction of what the code does and its
+comparison with the mandate's claims. Any review, `adversarial`, `correctness`, `simplification`,
+`security`, or one of your own with its question written in the file, can be added at any stage, and
+where it is added is what it reads. The packaged document adds `adversarial` at `build` and nothing
+else, and keeps every stage's own on. Nothing is required: switched off, the comparison sends every
+claim to you as a question, and acceptance names whatever was not read. A task's reviewer sends its
+findings back as many times as `review_policy.repair_rounds` allows, the same budget acceptance
+repairs on. It is outside the mandate's freeze, so changing it rewinds nothing, and it is yours alone
+to change: `rein reviews apply <file> --reason ...` at your terminal, or the dashboard's Reviews
+screen, where a review is dragged onto a lane and removed with ×, and a stage's own is switched in
+place. Each change is recorded with the document it wrote, and nothing runs on a file that differs
+from that record; `rein reviews restore` writes it back.
 
 **Running unattended.** `rein build`'s exit code is the signal: `0` done, `1` or `2` need a human,
 and `3` is transient — capacity, a signal, another run holding the lock — and safe to retry with
@@ -379,11 +382,11 @@ A job already shaped the old way is not failed retroactively: the base side repo
 ## Security
 
 - **gitleaks** at pre-commit; false positives go in `.gitleaksignore`.
-- A **structured security review**, when `.rein/reviews.yaml` switches it on (`whole_change.security`),
-  and a **dependency audit** run before acceptance. A blocking finding holds the gate shut until the
-  change closes it, and the next review decides whether it closed by re-reading the code it
-  anchored to — not by asking the reviewer. Switching the reading off does not clear one: it stands
-  until its code is gone or you dispute it, and acceptance says no security reading was taken.
+- A **structured security review** of the whole change, when `.rein/reviews.yaml` adds `security`
+  at `acceptance`, and a **dependency audit** run before acceptance. A blocking finding holds the
+  gate shut until the change closes it, and the next review decides whether it closed by re-reading
+  the code it anchored to — not by asking the reviewer. Taking the review off does not clear one: it
+  stands until its code is gone or you dispute it, and acceptance says which reviews read the change.
 - A finding with no code anchor is closed by a human's dispute or not at all.
 
 ## Existing repositories (brownfield)

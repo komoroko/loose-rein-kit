@@ -51,7 +51,7 @@ def _enums(node: Any, pointer: str = "") -> list[tuple[str, frozenset[str]]]:
 # Enums that are deliberately narrower than the shared vocabulary they draw from, with the
 # reason. Anything not listed here must match a models.py constant exactly.
 LOCAL_ENUMS: dict[frozenset[str], str] = {
-    frozenset({"code_reviewer"}): "quality_gate's agent step: only the code reviewer runs inside the gate",
+    frozenset({"reviewer"}): "quality_gate's agent step: only the code reviewer runs inside the gate",
 }
 
 
@@ -74,6 +74,7 @@ NON_DOCUMENT_VOCABULARIES: dict[str, str] = {
     "AGENT_ROLE_VALUES": "config's `agents` constrains the roles as fixed properties + additionalProperties: false",
     "CAPABILITY_VALUES": "a control-plane token's scope, never written into a document",
     "CENTRAL_ONLY_CAPABILITIES": "the same token vocabulary, split by who may exercise it",
+    "REPAIR_ONLY_CAPABILITIES": "the same token vocabulary, the part only a repair's launch carries",
     "MECHANIZED_EVIDENCE_KINDS": "a subset of ACCEPTANCE_EVIDENCE_KINDS (the two this loop can do itself)",
     "REVIEW_STAGE_VALUES": "the review stages are derived per request, not stored — review_api enforces them",
 }
@@ -115,8 +116,10 @@ def test_the_stage_is_derived_from_the_gates_and_stored_nowhere() -> None:
 
 def test_central_only_capabilities_are_capabilities() -> None:
     assert models.CENTRAL_ONLY_CAPABILITIES < models.CAPABILITY_VALUES
+    assert models.REPAIR_ONLY_CAPABILITIES < models.CAPABILITY_VALUES
+    assert not (models.REPAIR_ONLY_CAPABILITIES & models.CENTRAL_ONLY_CAPABILITIES)
     # The four verbs a leaf agent legitimately needs, and nothing more.
-    assert models.CAPABILITY_VALUES - models.CENTRAL_ONLY_CAPABILITIES == {
+    assert models.CAPABILITY_VALUES - models.CENTRAL_ONLY_CAPABILITIES - models.REPAIR_ONLY_CAPABILITIES == {
         "decision.declare",
         "knowledge_gap.create",
         "task.status",
@@ -428,13 +431,13 @@ machine:
       semantic_support: {status: supported, assessment_basis: machine_assessed}
       conformance: {status: observed}
   acceptance: {actual_extraction: true, comparison: true}
-  security:
-    read: true
+  reviews:
+    read: [security]
     findings:
-      - id: SEC-001
+      - id: F-001
+        review: security
         severity: high
-        category: credential_exposure
-        attack_scenario: the reviewer container could reach a host credential
+        scenario: the reviewer container could reach a host credential
         blocking: true
 human:
   status: not_started
@@ -451,7 +454,7 @@ def test_review_parses_and_digests_the_halves_separately() -> None:
 
 def test_blocking_security_finding_is_isolated() -> None:
     review = models.Review.parse(REVIEW)
-    assert [f["id"] for f in review.blocking_security_findings] == ["SEC-001"]
+    assert [f["id"] for f in review.blocking_findings] == ["F-001"]
 
 
 def test_absent_coverage_is_not_sufficient() -> None:

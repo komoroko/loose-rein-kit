@@ -43,7 +43,18 @@ import subprocess
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from rein import build_git, common, conflict, dag, event_chain, models, policy_check, pr_draft, status_api
+from rein import (
+    build_git,
+    common,
+    conflict,
+    dag,
+    event_chain,
+    models,
+    policy_check,
+    pr_draft,
+    review_reading,
+    status_api,
+)
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -489,14 +500,12 @@ def preconditions(
 
     if mode == "ready":
         head = _rev_parse(repo, config.work_branch)
-        subject = review.subject_head_sha if review is not None else ""
-        if not subject:
+        if review is None or not review.is_generated:
             errors.append("no machine review has been generated — there is nothing binding these slices")
-        elif subject != head:
-            errors.append(
-                f"the review was generated against {subject[:12]} but the work branch is at {head[:12]} — "
-                "something landed after the review. Regenerate it with `rein review generate`."
-            )
+        elif reason := review_reading.freshness(repo, review, state, at=config.work_branch).reason:
+            # On content, as acceptance's own check is: the gate's commit of `review.yaml` lands after
+            # the review and moves no byte it read.
+            errors.append(f"{config.work_branch}: {reason}")
         stranded = [s.label for s in slices if not is_ancestor(repo, s.head_sha, head)]
         if stranded:
             errors.append(

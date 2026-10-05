@@ -152,10 +152,10 @@ Four documents, distinct roles — do not conflate them:
 - **`.rein/review.yaml`** — the **machine review** and the **human review**, digested
   *separately*. Regenerating the machine review resets the human review; a human answer never
   makes the machine review stale.
-- **`.rein/reviews.yaml`** — which reviews run: the adversarial review before the mandate, per
-  stage, the reviewer steps that read each batch, the security review of the whole change
-  (`whole_change.security`), and what acceptance is decided by (`acceptance.actual_extraction`,
-  `acceptance.comparison`). Any of them may be off; what was not read is named at acceptance. Outside the mandate's freeze, and **a human's
+- **`.rein/reviews.yaml`** — which reviews run, stage by stage: each drafting stage, `build` (each
+  task) and `acceptance` (the whole change). Each stage has what belongs to it alone, switched (the
+  adversarial review of a drafted document; acceptance's `actual_extraction` and `comparison`), and
+  the reviews added to it. Any of them may be off; what was not read is named at acceptance. Outside the mandate's freeze, and **a human's
   to change, never yours**: `rein reviews apply` at their terminal or the dashboard writes it, with
   the reason and the whole document in the chain, and nothing runs on a file that differs from that
   record. Read it with `rein reviews show`; never edit it, and never run `apply` for them —
@@ -254,13 +254,13 @@ decided by the next reading, never by the fixer's account of itself.
 
 **A repair is made at the cause, and lands only with a test that fails without it.** The task's
 scope is where a finding was charged, not a boundary: a repair may write into another task's paths,
-and while it runs (`state.repair_grant`, honoured only while `rein build` holds its run lock) past
-the mandate's `include` — never into its `exclude`. Every path it writes past `include` is put to
+and past the mandate's `include` by its launch's own token, which the guard checks with the running
+build — never into its `exclude`. Every path it writes past `include` is put to
 the human at acceptance as a card (`state.scope_expansions`): adopted, it is inside the mandate
 from then on; refused, the next `rein build` takes it back out and no repair may write there
 again. The run applies only the repair's test changes to the commit before it and runs the tests
-there; a repair with no test, or whose tests pass there, is undone and the reason goes to the next
-round (`build_loop._verify_repair`).
+there; a repair with no test, one that changed only tests, or one whose tests pass there, is undone
+and the reason goes to the next round (`build_loop._verify_repair`).
 
 **A finding is routed by what repairing it would change, not by who found it** (`repair.route`).
 Three classes: **code** — one task's scope owns it and no claim, criterion or requirement moves —
@@ -333,12 +333,12 @@ human decides *whether*; the loop does the work.
 
 ## Security gate
 
-**gitleaks** at commit stage; a **structured security review** feeds the grounded review before
-acceptance when `.rein/reviews.yaml` has `whole_change.security` on. Off, the review records that no
-security reading was taken, and a blocking finding an earlier reading recorded still stands until
-its code is gone or a human disputes it. What "stale" means there is measured on content, over **two subjects**: the *product*, and
+**gitleaks** at commit stage; a **structured security review** of the whole change feeds the
+grounded review before acceptance when `.rein/reviews.yaml` adds `security` at `acceptance`.
+Without it, the review records that no security reading was taken, and a blocking finding an
+earlier reading recorded still stands until its code is gone or a human disputes it. What "stale" means there is measured on content, over **two subjects**: the *product*, and
 the **host surfaces** `rein install` wrote — the settings, hooks, MCP servers and instruction files
-a CLI reads before it reads its prompt. The security reviewer is sent a checkout of the head with
+a CLI reads before it reads its prompt. The reviewer of the whole change is sent a checkout of the head with
 those in it and told that a pre-authorized command or a hook added there is a finding, while the
 product digest is taken with them excluded so the blind extractor never reads this tool's own
 orchestration text. One digest cannot carry both questions: a commit that only widens `permissions.allow` would
@@ -367,8 +367,8 @@ not "the answer is bad" (detail: build.md, verify.md).
   or by a local merge when there is no remote. Asking again for the push, the lift and the merge
   was asking four times for one decision. `rein integrate` finishes an integration that stopped
   (the forge waiting on required checks) and asks nothing, because the decision is on the record;
-  it refuses to integrate anything but the commit the approved review read. Never merge by hand
-  around it.
+  it integrates only a work branch the approved review still speaks for, measured on the product
+  as acceptance measures it, and merges that one commit. Never merge by hand around it.
 - A cycle may ship as **one pull request** (`rein pr-draft`'s body) or as a **stack of them, one per
   task** (`rein pr-stack`). A stack opens as **drafts** before acceptance (`--push`, confirmed at a
   terminal, never pre-authorized) for reading on the forge; approving lifts and merges it. The

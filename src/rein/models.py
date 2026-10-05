@@ -259,7 +259,7 @@ NEGATIVE_CONTROL_VALUES = frozenset({"discriminating", "no_tests_changed", "unde
 #: Neither passes or fails a task on its own — the reviewer reports, and the loop decides what that
 #: costs.
 FINDING_SEVERITY_VALUES = frozenset({"must_fix", "question"})
-AGENT_ROLE_VALUES = frozenset({"implementer", "code_reviewer", "actual_extractor", "comparator", "security_reviewer"})
+AGENT_ROLE_VALUES = frozenset({"implementer", "reviewer", "actual_extractor", "comparator"})
 
 # --- review vocabulary (plan §6.7) --------------------------------------------
 #
@@ -374,25 +374,6 @@ EXTRA_BEHAVIOR_CATEGORY_VALUES = frozenset(
 #: Why something could not be settled. Each kind names a *different* missing thing, so that
 #: "we have no source" never renders the same as "the source does not support the claim".
 GAP_KIND_VALUES = frozenset({"evidence_gap", "actual_coverage_gap"})
-
-SECURITY_CATEGORY_VALUES = frozenset(
-    {
-        "credential_exposure",
-        "injection",
-        "authz_bypass",
-        "authn_weakness",
-        "crypto_misuse",
-        "ssrf",
-        "path_traversal",
-        "deserialization",
-        "supply_chain",
-        "sandbox_escape",
-        "information_disclosure",
-        "denial_of_service",
-        "other",
-    }
-)
-
 
 #: The acceptance rail, in order. Three screens and a freeze, because the same finding used to
 #: appear on four of them — as a summary count, as a raw gap, as an Expected/Actual row, and
@@ -529,21 +510,22 @@ EVENT_ORDER: tuple[str, ...] = (
     "actual_extraction_generated",
     "actual_extraction_failed",
     "comparison_generated",
-    "security_review_generated",
+    "change_review_generated",
     # A blocking finding stopped blocking. In the chain because that is a state change and the
     # chain is the only place it survives: `review.yaml` holds one generation's findings, and the
     # next generation re-derives the list from a reviewer with no memory of the last one.
-    "security_finding_resolved",
-    # A repair of acceptance's findings landed, or was refused and undone. In the chain because
-    # whether a repair showed a test failing without it is the evidence the finding's closing rests
-    # on, and because a refusal is the reason the same finding reaches the next round, or a human.
+    "finding_resolved",
+    # A repair of acceptance's findings landed with a test that fails without it, landed because that
+    # experiment could not be run, or was refused and undone. Three events, because a reader counting
+    # proven repairs must not count the second. In the chain because that is the evidence the
+    # finding's closing rests on, and because a refusal is the reason the same finding reaches the
+    # next round, or a human.
     "repair_verified",
+    "repair_unverified",
     "repair_refused",
-    # A repair may write where the mandate's `include` does not reach while it runs, and every path it
-    # does is put to a human. The grant's opening and closing are state changes, and so is a path
-    # widened, answered, or taken back out after a human refused it.
-    "repair_grant_opened",
-    "repair_grant_closed",
+    # A repair may write where the mandate's `include` does not reach, and every path it does is put
+    # to a human. A path widened, answered, or taken back out after a human refused it is a state
+    # change.
     "scope_expanded",
     "scope_expansion_reverted",
     "review_generated",
@@ -575,14 +557,15 @@ EVENT_VALUES = frozenset(EVENT_ORDER)
 CONFIRMATION_CHANNELS: tuple[str, ...] = ("terminal", "ui-session")
 CONFIRMATION_CHANNEL_VALUES = frozenset(CONFIRMATION_CHANNELS)
 
-#: A security finding's life. `open` holds acceptance shut. The two ways out are both facts rather
-#: than opinions, and neither is the reviewer's: `resolved` is recorded only when the code the
-#: finding anchored to is no longer in the tree (`security_review.resolution_of`), and `disputed`
-#: only when a human contradicted it with a reason that `state.disputed_findings` binds to the
-#: anchored text (`security_review.apply_disputes`) — so a dispute lapses if that code is edited.
-#: A finding is never deleted, so the document keeps the record of what closed it and how.
-SECURITY_FINDING_STATUS_ORDER: tuple[str, ...] = ("open", "resolved", "disputed")
-SECURITY_FINDING_STATUS_VALUES = frozenset(SECURITY_FINDING_STATUS_ORDER)
+#: The life of a finding a review of the whole change raised. `open` holds acceptance shut when it
+#: blocks. The two ways out are both facts rather than opinions, and neither is the reviewer's:
+#: `resolved` is recorded only when the code the finding anchored to is no longer in the tree
+#: (`change_review.resolution_of`), and `disputed` only when a human contradicted it with a reason
+#: that `state.disputed_findings` binds to the anchored text (`change_review.apply_disputes`) — so
+#: a dispute lapses if that code is edited. A finding is never deleted, so the document keeps the
+#: record of what closed it and how.
+FINDING_STATUS_ORDER: tuple[str, ...] = ("open", "resolved", "disputed")
+FINDING_STATUS_VALUES = frozenset(FINDING_STATUS_ORDER)
 
 #: A change request's life. `open` holds the gate shut; `addressed` is the agent saying it has
 #: been answered and naming how, which stops it blocking but puts it on the approval screen; a
@@ -598,6 +581,7 @@ CAPABILITY_VALUES = frozenset(
         "knowledge_gap.create",
         "task.status",
         "event.append",
+        "scope.repair",
         "gate.approve",
         "expert.confirm",
         "human.review.complete",
@@ -605,6 +589,11 @@ CAPABILITY_VALUES = frozenset(
         "state.replace",
     }
 )
+#: Granted only to the launch of a repair (`build_loop._repair_env`), never to an implementer or a
+#: reviewer: the bearer may write where the approved mandate's `include` does not reach. The gate
+#: guard asks the control plane whether the token it runs under holds it (`gate_guard`), so the
+#: grant is alive exactly as long as the run that minted it and reaches only that launch.
+REPAIR_ONLY_CAPABILITIES = frozenset({"scope.repair"})
 CENTRAL_ONLY_CAPABILITIES = frozenset(
     {
         "gate.approve",
@@ -631,7 +620,7 @@ ID_PATTERNS: Mapping[str, re.Pattern[str]] = {
     "statement": re.compile(r"^STMT-\d{3,}$"),
     "actual_statement": re.compile(r"^AST-\d{3,}$"),
     "decision_card": re.compile(r"^DC-\d{3,}$"),
-    "finding": re.compile(r"^SEC-\d{3,}$"),
+    "finding": re.compile(r"^F-\d{3,}$"),
     "extra_behavior": re.compile(r"^EXTRA-\d{3,}$"),
 }
 
@@ -724,7 +713,7 @@ def schema(name: str) -> Mapping[str, Any]:
 
 
 #: Repo-relative POSIX paths only, read from the schema that enforces it — the same direction
-#: `review_policy.review_schema_pattern` and `security_review.FINDING_ID_RE` already take, and for
+#: `review_policy.review_schema_pattern` and `change_review.FINDING_ID_RE` already take, and for
 #: the same reason: this rule was written out five times (here, and `repoPath`/`pathGlob` in three
 #: schemas), which is five chances for the validator and the code to disagree about what a path is.
 #:
@@ -1486,12 +1475,12 @@ class State:
 
     @property
     def disputed_findings(self) -> Mapping[str, Mapping[str, Any]]:
-        """Security findings a human contradicted, by id — the durable half of `dispute_finding`.
+        """Findings a human contradicted, by id — the durable half of `dispute_finding`.
 
         The review's own `human.dispositions` entry records that a decision card was answered, and
         a regeneration discards it. That left a disputed false positive with no exit: the
         regeneration carried it forward as a prior blocker, the reviewer honestly did not re-emit
-        a finding it did not believe, and `security_review.resolution_of` could not close it
+        a finding it did not believe, and `change_review.resolution_of` could not close it
         because the code it named was correct and still there.
 
         Each record binds the anchored text (`anchors_digest`), so it retires the way acceptance
@@ -1501,17 +1490,6 @@ class State:
         if not isinstance(value, dict):
             return {}
         return {str(k): v for k, v in value.items() if isinstance(v, dict)}
-
-    @property
-    def repair_grant(self) -> Mapping[str, Any] | None:
-        """The repair running now, while one does: it may write where the mandate's include does not reach.
-
-        Opened by `rein build` around one repair launch and closed when it ends
-        (`build_loop._repair`). Nothing else writes it, and a grant still open when a run starts is
-        one a crash left behind, which that run closes before anything launches.
-        """
-        value = self.raw.get("repair_grant")
-        return value if isinstance(value, dict) and value.get("task_id") else None
 
     @property
     def scope_expansions(self) -> Mapping[str, Mapping[str, Any]]:
@@ -1594,77 +1572,63 @@ class State:
         return None
 
 
-#: The reviews a reviewer step can read for without anything else being written down. Each has a
-#: question in `build_prompts`, and the last three, on a host that carries one, a discipline of the
-#: host's own (`adapters.Adapter.disciplines`). `adversarial` has none: it is an attempt to refute
-#: the change, and no host command is written for that.
+#: The reviews that can be added at a stage without anything else being written down. Each has a
+#: question for code and one for a drafted document (`build_prompts`), and the last three, on a host
+#: that carries one, a discipline of the host's own (`adapters.Adapter.disciplines`). `adversarial`
+#: has none: it is an attempt to refute the change, and no host command is written for that.
 BUILTIN_REVIEWS: tuple[str, ...] = ("adversarial", "correctness", "simplification", "security")
 
-#: The drafting stages the adversarial review runs at, in the order a cycle reaches them.
-ADVERSARIAL_STAGES: tuple[str, ...] = ("requirements", "design", "tasks")
+#: The drafting stages, in the order a cycle reaches them. Each reads its document before the mandate.
+DRAFTING_STAGES: tuple[str, ...] = ("requirements", "design", "tasks")
 
-#: The readings acceptance is decided by, in the order they run (`reviews.yaml` `acceptance`).
-ACCEPTANCE_READINGS: tuple[str, ...] = ("actual_extraction", "comparison")
+#: Every stage a review can be added at, in cycle order: the drafting stages, each task as it is
+#: built, and the whole change before acceptance.
+REVIEW_STAGES: tuple[str, ...] = (*DRAFTING_STAGES, "build", "acceptance")
+
+#: What belongs to one stage alone, switched on or off there rather than added. A drafting stage's
+#: is the adversarial review of its document by a fresh context (`adversarial-reviewer`), which
+#: works through the lenses the mandate froze; acceptance's are the readings it is decided by —
+#: `actual_extraction` reads the code blind, without the plan, and `comparison` holds that Actual
+#: against the mandate's claims, so it needs the extraction.
+STAGE_SWITCHES: Mapping[str, tuple[str, ...]] = {
+    **dict.fromkeys(DRAFTING_STAGES, ("adversarial",)),
+    "build": (),
+    "acceptance": ("actual_extraction", "comparison"),
+}
 
 
 @dataclass(frozen=True)
 class Readings:
-    """What the grounded review reads before acceptance (`reviews.yaml` `acceptance`, `whole_change`).
+    """What the grounded review reads before acceptance (`reviews.yaml` `acceptance`).
 
-    `actual_extraction` reads the code blind, without the plan, for what it does; `comparison` holds
-    that Actual against the mandate's claims, and so needs it. Both are acceptance's own: they make
-    what a person decides by rather than improving the work. `security` is a security reviewer's
-    reading of the whole change, a review whose findings the loop repairs. Each may be off: what was
+    `actual_extraction` and `comparison` make what a person decides by. `reviews` are the reviews
+    added at acceptance: each reads the whole change once every task has merged, and its findings
+    are the loop's to repair before a person sees what is left. Each may be off or empty: what was
     not read is recorded as not read (`Review.extraction_read`, `Review.comparison_read`,
-    `Review.security_read`), never inferred from an empty list.
+    `Review.reviews_read`), never inferred from an empty list.
     """
 
     actual_extraction: bool
     comparison: bool
-    security: bool
-
-
-@dataclass(frozen=True)
-class ReviewStep:
-    """One reviewer step: a launch per batch (and per join, by `stage`) that reads for `reviews`."""
-
-    raw: Mapping[str, Any]
-
-    @property
-    def name(self) -> str:
-        return _str(self.raw, "name")
-
-    @property
-    def reviews(self) -> tuple[str, ...]:
-        value = self.raw.get("reviews") or []
-        return tuple(str(v) for v in value) if isinstance(value, list) else ()
-
-    @property
-    def retries(self) -> int:
-        value = self.raw.get("retries", 1)
-        return value if isinstance(value, int) else 1
-
-    @property
-    def stage(self) -> str:
-        return _str(self.raw, "stage", "both")
-
-    @property
-    def paths(self) -> tuple[str, ...]:
-        value = self.raw.get("paths") or []
-        return tuple(str(v) for v in value) if isinstance(value, list) else ()
+    reviews: tuple[str, ...]
+    #: The question each custom review among `reviews` asks. A packaged one asks its own.
+    questions: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class Reviews:
-    """``reviews.yaml`` — which reviews run. Outside the mandate's freeze; written only by a human.
+    """``reviews.yaml`` — which reviews run, stage by stage. Outside the mandate's freeze; written
+    only by a human.
 
-    The adversarial review before the mandate and the reviewer steps of the quality gate raise the
-    quality of the work; neither is what the mandate decides or what acceptance decides by. So
-    changing them rewinds nothing, and what keeps an agent from switching a review off to get its
-    own work through is not a freeze but the write path: `rein reviews apply` at a terminal or the
-    dashboard's write session, each change in the audit chain with its reason and the whole
-    document it wrote. The path alone is not the guarantee — a shell write never meets the edit
-    hook — so every reader checks the file against that record (`reviews_cmd.binding_problem`).
+    Every stage has the same two parts: what belongs to it alone, switched (`STAGE_SWITCHES`), and
+    the reviews added to it, each a packaged name or a custom one with its question. Where a review
+    is added is what it reads: a drafted document, each task's change, or the whole change. None of
+    it is what the mandate decides, so changing it rewinds nothing, and what keeps an agent from
+    switching a review off to get its own work through is not a freeze but the write path:
+    `rein reviews apply` at a terminal or the dashboard's write session, each change in the audit
+    chain with its reason and the whole document it wrote. The path alone is not the guarantee — a
+    shell write never meets the edit hook — so every reader checks the file against that record
+    (`reviews_cmd.binding_problem`).
     """
 
     raw: Mapping[str, Any]
@@ -1678,34 +1642,30 @@ class Reviews:
         return cls(document)
 
     def problems(self) -> list[str]:
-        """What the schema cannot say: every name a step reads for has to be defined somewhere."""
+        """What the schema cannot say: names that resolve, and a comparison that has its input."""
         errors: list[str] = []
         custom = [c.get("name") for c in self.custom]
+        reserved = {*BUILTIN_REVIEWS, *(name for switches in STAGE_SWITCHES.values() for name in switches)}
         for name in custom:
-            if name in BUILTIN_REVIEWS or name in ACCEPTANCE_READINGS:
+            if name in reserved:
                 errors.append(
-                    f"custom/{name}: `{name}` is a packaged review or reading — a custom one needs a name of its own"
+                    f"custom/{name}: `{name}` is a packaged review or switch — a custom one needs a name of its own"
                 )
         if len(set(custom)) != len(custom):
             errors.append("custom: two reviews share a name")
-        if self.readings.comparison and not self.readings.actual_extraction:
+        known = {*BUILTIN_REVIEWS, *(str(n) for n in custom)}
+        for stage in REVIEW_STAGES:
+            for review in self.reviews_at(stage):
+                if review not in known:
+                    errors.append(f"{stage}/reviews: `{review}` is neither a packaged review nor one under `custom`")
+                elif review in STAGE_SWITCHES[stage]:
+                    errors.append(f"{stage}/reviews: `{review}` is this stage's own — it is switched, not added")
+        if self.switch("acceptance", "comparison") and not self.switch("acceptance", "actual_extraction"):
             errors.append(
                 "acceptance: `comparison` compares the actual extraction with the claims, so it needs "
                 "`actual_extraction` on"
             )
-        names = [step.name for step in self.steps]
-        if len(set(names)) != len(names):
-            errors.append("steps: two steps share a name")
-        known = {*BUILTIN_REVIEWS, *(str(n) for n in custom)}
-        for step in self.steps:
-            for review in step.reviews:
-                if review not in known:
-                    errors.append(f"steps/{step.name}: `{review}` is neither a packaged review nor one under `custom`")
         return errors
-
-    @property
-    def steps(self) -> tuple[ReviewStep, ...]:
-        return tuple(ReviewStep(step) for step in _maps(self.raw, "steps"))
 
     @property
     def custom(self) -> tuple[Mapping[str, Any], ...]:
@@ -1716,38 +1676,39 @@ class Reviews:
         """Each custom review's question, by name."""
         return {str(c.get("name")): str(c.get("question", "")).strip() for c in self.custom}
 
+    def _stage(self, stage: str) -> Mapping[str, Any]:
+        value = self.raw.get(stage)
+        return value if isinstance(value, dict) else {}
+
+    def switch(self, stage: str, name: str) -> bool:
+        """Is this stage's own `name` on? Off when the document does not say."""
+        return self._stage(stage).get(name) is True
+
+    def reviews_at(self, stage: str) -> tuple[str, ...]:
+        """The reviews added at `stage`, in the order a reviewer is asked them."""
+        value = self._stage(stage).get("reviews") or []
+        return tuple(str(v) for v in value) if isinstance(value, list) else ()
+
     def normalized(self) -> dict[str, Any]:
         """The document with every default written out and nothing without meaning left in.
 
-        Two documents that run the same reviews are equal here and only here: a step's `retries`
-        left to its default and written as 1 is one configuration, and the order of `custom`
-        (looked up by name) is not part of it. The order of the steps and of each step's reviews
-        is — the steps run in it, and a reviewer is asked in it. This is the form that is written
-        and recorded, so "what changed" is a comparison of two of these and nothing else.
+        Two documents that run the same reviews are equal here and only here: the order of
+        `custom` (looked up by name) is not part of it, and the order of a stage's reviews is — a
+        reviewer is asked in it. This is the form that is written and recorded, so "what changed"
+        is a comparison of two of these and nothing else.
         """
-        steps: list[dict[str, Any]] = []
-        for step in self.steps:
-            entry: dict[str, Any] = {
-                "name": step.name,
-                "reviews": list(step.reviews),
-                "retries": step.retries,
-                "stage": step.stage,
-            }
-            if step.paths:
-                entry["paths"] = list(step.paths)
-            steps.append(entry)
+        # A stage is written out only when the document has it. The schema requires every one, so
+        # every document that can be applied has them all; one that does not is a record written
+        # before this shape, and normalizing it into values it never stated would make the change
+        # that adds them compare equal to that record and never be written.
         document: dict[str, Any] = {
-            "adversarial": {stage: self.adversarial(stage) for stage in ADVERSARIAL_STAGES},
-            "steps": steps,
+            stage: {
+                **{name: self.switch(stage, name) for name in STAGE_SWITCHES[stage]},
+                "reviews": list(self.reviews_at(stage)),
+            }
+            for stage in REVIEW_STAGES
+            if isinstance(self.raw.get(stage), dict)
         }
-        # Written out only when the document has it. The schema requires it, so every document that
-        # can be applied does; the one that does not is a record written before the key existed,
-        # and normalizing it into a value it never stated would make the change that adds the key
-        # compare equal to that record and never be written.
-        if isinstance(self.raw.get("acceptance"), dict):
-            document["acceptance"] = {name: getattr(self.readings, name) for name in ACCEPTANCE_READINGS}
-        if isinstance(self.raw.get("whole_change"), dict):
-            document["whole_change"] = {"security": self.readings.security}
         if self.custom:
             document["custom"] = [
                 {"name": name, "question": question} for name, question in sorted(self.questions.items())
@@ -1755,31 +1716,23 @@ class Reviews:
         return document
 
     def adversarial(self, stage: str) -> bool:
-        value = self.raw.get("adversarial")
-        return bool(value.get(stage)) if isinstance(value, dict) else False
+        return self.switch(stage, "adversarial")
 
     @property
     def readings(self) -> Readings:
-        """What the grounded review reads once every task has merged, before acceptance.
-
-        All of it reads the merged tree: what a claim of the mandate rests on, and what one task
-        leaves open that another path now reaches, are only there. It runs where the grounded review
-        reads the change (`review.generate`); a security finding is the loop's to repair
-        (`repair.route`), and what was not read is named at acceptance as not read.
-        """
-        acceptance, whole = self.raw.get("acceptance"), self.raw.get("whole_change")
-        acceptance = acceptance if isinstance(acceptance, dict) else {}
-        whole = whole if isinstance(whole, dict) else {}
+        """What the grounded review reads once every task has merged, before acceptance."""
+        reviews = self.reviews_at("acceptance")
         return Readings(
-            actual_extraction=bool(acceptance.get("actual_extraction")),
-            comparison=bool(acceptance.get("comparison")),
-            security=bool(whole.get("security")),
+            actual_extraction=self.switch("acceptance", "actual_extraction"),
+            comparison=self.switch("acceptance", "comparison"),
+            reviews=reviews,
+            questions={name: question for name, question in self.questions.items() if name in reviews},
         )
 
     @property
     def adversarial_off(self) -> tuple[str, ...]:
         """The drafting stages whose adversarial review is switched off, in cycle order."""
-        return tuple(stage for stage in ADVERSARIAL_STAGES if not self.adversarial(stage))
+        return tuple(stage for stage in DRAFTING_STAGES if not self.adversarial(stage))
 
 
 @dataclass(frozen=True)
@@ -1849,9 +1802,9 @@ class Review:
     def host_surface_digest(self) -> str:
         """The digest of the installed host surfaces this review read.
 
-        The security stage is sent a checkout of the head with `.claude/`, `.codex/`, `.github/` and
-        `.gemini/` in it and is told to review them, while `change_digest` is taken with those paths
-        excluded. So a review is bound to two subjects, and this is the second
+        The change review is sent a checkout of the head with `.claude/`, `.codex/`, `.github/` and
+        `.gemini/` in it and, when it reads for security, is told to review them, while
+        `change_digest` is taken with those paths excluded. So a review is bound to two subjects, and this is the second
         (`review_reading.host_surface_digest`).
 
         "" for a review generated before this was measured. That is not the digest of an empty
@@ -1888,9 +1841,10 @@ class Review:
         return _maps(self.machine, "extra_behaviors")
 
     @property
-    def security_findings(self) -> tuple[Mapping[str, Any], ...]:
-        security = self.machine.get("security")
-        return _maps(security, "findings") if isinstance(security, dict) else ()
+    def review_findings(self) -> tuple[Mapping[str, Any], ...]:
+        """What the reviews of the whole change found (`reviews.yaml` `acceptance.reviews`)."""
+        reviews = self.machine.get("reviews")
+        return _maps(reviews, "findings") if isinstance(reviews, dict) else ()
 
     @property
     def extraction_read(self) -> bool:
@@ -1905,37 +1859,38 @@ class Review:
         return isinstance(acceptance, dict) and acceptance.get("comparison") is True
 
     @property
-    def security_read(self) -> bool:
-        """Did this review send the change to a security reviewer? (`reviews.yaml` `whole_change.security`)"""
-        security = self.machine.get("security")
-        return isinstance(security, dict) and security.get("read") is True
+    def reviews_read(self) -> tuple[str, ...]:
+        """Which reviews read the whole change (`reviews.yaml` `acceptance.reviews`), in the order asked."""
+        reviews = self.machine.get("reviews")
+        read = reviews.get("read") if isinstance(reviews, dict) else None
+        return tuple(str(name) for name in read) if isinstance(read, list) else ()
 
     @property
-    def open_security_findings(self) -> tuple[Mapping[str, Any], ...]:
+    def open_findings(self) -> tuple[Mapping[str, Any], ...]:
         """Findings not yet closed, whatever their severity: what the loop still has to answer.
 
-        Severity says whether a finding holds acceptance shut (`blocking_security_findings`). It
+        Severity says whether a finding holds acceptance shut (`blocking_findings`). It
         does not say whether the code should be repaired: a `low` finding in code a task owns is a
         defect inside an approved scope like any other, and the only one who can answer it without
         a person is the loop (`repair.route`).
         """
         closed = {"resolved", "disputed"}
-        return tuple(f for f in self.security_findings if f.get("status") not in closed)
+        return tuple(f for f in self.review_findings if f.get("status") not in closed)
 
     @property
-    def blocking_security_findings(self) -> tuple[Mapping[str, Any], ...]:
+    def blocking_findings(self) -> tuple[Mapping[str, Any], ...]:
         """Findings that still hold acceptance shut: `blocking`, and not already closed.
 
         A closed finding stays in the document — that is the record of what closed it and how —
         but it is not a blocker any more. There are two ways to close, and this excludes both:
         `resolved`, when the code the finding anchored to is gone, and `disputed`, when a human
-        contradicted it with a reason bound to the anchored text (`security_review.apply_disputes`
+        contradicted it with a reason bound to the anchored text (`change_review.apply_disputes`
         also clears `blocking`, so the flag and the status agree). Filtering here rather than at
         each reader is what keeps `doctor`, `findings`, `human_review`, `pr_draft`,
         `review_policy` and `status_api` from having to agree about it separately.
         """
         closed = {"resolved", "disputed"}
-        return tuple(f for f in self.security_findings if f.get("blocking") is True and f.get("status") not in closed)
+        return tuple(f for f in self.review_findings if f.get("blocking") is True and f.get("status") not in closed)
 
     @property
     def coverage(self) -> Mapping[str, Any]:
@@ -2386,7 +2341,11 @@ class Config:
 
     @property
     def repair_rounds(self) -> int:
-        """How many times acceptance may repair its own findings before it stops and asks a human.
+        """How many times a review's findings are sent back for repair before the loop stops.
+
+        One budget for every review the loop answers: a task's reviewer sends a `must_fix` back to
+        its implementer this many times before the task stops, and acceptance repairs its own
+        findings this many times before it asks a human.
 
         Bounded because the failure this has to survive is a *false positive*: repairing a finding
         that was never true converges on nothing, and an unbounded loop would spend a session

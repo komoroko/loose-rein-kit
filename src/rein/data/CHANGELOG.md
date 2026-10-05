@@ -8,14 +8,18 @@ new one). `pyproject.toml [project] version` is the single version source.
 
 **A minor release: the format moves to `rein-grounded-v11`, and every repository needs `rein sync
 --force`.** Four documents change shape. `config.yaml` requires `project.mainline`, the branch
-acceptance integrates into. `reviews.yaml` requires `whole_change: {security: <bool>}` and
-`acceptance: {actual_extraction: <bool>, comparison: <bool>}`; a generated `review.yaml` records
-under `machine.acceptance` and `machine.security` whether each reading was taken; and the per-task reviewer's `consider` is now `question`, in `state.yaml`'s
-handoffs and `review.yaml`'s residual findings. `state.yaml` also gains `repair_grant` and
-`scope_expansions`. Nothing converts any of it for you.
+acceptance integrates into, and its `agents` hold one `reviewer` where `code_reviewer` and
+`security_reviewer` were. `reviews.yaml` is written stage by stage (`requirements`, `design`,
+`tasks`, `build`, `acceptance`); a generated `review.yaml` records under `machine.acceptance` which
+of acceptance's readings were taken and under `machine.reviews` which reviews read the whole change
+and what they found; and the per-task reviewer's `consider` is now `question`, in `state.yaml`'s
+handoffs and `review.yaml`'s residual findings. `state.yaml` also gains `scope_expansions`, and a disputed finding is keyed `F-001` where it was `SEC-001`. Two events are
+renamed: `security_review_generated` is `change_review_generated`, and `security_finding_resolved`
+is `finding_resolved`. Nothing converts any of it for you.
 
-- **Add `mainline: main` (or your mainline's name) under `project:` in `config.yaml`.** It is
-  frozen with the mandate, so do it between cycles.
+- **Add `mainline: main` (or your mainline's name) under `project:` in `config.yaml`, and replace
+  `agents.code_reviewer` and `agents.security_reviewer` with one `agents.reviewer`.** Both are frozen
+  with the mandate, so do it between cycles.
 - **Upgrade after `rein cycle-close`.** A `state.yaml` whose task handoffs hold a `consider`
   finding is refused by the new schema, and unlike `review.yaml` it cannot be deleted and taken
   again. A repository between cycles holds none.
@@ -25,50 +29,54 @@ handoffs and `review.yaml`'s residual findings. `state.yaml` also gains `repair_
   `rein review generate --force` included. `rein sync` writes the empty one back, and `rein review
   generate` takes the review again; a stage whose inputs have not moved is served from the cache.
   After `rein cycle-close` there is nothing to delete.
-- **After the sync, apply a `reviews.yaml` that says what is read before acceptance.** Copy your
-  file, add `acceptance:` with `actual_extraction: true` and `comparison: true` to keep what
-  acceptance had, and `whole_change:` with `security: true` to keep the security reading you had
-  (`false` drops any of them), and run `rein reviews apply <file> --reason ...` at your terminal.
-  Until then every reader of the file refuses it, as it refuses any file the schema does not accept.
+- **After the sync, apply a `reviews.yaml` in the new shape.** Start from the packaged one (`rein
+  reviews show --json` after `rein sync` seeds a new repository; the scaffold otherwise), carry
+  over what you had — the reviews your steps read go under `build.reviews`, `adversarial` per
+  drafting stage under that stage, `security` at acceptance under `acceptance.reviews` — and run
+  `rein reviews apply <file> --reason ...` at your terminal. Until then every reader of the file
+  refuses it, as it refuses any file the schema does not accept.
 
 What changes:
 
-- **The packaged reviewer step reads for one review, `adversarial`.** It is an attempt to refute
+- **Reviews are added stage by stage, and no review is required.** Every stage — each drafting
+  stage, `build` (each task) and `acceptance` (the whole change) — has what belongs to it alone,
+  switched on or off, and the reviews added to it. Any review can be added at any stage, and where
+  it is added is what it reads: a drafted document, one task's change, or the whole change. A
+  drafting stage's own is the adversarial review of its document, and the phase prompts read the
+  added ones with `rein reviews show --stage <stage>`, each question phrased for a document;
+  acceptance's own are the blind extraction and the comparison. Reviewer steps, their names, their
+  `stage`, `retries` and `paths` are gone: the `build` reviews are read by one step, `review`, which
+  reads each batch and a join whose merge resolved a conflict, and sends a finding back as many
+  times as `review_policy.repair_rounds` allows — the budget acceptance repairs on.
+- **The packaged document adds one review, `adversarial`, at `build`.** It is an attempt to refute
   the change rather than to confirm it: the input that breaks it (a boundary, an empty value, an
   unexpected type, a failure path, concurrency, a half-applied write), the claim that has no
   evidence behind it but the implementer's summary, and the side that did not change (the callers,
   the tests that do not cover it, what should have been deleted with it). Each finding names the
   place, how it breaks and the input that breaks it. `correctness`, `simplification` and `security`
   are still packaged, with the host's `/code-review`, `/simplify` and `/security-review` offered for
-  them, and are yours to add to a step. A repository that already has a `reviews.yaml` keeps the
-  steps it has: only a new one is seeded with `adversarial`.
-- **The security review is a review of the whole change, switched in `reviews.yaml`'s
-  `whole_change.security`, and the packaged document has it off.** It reads the merged tree once
-  every task has landed and before acceptance, because what one task leaves open and another path
-  reaches is only there; its findings are the loop's to repair. Off, the grounded review launches no security reviewer, primes no
-  shared reading for the extractor alone, and records `security.read: false`, so an empty list of
-  findings is never read as a review that found none. A blocking finding an earlier reading
-  recorded still stands: it closes when its anchored code is gone from the tree or when you dispute
-  it, exactly as before, because switching a review off is not a way to clear a block. The
-  acceptance screen, the pull-request body and `rein reviews show` say the reading was not taken.
-- **Nothing is required: what acceptance is decided by is switched too, in `reviews.yaml`'s
-  `acceptance`.** `actual_extraction` and `comparison` are on in the packaged document, and the
-  comparison needs the extraction it compares. With the comparison off, no comparator is launched and
-  every claim of the plan is framed as `unknown` with the reason that nobody was asked to compare it,
-  so each is a decision card for a person, decided beside the blind extraction if that still runs.
-  With the extraction off as well, the Actual is empty. Acceptance, the pull-request body and
-  `rein reviews show` say which reading was not taken. With every reading off nothing is launched at
-  all, and the build warms no reading. A custom review may not take either reading's name.
-- **A review read under the other setting holds acceptance shut.** Switching any reading after the
-  review was generated leaves a review that read the wrong thing for this repository; readiness
-  names it as the machine's and asks for `rein review generate`.
-- **The Reviews screen is a palette and the cycle's lanes.** A review is dragged onto the lane that
-  runs it (the adversarial review onto a drafting stage, any step review onto a step or onto the
-  build lane for a step of its own, the security review onto the whole-change lane) and taken off
-  with ×. Taking off a step's last review takes off the step, and deleting a custom review takes it
-  off every step. The acceptance lane holds its two readings as on/off switches rather than fixed
-  cards; switching the comparison on switches the extraction on, and the extraction off the
-  comparison.
+  them, and are yours to add. Every stage's own is on.
+- **Any review can read the whole change.** The structured security review generalizes: whatever
+  `acceptance.reviews` lists is asked of the merged tree in one reviewer launch per reading, and
+  each finding names the review it answers (`F-001`, with `review`, `severity` and `scenario`). The
+  loop repairs what a task's scope owns, a blocking finding holds the gate until its anchored code
+  is gone or you dispute it, and taking a review off does not close what it found. With none added,
+  no reviewer is launched and the review records that none read the change.
+- **What acceptance is decided by is switched too.** `acceptance.actual_extraction` and
+  `acceptance.comparison` are on in the packaged document, and the comparison needs the extraction
+  it compares. With the comparison off, no comparator is launched and every claim of the plan is
+  framed as `unknown` with the reason that nobody was asked to compare it, so each is a decision
+  card for a person, decided beside the blind extraction if that still runs. With the extraction
+  off as well, the Actual is empty. With every reading off nothing is launched at all, and the build
+  warms no reading. A custom review may not take a packaged review's or a switch's name.
+- **A review read under another setting holds acceptance shut.** Switching a reading or changing
+  the reviews of the whole change after the review was generated leaves a review that read the
+  wrong thing for this repository; readiness names it as the machine's and asks for `rein review
+  generate`. Acceptance, the pull-request body and `rein reviews show` say what was not read.
+- **The Reviews screen is a palette and a lane per stage.** A review is dragged onto any lane and
+  taken off with ×; a stage's own is an on/off switch in its lane. Switching the comparison on
+  switches the extraction on, and the extraction off the comparison. Deleting a custom review takes
+  it off every lane.
 
 What acceptance is:
 
@@ -79,9 +87,13 @@ What acceptance is:
   frozen half) and integrates the work branch into `project.mainline`: through its pull request on
   `origin` (pushed, opened with `rein pr-draft`'s body if it has none, lifted, merged as a merge
   commit), through the stack if the cycle was published as one (lifted, then merged whole), or by a
-  local merge in a scratch worktree when there is no remote. `cycle_integrated` or
-  `integration_failed` records which. `rein integrate` finishes an integration that stopped and
-  asks nothing; it integrates only the commit the approved review read. `rein review complete`,
+  local merge when there is no remote, made where the mainline is checked out or in a scratch
+  worktree when nothing has it. `cycle_integrated` or `integration_failed` records which.
+  `rein integrate` finishes an integration that stopped and asks nothing. It integrates the work
+  branch's tip only while the approved review still speaks for it, measured on the product as
+  acceptance measures it, so a commit of `.rein/` at the gate does not stop it; it pushes and
+  merges that commit, never the branch's name (`--match-head-commit`), and finds the branch's
+  *open* pull request into the mainline, never one a previous cycle merged. `rein review complete`,
   the dashboard's freeze button and `rein pr-stack --ready` are gone, and `pr-stack` and
   `pr-draft` take the base from `project.mainline` instead of `--base`. `rein cycle-close` refuses
   an approved cycle that is not integrated.
@@ -93,7 +105,8 @@ What acceptance is:
 - **A blocker the machine clears is not put to a person.** Readiness says whose each blocker is: a
   stale review, a review read under the other security setting, an audit due, unfinished tasks, a
   refused path still in the change, a work branch that no longer merges into the mainline are the
-  machine's, each with the command that clears it. `rein next` and the board recommend that command
+  machine's, each with the command that clears it. With a remote, "the mainline" is the forge's:
+  approving fetches `origin/<mainline>` first and the conflict is measured against it. `rein next` and the board recommend that command
   and call nobody while one stands; the gate is put to you only when what is left is yours. Being
   able to integrate cleanly is now a precondition of acceptance, checked before, because approving
   does it.
@@ -110,18 +123,20 @@ How findings are answered:
   carried to you at acceptance.
 - **A repair is made at the cause.** The task's declared scope is where a finding is charged, not a
   boundary: a repair may write into another task's paths, which the mandate covers, where before it
-  stopped the run for a human. While it runs, it may also write past the mandate's `include` —
-  never into `exclude`, the plan, or anything the guard protects — through a grant in
-  `state.yaml` that the guard honours only while `rein build` holds its run lock, so a grant a
-  killed run left behind widens nothing. Every path a repair writes past `include` comes to you at
-  acceptance as a card: adopt it into the scope, or refuse it and the next `rein build` takes it
+  stopped the run for a human. It may also write past the mandate's `include` — never into
+  `exclude`, the plan, or anything the guard protects — by a `scope.repair` capability in its
+  launch's control-plane token, which the guard asks the running build to verify. No other launch
+  of the run carries it, and a launch that outlives its run has nobody to answer for it. Every
+  path a repair writes past `include` comes to you at acceptance as a card: adopt it into the scope, or refuse it and the next `rein build` takes it
   back out and no repair may write there again. Acceptance stays shut while one is unanswered.
 - **A repair lands only with a test that fails without it.** The run applies only the repair's test
   changes to the commit before it and runs the steps that declare `runs_tests` there. A repair
-  whose tests pass there does not reproduce the defect, and one that changes no test proves
-  nothing: either is undone (`git reset --keep`, so the uncommitted `.rein/` state is untouched),
-  recorded as `repair_refused`, and its reason handed to the next round's implementer. An
-  experiment that cannot be run is evidence in neither direction and does not refuse. A finding no
+  whose tests pass there does not reproduce the defect; one that changes no test proves nothing;
+  and one that changes only tests leaves the code as it was, so nothing can fail without it. Each
+  is undone (`git reset --keep`, so the uncommitted `.rein/` state is untouched), recorded as
+  `repair_refused`, and its reason handed to the next round's implementer. An experiment that
+  cannot be run is evidence in neither direction and does not refuse: that repair lands as
+  `repair_unverified`, and only one whose test failed without it is `repair_verified`. A finding no
   round could prove repaired is what reaches you. In a stacked cycle, taking a refused path back
   out is committed at the tip of the work branch, not on the slice that wrote it.
 - **A Decision Card's answer does what the chosen option says.** Cards are answered with an option

@@ -1,6 +1,6 @@
 """`rein reviews` — which reviews run, the one terminal path that changes them, and the record they are held to.
 
-  rein reviews show [--json]
+  rein reviews show [--json | --stage <drafting stage>]
   rein reviews apply <file> --reason "why"
   rein reviews restore
 
@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from rein import common, data, digests, event_chain, models, strict_yaml
+from rein import build_prompts, common, data, digests, event_chain, models, strict_yaml
 from rein import repo as repo_mod
 from rein import store as store_mod
 
@@ -63,7 +63,14 @@ class Record:
     #: Position in the chain it was read from.
     index: int
 
-    def adversarial(self, stage: str) -> bool:
+    def adversarial(self, stage: str) -> bool | None:
+        """Was the stage's adversarial review on in this record — or None, when it does not say.
+
+        A record written before reviews.yaml was kept stage by stage states no stage. Read as
+        "off", it would put a switch nobody made on the mandate screen, so it says nothing here.
+        """
+        if not isinstance(self.document.get(stage), Mapping):
+            return None
         return models.Reviews(self.document).adversarial(stage)
 
 
@@ -114,13 +121,15 @@ def adversarial_switched_off(events: Sequence[models.Event], *, since: int) -> l
     at_start = next((r for r in reversed(found) if r.index < since), None)
     during = [r for r in found if r.index >= since]
     rows: list[dict[str, str]] = []
-    for stage in models.ADVERSARIAL_STAGES:
+    for stage in models.DRAFTING_STAGES:
         notes: list[str] = []
         was = at_start.adversarial(stage) if at_start is not None else None
-        if at_start is not None and not was:
+        if at_start is not None and was is False:
             notes.append(f"off when this round began (set {at_start.ts} by {at_start.actor}: {at_start.reason})")
         for record in during:
             now = record.adversarial(stage)
+            if now is None:
+                continue
             if now == was or (was is None and now):
                 was = now
                 continue
@@ -191,64 +200,41 @@ def _record_write(
     )
 
 
-#: Each reading's switch: the section of `reviews.yaml` it is in, its name, and how a change to it
-#: is said.
-_READING_SWITCHES: tuple[tuple[str, str, str], ...] = (
-    ("acceptance", "actual_extraction", "actual extraction at acceptance"),
-    ("acceptance", "comparison", "comparison at acceptance"),
-    ("whole_change", "security", "security review of the whole change"),
-)
+#: How a stage's own switch is named in a line that says it changed.
+SWITCH_LABEL: Mapping[str, str] = {
+    "adversarial": "adversarial review",
+    "actual_extraction": "actual extraction",
+    "comparison": "comparison",
+}
 
 
 def describe(before: Mapping[str, Any] | None, after: Mapping[str, Any]) -> list[str]:
     """What a change does, one line per thing a reader would call a change.
 
     Both sides are normalized documents (`models.Reviews.normalized`), and every difference
-    between two of them is a line here — order included, because the steps run in it and a
-    reviewer is asked in it. :func:`prepare` refuses a difference this finds no line for.
+    between two of them is a line here — order included, because a reviewer is asked in it.
+    :func:`prepare` refuses a difference this finds no line for.
     """
     old = models.Reviews(before or {})
     new = models.Reviews(after)
     lines: list[str] = []
-    for stage in models.ADVERSARIAL_STAGES:
-        now = new.adversarial(stage)
-        if before is None or old.adversarial(stage) != now:
-            lines.append(f"adversarial review at {stage}: {'on' if now else 'OFF'}")
-    old_steps = {step.name: step for step in old.steps}
-    new_steps = {step.name: step for step in new.steps}
-    for step in old.steps:
-        if step.name not in new_steps:
-            lines.append(f"step {step.name}: removed (was {', '.join(step.reviews)})")
-    for step in new.steps:
-        if step.name not in old_steps:
-            lines.append(f"step {step.name}: added, reads for {', '.join(step.reviews)}")
-    kept_before = [s.name for s in old.steps if s.name in new_steps]
-    kept_after = [s.name for s in new.steps if s.name in old_steps]
-    if kept_before != kept_after:
-        lines.append(f"steps run in the order {', '.join(kept_after)} (was {', '.join(kept_before)})")
-    for name in kept_after:
-        was, now_step = old_steps[name], new_steps[name]
-        if dropped := [r for r in was.reviews if r not in now_step.reviews]:
-            lines.append(f"step {name}: no longer reads for {', '.join(dropped)}")
-        if added := [r for r in now_step.reviews if r not in was.reviews]:
-            lines.append(f"step {name}: now reads for {', '.join(added)}")
-        order_before = [r for r in was.reviews if r in now_step.reviews]
-        order_after = [r for r in now_step.reviews if r in was.reviews]
+    for stage in models.REVIEW_STAGES:
+        # A record from before the stage existed in the document stated none of its switches, so
+        # each is news.
+        stated = isinstance((before or {}).get(stage), dict)
+        for name in models.STAGE_SWITCHES[stage]:
+            now = new.switch(stage, name)
+            if not stated or old.switch(stage, name) != now:
+                lines.append(f"{SWITCH_LABEL[name]} at {stage}: {'on' if now else 'OFF'}")
+        was, now_reviews = old.reviews_at(stage), new.reviews_at(stage)
+        if dropped := [r for r in was if r not in now_reviews]:
+            lines.append(f"{stage}: no longer reads for {', '.join(dropped)}")
+        if added := [r for r in now_reviews if r not in was]:
+            lines.append(f"{stage}: now reads for {', '.join(added)}")
+        order_before = [r for r in was if r in now_reviews]
+        order_after = [r for r in now_reviews if r in was]
         if order_before != order_after:
-            lines.append(f"step {name}: asks in the order {', '.join(order_after)} (was {', '.join(order_before)})")
-        for key, was_value, now_value in (
-            ("retries", was.retries, now_step.retries),
-            ("stage", was.stage, now_step.stage),
-            ("paths", list(was.paths), list(now_step.paths)),
-        ):
-            if was_value != now_value:
-                lines.append(f"step {name}: {key} {was_value} → {now_value}")
-    # A record from before a section existed stated none of its switches, so each is news.
-    for section, name, label in _READING_SWITCHES:
-        now_on = getattr(new.readings, name)
-        stated = isinstance((before or {}).get(section), dict)
-        if not stated or getattr(old.readings, name) != now_on:
-            lines.append(f"{label}: {'on' if now_on else 'OFF'}")
+            lines.append(f"{stage}: asks in the order {', '.join(order_after)} (was {', '.join(order_before)})")
     old_questions, new_questions = old.questions, new.questions
     for name in sorted(old_questions.keys() - new_questions.keys()):
         lines.append(f"custom review {name}: removed")
@@ -388,22 +374,36 @@ def restore(repo: repo_mod.Repo) -> bool:
 
 
 def render(reviews: models.Reviews) -> str:
-    lines = ["adversarial review before the mandate:"]
-    lines += [f"  {stage}: {'on' if reviews.adversarial(stage) else 'OFF'}" for stage in models.ADVERSARIAL_STAGES]
-    lines.append("reviewer steps:")
-    lines += [
-        f"  {step.name} ({step.stage}, retries {step.retries}): {', '.join(step.reviews)}" for step in reviews.steps
-    ] or ["  (none — no reviewer reads the code before acceptance)"]
+    lines: list[str] = []
+    for stage in models.REVIEW_STAGES:
+        switches = [
+            f"{SWITCH_LABEL[name]} {'on' if reviews.switch(stage, name) else 'OFF'}"
+            for name in models.STAGE_SWITCHES[stage]
+        ]
+        added = ", ".join(reviews.reviews_at(stage)) or "no review added"
+        lines.append(f"{stage}: {'; '.join([*switches, added])}")
     if reviews.custom:
         lines.append("custom reviews:")
         lines += [f"  {name}: {question}" for name, question in reviews.questions.items()]
-    lines.append("reviews of the whole change, before acceptance:")
-    lines.append(f"  security: {'on' if reviews.readings.security else 'OFF'}")
-    lines.append("what acceptance is decided by:")
-    lines += [
-        f"  {name.replace('_', ' ')}: {'on' if getattr(reviews.readings, name) else 'OFF'}"
-        for name in models.ACCEPTANCE_READINGS
-    ]
+    return "\n".join(lines)
+
+
+def stage_brief(reviews: models.Reviews, stage: str) -> str:
+    """What one drafting stage reads its document for, in the words the reviewer is asked them.
+
+    The drafting phases are run by the host agent, not by `rein build`, so the phase prompt reads
+    this rather than `reviews.yaml`: the switch, and each added review's question as it is asked of
+    a document (`build_prompts.document_asks`). One source for the question, whoever asks it.
+    """
+    if stage not in models.DRAFTING_STAGES:
+        raise ReviewsError(f"`{stage}` is not a drafting stage ({', '.join(models.DRAFTING_STAGES)})")
+    lines = [f"adversarial review: {'on' if reviews.adversarial(stage) else 'OFF'}"]
+    added = reviews.reviews_at(stage)
+    if added:
+        lines.append("reviews added — ask each of the document:")
+        lines.append(build_prompts.document_asks(added, reviews.questions).rstrip("\n"))
+    else:
+        lines.append("no review added")
     return "\n".join(lines)
 
 
@@ -412,6 +412,12 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="action", required=True)
     show = sub.add_parser("show", help="print which reviews run")
     show.add_argument("--json", action="store_true", help="the document itself, for a script or a prompt")
+    show.add_argument(
+        "--stage",
+        choices=models.DRAFTING_STAGES,
+        default=None,
+        help="what one drafting stage reads its document for, with each question in full",
+    )
     show.add_argument("--repo", default=None, help="repository root (default: discovered from cwd)")
     change = sub.add_parser("apply", help="replace reviews.yaml with <file>, confirmed at this terminal")
     change.add_argument("file", help="the reviews document to apply (YAML, the shape `show --json` prints)")
@@ -429,7 +435,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action == "show":
             reviews = require_bound(repo)
-            text = json.dumps(dict(reviews.raw), ensure_ascii=False, indent=2) if args.json else render(reviews)
+            if args.json:
+                text = json.dumps(dict(reviews.raw), ensure_ascii=False, indent=2)
+            elif args.stage:
+                text = stage_brief(reviews, args.stage)
+            else:
+                text = render(reviews)
             print(common.terminal_text(text))
             return 0
         if args.action == "restore":

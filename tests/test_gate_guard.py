@@ -8,17 +8,18 @@ with an off switch an agent can reach is a convention, not a mechanism — which
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from rein import event_chain, gate_guard, models, store
+from rein import control_plane, event_chain, gate_guard, models, store
 from rein import repo as repo_mod
 from tests._support import DEMO_CYCLE, make_config, make_plan, make_receipt, make_state, seed_repo
 
@@ -976,7 +977,7 @@ def test_a_commented_out_registration_is_not_one() -> None:
     assert gate_guard.commit_stage_registration(text) == gate_guard.COMMIT_STAGE_ABSENT
 
 
-# --- a repair may widen `include` while it runs; a human answers each path it widened ------------
+# --- a repair may widen `include`, by its launch's token; a human answers each path it widened -----
 
 
 def _scoped(tmp_path: Path, **state_extra: object) -> None:
@@ -987,26 +988,47 @@ def _scoped(tmp_path: Path, **state_extra: object) -> None:
     seed_repo(tmp_path, plan=plan, state=state)
 
 
-_GRANT = {"task_id": "T-001", "opened_at": "2026-10-01T00:00:00Z"}
+@contextlib.contextmanager
+def _launched(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capabilities: frozenset[str]
+) -> Iterator[control_plane.ControlServer]:
+    """This process as an agent `rein build` launched: its run's control plane, and a token in its env."""
+    with control_plane.serving(repo_mod.Repo(root)) as server:
+        token = control_plane.mint(server.secret, run_id="RUN-1", task_id="T-001", capabilities=sorted(capabilities))
+        monkeypatch.setenv(control_plane.SOCKET_ENV, str(server.socket_path))
+        monkeypatch.setenv(control_plane.TOKEN_ENV, token)
+        yield server
 
 
-def _building(root: Path) -> store.FileLock:
-    """The run lock `rein build` holds, held here as a running build would."""
-    return store.FileLock(store.Store(repo_mod.Repo(root)).build_lock)
-
-
-def test_a_running_repair_may_write_past_include_but_never_into_exclude(tmp_path: Path) -> None:
+def test_a_repair_s_launch_may_write_past_include_but_never_into_exclude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`include` is where the work was expected; `exclude` is a human writing "not this"."""
-    _scoped(tmp_path, repair_grant=_GRANT)
-    with _building(tmp_path):
+    _scoped(tmp_path)
+    with _launched(tmp_path, monkeypatch, control_plane.REPAIR_CAPABILITIES):
         assert decide(tmp_path, "src/elsewhere/cause.py")[0]
         assert not decide(tmp_path, "src/vendor/thing.py")[0]
 
 
-def test_a_grant_no_running_build_holds_widens_nothing(tmp_path: Path) -> None:
-    """A killed run closes nothing, and the grant it opened must not outlive it."""
-    _scoped(tmp_path, repair_grant=_GRANT)
-    assert not decide(tmp_path, "src/elsewhere/cause.py")[0]
+def test_another_launch_of_the_same_run_is_not_granted_the_repair_s_leave(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The grant was a field of `state.yaml` honoured while any build held its lock, so every launch
+    of that run — an implementer of another task, a reviewer — could write past `include` while one
+    repair ran. It is the repair's token now, and an implementer's token does not carry it."""
+    _scoped(tmp_path)
+    with _launched(tmp_path, monkeypatch, control_plane.LEAF_CAPABILITIES):
+        allowed, reason = decide(tmp_path, "src/elsewhere/cause.py")
+    assert not allowed and "does not grant scope.repair" in reason
+
+
+def test_a_repair_token_outlives_nothing_its_run_did_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A killed run closes nothing; a launch that outlived it holds a token nobody answers for."""
+    _scoped(tmp_path)
+    with _launched(tmp_path, monkeypatch, control_plane.REPAIR_CAPABILITIES):
+        pass
+    allowed, reason = decide(tmp_path, "src/elsewhere/cause.py")
+    assert not allowed and "cannot reach the control plane" in reason
 
 
 def test_without_a_running_repair_past_include_is_still_refused(tmp_path: Path) -> None:
@@ -1014,17 +1036,43 @@ def test_without_a_running_repair_past_include_is_still_refused(tmp_path: Path) 
     assert not decide(tmp_path, "src/elsewhere/cause.py")[0]
 
 
-def test_an_adopted_path_is_inside_and_a_refused_one_is_outside_even_for_a_repair(tmp_path: Path) -> None:
-    entry = {"task_id": "T-001", "commit": "c" * 40, "findings": ["SEC-001"]}
+def test_the_loop_says_whose_change_it_checks(tmp_path: Path) -> None:
+    """The orchestrator's own process carries no token; checking a repair's change, it says so."""
+    _scoped(tmp_path)
+    root = repo_mod.Repo(tmp_path)
+    assert gate_guard.evaluate(str(tmp_path / "src/elsewhere/cause.py"), root, repair=True)[0]
+    assert not gate_guard.evaluate(str(tmp_path / "src/elsewhere/cause.py"), root, repair=False)[0]
+    assert not gate_guard.evaluate(str(tmp_path / "src/vendor/thing.py"), root, repair=True)[0]
+
+
+_EXPANSION = {"task_id": "T-001", "commit": "c" * 40, "findings": ["F-001"]}
+
+
+def test_an_adopted_path_is_inside_and_a_refused_one_is_outside_even_for_a_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _scoped(
         tmp_path,
-        repair_grant=_GRANT,
         scope_expansions={
-            "src/adopted.py": {**entry, "status": "adopted"},
-            "src/refused.py": {**entry, "status": "refused"},
+            "src/adopted.py": {**_EXPANSION, "status": "adopted"},
+            "src/refused.py": {**_EXPANSION, "status": "refused"},
         },
     )
-    with _building(tmp_path):
-        assert decide(tmp_path, "src/adopted.py")[0]
+    with store.Store(repo_mod.Repo(tmp_path)).transaction() as tx:
+        tx.append(
+            "disposition_recorded",
+            cycle_id=DEMO_CYCLE,
+            actor="test",
+            detail={"action": "adopt_scope", "path": "src/adopted.py"},
+        )
+    assert decide(tmp_path, "src/adopted.py")[0]
+    with _launched(tmp_path, monkeypatch, control_plane.REPAIR_CAPABILITIES):
         allowed, reason = decide(tmp_path, "src/refused.py")
     assert not allowed and "a human refused widening it here" in reason
+
+
+def test_an_adoption_nobody_answered_for_widens_nothing_at_the_hook(tmp_path: Path) -> None:
+    """Acceptance read an `adopted` only when the chain backed it; the hook took `state.yaml`'s word,
+    so the one place that lets a write through trusted what acceptance would not."""
+    _scoped(tmp_path, scope_expansions={"src/adopted.py": {**_EXPANSION, "status": "adopted"}})
+    assert not decide(tmp_path, "src/adopted.py")[0]

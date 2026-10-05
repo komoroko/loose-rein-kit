@@ -3,11 +3,10 @@
 This is the orchestration the build loop hands off to and `rein review generate` runs. It is
 deliberately thin over parts that already exist and are tested on their own: the deterministic
 Coverage Manifest and risk floor (diff_facts) and the three untrusted reviewer stages
-(actual_extraction → conformance → security_review), each of which validates its own output
+(actual_extraction → conformance → change_review), each of which validates its own output
 against the never-lists in review_policy. What lives *here* is the
-wiring and the schema-valid assembly into ``review.yaml``'s ``machine`` half, plus the two lifecycle
-verbs the human loop needs: ``complete`` (freeze the human review once every blocker is clear) and
-``show``.
+wiring and the schema-valid assembly into ``review.yaml``'s ``machine`` half, plus ``show``. The
+human half is frozen by the acceptance approval itself (``approve.record_approval``).
 
 Two boundaries are load-bearing:
 
@@ -18,7 +17,7 @@ Two boundaries are load-bearing:
   (actual_extraction enforces this); the comparator gets the Actual read-only and digest-bound.
 - **The machine half is written whole and resets the human half.** Regenerating the review moves
   ``machine`` and therefore its digest, which is exactly what must invalidate every human answer
-  built on the previous one (plan §6.6, §17.5). ``complete`` only ever touches ``human``.
+  built on the previous one (plan §6.6, §17.5).
 """
 
 from __future__ import annotations
@@ -38,6 +37,7 @@ from typing import Any
 from rein import (
     adapters,
     brief,
+    change_review,
     common,
     conformance,
     dag,
@@ -55,7 +55,6 @@ from rein import (
     reviews_cmd,
     run_progress,
     run_record,
-    security_review,
 )
 from rein import repo as repo_mod
 from rein import store as store_mod
@@ -135,7 +134,7 @@ def assemble(
     gaps: Sequence[Mapping[str, Any]] = (),
     extra_behaviors: Sequence[Mapping[str, Any]] = (),
     acceptance: Mapping[str, bool],
-    security: Mapping[str, Any],
+    reviews: Mapping[str, Any],
     effective_risk: str = "",
     plan: models.Plan | None = None,
     brief_sections: Mapping[str, Any] | None = None,
@@ -178,7 +177,7 @@ def assemble(
         "actual_extraction": [dict(a) for a in actual_statements],
         "claims": [dict(c) for c in claims],
         "acceptance": dict(acceptance),
-        "security": dict(security),
+        "reviews": dict(reviews),
     }
     if effective_risk:
         machine["effective_risk"] = effective_risk
@@ -192,12 +191,12 @@ def assemble(
         machine["extra_behaviors"] = [dict(e) for e in extra_behaviors]
 
     plan_claims = {c.id: c.raw for c in plan.claims} if plan is not None else {}
-    findings = list(security.get("findings", ()) or ())
+    findings = list(reviews.get("findings", ()) or ())
     statements, cards = decision_cards.derive_cards(
         claims=claims,
         gaps=gaps,
         extra_behaviors=extra_behaviors,
-        security_findings=findings,
+        review_findings=findings,
         scope_expansions=scope_expansions,
         plan_risk={cid: str(raw.get("risk", "low")) for cid, raw in plan_claims.items()},
         plan_domains={cid: tuple(str(d) for d in raw.get("domains", ()) or ()) for cid, raw in plan_claims.items()},
@@ -505,7 +504,7 @@ def generate(
         trusted_base = _resolve_base(repo, plan, base)
         exclude = not_the_product(repo, state)
         change = change_digest(repo, head, exclude)
-        # The second subject: the installed surfaces the security stage is sent a checkout of and
+        # The second subject: the installed surfaces the change review is sent a checkout of and
         # told to review, which `change` is taken with excluded (`review_reading.host_surface`).
         surface = host_surface_digest(repo, head)
 
@@ -652,7 +651,7 @@ def generate(
         # run at "19/18".
         stages_total = sum(len(k) for k in keys_by_unit.values()) + (1 if switched.comparison else 0)
         progress = _Progress(reviewers, total=stages_total, live=live)
-        discipline = review_reading.security_discipline(config)
+        disciplines = review_reading.reviewer_disciplines(config)
 
         def read(m: review_reading.ReadingFacts) -> review_reading.ReadOut:
             # This reading's own stage cell, never the run's: with more than one reading in flight a
@@ -669,7 +668,7 @@ def generate(
                     risk_floor=facts.risk_floor,
                     prior_blocking=prior_by_unit[m.reading.unit],
                     readings=switched,
-                    discipline=discipline,
+                    disciplines=disciplines,
                     on_stage=here.entered,
                     cache=cache,
                     keys=keys_by_unit[m.reading.unit],
@@ -735,13 +734,13 @@ def generate(
             unanswered=comparison.unanswered,
             gaps=gaps,
             extra_behaviors=_extra_behaviors(comparison.extra_behaviors, gaps=gaps),
-            acceptance={name: getattr(switched, name) for name in models.ACCEPTANCE_READINGS},
+            acceptance={name: getattr(switched, name) for name in models.STAGE_SWITCHES["acceptance"]},
             # Disputes re-applied here rather than trusted to survive in the human half: the
             # reviewer has no memory of the last review, so a deterministic false positive is
             # found again, and a regeneration discards the human answers that had settled it.
-            security={
-                "read": switched.security,
-                "findings": security_review.apply_disputes(repo, state, composed.findings),
+            reviews={
+                "read": list(switched.reviews),
+                "findings": change_review.apply_disputes(repo, state, composed.findings),
             },
             effective_risk=effective,
             plan=plan,
@@ -794,11 +793,12 @@ def generate(
             # across time — nothing resolves a reference by them.
             for closed in composed.resolved:
                 tx.append(
-                    "security_finding_resolved",
+                    "finding_resolved",
                     cycle_id=cycle,
                     actor=actor,
                     subject_ids=[str(closed.get("id", ""))],
                     detail={
+                        "review": str(closed.get("review", "")),
                         "severity": str(closed.get("severity", "")),
                         "resolved_at": dict(closed.get("resolved_at") or {}),
                     },
@@ -884,7 +884,7 @@ def _read_all(
 
     def bound(m: review_reading.ReadingFacts) -> review_reading.ReadOut:
         # Bound on the worker, because that is the thread whose launches have to be killable from
-        # another reading's failure. `read_one` binds the same token again around its own security
+        # another reading's failure. `read_one` binds the same token again around its own change
         # stage; `cancelling` saves and restores, so the two nest without fighting.
         with common.cancelling(cancel):
             return read(m)
@@ -904,14 +904,14 @@ _STAGE_EVENT: Mapping[str, str] = {"actual_extraction": "actual_extraction_faile
 
 #: The reviewer stages in the order their events are appended, so a log reads the same whichever
 #: order two threads happened to finish in.
-_STAGE_ORDER: tuple[str, ...] = ("actual_extraction", "comparison", "security_review")
+_STAGE_ORDER: tuple[str, ...] = ("actual_extraction", "comparison", "change_review")
 
 #: What a stage that really ran records. A stage reused from the cache records nothing: it produced
 #: no new reading, and an event for it would be a command issued rather than a change made.
 _STAGE_RAN_EVENT: Mapping[str, str] = {
     "actual_extraction": "actual_extraction_generated",
     "comparison": "comparison_generated",
-    "security_review": "security_review_generated",
+    "change_review": "change_review_generated",
 }
 
 
@@ -960,7 +960,7 @@ class _Progress:
     therefore that stage's bill. Otherwise it surfaces only in `run_measured`, after the fact, for
     the whole run at once.
 
-    Written from two threads — `read_one` runs its security stage on a worker — so the counter and
+    Written from two threads — `read_one` runs its change review on a worker — so the counter and
     the ledger snapshot are taken under a lock. A miscounted line is a small thing; a torn read of
     the totals would put a wrong number in front of somebody deciding whether to keep waiting.
     """
@@ -1055,7 +1055,7 @@ def _execution_plan(
     """
     stages: list[dict[str, Any]] = []
     for stage in _STAGE_ORDER:
-        if not getattr(readings, "security" if stage == "security_review" else stage):
+        if not _takes(readings, stage):
             continue
         role = review_policy.STAGE_ROLE[stage]
         for unit, keys in keys_by_unit.items():
@@ -1081,8 +1081,17 @@ def _execution_plan(
     return plan
 
 
+def _takes(readings: models.Readings, stage: str) -> bool:
+    """Does this review take `stage` at all (`reviews.yaml` `acceptance`)?"""
+    return {
+        "actual_extraction": readings.actual_extraction,
+        "comparison": readings.comparison,
+        "change_review": bool(readings.reviews),
+    }[stage]
+
+
 def _shares_reading(config: models.Config | None, *, readings: models.Readings) -> bool | None:
-    """Will the extractor and the security reviewer branch one reading? None when it cannot be said.
+    """Will the extractor and the change reviewer branch one reading? None when it cannot be said.
 
     The transport refuses a role this release cannot launch, which is a real answer in the
     production path and no answer at all here — the reviewers are injected, so `generate` runs
@@ -1292,7 +1301,7 @@ def _known_ids(plan: models.Plan | None, actual_statements: Sequence[Mapping[str
 
 
 def _readings(repo: repo_mod.Repo) -> models.Readings:
-    """What this review reads (`reviews.yaml` `acceptance` and `whole_change`).
+    """What this review reads (`reviews.yaml` `acceptance`).
 
     Read from the file only when it is what the chain records, as the build reads it: a switch
     flipped by a shell write is nobody's choice.
@@ -1308,7 +1317,7 @@ def _prior_blocking(
 ) -> list[dict[str, Any]]:
     """The blocking findings the previous review recorded **about the same base**, if any.
 
-    Whole findings, anchors included: `security_review.resolution_of` decides whether a dropped one
+    Whole findings, anchors included: `change_review.resolution_of` decides whether a dropped one
     was fixed or forgotten by re-reading the code it named, and an id says nothing about that.
 
     The carry-over exists so a reviewer cannot clear its own block by regenerating and quietly
@@ -1339,8 +1348,8 @@ def _prior_blocking(
     recorded = str(review.raw.get("machine", {}).get("binding", {}).get("trusted_base_sha", ""))
     if not recorded or recorded != trusted_base:
         return []
-    findings = [dict(f) for f in review.blocking_security_findings]
-    disputed = security_review.live_disputes(repo, state, findings)
+    findings = [dict(f) for f in review.blocking_findings]
+    disputed = change_review.live_disputes(repo, state, findings)
     return [f for f in findings if str(f.get("id", "")) not in disputed]
 
 
@@ -1368,7 +1377,7 @@ def _independence_record(
     who paid for it.
     """
     record: dict[str, Any] = {}
-    for role in ("actual_extractor", "comparator", "security_reviewer"):
+    for role in ("actual_extractor", "comparator", "reviewer"):
         entry: dict[str, Any] = {}
         group = config.independence_group(role) if config is not None else ""
         if group:

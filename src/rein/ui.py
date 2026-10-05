@@ -86,6 +86,7 @@ from rein import (
     agent_cli,
     approve,
     change_request,
+    change_review,
     common,
     decision_cards,
     digests,
@@ -97,7 +98,6 @@ from rein import (
     review_api,
     reviews_cmd,
     run_progress,
-    security_review,
     status_api,
 )
 from rein import events as events_mod
@@ -783,6 +783,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             )
         try:
             repo = repo_mod.Repo(self.server.active_root())
+            if gate == "acceptance":
+                approve.refresh_integration_target(repo)
             blockers = approve.readiness(repo, gate)
             if blockers:
                 raise UiActionError(HTTPStatus.CONFLICT, approve.render_blockers(gate, blockers))
@@ -822,11 +824,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 # What `apply` is handed back as `expect`: a change is made against this version.
                 "digest": digests.of(document),
                 "builtin": list(models.BUILTIN_REVIEWS),
-                "adversarial_stages": list(models.ADVERSARIAL_STAGES),
-                # Dragged onto the whole-change lane like any review, while acceptance's own readings
-                # are switched in place: they make what acceptance is decided by.
-                "whole_change": ["security"],
-                "acceptance": list(models.ACCEPTANCE_READINGS),
+                # The lanes, in cycle order, and what belongs to each alone: switched in place, while
+                # any review is dragged onto any lane.
+                "stages": [
+                    {"name": stage, "switches": list(models.STAGE_SWITCHES[stage])} for stage in models.REVIEW_STAGES
+                ],
             },
         )
 
@@ -971,7 +973,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             else None
         )
         answer = (cid, choice, confidence)
-        if meaning and meaning[1] == "dispute_finding" and security_review.FINDING_ID_RE.match(meaning[0]):
+        if meaning and meaning[1] == "dispute_finding" and change_review.FINDING_ID_RE.match(meaning[0]):
             if not reason.strip():
                 raise UiActionError(
                     HTTPStatus.BAD_REQUEST,
@@ -999,13 +1001,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _review_disposition(self, body: dict[str, object]) -> None:
         subject, action = str(body.get("subject_id") or ""), str(body.get("action") or "")
         note = str(body.get("note") or "")
-        # A dispute of a security finding is a statement about *code*, and it has to outlive the
+        # A dispute of a review finding is a statement about *code*, and it has to outlive the
         # machine review that raised it — regenerating discards the human half, and until this
         # existed a disputed false positive came back on every regeneration with nothing to settle
-        # it (`security_review.apply_disputes`). A dispute with no reason is refused: a review that
+        # it (`change_review.apply_disputes`). A dispute with no reason is refused: a review that
         # cannot be contradicted makes it infallible, and one that can be waved away makes it
         # pointless.
-        if action == "dispute_finding" and security_review.FINDING_ID_RE.match(subject):
+        if action == "dispute_finding" and change_review.FINDING_ID_RE.match(subject):
             if not note.strip():
                 raise UiActionError(
                     HTTPStatus.BAD_REQUEST,
@@ -1036,7 +1038,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         The same two records `_record_dispute` makes, for the same reason. The card's answer belongs to
         this review and goes when it does; what it decided about the *mandate* has to outlive that,
         so the path's status is written to `state.yaml` and the chain carries the path with the
-        action — which is what acceptance trusts an `adopted` by (`approve.adoptions`).
+        action — which is what every path check trusts an `adopted` by (`gate_guard.expansions_in_force`).
         """
         expected = str(body.get("machine_digest") or "")
         if not expected:
@@ -1119,12 +1121,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if state is None or not state.cycle_id:
                     raise UiActionError(HTTPStatus.CONFLICT, "state.yaml names no cycle — run `rein doctor`")
                 finding = next(
-                    (f for f in review.security_findings if str(f.get("id", "")) == finding_id),
+                    (f for f in review.review_findings if str(f.get("id", "")) == finding_id),
                     None,
                 )
                 if finding is None:
                     raise UiActionError(HTTPStatus.BAD_REQUEST, f"{finding_id} is not a finding in this review")
-                bound = security_review.anchors_digest(repo, finding)
+                bound = change_review.anchors_digest(repo, finding)
                 if not bound:
                     raise UiActionError(
                         HTTPStatus.CONFLICT,

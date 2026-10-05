@@ -213,8 +213,8 @@ def _disciplines_note(
     return note
 
 
-#: What each packaged review asks of one task's change. A custom review asks the text of the file
-#: `reviews.yaml` names for it.
+#: What each packaged review asks of one task's change. A custom review asks the question
+#: `reviews.yaml` holds for it.
 _TASK_ASKS: dict[str, str] = {
     "adversarial": "**Adversarial**: try to refute this change, not to confirm it. Break it — a boundary value, an "
     "empty input, an unexpected type, a failure path, concurrency, a half-applied write. Separate the claim from "
@@ -251,9 +251,53 @@ _JOIN_ASKS: dict[str, str] = {
 }
 
 
+#: The same reviews asked of the whole change once every task has merged (`change_review`).
+_CHANGE_ASKS: dict[str, str] = {
+    "adversarial": "**Adversarial**: try to refute the change as a whole, not each task again. Break it where "
+    "tasks meet and where the change meets what it did not touch — a contract two parts now read differently, an "
+    "invariant one relies on and another removed, an order or lifetime that holds only while one part is absent, "
+    "state two parts write, a caller nobody updated. Each finding names the place, how it breaks and the input "
+    "that breaks it.",
+    "correctness": "**Correctness**: a wrong result, a broken contract or an unhandled failure path that only the "
+    "merged tree shows — the suite that passed is the union of the tasks' suites, and no test in it was written "
+    "with the whole in view.",
+    "simplification": "**Shape**: duplication between what two tasks added, one responsibility living in two "
+    "places, an abstraction one task introduced that another worked around, anything no requirement asks for.",
+    "security": "**Security**: input reaching a query, a command, a path or a deserializer by any path the change "
+    "opens; a check one part added that another path bypasses; a value one part trusts that another fills from "
+    "input; a secret in code, a log or an error message.",
+}
+
+#: The same reviews asked of a drafted document before the mandate: the requirements, the design,
+#: or the task plan. `adversarial` is not here — at a drafting stage it is the stage's own review,
+#: switched rather than added (`models.STAGE_SWITCHES`).
+_DOCUMENT_ASKS: dict[str, str] = {
+    "correctness": "**Correctness**: a statement the rest contradicts, a case it leaves undefined, a criterion "
+    "nobody could check, a dependency in the wrong order.",
+    "simplification": "**Simplification**: scope no requirement asks for, a mechanism more general than the need, "
+    "two places saying the same thing.",
+    "security": "**Security**: an input, a boundary or a secret the document does not say how to protect; an "
+    "authority it grants without saying who checks it.",
+}
+
+
 def review_asks(reviews: Sequence[str], questions: Mapping[str, str], *, at_the_join: bool = False) -> str:
     """One bullet per review this step reads for, in the order `reviews.yaml` lists them."""
-    table = _JOIN_ASKS if at_the_join else _TASK_ASKS
+    return _asks(_JOIN_ASKS if at_the_join else _TASK_ASKS, reviews, questions)
+
+
+def change_asks(reviews: Sequence[str], questions: Mapping[str, str]) -> str:
+    """One bullet per review added at acceptance, asked of the whole change."""
+    return _asks(_CHANGE_ASKS, reviews, questions)
+
+
+def document_asks(reviews: Sequence[str], questions: Mapping[str, str]) -> str:
+    """One bullet per review added at a drafting stage, asked of that stage's document."""
+    return _asks(_DOCUMENT_ASKS, reviews, questions)
+
+
+def _asks(table: Mapping[str, str], reviews: Sequence[str], questions: Mapping[str, str]) -> str:
+    """A packaged review asks its own question for this scope; a custom one asks the text it was given."""
     return "".join(f"- {table[name]}\n" if name in table else f"- **{name}**: {questions[name]}\n" for name in reviews)
 
 
@@ -542,12 +586,11 @@ def integration_review_prompt(
 ) -> str:
     """Review the tree the merge produced, which the batch's reviewer never saw.
 
-    A `stage: both` agent step reads a batch before it merges, and the join is only read again when
-    a merge had to resolve a conflict — then the merged tree holds code no reviewer was shown. A
-    `stage: integration` step reads every join. What either is here for is the thing the merge
-    makes: two tasks that each added a helper, a responsibility that ended up in two places, an
-    abstraction one task introduced and the next one worked around, a contract two tasks now read
-    differently.
+    The reviewer step reads a batch before it merges, and reads the join again only when a merge
+    had to resolve a conflict — then the merged tree holds code no reviewer was shown. What it is
+    here for then is the thing the merge makes: two tasks that each added a helper, a
+    responsibility that ended up in two places, an abstraction one task introduced and the next one
+    worked around, a contract two tasks now read differently.
 
     **This asks about correctness as well as shape, and the argument that it should not was
     wrong.** It used to be the `/simplify` discipline alone, on the reasoning that the command

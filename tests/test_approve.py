@@ -348,18 +348,18 @@ def test_gate_four_blocks_on_a_gap_the_comparator_marked_blocking(tmp_path: Path
 
 def test_gate_four_blocks_on_a_blocking_security_finding(tmp_path: Path) -> None:
     finding = {
-        "id": "SEC-001",
+        "id": "F-001",
         "severity": "high",
-        "category": "credential_exposure",
-        "attack_scenario": "the reviewer container reaches a host credential",
+        "review": "security",
+        "scenario": "the reviewer container reaches a host credential",
         "blocking": True,
     }
     repo = repo_at(
         tmp_path,
         state=make_state(tasks={"T-001": "done"}),
-        review=make_review(generated=True, human_status="frozen", security_findings=[finding]),
+        review=make_review(generated=True, human_status="frozen", review_findings=[finding]),
     )
-    assert any("SEC-001" in b for b in approve.readiness(repo, "acceptance"))
+    assert any("F-001" in b for b in approve.readiness(repo, "acceptance"))
 
 
 def _with_review(repo: repo_mod.Repo, review: dict[str, Any]) -> None:
@@ -484,44 +484,56 @@ def test_recording_a_review_does_not_make_it_stale(tmp_path: Path) -> None:
     assert not [b for b in approve.readiness(repo, "acceptance") if "says nothing" in b]
 
 
-@pytest.mark.parametrize(
-    ("setting", "recorded"),
-    [
-        ("acceptance.actual_extraction", ("acceptance", "actual_extraction")),
-        ("acceptance.comparison", ("acceptance", "comparison")),
-        ("whole_change.security", ("security", "read")),
-    ],
-)
-def test_a_review_read_under_the_other_setting_holds_acceptance_shut(
-    tmp_path: Path, setting: str, recorded: tuple[str, str]
-) -> None:
-    """Switching a reading changes what the review has to have read. A review taken without it does
-    not answer for a repository that now asks for it, and one taken with it holds an answer over an
-    acceptance whose person switched it off. The machine clears it by reading again."""
+def _readiness_under(tmp_path: Path, *, recorded: dict[str, Any], reviews: dict[str, Any]) -> list[str]:
+    """Acceptance's readiness for a review that recorded `recorded` as read, under `reviews`."""
     repo, head, change = _reviewed_repo(tmp_path)
     review = make_review(generated=True, human_status="frozen", effective_risk="low")
     review["machine"]["binding"]["subject_head_sha"] = head
     review["machine"]["binding"]["change_digest"] = change
-    section, key = recorded
-    name = setting.split(".")[1]
+    review["machine"]["acceptance"] = recorded["acceptance"]
+    review["machine"]["reviews"]["read"] = recorded["reviews"]
+    seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=review, reviews=reviews)
+    return approve.readiness(repo, "acceptance")
 
-    def blockers(*, read: bool, wanted: bool) -> list[str]:
-        review["machine"][section][key] = read
-        # The other readings stay as recorded; only this one is moved on each side.
-        reviews = make_reviews()
-        reviews[setting.split(".")[0]][name] = wanted
-        if name == "actual_extraction":
-            # The comparison needs the extraction, so a document without it has neither.
-            reviews["acceptance"]["comparison"] = wanted
-            review["machine"]["acceptance"]["comparison"] = read
-        seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=review, reviews=reviews)
-        return [b for b in approve.readiness(repo, "acceptance") if setting in b]
 
-    assert blockers(read=True, wanted=True) == []
-    assert blockers(read=False, wanted=False) == []
-    [missing] = blockers(read=False, wanted=True)
+@pytest.mark.parametrize("name", ["actual_extraction", "comparison"])
+def test_a_review_read_under_the_other_switch_holds_acceptance_shut(tmp_path: Path, name: str) -> None:
+    """Switching a reading changes what the review has to have read. A review taken without it does
+    not answer for a repository that now asks for it, and one taken with it holds an answer over an
+    acceptance whose person switched it off. The machine clears it by reading again."""
+    on = {"actual_extraction": True, "comparison": True}
+    # The comparison needs the extraction, so switching the extraction off takes both.
+    off = {**on, name: False, **({"comparison": False} if name == "actual_extraction" else {})}
+
+    def blockers(read: dict[str, bool], wanted: dict[str, bool]) -> list[str]:
+        found = _readiness_under(
+            tmp_path,
+            recorded={"acceptance": read, "reviews": ["security"]},
+            reviews=make_reviews(actual_extraction=wanted["actual_extraction"], comparison=wanted["comparison"]),
+        )
+        return [b for b in found if f"acceptance.{name}" in b]
+
+    assert blockers(on, on) == []
+    assert blockers(off, off) == []
+    [missing] = blockers(off, on)
     assert "without the" in missing and approve.owner(missing) == "machine"
-    assert any("with the" in b and "off" in b for b in blockers(read=True, wanted=False))
+    assert any("with the" in b and "off" in b for b in blockers(on, off))
+
+
+def test_a_review_that_read_for_other_reviews_holds_acceptance_shut(tmp_path: Path) -> None:
+    on = {"actual_extraction": True, "comparison": True}
+    found = _readiness_under(
+        tmp_path, recorded={"acceptance": on, "reviews": ["security"]}, reviews=make_reviews(acceptance=["correctness"])
+    )
+    [blocker] = [b for b in found if "acceptance.reviews" in b]
+    assert "for security" in blocker and "correctness" in blocker and approve.owner(blocker) == "machine"
+    assert not [
+        b
+        for b in _readiness_under(
+            tmp_path, recorded={"acceptance": on, "reviews": ["security"]}, reviews=make_reviews()
+        )
+        if "acceptance.reviews" in b
+    ]
 
 
 # --- what acceptance carries rather than re-reads -------------------------------------
@@ -539,21 +551,19 @@ def test_gate_five_carries_gate_fours_security_review_and_refuses_a_stale_one(tm
     acceptance has no security evidence at all, so they are pinned here and not only at acceptance.
     """
     finding = {
-        "id": "SEC-001",
+        "id": "F-001",
         "severity": "high",
-        "category": "credential_exposure",
-        "attack_scenario": "the reviewer container reaches a host credential",
+        "review": "security",
+        "scenario": "the reviewer container reaches a host credential",
         "blocking": True,
     }
     repo, head, change = _reviewed_repo(tmp_path)
 
-    blocking = make_review(generated=True, human_status="frozen", security_findings=[finding])
+    blocking = make_review(generated=True, human_status="frozen", review_findings=[finding])
     blocking["machine"]["binding"]["subject_head_sha"] = head
     blocking["machine"]["binding"]["change_digest"] = change
     seed_repo(tmp_path, state=make_state(tasks={"T-001": "done"}), review=blocking)
-    assert any("SEC-001" in b for b in approve.readiness(repo, "acceptance")), (
-        "a blocking finding holds acceptance shut"
-    )
+    assert any("F-001" in b for b in approve.readiness(repo, "acceptance")), "a blocking finding holds acceptance shut"
 
     clean = make_review(generated=True, human_status="frozen", effective_risk="low")
     clean["machine"]["binding"]["subject_head_sha"] = head
@@ -1202,7 +1212,7 @@ def test_every_list_the_naming_layer_carries_reaches_the_terminal(
     assert record is not None
     reviews_cmd.apply(
         repo,
-        {**make_reviews(), "adversarial": {"requirements": True, "design": False, "tasks": True}},
+        {**make_reviews(), "design": {"adversarial": False, "reviews": []}},
         "a one-line fix",
         actor="test",
         expect=record.digest,
@@ -2030,7 +2040,7 @@ def _widened(repo: repo_mod.Repo, path: str, status: str, *, chain: bool) -> Non
     with store.transaction() as tx:
         state = tx.store.read_state()
         assert state is not None
-        entry = {"status": status, "task_id": "T-001", "commit": "c" * 40, "findings": ["SEC-001"]}
+        entry = {"status": status, "task_id": "T-001", "commit": "c" * 40, "findings": ["F-001"]}
         tx.write("state", {**state.raw, "scope_expansions": {path: entry}})
         tx.append("scope_expanded", cycle_id=state.cycle_id, subject_ids=["T-001"], detail={"paths": [path]})
         if chain:

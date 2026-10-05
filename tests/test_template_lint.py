@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from rein import gate_guard, models, store
-from tests._support import REVIEW_STEP, make_config, make_reviews
+from tests._support import make_config, make_reviews
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -44,7 +44,7 @@ _TASKS_CMD = (
     "kind: foundation | parallel | integration. "
     "status: todo in-progress blocked needs-revision awaiting-evidence done.\n"
 )
-_REVIEWS = store.dump_yaml(make_reviews(steps=[REVIEW_STEP])).decode()
+_REVIEWS = store.dump_yaml(make_reviews(build=["adversarial"])).decode()
 _DOD_PROSE = "the pipeline runs test then review.\n"  # every prose copy of the DoD must echo the step names
 
 
