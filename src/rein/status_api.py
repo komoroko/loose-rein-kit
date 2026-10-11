@@ -75,7 +75,7 @@ class Recommendation:
     """The next action, as a copy-able command plus a one-sentence why."""
 
     command: str
-    kind: str  # run_phase | approve_gate | reconcile | resolve | setup | close | fix
+    kind: str  # run_phase | approve_gate | reconcile | resolve | provide | evidence | setup | close | fix
     reason: str
     also: tuple[str, ...] = ()
 
@@ -148,6 +148,8 @@ def next_action(
     baseline: str = "",
     blocked: Recommendation | None = None,
     scoped: Recommendation | None = None,
+    #: What the open wait on a person says is owed (`events.open_wait`), "" when nothing is.
+    owed: str = "",
 ) -> Recommendation:
     """The deterministic decision table (first match wins).
 
@@ -255,13 +257,17 @@ def next_action(
             "step you point it at.",
             also=("rein doctor",),
         )
+    # 5b. The build stopped because only a person can provide what comes next. A wait, not a
+    # decision: the recommendation is the owed work, as the loop listed it when it stopped (#107).
+    if stage == "building" and owed:
+        return Recommendation(command="rein build", kind="provide", reason=owed)
     # 6. Events awaiting a human decision block acceptance.
     if stage == "building" and attention_count:
         return Recommendation(
             command="rein events --summary",
             kind="resolve",
-            reason=f"{attention_count} condition(s) await a human decision; record a disposition for each "
-            "before the acceptance decision.",
+            reason=f"{attention_count} condition(s) await a human decision before the acceptance decision. "
+            "Each retires when what it names has moved on: the task done, the plan re-frozen, the review taken.",
         )
     # 7. Everything approved, and the approval not yet carried out: integrating it is the decision a
     # person already made, so finishing it asks nobody.
@@ -1050,6 +1056,7 @@ def collect_status(
     # The one rule for "what is still waiting", grouped once: the recommendation's count, the
     # queue's rows and `rein events --summary` all read this, so they cannot disagree.
     attention = events_mod.open_conditions(events, task_status)
+    wait = events_mod.open_wait(events, task_status)
 
     # The acceptance gate's blocking findings, split by who can act on each. Empty when there is no plan or no
     # generated review, which `repair.route` answers for itself — and when the graph is inconsistent,
@@ -1084,6 +1091,7 @@ def collect_status(
         gates=gates,
         counts=counts,
         attention_count=len(attention),
+        owed=str(wait.detail.get("message", "")) if wait is not None else "",
         chain_defects=len(defects),
         uninitialized=uninitialized,
         gate_chain_broken=bool(state.gate_chain_violations()) if state else False,

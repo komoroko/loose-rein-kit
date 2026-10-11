@@ -106,6 +106,36 @@ def test_verify_must_clear_the_events_awaiting_a_decision() -> None:
     rec = decide(attention_count=2)
     assert rec.command == "rein events --summary"
     assert rec.kind == "resolve"
+    assert "disposition" not in rec.reason, "no verb records a disposition against a chain event"
+
+
+def test_a_wait_on_a_person_is_recommended_as_the_owed_work() -> None:
+    """#107: the board told the human to record a disposition for a wait, which nothing can record,
+    while the owed work that does end it went unrecommended."""
+    owed = "1 task(s) wait on something only a person can provide ... Provide them, then run `rein build` again"
+    rec = decide(owed=owed, attention_count=1)
+    assert (rec.command, rec.kind, rec.reason) == ("rein build", "provide", owed)
+
+
+def test_the_board_recommends_an_open_wait_from_the_chain(tmp_path: Path) -> None:
+    from rein import event_chain
+
+    wait = event_chain.make(
+        "knowledge_gap",
+        "demo-cycle",
+        subject_ids=["T-001"],
+        detail={"kind": "awaiting_operator", "message": "commit labels.csv for T-001, then rein build"},
+    )
+    seed_repo(
+        tmp_path,
+        events=[event_chain.link(None, wait)],
+        state=make_state(tasks={"T-001": "todo"}),
+        config=make_config(profiles=SANDBOXED_PROFILES),
+    )
+    status = status_api.collect_status(repo_mod.Repo(tmp_path))
+    assert status["next"]["kind"] == "provide", status["next"]  # type: ignore[index]
+    assert "labels.csv" in status["next"]["reason"]  # type: ignore[index]
+    assert not [item for item in status["pending"] if item["kind"] == "escalation"]  # type: ignore[union-attr]
 
 
 def test_with_no_mandate_the_board_points_at_writing_one() -> None:

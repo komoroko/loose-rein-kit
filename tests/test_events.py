@@ -388,6 +388,43 @@ def test_the_causes_are_a_breakdown_of_the_one_stop_count() -> None:
     assert sum(causes.values()) == events.stops(built)
 
 
+def _waits() -> list[models.Event]:
+    """#107's chain: three builds stopped on person-owed work, the list shrinking as tasks finished."""
+    return _detailed(
+        ("knowledge_gap", ("T-071", "T-058", "T-059"), {"kind": "awaiting_operator", "message": "3 owed"}),
+        ("task_completed", ("T-058",), {"status": "done"}),
+        ("task_completed", ("T-059",), {"status": "done"}),
+        ("knowledge_gap", ("T-071",), {"kind": "awaiting_operator", "message": "1 task(s) owe: commit T-071"}),
+        ("knowledge_gap", ("T-071",), {"kind": "awaiting_operator", "message": "1 task(s) owe: commit T-071"}),
+        ("knowledge_gap", ("T-080",), {"kind": "awaiting_evidence", "message": "observe A-2"}),
+    )
+
+
+def test_a_wait_on_a_person_is_not_a_condition_to_decide() -> None:
+    """#107: the board asked for "a disposition for each" of these, and no verb records one. A wait
+    retires when its tasks are done; what moves it is the owed work, which the board names."""
+    built = _waits()
+    outcomes = events.task_outcomes(built)
+
+    assert events.open_attention(built, outcomes) == []
+    assert events.open_conditions(built, outcomes) == []
+    wait = events.open_wait(built, outcomes)
+    assert wait is not None and wait.seq == built[4].seq
+    assert "commit T-071" in events.render_summary(built, outcomes)
+
+    assert events.open_wait(built, {**outcomes, "T-071": "done"}) is None
+
+
+def test_every_recorded_wait_is_a_stop_after_it_ends_too() -> None:
+    """Counted while open only, a wait the person then served vanished from the count, so an archived
+    cycle counted none of its waits on a person."""
+    built = _waits() + _detailed(
+        ("task_completed", ("T-071",), {"status": "done"}), ("task_completed", ("T-080",), {"status": "done"})
+    )
+    assert events.stops(built) == 4
+    assert events.stop_causes(built) == {"precondition": 3, "observation": 1}
+
+
 def test_a_stop_whose_record_names_no_known_cause_is_not_folded_into_another() -> None:
     """A stop moved into a neighbouring column would argue for a change it says nothing about."""
     built = _detailed(("knowledge_gap", ("T-1",), {"message": "the agent declared a gap"}))

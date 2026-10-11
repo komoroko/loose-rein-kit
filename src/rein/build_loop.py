@@ -1337,9 +1337,9 @@ class Orchestrator:
         `knowledge_gap` (what `rein events --summary` lists as still open) and keeps the kind in
         the detail, the same shape `set_task_status` uses to map statuses onto event names.
 
-        There is no "resolve" verb any more: an escalation is closed by a signed disposition in
-        the review, not by a flag somebody flips in a log (`rein events --summary` lists
-        what is still open).
+        There is no "resolve" verb: nothing closes a record by flipping a flag in a log. One
+        retires when what it names has moved on (`events.open_attention`), and a wait on a person
+        (`events.WAIT_KINDS`) is recorded here but never queued as a decision.
         """
         logger.warning(f"[escalation] {message}")
         self._event("knowledge_gap", task or self.cycle_id, {"kind": kind, "message": message})
